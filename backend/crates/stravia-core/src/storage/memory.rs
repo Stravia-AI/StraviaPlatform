@@ -657,6 +657,7 @@ impl RouteStore for MemoryStorage {
             supported_thinking_levels: Vec::new(),
             context_window: None,
             supports_image_input: false,
+            supports_remote_compaction: false,
             targets,
         };
         route.refresh_supported_thinking_levels();

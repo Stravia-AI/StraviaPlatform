@@ -9,6 +9,7 @@ struct TargetModelProjection {
     supports_image_input: bool,
     supports_text_output: bool,
     supports_image_output: bool,
+    supports_remote_compaction: bool,
 }
 
 /// Runtime cooldown/probe projection for one persisted Target of a Route.
@@ -242,8 +243,15 @@ impl RouteModule<'_> {
             .await?
             .image
             .route_id;
+        let context = crate::plugin::VendorCallContext::new(
+            self.gw.lifecycle.cancellation.clone(),
+            stravia_runtime_contract::Deadline::fixed(
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            ),
+        );
 
-        // 已禁用 Target 也投影展示名，便于管理面识别；能力汇总仍只统计已启用 Target。
+        // 压缩开关覆盖全部配置的 Target，防止重新启用 Target 后客户端配置误报支持；
+        // 图片输入和上下文窗口仍按已启用 Target 汇总。
         for route in &mut *routes {
             route.image_generation_bound =
                 image_route_id.as_deref() == Some(route.model_id.as_str());
@@ -268,6 +276,14 @@ impl RouteModule<'_> {
                         .as_ref()
                         .and_then(|limit| limit.context);
                     let modalities = record.metadata.effective_modalities();
+                    let supports_remote_compaction = self
+                        .target_supports_remote_compaction(
+                            target.provider_id().as_str(),
+                            model,
+                            &record,
+                            &context,
+                        )
+                        .await;
                     projections.insert(
                         key.clone(),
                         TargetModelProjection {
@@ -283,6 +299,7 @@ impl RouteModule<'_> {
                             supports_image_output: record.metadata.supports_route_output_modality(
                                 crate::db::models::RouteOutputModality::Image,
                             ),
+                            supports_remote_compaction,
                         },
                     );
                 }
@@ -323,8 +340,78 @@ impl RouteModule<'_> {
                 });
             route.supports_image_input =
                 all_targets_support_image_input(&route.targets, &projections);
+            route.supports_remote_compaction = !route.targets.is_empty()
+                && route.targets.iter().all(|target| {
+                    target_capabilities(target, &projections)
+                        .is_some_and(|projection| projection.supports_remote_compaction)
+                });
         }
         Ok(())
+    }
+
+    async fn target_supports_remote_compaction(
+        &self,
+        provider_id: &str,
+        model: &str,
+        record: &crate::provider_models::ProviderModelRecord,
+        context: &crate::plugin::VendorCallContext,
+    ) -> bool {
+        use stravia_runtime_contract::protocol::ids::{OPEN_RESPONSES_2026_04_24, Protocol};
+        use stravia_vendor_sdk::{Capability, Operation};
+
+        if !record.effective_available() {
+            return false;
+        }
+        // 复用实际执行的组件准入与纯协议选择，不探测上游，也不凭保存的协议猜能力。
+        let selected = async {
+            // 执行准备包含其他操作的异步分支，不能把整棵 future 布局嵌入管理读路径。
+            let mut prepared = Box::pin(self.gw.prepare_vendor_execution(
+                provider_id,
+                Some(model),
+                Operation::Compact,
+                context,
+            ))
+            .await?;
+            let channel = prepared
+                .descriptor()
+                .channels
+                .iter()
+                .find(|channel| channel.id == prepared.provider().channel)
+                .ok_or_else(|| anyhow::anyhow!("Provider channel is unavailable"))?;
+            crate::model_turn::validate_target_capability(
+                channel,
+                model,
+                Some(record),
+                Capability::Compact,
+            )?;
+            let mut request =
+                stravia_runtime_contract::protocol::ir::AiRequest::new(model, Vec::new());
+            request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
+            stravia_protocol_codec::codec::compaction::prepare_responses_compaction_request(
+                &mut request,
+            );
+            self.gw
+                .select_vendor_protocol(&mut prepared, &request, context)
+                .await?;
+            Ok::<_, anyhow::Error>(
+                stravia_protocol_codec::registry::ProtocolRegistry::global()
+                    .resolve_alias(prepared.protocol())
+                    .is_some_and(|endpoint| {
+                        matches!(
+                            endpoint.protocol,
+                            Protocol::OpenResponses | Protocol::AnthropicMessages
+                        )
+                    }),
+            )
+        }
+        .await;
+        match selected {
+            Ok(supported) => supported,
+            Err(error) => {
+                tracing::debug!(provider_id, model, %error, "Remote compaction capability is unavailable");
+                false
+            }
+        }
     }
 }
 

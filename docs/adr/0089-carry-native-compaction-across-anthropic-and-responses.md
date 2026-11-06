@@ -19,7 +19,8 @@ Remote Compaction Request 由当前选中 Target 的上游执行，结果经过�
 - **无状态信封**：Anthropic 的完整原生块封进 Responses `encrypted_content`；Responses 状态封进 Anthropic 块的 `signature`，`content` 为固定占位文本。信封使用带版本前缀的 base64url JSON，不新增持久化表。解码恢复原生 IR，只有目标协议不同才封装；编码必须以当前规范状态为准，同时保留签名块的未知字段，不能输出裸 Anthropic signature 作为 Responses 密文。
 - **回放**：状态的来源、Principal、有效期与 Target 绑定继续按既有规则校验。同一 Anthropic Target 回放原生块，保持签名与内容以及后续 thinking、text、tool_use 的相对顺序，并携带压缩 beta；最新块替换此前的整个窗口。Anthropic 可读摘要在不能保留其原生协议或 Target 绑定时可按既有规则降级为历史摘要文本；无摘要的 Responses 不透明状态仍不能跨 Target 回放。这延续 ADR-0047 的不透明状态约束及本决定对 Anthropic 可读摘要的明确例外。
 - **凭据保护**：原生 compaction 载荷不还原凭据占位符，避免破坏签名；回放仍使用上游原样签名与内容，不借摘要还原泄露凭据。
-- **客户端配置**：`connect_client_apply` 为 omp 的 Stravia provider 写入 `remoteCompaction: { enabled: true, v2StreamingEnabled: true }`。重新接入时替换该 provider 的旧压缩配置；Pi 配置不写入这些 omp 专用字段。Stravia 不执行客户端本地摘要回退；客户端自己的后续方法仍由客户端配置决定。
+- **能力投影**：管理读模型时派生只读字段 `supports_remote_compaction`，不持久化。至少存在一个 Target，且全部配置的 Target（包括已禁用者）都具备有效 Provider Model、当前有效插件与通道的 `Compact` 能力，并由同一插件的纯协议选择阶段选中 Open Responses 或 Anthropic Messages，才标注支持。复用实际执行的准入与协议选择，不凭厂商名、模型名或保存的协议提示猜测，不请求真实上游；缺失、不可用或选择失败按不支持处理。这是当前声明能力，不保证具体上游最终接受压缩请求，也不改变运行时未知能力交由上游裁决的行为。
+- **客户端配置**：`connect_client_apply` 按上述后端投影，只在合格的 omp 模型条目内写入 `remoteCompaction: { enabled: true, v2StreamingEnabled: true }`，不设置 provider 级压缩默认值；混合 Target 或能力未知的模型不写这些键。模型级控制遵循 [OMP 配置契约](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md)。重新接入时替换该 provider 及其模型条目的旧压缩配置；Pi 配置不写入这些 omp 专用字段。Stravia 不执行客户端本地摘要回退；客户端自己的后续方法仍由客户端配置决定。
 - **Codex 插件**：Compact 与普通推理共用原生 `/responses` 请求准备、headers 和会话身份投影，但独立压缩固定走 HTTP SSE；不保留 V1 保留消息预算、截断器或 `response.compaction` 包装。非 2xx 和流内上游错误保留现有分类；失败不触发恢复或重放。更新后需重新构建并导入独立 Codex 插件。
 - **Claude Code 插件**：封闭字段集收窄前消费规范摘要控制，之后写入原生 `compaction`。独立压缩与携带状态的推理禁用 thread、diagnostics 与线程 beta，发送完整窗口；没有压缩块的普通会话沿用线程机制。请求带压缩控制或回放块时声明压缩 beta，缓存断点不标注 compaction 块。更新后需重新构建并导入独立 Claude Code 插件。
 

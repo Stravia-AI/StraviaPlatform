@@ -106,6 +106,7 @@ function model(id = 'route-a', overrides: Partial<Route> = {}): Route {
     is_enabled: true,
     created_at: '',
     supported_thinking_levels: ['off', 'low', 'high'],
+    supports_remote_compaction: false,
     targets: [
       {
         id: 'target',

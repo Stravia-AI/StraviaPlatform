@@ -14,6 +14,7 @@ const model: Route = {
   is_enabled: true,
   created_at: '2026-01-01T00:00:00Z',
   supported_thinking_levels: [],
+  supports_remote_compaction: false,
   targets: [],
 }
 function key(id: string, overrides: Partial<ApiKey> = {}): ApiKey {

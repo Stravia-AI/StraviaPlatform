@@ -30,6 +30,7 @@ function routeWithTargets(): Route {
     is_enabled: true,
     created_at: '',
     supported_thinking_levels: [],
+    supports_remote_compaction: false,
     targets: [
       {
         id: 'target-b',

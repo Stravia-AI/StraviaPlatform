@@ -38,6 +38,7 @@ const route = (id: string, ...providerIds: string[]): Route => ({
   is_enabled: true,
   created_at: '2026-01-01T00:00:00Z',
   supported_thinking_levels: [],
+  supports_remote_compaction: false,
   targets: providerIds.map(target),
 })
 

@@ -179,6 +179,8 @@ pub struct RouteConfig {
     pub supported_thinking_levels: Vec<ThinkingLevel>,
     pub context_window: Option<u64>,
     pub supports_image_input: bool,
+    /// 只读管理投影：全部配置的 Target 都声明并能选择原生压缩协议，不持久化。
+    pub supports_remote_compaction: bool,
     pub targets: Vec<TargetConfig>,
 }
 
@@ -240,6 +242,7 @@ pub struct RouteView<'a> {
     pub supported_thinking_levels: &'a [ThinkingLevel],
     pub context_window: Option<u64>,
     pub supports_image_input: bool,
+    pub supports_remote_compaction: bool,
     #[serde(serialize_with = "serialize_target_views")]
     pub targets: &'a [TargetConfig],
 }
@@ -270,6 +273,7 @@ impl<'a> From<&'a RouteConfig> for RouteView<'a> {
             supported_thinking_levels: &route.supported_thinking_levels,
             context_window: route.context_window,
             supports_image_input: route.supports_image_input,
+            supports_remote_compaction: route.supports_remote_compaction,
             targets: &route.targets,
         }
     }
