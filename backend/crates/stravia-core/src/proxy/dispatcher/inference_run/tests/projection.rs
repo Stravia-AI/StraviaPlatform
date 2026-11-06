@@ -1653,8 +1653,10 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
                 "thinking" => {
                     events.push(json!({"type": "content_block_start", "index": index,
                         "content_block": {"type": "thinking", "thinking": "", "signature": ""}}));
-                    events.push(json!({"type": "content_block_delta", "index": index,
-                        "delta": {"type": "thinking_delta", "thinking": block["thinking"]}}));
+                    if block["thinking"] != "" {
+                        events.push(json!({"type": "content_block_delta", "index": index,
+                            "delta": {"type": "thinking_delta", "thinking": block["thinking"]}}));
+                    }
                     events.push(json!({"type": "content_block_delta", "index": index,
                         "delta": {"type": "signature_delta", "signature": block["signature"]}}));
                 }
@@ -1729,25 +1731,47 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
     let tool_use =
         json!({"type": "tool_use", "id": "toolu_read", "name": "read", "input": {"path": "a"}});
     let text = json!({"type": "text", "text": "answer"});
+    let empty_thinking = json!({"type": "thinking", "thinking": "", "signature": "SIG-VISIBLE"});
     let scenarios = [
+        (
+            "signature-only+tool",
+            vec![empty_thinking.clone(), tool_use.clone()],
+            "tool_use",
+            false,
+        ),
+        (
+            "compaction+signature-only+tool",
+            vec![empty_thinking.clone(), tool_use.clone()],
+            "tool_use",
+            true,
+        ),
+        (
+            "text+signature-only+tool",
+            vec![text.clone(), empty_thinking, tool_use.clone()],
+            "tool_use",
+            true,
+        ),
         (
             "thinking+redacted+tool",
             vec![thinking.clone(), redacted.clone(), tool_use.clone()],
             "tool_use",
+            false,
         ),
         (
             "redacted+thinking+tool",
             vec![redacted.clone(), thinking.clone(), tool_use.clone()],
             "tool_use",
+            false,
         ),
         (
             "redacted+text",
             vec![redacted.clone(), text.clone()],
             "end_turn",
+            false,
         ),
     ];
 
-    for (name, content, stop_reason) in scenarios {
+    for (name, content, stop_reason, compacted) in scenarios {
         for (stream, replay) in [
             (true, "echo"),
             (false, "echo"),
@@ -1787,7 +1811,13 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
             let router = crate::proxy::server::create_router(gateway.clone());
             let tools = json!([{"type": "function", "name": "read",
                 "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}]);
-            let mut input = vec![json!({"role": "user", "content": "question"})];
+            let compaction = json!({"type": "compaction", "content": "Earlier context", "signature": "SIG-COMPACTION"});
+            let mut input = Vec::new();
+            if compacted {
+                input.push(json!({"type": "compaction", "encrypted_content":
+                    stravia_protocol_codec::codec::compaction::seal_anthropic(&compaction)}));
+            }
+            input.push(json!({"role": "user", "content": "question"}));
             for turn in 0..2 {
                 let response = router
                     .clone()
@@ -1832,21 +1862,30 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
                     serde_json::from_slice(&body).unwrap()
                 };
                 if stream {
-                    let mut added = std::str::from_utf8(&body)
+                    let added = std::str::from_utf8(&body)
                         .unwrap()
                         .lines()
                         .filter_map(|line| line.strip_prefix("data: "))
                         .filter_map(|data| serde_json::from_str::<Value>(data).ok())
                         .filter(|event| event["type"] == "response.output_item.added")
-                        .map(|event| event["output_index"].as_u64().unwrap())
+                        .map(|event| {
+                            (
+                                event["output_index"].as_u64().unwrap(),
+                                event["item"]["type"].clone(),
+                            )
+                        })
                         .collect::<Vec<_>>();
-                    let emitted = added.len();
-                    added.sort_unstable();
-                    added.dedup();
+                    let completed = delivered["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| (index as u64, item["type"].clone()))
+                        .collect::<Vec<_>>();
                     assert_eq!(
-                        added.len(),
-                        emitted,
-                        "{name} stream={stream}: duplicate output_index in {}",
+                        added,
+                        completed,
+                        "{name} stream={stream}: streamed item positions must match completed history in {}",
                         String::from_utf8_lossy(&body)
                     );
                 }
@@ -1860,6 +1899,23 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
                     "{name} stream={stream}: {wire}"
                 );
                 let delivered_output = delivered["output"].as_array().unwrap().clone();
+                let output_types = delivered_output
+                    .iter()
+                    .map(|item| item["type"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                let expected_types = content
+                    .iter()
+                    .map(|block| match block["type"].as_str().unwrap() {
+                        "thinking" | "redacted_thinking" => "reasoning",
+                        "tool_use" => "function_call",
+                        "text" => "message",
+                        other => panic!("unsupported fixture block {other}"),
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    output_types, expected_types,
+                    "{name} stream={stream}: client history must preserve upstream item order"
+                );
                 let reasoning_count = delivered_output
                     .iter()
                     .filter(|item| item["type"] == "reasoning")
@@ -1914,10 +1970,18 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
             }
             let requests = requests.lock().clone();
             assert_eq!(requests.len(), 2, "{name} stream={stream}");
+            if compacted {
+                assert_eq!(
+                    requests[1]["messages"][0]["content"],
+                    json!([compaction]),
+                    "{name}: native compaction must remain first and unchanged"
+                );
+            }
             let assistant = requests[1]["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
+                .rev()
                 .find(|message| message["role"] == "assistant");
             let replayed = assistant.map(|message| message["content"].clone());
             assert_eq!(

@@ -327,8 +327,7 @@ test('dirty Back, Forward and internal navigation preserve or discard the draft 
 
 async function chooseManualTemplate(page: Page) {
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
-  await page.locator('#manual-provider-model-search').click()
-  await page.getByPlaceholder('Search model template').fill('openai/gpt-5.4')
+  await page.locator('#manual-provider-model-search').fill('openai/gpt-5.4')
   await page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ }).click()
   await page.getByRole('button', { name: 'Continue' }).click()
 }

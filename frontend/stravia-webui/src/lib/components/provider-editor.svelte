@@ -339,7 +339,7 @@ function saveProvider(): void {
             <Empty.Header>
               <Empty.Media variant="icon"><SearchIcon /></Empty.Media>
               <Empty.Title>
-                {search.trim() ? m.provider_editor_no_matching_services() : m.provider_config_no_plugins()}
+                {search.trim() ? m.common_no_matching_providers() : m.provider_config_no_plugins()}
               </Empty.Title>
               <Empty.Description>
                 {search.trim()

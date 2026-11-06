@@ -437,13 +437,53 @@ test('model ID suggestions preserve arbitrary text, composition, and form focus'
   await expect(page.getByRole('button', { name: 'Clear selected model', exact: true })).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(displayName).toBeFocused()
-  await modelId.focus()
+  await modelId.click()
   await expect(page.getByRole('option', { name: /Claude Opus/ })).toBeVisible()
   await page.getByRole('button', { name: 'Clear selected model', exact: true }).click()
   await expect(modelId).toHaveValue('')
   await expect(displayName).toHaveValue('')
   await expect(modelId).toBeFocused()
 })
+
+for (const width of [1440, 320]) {
+  test(`model ID suggestions keep long variant names and IDs readable at ${width}px`, async ({ page }) => {
+    const models = [
+      { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+      { id: 'deepseek/deepseek-v4-flash-thinking', name: 'DeepSeek V4 Flash Thinking' },
+      { id: 'deepseek/deepseek-v4-flash-thinking-preview-20261020', name: 'DeepSeek V4 Flash Thinking Preview' },
+    ]
+    await page.route('**/api/v1/catalog/models', (route) =>
+      route.fulfill({ json: { revision: 'long-names', generated_at: '2026-08-20T14:01:40Z', models } }),
+    )
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/models/new')
+    await page.locator('#route-model-id').fill('deepseek-v4')
+    const options = page.getByRole('option')
+    await expect(options).toHaveCount(models.length)
+    const clipped = await options.evaluateAll((items) =>
+      items.flatMap((item) =>
+        Array.from(item.querySelectorAll('span'))
+          .filter((span) => span.scrollWidth > span.clientWidth + 1)
+          .map((span) => span.textContent),
+      ),
+    )
+    expect(clipped).toEqual([])
+    const field = page.locator('[data-slot="input-group"]').filter({ has: page.locator('#route-model-id') })
+    const popover = page
+      .locator('[data-slot="popover-content"]')
+      .filter({ has: page.locator('#route-model-id-options') })
+    // 下拉与整个输入框（含清除按钮）左右对齐；轮询以等待打开时的缩放动画结束。
+    await expect
+      .poll(async () => {
+        const [fieldBox, popoverBox] = await Promise.all([field.boundingBox(), popover.boundingBox()])
+        return (
+          Math.abs(popoverBox!.x - fieldBox!.x) <= 1 &&
+          Math.abs(popoverBox!.x + popoverBox!.width - (fieldBox!.x + fieldBox!.width)) <= 1
+        )
+      })
+      .toBe(true)
+  })
+}
 
 test('configured Providers table shows inventory, linked models and cost, and persists column customization', async ({
   page,
@@ -1706,17 +1746,13 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
 
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
-  const manualModelPicker = page.locator('#manual-provider-model-search')
-  await manualModelPicker.click()
-  const manualModelSearch = page.getByPlaceholder('Search model template')
-  await expect(manualModelSearch).toHaveAttribute('aria-label', 'Search model template')
-  await manualModelSearch.fill('openai/gpt-5.4')
+  const manualModelPicker = page.getByRole('combobox', { name: 'Search model template' })
+  await manualModelPicker.fill('openai/gpt-5.4')
   await page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ }).click()
-  await manualModelPicker.click()
+  await expect(manualModelPicker).toHaveValue('GPT-5.4')
   await page.getByRole('button', { name: 'Clear selected model' }).click()
   await expect(page.getByRole('button', { name: 'Continue' })).toBeDisabled()
-  await manualModelPicker.click()
-  await manualModelSearch.fill('openai/gpt-5.4')
+  await manualModelPicker.fill('openai/gpt-5.4')
   await page.getByRole('option', { name: /GPT-5\.4.*openai\/gpt-5\.4/ }).click()
   await page.getByRole('button', { name: 'Continue' }).click()
   await expect.poll(() => prepareBodies[0]).toEqual({ model_id: 'gpt-5.4', template_id: 'openai/gpt-5.4' })
@@ -1730,8 +1766,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
 
   await page.getByRole('button', { name: 'Close model editor' }).click()
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
-  await manualModelPicker.click()
-  await manualModelSearch.fill('openai/gpt-5.3-codex-spark')
+  await manualModelPicker.fill('openai/gpt-5.3-codex-spark')
   await page.getByRole('option', { name: /GPT-5\.3 Codex Spark.*openai\/gpt-5\.3-codex-spark/ }).click()
   const [manualDialogBounds, manualPickerBounds] = await Promise.all([
     page.getByRole('dialog', { name: 'Add a model manually' }).boundingBox(),
@@ -1743,15 +1778,13 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   expect(manualPickerBounds.x + manualPickerBounds.width).toBeLessThanOrEqual(
     manualDialogBounds.x + manualDialogBounds.width,
   )
-  await manualModelPicker.click()
   await page.getByRole('button', { name: 'Clear selected model' }).click()
-  await manualModelPicker.click()
-  await manualModelSearch.fill('anthropic/claude-opus-4.6')
+  await manualModelPicker.fill('anthropic/claude-opus-4.6')
   await page.getByRole('option', { name: /Claude Opus 4\.6.*anthropic\/claude-opus-4\.6/ }).click()
   await page.getByRole('button', { name: 'Continue' }).click()
   await expect(page.getByText('The selected model is no longer available. Search for another model.')).toBeVisible()
   await expect(page.getByRole('dialog', { name: 'Add a model manually' })).toBeVisible()
-  await expect(manualModelPicker).toHaveText(/Claude Opus 4\.6.*anthropic\/claude-opus-4\.6/)
+  await expect(manualModelPicker).toHaveValue('Claude Opus 4.6')
 })
 
 test('OAuth Provider configuration allows manual completion while the localhost listener is active', async ({

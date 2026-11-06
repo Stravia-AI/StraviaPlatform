@@ -5,7 +5,8 @@ import { useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
-import { logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
+import { logicalModelOption, sortLogicalModels } from '#lib/logical-model.js'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import SettingsSection from '#lib/components/settings/settings-section.svelte'
 import SettingsSheet from '#lib/components/settings/settings-sheet.svelte'
@@ -209,23 +210,14 @@ function selectThinkingLevel(value?: string): void {
   <Field.Group>
     <Field.Field>
       <Field.Label for="media-model-{kind}">{m.media_understanding_model_label()}</Field.Label>
-      <Select.Root type="single" value={modelId} disabled={saving} onValueChange={selectModel}>
-        <Select.Trigger id="media-model-{kind}" class="w-full">
-          {selectedModel?.display_name ?? m.media_understanding_select_model()}
-        </Select.Trigger>
-        <Select.Content
-          ><Select.Group>
-            {#each eligibleModels as model (model.id)}
-              {@const secondaryId = logicalModelSecondaryId(model)}
-              <Select.Item value={model.id} label={model.display_name}>
-                <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                {#if secondaryId}
-                  <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
-                {/if}
-              </Select.Item>
-            {/each}
-          </Select.Group></Select.Content>
-      </Select.Root>
+      <SearchCombobox
+        id="media-model-{kind}"
+        value={modelId}
+        options={eligibleModels.map(logicalModelOption)}
+        placeholder={m.media_understanding_select_model()}
+        emptyText={m.common_no_matching_models()}
+        disabled={saving}
+        onValueChange={selectModel} />
     </Field.Field>
     <Field.Field>
       <Field.Label for="media-thinking-level-{kind}">

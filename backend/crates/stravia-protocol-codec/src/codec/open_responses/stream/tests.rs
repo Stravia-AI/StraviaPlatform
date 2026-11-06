@@ -476,6 +476,7 @@ fn anthropic_live_text_thinking_text_tool_preserves_responses_chronology() {
                     event["delta"].as_str().unwrap(),
                 )
             })
+            .filter(|(_, text)| !text.is_empty())
             .collect::<Vec<_>>();
         assert_eq!(
             readable,

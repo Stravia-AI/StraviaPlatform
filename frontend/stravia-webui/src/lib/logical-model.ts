@@ -1,3 +1,4 @@
+import type { SearchComboboxOption } from '#lib/search-combobox-option.js'
 import type { Route } from '#lib/types.js'
 
 export type LogicalModelIdentity = Pick<Route, 'model_id' | 'display_name'>
@@ -9,6 +10,18 @@ export function effectiveModelDisplayName(model: LogicalModelIdentity): string {
 export function logicalModelSecondaryId(model: LogicalModelIdentity): string | undefined {
   const displayName = effectiveModelDisplayName(model)
   return displayName === model.model_id ? undefined : model.model_id
+}
+
+/** 选择框候选：展示名在上，与之不同的模型 ID 在下；未命名时展示名就是 ID，按技术值显示。 */
+export function logicalModelOption(model: LogicalModelIdentity & { id: string }): SearchComboboxOption {
+  const detail = logicalModelSecondaryId(model)
+  return {
+    value: model.id,
+    label: effectiveModelDisplayName(model),
+    detail,
+    keywords: [model.model_id],
+    technical: !detail,
+  }
 }
 
 function compareText(left: string, right: string): number {

@@ -103,7 +103,7 @@ test('Connect exposes recovery without eligible keys and retains code choices on
   await page.getByRole('link', { name: 'Continue setup', exact: true }).click()
   await expect(page.getByRole('tab', { name: 'Code', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(page.locator('#code-protocol')).toContainText('Open Responses')
-  await expect(page.locator('#code-model')).toContainText('My model')
+  await expect(page.locator('#code-model')).toHaveValue('My model')
   await expect(page.locator('#code-key')).toContainText('New key')
   await expect(page.getByRole('tab', { name: 'cURL', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
@@ -185,6 +185,7 @@ test('Claude requires all four mappings while other clients do not ask for a def
     await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled()
     await page.locator(`#${id}`).click()
     await page.getByRole('option', { name: /My model/ }).click()
+    await expect(page.getByRole('listbox')).toHaveCount(0)
   }
   await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
 })
@@ -202,7 +203,8 @@ test('Wide workspace stacks labels over bounded controls sharing one column, inc
   const workspace = (await page.locator('.connect-page').boundingBox())!
   expect(Math.abs(workspace.width - 1920)).toBeLessThanOrEqual(1)
   const boxes = []
-  for (const id of ids) boxes.push((await page.locator(`#${id}`).boundingBox())!)
+  // 模型搜索框的可见边框在外层容器上，统一量控件列里的直接子元素。
+  for (const id of ids) boxes.push((await page.locator(`[data-slot="connect-control"]:has(#${id}) > *`).boundingBox())!)
   const right = boxes[0].x + boxes[0].width
   for (const box of boxes) {
     expect(box.width).toBeGreaterThanOrEqual(18 * 16 - 0.5)

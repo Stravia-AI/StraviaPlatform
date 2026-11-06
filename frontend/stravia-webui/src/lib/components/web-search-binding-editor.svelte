@@ -23,6 +23,7 @@ import { toast } from 'svelte-sonner'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
@@ -30,7 +31,7 @@ import * as Select from '#lib/components/ui/select/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
-import { logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
+import { logicalModelOption, sortLogicalModels } from '#lib/logical-model.js'
 
 let {
   open = $bindable(false),
@@ -144,26 +145,14 @@ async function submit(): Promise<void> {
             <Field.Field>
               <Field.Label for="search-local-model" hint={m.web_search_eligible_model_help()}
                 >{m.web_search_model_used()}</Field.Label>
-              <Select.Root
-                type="single"
-                bind:value={localModelId}
-                disabled={saving || eligibleModelsQuery.isPending || eligibleModelsQuery.isError}>
-                <Select.Trigger id="search-local-model" class="w-full">
-                  {eligibleModels.find((model) => model.id === localModelId)?.display_name ?? m.common_select_model()}
-                </Select.Trigger>
-                <Select.Content
-                  ><Select.Group>
-                    {#each eligibleModels as model (model.id)}
-                      {@const secondaryId = logicalModelSecondaryId(model)}
-                      <Select.Item value={model.id} label={model.display_name}>
-                        <span class="min-w-0 flex-1 truncate">{model.display_name}</span>
-                        {#if secondaryId}
-                          <span class="truncate font-technical text-xs text-muted-foreground">{secondaryId}</span>
-                        {/if}
-                      </Select.Item>
-                    {/each}
-                  </Select.Group></Select.Content>
-              </Select.Root>
+              <SearchCombobox
+                id="search-local-model"
+                value={localModelId}
+                options={eligibleModels.map(logicalModelOption)}
+                placeholder={m.common_select_model()}
+                emptyText={m.common_no_matching_models()}
+                disabled={saving || eligibleModelsQuery.isPending || eligibleModelsQuery.isError}
+                onValueChange={(value: string) => (localModelId = value)} />
             </Field.Field>
             {#if eligibleModelsQuery.isError}
               <RequestFailure
@@ -182,23 +171,21 @@ async function submit(): Promise<void> {
           {:else}
             <Field.Field data-invalid={Boolean(externalRouteId) && !selectedExternalRoute?.available}>
               <Field.Label for="search-external-route">{m.web_search_external_route()}</Field.Label>
-              <Select.Root
-                type="single"
-                bind:value={externalRouteId}
-                disabled={saving || externalRoutesQuery.isPending || externalRoutesQuery.isError}>
-                <Select.Trigger id="search-external-route" class="w-full">
-                  {selectedExternalRoute?.display_name ?? m.web_search_select_external_route()}
-                </Select.Trigger>
-                <Select.Content
-                  ><Select.Group>
-                    {#each externalRoutes as route (route.model_id)}
-                      <Select.Item value={route.model_id} label={route.display_name} disabled={!route.available}>
-                        <span class="min-w-0 flex-1 truncate">{route.display_name}</span>
-                        <span class="truncate font-technical text-xs text-muted-foreground">{route.model_id}</span>
-                      </Select.Item>
-                    {/each}
-                  </Select.Group></Select.Content>
-              </Select.Root>
+              <SearchCombobox
+                id="search-external-route"
+                value={externalRouteId}
+                options={externalRoutes.map((route) => ({
+                  ...logicalModelOption({
+                    id: route.model_id,
+                    model_id: route.model_id,
+                    display_name: route.display_name,
+                  }),
+                  disabled: !route.available,
+                }))}
+                placeholder={m.web_search_select_external_route()}
+                emptyText={m.common_no_matching_models()}
+                disabled={saving || externalRoutesQuery.isPending || externalRoutesQuery.isError}
+                onValueChange={(value: string) => (externalRouteId = value)} />
               {#if externalRouteId && !selectedExternalRoute?.available}
                 <Field.Error>{m.web_search_external_route_unavailable()}</Field.Error>
               {/if}

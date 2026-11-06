@@ -16,6 +16,7 @@ import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { modelIdFromCatalogId } from '#lib/catalog-model-id.js'
 import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
 import { startDragAutoscroll } from '#lib/drag-autoscroll.js'
+import { idNameOption, type SearchComboboxOption } from '#lib/search-combobox-option.js'
 import { formatList } from '#lib/format.js'
 import { currencyForKind } from '#lib/money.js'
 import { specificationModality } from '#lib/model-specification.js'
@@ -60,12 +61,10 @@ import {
   type RouteTargetInsertion,
 } from './route-targets-form.js'
 
-import ModelCombobox from '#lib/components/model-combobox.svelte'
-import ModelIdCombobox from '#lib/components/model-id-combobox.svelte'
 import ModelDetailsDialog from '#lib/components/model-details-dialog.svelte'
 import ModelSpecification from '#lib/components/model-specification.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
-import ProviderCombobox from '#lib/components/provider-combobox.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
@@ -903,25 +902,20 @@ async function saveModel(): Promise<void> {
         </SettingRow>
         <Field.Field>
           <Field.Label for="route-model-id">{m.model_editor_model_id()}</Field.Label>
-          <ModelIdCombobox
+          <SearchCombobox
             id="route-model-id"
             value={form.modelId}
-            models={canonicalModels}
+            options={canonicalModels.map(idNameOption)}
+            freeText
             placeholder={m.model_editor_model_id_placeholder()}
-            emptyText={m.model_editor_no_models_found()}
+            emptyText={m.common_no_matching_models()}
             ariaLabel={m.model_editor_model_id()}
-            clearAriaLabel={m.model_editor_clear_selected_model()}
-            onInput={(value: string) => {
-              form.modelId = value
+            clearLabel={m.model_editor_clear_selected_model()}
+            onValueChange={(value: string, option?: SearchComboboxOption) => {
+              form.modelId = option ? modelIdFromCatalogId(option.value) : value
+              if (option) form.displayName = option.label
             }}
-            onSelect={(model: { id: string; name: string }) => {
-              form.modelId = modelIdFromCatalogId(model.id)
-              form.displayName = model.name
-            }}
-            onClear={() => {
-              form.modelId = ''
-              form.displayName = ''
-            }} />
+            onClear={() => (form.displayName = '')} />
         </Field.Field>
         <Field.Field>
           <Field.Label for="route-display-name">{m.model_editor_model_name()}</Field.Label>
@@ -1381,15 +1375,14 @@ async function saveModel(): Promise<void> {
               <Field.Group class="grid gap-4 lg:grid-cols-2">
                 <Field.Field>
                   <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
-                  <ProviderCombobox
+                  <SearchCombobox
                     id={`target-provider-${target.key}`}
                     value={target.providerId}
-                    providers={availableProviders}
+                    options={availableProviders.map((provider) => ({ value: provider.id, label: provider.name }))}
                     placeholder={m.model_editor_choose_model_service()}
-                    searchPlaceholder={m.model_editor_search_providers()}
-                    emptyText={m.provider_editor_no_matching_services()}
+                    emptyText={m.common_no_matching_providers()}
                     ariaLabel={m.model_editor_destination_value_model_service({ index: index + 1 })}
-                    onSelect={(value: string) => void changeProvider(target, value)} />
+                    onValueChange={(value: string) => void changeProvider(target, value)} />
                 </Field.Field>
 
                 <Field.Field>
@@ -1406,17 +1399,15 @@ async function saveModel(): Promise<void> {
                     <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}
                       >{m.model_editor_choose_synced_model()}</Button>
                   {:else}
-                    <ModelCombobox
+                    <SearchCombobox
                       id={`target-model-${target.key}`}
                       value={target.model}
-                      models={modelCandidates(target)}
+                      options={modelCandidates(target).map(idNameOption)}
                       placeholder={m.model_editor_choose_model()}
-                      searchPlaceholder={m.model_editor_search_model_id()}
-                      emptyText={m.model_editor_no_models_found()}
+                      emptyText={m.common_no_matching_models()}
                       ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
-                      searchAriaLabel={m.model_editor_search_models_destination_value({ index: index + 1 })}
                       disabled={!target.providerId || target.loading}
-                      onSelect={(value: string) => void selectModel(target, value)} />
+                      onValueChange={(value: string) => void selectModel(target, value)} />
                     {#if target.providerId && !target.loading && modelCandidates(target).length === 0}
                       <p class="text-sm text-warning" role="status">{m.route_output_no_candidates()}</p>
                     {/if}

@@ -1,8 +1,9 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import type { CanonicalModelSummary } from '#lib/types.js'
+import { idNameOption } from '#lib/search-combobox-option.js'
 
-import ModelCombobox from '#lib/components/model-combobox.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
@@ -41,19 +42,16 @@ let {
     {/snippet}
     <Field.Field orientation="vertical">
       <Field.Label for="manual-provider-model-search">{m.provider_model_catalog_model_template()}</Field.Label>
-      <ModelCombobox
+      <SearchCombobox
         id="manual-provider-model-search"
         value={templateId}
-        {models}
+        options={models.map(idNameOption)}
         placeholder={m.provider_model_catalog_search_model()}
-        searchPlaceholder={m.provider_model_catalog_search_model()}
-        emptyText={m.provider_model_catalog_no_models_found()}
+        emptyText={m.common_no_matching_models()}
         ariaLabel={m.provider_model_catalog_search_model()}
-        searchAriaLabel={m.provider_model_catalog_search_model()}
-        clearAriaLabel={m.provider_model_catalog_clear_selected_model()}
+        clearLabel={m.provider_model_catalog_clear_selected_model()}
         disabled={modelsPending || preparing}
-        {onSelect}
-        {onClear} />
+        onValueChange={(value: string) => (value ? onSelect(value) : onClear())} />
     </Field.Field>
     {#snippet footer()}
       <Button variant="outline" onclick={() => onOpenChange(false)}>{m.common_cancel()}</Button>

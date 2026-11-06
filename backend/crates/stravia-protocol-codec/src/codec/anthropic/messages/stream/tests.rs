@@ -508,27 +508,6 @@ fn test_stream_signature_delta_is_captured() {
 }
 
 #[test]
-fn standard_empty_block_starts_do_not_emit_unknown_deltas() {
-    let sse = [
-            make_sse_block(
-                "content_block_start",
-                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
-            ),
-            make_sse_block(
-                "content_block_start",
-                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
-            ),
-        ]
-        .join("");
-
-    let deltas = AnthropicStreamParser::default()
-        .parse_chunk(&sse)
-        .expect("standard block starts");
-
-    assert!(deltas.is_empty(), "unexpected canonical deltas: {deltas:?}");
-}
-
-#[test]
 fn test_stream_formatter_emits_signature_delta() {
     let mut formatter = AnthropicStreamFormatter::new();
     let events = formatter.format_deltas(&[
@@ -548,6 +527,141 @@ fn test_stream_formatter_emits_signature_delta() {
                 && json["delta"]["signature"].as_str() == Some("abc123")
         });
     assert!(has_signature, "expected signature_delta event");
+}
+
+#[test]
+fn signed_thinking_keeps_stream_history_order_across_byte_boundaries() {
+    use crate::accumulator::StreamResponseAccumulator;
+    use crate::codec::open_responses::stream::ResponsesStreamFormatter;
+    use crate::transform::ProtocolTransform;
+    use serde_json::json;
+    use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
+
+    for thinking in ["", "可见思考"] {
+        for explicit_empty_delta in [false, true] {
+            let mut events = vec![json!({"type":"message_start", "message": {
+                "id":"msg_signed", "model":"claude", "content":[],
+                "usage":{"input_tokens":1, "output_tokens":0}
+            }})];
+            for (index, signature) in [(0, "sig-first"), (2, "sig-second")] {
+                events.push(json!({"type":"content_block_start", "index":index,
+                    "content_block":{"type":"thinking", "thinking":"", "signature":""}}));
+                if explicit_empty_delta {
+                    events.push(json!({"type":"content_block_delta", "index":index,
+                        "delta":{"type":"thinking_delta", "thinking":""}}));
+                }
+                if !thinking.is_empty() {
+                    events.push(json!({"type":"content_block_delta", "index":index,
+                        "delta":{"type":"thinking_delta", "thinking":thinking}}));
+                }
+                events.push(json!({"type":"content_block_delta", "index":index,
+                    "delta":{"type":"signature_delta", "signature":signature}}));
+                events.push(json!({"type":"content_block_stop", "index":index}));
+                if index == 0 {
+                    events.extend([
+                        json!({"type":"content_block_start", "index":1, "content_block":{"type":"text", "text":""}}),
+                        json!({"type":"content_block_delta", "index":1, "delta":{"type":"text_delta", "text":"answer"}}),
+                        json!({"type":"content_block_stop", "index":1}),
+                    ]);
+                }
+            }
+            events.extend([
+                json!({"type":"content_block_start", "index":3,
+                    "content_block":{"type":"tool_use", "id":"call_read", "name":"read", "input":{}}}),
+                json!({"type":"content_block_delta", "index":3,
+                    "delta":{"type":"input_json_delta", "partial_json":"{\"path\":\"a\"}"}}),
+                json!({"type":"content_block_stop", "index":3}),
+                json!({"type":"message_delta", "delta":{"stop_reason":"tool_use"}, "usage":{"output_tokens":2}}),
+                json!({"type":"message_stop"}),
+            ]);
+            let sse: String = events
+                .iter()
+                .map(|event| make_sse_block(event["type"].as_str().unwrap(), &event.to_string()))
+                .collect();
+            for chunk_size in [sse.len(), 1, 7, 13] {
+                let mut decoder = ProtocolTransform::global()
+                    .decode_stream(ANTHROPIC_MESSAGES_2023_06_01)
+                    .unwrap();
+                let mut accumulator = StreamResponseAccumulator::default();
+                let mut formatter = ResponsesStreamFormatter::new();
+                let mut wire = Vec::new();
+                for chunk in sse.as_bytes().chunks(chunk_size) {
+                    let deltas = decoder.decode_chunk(chunk).unwrap();
+                    for delta in &deltas {
+                        accumulator.apply_with_identity(delta);
+                    }
+                    wire.extend(formatter.format_deltas(&deltas));
+                }
+                let end = decoder.finish().unwrap();
+                for delta in &end {
+                    accumulator.apply_with_identity(delta);
+                }
+                wire.extend(formatter.format_deltas(&end));
+                let history = accumulator.into_ai_response();
+                assert_eq!(history.items.len(), 4);
+                assert_eq!(
+                    history.items[0].thinking_ref(),
+                    Some((thinking, Some("sig-first")))
+                );
+                assert_eq!(history.items[1].output_text_ref(), Some("answer"));
+                assert_eq!(
+                    history.items[2].thinking_ref(),
+                    Some((thinking, Some("sig-second")))
+                );
+                let call = history.items[3].function_call_ref().unwrap();
+                assert_eq!(call.id, "call_read");
+                assert_eq!(call.arguments, r#"{"path":"a"}"#);
+
+                let payloads: Vec<Value> = wire
+                    .iter()
+                    .map(|event| serde_json::from_str(&event.data).unwrap())
+                    .collect();
+                for event_type in ["response.output_item.added", "response.output_item.done"] {
+                    let items: Vec<_> = payloads
+                        .iter()
+                        .filter(|event| event["type"] == event_type)
+                        .map(|event| {
+                            (
+                                event["output_index"].as_u64().unwrap(),
+                                event["item"]["type"].as_str().unwrap(),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(
+                        items,
+                        [
+                            (0, "reasoning"),
+                            (1, "message"),
+                            (2, "reasoning"),
+                            (3, "function_call")
+                        ]
+                    );
+                }
+                let completed = payloads
+                    .iter()
+                    .find(|event| event["type"] == "response.completed")
+                    .unwrap();
+                let output = completed["response"]["output"].as_array().unwrap();
+                let delivered: Vec<_> = payloads
+                    .iter()
+                    .filter(|event| event["type"] == "response.output_item.done")
+                    .map(|event| event["item"].clone())
+                    .collect();
+                assert_eq!(&delivered, output);
+                assert_eq!(output[1]["content"][0]["text"], "answer");
+                assert!(
+                    !serde_json::to_string(&payloads)
+                        .unwrap()
+                        .contains("sig-first")
+                );
+                assert!(
+                    !serde_json::to_string(&payloads)
+                        .unwrap()
+                        .contains("sig-second")
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -616,7 +616,7 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
 
   await page.goto('/connect')
   await page.getByRole('tab', { name: 'Code' }).click()
-  await page.getByRole('button', { name: 'Model' }).click()
+  await page.getByRole('combobox', { name: 'Model' }).click()
   await page.getByRole('option', { name: 'gpt-5.4' }).click()
   await page.getByRole('tab', { name: 'cURL' }).click()
 
@@ -1148,7 +1148,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Add destination' }).click()
   await page.getByLabel('Destination 1 provider', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider A' }).click()
-  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
+  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveValue('')
   await expect(page.getByLabel('Destination 1 model', { exact: true })).toBeEnabled()
   await page.getByLabel('Destination 1 model', { exact: true }).click()
   await expect(page.getByRole('option', { name: /GPT Available.*gpt-available/ })).toBeVisible()
@@ -1186,8 +1186,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Confirm' }).click()
 
   await page.getByRole('button', { name: 'Add destination' }).click()
-  await page.getByLabel('Destination 2 provider', { exact: true }).click()
-  await page.getByPlaceholder('Search providers').fill('Provider A')
+  await page.getByRole('combobox', { name: 'Destination 2 provider', exact: true }).fill('Provider A')
   await expect(page.getByRole('option', { name: 'Provider B' })).toHaveCount(0)
   await page.getByRole('option', { name: 'Provider A' }).click()
   await page.getByLabel('Destination 2 model', { exact: true }).click()
@@ -1224,7 +1223,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Edit destination 1' }).click()
   await page.getByLabel('Destination 1 provider', { exact: true }).click()
   await page.getByRole('option', { name: 'Provider B' }).click()
-  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/Choose a model/)
+  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveValue('')
   await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeDisabled()
   await expect(page.getByRole('dialog').getByRole('group', { name: 'Model specification' })).toHaveCount(0)
   await page.getByLabel('Destination 1 model', { exact: true }).click()
@@ -1238,7 +1237,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(validationError).toBeVisible()
   await expect(modelSearch).toHaveValue('gpt-5.4')
   await page.getByRole('button', { name: 'Edit destination 1' }).click()
-  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveText(/GPT Available/)
+  await expect(page.getByLabel('Destination 1 model', { exact: true })).toHaveValue('GPT Available')
   await page.getByRole('button', { name: 'Confirm' }).click()
   await expect(page.getByRole('switch', { name: 'Enabled' })).not.toBeChecked()
   // 指针停在 toast 上会暂停它的计时；节奏调整后确认按钮落在 toast 下方，先移开。

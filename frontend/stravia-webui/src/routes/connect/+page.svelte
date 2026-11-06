@@ -17,8 +17,7 @@ import { admin, isTauri, proxyBase } from '#lib/admin-client.js'
 import { getConnectSetup } from '#lib/connect-setup.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { applyConnectClient, asConnectClientApplyError, planConnectClient } from '#lib/connect-client-apply.js'
-import { effectiveModelDisplayName, logicalModelSecondaryId, sortLogicalModels } from '#lib/logical-model.js'
-import type { Route } from '#lib/types.js'
+import { logicalModelOption, sortLogicalModels } from '#lib/logical-model.js'
 import {
   apiKeyAllowsModel,
   buildCode,
@@ -35,6 +34,7 @@ import {
 } from '#lib/connect.js'
 import ConnectControlRow from '#lib/components/connect-control-row.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
@@ -199,29 +199,9 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
   setup.createKey = createKey
   void goto(resolve(path))
 }
-
-function cliModelName(modelId: string): string | undefined {
-  const model = cliModels.find((candidate) => candidate.id === modelId)
-  return model ? effectiveModelDisplayName(model) : undefined
-}
 </script>
 
 <svelte:head><title>{m.connect_connect_apps()} · Stravia</title></svelte:head>
-
-{#snippet logicalModelOption(model: Route)}
-  <span class="min-w-0 flex-1 truncate">{effectiveModelDisplayName(model)}</span>
-  {#if logicalModelSecondaryId(model)}
-    <span class="truncate font-technical text-xs text-muted-foreground">{model.model_id}</span>
-  {/if}
-{/snippet}
-
-{#snippet logicalModelItems(options: Route[])}
-  {#each options as model (model.id)}
-    <Select.Item value={model.id} label={effectiveModelDisplayName(model)}>
-      {@render logicalModelOption(model)}
-    </Select.Item>
-  {/each}
-{/snippet}
 
 {#snippet keyActions(selected: boolean)}
   <div class="flex flex-wrap gap-2">
@@ -330,14 +310,13 @@ function cliModelName(modelId: string): string | undefined {
                 {#if selectedCliKey && cliModels.length > 0 && cliToolId === 'claude-code'}
                   {#each claudeMappingRows as row (row.id)}
                     <ConnectControlRow label={row.label()} labelFor={row.id}>
-                      <Select.Root type="single" bind:value={claudeModelIds[row.key]}>
-                        <Select.Trigger id={row.id} class="w-full min-w-0"
-                          ><span class="truncate"
-                            >{cliModelName(claudeModelIds[row.key]) ?? m.common_select_model()}</span
-                          ></Select.Trigger>
-                        <Select.Content
-                          ><Select.Group>{@render logicalModelItems(cliModels)}</Select.Group></Select.Content>
-                      </Select.Root>
+                      <SearchCombobox
+                        id={row.id}
+                        value={claudeModelIds[row.key]}
+                        options={cliModels.map(logicalModelOption)}
+                        placeholder={m.common_select_model()}
+                        emptyText={m.common_no_matching_models()}
+                        onValueChange={(value: string) => (claudeModelIds[row.key] = value)} />
                     </ConnectControlRow>
                   {/each}
                 {/if}
@@ -450,14 +429,14 @@ function cliModelName(modelId: string): string | undefined {
                   </Select.Root>
                 </ConnectControlRow>
                 <ConnectControlRow label={m.common_model()} labelFor="code-model">
-                  <Select.Root type="single" bind:value={codeModelId} disabled={models.length === 0}>
-                    <Select.Trigger id="code-model" class="w-full min-w-0"
-                      ><span class="truncate"
-                        >{(codeModel ? effectiveModelDisplayName(codeModel) : undefined) ??
-                          (models.length ? m.common_select_model() : m.connect_add_model_first())}</span
-                      ></Select.Trigger>
-                    <Select.Content><Select.Group>{@render logicalModelItems(models)}</Select.Group></Select.Content>
-                  </Select.Root>
+                  <SearchCombobox
+                    id="code-model"
+                    value={codeModelId}
+                    options={models.map(logicalModelOption)}
+                    placeholder={models.length ? m.common_select_model() : m.connect_add_model_first()}
+                    emptyText={m.common_no_matching_models()}
+                    disabled={models.length === 0}
+                    onValueChange={(value: string) => (codeModelId = value)} />
                 </ConnectControlRow>
                 <ConnectControlRow label={m.common_api_key()} labelFor="code-key">
                   <Select.Root

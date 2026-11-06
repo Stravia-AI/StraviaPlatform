@@ -5,11 +5,11 @@ import * as Field from '#lib/components/ui/field/index.js'
 
 interface Props {
   label: string
-  /** 控件（Select 触发器）的 id，label 的 `for`。 */
+  /** 控件的 id，label 的 `for`。 */
   labelFor: string
   /** 可选解释，只在 label 右侧问号提示中出现。 */
   hint?: string
-  /** Select 触发器；占满所在列。 */
+  /** Select 触发器或 SearchCombobox；占满所在列。 */
   children: Snippet
   /** 控件下方的禁用原因或次要动作。 */
   below?: Snippet

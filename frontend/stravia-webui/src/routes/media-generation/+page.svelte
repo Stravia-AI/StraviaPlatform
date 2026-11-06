@@ -5,14 +5,15 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { idNameOption } from '#lib/search-combobox-option.js'
 import type { MediaGenerationConfig, MediaGenerationConfigView } from '#lib/types.js'
 import PageHeader from '#lib/components/page-header.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import SettingsSheet from '#lib/components/settings/settings-sheet.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
-import * as Select from '#lib/components/ui/select/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
@@ -50,8 +51,6 @@ const savedConfigurationValid = $derived(
 const toggleDisabled = $derived(
   routeSaving || clearSaving || toggleSaving || (!configQuery.data?.config.enabled && !savedConfigurationValid),
 )
-const selectedRoute = $derived(eligibleRoutes.find((route) => route.id === routeDraft))
-const selectedRouteLabel = $derived(routeDraft ? selectedRoute?.name || routeDraft : m.media_generation_no_route())
 const savedRoute = $derived(eligibleRoutes.find((route) => route.id === savedRouteId))
 const clearSummary = $derived(savedRouteId ? savedRoute?.name || savedRouteId : m.media_generation_no_route())
 
@@ -239,31 +238,15 @@ async function unlinkRoute(): Promise<void> {
         {#if eligibleRoutesQuery.isPending}
           <Skeleton class="h-9 min-w-0 flex-1" aria-label={m.media_generation_routes_loading()} aria-busy="true" />
         {:else}
-          <Select.Root
-            type="single"
+          <SearchCombobox
+            id="media-generation-image-route"
+            class="min-w-0 flex-1"
             value={routeDraft ?? ''}
-            onValueChange={chooseRoute}
-            disabled={routeSaving || clearSaving || eligibleRoutes.length === 0}>
-            <Select.Trigger id="media-generation-image-route" class="min-w-0 flex-1">
-              <span class={routeDraft && !selectedRoute?.name ? 'font-technical' : ''}>
-                {selectedRouteLabel}
-              </span>
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Group>
-                {#each eligibleRoutes as route (route.id)}
-                  <Select.Item value={route.id} label={route.name || route.id}>
-                    <span class="flex min-w-0 flex-col">
-                      <span class="truncate">{route.name || route.id}</span>
-                      {#if route.name}
-                        <span class="truncate font-technical text-xs text-muted-foreground">{route.id}</span>
-                      {/if}
-                    </span>
-                  </Select.Item>
-                {/each}
-              </Select.Group>
-            </Select.Content>
-          </Select.Root>
+            options={eligibleRoutes.map(idNameOption)}
+            placeholder={m.media_generation_no_route()}
+            emptyText={m.common_no_matching_models()}
+            disabled={routeSaving || clearSaving || eligibleRoutes.length === 0}
+            onValueChange={chooseRoute} />
           {#if eligibleRoutesQuery.isSuccess && eligibleRoutes.length === 0 && !savedRouteId}
             <Button type="button" variant="outline" size="sm" href={resolve('models')}
               >{m.connect_add_a_model()}</Button>

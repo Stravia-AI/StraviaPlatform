@@ -26,6 +26,7 @@ import { Button } from '#lib/components/ui/button/index.js'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { cn } from '#lib/utils.js'
@@ -285,18 +286,16 @@ $effect(() => {
             bind:value={search} />
         </div>
         <div class="grid gap-2 @sm:grid-cols-3">
-          <Select.Root type="single" bind:value={providerId}>
-            <Select.Trigger id="history-provider" class="w-full min-w-0" aria-label={m.common_model_service()}
-              ><span class="truncate"
-                >{serviceOptions.get(providerId) ?? (providerId || m.model_changes_all_services())}</span
-              ></Select.Trigger>
-            <Select.Content
-              ><Select.Group
-                ><Select.Item value="">{m.model_changes_all_services()}</Select.Item
-                >{#each [...serviceOptions] as [id, name] (id)}<Select.Item value={id}>{name}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content>
-          </Select.Root>
+          <SearchCombobox
+            id="history-provider"
+            class="w-full min-w-0"
+            value={providerId}
+            options={[...serviceOptions].map(([id, name]) => ({ value: id, label: name }))}
+            placeholder={m.model_changes_all_services()}
+            ariaLabel={m.common_model_service()}
+            emptyText={m.common_no_matching_providers()}
+            clearLabel={m.common_table_clear_filter()}
+            onValueChange={(value: string) => (providerId = value)} />
           <Select.Root type="single" bind:value={type}>
             <Select.Trigger id="history-type" class="w-full min-w-0" aria-label={m.model_changes_type()}
               ><span class="truncate">{type ? changeLabel(type) : m.model_changes_all_types()}</span></Select.Trigger>

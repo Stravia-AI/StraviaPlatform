@@ -101,7 +101,7 @@ for (const enabled of [false, true]) {
     await page.getByRole('option', { name: 'Text', exact: true }).click()
     await page.getByRole('link', { name: 'Open media generation', exact: true }).click()
     await page.getByRole('button', { name: 'Discard changes', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Image route', exact: true })).toContainText('historical-image-route')
+    await expect(page.getByRole('combobox', { name: 'Image route', exact: true })).toHaveValue('historical-image-route')
     // 取消不改变配置；保存才解绑并关闭功能。
     const sheet = page.locator('[data-slot="sheet-content"]')
     await page.getByRole('button', { name: 'Unlink image route', exact: true }).click()
@@ -159,7 +159,9 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     })
     await page.route('**/api/v1/media-generation/eligible-routes', (route) => route.fulfill({ json: { data: [] } }))
     await page.goto('/media-generation')
-    await expect(page.getByText(/historical-image-route/).first()).toBeVisible()
+    await expect(page.getByRole('combobox', { name: zh ? '图片路由' : 'Image route', exact: true })).toHaveValue(
+      'historical-image-route',
+    )
     await page.getByRole('switch', { name: zh ? '启用媒体生成' : 'Enable media generation' }).click()
     await expect.poll(() => writes.length).toBe(1)
     expect(writes[0]).toEqual({ enabled: false, image: { route_id: 'historical-image-route' } })
@@ -226,11 +228,11 @@ test('media generation saves its gate independently and recovers from a rejected
   await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0)
 
   // 完整有效的路由选择即时保存且不弹成功 toast；被拒绝时选择回到服务器确认值并显示错误。
-  const routeSelect = page.getByRole('button', { name: 'Image route', exact: true })
+  const routeSelect = page.getByRole('combobox', { name: 'Image route', exact: true })
   await routeSelect.click()
   await page.getByRole('option', { name: 'Image Route B' }).click()
   await expect(page.getByText(/not compatible with image generation/i)).toBeVisible()
-  await expect(routeSelect).toContainText('Image Route A')
+  await expect(routeSelect).toHaveValue('Image Route A')
   await expect(page.getByText('Media generation settings saved.')).toHaveCount(0)
   expect(config).toEqual({ enabled: false, image: { route_id: 'route-a' } })
 
@@ -250,11 +252,11 @@ test('media generation saves its gate independently and recovers from a rejected
     .getByRole('navigation', { name: 'Primary navigation' })
     .getByRole('link', { name: /Media generation/ })
     .click()
-  await expect(routeSelect).toContainText('Image Route A')
+  await expect(routeSelect).toHaveValue('Image Route A')
   await routeSelect.click()
   await page.getByRole('option', { name: 'Image Route B' }).click()
   await expect.poll(() => config).toEqual({ enabled: true, image: { route_id: 'route-b' } })
-  await expect(routeSelect).toContainText('Image Route B')
+  await expect(routeSelect).toHaveValue('Image Route B')
   await expect(page.getByText(/not compatible with image generation/i)).toHaveCount(0)
   await expect(page.getByText('Media generation settings saved.')).toHaveCount(0)
 })
@@ -374,7 +376,7 @@ test.describe('media generation switch guidance', () => {
     await expect(tooltip).toHaveCount(0)
 
     // Exercise a new touch interaction, not an already-focused trigger's synthetic click.
-    await page.getByRole('button', { name: 'Image route', exact: true }).focus()
+    await page.getByRole('combobox', { name: 'Image route', exact: true }).focus()
     const bounds = (await gate.boundingBox())!
     await page.touchscreen.tap(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
     await expect(tooltip).toContainText('Choose and save an image route')
@@ -382,7 +384,7 @@ test.describe('media generation switch guidance', () => {
     await page.keyboard.press('Escape')
     await expect(tooltip).toHaveCount(0)
 
-    await page.getByRole('button', { name: 'Image route', exact: true }).click()
+    await page.getByRole('combobox', { name: 'Image route', exact: true }).click()
     await page.getByRole('option', { name: 'Image model' }).click()
     await expect(gate).toBeEnabled()
     await gate.hover()

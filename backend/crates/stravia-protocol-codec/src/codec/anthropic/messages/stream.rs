@@ -499,11 +499,12 @@ fn parse_anthropic_event(
                             });
                         }
                     }
-                    // Empty text/thinking block starts carry no canonical
-                    // content. Their subsequent deltas contain the semantic
-                    // payload, so emitting them as Unknown would make an
-                    // otherwise lossless cross-protocol stream fail audit.
-                    Some("text") | Some("thinking") => {}
+                    // 无正文的签名思考也必须先占位，否则投影直到收尾才补出
+                    // Marker，已交付的工具调用会越过它，下一轮回放顺序失真。
+                    Some("thinking") => {
+                        deltas.push(AiStreamDelta::ThinkingDelta(String::new()));
+                    }
+                    Some("text") => {}
                     // Anthropic server-side tool blocks (web_search, code_execution,
                     // mcp_tool_use, etc.) and any future block types not yet known:
                     // forward verbatim so downstream clients receive the full event.

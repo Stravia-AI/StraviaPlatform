@@ -18,7 +18,7 @@ import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { formatCompactCount } from '#lib/format.js'
 import { HIT_HIGHLIGHT_QUERY, HIT_HIGHLIGHT_VALUE } from '#lib/credential-hit-records.js'
 import { credentialRulesQuery, customCredentialRulesQuery } from '#lib/credential-protection-queries.js'
-import { effectiveModelDisplayName } from '#lib/logical-model.js'
+import { logicalModelOption } from '#lib/logical-model.js'
 import { clientErrorTypeLabel, observationStatusLabel, upstreamErrorOutcomeLabel } from '#lib/observation-labels.js'
 import { observationOutputPreview } from '#lib/observation-conversation.js'
 import { navigateToBundle, subscribeToInteractionLive, subscribeToObservations } from '#lib/observation-stream.js'
@@ -42,6 +42,7 @@ import UpstreamErrorTable from '#lib/components/upstream-error-table.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import RequestFailure from '#lib/components/request-failure.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
 import TimeWindowControls from '#lib/components/time-window-controls.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
@@ -104,7 +105,6 @@ const ws = new ObservationWorkspace(
 const selectedOutputPreview = $derived(
   ws.interactionDetail ? observationOutputPreview(ws.interactionDetail, ws.selectedLiveBlocks) : undefined,
 )
-const selectedFilterModel = $derived(modelsQuery.data?.find((item) => item.id === ws.modelFilter))
 const draftStartMs = $derived(new Date(draftStart).getTime())
 const draftEndMs = $derived(new Date(draftEnd).getTime())
 const validDraftRange = $derived(isValidObservationRange(draftStartMs, draftEndMs))
@@ -590,40 +590,23 @@ async function downloadBundle(): Promise<void> {
     <div class="route-overlay-body">
       <Field.FieldGroup>
         <Field.Field
-          ><Field.FieldLabel for="observation-provider">{m.common_model_service()}</Field.FieldLabel><Select.Root
-            type="single"
-            bind:value={() => ws.providerFilter, (value: string) => ws.setProviderFilter(value)}
-            ><Select.Trigger id="observation-provider" class="w-full"
-              >{providersQuery.data?.find((item) => item.id === ws.providerFilter)?.name ??
-                m.observation_all()}</Select.Trigger
-            ><Select.Content
-              ><Select.Group
-                ><Select.Item value="all">{m.observation_all()}</Select.Item
-                >{#each providersQuery.data ?? [] as provider (provider.id)}<Select.Item
-                    value={provider.id}
-                    label={provider.name}>{provider.name}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content
-            ></Select.Root
-          ></Field.Field>
+          ><Field.FieldLabel for="observation-provider">{m.common_model_service()}</Field.FieldLabel><SearchCombobox
+            id="observation-provider"
+            value={ws.providerFilter === 'all' ? '' : ws.providerFilter}
+            options={(providersQuery.data ?? []).map((provider) => ({ value: provider.id, label: provider.name }))}
+            placeholder={m.logs_all_model_services()}
+            emptyText={m.common_no_matching_providers()}
+            clearLabel={m.common_table_clear_filter()}
+            onValueChange={(value: string) => ws.setProviderFilter(value || 'all')} /></Field.Field>
         <Field.Field
-          ><Field.FieldLabel for="observation-model">{m.common_model()}</Field.FieldLabel><Select.Root
-            type="single"
-            bind:value={() => ws.modelFilter, (value: string) => ws.setModelFilter(value)}
-            ><Select.Trigger id="observation-model" class="w-full"
-              >{selectedFilterModel
-                ? effectiveModelDisplayName(selectedFilterModel)
-                : m.observation_all()}</Select.Trigger
-            ><Select.Content
-              ><Select.Group
-                ><Select.Item value="all">{m.observation_all()}</Select.Item
-                >{#each modelsQuery.data ?? [] as model (model.id)}<Select.Item
-                    value={model.id}
-                    label={effectiveModelDisplayName(model)}>{effectiveModelDisplayName(model)}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content
-            ></Select.Root
-          ></Field.Field>
+          ><Field.FieldLabel for="observation-model">{m.common_model()}</Field.FieldLabel><SearchCombobox
+            id="observation-model"
+            value={ws.modelFilter === 'all' ? '' : ws.modelFilter}
+            options={(modelsQuery.data ?? []).map(logicalModelOption)}
+            placeholder={m.common_all_models()}
+            emptyText={m.common_no_matching_models()}
+            clearLabel={m.common_table_clear_filter()}
+            onValueChange={(value: string) => ws.setModelFilter(value || 'all')} /></Field.Field>
         <Field.Field
           ><Field.FieldLabel for="observation-key">{m.common_api_key()}</Field.FieldLabel><Select.Root
             type="single"

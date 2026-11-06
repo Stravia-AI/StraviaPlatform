@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Model and provider choices in the WebUI now share one searchable picker: model destinations and providers in the model editor, manual model templates, media understanding, web search, Connect clients, media generation, and the provider and model filters in Request history and model change history. Type in the field to filter; each option shows its name with the ID on a second line, and both wrap instead of being truncated. Filters treat an empty value as all and offer a clear button. The chat composer's model picker and API Key model allowlists keep their dedicated controls.
+
+### Fixed
+
+- Anthropic streams with signed thinking but no visible thinking text now preserve the reasoning item's position before subsequent text and tool calls in Responses history. Continuing with native compaction no longer sends the tool call before its thinking block and triggers `The final block in an assistant message cannot be thinking`. Signatures and compaction payloads remain unchanged. Rebuild and re-import standalone Anthropic-based plugins, including Claude Code; updating the host alone does not replace installed plugins. Previously saved, incorrectly ordered client history is not rewritten.
+- Model ID suggestions in the model editor now show each catalog model's full name and ID on separate wrapping lines instead of truncating both, so variants that differ only at the end (such as DeepSeek V4 Flash and DeepSeek V4 Flash Thinking) remain distinguishable. The suggestion list now matches the full input width, including the clear button.
+
 ## [0.6.3] - 2026-11-05
 
 ### Verification
