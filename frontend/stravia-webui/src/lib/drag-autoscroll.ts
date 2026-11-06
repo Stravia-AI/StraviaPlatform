@@ -1,5 +1,5 @@
 /**
- * HTML5 拖拽期间让最近的可滚动祖先随指针滚动。
+ * HTML5 拖拽与触屏拖拽期间让最近的可滚动祖先随指针滚动。
  *
  * 浏览器自带的拖拽自动滚动只在容器边缘极窄的一圈内生效，且各引擎（含桌面端 WebView）行为不一；
  * 管理页底部又有固定操作栏盖住这一圈，导致拖到页面外的目标无法到达。这里自行实现：边缘区内按距离线性加速。
@@ -56,7 +56,7 @@ export function startDragAutoscroll(): () => void {
   // scrollTop 在部分显示缩放下会取整；累积余量避免低速时每帧不足 1px 而卡住。
   let carry = 0
 
-  const track = (event: DragEvent) => {
+  const track = (event: MouseEvent) => {
     pointerY = event.clientY
     scroller = scrollableAncestor(event.target)
   }
@@ -80,10 +80,13 @@ export function startDragAutoscroll(): () => void {
   // 移入新元素时可能先只有 dragenter；不能沿用边缘位置等到 dragover 才停滚。
   document.addEventListener('dragenter', track, { capture: true, passive: true })
   document.addEventListener('dragover', track, { capture: true, passive: true })
+  // 触屏拖拽（touch-drag.ts）由 Pointer Events 驱动，不产生 dragover；原生拖拽期间浏览器不派发 pointermove，二者不会重复。
+  document.addEventListener('pointermove', track, { capture: true, passive: true })
   frame = requestAnimationFrame(step)
   return () => {
     document.removeEventListener('dragenter', track, { capture: true })
     document.removeEventListener('dragover', track, { capture: true })
+    document.removeEventListener('pointermove', track, { capture: true })
     cancelAnimationFrame(frame)
   }
 }
