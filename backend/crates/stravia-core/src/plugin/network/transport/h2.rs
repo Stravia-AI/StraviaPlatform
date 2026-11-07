@@ -2,12 +2,10 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
 use rama_core::{extensions::ExtensionsRef, rt::Executor};
 use rama_http_core::client::conn::http2::{Builder, SendRequest};
 pub use rama_http_core::client::conn::http2::H2PeerSettingsHandle;
 use rama_http_types::{
-    body::util::Full,
     proto::h2::{
         PseudoHeaderOrder,
         frame::{EarlyFrame, SettingOrder, SettingsConfig},
@@ -15,8 +13,10 @@ use rama_http_types::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use super::body::RequestBody;
+
 /// A cloneable, multiplexed HTTP/2 request sender.
-pub type H2Sender = SendRequest<Full<Bytes>>;
+pub type H2Sender = SendRequest<RequestBody>;
 
 /// Settings applied to each new HTTP/2 connection.
 #[derive(Clone, Debug)]
@@ -81,7 +81,7 @@ where
         .set_keep_alive_timeout(settings.keep_alive_timeout)
         .set_keep_alive_while_idle(settings.keep_alive_while_idle);
 
-    let (sender, connection) = builder.handshake::<_, Full<Bytes>>(io).await?;
+    let (sender, connection) = builder.handshake::<_, RequestBody>(io).await?;
     let peer_settings = connection.peer_settings_handle();
     tokio::spawn(async move {
         if let Err(error) = connection.await {

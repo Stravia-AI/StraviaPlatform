@@ -1,11 +1,17 @@
 //! Outbound HTTP/1 and HTTP/2 transport with explicit routing.
 
+mod body;
 mod connector;
+mod capture;
 mod h1;
 mod h2;
 mod pool;
 mod route;
 
+#[cfg(test)]
+mod observer_tests;
+#[cfg(test)]
+mod length_tests;
 #[cfg(test)]
 mod wire_tests;
 #[cfg(test)]
@@ -44,6 +50,15 @@ pub(crate) struct RequestPlan {
     pub uri: String,
     pub fields: Vec<Field>,
     pub body: Bytes,
+    pub observer: Option<Box<dyn FnOnce(RequestHead) + Send>>,
+}
+
+/// Final protocol-specific request head, captured immediately before dispatch.
+pub(crate) struct RequestHead {
+    pub version: HttpVersionPref,
+    pub method: String,
+    pub uri: String,
+    pub fields: Vec<Field>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +76,7 @@ pub(crate) struct Route {
     pub resolver: Arc<dyn Resolver>,
     pub version: HttpVersionPref,
     pub h2: H2Settings,
+    pub omit_h2_content_length: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,14 +93,17 @@ pub(crate) enum TransportError {
     Timeout,
     #[error("transport cancelled")]
     Cancelled,
-    #[error("upstream rejected upgrade with status {0:?}")]
-    UpgradeRejected(Head),
 }
 
 #[derive(Debug)]
 pub(crate) struct Head {
     pub status: u16,
     pub fields: Vec<Field>,
+}
+
+pub(crate) enum UpgradeResponse {
+    Upgraded(Head, UpgradedIo),
+    Rejected(UpstreamResponse),
 }
 
 pub(crate) struct UpstreamResponse {
@@ -136,15 +155,15 @@ impl VendorTransport {
         Ok(UpstreamResponse { head, body: UpstreamBody(response.into_body()) })
     }
 
-    pub(crate) async fn upgrade(&self, plan: RequestPlan, route: Route) -> Result<(Head, UpgradedIo), TransportError> {
+    pub(crate) async fn upgrade(&self, plan: RequestPlan, route: Route) -> Result<UpgradeResponse, TransportError> {
         let response = self.request(plan, route, true).await?;
         let head = response_head(&response);
         let expected = if response.version() == Version::HTTP_2 { 200 } else { 101 };
         if head.status != expected {
-            return Err(TransportError::UpgradeRejected(head));
+            return Ok(UpgradeResponse::Rejected(UpstreamResponse { head, body: UpstreamBody(response.into_body()) }));
         }
         let io = handle_upgrade(&response).await.map_err(|e| TransportError::Protocol(e.to_string()))?;
-        Ok((head, UpgradedIo(io)))
+        Ok(UpgradeResponse::Upgraded(head, UpgradedIo(io)))
     }
 
     async fn request(&self, mut plan: RequestPlan, route: Route, upgrade: bool) -> Result<Response<Incoming>, TransportError> {
@@ -168,6 +187,8 @@ impl VendorTransport {
             (_, HttpVersionPref::Auto) => AlpnPreference::Http2ThenHttp1,
             (_, HttpVersionPref::Http2) => AlpnPreference::Http2Only,
         };
+        let observer = plan.observer.take();
+        let pseudo_order = observer.as_ref().and_then(|_| route.h2.pseudo_header_order.clone());
         let mut connection = self.pool.acquire(ConnectOptions {
             route: proxy,
             host,
@@ -194,8 +215,11 @@ impl VendorTransport {
                 return Err(TransportError::Protocol("HTTP/2 peer does not enable extended CONNECT".into()));
             }
             plan.method = "CONNECT".into();
+            // RFC 8441 replaces the HTTP/1 key/accept challenge with the
+            // extended CONNECT protocol identifier.
+            plan.fields.retain(|field| !field.name.eq_ignore_ascii_case("sec-websocket-key"));
         }
-        let mut request = h1::request(plan, if is_h2 { Version::HTTP_2 } else { Version::HTTP_11 })?;
+        let mut request = h1::request(plan, if is_h2 { Version::HTTP_2 } else { Version::HTTP_11 }, is_h2 && route.omit_h2_content_length)?;
         if upgrade && is_h2 {
             request.extensions().insert(Protocol::from_static("websocket"));
         }
@@ -212,6 +236,9 @@ impl VendorTransport {
         }
         if let Some(auth) = connection.proxy_authorization.as_ref() {
             request.headers_mut().append(HeaderName::from_static("proxy-authorization"), HeaderValue::from_str(auth).map_err(|e| TransportError::Proxy(e.to_string()))?);
+        }
+        if let Some(observer) = observer {
+            observer(capture::request_head(&request, pseudo_order.as_ref(), upgrade && is_h2));
         }
         match connection.sender.as_mut().expect("new connection always has sender") {
             Sender::Http1(sender) => sender.send_request(request).await,

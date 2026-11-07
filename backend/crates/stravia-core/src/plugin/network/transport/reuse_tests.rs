@@ -44,6 +44,7 @@ async fn request(transport: &VendorTransport, uri: &str, route: Route) -> usize 
         uri: uri.into(),
         fields: Vec::new(),
         body: Bytes::new(),
+        observer: None,
     }, route).await.unwrap();
     assert_eq!(response.head.status, 200);
     let mut body = Vec::new();
@@ -95,6 +96,7 @@ async fn http1_reuses_only_matching_shape_revision_and_proxy_identity() {
             proxy: OutboundProxySettings::default(),
             version: HttpVersionPref::Http1,
             h2: H2Settings::default(),
+            omit_h2_content_length: false,
             resolver: Arc::new(SystemResolver),
         };
         let transport = VendorTransport::new();

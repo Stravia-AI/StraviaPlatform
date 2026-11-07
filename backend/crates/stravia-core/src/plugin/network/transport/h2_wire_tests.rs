@@ -6,7 +6,6 @@ use bytes::{Bytes, BytesMut};
 use rama_core::svc_input::ServiceInput;
 use rama_http_types::{
     Request,
-    body::util::Full,
     proto::h2::{
         PseudoHeader, PseudoHeaderOrder,
         frame::{SettingId, SettingOrder, SettingsConfig},
@@ -19,7 +18,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::h2::{H2Settings, connect};
+use super::{body::RequestBody, h2::{H2Settings, connect}};
 
 struct Frame {
     kind: u8,
@@ -131,7 +130,7 @@ async fn configured_settings_and_pseudo_headers_reach_the_wire() {
         sender.ready().await.unwrap();
         let request = Request::builder()
             .uri("http://example.test/wire?x=1")
-            .body(Full::new(Bytes::new()))
+            .body(RequestBody::new(Bytes::new(), false))
             .unwrap();
         let response = tokio::spawn(async move { sender.send_request(request).await });
         let (settings, window, mut headers) = server.await.unwrap();

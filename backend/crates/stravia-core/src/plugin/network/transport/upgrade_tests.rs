@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::{Field, H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, TransportError, VendorTransport};
+use super::{Field, H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, TransportError, UpgradeResponse, VendorTransport};
 use crate::outbound_proxy::OutboundProxySettings;
 
 fn route(version: HttpVersionPref) -> Route {
@@ -32,6 +32,7 @@ fn route(version: HttpVersionPref) -> Route {
         resolver: Arc::new(SystemResolver),
         version,
         h2: H2Settings::default(),
+        omit_h2_content_length: false,
     }
 }
 
@@ -42,8 +43,10 @@ fn plan(uri: String) -> RequestPlan {
         fields: vec![
             Field { name: "Connection".into(), bytes: b"Upgrade".to_vec() },
             Field { name: "Upgrade".into(), bytes: b"websocket".to_vec() },
+            Field { name: "Sec-WebSocket-Key".into(), bytes: b"dGhlIHNhbXBsZSBub25jZQ==".to_vec() },
         ],
         body: Bytes::new(),
+        observer: None,
     }
 }
 
@@ -69,9 +72,9 @@ async fn http1_upgrade_preserves_bytes_read_with_response_and_supports_writes() 
             assert_eq!(&client_data, b"client-reply");
         });
 
-        let (head, mut io) = VendorTransport::new()
+        let UpgradeResponse::Upgraded(head, mut io) = VendorTransport::new()
             .upgrade(plan(format!("ws://{address}/socket")), route(HttpVersionPref::Http1))
-            .await.unwrap();
+            .await.unwrap() else { panic!("expected a successful HTTP/1 upgrade") };
         assert_eq!(head.status, 101);
         let mut first = [0; 12];
         io.read_exact(&mut first).await.unwrap();
@@ -80,6 +83,46 @@ async fn http1_upgrade_preserves_bytes_read_with_response_and_supports_writes() 
         io.flush().await.unwrap();
         server.await.unwrap();
     }).await.expect("HTTP/1 upgrade timed out");
+}
+
+#[tokio::test]
+async fn http1_upgrade_rejection_preserves_status_ordered_headers_and_body() {
+    timeout(Duration::from_secs(10), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+                assert!(request.len() <= 8192);
+            }
+            assert!(request.starts_with(b"GET /socket HTTP/1.1\r\n"));
+            socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Basic realm=first\r\nx-reason: denied\r\nwww-authenticate: Bearer realm=second\r\ncontent-length: 13\r\n\r\nauth required").await.unwrap();
+        });
+
+        let UpgradeResponse::Rejected(mut response) = VendorTransport::new()
+            .upgrade(plan(format!("ws://{address}/socket")), route(HttpVersionPref::Http1))
+            .await.unwrap() else { panic!("expected an HTTP/1 upgrade rejection") };
+        assert_eq!(response.head.status, 401);
+        let fields: Vec<_> = response.head.fields.iter()
+            .map(|field| (field.name.as_str(), field.bytes.as_slice()))
+            .collect();
+        assert_eq!(fields, vec![
+            ("www-authenticate", b"Basic realm=first".as_slice()),
+            ("x-reason", b"denied".as_slice()),
+            ("www-authenticate", b"Bearer realm=second".as_slice()),
+            ("content-length", b"13".as_slice()),
+        ]);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body.next_chunk().await.unwrap() {
+            body.extend_from_slice(&chunk);
+        }
+        assert_eq!(body, b"auth required");
+        server.await.unwrap();
+    }).await.expect("HTTP/1 upgrade rejection timed out");
 }
 
 struct Frame {
@@ -147,6 +190,7 @@ async fn h2_extended_connect_negotiates_and_transfers_both_directions() {
             assert!(fields.iter().any(|(name, value)| name == b":method" && value == b"CONNECT"));
             assert!(fields.iter().any(|(name, value)| name == b":protocol" && value == b"websocket"));
             assert!(fields.iter().any(|(name, value)| name == b":path" && value == b"/socket"));
+            assert!(!fields.iter().any(|(name, _)| name == b"sec-websocket-key"));
 
             // HEADERS with indexed :status 200, then DATA without END_STREAM.
             let id = stream.to_be_bytes();
@@ -163,9 +207,9 @@ async fn h2_extended_connect_negotiates_and_transfers_both_directions() {
             assert_eq!(data, b"client-reply");
         });
 
-        let (head, mut io) = VendorTransport::new()
+        let UpgradeResponse::Upgraded(head, mut io) = VendorTransport::new()
             .upgrade(plan(format!("http://{address}/socket")), route(HttpVersionPref::Http2))
-            .await.unwrap();
+            .await.unwrap() else { panic!("expected a successful HTTP/2 upgrade") };
         assert_eq!(head.status, 200);
         let mut first = [0; 12];
         io.read_exact(&mut first).await.unwrap();

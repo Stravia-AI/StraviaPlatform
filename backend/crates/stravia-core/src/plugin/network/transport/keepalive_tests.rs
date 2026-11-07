@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rama_core::svc_input::ServiceInput;
-use rama_http_types::{Request, body::util::Full};
+use rama_http_types::Request;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -12,7 +12,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::h2::{H2Settings, connect};
+use super::{body::RequestBody, h2::{H2Settings, connect}};
 
 #[tokio::test]
 async fn unanswered_keepalive_ping_fails_pending_response() {
@@ -67,7 +67,7 @@ async fn unanswered_keepalive_ping_fails_pending_response() {
         sender.ready().await.unwrap();
         let request = Request::builder()
             .uri("http://example.test/keepalive")
-            .body(Full::new(Bytes::new()))
+            .body(RequestBody::new(Bytes::new(), false))
             .unwrap();
         let response = tokio::spawn(async move { sender.send_request(request).await });
 
