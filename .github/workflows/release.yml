@@ -154,6 +154,9 @@ jobs:
         with:
           version: ${{ env.TASK_VERSION }}
 
+      - name: Prepare patched crates
+        run: task prepare:crates
+
       - name: Build standalone plugins
         run: task build:vendors:all
 
@@ -260,6 +263,9 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake clang libclang-dev python3 pkg-config
+
+      - name: Prepare patched crates
+        run: task prepare:crates
 
       - name: Build server
         run: task build:server
@@ -383,6 +389,9 @@ jobs:
           STRAVIA_UPDATER_PUBLIC_KEY: ${{ secrets.STRAVIA_UPDATER_PUBLIC_KEY }}
         run: python3 .github/scripts/configure_updater_signing.py
 
+      - name: Prepare patched crates
+        run: task prepare:crates
+
       - name: Build desktop bundle
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -497,6 +506,9 @@ jobs:
         uses: go-task/setup-task@v2
         with:
           version: ${{ env.TASK_VERSION }}
+
+      - name: Prepare patched crates
+        run: task prepare:crates
 
       - name: Build macOS application, DMG, and signed updater archive
         env:

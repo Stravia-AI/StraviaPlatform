@@ -1,0 +1,9 @@
+[
+  {
+    "crate": "rustls",
+    "version": "0.23.46",
+    "sha256": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
+    "patch": "rustls@0.23.46.patch",
+    "directory": "rustls-0.23.46-shape1"
+  }
+]

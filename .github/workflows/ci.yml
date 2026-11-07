@@ -61,6 +61,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Test patched crate preparation
+        run: python3 -m unittest tests.test_prepare_crates
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -72,10 +75,13 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-test
+          shared-key: ci-v2-linux-gnu-pinned-test-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
@@ -167,12 +173,16 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        if: steps.unit-lane.outputs.run_expensive == 'true'
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         if: steps.unit-lane.outputs.run_expensive == 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # Compiler fingerprints separate stable once it differs from pinned.
-          shared-key: ci-v2-linux-gnu-pinned-test
+          shared-key: ci-v2-linux-gnu-pinned-test-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
           cache-on-failure: 'false'
@@ -246,10 +256,13 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v3-windows-msvc-desktop-browser-debug
+          shared-key: ci-v3-windows-msvc-desktop-browser-debug-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
@@ -293,10 +306,13 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' && matrix.suite == 'admin' }}
           cache-on-failure: 'false'
@@ -397,10 +413,13 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
@@ -463,10 +482,13 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
@@ -532,10 +554,13 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Prepare patched crates
+        run: python patches/cargo/prepare.py
+
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v3-windows-msvc-desktop-browser-debug
+          shared-key: ci-v3-windows-msvc-desktop-browser-debug-${{ hashFiles('patches/cargo/**') }}
           cache-targets: 'true'
           save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
           cache-on-failure: 'false'

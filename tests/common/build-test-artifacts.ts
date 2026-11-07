@@ -5,6 +5,12 @@ import { cpus } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 
 const repository = resolve(import.meta.dir, '../..')
+const preparation = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['patches/cargo/prepare.py'], {
+  cwd: repository,
+  stdio: 'inherit',
+})
+if (preparation.error) throw preparation.error
+if (preparation.status !== 0) throw new Error('Failed to prepare patched Cargo crates')
 const cargoTarget = resolve(repository, process.env.CARGO_TARGET_DIR ?? 'target')
 const suffix = process.platform === 'win32' ? '.exe' : ''
 const checking = process.argv[2] === '--status'
@@ -131,6 +137,7 @@ const signature = createHash('sha256')
       arch: process.arch,
       cpu: cpus()[0]?.model,
       command: plan.command,
+      patchedCrates: readFileSync(join(repository, '.stravia-patched-crates', 'rustls-0.23.46-shape1', '.prepare-stamp.json'), 'utf8'),
       environment: compilerEnvironment,
     }),
   )
