@@ -3946,21 +3946,29 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
     }
     let infer_turn: Value =
         serde_json::from_str(requests[0].headers["x-codex-turn-metadata"].to_str()?)?;
-    let installation_id = requests[0].headers["x-codex-installation-id"].to_str()?;
-    uuid::Uuid::parse_str(installation_id)?;
+    // 0.167.0 只在 client_metadata 与 turn metadata 中携带 installation ID，不再发送同名请求头。
+    let installation_id = requests[0].body["client_metadata"]["x-codex-installation-id"]
+        .as_str()
+        .expect("installation ID in client_metadata")
+        .to_owned();
+    uuid::Uuid::parse_str(&installation_id)?;
     assert_ne!(installation_id, "client-installation");
     assert_eq!(infer_turn["installation_id"], installation_id);
-    assert_eq!(
-        requests[0].body["client_metadata"]["x-codex-installation-id"],
-        requests[0].headers["x-codex-installation-id"].to_str()?
-    );
     assert!(infer_turn.get("custom_hint").is_none());
     for request in &requests {
         assert_eq!(
-            request.headers["x-codex-installation-id"].to_str()?,
+            request.body["client_metadata"]["x-codex-installation-id"],
             installation_id
         );
-        assert!(!request.headers.contains_key("x-codex-beta-features"));
+        assert!(!request.headers.contains_key("x-codex-installation-id"));
+        assert_eq!(
+            request
+                .headers
+                .get("x-codex-beta-features")
+                .and_then(|value| value.to_str().ok()),
+            Some("remote_compaction_v2"),
+            "client beta features never reach upstream"
+        );
         assert_ne!(
             request
                 .headers

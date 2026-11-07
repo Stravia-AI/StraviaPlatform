@@ -243,6 +243,16 @@ async fn http_case(case: &'static str) {
             request.extend_from_slice(&buffer[..count]);
         }
         let body: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+        // Routing fields lead the raw wire bytes in the official declaration
+        // order; a sorted map would start with `client_metadata`.
+        assert!(
+            request[header_end..].starts_with(br#"{"model":"#),
+            "{}",
+            String::from_utf8_lossy(&request[header_end..])
+        );
+        let raw = String::from_utf8_lossy(&request[header_end..]);
+        let at = |key: &str| raw.find(&format!(r#","{key}":"#)).unwrap();
+        assert!(at("stream") < at("input") && at("input") < at("client_metadata"));
         let header = |expected: &str| {
             headers.lines().find_map(|line| {
                 let (name, value) = line.split_once(':')?;
@@ -271,14 +281,22 @@ async fn http_case(case: &'static str) {
                     "parameters": {"type": "object"}}])
             );
             assert_eq!(body["reasoning"]["effort"], "high");
+            // 实时 base instructions 与推理一样投影为 developer 前缀，不留在顶层。
+            assert!(body.get("instructions").is_none());
+            let base_instructions = &body["input"][0];
+            assert_eq!(base_instructions["role"], "developer");
+            assert_eq!(
+                base_instructions["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+                serde_json::json!(["model.base_instructions"])
+            );
             if case == "compact-explicit" {
                 assert_eq!(
-                    body["instructions"],
+                    base_instructions["content"][0]["text"],
                     "session instructions\n\nCompaction instructions:\nexplicit summary rules"
                 );
             } else if case == "compact" {
                 assert_eq!(
-                    body["instructions"],
+                    base_instructions["content"][0]["text"],
                     stravia_protocol_codec::codec::compaction::DEFAULT_COMPACTION_INSTRUCTIONS
                 );
             }
@@ -300,7 +318,23 @@ async fn http_case(case: &'static str) {
         );
         assert_ne!(turn["turn_id"], "injected-turn");
         assert!(turn.get("parent_turn_id").is_none());
-        assert!(turn.get("root_turn_id").is_none());
+        // A root thread's turn is its own causal root; the injected client
+        // label never reaches the native snapshot.
+        assert_eq!(turn["root_turn_id"], turn["turn_id"]);
+        assert_eq!(body["client_metadata"]["root_turn_id"], turn["turn_id"]);
+        assert_eq!(
+            header("x-codex-turn-metadata"),
+            body["client_metadata"]["x-codex-turn-metadata"].as_str()
+        );
+        assert_eq!(header("version"), Some("0.167.0"));
+        assert_eq!(header("originator"), Some("codex-tui"));
+        assert_eq!(
+            header("x-codex-beta-features"),
+            Some("remote_compaction_v2")
+        );
+        assert_eq!(header("accept"), Some("text/event-stream"));
+        assert!(header("x-codex-installation-id").is_none());
+        assert!(body.get("instructions").is_none());
         if case == "logprobs"
             && body["include"].as_array().is_some_and(|include| {
                 include
@@ -630,6 +664,11 @@ struct MockSocket {
 impl HostWebSocket for MockSocket {
     async fn send(&self, message: WebSocketMessage) -> Result<(), HostFailure> {
         if let WebSocketMessage::Text(text) = &message {
+            // Field order is wire behavior; only parse after checking the raw text.
+            assert!(
+                text.starts_with(r#"{"type":"response.create","model":"#),
+                "{text}"
+            );
             self.recorded
                 .sent
                 .lock()
@@ -1180,6 +1219,96 @@ async fn affinity_and_account_headers_follow_actual_codex_frames() {
             .map(String::as_str),
         Some("Bearer other-token")
     );
+}
+
+/// Official 0.167.0 WS capture: Lite frames carry the HTTP-only Lite header
+/// and the dispatch time as reserved client_metadata keys; a continuation
+/// frame sends only the appended items, never the prompt prefix again.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn lite_websocket_frames_follow_the_official_capture() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "lite-window".into());
+    provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+        extensions: BTreeMap::from([
+            ("use_responses_lite".into(), serde_json::json!(true)),
+            ("support_verbosity".into(), serde_json::json!(true)),
+            ("default_verbosity".into(), serde_json::json!("low")),
+        ]),
+        ..Default::default()
+    });
+    for previous_id in [None, Some("resp_lite_first")] {
+        let mut turn_request = request();
+        turn_request.instructions = Some("base instructions".into());
+        turn_request.parameters.continuation =
+            previous_id.map(|id| Continuation::PreviousResponse(id.into()));
+        execute_once(
+            &runtime,
+            &plugin,
+            provider.clone(),
+            turn_request,
+            codex_frames(0, "resp_lite"),
+            &recorded,
+        )
+        .await
+        .expect("Codex Lite WebSocket inference");
+    }
+    let connections = recorded.connections.lock();
+    let sent = recorded.sent.lock();
+    for (connection, frame) in connections.iter().zip(sent.iter()) {
+        for absent in [
+            "x-codex-turn-metadata",
+            "x-openai-internal-codex-responses-lite",
+            "x-codex-installation-id",
+        ] {
+            assert!(!connection.headers.contains_key(absent), "{absent}");
+        }
+        assert_eq!(
+            connection.headers["x-codex-beta-features"],
+            "remote_compaction_v2"
+        );
+        assert_eq!(connection.headers["originator"], "codex-tui");
+        let metadata = &frame["client_metadata"];
+        assert_eq!(
+            metadata["ws_request_header_x_openai_internal_codex_responses_lite"],
+            "true"
+        );
+        assert!(
+            metadata["x-codex-ws-stream-request-start-ms"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .is_ok()
+        );
+        assert!(frame.get("instructions").is_none());
+        assert!(frame.get("tools").is_none());
+        assert_eq!(frame["parallel_tool_calls"], false);
+        assert_eq!(frame["reasoning"]["context"], "all_turns");
+        assert_eq!(frame["text"]["verbosity"], "low");
+        assert_eq!(
+            frame["access_programs"],
+            serde_json::json!({"cyber":"standard"})
+        );
+    }
+    let roles = |frame: &serde_json::Value| {
+        frame["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["role"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(roles(&sent[0]), ["developer", "user"]);
+    assert_eq!(
+        sent[0]["input"][0]["content"][0]["text"],
+        "base instructions"
+    );
+    assert_eq!(sent[1]["previous_response_id"], "resp_lite_first");
+    assert_eq!(roles(&sent[1]), ["user"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

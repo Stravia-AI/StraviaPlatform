@@ -82,29 +82,26 @@ pub(super) fn generate(
         "stream":true,
         "include":[]
     });
-    codex::prepare_operation_body(&mut body, codex::BodyOperation::Image)?;
-    let mut session = codex::NativeSession::new(provider);
+    let mut session = codex::NativeSession::new(provider, codex::BodyOperation::Image);
     session.resolve_identity(host, provider)?;
-    session.apply_body(&mut body);
+    session.project_body(&mut body)?;
     let mut headers = vec![
-        ("content-type".into(), "application/json".into()),
         ("accept".into(), "text/event-stream".into()),
+        ("content-type".into(), "application/json".into()),
     ];
-    codex::append_runtime_headers(
-        provider,
-        &body,
-        &session,
-        codex::BodyOperation::Image,
-        &mut headers,
-    )?;
+    codex::append_runtime_headers(provider, &body, &session, &mut headers)?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: "POST".into(),
-        url: endpoint(&provider.base_url, "/responses"),
-        headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| invalid("Codex image request could not be encoded"))?,
-    })?;
+    let response = codex::start_responses_http(
+        host,
+        provider,
+        stravia_vendor_sdk::wit::types::HttpRequest {
+            method: "POST".into(),
+            url: endpoint(&provider.base_url, "/responses"),
+            headers,
+            body: serde_json::to_vec(&codex::WireBody(&body))
+                .map_err(|_| invalid("Codex image request could not be encoded"))?,
+        },
+    )?;
     ensure_success(&response, "Codex image generation")?;
     let bytes = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES)?;
     let response = codex::parse_responses_body(&bytes)?;

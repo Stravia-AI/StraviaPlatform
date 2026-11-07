@@ -67,14 +67,18 @@ fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
         })
 }
 
+/// Official 0.167.0 backend-client usage read. The TUI also sends
+/// `x-openai-codex-luna-reserve`, which backend-client reserves for clients
+/// that can switch to the Reserve model; a passive usage reader must not.
 fn usage_request(provider: &ProviderSnapshot, access_token: &str) -> HttpRequest {
     let mut headers = vec![
+        ("user-agent".into(), crate::codex::user_agent()),
         ("authorization".into(), format!("Bearer {access_token}")),
-        ("accept".into(), "application/json".into()),
     ];
     if let Some(account_id) = account_id(provider, access_token) {
         headers.push(("chatgpt-account-id".into(), account_id));
     }
+    headers.push(("accept".into(), "*/*".into()));
     HttpRequest {
         method: "GET".into(),
         url: USAGE_URL.into(),
