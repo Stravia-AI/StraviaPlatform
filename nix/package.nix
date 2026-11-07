@@ -9,6 +9,7 @@
   autoPatchelfHook,
   clang,
   cmake,
+  fetchurl,
   gitMinimal,
   ninja,
   pkg-config,
@@ -19,6 +20,10 @@ let
   workspace = builtins.fromTOML (builtins.readFile (source + "/Cargo.toml"));
   toolchain = builtins.fromTOML (builtins.readFile (source + "/rust-toolchain.toml"));
   version = workspace.workspace.package.version;
+  rustlsCrate = fetchurl {
+    url = "https://static.crates.io/crates/rustls/rustls-0.23.46.crate";
+    hash = "sha256-SOE72MDpNlxDz6XJ6PmtSdPIREkmyarIGeDk3FA8j98=";
+  };
 
   # 用白名单界定源码，避免把开发数据库、凭据和已有产物送入 store。
   cleanSource =
@@ -56,7 +61,7 @@ let
       "bun.lock"
       "frontend"
     ]
-    || inTree "patches" path
+    || (inTree "patches" path && !(inTree "patches/cargo" path))
     || inTree "frontend/stravia-webui" path;
   webSource = cleanSource frontendInput;
   serverSource = cleanSource (
@@ -66,6 +71,7 @@ let
       "Cargo.lock"
       "rust-toolchain.toml"
       "LICENSE"
+      "patches"
       "frontend"
       "frontend/stravia-webui"
       "frontend/stravia-webui/src"
@@ -73,6 +79,7 @@ let
       "frontend/stravia-webui/static"
     ]
     || inTree ".cargo" path
+    || inTree "patches/cargo" path
     || inTree "backend" path
     || inTree "frontend/stravia-webui/src/assets/icons" path
     || path == "frontend/stravia-webui/static/stravia-logo.svg"
@@ -175,6 +182,7 @@ stdenv.mkDerivation {
     export CARGO_BUILD_JOBS="$NIX_BUILD_CORES"
     mkdir -p "$CARGO_HOME" frontend/stravia-webui/dist
     cp -r ${webui}/. frontend/stravia-webui/dist/
+    python3 patches/cargo/prepare.py --offline --crate-file ${rustlsCrate}
     cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors
     cargo build --locked --offline --release -p stravia-server --bin stravia-server
     runHook postBuild
