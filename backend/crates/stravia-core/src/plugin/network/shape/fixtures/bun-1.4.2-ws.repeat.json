@@ -1,0 +1,345 @@
+{
+  "clienthello": {
+    "alpn": [
+      "http/1.1"
+    ],
+    "cipher_suites": [
+      4865,
+      4866,
+      4867,
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49161,
+      49171,
+      49162,
+      49172,
+      156,
+      157,
+      47,
+      53
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          0
+        ],
+        "decoded": {
+          "renegotiation_info": true
+        },
+        "length": 1,
+        "payload_omitted": null,
+        "type": 65281
+      },
+      {
+        "body": [
+          0,
+          8,
+          17,
+          236,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            29,
+            23,
+            24
+          ]
+        },
+        "length": 10,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 35
+      },
+      {
+        "body": [
+          0,
+          9,
+          8,
+          104,
+          116,
+          116,
+          112,
+          47,
+          49,
+          46,
+          49
+        ],
+        "decoded": null,
+        "length": 11,
+        "payload_omitted": null,
+        "type": 16
+      },
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "status_request": true
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": [
+          0,
+          18,
+          4,
+          3,
+          8,
+          4,
+          4,
+          1,
+          5,
+          3,
+          8,
+          5,
+          5,
+          1,
+          8,
+          6,
+          6,
+          1,
+          2,
+          1
+        ],
+        "decoded": {
+          "algorithms": [
+            1027,
+            2052,
+            1025,
+            1283,
+            2053,
+            1281,
+            2054,
+            1537,
+            513
+          ]
+        },
+        "length": 20,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [],
+        "decoded": {
+          "signed_certificate_timestamp": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 18
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      }
+    ],
+    "extensions": [
+      0,
+      23,
+      65281,
+      10,
+      11,
+      35,
+      16,
+      5,
+      13,
+      18,
+      51,
+      45,
+      43
+    ],
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43,4588-29-23-24,0",
+    "ja3_hash": "1523504b38f0fae0d881d4b6554aac1b",
+    "ja4": "t13d1713h1_5b57614c22b0_6a3d802a7139",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      1027,
+      2052,
+      1025,
+      1283,
+      2053,
+      1281,
+      2054,
+      1537,
+      513
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      4588,
+      29,
+      23,
+      24
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "headers": [
+      {
+        "name": "Host",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Connection",
+        "value": "Upgrade"
+      },
+      {
+        "name": "Upgrade",
+        "value": "websocket"
+      },
+      {
+        "name": "Sec-WebSocket-Version",
+        "value": "13"
+      },
+      {
+        "name": "Sec-WebSocket-Extensions",
+        "value": "permessage-deflate; client_max_window_bits"
+      },
+      {
+        "name": "Sec-WebSocket-Key",
+        "value": "<redacted>"
+      }
+    ],
+    "method": "GET",
+    "normalizations": [
+      {
+        "header_index": 0,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 5,
+        "reason": "credential_or_dynamic"
+      }
+    ],
+    "raw_head": "GET <redacted> HTTP/1.1\r\nHost: <redacted>\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\nSec-WebSocket-Key: <redacted>\r\n\r\n",
+    "target": "<redacted>",
+    "version": "HTTP/1.1"
+  },
+  "provenance": {
+    "arch": "x86_64",
+    "captured_at": "2026-11-07T05:27:08.509125211+00:00",
+    "client": "bun-ws",
+    "os": "linux",
+    "version": "1.4.2",
+    "capture_round": 2,
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; temporary HOME and placeholder credentials",
+    "target": "https://localhost:<ephemeral-port>",
+    "capture_tool": "stravia-tools capture-client module, standalone harness",
+    "invocation": "bun -e local WebSocket send script",
+    "configuration": "temporary HOME; NODE_EXTRA_CA_CERTS=temporary capture CA",
+    "trust": "NODE_EXTRA_CA_CERTS"
+  },
+  "ws": {
+    "first_frame": {
+      "fin": true,
+      "length": 13,
+      "masked": true,
+      "opcode": 1,
+      "payload": "<redacted>",
+      "rsv": 0
+    }
+  }
+}

@@ -1,0 +1,446 @@
+{
+  "clienthello": {
+    "alpn": [],
+    "cipher_suites": [
+      4866,
+      4867,
+      4865,
+      49196,
+      49200,
+      159,
+      52393,
+      52392,
+      52394,
+      49195,
+      49199,
+      158,
+      49188,
+      49192,
+      107,
+      49187,
+      49191,
+      103,
+      49162,
+      49172,
+      57,
+      49161,
+      49171,
+      51,
+      157,
+      156,
+      61,
+      60,
+      53,
+      47
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": [
+          0
+        ],
+        "decoded": {
+          "renegotiation_info": true
+        },
+        "length": 1,
+        "payload_omitted": null,
+        "type": 65281
+      },
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": [
+          0,
+          16,
+          17,
+          236,
+          0,
+          29,
+          0,
+          23,
+          0,
+          30,
+          0,
+          24,
+          0,
+          25,
+          1,
+          0,
+          1,
+          1
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            29,
+            23,
+            30,
+            24,
+            25,
+            256,
+            257
+          ]
+        },
+        "length": 18,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 35
+      },
+      {
+        "body": [],
+        "decoded": {
+          "encrypt_then_mac": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 22
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          0,
+          52,
+          9,
+          5,
+          9,
+          6,
+          9,
+          4,
+          4,
+          3,
+          5,
+          3,
+          6,
+          3,
+          8,
+          7,
+          8,
+          8,
+          8,
+          26,
+          8,
+          27,
+          8,
+          28,
+          8,
+          9,
+          8,
+          10,
+          8,
+          11,
+          8,
+          4,
+          8,
+          5,
+          8,
+          6,
+          4,
+          1,
+          5,
+          1,
+          6,
+          1,
+          3,
+          3,
+          3,
+          1,
+          3,
+          2,
+          4,
+          2,
+          5,
+          2,
+          6,
+          2
+        ],
+        "decoded": {
+          "algorithms": [
+            2309,
+            2310,
+            2308,
+            1027,
+            1283,
+            1539,
+            2055,
+            2056,
+            2074,
+            2075,
+            2076,
+            2057,
+            2058,
+            2059,
+            2052,
+            2053,
+            2054,
+            1025,
+            1281,
+            1537,
+            771,
+            769,
+            770,
+            1026,
+            1282,
+            1538
+          ]
+        },
+        "length": 54,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      }
+    ],
+    "extensions": [
+      65281,
+      0,
+      11,
+      10,
+      35,
+      22,
+      23,
+      13,
+      43,
+      45,
+      51
+    ],
+    "ja3": "771,4866-4867-4865-49196-49200-159-52393-52392-52394-49195-49199-158-49188-49192-107-49187-49191-103-49162-49172-57-49161-49171-51-157-156-61-60-53-47,65281-0-11-10-35-22-23-13-43-45-51,4588-29-23-30-24-25-256-257,0",
+    "ja3_hash": "0b85eb0d4981e69064e40753e4f0ac5f",
+    "ja4": "t13d301100_1d37bd780c83_8e6e362c5eac",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      2309,
+      2310,
+      2308,
+      1027,
+      1283,
+      1539,
+      2055,
+      2056,
+      2074,
+      2075,
+      2076,
+      2057,
+      2058,
+      2059,
+      2052,
+      2053,
+      2054,
+      1025,
+      1281,
+      1537,
+      771,
+      769,
+      770,
+      1026,
+      1282,
+      1538
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      4588,
+      29,
+      23,
+      30,
+      24,
+      25,
+      256,
+      257
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "headers": [
+      {
+        "name": "x-codex-beta-features",
+        "value": "remote_compaction_v2"
+      },
+      {
+        "name": "x-codex-window-id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-codex-turn-metadata",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-client-request-id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "session-id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "thread-id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "accept",
+        "value": "text/event-stream"
+      },
+      {
+        "name": "content-type",
+        "value": "application/json"
+      },
+      {
+        "name": "authorization",
+        "value": "<redacted>"
+      },
+      {
+        "name": "originator",
+        "value": "codex_exec"
+      },
+      {
+        "name": "user-agent",
+        "value": "codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)"
+      },
+      {
+        "name": "host",
+        "value": "<redacted>"
+      },
+      {
+        "name": "content-length",
+        "value": "<redacted>"
+      }
+    ],
+    "method": "POST",
+    "normalizations": [
+      {
+        "header_index": 1,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 2,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 3,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 4,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 5,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 8,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 11,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 12,
+        "reason": "unclassified"
+      }
+    ],
+    "raw_head": "POST <redacted> HTTP/1.1\r\nx-codex-beta-features: remote_compaction_v2\r\nx-codex-window-id: <redacted>\r\nx-codex-turn-metadata: <redacted>\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\naccept: text/event-stream\r\ncontent-type: application/json\r\nauthorization: <redacted>\r\noriginator: codex_exec\r\nuser-agent: codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)\r\nhost: <redacted>\r\ncontent-length: <redacted>\r\n\r\n",
+    "target": "<redacted>",
+    "version": "HTTP/1.1"
+  },
+  "provenance": {
+    "arch": "x86_64",
+    "captured_at": "2026-11-07T05:27:07.471773515+00:00",
+    "client": "codex-http-native",
+    "os": "linux",
+    "version": "0.167.0",
+    "capture_round": 1,
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; temporary HOME and placeholder credentials",
+    "target": "https://localhost:<ephemeral-port>",
+    "capture_tool": "stravia-tools capture-client module, standalone harness",
+    "invocation": "codex exec --skip-git-repo-check with -c provider configuration and prompt \"local capture only\"",
+    "configuration": "temporary CODEX_HOME; model=gpt-5.4; custom provider base_url=local target/v1, env_key=OPENAI_API_KEY, wire_api=responses, supports_websockets=false; OPENAI_API_KEY=placeholder",
+    "trust": "SSL_CERT_DIR with OpenSSL-hash-named temporary capture CA; CODEX_CA_CERTIFICATE and SSL_CERT_FILE unset"
+  }
+}
