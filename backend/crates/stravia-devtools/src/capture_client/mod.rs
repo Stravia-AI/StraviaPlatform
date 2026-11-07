@@ -107,7 +107,7 @@ fn sanitize_header_value<'a>(name: &str, value: &'a str) -> (&'a str, Option<&'s
     if ["authorization", "cookie", "credential", "secret", "token", "api-key", "apikey", "session", "nonce", "request-id", "request_id", "idempotency", "retry-count", "trace", "baggage", "timestamp", "websocket-key"].iter().any(|part| name.contains(part)) {
         return ("<redacted>", Some("credential_or_dynamic"));
     }
-    let preserve = matches!(name.as_str(), ":method" | ":scheme" | "accept" | "accept-encoding" | "accept-language" | "content-type" | "connection" | "upgrade" | "sec-websocket-version" | "sec-websocket-extensions" | "sec-websocket-protocol" | "user-agent" | "anthropic-version" | "anthropic-beta" | "openai-beta" | "openai-version")
+    let preserve = matches!(name.as_str(), ":method" | ":scheme" | "accept" | "accept-encoding" | "accept-language" | "content-type" | "connection" | "upgrade" | "sec-websocket-version" | "sec-websocket-extensions" | "sec-websocket-protocol" | "user-agent" | "anthropic-version" | "anthropic-beta" | "anthropic-dangerous-direct-browser-access" | "openai-beta" | "openai-version" | "x-codex-beta-features" | "originator" | "x-app")
         || name.starts_with("x-stainless-") || name.starts_with("x-client-") || name.starts_with("x-sdk-");
     if preserve { (value, None) } else { ("<redacted>", Some("unclassified")) }
 }
