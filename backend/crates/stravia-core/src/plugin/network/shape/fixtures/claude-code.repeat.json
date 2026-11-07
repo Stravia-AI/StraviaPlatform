@@ -1,0 +1,415 @@
+{
+  "clienthello": {
+    "alpn": [
+      "http/1.1"
+    ],
+    "cipher_suites": [
+      4865,
+      4866,
+      4867,
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49161,
+      49171,
+      49162,
+      49172,
+      156,
+      157,
+      47,
+      53
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          0
+        ],
+        "decoded": {
+          "renegotiation_info": true
+        },
+        "length": 1,
+        "payload_omitted": null,
+        "type": 65281
+      },
+      {
+        "body": [
+          0,
+          8,
+          17,
+          236,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            29,
+            23,
+            24
+          ]
+        },
+        "length": 10,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 35
+      },
+      {
+        "body": [
+          0,
+          9,
+          8,
+          104,
+          116,
+          116,
+          112,
+          47,
+          49,
+          46,
+          49
+        ],
+        "decoded": null,
+        "length": 11,
+        "payload_omitted": null,
+        "type": 16
+      },
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "status_request": true
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": [
+          0,
+          22,
+          4,
+          3,
+          8,
+          4,
+          4,
+          1,
+          5,
+          3,
+          8,
+          5,
+          5,
+          1,
+          8,
+          6,
+          6,
+          1,
+          8,
+          7,
+          6,
+          3,
+          2,
+          1
+        ],
+        "decoded": {
+          "algorithms": [
+            1027,
+            2052,
+            1025,
+            1283,
+            2053,
+            1281,
+            2054,
+            1537,
+            2055,
+            1539,
+            513
+          ]
+        },
+        "length": 24,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [],
+        "decoded": {
+          "signed_certificate_timestamp": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 18
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      }
+    ],
+    "extensions": [
+      0,
+      23,
+      65281,
+      10,
+      11,
+      35,
+      16,
+      5,
+      13,
+      18,
+      51,
+      45,
+      43
+    ],
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43,4588-29-23-24,0",
+    "ja3_hash": "1523504b38f0fae0d881d4b6554aac1b",
+    "ja4": "t13d1713h1_5b57614c22b0_7f527383e249",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      1027,
+      2052,
+      1025,
+      1283,
+      2053,
+      1281,
+      2054,
+      1537,
+      2055,
+      1539,
+      513
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      4588,
+      29,
+      23,
+      24
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "headers": [
+      {
+        "name": "Accept",
+        "value": "application/json"
+      },
+      {
+        "name": "Content-Type",
+        "value": "application/json"
+      },
+      {
+        "name": "User-Agent",
+        "value": "claude-cli/2.1.319 (external, sdk-cli)"
+      },
+      {
+        "name": "X-Claude-Code-Session-Id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "X-Stainless-Arch",
+        "value": "x64"
+      },
+      {
+        "name": "X-Stainless-Lang",
+        "value": "js"
+      },
+      {
+        "name": "X-Stainless-OS",
+        "value": "Linux"
+      },
+      {
+        "name": "X-Stainless-Package-Version",
+        "value": "0.128.0"
+      },
+      {
+        "name": "X-Stainless-Retry-Count",
+        "value": "<redacted>"
+      },
+      {
+        "name": "X-Stainless-Runtime",
+        "value": "node"
+      },
+      {
+        "name": "X-Stainless-Runtime-Version",
+        "value": "v26.12.1"
+      },
+      {
+        "name": "X-Stainless-Timeout",
+        "value": "600"
+      },
+      {
+        "name": "anthropic-beta",
+        "value": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20"
+      },
+      {
+        "name": "anthropic-dangerous-direct-browser-access",
+        "value": "true"
+      },
+      {
+        "name": "anthropic-version",
+        "value": "2023-06-01"
+      },
+      {
+        "name": "x-api-key",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-app",
+        "value": "cli"
+      },
+      {
+        "name": "Connection",
+        "value": "keep-alive"
+      },
+      {
+        "name": "Host",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Accept-Encoding",
+        "value": "gzip, deflate, br, zstd"
+      },
+      {
+        "name": "Content-Length",
+        "value": "<redacted>"
+      }
+    ],
+    "method": "POST",
+    "normalizations": [
+      {
+        "header_index": 3,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 8,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 15,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 18,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 20,
+        "reason": "unclassified"
+      }
+    ],
+    "raw_head": "POST <redacted> HTTP/1.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nUser-Agent: claude-cli/2.1.319 (external, sdk-cli)\r\nX-Claude-Code-Session-Id: <redacted>\r\nX-Stainless-Arch: x64\r\nX-Stainless-Lang: js\r\nX-Stainless-OS: Linux\r\nX-Stainless-Package-Version: 0.128.0\r\nX-Stainless-Retry-Count: <redacted>\r\nX-Stainless-Runtime: node\r\nX-Stainless-Runtime-Version: v26.12.1\r\nX-Stainless-Timeout: 600\r\nanthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20\r\nanthropic-dangerous-direct-browser-access: true\r\nanthropic-version: 2023-06-01\r\nx-api-key: <redacted>\r\nx-app: cli\r\nConnection: keep-alive\r\nHost: <redacted>\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: <redacted>\r\n\r\n",
+    "target": "<redacted>",
+    "version": "HTTP/1.1"
+  },
+  "provenance": {
+    "arch": "x86_64",
+    "captured_at": "2026-11-07T05:27:07.244577797+00:00",
+    "client": "claude",
+    "os": "linux",
+    "version": "2.1.319",
+    "capture_round": 2,
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; temporary HOME and placeholder credentials",
+    "target": "https://localhost:<ephemeral-port>",
+    "capture_tool": "stravia-tools capture-client module, standalone harness",
+    "invocation": "claude --print --no-session-persistence --model claude-sonnet-4-5 \"local capture only\"",
+    "configuration": "ANTHROPIC_BASE_URL=local target; ANTHROPIC_API_KEY=placeholder; NODE_EXTRA_CA_CERTS=temporary capture CA; nonessential traffic, updater, telemetry, error reporting disabled",
+    "trust": "NODE_EXTRA_CA_CERTS"
+  }
+}
