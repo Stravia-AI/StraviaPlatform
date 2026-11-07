@@ -1,0 +1,310 @@
+// Stravia vendor plugin contract, version 1.0.0.
+//
+// One package = one vendor. The guest orchestrates vendor flows and drives
+// controlled HTTP / WebSocket through host imports; it never gets raw sockets,
+// filesystem, env, or background tasks. Host enforces origin allowlists,
+// backpressure, cancellation, and resource limits.
+package stravia:vendor@1.0.0;
+
+/// Types shared between the world exports and the host-side interfaces.
+interface types {
+    /// Vendor operation kinds. Connection checks are mandatory per channel;
+    /// other operations are optional advertised capabilities. Unsupported
+    /// operations must be reported, not faked with empty success.
+    enum operation-kind {
+        /// Chat / inference canonical turn.
+        infer,
+        /// Native compaction of canonical history.
+        compact,
+        /// Full web search returning a cited research report (no continuation).
+        search,
+        /// Image generation / reference-image edit.
+        media-image,
+        /// OAuth or custom auth session step.
+        auth,
+        /// Model discovery / metadata sync.
+        discover,
+        /// Upstream allowance / quota read.
+        allowance,
+        /// Business validation of proposed config values.
+        config-validation,
+        /// Mandatory explicit non-generating upstream connection check.
+        /// Return unsupported when no safe read-only probe is available.
+        connection-check,
+    }
+
+    /// Wire for canonical payloads. The host wraps/unwraps a versioned,
+    /// validated envelope — never raw vendor JSON — so the guest can rely on
+    /// `canonical-format` in the descriptor.
+    record canonical-payload {
+        /// Envelope schema version the guest was built against.
+        format: u32,
+        /// Serialized canonical body (serde_json bytes of the contract type
+        /// for the operation, e.g. AiRequest for `infer`).
+        body: list<u8>,
+    }
+
+    /// Incremental canonical output event emitted during `infer`/`compact`.
+    /// `delta` is a serialized `AiStreamDelta`; `completed` carries a final
+    /// `AiResponse`; `compacted` carries `NativeCompactionResponse` without
+    /// coercing away authoritative wire identity/time/rolling fields.
+    variant canonical-event {
+        delta(canonical-payload),
+        completed(canonical-payload),
+        compacted(canonical-payload),
+        failed(plugin-error),
+    }
+
+    /// One emitted media artifact produced by a `media-image` operation.
+    /// The host owns artifact persistence; the guest returns bytes + metadata.
+    record media-artifact {
+        media-type: string,
+        bytes: list<u8>,
+        /// Optional upstream-side identifier for diagnostics only.
+        upstream-ref: option<string>,
+        /// JSON object with decoded dimensions, format, and other non-secret
+        /// media facts when known.
+        metadata: list<u8>,
+    }
+
+    /// Structured error classification the host uses for retry/failover and
+    /// for stable user-facing text. `message` is guest-supplied and MUST be
+    /// treated as untrusted — the host never exposes it raw. Lifecycle faults
+    /// are disjoint from `upstream`, so a guest cannot make a trap, resource
+    /// failure, cancellation, or deadline safe to replay by attaching retry
+    /// metadata.
+    record plugin-error {
+        kind: error-kind,
+        message: string,
+        /// Upstream HTTP status when the error wraps a response.
+        upstream-status: option<u16>,
+    }
+
+    /// Canonical model failure facts retained across the plugin boundary.
+    /// This mirrors `AiErrorKind`; `unknown` is explicit rather than inferred
+    /// from guest text or a provider brand. Future classifications use `other`.
+    variant model-error-kind {
+        authentication-error,
+        authorization-error,
+        not-found-error,
+        rate-limit-error,
+        quota-exceeded,
+        invalid-request,
+        server-error,
+        service-unavailable,
+        timeout,
+        content-filtered,
+        context-length-exceeded,
+        model-not-available,
+        stream-mid-error,
+        unexpected-eof,
+        unknown,
+        other(string),
+    }
+
+    /// Facts about an upstream failure. Management operations can leave
+    /// `model-error-kind` unknown; model/search/media implementations preserve
+    /// the canonical classification they observed. Retry-After is a duration
+    /// from receipt, never a guest instruction to sleep or retry by itself.
+    /// `transport-failure` is present only when another transport may avoid the
+    /// same failure; the host still owns retry budget and replay decisions.
+    record upstream-failure {
+        model-error-kind: option<model-error-kind>,
+        retry-after-milliseconds: option<u64>,
+        /// `websocket` is recognized; unknown values are not retry evidence.
+        transport-failure: option<string>,
+    }
+
+    variant error-kind {
+        /// Operation or capability not implemented by this plugin/channel.
+        unsupported,
+        /// Caller input fails validation; not retryable.
+        invalid,
+        /// Upstream replied, but its successful body violates the expected protocol.
+        invalid-response,
+        /// Auth failure or missing credentials; host may re-auth.
+        auth,
+        /// Verified upstream evidence that the requested continuation no longer
+        /// exists. Host may safely replay full canonical history according to
+        /// Model Turn Executor policy; generic 400/404 errors must not use it.
+        continuation-not-found,
+        /// The exact socket tip requested for local continuation is unavailable.
+        /// No new handshake or model request has been sent.
+        continuation-unavailable,
+        /// 上游明确拒绝受保护推理回放。宿主仅在尚未提交模型输出时，
+        /// 剥离非本上游来源的载荷并重放一次；保留本上游载荷，不再分级恢复。
+        protected-reasoning-rejected,
+        /// Upstream failed. Typed facts, not this variant alone, drive model
+        /// retry/failover policy.
+        upstream(upstream-failure),
+        /// Guest trapped or exceeded limits; NEVER reported as safe to retry.
+        trapped,
+        /// Operation was cancelled by the host.
+        cancelled,
+        /// Operation exceeded its deadline.
+        deadline-exceeded,
+        /// Resource limit (memory/output/handles) exceeded.
+        resource-exhausted,
+        /// The referenced supplier/catalog entry is absent from the vendor's
+        /// currently registered set. Distinct from `invalid`: it asserts the
+        /// runtime catalog no longer owns that identity, not that input was
+        /// malformed.
+        provider-not-found,
+    }
+
+    /// Scoped view of the provider connection the host hands to the guest for
+    /// the operation. Secrets are already authorized for this connection; the
+    /// guest never sees other connections' credentials. It accompanies the
+    /// typed operation input and is also passed directly to the pure protocol
+    /// selection export before model execution.
+    record provider-snapshot {
+        /// Supplier profile selected for this operation. This is stable
+        /// provider identity, not the saved connection UUID or package id.
+        provider-id: string,
+        /// Channel selected for this operation. Duplicated in the execute
+        /// argument so the SDK can reject a mismatched or tampered snapshot.
+        channel: string,
+        /// Resolved base URL of the connection (host-configured).
+        base-url: string,
+        /// Selected canonical egress protocol endpoint/alias for multi-protocol
+        /// channels. This is provider connection identity, not a saved option.
+        protocol: string,
+        /// Non-secret option values as declared by `config_fields`.
+        options: list<u8>,
+        /// Secret credential material for this connection/auth session only.
+        secrets: list<u8>,
+        /// Current selected upstream model, when the operation needs one.
+        model: option<string>,
+        /// Persisted model metadata view (family/selector/capabilities).
+        model-metadata: option<list<u8>>,
+        /// Host-filtered inbound client headers scoped to this operation only;
+        /// never saved config and never includes unapproved credentials.
+        client-headers: list<tuple<string, string>>,
+        /// Host-owned operation metadata (request/session identifiers and
+        /// other non-secret execution context), encoded as JSON.
+        operation-metadata: list<u8>,
+    }
+
+    /// Typed operation input. The `input` payload interpretation is fixed by
+    /// `operation` — the guest decodes it into the matching SDK type and the
+    /// host encodes it; there is no arbitrary-bytes pass-through.
+    record operation-input {
+        /// Always present: the scoped connection view.
+        provider: provider-snapshot,
+        /// Kind-specific payload:
+        ///   infer             -> AiRequest
+        ///   compact           -> AiRequest
+        ///   search            -> SearchRequest
+        ///   media-image       -> MediaRequest
+        ///   auth              -> AuthStep
+        ///   discover          -> DiscoverRequest (empty payload allowed)
+        ///   allowance         -> AllowanceRequest (empty payload allowed)
+        ///   config-validation -> ConfigValidationRequest
+        input: canonical-payload,
+    }
+}
+
+/// Controlled host services imported by the guest. Every call is scoped to the
+/// single operation; no handle survives it.
+interface host {
+    use types.{canonical-event, plugin-error};
+
+    /// Operation-scoped private state. The host binds the connection or auth
+    /// session; the guest never names a provider/session/vendor id.
+    /// Returns `none` when no state exists yet.
+    read-private-state: func() -> result<option<list<u8>>, plugin-error>;
+    /// Replace the private-state blob for this scope. The host enforces the
+    /// declared format-version capacity and rejects writes after the
+    /// operation is cancelled or fenced by an incompatible update.
+    write-private-state: func(bytes: list<u8>) -> result<_, plugin-error>;
+
+    /// Mark the exact boundary immediately before a model-generating HTTP
+    /// request or WebSocket generation frame is sent. Auxiliary auth,
+    /// discovery, registration, allowance, and assignment requests must not
+    /// call this import. The host uses it to own retry and replay policy.
+    emit-started: func() -> result<_, plugin-error>;
+
+    /// Emit one incremental canonical output event for the running
+    /// operation. The host applies bounded backpressure; the call blocks
+    /// until the event is accepted or the operation is cancelled.
+    emit-event: func(event: canonical-event) -> result<_, plugin-error>;
+
+    /// Diagnostic log line routed through the host. Secrets must not be
+    /// logged; the host may still redact before persisting.
+    log: func(level: log-level, message: string);
+
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+}
+
+/// The vendor plugin world. `descriptor` is the identity/contract manifest
+/// the host reads before admitting the component; `select-protocol` performs
+/// pure request-dependent protocol choice; `execute` runs one operation and
+/// returns only after all sub-tasks and handles are dropped.
+/// Within 1.x no new world export may be required; new exports belong to
+/// separate optional interfaces which the host probes for presence.
+/// Existing records, variants, enums, and signatures are sealed: extending
+/// them requires a new major version. `operation-kind` and `error-kind` are
+/// closed; provider and operation extensions belong in JSON metadata.
+world vendor {
+    // Pull in only the WASI surface a plugin may legitimately use: stdio for
+    // panic/log output, clocks for signing/expiry/backoff, and secure random
+    // for PKCE/nonces. The host supplies a restricted implementation — no
+    // environment, filesystem, or sockets — and rejects any other import at
+    // load.
+    import wasi:cli/stdout@0.2.12;
+    import wasi:cli/stderr@0.2.12;
+    import wasi:clocks/monotonic-clock@0.2.12;
+    import wasi:clocks/wall-clock@0.2.12;
+    import wasi:random/random@0.2.12;
+
+    import stravia:net/http@1.0.0;
+    import stravia:net/websocket@1.0.0;
+    import host;
+
+    use types.{canonical-payload, operation-kind, operation-input, plugin-error, provider-snapshot};
+
+    /// Returns the serialized `VendorDescriptor` JSON. Called once at load
+    /// inside a restricted store; result is validated before the plugin is
+    /// admitted.
+    export descriptor: func() -> string;
+
+    /// Select the egress protocol for one canonical model request without
+    /// performing I/O or mutating guest or host state. The host calls this only
+    /// for `infer` and `compact`, after pinning the component and provider
+    /// connection but before preparing protocol-specific history. The request
+    /// is the serialized canonical `AiRequest`; the returned string must name
+    /// a protocol admitted by the selected channel.
+    export select-protocol: func(
+        operation: operation-kind,
+        channel: string,
+        provider: provider-snapshot,
+        request: canonical-payload,
+    ) -> result<string, plugin-error>;
+
+    /// Run one operation against the typed input. Returning `err` is a
+    /// classified vendor failure; `unsupported` is the only acceptable answer
+    /// for unimplemented kinds. Success returns the operation's serialized
+    /// result payload (see `types.operation-input` for the per-kind shape).
+    export execute: func(
+        operation: operation-kind,
+        channel: string,
+        input: operation-input,
+    ) -> result<list<u8>, plugin-error>;
+
+    /// Synchronize the vendor-owned runtime catalog and return the complete
+    /// replacement Provider Profile set the host should register for this
+    /// vendor. `input` is a serialized `CatalogSyncRequest`; the result is a
+    /// serialized `CatalogSyncOutcome`. The call is vendor-scoped rather than
+    /// connection-scoped: the host admits `stravia:net/http.start` only for the configured
+    /// catalog origin and denies connection state, event emission, and other
+    /// operation imports. Vendors without a runtime catalog return
+    /// `unsupported` (the SDK default does so).
+    export sync-catalog: func(
+        input: canonical-payload,
+    ) -> result<canonical-payload, plugin-error>;
+}

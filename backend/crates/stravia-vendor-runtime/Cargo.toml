@@ -28,6 +28,8 @@ wasmtime-wasi = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
+tungstenite-deflate = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 stravia-runtime-contract = { workspace = true }
