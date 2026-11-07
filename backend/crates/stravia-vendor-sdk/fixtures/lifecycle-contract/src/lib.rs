@@ -314,8 +314,10 @@ impl VendorGuest for LifecycleContractVendor {
                 options.shape("default").map_err(invalid)?;
                 options.reuse_max_age(std::time::Duration::ZERO).map_err(invalid)?;
                 options.ws_compression(stravia_vendor_sdk::WsCompression::Required).map_err(invalid)?;
+                let mut fields = Fields::new();
+                fields.append("sec-websocket-extensions", b"permessage-deflate; client_max_window_bits".to_vec());
                 let socket = host.ws_connect(
-                    stravia_vendor_sdk::ConnectRequest::new(configured_url(&provider.options, "auxUrl")?),
+                    stravia_vendor_sdk::ConnectRequest::new(configured_url(&provider.options, "auxUrl")?).fields(fields),
                     &options,
                 )?;
                 socket.send(&stravia_vendor_sdk::WsMessage::Text(
@@ -403,6 +405,7 @@ impl VendorGuest for LifecycleContractVendor {
         options.shape("default").map_err(invalid)?;
         if mode == "compression" {
             fields.append("accept-encoding", b"gzip".to_vec());
+            fields.append("content-encoding", b"gzip".to_vec());
             options.request_encoding(stravia_vendor_sdk::Coding::Gzip).map_err(invalid)?;
             options.response_decoding(&[stravia_vendor_sdk::Coding::Gzip]).map_err(invalid)?;
         } else {

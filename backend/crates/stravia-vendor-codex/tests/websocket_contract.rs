@@ -1127,6 +1127,10 @@ async fn affinity_and_account_headers_follow_actual_codex_frames() {
     assert_eq!(closed.len(), cases.len());
     for (index, (_, previous_id, _, response_id)) in cases.iter().enumerate() {
         assert_eq!(connections[index].compression.as_deref(), Some("preferred"));
+        assert_eq!(
+            connections[index].headers["sec-websocket-extensions"],
+            "permessage-deflate; client_max_window_bits"
+        );
         assert_eq!(connections[index].continuation_id.as_deref(), *previous_id);
         assert_eq!(connections[index].reuse_max_age_millis, Some(3_300_000));
         assert_eq!(sent[index]["previous_response_id"].as_str(), *previous_id);

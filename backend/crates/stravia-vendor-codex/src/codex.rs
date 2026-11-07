@@ -987,10 +987,11 @@ pub(super) fn http_options() -> Result<stravia_vendor_sdk::net::Options, stravia
 pub(super) fn start_responses_http(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: stravia_vendor_sdk::net::Request,
+    mut request: stravia_vendor_sdk::net::Request,
 ) -> Result<stravia_vendor_sdk::HttpResponse, stravia_vendor_sdk::PluginError> {
     let mut options = http_options()?;
     if official_endpoint(&provider.base_url) {
+        request.headers.append("content-encoding", b"zstd".to_vec());
         options.request_encoding(stravia_vendor_sdk::net::Coding::Zstd)
             .map_err(|e| invalid(&e.to_string()))?;
     }
@@ -1053,6 +1054,10 @@ pub(super) fn infer_websocket(
         "openai-beta",
         "responses_websockets=2026-02-06".into(),
     );
+    headers.push((
+        "sec-websocket-extensions".into(),
+        "permessage-deflate; client_max_window_bits".into(),
+    ));
 
     let url = if let Some(url) = configured_websocket_url(provider) {
         url.to_owned()
