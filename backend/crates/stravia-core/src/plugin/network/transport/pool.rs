@@ -16,7 +16,7 @@ use tokio::time::Instant;
 use bytes::Bytes;
 use rama_core::ServiceInput;
 use rama_http_core::client::conn::http1;
-use rama_http_types::body::Full;
+use rama_http_types::body::util::Full;
 use rustls::{client::Resumption, ClientConfig};
 
 use super::{connector::{self, Resolver, Route}, h2::{self, H2PeerSettingsHandle, H2Settings}};
@@ -69,27 +69,25 @@ pub struct PooledConnection {
     pub forward_proxy: bool,
     pub proxy_authorization: Option<String>,
     pub peer_settings: Option<H2PeerSettingsHandle>,
-    pool: Arc<Mutex<State>>,
-    key: Key,
+    guard: Option<EntryGuard>,
 }
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         let Some(Sender::Http1(mut sender)) = self.sender.take() else { return };
-        let pool = Arc::downgrade(&self.pool);
-        let key = self.key.clone();
+        let Some(guard) = self.guard.take() else { return };
         let authorization = self.proxy_authorization.clone();
         let forward_proxy = self.forward_proxy;
-        // `ready` waits until the previous response body has been consumed or
-        // dropped. In particular, returning the response headers is not enough.
+        // Keep the entry alive until the body releases the HTTP/1 connection.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 if sender.ready().await.is_ok() {
-                    let Some(pool) = pool.upgrade() else { return };
-                    let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(entry) = state.entries.get_mut(&key) {
-                        entry.h1.push(IdleH1 { sender, authorization, forward_proxy, since: Instant::now() });
-                        schedule_h1_expiry(&pool, key.clone());
+                    if let Some(pool) = guard.pool.upgrade() {
+                        let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(entry) = state.entries.get_mut(&guard.key) {
+                            entry.h1.push(IdleH1 { sender, authorization, forward_proxy, since: Instant::now() });
+                            schedule_h1_expiry(&pool, guard.key.clone());
+                        }
                     }
                 }
             });
@@ -157,6 +155,7 @@ struct IdleH2 {
 }
 
 struct Entry {
+    active: usize,
     h1: Vec<IdleH1>,
     h2: Option<IdleH2>,
     target_tls: Option<Arc<ClientConfig>>,
@@ -168,6 +167,32 @@ struct State {
     entries: HashMap<Key, Entry>,
 }
 
+fn remove_unused(state: &mut State, key: &Key) {
+    if state.entries.get(key).is_some_and(|entry| {
+        entry.active == 0 && entry.h1.is_empty() && entry.h2.is_none()
+    }) {
+        state.entries.remove(key);
+    }
+}
+
+// Held from the start of acquisition through the lease, and until an H1
+// response releases its sender. Cancellation and errors release it too.
+struct EntryGuard {
+    pool: std::sync::Weak<Mutex<State>>,
+    key: Key,
+}
+impl Drop for EntryGuard {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.upgrade() {
+            let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = state.entries.get_mut(&self.key) {
+                entry.active -= 1;
+            }
+            remove_unused(&mut state, &self.key);
+        }
+    }
+}
+
 fn schedule_h1_expiry(pool: &Arc<Mutex<State>>, key: Key) {
     let pool = Arc::downgrade(pool);
     tokio::spawn(async move {
@@ -177,6 +202,7 @@ fn schedule_h1_expiry(pool: &Arc<Mutex<State>>, key: Key) {
             if let Some(entry) = state.entries.get_mut(&key) {
                 entry.h1.retain(|idle| idle.since.elapsed() < IDLE_TIMEOUT && !idle.sender.is_closed());
             }
+            remove_unused(&mut state, &key);
         }
     });
 }
@@ -195,6 +221,7 @@ fn schedule_h2_expiry(pool: &Arc<Mutex<State>>, key: Key) {
                 // The h2 driver keeps active streams alive after the last sender
                 // is dropped; this only removes the pool's reusable handle.
                 entry.h2 = None;
+                remove_unused(&mut state, &key);
                 break;
             }
             delay = IDLE_TIMEOUT.saturating_sub(idle.since.elapsed());
@@ -222,12 +249,6 @@ fn other(error: impl std::fmt::Display) -> io::Error {
 }
 
 impl Pool {
-    pub fn new() -> Self { Self::default() }
-
-    pub async fn connect(&self, options: ConnectOptions) -> io::Result<PooledConnection> {
-        self.acquire(options).await
-    }
-
     pub async fn acquire(&self, options: ConnectOptions) -> io::Result<PooledConnection> {
         if !matches!(options.scheme.as_str(), "http" | "https") || options.port == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid destination scheme or port"));
@@ -238,19 +259,21 @@ impl Pool {
             proxy_tls: ConfigIdentity(options.proxy_tls.clone()), shape_name: options.shape_name.clone(),
             shape_revision: options.shape_revision, alpn: options.alpn,
         };
-        let (target_tls, proxy_tls) = {
+        let (target_tls, proxy_tls, guard) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let entry = state.entries.entry(key.clone()).or_insert_with(|| Entry {
-                h1: Vec::new(), h2: None,
+                active: 0, h1: Vec::new(), h2: None,
                 target_tls: isolated(&options.target_tls), proxy_tls: isolated(&options.proxy_tls),
             });
+            entry.active += 1;
+            let guard = EntryGuard { pool: Arc::downgrade(&self.state), key: key.clone() };
             entry.h1.retain(|idle| idle.since.elapsed() < IDLE_TIMEOUT && !idle.sender.is_closed());
             if let Some(h2) = entry.h2.as_mut() {
                 if h2.since.elapsed() < IDLE_TIMEOUT && !h2.sender.is_closed() {
                     h2.since = Instant::now();
                     return Ok(PooledConnection {
                         sender: Some(Sender::Http2(h2.sender.clone())), peer_settings: Some(h2.peer_settings.clone()),
-                        forward_proxy: false, proxy_authorization: None, pool: Arc::clone(&self.state), key,
+                        forward_proxy: false, proxy_authorization: None, guard: Some(guard),
                     });
                 }
                 entry.h2 = None;
@@ -259,10 +282,10 @@ impl Pool {
                 return Ok(PooledConnection {
                     sender: Some(Sender::Http1(idle.sender)), peer_settings: None,
                     forward_proxy: idle.forward_proxy, proxy_authorization: idle.authorization,
-                    pool: Arc::clone(&self.state), key,
+                    guard: Some(guard),
                 });
             }
-            (entry.target_tls.clone(), entry.proxy_tls.clone())
+            (entry.target_tls.clone(), entry.proxy_tls.clone(), guard)
         };
 
         let forward_proxy = options.scheme == "http" && matches!(&options.route, Route::Proxy(proxy) if proxy.is_http_forward_proxy());
@@ -313,6 +336,6 @@ impl Pool {
             });
             (Sender::Http1(sender), None)
         };
-        Ok(PooledConnection { sender: Some(sender), forward_proxy, proxy_authorization: authorization, peer_settings, pool: Arc::clone(&self.state), key })
+        Ok(PooledConnection { sender: Some(sender), forward_proxy, proxy_authorization: authorization, peer_settings, guard: Some(guard) })
     }
 }

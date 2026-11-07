@@ -26,20 +26,20 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "t
 axum = { workspace = true, features = ["json", "query", "ws"] }
 rmcp = { workspace = true, features = ["client", "server", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 reqwest = { workspace = true, features = ["charset", "form", "http2", "json", "rustls", "stream"] }
-rama-core = { version = "=0.4.0", features = ["std"] }
-rama-http = "=0.4.0"
-rama-http-core = "=0.4.0"
-rama-http-types = "=0.4.0"
-rama-net = "=0.4.0"
-rustls = { version = "=0.23.46", features = ["aws-lc-rs"] }
-aws-lc-rs = "1.18.1"
-brotli-decompressor = "=5.0.3"
-flate2 = "1.1.10"
+rama-core = { workspace = true }
+rama-http = { workspace = true }
+rama-http-core = { workspace = true }
+rama-http-types = { workspace = true }
+rama-net = { workspace = true }
+rustls = { workspace = true }
+aws-lc-rs = { workspace = true }
+brotli-decompressor = { workspace = true }
+flate2 = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 tokio-rustls = { workspace = true }
-percent-encoding = "2"
+percent-encoding = { workspace = true }
 http = { workspace = true }
-hyper-util = { version = "0.1.21", features = ["client-proxy"] }
+hyper-util = { workspace = true }
 tungstenite-deflate = { workspace = true }
 tokio-tungstenite-deflate = { workspace = true }
 async-compression = { workspace = true }

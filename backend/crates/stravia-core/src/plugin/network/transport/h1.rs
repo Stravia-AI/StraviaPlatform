@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use rama_http_types::{
-    body::Full,
+    body::util::Full,
     header::{HeaderName, HeaderValue},
     Method, Request, Version,
 };

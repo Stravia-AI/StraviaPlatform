@@ -6,7 +6,7 @@ use bytes::{Bytes, BytesMut};
 use rama_core::svc_input::ServiceInput;
 use rama_http_types::{
     Request,
-    body::Full,
+    body::util::Full,
     proto::h2::{
         PseudoHeader, PseudoHeaderOrder,
         frame::{SettingId, SettingOrder, SettingsConfig},

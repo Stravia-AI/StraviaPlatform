@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rama_core::svc_input::ServiceInput;
-use rama_http_types::{Request, body::Full};
+use rama_http_types::{Request, body::util::Full};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
