@@ -1,0 +1,23 @@
+{
+  "provenance": {
+    "client": "official Antigravity CLI",
+    "version": "1.5.2",
+    "platform": "linux amd64",
+    "capture": "HTTP/1.1 request head observed twice from official CLI against a local dummy Cloud Code upstream after fake consumer-token bootstrap; user, mount and network namespaces with loopback only, fake HOME and system trust bound to temporary local CA",
+    "endpoint": "streamGenerateContent?alt=sse",
+    "limitations": "HTTP request head only; this fixture does not assert TLS or HTTP/2 parameters. The local upstream terminated the CLI immediately after capturing the inference head; no response or production request was sent.",
+    "normalization": "Host and Authorization values replaced with <redacted>; request target and other header bytes retained. No request body was saved."
+  },
+  "method": "POST",
+  "path": "/v1internal:streamGenerateContent?alt=sse",
+  "raw_head": "POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\nHost: <redacted>\r\nUser-Agent: antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)\r\nTransfer-Encoding: chunked\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n",
+  "headers": [
+    {"name": "Host", "value": "<redacted>"},
+    {"name": "User-Agent", "value": "antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)"},
+    {"name": "Transfer-Encoding", "value": "chunked"},
+    {"name": "Authorization", "value": "<redacted>"},
+    {"name": "Content-Type", "value": "application/json"},
+    {"name": "Accept-Encoding", "value": "gzip"}
+  ],
+  "repeat_observation": "Identical normalized request head in two independent isolated runs."
+}
