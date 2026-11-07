@@ -62,12 +62,17 @@ impl AsyncWrite for Replay {
 pub async fn run(args: CaptureArgs) -> Result<()> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.distinguished_name = rcgen::DistinguishedName::new();
+    ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Stravia local capture CA");
     ca_params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyCertSign];
     let ca_key = KeyPair::generate()?;
     let ca = ca_params.self_signed(&ca_key)?;
     let issuer = Issuer::new(ca_params, ca_key);
     let leaf_key = KeyPair::generate()?;
-    let leaf_params = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
+    let mut leaf_params = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
+    leaf_params.distinguished_name = rcgen::DistinguishedName::new();
+    leaf_params.distinguished_name.push(rcgen::DnType::CommonName, "localhost");
+    leaf_params.use_authority_key_identifier_extension = true;
     let leaf = leaf_params.signed_by(&leaf_key, &issuer)?;
     let private_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
