@@ -2,8 +2,9 @@ use bytes::Bytes;
 use rama_http_types::{
     body::Full,
     header::{HeaderName, HeaderValue},
-    Method, Request, Uri, Version,
+    Method, Request, Version,
 };
+use rama_net::uri::Uri;
 
 use super::{Field, RequestPlan, TransportError};
 
@@ -11,18 +12,11 @@ use super::{Field, RequestPlan, TransportError};
 pub(super) fn request(
     plan: RequestPlan,
     version: Version,
-    forward_proxy: bool,
 ) -> Result<Request<Full<Bytes>>, TransportError> {
     let method = Method::from_bytes(plan.method.as_bytes())
         .map_err(|e| TransportError::Protocol(e.to_string()))?;
-    let absolute: Uri = plan.uri.parse()
-        .map_err(|e: rama_http_types::uri::InvalidUri| TransportError::Protocol(e.to_string()))?;
-    let uri = if version == Version::HTTP_11 && !forward_proxy {
-        absolute.path_and_query().map_or("/", |p| p.as_str()).parse()
-            .map_err(|e: rama_http_types::uri::InvalidUri| TransportError::Protocol(e.to_string()))?
-    } else {
-        absolute
-    };
+    let uri: Uri = plan.uri.parse()
+        .map_err(|e: rama_net::uri::ParseError| TransportError::Protocol(e.to_string()))?;
     let mut request = Request::builder().method(method).uri(uri).version(version)
         .body(Full::new(plan.body))
         .map_err(|e| TransportError::Protocol(e.to_string()))?;

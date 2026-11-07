@@ -16,6 +16,10 @@ mod proxy_tests;
 mod proxy_tls_tests;
 #[cfg(test)]
 mod reuse_tests;
+#[cfg(test)]
+mod upgrade_tests;
+#[cfg(test)]
+mod keepalive_tests;
 
 use std::{pin::Pin, sync::Arc, task::{Context, Poll}};
 
@@ -33,11 +37,7 @@ use pool::{AlpnPreference, ConnectOptions, Pool, Sender};
 pub(crate) use connector::{Resolver, SystemResolver};
 pub(crate) use h2::H2Settings;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Field {
-    pub name: String,
-    pub bytes: Vec<u8>,
-}
+pub(crate) use stravia_vendor_sdk::net::Field;
 
 pub(crate) struct RequestPlan {
     pub method: String,
@@ -160,10 +160,13 @@ impl VendorTransport {
         let host = uri.host_str().ok_or_else(|| TransportError::Protocol("URL has no host".into()))?.to_owned();
         let port = uri.port_or_known_default().ok_or_else(|| TransportError::Protocol("URL has no port".into()))?;
         plan.uri = uri.to_string();
-        let alpn = match route.version {
-            HttpVersionPref::Auto => AlpnPreference::Http2ThenHttp1,
-            HttpVersionPref::Http1 => AlpnPreference::Http1Only,
-            HttpVersionPref::Http2 => AlpnPreference::Http2Only,
+        if route.proxy.force_http1 && matches!(route.version, HttpVersionPref::Http2) {
+            return Err(TransportError::Proxy("proxy policy requires HTTP/1".into()));
+        }
+        let alpn = match (route.proxy.force_http1, route.version) {
+            (true, _) | (_, HttpVersionPref::Http1) => AlpnPreference::Http1Only,
+            (_, HttpVersionPref::Auto) => AlpnPreference::Http2ThenHttp1,
+            (_, HttpVersionPref::Http2) => AlpnPreference::Http2Only,
         };
         let mut connection = self.pool.acquire(ConnectOptions {
             route: proxy,
@@ -192,7 +195,7 @@ impl VendorTransport {
             }
             plan.method = "CONNECT".into();
         }
-        let mut request = h1::request(plan, if is_h2 { Version::HTTP_2 } else { Version::HTTP_11 }, connection.forward_proxy)?;
+        let mut request = h1::request(plan, if is_h2 { Version::HTTP_2 } else { Version::HTTP_11 })?;
         if upgrade && is_h2 {
             request.extensions().insert(Protocol::from_static("websocket"));
         }

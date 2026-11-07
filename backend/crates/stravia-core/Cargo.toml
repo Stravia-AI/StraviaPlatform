@@ -31,7 +31,11 @@ rama-http = "=0.4.0"
 rama-http-core = "=0.4.0"
 rama-http-types = "=0.4.0"
 rama-net = "=0.4.0"
-rustls = "=0.23.46"
+rustls = { version = "=0.23.46", features = ["aws-lc-rs"] }
+aws-lc-rs = "1.18.1"
+brotli-decompressor = "=5.0.3"
+flate2 = "1.1.10"
+rustls-platform-verifier = { workspace = true }
 tokio-rustls = { workspace = true }
 percent-encoding = "2"
 http = { workspace = true }

@@ -28,6 +28,12 @@ pub(super) fn select_proxy(
     // This matcher only evaluates the explicitly supplied rules. Unlike the
     // environment constructors, the builder does not inspect system proxies.
     let matcher = Matcher::builder().all(settings.url.trim()).no(bypass).build();
+    // Distinguish a bypass match from an unparseable proxy: silently routing
+    // direct on a proxy parsing failure would leak the request.
+    let baseline = Matcher::builder().all(settings.url.trim()).build();
+    if baseline.intercept(&uri).is_none() {
+        return Err(TransportError::Proxy("proxy URL cannot be matched".into()));
+    }
     if matcher.intercept(&uri).is_none() {
         Ok(connector::Route::Direct)
     } else {
