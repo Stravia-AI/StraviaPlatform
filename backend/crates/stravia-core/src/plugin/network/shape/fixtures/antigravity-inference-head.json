@@ -5,7 +5,7 @@
     "platform": "linux amd64",
     "capture": "HTTP/1.1 request head observed twice from official CLI against a local dummy Cloud Code upstream after fake consumer-token bootstrap; user, mount and network namespaces with loopback only, fake HOME and system trust bound to temporary local CA",
     "endpoint": "streamGenerateContent?alt=sse",
-    "limitations": "HTTP request head only; this fixture does not assert TLS or HTTP/2 parameters. In both observations the TLS connection previously carried writeTrajectoryAcls. The local upstream terminated the CLI immediately after capturing the inference head; no response or production request was sent.",
+    "limitations": "HTTP request head only; this fixture does not assert TLS or HTTP/2 parameters. The local upstream terminated the CLI immediately after capturing the inference head; no response or production request was sent.",
     "normalization": "Host and Authorization values replaced with <redacted>; request target and other header bytes retained. No request body was saved."
   },
   "method": "POST",
