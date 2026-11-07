@@ -18,6 +18,19 @@ impl AdminService {
                 None,
             )
             .await
+            .map_err(|error| match error.downcast_ref::<stravia_vendor_runtime::LoadError>() {
+                Some(stravia_vendor_runtime::LoadError::IncompatibleAbi { .. }) => coded_error(
+                    "VENDOR_PLUGIN_INCOMPATIBLE_ABI",
+                    "This plugin is incompatible with Stravia. Import a compatible rebuilt plugin.",
+                    serde_json::json!({}),
+                ),
+                Some(stravia_vendor_runtime::LoadError::RequiresNewerHost { .. }) => coded_error(
+                    "VENDOR_PLUGIN_REQUIRES_NEWER_HOST",
+                    "This plugin requires a newer version of Stravia. Upgrade Stravia and try again.",
+                    serde_json::json!({}),
+                ),
+                _ => error,
+            })
     }
 
     pub async fn confirm_vendor_plugin(

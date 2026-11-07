@@ -455,7 +455,11 @@ impl VendorPlugins {
                 .runtime
                 .load(&bytes)
                 .await
-                .map_err(|_| anyhow::anyhow!("invalid or incompatible vendor component"))?,
+                .map_err(|error| match error {
+                    error @ (stravia_vendor_runtime::LoadError::IncompatibleAbi { .. }
+                    | stravia_vendor_runtime::LoadError::RequiresNewerHost { .. }) => error.into(),
+                    _ => anyhow::anyhow!("invalid or incompatible vendor component"),
+                })?,
         };
         let descriptor = loaded.descriptor();
         if let Some(expected) = expected_vendor {

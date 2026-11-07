@@ -1729,6 +1729,8 @@
       }
     }
   ],
+  "backend_error_vendor_plugin_incompatible": "此插件与 Stravia 不兼容。请导入重新构建的兼容插件。",
+  "backend_error_vendor_plugin_requires_newer_host": "此插件需要更新版本的 Stravia。请升级 Stravia 后重试。",
   "backend_error_unknown": "请求失败：{message}",
   "backend_error_catalog_refresh_failed": "供应商目录无法刷新。当前目录未改变，请重试。",
   "backend_error_catalog_scope_refresh_failed": "供应商目录的模型详情暂时不可用。已保存的模型未改变，请重新同步。",

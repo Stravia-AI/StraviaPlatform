@@ -1738,6 +1738,8 @@
       }
     }
   ],
+  "backend_error_vendor_plugin_incompatible": "This plugin is incompatible with Stravia. Import a compatible rebuilt plugin.",
+  "backend_error_vendor_plugin_requires_newer_host": "This plugin requires a newer version of Stravia. Upgrade Stravia and try again.",
   "backend_error_unknown": "Request failed: {message}",
   "backend_error_catalog_refresh_failed": "The provider catalog could not be refreshed. Your current catalog is unchanged. Try again.",
   "backend_error_catalog_scope_refresh_failed": "Provider catalog model details are temporarily unavailable. Your saved models are unchanged. Try syncing again.",
