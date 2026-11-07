@@ -4,15 +4,17 @@ import base64
 import http.client
 import io
 import json
+import threading
 import time
 import zipfile
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import pytest
 
-from tests.common.helpers import download_observation_bundle, http_request, observation_bundle_events
+from tests.common.helpers import _MinimalMockHandler, download_observation_bundle, http_request, observation_bundle_events
 from tests.common.observation_contents import output_text
 from tests.e2e.admin.test_compaction_diagnostics import _semantic, diagnostic_provider
 from tests.e2e.admin.test_observations import (
@@ -157,6 +159,50 @@ def test_rejected_media_capture_preserves_raw_payload(
     if not malformed:
         payload = json.loads(events[0]["payload"])
         assert payload["messages"][0]["content"][0]["text"] == ordinary
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_upstream_wire_capture_matches_received_ordered_fields(admin_env: dict[str, Any]) -> None:
+    received: list[list[tuple[str, str]]] = []
+
+    class Handler(_MinimalMockHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            received.append(list(self.headers.raw_items()))
+            super().do_POST()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _enable_debug(admin_env)
+        local_env = {**admin_env, "mock": f"http://127.0.0.1:{server.server_port}"}
+        route_id, key = _create_route(local_env, "wire-ordered-upstream")
+        status, body = http_request(
+            "POST", f"{admin_env['proxy']}/v1/chat/completions",
+            payload={"model": "wire-ordered-upstream", "messages": [{"role": "user", "content": "hello"}]},
+            headers={"authorization": f"Bearer {key}"},
+        )
+        assert status == 200, body
+        assert len(received) == 1
+        fields = received[0]
+        assert all(name.lower() != "accept" for name, _ in fields)
+        assert [(name.lower(), value) for name, value in fields if name.lower() == "authorization"] == [
+            ("authorization", "Bearer upstream-secret")
+        ]
+        detail = _wait_for("finalized ordered upstream trace", lambda: _finalized_route_detail(admin_env, route_id))
+        _, _, archive = download_observation_bundle(admin_env, detail)
+        records = observation_bundle_events(archive)
+        head = next(record for record in records if record.get("direction") == "upstream_request" and record.get("headers"))
+        assert head["schema_version"] == 3
+        assert head["headers"] == [
+            {"name": name, "bytes": list(("***" if name.lower() == "authorization" else value).encode("latin-1"))}
+            for name, value in fields
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 @pytest.mark.e2e
