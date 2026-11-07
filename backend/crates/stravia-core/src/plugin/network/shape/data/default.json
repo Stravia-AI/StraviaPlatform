@@ -1,0 +1,11 @@
+{
+  "name": "default",
+  "revision": 1,
+  "tls": {
+    "session_tickets": true,
+    "alpn": { "http": ["h2", "http/1.1"], "ws": ["http/1.1"] }
+  },
+  "http1": {},
+  "http2": {},
+  "ws": { "over_h2": false }
+}
