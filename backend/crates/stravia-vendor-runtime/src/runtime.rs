@@ -17,10 +17,12 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
 use crate::bindings::stravia::vendor::{host as wit_host, types as wit_types};
+use crate::bindings::stravia::net::{types as net_types, http as net_http, websocket as net_ws};
+use stravia_vendor_sdk::net::{Request, ConnectRequest};
 use crate::error::{LoadError, RuntimeError};
 use crate::host::{
-    HostFailure, HostServices, HttpRequest, HttpResponseResource, LogLevel, RuntimeEvent,
-    WebSocketMessage, WebSocketResource, WsRequest,
+    HostFailure, HostServices, HttpResponseResource, LogLevel, RuntimeEvent,
+    WebSocketMessage, WebSocketResource, NetOptionsResource,
 };
 
 mod admission;
@@ -540,11 +542,47 @@ impl VendorRuntime {
     }
 
     fn validate_imports(&self, component: &Component) -> Result<(), LoadError> {
+        const AVAILABLE_ABI: &str = "1.0.0";
         for (name, _) in component.component_type().imports(&self.engine) {
-            let allowed = matches!(
-                name,
-                "stravia:vendor/host@0.6.0" | "stravia:vendor/types@0.6.0"
-            ) || name.rsplit_once('@').is_some_and(|(interface, version)| {
+            if let Some((interface, version)) = name.rsplit_once('@') {
+                if matches!(
+                    interface,
+                    "stravia:vendor/host"
+                        | "stravia:vendor/types"
+                        | "stravia:net/types"
+                        | "stravia:net/http"
+                        | "stravia:net/websocket"
+                ) {
+                    // Compilation validates SemVer; only stable releases are
+                    // eligible. Build metadata does not affect compatibility.
+                    let release = version.split_once('+').map_or(version, |(release, _)| release);
+                    let mut parts = release.split('.');
+                    if let (Some(major), Some(minor), Some(patch), None) =
+                        (parts.next(), parts.next(), parts.next(), parts.next())
+                    {
+                        if let (Ok(major), Ok(minor), Ok(_)) =
+                            (major.parse::<u64>(), minor.parse::<u64>(), patch.parse::<u64>())
+                        {
+                            if major != 1 {
+                                return Err(LoadError::IncompatibleAbi {
+                                    interface: interface.to_owned(),
+                                    required: version.to_owned(),
+                                    available: AVAILABLE_ABI,
+                                });
+                            }
+                            if minor > 0 {
+                                return Err(LoadError::RequiresNewerHost {
+                                    interface: interface.to_owned(),
+                                    required: version.to_owned(),
+                                    available: AVAILABLE_ABI,
+                                });
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            let allowed = name.rsplit_once('@').is_some_and(|(interface, version)| {
                 // Component compilation already validates SemVer. Ignore build
                 // metadata and admit only stable 0.2.x; the linker still checks
                 // required functions and resource types. Interface permissions
@@ -632,6 +670,9 @@ impl VendorRuntime {
         let mut linker = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wit_host::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
+        net_types::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
+        net_http::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
+        net_ws::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
         Ok(linker)
     }
 
@@ -744,114 +785,112 @@ impl StoreState {
 
     fn start_http(
         &mut self,
-        request: wit_types::HttpRequest,
-        compression: Option<wit_types::HttpCompression>,
-        http1_only: bool,
-    ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
-    {
+        request: net_http::Request,
+        options: Resource<NetOptionsResource>,
+    ) -> Result<Result<Resource<HttpResponseResource>, net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.network_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
-        let request = HttpRequest {
+        let options = self.table.get(&options)?.0.clone();
+        let mut headers = stravia_vendor_sdk::net::Fields::new();
+        for field in request.headers {
+            headers.append(field.name, field.bytes);
+        }
+        let request = stravia_vendor_sdk::net::Request {
             method: request.method,
             url: request.url,
-            headers: request.headers,
+            headers,
             body: request.body,
-            compression: compression.map(|compression| stravia_vendor_sdk::HttpCompression {
-                request: compression.request.map(convert_http_content_coding),
-                response: compression
-                    .response
-                    .into_iter()
-                    .map(convert_http_content_coding)
-                    .collect(),
-            }),
-            http1_only,
         };
-        match self.services.http_start(request) {
-            Ok(response) => self
-                .table
-                .push(HttpResponseResource(response))
-                .map(Ok)
-                .map_err(Into::into),
-            Err(error) => Ok(Err(to_wit_failure(error))),
+        match self.services.http_start(request, options) {
+            Ok(response) => self.table.push(HttpResponseResource(response)).map(Ok).map_err(Into::into),
+            Err(error) => Ok(Err(to_net_failure(error))),
         }
     }
 
     async fn connect_ws(
         &mut self,
-        request: wit_types::WsRequest,
-        compression: Option<wit_types::WsCompression>,
-    ) -> Result<Result<Resource<WebSocketResource>, wit_types::PluginError>, wasmtime::Error> {
+        request: net_ws::ConnectRequest,
+        options: Resource<NetOptionsResource>,
+    ) -> Result<Result<Resource<WebSocketResource>, net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
-        match self
-            .services
-            .ws_connect(WsRequest {
-                url: request.url,
-                headers: request.headers,
-                protocols: request.protocols,
-                continuation_id: request.continuation_id,
-                reuse_max_age_millis: request.reuse_max_age_millis,
-                compression: compression.map(convert_ws_compression),
-            })
-            .await
-        {
-            Ok(socket) => self
-                .table
-                .push(WebSocketResource(socket))
-                .map(Ok)
-                .map_err(Into::into),
-            Err(error) => Ok(Err(to_wit_failure(error))),
+        let options = self.table.get(&options)?.0.clone();
+        let mut headers = stravia_vendor_sdk::net::Fields::new();
+        for field in request.headers {
+            headers.append(field.name, field.bytes);
+        }
+        let request = stravia_vendor_sdk::net::ConnectRequest { url: request.url, headers };
+        match self.services.ws_connect(request, options).await {
+            Ok(socket) => self.table.push(WebSocketResource(socket)).map(Ok).map_err(Into::into),
+            Err(error) => Ok(Err(to_net_failure(error))),
         }
     }
 }
 
+impl net_types::HostOptions for StoreState {
+    async fn new(&mut self) -> wasmtime::Result<Resource<NetOptionsResource>> {
+        self.network_active().map_err(|error| wasmtime::Error::msg(error.message))?;
+        Ok(self.table.push(NetOptionsResource(stravia_vendor_sdk::net::Options::new()))?)
+    }
+
+    async fn set(
+        &mut self,
+        options: Resource<NetOptionsResource>,
+        key: String,
+        value: String,
+    ) -> Result<Result<(), net_types::NetError>, wasmtime::Error> {
+        if let Err(error) = self.network_active() {
+            return Ok(Err(to_net_failure(error)));
+        }
+        if let Err(error) = stravia_vendor_sdk::net::validate_host_option(&key, &value)
+            .and_then(|()| self.services.validate_net_option(&key, &value))
+        {
+            return Ok(Err(net_types::NetError {
+                code: "unsupported-option".into(), message: error.to_string(), status: None,
+                retry_after_millis: None, model_error_kind: None, transport_failure: None,
+            }));
+        }
+        // Host validation is stricter than the SDK's local grammar.
+        if let Err(error) = self.table.get_mut(&options)?.0.set(&key, &value) {
+            return Ok(Err(net_types::NetError {
+                code: "unsupported-option".into(), message: error.to_string(), status: None,
+                retry_after_millis: None, model_error_kind: None, transport_failure: None,
+            }));
+        }
+        Ok(Ok(()))
+    }
+
+    async fn drop(&mut self, options: Resource<NetOptionsResource>) -> wasmtime::Result<()> {
+        self.table.delete(options)?;
+        Ok(())
+    }
+}
+
+impl net_types::Host for StoreState {}
+
+impl net_http::Host for StoreState {
+    async fn start(
+        &mut self,
+        request: net_http::Request,
+        options: Resource<NetOptionsResource>,
+    ) -> Result<Result<Resource<HttpResponseResource>, net_types::NetError>, wasmtime::Error> {
+        self.start_http(request, options)
+    }
+}
+
+impl net_ws::Host for StoreState {
+    async fn connect(
+        &mut self,
+        request: net_ws::ConnectRequest,
+        options: Resource<NetOptionsResource>,
+    ) -> Result<Result<Resource<WebSocketResource>, net_types::NetError>, wasmtime::Error> {
+        self.connect_ws(request, options).await
+    }
+}
+
 impl wit_host::Host for StoreState {
-    async fn http_start(
-        &mut self,
-        request: wit_types::HttpRequest,
-    ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
-    {
-        self.start_http(request, None, false)
-    }
-
-    async fn http_start_with_compression(
-        &mut self,
-        request: wit_types::HttpRequest,
-        compression: wit_types::HttpCompression,
-    ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
-    {
-        self.start_http(request, Some(compression), false)
-    }
-
-    /// The new WIT entry point requires a host built against this updated
-    /// contract. Existing entries retain their HTTP negotiation behavior;
-    /// only this entry point carries explicit options.
-    async fn http_start_with_options(
-        &mut self,
-        request: wit_types::HttpRequest,
-        options: wit_types::HttpRequestOptions,
-    ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
-    {
-        self.start_http(request, options.compression, options.http1_only)
-    }
-
-    async fn ws_connect(
-        &mut self,
-        request: wit_types::WsRequest,
-    ) -> Result<Result<Resource<WebSocketResource>, wit_types::PluginError>, wasmtime::Error> {
-        self.connect_ws(request, None).await
-    }
-
-    async fn ws_connect_with_compression(
-        &mut self,
-        request: wit_types::WsRequest,
-        compression: wit_types::WsCompression,
-    ) -> Result<Result<Resource<WebSocketResource>, wit_types::PluginError>, wasmtime::Error> {
-        self.connect_ws(request, Some(compression)).await
-    }
-
     async fn read_private_state(
         &mut self,
     ) -> Result<Result<Option<Vec<u8>>, wit_types::PluginError>, wasmtime::Error> {
@@ -958,13 +997,13 @@ impl wit_host::Host for StoreState {
     }
 }
 
-impl wit_host::HostHttpResponse for StoreState {
+impl net_http::HostResponse for StoreState {
     async fn status(
         &mut self,
         response: Resource<HttpResponseResource>,
-    ) -> Result<Result<u16, wit_types::PluginError>, wasmtime::Error> {
+    ) -> Result<Result<u16, net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.network_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
         match response.status().await {
@@ -976,37 +1015,32 @@ impl wit_host::HostHttpResponse for StoreState {
                 }
                 Ok(Ok(status))
             }
-            Err(error) => Ok(Err(to_wit_failure(error))),
+            Err(error) => Ok(Err(to_net_failure(error))),
         }
     }
 
     async fn headers(
         &mut self,
         response: Resource<HttpResponseResource>,
-    ) -> Result<Result<Vec<(String, String)>, wit_types::PluginError>, wasmtime::Error> {
+    ) -> Result<Result<Vec<net_types::Field>, net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.network_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
-        match response.headers().await {
-            Ok(headers) => Ok(Ok(headers)),
-            Err(error) => Ok(Err(to_wit_failure(error))),
-        }
+        Ok(response.headers().await.map(|fields| fields.into_iter().map(|field| net_types::Field {
+            name: field.name, bytes: field.bytes,
+        }).collect()).map_err(to_net_failure))
     }
 
     async fn read_body(
         &mut self,
         response: Resource<HttpResponseResource>,
-    ) -> Result<Result<Option<Vec<u8>>, wit_types::PluginError>, wasmtime::Error> {
+    ) -> Result<Result<Option<Vec<u8>>, net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.network_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
-        match response.read_body().await {
-            Ok(Some(chunk)) => Ok(Ok(Some(chunk))),
-            Ok(None) => Ok(Ok(None)),
-            Err(error) => Ok(Err(to_wit_failure(error))),
-        }
+        Ok(response.read_body().await.map_err(to_net_failure))
     }
 
     async fn drop(&mut self, response: Resource<HttpResponseResource>) -> wasmtime::Result<()> {
@@ -1015,51 +1049,59 @@ impl wit_host::HostHttpResponse for StoreState {
     }
 }
 
-impl wit_host::HostWsConnection for StoreState {
+impl net_ws::HostConnection for StoreState {
+    async fn handshake_status(&mut self, socket: Resource<WebSocketResource>) -> wasmtime::Result<u16> {
+        self.operation_active().map_err(|error| wasmtime::Error::msg(error.message))?;
+        Ok(self.table.get(&socket)?.0.handshake_status())
+    }
+
+    async fn handshake_headers(&mut self, socket: Resource<WebSocketResource>) -> wasmtime::Result<Vec<net_types::Field>> {
+        self.operation_active().map_err(|error| wasmtime::Error::msg(error.message))?;
+        Ok(self.table.get(&socket)?.0.handshake_headers().into_iter().map(|field| net_types::Field {
+            name: field.name, bytes: field.bytes,
+        }).collect())
+    }
+
     async fn send(
         &mut self,
         socket: Resource<WebSocketResource>,
-        message: wit_types::WsMessage,
-    ) -> Result<Result<(), wit_types::PluginError>, wasmtime::Error> {
+        message: net_ws::Message,
+    ) -> Result<Result<(), net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
         let message = convert_ws_from_wit(message);
         let socket = self.table.get(&socket)?.0.clone();
-        Ok(socket.send(message).await.map_err(to_wit_failure))
+        Ok(socket.send(message).await.map_err(to_net_failure))
     }
 
     async fn next(
         &mut self,
         socket: Resource<WebSocketResource>,
-    ) -> Result<Result<Option<wit_types::WsMessage>, wit_types::PluginError>, wasmtime::Error> {
+    ) -> Result<Result<Option<net_ws::Message>, net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
         let socket = self.table.get(&socket)?.0.clone();
-        match socket.next().await {
-            Ok(Some(message)) => Ok(Ok(Some(convert_ws_to_wit(message)))),
-            Ok(None) => Ok(Ok(None)),
-            Err(error) => Ok(Err(to_wit_failure(error))),
-        }
+        Ok(socket.next().await.map(|message| message.map(convert_ws_to_wit)).map_err(to_net_failure))
     }
 
     async fn close(
         &mut self,
         socket: Resource<WebSocketResource>,
         continuation_id: Option<String>,
-    ) -> Result<Result<(), wit_types::PluginError>, wasmtime::Error> {
+    ) -> Result<Result<(), net_types::NetError>, wasmtime::Error> {
         if let Err(error) = self.operation_active() {
-            return Ok(Err(to_wit_failure(error)));
+            return Ok(Err(to_net_failure(error)));
         }
         if continuation_id.is_some() && self.operation != Some(Operation::Infer) {
-            return Ok(Err(to_wit_failure(HostFailure::new(
+            return Ok(Err(to_net_failure(HostFailure::new(
                 ErrorKind::Trapped,
                 "response continuation can only be declared by inference",
             ))));
         }
         let socket = self.table.get(&socket)?.0.clone();
-        Ok(socket.close(continuation_id).await.map_err(to_wit_failure))
+        Ok(socket.close(continuation_id).await.map_err(to_net_failure))
     }
 
     async fn drop(&mut self, socket: Resource<WebSocketResource>) -> wasmtime::Result<()> {
@@ -1183,7 +1225,7 @@ fn convert_error_kind(value: wit_types::ErrorKind) -> ErrorKind {
             ErrorKind::Upstream(stravia_vendor_sdk::UpstreamFailure {
                 model_error_kind: failure.model_error_kind.map(convert_model_error_kind),
                 retry_after_milliseconds: failure.retry_after_milliseconds,
-                transport_failure: failure.transport_failure.map(convert_transport_failure),
+                transport_failure: failure.transport_failure,
             })
         }
         wit_types::ErrorKind::Trapped => ErrorKind::Trapped,
@@ -1214,40 +1256,48 @@ fn convert_model_error_kind(
         wit_types::ModelErrorKind::StreamMidError => ModelErrorKind::StreamMidError,
         wit_types::ModelErrorKind::UnexpectedEof => ModelErrorKind::UnexpectedEof,
         wit_types::ModelErrorKind::Unknown => ModelErrorKind::Unknown,
+        wit_types::ModelErrorKind::Other(value) => ModelErrorKind::Other(value),
     }
 }
 
-fn convert_http_content_coding(
-    value: wit_types::HttpContentCoding,
-) -> stravia_vendor_sdk::HttpContentCoding {
-    use stravia_vendor_sdk::HttpContentCoding;
-    match value {
-        wit_types::HttpContentCoding::Gzip => HttpContentCoding::Gzip,
-        wit_types::HttpContentCoding::Deflate => HttpContentCoding::Deflate,
-        wit_types::HttpContentCoding::Br => HttpContentCoding::Br,
-        wit_types::HttpContentCoding::Zstd => HttpContentCoding::Zstd,
-    }
-}
-
-fn convert_ws_compression(value: wit_types::WsCompression) -> stravia_vendor_sdk::WsCompression {
-    use stravia_vendor_sdk::{CompressionNegotiation, WsCompression};
-    match value {
-        wit_types::WsCompression::Disabled => WsCompression::Disabled,
-        wit_types::WsCompression::PermessageDeflate(negotiation) => {
-            WsCompression::PermessageDeflate(match negotiation {
-                wit_types::CompressionNegotiation::Preferred => CompressionNegotiation::Preferred,
-                wit_types::CompressionNegotiation::Required => CompressionNegotiation::Required,
-            })
+fn to_net_failure(failure: HostFailure) -> net_types::NetError {
+    use stravia_vendor_sdk::ModelErrorKind as M;
+    let (code, retry_after_millis, model_error_kind, transport_failure) = match failure.kind {
+        ErrorKind::Unsupported => ("unsupported", None, None, None),
+        ErrorKind::Invalid => ("invalid", None, None, None),
+        ErrorKind::InvalidResponse => ("invalid-response", None, None, None),
+        ErrorKind::Auth => ("auth", None, None, None),
+        ErrorKind::ContinuationNotFound => ("continuation-not-found", None, None, None),
+        ErrorKind::ContinuationUnavailable => ("continuation-unavailable", None, None, None),
+        ErrorKind::ProtectedReasoningRejected => ("protected-reasoning-rejected", None, None, None),
+        ErrorKind::Trapped => ("trapped", None, None, None),
+        ErrorKind::Cancelled => ("cancelled", None, None, None),
+        ErrorKind::DeadlineExceeded => ("deadline-exceeded", None, None, None),
+        ErrorKind::ResourceExhausted => ("resource-exhausted", None, None, None),
+        ErrorKind::ProviderNotFound => ("provider-not-found", None, None, None),
+        ErrorKind::Upstream(facts) => {
+            let model = facts.model_error_kind.map(|kind| match kind {
+                M::AuthenticationError => "authentication-error".into(),
+                M::AuthorizationError => "authorization-error".into(),
+                M::NotFoundError => "not-found-error".into(),
+                M::RateLimitError => "rate-limit-error".into(),
+                M::QuotaExceeded => "quota-exceeded".into(),
+                M::InvalidRequest => "invalid-request".into(),
+                M::ServerError => "server-error".into(),
+                M::ServiceUnavailable => "service-unavailable".into(),
+                M::Timeout => "timeout".into(),
+                M::ContentFiltered => "content-filtered".into(),
+                M::ContextLengthExceeded => "context-length-exceeded".into(),
+                M::ModelNotAvailable => "model-not-available".into(),
+                M::StreamMidError => "stream-mid-error".into(),
+                M::UnexpectedEof => "unexpected-eof".into(),
+                M::Unknown => "unknown".into(),
+                M::Other(value) => value,
+            });
+            ("upstream", facts.retry_after_milliseconds, model, facts.transport_failure)
         }
-    }
-}
-
-fn convert_transport_failure(
-    value: wit_types::TransportFailure,
-) -> stravia_vendor_sdk::TransportFailure {
-    match value {
-        wit_types::TransportFailure::Websocket => stravia_vendor_sdk::TransportFailure::Websocket,
-    }
+    };
+    net_types::NetError { code: code.into(), message: failure.message, status: failure.upstream_status, retry_after_millis, model_error_kind, transport_failure }
 }
 
 fn to_wit_failure(value: HostFailure) -> wit_types::PluginError {
@@ -1263,7 +1313,7 @@ fn to_wit_failure(value: HostFailure) -> wit_types::PluginError {
             wit_types::ErrorKind::Upstream(wit_types::UpstreamFailure {
                 model_error_kind: failure.model_error_kind.map(to_wit_model_error_kind),
                 retry_after_milliseconds: failure.retry_after_milliseconds,
-                transport_failure: failure.transport_failure.map(to_wit_transport_failure),
+                transport_failure: failure.transport_failure,
             })
         }
         ErrorKind::Trapped => wit_types::ErrorKind::Trapped,
@@ -1297,14 +1347,7 @@ fn to_wit_model_error_kind(value: stravia_vendor_sdk::ModelErrorKind) -> wit_typ
         ModelErrorKind::StreamMidError => wit_types::ModelErrorKind::StreamMidError,
         ModelErrorKind::UnexpectedEof => wit_types::ModelErrorKind::UnexpectedEof,
         ModelErrorKind::Unknown => wit_types::ModelErrorKind::Unknown,
-    }
-}
-
-fn to_wit_transport_failure(
-    value: stravia_vendor_sdk::TransportFailure,
-) -> wit_types::TransportFailure {
-    match value {
-        stravia_vendor_sdk::TransportFailure::Websocket => wit_types::TransportFailure::Websocket,
+        ModelErrorKind::Other(value) => wit_types::ModelErrorKind::Other(value),
     }
 }
 
@@ -1467,23 +1510,23 @@ fn classify_trap(error: &wasmtime::Error) -> RuntimeError {
     }
 }
 
-fn convert_ws_from_wit(value: wit_types::WsMessage) -> WebSocketMessage {
+fn convert_ws_from_wit(value: net_ws::Message) -> WebSocketMessage {
     match value {
-        wit_types::WsMessage::Text(value) => WebSocketMessage::Text(value),
-        wit_types::WsMessage::Binary(value) => WebSocketMessage::Binary(value),
-        wit_types::WsMessage::Ping(value) => WebSocketMessage::Ping(value),
-        wit_types::WsMessage::Pong(value) => WebSocketMessage::Pong(value),
-        wit_types::WsMessage::Close(value) => WebSocketMessage::Close(value),
+        net_ws::Message::Text(value) => WebSocketMessage::Text(value),
+        net_ws::Message::Binary(value) => WebSocketMessage::Binary(value),
+        net_ws::Message::Ping(value) => WebSocketMessage::Ping(value),
+        net_ws::Message::Pong(value) => WebSocketMessage::Pong(value),
+        net_ws::Message::Close(value) => WebSocketMessage::Close(value),
     }
 }
 
-fn convert_ws_to_wit(value: WebSocketMessage) -> wit_types::WsMessage {
+fn convert_ws_to_wit(value: WebSocketMessage) -> net_ws::Message {
     match value {
-        WebSocketMessage::Text(value) => wit_types::WsMessage::Text(value),
-        WebSocketMessage::Binary(value) => wit_types::WsMessage::Binary(value),
-        WebSocketMessage::Ping(value) => wit_types::WsMessage::Ping(value),
-        WebSocketMessage::Pong(value) => wit_types::WsMessage::Pong(value),
-        WebSocketMessage::Close(value) => wit_types::WsMessage::Close(value),
+        WebSocketMessage::Text(value) => net_ws::Message::Text(value),
+        WebSocketMessage::Binary(value) => net_ws::Message::Binary(value),
+        WebSocketMessage::Ping(value) => net_ws::Message::Ping(value),
+        WebSocketMessage::Pong(value) => net_ws::Message::Pong(value),
+        WebSocketMessage::Close(value) => net_ws::Message::Close(value),
     }
 }
 
@@ -1493,7 +1536,8 @@ struct DenyServices;
 impl HostServices for DenyServices {
     fn http_start(
         &self,
-        _request: HttpRequest,
+        _request: Request,
+        _options: stravia_vendor_sdk::net::Options,
     ) -> Result<Arc<dyn crate::host::HostHttpResponse>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Trapped,
@@ -1503,7 +1547,8 @@ impl HostServices for DenyServices {
 
     async fn ws_connect(
         &self,
-        _request: WsRequest,
+        _request: ConnectRequest,
+        _options: stravia_vendor_sdk::net::Options,
     ) -> Result<Arc<dyn crate::host::HostWebSocket>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Trapped,

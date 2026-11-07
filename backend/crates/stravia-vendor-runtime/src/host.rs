@@ -3,7 +3,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
-use stravia_vendor_sdk::{ErrorKind, HttpCompression, WsCompression};
+use stravia_vendor_sdk::{ErrorKind, net::{self, ConnectRequest, Field, Options, Request}};
+
+#[derive(Clone, Default)]
+#[doc(hidden)]
+pub struct NetOptionsResource(pub Options);
 
 #[derive(Clone)]
 #[doc(hidden)]
@@ -12,32 +16,6 @@ pub struct HttpResponseResource(pub Arc<dyn HostHttpResponse>);
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct WebSocketResource(pub Arc<dyn HostWebSocket>);
-
-#[derive(Debug, Clone)]
-pub struct HttpRequest {
-    pub method: String,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    /// None preserves manually supplied compression headers and pre-encoded
-    /// request bytes. Some opts into host-owned compression, including an
-    /// identity-only policy.
-    pub compression: Option<HttpCompression>,
-    /// `http1_only` restricts HTTP protocol negotiation to HTTP/1.1;
-    /// TLS, proxy, redirect, and origin checks are unchanged.
-    pub http1_only: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct WsRequest {
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub protocols: Vec<String>,
-    pub continuation_id: Option<String>,
-    pub reuse_max_age_millis: Option<u64>,
-    /// None is the legacy, non-negotiating entry point; Some is explicit policy.
-    pub compression: Option<WsCompression>,
-}
 
 #[derive(Debug, Clone)]
 pub enum WebSocketMessage {
@@ -105,14 +83,14 @@ impl HostFailure {
         kind: Option<stravia_runtime_contract::protocol::ir::AiErrorKind>,
         status: Option<u16>,
         retry_after: Option<Duration>,
-        transport_failure: stravia_vendor_sdk::TransportFailure,
+        transport_failure: String,
         message: impl Into<String>,
     ) -> Self {
-        Self {
-            kind: ErrorKind::upstream_transport(kind, retry_after, transport_failure),
-            message: message.into(),
-            upstream_status: status,
+        let mut kind = ErrorKind::upstream(kind, retry_after);
+        if let ErrorKind::Upstream(failure) = &mut kind {
+            failure.transport_failure = Some(transport_failure);
         }
+        Self { kind, message: message.into(), upstream_status: status }
     }
 }
 
@@ -122,12 +100,14 @@ impl HostFailure {
 #[async_trait]
 pub trait HostHttpResponse: Send + Sync {
     async fn status(&self) -> Result<u16, HostFailure>;
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure>;
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure>;
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure>;
 }
 
 #[async_trait]
 pub trait HostWebSocket: Send + Sync {
+    fn handshake_status(&self) -> u16;
+    fn handshake_headers(&self) -> Vec<Field>;
     async fn send(&self, message: WebSocketMessage) -> Result<(), HostFailure>;
     async fn next(&self) -> Result<Option<WebSocketMessage>, HostFailure>;
     async fn close(&self, continuation_id: Option<String>) -> Result<(), HostFailure>;
@@ -140,18 +120,23 @@ pub trait HostWebSocket: Send + Sync {
 #[async_trait]
 pub trait HostServices: Send + Sync {
     /// Admit and start the request without waiting for response headers.
-    /// `http1_only` restricts HTTP protocol negotiation to HTTP/1.1.
     /// Redirect targets must be checked again and credentials must not be
     /// forwarded across origins unless explicitly authorized. TLS, proxy,
     /// network permission, and failure handling remain host-owned.
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure>;
+    fn http_start(&self, request: Request, options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure>;
 
-    /// Connect with a guest-declared maximum age for cross-request reuse.
-    /// `None` uses the host default; zero disables cross-request reuse. Hosts
-    /// may cap the requested age. Age starts at the first handshake, and later
-    /// checkouts may shorten but never extend the deadline. This policy does
-    /// not shorten the independent in-flight I/O deadline.
-    async fn ws_connect(&self, request: WsRequest) -> Result<Arc<dyn HostWebSocket>, HostFailure>;
+    /// Connect with the supplied transport options and host-owned reuse policy.
+    async fn ws_connect(&self, request: ConnectRequest, options: Options) -> Result<Arc<dyn HostWebSocket>, HostFailure>;
+
+    /// Validate every option independently before storing it in the resource.
+    /// Hosts with a shape registry override this to validate its membership.
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        net::validate_host_option(key, value)?;
+        if key == net::keys::SHAPE && value != "default" {
+            return Err(net::OptionError { key: key.into(), value: value.into() });
+        }
+        Ok(())
+    }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure>;
     async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure>;
