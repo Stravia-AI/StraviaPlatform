@@ -125,6 +125,10 @@ async fn capture_h1<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result
     let method = parts.next().context("missing method")?;
     let _target = parts.next().context("missing request target")?;
     let version = parts.next().context("missing HTTP version")?;
+    let target_start = request.find(char::is_whitespace).context("invalid request line")?;
+    let target_start = target_start + request[target_start..].len() - request[target_start..].trim_start().len();
+    let target_end = target_start + request[target_start..].find(char::is_whitespace).context("invalid request line")?;
+    let mut raw_head = format!("{}<redacted>{}\r\n", &request[..target_start], &request[target_end..]);
     let mut headers = Vec::new();
     let mut normalizations = Vec::new();
     let mut websocket_key = None;
@@ -132,14 +136,28 @@ async fn capture_h1<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Result
     for line in lines.filter(|line| !line.is_empty()) {
         let (name, value) = line.split_once(':').context("malformed HTTP/1 header")?;
         if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c)) { bail!("invalid HTTP header name"); }
-        let value = value.trim();
+        let raw_value = value;
+        let value = raw_value.trim();
         if name.eq_ignore_ascii_case("sec-websocket-key") { websocket_key = Some(value.to_owned()); }
         if name.eq_ignore_ascii_case("upgrade") && value.eq_ignore_ascii_case("websocket") { upgrade = true; }
         let (safe, reason) = sanitize_header_value(name, value);
         if let Some(reason) = reason { normalizations.push(serde_json::json!({"header_index": headers.len(), "reason": reason})); }
+        raw_head.push_str(name);
+        raw_head.push(':');
+        if reason.is_some() {
+            let leading = raw_value.len() - raw_value.trim_start().len();
+            let end = raw_value.trim_end().len().max(leading);
+            raw_head.push_str(&raw_value[..leading]);
+            raw_head.push_str("<redacted>");
+            raw_head.push_str(&raw_value[end..]);
+        } else {
+            raw_head.push_str(raw_value);
+        }
+        raw_head.push_str("\r\n");
         headers.push(serde_json::json!({"name": name, "value": safe}));
     }
-    let h1 = serde_json::json!({"method": method, "target": "<redacted>", "version": version, "headers": headers, "normalizations": normalizations});
+    raw_head.push_str("\r\n");
+    let h1 = serde_json::json!({"method": method, "target": "<redacted>", "version": version, "headers": headers, "normalizations": normalizations, "raw_head": raw_head});
     if upgrade {
         let key = websocket_key.context("websocket upgrade without key")?;
         let mut hash = Sha1::new();

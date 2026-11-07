@@ -94,6 +94,38 @@ fn safe_alpn(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+// Only retain bodies whose complete structure is known not to carry opaque data.
+fn safe_extension_body(kind: u16, payload: &[u8]) -> bool {
+    match kind {
+        // status_request with no responder IDs or request extensions.
+        5 => payload == [1, 0, 0, 0, 0],
+        10 | 11 | 13 | 27 | 43 | 50 => true, // parsed and length-checked below
+        16 => {
+            let mut outer = Cursor::new(payload);
+            let Ok(list) = outer.vec16() else { return false };
+            if !outer.done() { return false; }
+            let mut protocols = Cursor::new(list);
+            while !protocols.done() {
+                let Ok(protocol) = protocols.vec8() else { return false };
+                if safe_alpn(protocol).is_none() { return false; }
+            }
+            true
+        }
+        18 | 22 | 23 => payload.is_empty(),
+        21 => payload.iter().all(|byte| *byte == 0),
+        45 => {
+            let mut modes = Cursor::new(payload);
+            match modes.vec8() {
+                Ok(values) => modes.done() && values.iter().all(|v| *v <= 1),
+                Err(_) => false,
+            }
+        }
+        // Initial renegotiation indication only, never dynamic verify data.
+        65281 => payload == [0],
+        _ => false,
+    }
+}
+
 fn decode(bytes: &[u8]) -> Result<Value> {
     let mut c = Cursor::new(bytes);
     let legacy_version = c.u16()?;
@@ -132,8 +164,14 @@ fn decode(bytes: &[u8]) -> Result<Value> {
                 10 => { groups = words(p.vec16()?)?; p.finish()?; decoded = Some(json!({"groups": groups})); }
                 11 => { point_formats = p.vec8()?.to_vec(); p.finish()?; decoded = Some(json!({"point_formats": point_formats})); }
                 13 => { signature_algorithms = words(p.vec16()?)?; p.finish()?; decoded = Some(json!({"algorithms": signature_algorithms})); }
+                5 => { decoded = Some(json!({"status_request": true})); }
                 18 => { decoded = Some(json!({"signed_certificate_timestamp": true})); }
                 22 => { decoded = Some(json!({"encrypt_then_mac": true})); }
+                23 => { decoded = Some(json!({"extended_master_secret": true})); }
+                45 if safe_extension_body(kind, payload) => {
+                    decoded = Some(json!({"psk_key_exchange_modes": &payload[1..]}));
+                }
+                65281 => { decoded = Some(json!({"renegotiation_info": true})); }
                 27 => { let algorithms = words(p.vec8()?)?; p.finish()?; decoded = Some(json!({"algorithms": algorithms})); }
                 50 => { let algorithms = words(p.vec16()?)?; p.finish()?; decoded = Some(json!({"algorithms": algorithms})); }
                 16 => {
@@ -160,11 +198,13 @@ fn decode(bytes: &[u8]) -> Result<Value> {
                 }
                 _ => {} // Unknown extension data can contain secrets.
             }
+            let safe_body = safe_extension_body(kind, payload);
             extension_details.push(json!({
                 "type": kind,
                 "length": payload.len(),
                 "decoded": decoded,
-                "payload_omitted": "extension payload may contain sensitive or unrecognized data"
+                "body": if safe_body { Some(payload) } else { None },
+                "payload_omitted": if safe_body { None } else { Some("extension payload may contain sensitive or unrecognized data") }
             }));
         }
     }

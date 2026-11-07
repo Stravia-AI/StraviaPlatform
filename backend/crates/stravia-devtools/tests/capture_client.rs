@@ -157,7 +157,7 @@ fn captures_fragmented_clienthello_and_completes_tls_request() {
 fn captures_http1_header_order_without_secrets() {
     let capture = Capture::start();
     let mut stream = capture.connect();
-    stream.write_all(b"POST /private-path?token=secret-query HTTP/1.1\r\nHost: localhost\r\nUser-Agent: example-client/1.2\r\nAccept: application/json\r\nX-First: private-first\r\nAuthorization: Bearer secret-auth\r\nCookie: secret-cookie\r\nX-First: private-second\r\nContent-Length: 0\r\n\r\n").unwrap();
+    stream.write_all(b"POST /private-path?token=secret-query HTTP/1.1\r\nHost: localhost\r\nUser-Agent: example-client/1.2\r\nAccept: application/json\r\nX-First: private-first\r\nAuthorization:\tBearer secret-auth  \r\nCookie: secret-cookie\r\nX-First: private-second\r\nContent-Length: 0\r\n\r\n").unwrap();
     let response = response_headers(&mut stream);
     assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
     drop(stream);
@@ -165,6 +165,8 @@ fn captures_http1_header_order_without_secrets() {
     assert_eq!(result["h1"]["method"], "POST");
     assert_eq!(result["h1"]["version"], "HTTP/1.1");
     assert_eq!(result["h1"]["target"], "<redacted>");
+    assert!(result["h1"]["raw_head"].as_str().unwrap().contains("Authorization:\t<redacted>  \r\n"));
+    assert!(result["h1"]["raw_head"].as_str().unwrap().starts_with("POST <redacted> HTTP/1.1\r\n"));
     assert_eq!(result["h1"]["headers"], json!([
         {"name":"Host", "value":"<redacted>"},
         {"name":"User-Agent", "value":"example-client/1.2"},
