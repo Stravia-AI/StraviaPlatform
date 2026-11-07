@@ -15,6 +15,31 @@ use tower_http::decompression::{Decompression, DecompressionBody};
 
 use super::{invalid, transport_failure};
 
+/// 只把唯一的 chunked 声明提升为宿主 framing 策略，不允许插件提交任意逐跳编码。
+pub(super) fn take_chunked_header(
+    headers: &mut Vec<(String, String)>,
+) -> Result<bool, HostFailure> {
+    let mut selected = None;
+    for (index, (name, value)) in headers.iter().enumerate() {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if selected.is_some()
+                || !value
+                    .trim_matches([' ', '\t'])
+                    .eq_ignore_ascii_case("chunked")
+            {
+                return Err(invalid("HTTP Transfer-Encoding requires one chunked value"));
+            }
+            selected = Some(index);
+        }
+    }
+    if let Some(index) = selected {
+        headers.remove(index);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// 必须在发送前调用；手写编码头会破坏宿主的唯一所有权，不能悄悄覆盖。
 pub(super) fn prepare(
     headers: &mut HeaderMap,

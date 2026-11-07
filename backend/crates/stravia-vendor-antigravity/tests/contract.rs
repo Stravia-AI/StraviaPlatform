@@ -175,6 +175,31 @@ async fn upstream(
         "/v1internal:retrieveUserQuotaSummary" => {
             json!({"groups":[{"displayName":"Gemini","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7,"resetTime":"2026-01-01T00:00:00Z"}]}],"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7}]})
         }
+        "/v1internal:generateContent" => {
+            if fixture.error_stream.load(Ordering::Relaxed) {
+                return (
+                    [("retry-after", "9")],
+                    axum::Json(json!({"error":{"code":429,"message":"rate limit"}})),
+                )
+                    .into_response();
+            }
+            if let Some(refusal) = fixture.image_refusal.lock().as_ref() {
+                return axum::Json(refusal.clone()).into_response();
+            }
+            let mut response = json!({"response":{
+                "candidates":[{"content":{"role":"model","parts":[{
+                    "inlineData":{"mimeType":"image/png","data":IMAGE_PNG}
+                }]},"finishReason":"STOP"}],
+                "usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":13,"totalTokenCount":20}
+            }});
+            if fixture.truncated.load(Ordering::Relaxed) {
+                response["response"]["candidates"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("finishReason");
+            }
+            response
+        }
         "/v1internal:streamGenerateContent" => {
             if fixture.error_stream.load(Ordering::Relaxed) {
                 return (
@@ -202,32 +227,6 @@ async fn upstream(
                         ).into_response();
                     }
                 }
-            }
-            if request.pointer("/request/generationConfig/responseModalities")
-                == Some(&json!(["IMAGE"]))
-            {
-                if let Some(refusal) = fixture.image_refusal.lock().as_ref() {
-                    return (
-                        [("content-type", "text/event-stream")],
-                        format!("data: {refusal}\n\n"),
-                    )
-                        .into_response();
-                }
-                let image = json!({"response":{
-                    "candidates":[{"index":0,"content":{"role":"model","parts":[{
-                        "inlineData":{"mimeType":"image/png","data":IMAGE_PNG}
-                    }]}}],
-                    "usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":13,"totalTokenCount":20}
-                }});
-                let finish = json!({"response":{
-                    "candidates":[{"index":0,"finishReason":"STOP"}],
-                    "usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":13,"totalTokenCount":20}
-                }});
-                let mut stream = format!("data: {image}\r\n\r\n");
-                if !fixture.truncated.load(Ordering::Relaxed) {
-                    stream.push_str(&format!("data: {finish}\n\n"));
-                }
-                return ([("content-type", "text/event-stream")], stream).into_response();
             }
             let first = "data: {\"response\":{\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"真实 HTTP 冒烟\"}]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":8,\"totalTokenCount\":13}}}\r\n\r\n";
             let last = "data: {\"response\":{\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"metadata\":{\"seed\":7}}},\"thoughtSignature\":\"genuine-signature\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":8,\"totalTokenCount\":13}}}\n\n";
@@ -487,22 +486,32 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
         assert_eq!(usage.completion_tokens, 13);
         let received = fixture.received.lock();
         let (url, headers, bytes) = received.last().unwrap();
-        assert_eq!(url, "/v1internal:streamGenerateContent?alt=sse");
+        assert_eq!(url, "/v1internal:generateContent");
         assert_eq!(headers["authorization"], "Bearer test-token");
+        assert!(!headers.contains_key("transfer-encoding"));
         assert!(!headers.contains_key("x-downstream-secret"));
         let envelope: Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(envelope["model"], "account-image");
         assert_eq!(envelope["project"], "test-project");
+        assert_eq!(envelope["requestType"], "image_gen");
+        assert!(
+            envelope["requestId"]
+                .as_str()
+                .unwrap()
+                .starts_with("image_gen/")
+        );
+        assert!(envelope["request"].get("systemInstruction").is_none());
         assert_eq!(
             envelope["request"]["generationConfig"],
             json!({
-                "responseModalities":["IMAGE"],"candidateCount":1,
+                "candidateCount":1,
                 "imageConfig":{"aspectRatio":"16:9","imageSize":"2K"}
             })
         );
         let parts = envelope["request"]["contents"][0]["parts"]
             .as_array()
             .unwrap();
+        assert!(parts[0].get("text").is_some());
         let returned_references: Vec<_> = parts
             .iter()
             .filter_map(|part| part.get("inlineData"))
@@ -561,9 +570,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     .unwrap_err();
     assert_eq!(error.diagnostic_message(), Some(failure_message));
     assert_ne!(error.model_error_kind(), Some(AiErrorKind::ContentFiltered));
-    *fixture.image_refusal.lock() = Some(
-        json!({"response":{"candidates":[{"content":{},"finishMessage":"The image is still being generated"}]}}),
-    );
+    *fixture.image_refusal.lock() =
+        Some(json!({"response":{"candidates":[{"content":{},"finishMessage":failure_message}]}}));
     let error = run(
         &runtime,
         &plugin,
@@ -575,7 +583,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     )
     .await
     .unwrap_err();
-    assert_eq!(error.model_error_kind(), Some(AiErrorKind::UnexpectedEof));
+    assert_eq!(error.model_error_kind(), Some(AiErrorKind::ServerError));
+    assert_eq!(error.diagnostic_message(), Some(failure_message));
     *fixture.image_refusal.lock() = None;
     fixture.truncated.store(true, Ordering::Relaxed);
     let error = run(

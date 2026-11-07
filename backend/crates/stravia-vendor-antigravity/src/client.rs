@@ -4,6 +4,23 @@ use stravia_vendor_sdk::{ErrorKind, GuestHost, PluginError, ProviderSnapshot, re
 
 pub(crate) const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
 
+pub(crate) fn http_start(
+    host: &GuestHost,
+    request: stravia_vendor_sdk::HttpRequest,
+) -> Result<stravia_vendor_sdk::HttpResponse, PluginError> {
+    // Cloud Code 使用 HTTP/1，压缩由宿主负责。
+    host.http_start_with_options(
+        request,
+        stravia_vendor_sdk::HttpRequestOptions {
+            compression: Some(stravia_vendor_sdk::HttpCompression {
+                request: None,
+                response: vec![stravia_vendor_sdk::HttpContentCoding::Gzip],
+            }),
+            http1_only: true,
+        },
+    )
+}
+
 pub(crate) fn headers(provider: &ProviderSnapshot) -> Result<Vec<(String, String)>, PluginError> {
     let token = credential(provider, "access_token")
         .ok_or_else(|| plugin_error(ErrorKind::Auth, "Antigravity access token is missing"))?;
@@ -63,12 +80,15 @@ pub(crate) fn request_json(
     if method != "POST" {
         headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-type"));
     }
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: method.into(),
-        url,
-        headers,
-        body,
-    })?;
+    let response = http_start(
+        host,
+        stravia_vendor_sdk::wit::types::HttpRequest {
+            method: method.into(),
+            url,
+            headers,
+            body,
+        },
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_JSON_BODY)?;

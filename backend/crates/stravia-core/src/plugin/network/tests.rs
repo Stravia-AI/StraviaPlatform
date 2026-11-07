@@ -180,6 +180,7 @@ async fn regex_policy_reauthorizes_http_redirect_before_sending() {
     .unwrap();
     let response = network
         .http_start(stravia_vendor_runtime::HttpRequest {
+            http1_only: false,
             method: "GET".into(),
             url,
             headers: Vec::new(),
@@ -1039,6 +1040,7 @@ async fn legacy_http_preserves_raw_responses_and_manual_request_encoding() {
     ] {
         let response = network
             .http_start(stravia_vendor_runtime::HttpRequest {
+                http1_only: false,
                 method: "GET".into(),
                 url: format!("{base}/{path}"),
                 headers: accept_encoding
@@ -1070,6 +1072,7 @@ async fn legacy_http_preserves_raw_responses_and_manual_request_encoding() {
         );
     }
     let request = |headers| stravia_vendor_runtime::HttpRequest {
+        http1_only: false,
         method: "POST".into(),
         url: format!("{base}/echo"),
         headers,
@@ -1096,6 +1099,264 @@ async fn legacy_http_preserves_raw_responses_and_manual_request_encoding() {
         );
     }
     task.abort();
+}
+
+#[tokio::test]
+async fn explicit_http_options_preserve_http1_across_fixed_length_redirects() {
+    let (seen_tx, mut seen_rx) = mpsc::channel(2);
+    let app = Router::new().fallback(move |request: axum::extract::Request| {
+        let seen_tx = seen_tx.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            let redirect = parts.uri.path() == "/redirect";
+            let body = axum::body::to_bytes(body, 1024).await.unwrap();
+            seen_tx.send((parts, body)).await.unwrap();
+            if redirect {
+                axum::response::Redirect::temporary("/received").into_response()
+            } else {
+                ([("content-encoding", "gzip")], GZIP_BODY).into_response()
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut network = network(&base, Arc::new(VendorWebSocketPool::default()));
+    network.http = reqwest::Client::builder()
+        .no_proxy()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    let body = br#"{"prompt":"fixed-length JSON"}"#;
+    for supplied_accept in [None, Some("application/json")] {
+        let response = network
+            .http_start(stravia_vendor_runtime::HttpRequest {
+                method: "POST".into(),
+                url: format!("{base}/redirect"),
+                headers: supplied_accept
+                    .into_iter()
+                    .map(|value| ("accept".into(), value.into()))
+                    .collect(),
+                body: body.to_vec(),
+                compression: Some(HttpCompression {
+                    request: None,
+                    response: vec![HttpContentCoding::Gzip],
+                }),
+                http1_only: true,
+            })
+            .unwrap();
+        assert_eq!(read_all(response.as_ref()).await, b"decoded upstream body");
+        for expected_path in ["/redirect", "/received"] {
+            let (parts, received) = seen_rx.recv().await.unwrap();
+            assert_eq!(parts.uri.path(), expected_path);
+            assert_eq!(parts.version, axum::http::Version::HTTP_11);
+            if let Some(accept) = supplied_accept {
+                assert_eq!(parts.headers["accept"], accept);
+            }
+            assert_eq!(parts.headers["accept-encoding"], "gzip");
+            assert_eq!(
+                parts.headers["content-length"]
+                    .to_str()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                body.len()
+            );
+            assert!(!parts.headers.contains_key("transfer-encoding"));
+            assert_eq!(received.as_ref(), body);
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn explicit_chunked_request_uses_http1_without_content_length() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    for payload in [
+        (0..=255).cycle().take(128 * 1024 + 19).collect::<Vec<u8>>(),
+        Vec::new(),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/infer", listener.local_addr().unwrap());
+        let received = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "POST /infer HTTP/1.1\r\n");
+            let mut headers = reqwest::header::HeaderMap::new();
+            loop {
+                line.clear();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.trim_end().split_once(':').unwrap();
+                headers.append(
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    reqwest::header::HeaderValue::from_str(value.trim()).unwrap(),
+                );
+            }
+            assert_eq!(headers.get_all("transfer-encoding").iter().count(), 1);
+            assert_eq!(headers["transfer-encoding"], "chunked");
+            assert!(!headers.contains_key("content-length"));
+            assert_eq!(headers["accept-encoding"], "gzip");
+            let mut body = Vec::new();
+            loop {
+                line.clear();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                let size = usize::from_str_radix(line.trim_end(), 16).unwrap();
+                let start = body.len();
+                body.resize(start + size, 0);
+                socket.read_exact(&mut body[start..]).await.unwrap();
+                let mut delimiter = [0; 2];
+                socket.read_exact(&mut delimiter).await.unwrap();
+                assert_eq!(delimiter, *b"\r\n");
+                if size == 0 {
+                    break;
+                }
+            }
+            socket
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .unwrap();
+            body
+        });
+        let mut network = network(&url, Arc::new(VendorWebSocketPool::default()));
+        // 普通客户端强制 HTTP/2，证明 chunked 真正选择已有 HTTP/1.1 客户端，而非只改头。
+        network.http = reqwest::Client::builder()
+            .no_proxy()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap();
+        let response = network
+            .http_start(stravia_vendor_runtime::HttpRequest {
+                http1_only: false,
+                method: "POST".into(),
+                url,
+                headers: vec![("transfer-encoding".into(), "chunked".into())],
+                body: payload.clone(),
+                compression: Some(HttpCompression {
+                    request: None,
+                    response: vec![HttpContentCoding::Gzip],
+                }),
+            })
+            .expect("admit explicit chunked framing");
+        assert_eq!(response.status().await.unwrap(), 200);
+        assert_eq!(read_all(response.as_ref()).await, b"OK");
+        assert_eq!(received.await.unwrap(), payload);
+    }
+}
+
+#[tokio::test]
+async fn chunked_framing_rejects_ambiguous_or_unsupported_headers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let network = network(&url, Arc::new(VendorWebSocketPool::default()));
+    for headers in [
+        vec![("transfer-encoding", "gzip")],
+        vec![("transfer-encoding", "gzip, chunked")],
+        vec![("transfer-encoding", "chunked, chunked")],
+        vec![("transfer-encoding", "chunked\r\n")],
+        vec![
+            ("transfer-encoding", "chunked"),
+            ("Transfer-Encoding", "chunked"),
+        ],
+        vec![("transfer-encoding", "chunked"), ("content-length", "7")],
+    ] {
+        assert!(
+            network
+                .http_start(stravia_vendor_runtime::HttpRequest {
+                    http1_only: false,
+                    method: "POST".into(),
+                    url: url.clone(),
+                    headers: headers
+                        .iter()
+                        .map(|(name, value)| ((*name).into(), (*value).into()))
+                        .collect(),
+                    body: b"{\"a\":1}".to_vec(),
+                    compression: None,
+                })
+                .is_err(),
+            "invalid framing must fail before sending: {headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn chunked_redirect_preserves_body_or_removes_all_body_headers() {
+    use tokio::io::AsyncReadExt;
+
+    let (seen_tx, mut seen_rx) = mpsc::channel(1);
+    let app = Router::new()
+        .route(
+            "/temporary",
+            axum::routing::post(|| async { axum::response::Redirect::temporary("/received") }),
+        )
+        .route(
+            "/see-other",
+            axum::routing::post(|| async { axum::response::Redirect::to("/received") }),
+        )
+        .route(
+            "/received",
+            axum::routing::any(
+                move |method: axum::http::Method,
+                      headers: axum::http::HeaderMap,
+                      body: bytes::Bytes| {
+                    let seen_tx = seen_tx.clone();
+                    async move {
+                        seen_tx.send((method, headers, body)).await.unwrap();
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let network = network(&base, Arc::new(VendorWebSocketPool::default()));
+    let original = b"{\"attachment\":\"preserve across a same-origin redirect\"}";
+    for path in ["temporary", "see-other"] {
+        let response = network
+            .http_start(stravia_vendor_runtime::HttpRequest {
+                http1_only: false,
+                method: "POST".into(),
+                url: format!("{base}/{path}"),
+                headers: vec![
+                    ("transfer-encoding".into(), " ChUnKeD\t".into()),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                body: original.to_vec(),
+                compression: Some(HttpCompression {
+                    request: Some(HttpContentCoding::Gzip),
+                    response: Vec::new(),
+                }),
+            })
+            .unwrap();
+        assert_eq!(response.status().await.unwrap(), 204);
+        let (method, headers, body) = seen_rx.recv().await.unwrap();
+        if path == "temporary" {
+            assert_eq!(method, axum::http::Method::POST);
+            assert_eq!(headers["transfer-encoding"], "chunked");
+            assert!(!headers.contains_key("content-length"));
+            assert_eq!(headers["content-encoding"], "gzip");
+            let mut decoded = Vec::new();
+            async_compression::tokio::bufread::GzipDecoder::new(body.as_ref())
+                .read_to_end(&mut decoded)
+                .await
+                .unwrap();
+            assert_eq!(decoded, original);
+        } else {
+            assert_eq!(method, axum::http::Method::GET);
+            assert!(body.is_empty());
+            assert!(!headers.contains_key("transfer-encoding"));
+            assert!(!headers.contains_key("content-encoding"));
+            assert!(!headers.contains_key("content-type"));
+        }
+    }
+    server.abort();
 }
 
 #[tokio::test]
@@ -1135,6 +1396,7 @@ async fn declared_response_compression_preserves_order_and_first_occurrence_on_w
     ] {
         let response = network
             .http_start(stravia_vendor_runtime::HttpRequest {
+                http1_only: false,
                 method: "GET".into(),
                 url: url.clone(),
                 headers: Vec::new(),
@@ -1171,6 +1433,7 @@ async fn declared_response_compression_is_decoded_and_undeclared_encoding_is_rej
     });
     let network = network(&url, Arc::new(VendorWebSocketPool::default()));
     let request = |headers: &[(&str, &str)], response| stravia_vendor_runtime::HttpRequest {
+        http1_only: false,
         method: "GET".into(),
         url: url.clone(),
         headers: headers

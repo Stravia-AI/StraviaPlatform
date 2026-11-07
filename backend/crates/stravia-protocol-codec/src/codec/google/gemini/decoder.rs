@@ -163,11 +163,12 @@ impl GoogleDecoder {
         let mut messages: Vec<AiItem> = Vec::new();
 
         for content in req.contents {
-            messages.push(decode_content(
+            decode_content(
                 content,
                 &mut generated_tool_id_seq,
                 &supplied_tool_ids,
-            )?);
+                &mut messages,
+            )?;
         }
 
         // ── Tools ─────────────────────────────────────────────────────────────
@@ -371,17 +372,17 @@ fn decode_content(
     content: GoogleContent,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
-) -> Result<AiItem> {
-    let mut role = match content.role.as_deref() {
+    messages: &mut Vec<AiItem>,
+) -> Result<()> {
+    let role = match content.role.as_deref() {
         Some("user") | None => Role::User,
         Some("model") => Role::Assistant,
         Some(other) => anyhow::bail!("unknown Gemini role: {other}"),
     };
 
+    let start = messages.len();
     let mut blocks: Vec<ContentBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut has_function_response = false;
-    let mut tool_result_ids = Vec::new();
 
     for part in content.parts {
         match part {
@@ -402,18 +403,8 @@ fn decode_content(
                     });
                 }
             }
-            GooglePart::InlineData { inline_data } => {
-                let mime = inline_data.mime_type;
-                let source = MediaSource::Base64 {
-                    media_type: mime.clone(),
-                    data: inline_data.data,
-                };
-                blocks.push(media_block(source, Some(mime)));
-            }
-            GooglePart::FileData { file_data } => {
-                let mime = file_data.mime_type.filter(|value| !value.is_empty());
-                let source = MediaSource::Url(file_data.file_uri);
-                blocks.push(media_block(source, mime));
+            part @ (GooglePart::InlineData { .. } | GooglePart::FileData { .. }) => {
+                blocks.push(decode_media_part(part).expect("matched media part"));
             }
             GooglePart::FunctionCall {
                 function_call,
@@ -444,17 +435,37 @@ fn decode_content(
                 });
             }
             GooglePart::FunctionResponse { function_response } => {
-                has_function_response = true;
+                if !blocks.is_empty() {
+                    messages.push(decoded_content(
+                        role,
+                        std::mem::take(&mut blocks),
+                        std::mem::take(&mut tool_calls),
+                    ));
+                }
                 let tool_use_id = function_response.id.unwrap_or(function_response.name);
-                tool_result_ids.push(tool_use_id.clone());
-                blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.into(),
+                let mut result = Vec::with_capacity(1 + function_response.parts.len());
+                result.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone().into(),
                     content: function_response.response,
                     content_kind: Some(
                         stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
                     ),
                     is_error: None,
                     cache_control: None,
+                });
+                result.extend(
+                    function_response
+                        .parts
+                        .into_iter()
+                        .filter_map(decode_media_part),
+                );
+                // 一个 Item 只属于一次调用，避免并行结果的附件串到另一个 call_id。
+                messages.push(AiItem {
+                    role: Role::Tool,
+                    content: MessageContent::Blocks(result),
+                    tool_calls: None,
+                    tool_call_id: Some(tool_use_id.into()),
+                    meta: None,
                 });
             }
             GooglePart::ExecutableCode { executable_code } => {
@@ -501,6 +512,31 @@ fn decode_content(
         }
     }
 
+    if !blocks.is_empty() || messages.len() == start {
+        messages.push(decoded_content(role, blocks, tool_calls));
+    }
+    Ok(())
+}
+
+fn decode_media_part(part: GooglePart) -> Option<ContentBlock> {
+    match part {
+        GooglePart::InlineData { inline_data } => {
+            let mime = inline_data.mime_type;
+            let source = MediaSource::Base64 {
+                media_type: mime.clone(),
+                data: inline_data.data,
+            };
+            Some(media_block(source, Some(mime)))
+        }
+        GooglePart::FileData { file_data } => {
+            let mime = file_data.mime_type.filter(|value| !value.is_empty());
+            Some(media_block(MediaSource::Url(file_data.file_uri), mime))
+        }
+        _ => None,
+    }
+}
+
+fn decoded_content(role: Role, mut blocks: Vec<ContentBlock>, tool_calls: Vec<ToolCall>) -> AiItem {
     let msg_content = if matches!(blocks.as_slice(), [ContentBlock::Text { .. }]) {
         let Some(ContentBlock::Text { text, .. }) = blocks.pop() else {
             unreachable!();
@@ -515,18 +551,14 @@ fn decode_content(
     } else {
         Some(tool_calls)
     };
-    if has_function_response {
-        role = Role::Tool;
-    }
 
-    Ok(AiItem {
+    AiItem {
         role,
         content: msg_content,
         tool_calls: tool_calls_opt,
-        tool_call_id: ((tool_result_ids.len() == 1).then(|| tool_result_ids.remove(0)))
-            .map(Into::into),
+        tool_call_id: None,
         meta: None,
-    })
+    }
 }
 
 fn next_synthetic_tool_call_id(sequence: &mut usize, supplied_ids: &HashSet<String>) -> String {

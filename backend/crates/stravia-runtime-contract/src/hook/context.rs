@@ -216,6 +216,18 @@ pub enum ContextPatchError {
 fn normalized_context_items(messages: &[AiItem]) -> Vec<ContextItem> {
     let mut items = Vec::new();
     for message in messages {
+        if message.role == Role::Tool
+            && message.tool_call_id.is_some()
+            && let MessageContent::Blocks(blocks) = &message.content
+            && blocks.iter().any(|block| !block.is_tool_result())
+        {
+            // 绑定同一次调用的业务 JSON 和附件必须一起重写，不能拆成重复工具结果。
+            items.push(ContextItem::Message {
+                id: ContextItemId::new(),
+                message: message.clone(),
+            });
+            continue;
+        }
         let first_item = items.len();
         let mut message_meta = message.meta.clone();
         let mut seen_tool_calls = HashSet::new();
@@ -793,6 +805,41 @@ mod tests {
         assert_eq!(snapshot.items[2].id(), &original_ids[1]);
         assert_eq!(snapshot.items[3].id(), &original_ids[2]);
     }
+    #[test]
+    fn tool_result_attachments_stay_bound_after_context_rewrite() {
+        let result: AiItem = serde_json::from_value(serde_json::json!({
+            "role":"tool", "tool_call_id":"read-1", "content":[
+                {"type":"tool_result","tool_use_id":"read-1","content":{"receipt":"42"},"content_kind":"json"},
+                {"type":"file","source":{"type":"base64","media_type":"application/pdf","data":"JVBERg=="},"media_type":"application/pdf"}
+            ]
+        })).unwrap();
+        let original = AiRequest::new("model", vec![message("old prompt"), result.clone()]);
+        let mut snapshot = ContextSnapshot::from_request(&original, ContextCompleteness::Full);
+        let replacement = ContextSnapshot::from_request(
+            &AiRequest::new("model", vec![message("new prompt")]),
+            ContextCompleteness::Full,
+        );
+        snapshot
+            .apply_rewrites(&[ReplaceContextSpan {
+                start: snapshot.items[0].id().clone(),
+                end: snapshot.items[0].id().clone(),
+                replacement: replacement.items,
+            }])
+            .unwrap();
+        let mut rebuilt = AiRequest::new("model", Vec::new());
+        snapshot.write_to_request(&mut rebuilt);
+        let tool_results: Vec<_> = rebuilt
+            .items
+            .iter()
+            .filter(|item| item.role == Role::Tool)
+            .collect();
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(
+            serde_json::to_value(tool_results[0]).unwrap(),
+            serde_json::to_value(result).unwrap()
+        );
+    }
+
     #[test]
     fn semantic_history_uses_typed_items_and_round_trips() {
         let call = ToolCall {

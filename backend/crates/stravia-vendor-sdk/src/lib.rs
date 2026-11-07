@@ -37,8 +37,8 @@ mod message_build_support;
 
 pub use crate::bindings::stravia::vendor::host::LogLevel;
 pub use crate::bindings::stravia::vendor::types::{
-    CompressionNegotiation, HttpCompression, HttpContentCoding, HttpRequest, WsCompression,
-    WsRequest,
+    CompressionNegotiation, HttpCompression, HttpContentCoding, HttpRequest, HttpRequestOptions,
+    WsCompression, WsRequest,
 };
 pub use descriptor::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,

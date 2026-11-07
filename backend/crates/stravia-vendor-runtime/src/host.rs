@@ -19,9 +19,13 @@ pub struct HttpRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
-    /// None preserves the legacy entry point's manual compression headers.
-    /// Some opts into host-owned compression, including an identity-only policy.
+    /// None preserves manually supplied compression headers and pre-encoded
+    /// request bytes. Some opts into host-owned compression, including an
+    /// identity-only policy.
     pub compression: Option<HttpCompression>,
+    /// `http1_only` restricts HTTP protocol negotiation to HTTP/1.1;
+    /// TLS, proxy, redirect, and origin checks are unchanged.
+    pub http1_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -136,8 +140,10 @@ pub trait HostWebSocket: Send + Sync {
 #[async_trait]
 pub trait HostServices: Send + Sync {
     /// Admit and start the request without waiting for response headers.
+    /// `http1_only` restricts HTTP protocol negotiation to HTTP/1.1.
     /// Redirect targets must be checked again and credentials must not be
-    /// forwarded across origins unless explicitly authorized.
+    /// forwarded across origins unless explicitly authorized. TLS, proxy,
+    /// network permission, and failure handling remain host-owned.
     fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure>;
 
     /// Connect with a guest-declared maximum age for cross-request reuse.

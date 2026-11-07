@@ -195,15 +195,28 @@ fn token_request(host: &GuestHost, params: &[(&str, &str)]) -> Result<Value, Plu
     let form: String = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params.iter().copied())
         .finish();
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: "POST".into(),
-        url: TOKEN_URL.into(),
-        headers: vec![(
-            "content-type".into(),
-            "application/x-www-form-urlencoded".into(),
-        )],
-        body: form.into_bytes(),
-    })?;
+    let response = host.http_start_with_options(
+        stravia_vendor_sdk::HttpRequest {
+            method: "POST".into(),
+            url: TOKEN_URL.into(),
+            headers: vec![
+                (
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
+                ("user-agent".into(), "Go-http-client/2.0".into()),
+            ],
+            body: form.into_bytes(),
+        },
+        stravia_vendor_sdk::HttpRequestOptions {
+            compression: Some(stravia_vendor_sdk::HttpCompression {
+                request: None,
+                response: vec![stravia_vendor_sdk::HttpContentCoding::Gzip],
+            }),
+            // 官方 OAuth 使用默认 HTTP 协商，区别于 Cloud Code 的 HTTP/1 客户端。
+            http1_only: false,
+        },
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, client::MAX_JSON_BODY)?;

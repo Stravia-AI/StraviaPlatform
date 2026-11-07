@@ -192,6 +192,18 @@ interface types {
         body: list<u8>,
     }
 
+    /// Explicit transport controls for one HTTP request. `http1-only`
+    /// restricts HTTP protocol negotiation to HTTP/1.1;
+    /// TLS, proxy, redirect, and origin checks remain unchanged.
+    record http-request-options {
+        /// None preserves manually supplied compression headers and pre-encoded
+        /// request bytes. Some opts into host-owned compression, including an
+        /// identity-only policy.
+        compression: option<http-compression>,
+        /// True restricts HTTP protocol negotiation to HTTP/1.1.
+        http1-only: bool,
+    }
+
     /// WebSocket upgrade request issued through the controlled transport.
     record ws-request {
         url: string,
@@ -271,7 +283,7 @@ interface types {
 /// Controlled host services imported by the guest. Every call is scoped to the
 /// single operation; no handle survives it.
 interface host {
-    use types.{http-request, http-compression, ws-request, ws-compression, ws-message, canonical-event, plugin-error};
+    use types.{http-request, http-compression, http-request-options, ws-request, ws-compression, ws-message, canonical-event, plugin-error};
 
     /// An in-flight HTTP exchange. `http-start` returns the handle as soon as
     /// the request is admitted, so a single operation can run several
@@ -296,6 +308,14 @@ interface host {
     /// Start an HTTP request with host-owned request encoding and response decoding.
     /// Compression headers are exclusive to this policy; the body is application bytes.
     http-start-with-compression: func(req: http-request, compression: http-compression) -> result<http-response, plugin-error>;
+
+    /// Start an HTTP request with explicit transport options. This entry point
+    /// requires a host built against this version of the contract; older hosts
+    /// do not implement `http-start-with-options` and cannot load a plugin
+    /// importing it. `http1-only: true` restricts HTTP protocol negotiation
+    /// to HTTP/1.1. TLS, proxy, redirect, network permission, and failure
+    /// handling are unchanged.
+    http-start-with-options: func(req: http-request, options: http-request-options) -> result<http-response, plugin-error>;
 
     /// WebSocket connection controlled by the host.
     resource ws-connection {

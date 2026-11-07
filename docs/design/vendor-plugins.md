@@ -78,7 +78,7 @@ Core 以「目录身份 + channel ID」处理选择器中的替代关系：目�
 | Command Code | `1.82.1` | [官方 npm latest](https://registry.npmjs.org/command-code/latest) |
 | Devin CLI / chisel | `3000.11.3` | [官方 stable changelog](https://docs.devin.ai/cli/changelog/stable) |
 | OpenCode Zen Free | `1.18.25`；provider-utils `4.0.23`、Bun `1.3.14` | 本机官方 CLI 隔离抓包与真实 Wasm 实调；[固定发行源码](https://github.com/anomalyco/opencode/tree/cb7d8b2f5e44876ef98b661dc10590c915af3a9f) |
-| Antigravity CLI | `1.3.5`，保留 `/cli/` 身份路径 | [官方 CLI 更新 manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) |
+| Antigravity CLI | `1.5.1`，`cl=1014269460`，保留 `/cli/` 身份路径 | 本机官方 Linux/amd64 CLI 真实抓包与重建 Wasm 实调；[官方 CLI 更新 manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) |
 | base / GitHub Copilot 额度 | `editor-version: vscode/1.141.1` | [微软 stable 更新 API](https://update.code.visualstudio.com/api/update/win32-x64/stable/latest) |
 
 Claude Code 采用 2.1.317 的普通交互式 profile：`claude-cli/2.1.317 (external, cli)`，Linux/x64、Node `v26.12.1` 的 Stainless 头来自该版 Linux 原生客户端真实请求，不声称 Wasm 在运行 Node。默认及自定义 system 的真实终端会话均以 `claude-haiku-5-5` 完成三轮对话与 Read 工具循环；当时未添加工具名前缀的实际 Wasm 也通过同模型真实上游验证。现行版本保留下述 `_` 隔离策略，其恢复后的验证为本地实际 Wasm 与 loopback HTTP，不冒称重新验证过真实上游。`-p` 的 `sdk-cli` profile 仅作对照，不再用作插件默认身份，详见[抓包研究](../research/claude-code-message-threads.md)。OpenCode 固定实际捕获且通过上游验证的完整 UA 组合；`1.19.0` 组合本次被拒，不能仅凭 npm latest 推定可用，也不跟随独立 SDK 的 latest 自动变化。Command Code 的额度、初始化与推理使用同一版本常量。
@@ -103,7 +103,7 @@ Claude Code 采用 2.1.317 的普通交互式 profile：`claude-cli/2.1.317 (ext
 | Grok CLI `1.0.52` | `x-grok-conv-id` 与 `x-grok-session-id` 同一 UUIDv7 位格式；缺 scope 省略。`x-grok-req-id` 每调用独立新建 UUIDv4。 | [官方 1.0.52 发行物](https://x.ai/cli/grok-1.0.52-linux-x86_64.gz)确认版本及头名；UUIDv7 默认工厂与 UUIDv4 RequestId 来自[固定公开源码](https://github.com/xai-org/grok-build/tree/9684fa3cdbf2995e30ea8b9b637f1db008f144fc)，该源码实际为 **1.0.10**，不能冒称已证明 1.0.52 全部生成算法。其 compact/recap 等路径允许带标签 ID，不能推定服务端所有接口强制裸 UUID。当前 stable 指针为 1.0.67，本次未升级固定身份。 |
 | Command Code `1.82.1` | trusted session 映射 UUIDv4 位格式，`x-session-id=body.threadId`。无 scope 保留既有 UUIDv4／TTL 新建生命周期；独立 telemetry `sess_`、trace/span 与 fingerprint 不变。 | [官方 npm 产物](https://registry.npmjs.org/command-code/-/command-code-1.82.1.tgz) `newSession` 使用 `randomUUID`，`toWireThreadId` 使用 `z.uuid()` 校验；此为客户端校验，不是服务端接受证明。telemetry session 不是 thread。 |
 | Devin `3000.11.3` | trajectory/cascade 按两个既有不同语义映射为 UUIDv4 位格式，不再以 token 参与派生。每次编码 message 仍新建 UUIDv4；step 推进、AssignModel 的 cascade/JWT 绑定不变。 | [官方 manifest](https://static.devin.ai/cli/3000.11.3/manifest.json)及[固定发行物](https://static.devin.ai/cli/3000.11.3/devin-3000.11.3-x86_64-unknown-linux.tar.gz)摘要匹配，但 stripped 二进制不足恢复精确字段生成／validator。**v4 只是保留既有 codec 形态，官方字段版本尚未证实**；不把第三方 3000.10.x 编码证据重标为官方 3000.11.3 契约。 |
-| Antigravity CLI `1.3.5` | `sessionId` 为完整 UTF-8 的 FNV-1a64 按 signed int64 输出十进制，无 scope 省略。文本与图片 `requestId` 每调用新建 `agent/UUIDv4`，使用无原生操作上下文的官方 fallback。 | [官方 Linux 发行物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)反汇编确认 `getSessionID`、`computeRequestID`；前者调用 `FormatInt`，后者 fallback 使用 `%v/%v` 与 `NewRandom`。上层输入结构的字段准确名称／恢复作用域尚未完全恢复，不伪造原生 conversation 树，也不声称服务端强制此算法。 |
+| Antigravity CLI `1.5.1`；session 算法另核对 `1.3.5` | `sessionId` 为完整 UTF-8 的 FNV-1a64 按 signed int64 输出十进制，无 scope 省略。文本 `requestId` 保留 `agent/UUIDv4` fallback；独立生图使用 `image_gen/<毫秒时间戳>/<UUIDv4>/1`，不模拟 CLI 的共享操作树或步数。 | 官方 agy 1.5.1 生图抓包确认 `image_gen/<时间戳>/<操作 UUID>/<步骤>`；[官方 1.3.5 Linux 发行物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)反汇编确认 `getSessionID` 的 `FormatInt` 及 `computeRequestID` fallback。上层输入结构的字段准确名称／恢复作用域尚未完全恢复，不声称服务端强制此算法。 |
 | OpenCode Zen Free `1.18.25` | 稳定 session 为 `ses_` + 12 lowerhex + 14 base62；无 scope 仍按真实时间新建。`x-opencode-request` 为独立新建 `msg_`，不是 session 或 HTTP UUID。删除原 256 项持久映射。 | 固定源码 [`cb7d8b2f`](https://github.com/anomalyco/opencode/tree/cb7d8b2f5e44876ef98b661dc10590c915af3a9f)：[默认算法](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/schema/src/identifier.ts)为 time/counter/random，客户端 session/message 类型只检查 `ses`／`msg` 前缀；[请求头](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/opencode/src/session/llm/request.ts#L190-L194)取 `input.sessionID`／`input.user.id`。SDK 无可信独立 message 源，保留每插件操作新建，不从 session/root 伪造用户消息关联。公开 Zen handler 无时间解码证据，不能替代当前私有网关校验。 |
 | Kilo CLI `7.8.15` / Gateway | 不强加 session/root/message/request。没有对应原生上下文时不添加可选 task/parent/project/machine 字段；组织授权字段不变。 | [固定源码 `56aead64`](https://github.com/Kilo-Org/kilocode/tree/56aead6452eb5837b9800b05d1fa7989f50ccbe0) 的 Gateway factory 无 task ID 也可构造请求；不能从 CLI 可选遥测推定所有 Gateway API 必填。 |
 | Muse Code / Model API `1.0.0` | 不添加无证据的客户端 session/request。响应/message ID 与 `previous_response_id` 保留上游值；显式 `prompt_cache_key`、`safety_identifier` 不是会话源。 | 官方 [CreateResponse](https://dev.meta.ai/docs/api-reference/responses/schemas#create-response) 与 [Responses 兼容文档](https://dev.meta.ai/docs/protocols/responses#openai-compatibility)没有强制客户端会话／HTTP ID；未给独立客户端发行版本，不伪造版本号。 |
@@ -254,7 +254,7 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 推理清单只采用 `agentModelSorts[].groups[].modelIds` 引用的 Agent 选项，不把完整 `models` 目录或搜索等其他用途清单当作可推理模型。解析真实 `deprecatedModelIds` 重定向并排除 disabled 后，按官方显示 slug 的家族与明确档位合并：例如 Gemini 3.1 Pro 登记为 `gemini-3.1-pro`，支持 `low`、`high`，默认实际 selector 为 `gemini-pro-agent`。同名或同 enum 不构成合并依据，Thinking 标签不自动生成离散档位。筛选和映射证据见 [模型映射调研](../research/antigravity-model-mapping.md)。
 
-模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；未固定的规格字段随同步刷新，固定字段保持不变。生图复用原 OAuth、project 与连接，走原生 SSE，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；新增链路通过本地上游验证，不代表所有真实账号都有生图权限或额度。
+模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；未固定的规格字段随同步刷新，固定字段保持不变。生图复用原 OAuth、project 与连接，按官方 agy 1.5.1 抓包走 `generateContent` 定长 JSON，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；本地响应回放不代表所有真实账号都有生图权限或额度。
 
 合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。Effort 通过 envelope 的模型 ID 实现，不同时转换为 Gemini thinking budget；独立的原生 Budget 等控制保持既有行为。
 
@@ -264,7 +264,7 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 OAuth 使用 CLI 1.2.16 静态核对的 `https://accounts.google.com/o/oauth2/auth`、`https://oauth2.googleapis.com/token`、固定网站回调 `https://antigravity.google/oauth-callback` 与 consumer 七个 scope。宿主通用契约允许 `AuthorizationCode + callback=None + manual_input.type=text`，有效模式为 `manual`、listener 为 `not_required`；缺少手动 text 输入的无 callback 授权码描述符仍拒绝。现有 WebUI 按描述符渲染，不增加供应商分支。
 
-推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头只由插件构造 Bearer、JSON Content-Type 与已核对的 CLI User-Agent；不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON 和真实签名保留，不制造签名或伪成功。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
+推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头由插件构造 Bearer、JSON Content-Type 与 agy 1.5.1 Linux/amd64 的完整 CLI User-Agent（含 `cl=1014269460`）；通过宿主压缩策略协商 `Accept-Encoding: gzip` 并解压响应，不只手工添加声明。不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client，也不为 SSE 额外添加官方未发送的 Accept。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON、`functionResponse.parts` 中的附件和真实签名保留，不制造签名或伪成功。工具结果与附件共用调用边界，跨协议转换、上下文重写和 Observation 不再只留下业务 JSON。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
 
 Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false` 等价转换为 `{"not": {}}`，因此 `{"not": true}` 仍表示禁止任意值，不通过删除约束绕过本地校验。`additionalProperties` 的原生布尔开关，以及 `default`、`example`、工具参数与结果中的业务布尔值保持原样。
 
@@ -618,7 +618,17 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - OAuth 回放与原生压缩的账户身份采用宿主持久化的稳定认证连接标识，而不是 access token、refresh token 或到期时间。正常刷新保持身份，重新登录创建新身份；非 OAuth 凭据变更仍改变其指纹。Target、供应商、channel、协议、模型、代理、地址与选项边界保持不变。
 - 具体职责取舍见 [ADR-0071](../adr/0071-orchestrate-vendors-through-host-network-capabilities.md)，网络授权采用下述元数据声明与白名单原则。
 
+### HTTP 请求分帧
+
+HTTP 两个入口都允许插件以唯一的 `Transfer-Encoding: chunked` 选择宿主 framing：插件交付完整、未分帧的正文，宿主移除该意图头，选择相同代理和 TLS 配置的 HTTP/1.1 客户端，再由 HTTP 引擎生成真实 chunked 帧及终止块，不发送 Content-Length。该选择不要求应用边生成 JSON 边上传。重复声明、编码链及其他 transfer coding 在发送前拒绝；Content-Length 和其他受控逐跳头仍不可手写，WebSocket 不接受这个选项。未选择时维持既有客户端协商和定长正文行为。
+
+编码请求体先压缩、后分帧；允许保留正文的同源重定向复用编码后的字节与 chunked 方式，改为无正文 GET 时移除内容类型、编码及 framing 头。既有 URL 授权、跨源正文拒绝、取消和响应大小限制不变。Antigravity 仅在 Infer 选择 chunked；目录、项目、额度和图片生成仍使用定长 JSON。网络诊断仍记录正文层字节，不把它当作 TCP 分块捕获；分帧证据来自独立的原始 HTTP 接收器。
+
 ### HTTP 与 WebSocket 传输压缩
+
+`http-start-with-options(request, options)` 提供逐请求的 `http1-only`，并以可选 `compression` 复用下述压缩契约。`http1-only=true` 选择同一代理与 TLS 策略下的 HTTP/1 客户端；false 沿用既有协议协商。重定向每一跳仍执行这些选项及原有权限检查。宿主不根据供应商 ID、UA 或 URL 猜测策略。两个既有 HTTP 入口保持默认协议协商，不改变其他供应商的请求行为。使用新增入口的插件必须与新宿主一同更新。
+
+宿主使用未修改的 reqwest，保留它自动添加的 `Accept: */*`；这是相对 agy 官方样本接受的差异，不提供关闭默认头的选项，也不通过空 header 值伪装缺席。显式请求头、Host、正文长度、分帧和压缩协商仍按现有契约处理；不因此替换 TLS、系统证书验证或代理实现。
 
 传输压缩由插件按每次请求声明、宿主执行，不是 Provider 持久化配置，也不改变模型原生的上下文压缩语义。新增入口将压缩策略作为独立参数，不向旧 request record 增加字段，并复用原来的响应和连接资源。SDK 保留 `http_start(request)` / `ws_connect(request)`，另提供 `http_start_with_compression(request, compression)` / `ws_connect_with_compression(request, compression)`。新入口提交和读取的始终是应用字节；HTTP 内容编码与 WebSocket 消息扩展是两个独立契约：
 
@@ -636,7 +646,7 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - 新 HTTP 入口的响应流逐块解码，不等待 SSE 或长流结束。未知、未声明、重复或叠加的 `Content-Encoding` 明确失败，损坏及截断的压缩流不得退回原始压缩字节。解码后的响应头移除 `Content-Encoding` 与 wire `Content-Length`；HEAD、1xx、204、205、304 不读取压缩正文。
 - WS 的扩展响应参数经过严格校验；重复、未知、非法参数不能在 `preferred` 下被忽略或通过另一次握手降级。实际协商的窗口与 context-takeover 状态绑定 socket，消息分片、控制帧交错和后续消息沿用引擎的真实编解码上下文。单帧及解压后单消息上限均为 256 MiB，解压期间就执行消息预算检查，不能先无限展开再检查。
 - WS 池按 `disabled`、`preferred`、`required` 分隔，精确续接同样包含压缩策略；`required` 不能取出未协商压缩的连接。原有凭据、origin、代理、作用域亲和、tip 和复用寿命隔离继续生效，压缩不授予重放或扩大网络权限。
-- Claude Code 推理通过新入口的强类型响应列表请求 gzip、deflate、br、zstd；Codex WS 通过新入口使用 `preferred`。其余现有调用继续使用旧入口，不因宿主支持压缩就推测上游接受压缩请求体或自动提供 WS 扩展。
+- Claude Code 推理通过强类型响应列表请求 gzip、deflate、br、zstd；Antigravity 模型后端和 OAuth 请求只声明 gzip 响应、不压缩请求体，未压缩响应仍可读取。模型后端固定 HTTP/1，OAuth 沿用默认协商；两者均保留宿主默认的 `Accept: */*`。Codex WS 使用 `preferred`。其余现有调用继续使用旧入口，不因宿主支持压缩就推测上游接受压缩请求体或自动提供 WS 扩展。
 - HTTP 请求诊断保留实际编码后的 wire 正文；新入口解码后的响应正文标记为 `decoded_body_chunk`，不冒充压缩线上字节。旧入口保留 `body_chunk` 及其已有正文语义。WS 诊断内容仍是消息层应用数据，不是带 RSV 位的原始压缩帧。
 
 HTTP 由 `async-compression` 编码、`tower-http` 流式解码。WS 的 HTTP、代理和 TLS 继续由 reqwest 承担，帧与压缩使用 [固定提交的 tungstenite 实现](https://github.com/openai-oss-forks/tungstenite-rs/tree/4fffad30fe373adbdcffab9545e9e9bf4f2fc19f)及 [Tokio 适配](https://github.com/openai-oss-forks/tokio-tungstenite/tree/0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186)，不全局替换其他客户端的 WebSocket 依赖。宿主只验证握手并映射实际协商参数，不维护第二套帧或 DEFLATE 引擎。依赖提交和 Nix 源码哈希分别固定在根 Cargo 清单／锁文件及 `nix/package.nix`。
@@ -664,7 +674,7 @@ HTTP 由 `async-compression` 编码、`tower-http` 流式解码。WS 的 HTTP、
 - 描述符明确声明非秘密布尔字段 `use_websocket`，且管理员保存为 `true` 时，宿主只为已保存 base URL 增加同主机、同有效端口的 `http→ws` / `https→wss` origin。未声明、关闭或缺省该字段均不扩张授权；附属地址、子域和其他端口不因此获准。
 - 管理员可以显式将当前连接配置为本机或局域网服务，不一刀切禁止私网目标；这一配置不授权访问其他本机或私网地址。
 - 安装或更新页面展示插件声明的附属服务地址。HTTP / WebSocket 首次请求、每次重定向及池化 WebSocket 的实际地址均检查同一冻结策略，不自动将原目标的认证头转发到另一 origin。
-- 所有入口的连接管理与报文分帧仍由宿主负责：插件不得设置 `Transfer-Encoding`、`Content-Length`、`Upgrade` 或受控代理头。HTTP 的 `Connection` 只允许 `keep-alive`（HTTP/2 下由传输层移除）；WS 的标准握手头由宿主生成。新增压缩入口独占 `Accept-Encoding`、`Content-Encoding` 和 `Sec-WebSocket-Extensions`，手写受控头在发送或复用连接前拒绝；旧入口仅保留上述既有 header 驱动行为，不扩大 origin、凭据或代理权限。
+- 所有入口的连接管理与报文分帧仍由宿主负责：HTTP 仅接受单个 `Transfer-Encoding: chunked` 作为上述受控分帧选项，不接受手写 `Content-Length`、`Upgrade` 或受控代理头。HTTP 的 `Connection` 只允许 `keep-alive`（HTTP/2 下由传输层移除）；WS 的标准握手头由宿主生成。显式压缩策略独占 `Accept-Encoding`、`Content-Encoding` 和 `Sec-WebSocket-Extensions`，手写受控头在发送或复用连接前拒绝；旧入口仅保留上述既有 header 驱动行为，不扩大 origin、凭据或代理权限。
 - 使用出站代理不扩大允许访问的目标范围。允许访问目标与向目标发送凭据是不同的授权，不得根据网络白名单自动注入其他目标的凭据。
 - 内嵌 `base` 随宿主自动更新时，新增声明的网络 origin 无需单独确认，由宿主随受信内置版本更新生效白名单；这不授予插件在运行期间自行修改声明或访问任意目标的权力。
 - 本地包手动更新在已有确认界面展示网络范围变化，沿用一次更新确认，不额外增加网络授权步骤。

@@ -145,13 +145,13 @@ Codex 模型发现只接受来源明确的 `media_image`、`output_modalities` /
 
 ### Antigravity 原生图片生成
 
-Antigravity 参考 OMP 的 [原生图片适配器](https://github.com/can1357/oh-my-pi/blob/main/packages/ai/src/images/google-antigravity.ts) 和 [图片模型发现](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/discovery/antigravity.ts)，不借用普通推理请求或 Codex 托管工具：
+Antigravity 的图片传输与请求形状以 2026-11-06 官方 agy 1.5.1 原生 `generate_image` 抓包为准；OMP 的[原生图片适配器](https://github.com/can1357/oh-my-pi/blob/main/packages/ai/src/images/google-antigravity.ts)仅作对照，不能替代官方样本。图片能力发现另参考其[发现实现](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/discovery/antigravity.ts)：
 
 1. 模型同步读取账号 `fetchAvailableModels` 返回的 `imageGenerationModelIds`，解析已声明的废弃 ID 重定向并过滤禁用目标；图片模型保留真实 ID，不按推理档位折叠，不创建虚拟模型或固定默认型号。广告 ID 缺少详情时保留该模型，但不猜测上下文、图片输入或推理能力。
 2. 图片专用模型登记 `media_image` 和 `modalities.output: ["image"]`；同一 ID 已有 Agent 推理能力时保留文字输出与推理选择表，并增加图片能力。`supportsImages` 只声明图片输入，不能据此赋予图片输出。
-3. 通过图片 Route 选择 Target，复用对应 Provider 的 OAuth、project 和连接设置。调用 `streamGenerateContent?alt=sse`，上游模型取 Target 的真实 selector，不在生成时另选账号广告列表中的首个型号。
-4. 原生请求使用 `responseModalities: ["IMAGE"]`、`candidateCount: 1`；有序参考图编码为 `inlineData`，比例与分辨率直映射到 `imageConfig.aspectRatio` 和 `imageConfig.imageSize`，省略的偏好不补默认值。普通推理的参数白名单保持不变。
-5. 消费 SSE 的图片 `inlineData`，要求成功终态及恰好一张图片，限制解码图片为 32 MiB；空图、非法编码、非图片 MIME、多图、截断或上游错误均不报告成功。Core 继续完整解码图片、校验实际规格并收存为 Artifact；HTTP 和流内错误沿用 Route 错误分类与重试策略。
+3. 通过图片 Route 选择 Target，复用对应 Provider 的 OAuth、project 和连接设置。调用 `POST /v1internal:generateContent`，使用定长 JSON 请求体，不请求 SSE 或 chunked。上游模型取 Target 的真实 selector，不在生成时另选账号广告列表中的首个型号。
+4. 外层使用 `requestType: image_gen`；每次独立生成使用 `image_gen/<毫秒时间戳>/<UUIDv4>/1` 请求 ID，不伪造 CLI 的共享操作树。内层只发送用户内容和生成配置：提示文本在前，有序 `inlineData` 参考图在后，`candidateCount: 1`，省略比例时采用官方默认 `imageConfig.aspectRatio: "1:1"`。不添加系统提示或 `responseModalities`。显式分辨率保留既有 `imageConfig.imageSize` 映射，但此次官方工具抓包未覆盖分辨率选项；普通 Infer 白名单不变。
+5. 通过宿主解压 gzip JSON 响应，读取图片 `inlineData`，要求 `STOP` 及恰好一张图片，限制解码图片为 32 MiB；空图、非法编码、非图片 MIME、多图、缺失终态或上游错误均不报告成功。完整 JSON 中只有 `finishMessage` 的失败保留原始诊断，不误报为流被截断；策略拒绝仍归类为 ContentFiltered。Core 继续完整解码图片、校验实际规格并收存为 Artifact；HTTP 与响应体内错误沿用 Route 错误分类与重试策略。
 
 已安装实例须重新构建并导入独立 `antigravity` 插件，再同步账号模型，随后将发现的图片模型绑定到图片 Route 并在媒体生成中选择该 Route。未固定的规格字段随同步刷新，人工固定字段不被强制覆盖；不自动创建、改绑或启用 Route。账号是否广告图片模型、配额与真实生图资格仍由上游决定，本地合约验证不能代替真实账号验证。
 
