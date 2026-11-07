@@ -31,7 +31,7 @@ const CHANNEL: &str = "codex";
 /// model availability for `/models` and `/responses` by exact client version
 /// rather than the catalog's `minimal_client_version`; an older pin silently
 /// hides newer SKUs such as gpt-6-sol and gpt-6.1-sol from discovery.
-const CLIENT_VERSION: &str = "0.162.1";
+const CLIENT_VERSION: &str = "0.167.0";
 const MAX_ERROR_BODY: usize = 256 * 1024;
 const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
 
@@ -263,10 +263,16 @@ fn infer(
             upstream_status: None,
         });
     }
-    let mut session = codex::NativeSession::new(&provider);
+    let body_operation = if operation == Operation::Compact {
+        codex::BodyOperation::Compaction
+    } else if websocket {
+        codex::BodyOperation::WebSocket
+    } else {
+        codex::BodyOperation::Http
+    };
+    let mut session = codex::NativeSession::new(&provider, body_operation);
     session.resolve_identity(host, &provider)?;
     let attempt = prepare_attempt(
-        &provider,
         &protocol.to_string(),
         request,
         operation,
@@ -295,26 +301,21 @@ fn infer(
     headers.retain(|(name, _)| {
         !name.eq_ignore_ascii_case("content-type") && !name.eq_ignore_ascii_case("accept")
     });
+    headers.push(("accept".into(), "text/event-stream".into()));
     headers.push(("content-type".into(), "application/json".into()));
-    headers.push((
-        "accept".into(),
-        "text/event-stream, application/json".into(),
-    ));
-    codex::append_runtime_headers(
-        &provider,
-        &body,
-        &session,
-        codex::BodyOperation::Http,
-        &mut headers,
-    )?;
+    codex::append_runtime_headers(&provider, &body, &session, &mut headers)?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: "POST".into(),
-        url: endpoint(&provider.base_url, &path),
-        headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| invalid("Codex request could not be encoded"))?,
-    })?;
+    let response = codex::start_responses_http(
+        host,
+        &provider,
+        stravia_vendor_sdk::wit::types::HttpRequest {
+            method: "POST".into(),
+            url: endpoint(&provider.base_url, &path),
+            headers,
+            body: serde_json::to_vec(&codex::WireBody(&body))
+                .map_err(|_| invalid("Codex request could not be encoded"))?,
+        },
+    )?;
     match operation {
         Operation::Infer => {
             // Codex 流式请求的成功响应按 SSE 解码，不依赖上游是否返回 Content-Type。
@@ -380,7 +381,6 @@ fn requests_previous_response(request: &AiRequest) -> bool {
 }
 
 fn prepare_attempt(
-    provider: &ProviderSnapshot,
     protocol: &str,
     mut request: AiRequest,
     operation: Operation,
@@ -399,58 +399,19 @@ fn prepare_attempt(
     } else {
         common::header_pairs(&encoded.headers)?
     };
-    prepare_responses_body(provider, &mut body)?;
-    if websocket {
-        codex::prepare_operation_body(&mut body, codex::BodyOperation::WebSocket)?;
-    } else {
-        codex::prepare_body(&mut body)?;
-    }
+    session.project_body(&mut body)?;
     // 独立压缩与官方客户端一致：普通流式 /responses + 末尾 compaction_trigger。
     let retained = if operation == Operation::Compact {
         compaction::arm(&mut body)?
     } else {
         Vec::new()
     };
-    session.apply_body(&mut body);
     Ok(Attempt {
         body,
         headers,
         egress_path: encoded.path,
         retained,
     })
-}
-
-fn prepare_responses_body(
-    provider: &ProviderSnapshot,
-    body: &mut Value,
-) -> Result<(), PluginError> {
-    let object = body
-        .as_object_mut()
-        .ok_or_else(|| invalid("Codex Responses request body must be an object"))?;
-    let include = object
-        .entry("include")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if include.is_null() {
-        *include = Value::Array(Vec::new());
-    }
-    let include = include
-        .as_array_mut()
-        .ok_or_else(|| invalid("Codex Responses include must be an array"))?;
-    // Codex CLI 不请求 logprobs；订阅推理端点会拒绝公共 Responses 派生的该项。
-    include.retain(|value| value.as_str() == Some("reasoning.encrypted_content"));
-    if !object.contains_key("prompt_cache_key")
-        && let Some(affinity) = provider
-            .operation_metadata
-            .get("transport_affinity")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-    {
-        object.insert(
-            "prompt_cache_key".into(),
-            Value::String(affinity.to_owned()),
-        );
-    }
-    Ok(())
 }
 
 fn discover(
@@ -478,8 +439,11 @@ fn discover(
     url.push(if url.contains('?') { '&' } else { '?' });
     url.push_str("client_version=");
     url.push_str(CLIENT_VERSION);
-    let mut headers = vec![("accept".into(), "application/json".into())];
+    // Official 0.167.0 `/models` capture: version, auth identity, then the
+    // reqwest default Accept.
+    let mut headers = vec![("version".into(), CLIENT_VERSION.into())];
     codex::append_identity_headers(&provider, &mut headers)?;
+    headers.push(("accept".into(), "*/*".into()));
     let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
         method: "GET".into(),
         url,
@@ -991,7 +955,7 @@ mod tests {
         .body;
         assert_eq!(body["metadata"], json!({"verification":"canonical-final"}));
         assert_eq!(body["prompt_cache_retention"], "24h");
-        codex::prepare_body(&mut body).unwrap();
+        codex::prepare_operation_body(&mut body, codex::BodyOperation::Http).unwrap();
         for unsupported in [
             "metadata",
             "prompt_cache_retention",
@@ -1056,7 +1020,7 @@ mod tests {
                 .unwrap()
                 .body;
         body["tools"] = tools.into();
-        codex::prepare_body(&mut body).unwrap();
+        codex::prepare_operation_body(&mut body, codex::BodyOperation::Http).unwrap();
         assert!(
             body.get("tool_choice").is_none(),
             "CLI inference uses string tool choices"
@@ -1108,7 +1072,7 @@ mod tests {
             let mut body = json!({
                 "model":"gpt-6-astra", "input":"hello", "tools":tools, "tool_choice":"required"
             });
-            codex::prepare_body(&mut body).unwrap();
+            codex::prepare_operation_body(&mut body, codex::BodyOperation::Http).unwrap();
             assert_eq!(body["input"], "hello");
             assert_eq!(body["tools"], json!([]));
             assert!(body.get("tool_choice").is_none());

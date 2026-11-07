@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The standalone `openai-codex` plugin now matches the official Codex `0.167.0` TUI wire, verified against source and an authorized capture: client version `0.167.0`, originator `codex-tui` and its Linux User-Agent on inference, model discovery and allowance requests; `x-codex-beta-features: remote_compaction_v2`; the installation ID only in `client_metadata` and turn metadata rather than as a header; and complete turn metadata using the least-disclosure settings (analytics and auto-review off, no workspace details). Models marked `use_responses_lite` receive the Responses Lite shape: instructions and tools move into an input prefix, parallel tool calls are disabled, and WebSocket continuations send only new items. Requests fill model defaults for tool choice, reasoning effort and verbosity, add the inference-only `access_programs` control, and compress HTTP request bodies with zstd on the official endpoint. Top-level request fields are sent in the official order, with routing fields ahead of the input. The base-instructions prefix carries the official creation time on Responses Lite models and a thread-scoped UUIDv5 ID on other models. When the client sets no `prompt_cache_key`, the plugin uses the session thread ID, so upstream prompt caches rebuild once after the update. Rebuild and re-import the standalone `openai-codex` plugin; updating the host alone does not replace it. Remaining wire differences are listed in [vendor plugins](docs/design/vendor-plugins.md).
+
 ## [0.6.4] - 2026-11-06
 
 ### Verification

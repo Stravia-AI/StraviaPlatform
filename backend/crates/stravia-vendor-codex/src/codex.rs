@@ -20,90 +20,389 @@ use super::{
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 // Retire reusable sessions before the upstream's one-hour connection limit.
 const WEBSOCKET_REUSE_MAX_AGE_MILLIS: u64 = 55 * 60 * 1000;
-const ORIGINATOR: &str = "codex_cli_rs";
+/// Interactive official client identity (rust-v0.167.0
+/// login/src/auth/default_client.rs `get_codex_user_agent`). A Wasm guest
+/// cannot observe the host OS or terminal, so the platform segment uses the
+/// official fallbacks for an unidentified Linux release (`os_info` Unknown
+/// version) and an undetected terminal ("unknown").
+const ORIGINATOR: &str = "codex-tui";
+const USER_AGENT_PLATFORM: &str = "(Linux Unknown; x86_64) unknown";
+/// core/src/session/mod.rs `build_model_client_beta_features_header` always
+/// advertises remote compaction; the guest enables no experimental features.
+const BETA_FEATURES: &str = "remote_compaction_v2";
+const TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
+/// core/src/client.rs: Responses Lite is a header on HTTP and a reserved
+/// client_metadata key on WebSocket frames.
+const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+const RESPONSES_LITE_WS_METADATA_KEY: &str =
+    "ws_request_header_x_openai_internal_codex_responses_lite";
+const WS_REQUEST_START_METADATA_KEY: &str = "x-codex-ws-stream-request-start-ms";
+/// tools/src/tool_name.rs `DEFAULT_FUNCTION_NAMESPACE`.
+const FUNCTION_NAMESPACE: &str = "functions";
 
 /// One identity projection shared by the HTTP body, HTTP headers and WS handshake.
 /// Only the host-scoped affinity may select a reusable native session.
 pub(super) struct NativeSession {
-    metadata: Value,
-    headers: Vec<(String, String)>,
+    operation: BodyOperation,
+    installation_id: Option<String>,
+    /// The official client uses one UUID as both session and thread identity.
+    thread_id: String,
+    window_id: String,
+    turn_id: String,
+    context_window_id: String,
+    parent_thread_id: Option<String>,
+    forked_from_thread_id: Option<String>,
+    turn_started_at_unix_ms: i64,
+    model: ModelProfile,
+}
+
+/// Request-shaping facts from the official `/models` catalog row, which
+/// discovery stores as model metadata extensions.
+struct ModelProfile {
+    responses_lite: bool,
+    support_verbosity: Option<bool>,
+    default_verbosity: Option<String>,
+    default_reasoning_level: Option<String>,
+    node_repl_auto_review_required: bool,
+    node_repl_disabled: bool,
+}
+
+impl ModelProfile {
+    fn new(provider: &ProviderSnapshot, operation: BodyOperation) -> Self {
+        Self {
+            // Only native inference uses the Lite wire; the plugin-constructed
+            // search and image requests keep the public Responses shape.
+            responses_lite: operation.is_inference()
+                && model_metadata(provider, "use_responses_lite").and_then(Value::as_bool)
+                    == Some(true),
+            support_verbosity: model_metadata(provider, "support_verbosity")
+                .and_then(Value::as_bool),
+            default_verbosity: model_text(provider, "default_verbosity"),
+            default_reasoning_level: model_text(provider, "default_reasoning_level"),
+            node_repl_auto_review_required: model_metadata(
+                provider,
+                "node_repl_auto_review_required",
+            )
+            .and_then(Value::as_bool)
+                == Some(true),
+            node_repl_disabled: model_metadata(provider, "node_repl_disabled")
+                .and_then(Value::as_bool)
+                == Some(true),
+        }
+    }
 }
 
 impl NativeSession {
-    pub(super) fn new(provider: &ProviderSnapshot) -> Self {
+    pub(super) fn new(provider: &ProviderSnapshot, operation: BodyOperation) -> Self {
         let thread_id = scoped_affinity(provider, "transport_affinity")
             .map(|affinity| native_uuid("openai-codex", affinity))
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-        let session_id = thread_id.clone();
-        // The SDK has no trusted native window ordinal. Keep the existing
-        // transport-scoped lifecycle; do not invent a compaction counter.
-        let window_id = format!("{thread_id}:0");
-        // Canonical client turn/request labels are not host-scoped operation
-        // identities. A newly constructed native turn remains independent.
-        let turn_id = uuid::Uuid::now_v7().to_string();
-        let mut metadata = json!({
-            "session_id": session_id,
-            "thread_id": thread_id,
-            "x-codex-window-id": window_id,
-            "turn_id": turn_id,
-        });
-        for (affinity_key, metadata_key) in [
-            (
-                "parent_thread_transport_affinity",
-                "x-codex-parent-thread-id",
-            ),
-            (
-                "forked_from_thread_transport_affinity",
-                "forked_from_thread_id",
-            ),
-        ] {
-            if let Some(affinity) = scoped_affinity(provider, affinity_key) {
-                metadata[metadata_key] = native_uuid("openai-codex", affinity).into();
-            }
+        let lineage = |key| {
+            scoped_affinity(provider, key).map(|affinity| native_uuid("openai-codex", affinity))
+        };
+        Self {
+            operation,
+            installation_id: None,
+            // The SDK has no trusted native window ordinal. Keep the existing
+            // transport-scoped lifecycle; do not invent a compaction counter.
+            window_id: format!("{thread_id}:0"),
+            // Canonical client turn/request labels are not host-scoped operation
+            // identities. A newly constructed native turn remains independent.
+            turn_id: uuid::Uuid::now_v7().to_string(),
+            context_window_id: scoped_affinity(provider, "context_window_transport_affinity")
+                .map(|affinity| native_uuid("openai-codex:context-window", affinity))
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+            parent_thread_id: lineage("parent_thread_transport_affinity"),
+            forked_from_thread_id: lineage("forked_from_thread_transport_affinity"),
+            turn_started_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            model: ModelProfile::new(provider, operation),
+            thread_id,
         }
-        if let Some(affinity) = scoped_affinity(provider, "context_window_transport_affinity") {
-            metadata["context_window_id"] =
-                native_uuid("openai-codex:context-window", affinity).into();
-        }
-        let mut headers = vec![
-            ("session-id".into(), session_id),
-            ("thread-id".into(), thread_id),
-            ("x-codex-window-id".into(), window_id),
-        ];
-        if let Some(parent_thread) = metadata
-            .get("x-codex-parent-thread-id")
-            .and_then(Value::as_str)
-        {
-            headers.push(("x-codex-parent-thread-id".into(), parent_thread.into()));
-        }
-        let mut turn_metadata = serde_json::Map::new();
-        for name in ["session_id", "thread_id", "turn_id"] {
-            if let Some(value) = metadata.get(name) {
-                turn_metadata.insert(name.into(), value.clone());
-            }
-        }
-        if let Some(parent_thread) = metadata.get("x-codex-parent-thread-id") {
-            turn_metadata.insert("parent_thread_id".into(), parent_thread.clone());
-        }
-        // These official lineage fields occur only inside the turn snapshot,
-        // not as independent flat client_metadata compatibility keys.
-        for name in ["forked_from_thread_id", "context_window_id"] {
-            if let Some(value) = metadata
-                .as_object_mut()
-                .and_then(|metadata| metadata.remove(name))
-            {
-                turn_metadata.insert(name.into(), value);
-            }
-        }
-        turn_metadata.insert("window_id".into(), metadata["x-codex-window-id"].clone());
-        let turn_metadata = Value::Object(turn_metadata).to_string();
-        headers.push(("x-codex-turn-metadata".into(), turn_metadata.clone()));
-        metadata["x-codex-turn-metadata"] = turn_metadata.into();
-        Self { metadata, headers }
     }
 
-    pub(super) fn apply_body(&self, body: &mut Value) {
-        body["client_metadata"] = self.metadata.clone();
+    /// Projects a Responses body onto the official rust-v0.167.0
+    /// `ResponsesApiRequest` / `ResponseCreateWsRequest` (core/src/client.rs
+    /// `build_responses_request`) and attaches this session's identity.
+    pub(super) fn project_body(
+        &self,
+        body: &mut Value,
+    ) -> Result<(), stravia_vendor_sdk::PluginError> {
+        let instructions = body
+            .as_object_mut()
+            .ok_or_else(|| invalid("Codex Responses request body must be an object"))?
+            .remove("instructions");
+        prepare_operation_body(body, self.operation)?;
+        let object = body
+            .as_object_mut()
+            .expect("projected Codex body is an object");
+        // The official request input is always an item list.
+        if let Some(Value::String(text)) = object.get_mut("input") {
+            let text = std::mem::take(text);
+            object.insert(
+                "input".into(),
+                json!([{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                }]),
+            );
+        }
+        if self.operation.is_inference() {
+            self.apply_model_defaults(object);
+        }
+        let tools = if self.model.responses_lite {
+            object.insert("parallel_tool_calls".into(), Value::Bool(false));
+            if let Some(reasoning) = object
+                .entry("reasoning")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+            {
+                reasoning.insert("context".into(), "all_turns".into());
+            }
+            object.remove("tools")
+        } else {
+            None
+        };
+        // A WS continuation resumes a response whose prompt already carried the
+        // prefix; the official client sends only the newly appended items.
+        if request_continuation_id(body).is_none() {
+            self.prepend_prompt_prefix(body, tools, instructions)?;
+        }
+        let object = body
+            .as_object_mut()
+            .expect("projected Codex body is an object");
+        if !object.contains_key("prompt_cache_key") {
+            // Official `PromptCacheKey::SessionDerived`.
+            object.insert("prompt_cache_key".into(), self.thread_id.clone().into());
+        }
+        if self.user_inference_turn() {
+            object.insert("access_programs".into(), json!({"cyber": "standard"}));
+        }
+        self.apply_client_metadata(body)
+    }
+
+    /// Official model defaults fill controls the caller left unset.
+    fn apply_model_defaults(&self, object: &mut serde_json::Map<String, Value>) {
+        object.entry("tool_choice").or_insert_with(|| "auto".into());
+        object.insert("include".into(), json!(["reasoning.encrypted_content"]));
+        if let Some(effort) = &self.model.default_reasoning_level
+            && let Some(reasoning) = object
+                .entry("reasoning")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        {
+            reasoning
+                .entry("effort")
+                .or_insert_with(|| effort.clone().into());
+        }
+        match self.model.support_verbosity {
+            Some(true) => {
+                if let Some(verbosity) = &self.model.default_verbosity
+                    && let Some(text) = object
+                        .entry("text")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                {
+                    text.entry("verbosity")
+                        .or_insert_with(|| verbosity.clone().into());
+                }
+            }
+            // The official client drops verbosity for models that reject it.
+            Some(false) => {
+                if let Some(text) = object.get_mut("text").and_then(Value::as_object_mut) {
+                    text.remove("verbosity");
+                    if text.is_empty() {
+                        object.remove("text");
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Prompt-only prefix items, rebuilt on every full request because the
+    /// guest keeps no conversation history. Official 0.167.0 builds them on
+    /// two paths:
+    /// - Responses Lite with the default-on `incremental_tools` feature
+    ///   records them in history once per window (core/src/session/mod.rs):
+    ///   `at_`/`msg_` UUIDv7 IDs, and the base instructions stamped with the
+    ///   recording turn and its fractional Unix-second `create_time`. Without
+    ///   history, the IDs hash the payload within the thread (v7 bit format)
+    ///   to keep the same per-window stability, and each request stamps
+    ///   itself as the recording turn.
+    /// - Other models get request-time items (core/src/client.rs): a UUIDv5
+    ///   ID in the thread namespace and no turn or time stamp.
+    fn prepend_prompt_prefix(
+        &self,
+        body: &mut Value,
+        tools: Option<Value>,
+        instructions: Option<Value>,
+    ) -> Result<(), stravia_vendor_sdk::PluginError> {
+        let mut prefix = Vec::with_capacity(2);
+        // Only Responses Lite moves tool declarations into the prefix.
+        if let Some(Value::Array(tools)) = tools
+            && !tools.is_empty()
+        {
+            let tools = responses_lite_tools(tools);
+            let encoded = serde_json::to_vec(&tools)
+                .map_err(|_| invalid("Codex tool declarations could not be encoded"))?;
+            prefix.push(json!({
+                "type": "additional_tools",
+                "id": format!("at_{}", self.prefix_item_uuid(&encoded)),
+                "role": "developer",
+                "tools": tools,
+            }));
+        }
+        if let Some(Value::String(text)) = instructions
+            && !text.is_empty()
+        {
+            let (id, passthrough) = if self.model.responses_lite {
+                (
+                    self.prefix_item_uuid(text.as_bytes()),
+                    json!({
+                        "turn_id": self.turn_id,
+                        "create_time": response_item_create_time(),
+                        "content_item_kinds": ["model.base_instructions"],
+                        // Only Responses Lite accepts per-content attribution.
+                        "content_item_metadata": [{"provenance": {"type": "harness", "hook": false}}],
+                    }),
+                )
+            } else {
+                (
+                    request_prefix_uuid(&self.thread_id, text.as_bytes()),
+                    json!({"content_item_kinds": ["model.base_instructions"]}),
+                )
+            };
+            prefix.push(json!({
+                "type": "message",
+                "id": format!("msg_{id}"),
+                "role": "developer",
+                "content": [{"type": "input_text", "text": text}],
+                "internal_chat_message_metadata_passthrough": passthrough,
+            }));
+        }
+        if prefix.is_empty() {
+            return Ok(());
+        }
+        body.get_mut("input")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| invalid("Codex Responses input must be an item list"))?
+            .splice(0..0, prefix);
+        Ok(())
+    }
+
+    fn prefix_item_uuid(&self, payload: &[u8]) -> String {
+        derived_uuid(&[
+            b"openai-codex:prompt-prefix",
+            self.thread_id.as_bytes(),
+            payload,
+        ])
+    }
+
+    /// Ordinary inference turns carry the default Cyber access program;
+    /// compaction and auxiliary requests do not (official title generation).
+    fn user_inference_turn(&self) -> bool {
+        matches!(
+            self.operation,
+            BodyOperation::Http | BodyOperation::WebSocket
+        )
+    }
+
+    /// core/src/responses_metadata.rs `CodexResponsesMetadata::client_metadata`
+    /// plus core/src/client.rs guardian credits. The turn snapshot records the
+    /// body's final model and reasoning.
+    fn apply_client_metadata(
+        &self,
+        body: &mut Value,
+    ) -> Result<(), stravia_vendor_sdk::PluginError> {
+        let turn_metadata = self.turn_metadata(body)?;
+        let mut metadata = serde_json::Map::new();
+        if let Some(installation_id) = &self.installation_id {
+            metadata.insert(
+                "x-codex-installation-id".into(),
+                installation_id.clone().into(),
+            );
+        }
+        metadata.insert("session_id".into(), self.thread_id.clone().into());
+        metadata.insert("thread_id".into(), self.thread_id.clone().into());
+        metadata.insert("x-codex-window-id".into(), self.window_id.clone().into());
+        metadata.insert("turn_id".into(), self.turn_id.clone().into());
+        if let Some(parent_thread_id) = &self.parent_thread_id {
+            metadata.insert(
+                "x-codex-parent-thread-id".into(),
+                parent_thread_id.clone().into(),
+            );
+        }
+        if let Some(root_turn_id) = self.root_turn_id() {
+            metadata.insert("root_turn_id".into(), root_turn_id.into());
+        }
+        metadata.insert(TURN_METADATA_KEY.into(), turn_metadata.into());
+        // No MCP tool runs inside the guest, so attribution is always empty.
+        metadata.insert("mcp_attribution".into(), r#"{"status":"none"}"#.into());
+        metadata.insert("guardian_credits_requested".into(), "true".into());
+        body["client_metadata"] = Value::Object(metadata);
+        Ok(())
+    }
+
+    /// A root thread's turn is its own causal root; a child thread's root turn
+    /// belongs to the parent and is not observable here.
+    fn root_turn_id(&self) -> Option<&str> {
+        self.parent_thread_id
+            .is_none()
+            .then_some(self.turn_id.as_str())
+    }
+
+    fn turn_metadata(&self, body: &Value) -> Result<String, stravia_vendor_sdk::PluginError> {
+        let root = self.parent_thread_id.is_none();
+        let turn = self.operation != BodyOperation::Compaction;
+        let payload = TurnMetadataPayload {
+            installation_id: self.installation_id.as_deref(),
+            session_id: &self.thread_id,
+            thread_id: &self.thread_id,
+            agent_name: root.then_some("/root"),
+            turn_id: &self.turn_id,
+            window_id: &self.window_id,
+            window_number: 0,
+            context_window_id: &self.context_window_id,
+            request_kind: if turn { "turn" } else { "compaction" },
+            history_initialization: if self.forked_from_thread_id.is_some() {
+                "cold_fork"
+            } else {
+                "new"
+            },
+            forked_from_thread_id: self.forked_from_thread_id.as_deref(),
+            parent_thread_id: self.parent_thread_id.as_deref(),
+            root_turn_id: self.root_turn_id(),
+            thread_source: if root { "user" } else { "subagent" },
+            turn_trigger: (turn && root).then_some("user"),
+            // Sandbox facts are always reported; these are the captured Linux
+            // TUI defaults. Analytics and auto-review are the least-disclosure
+            // settings, and no workspace git enrichment is reported.
+            sandbox: "seccomp",
+            sandbox_mode: "workspace-write",
+            auto_review_enabled: false,
+            node_repl_auto_review_required: self.model.node_repl_auto_review_required,
+            node_repl_disabled: self.model.node_repl_disabled,
+            turn_started_at_unix_ms: self.turn_started_at_unix_ms,
+            analytics_enabled: false,
+            // The guest cannot tell a client's manual compaction from an
+            // automatic one; standalone remote compaction is the closest shape.
+            compaction: (!turn).then_some(CompactionMetadata {
+                trigger: "manual",
+                reason: "user_requested",
+                implementation: "responses_compaction_v2",
+                phase: "standalone_turn",
+                strategy: "memento",
+            }),
+            model: turn
+                .then(|| body.get("model").and_then(Value::as_str))
+                .flatten(),
+            reasoning_effort: turn
+                .then(|| body.pointer("/reasoning/effort").and_then(Value::as_str))
+                .flatten(),
+        };
+        serde_json::to_string(&payload)
+            .map_err(|_| invalid("Codex native turn metadata could not be encoded"))
     }
 
     pub(super) fn resolve_identity(
@@ -118,29 +417,127 @@ impl NativeSession {
         if uuid::Uuid::parse_str(&identity.installation_id).is_err() {
             return Err(invalid("Codex native installation identity is invalid"));
         }
-        let installation = identity.installation_id.clone();
+        self.installation_id = Some(identity.installation_id.clone());
         if created {
             write_identities(host, &mut root, identities)?;
         }
-        self.headers
-            .push(("x-codex-installation-id".into(), installation.clone()));
-        self.metadata["x-codex-installation-id"] = installation.clone().into();
-        let mut turn_metadata: Value = serde_json::from_str(
-            self.metadata["x-codex-turn-metadata"]
-                .as_str()
-                .expect("native turn metadata"),
-        )
-        .map_err(|_| invalid("Codex native turn metadata is invalid"))?;
-        turn_metadata["installation_id"] = installation.into();
-        let turn_metadata = turn_metadata.to_string();
-        set_header(
-            &mut self.headers,
-            "x-codex-turn-metadata",
-            turn_metadata.clone(),
-        );
-        self.metadata["x-codex-turn-metadata"] = turn_metadata.into();
         Ok(())
     }
+}
+
+/// Field order is the official `CodexTurnMetadataPayload` declaration order
+/// (core/src/responses_metadata.rs); `model` and `reasoning_effort` are the
+/// sorted flattened execution extras that follow it.
+#[derive(Serialize)]
+struct TurnMetadataPayload<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installation_id: Option<&'a str>,
+    session_id: &'a str,
+    thread_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<&'static str>,
+    turn_id: &'a str,
+    window_id: &'a str,
+    window_number: u64,
+    context_window_id: &'a str,
+    request_kind: &'static str,
+    history_initialization: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from_thread_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_thread_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root_turn_id: Option<&'a str>,
+    thread_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_trigger: Option<&'static str>,
+    sandbox: &'static str,
+    sandbox_mode: &'static str,
+    auto_review_enabled: bool,
+    node_repl_auto_review_required: bool,
+    node_repl_disabled: bool,
+    turn_started_at_unix_ms: i64,
+    analytics_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compaction: Option<CompactionMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct CompactionMetadata {
+    trigger: &'static str,
+    reason: &'static str,
+    implementation: &'static str,
+    phase: &'static str,
+    strategy: &'static str,
+}
+
+fn model_metadata<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a Value> {
+    provider.model_metadata.as_ref()?.extensions.get(key)
+}
+
+fn model_text(provider: &ProviderSnapshot, key: &str) -> Option<String> {
+    model_metadata(provider, key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// tools/src/tool_spec.rs `create_tools_json_for_responses_lite`: function and
+/// freeform tools join the default `functions` namespace at the position of
+/// the first such tool; every other declaration is kept as is.
+fn responses_lite_tools(tools: Vec<Value>) -> Vec<Value> {
+    let mut functions = Vec::new();
+    let mut description = String::new();
+    let mut functions_index = None;
+    let mut declarations = Vec::with_capacity(tools.len());
+    for mut tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function" | "custom") => functions.push(tool),
+            Some("namespace")
+                if tool.get("name").and_then(Value::as_str) == Some(FUNCTION_NAMESPACE) =>
+            {
+                if let Some(text) = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    description = text.to_owned();
+                }
+                if let Some(Value::Array(children)) = tool.get_mut("tools") {
+                    functions.append(children);
+                }
+            }
+            _ => {
+                declarations.push(tool);
+                continue;
+            }
+        }
+        functions_index.get_or_insert(declarations.len());
+    }
+    if let Some(index) = functions_index
+        && !functions.is_empty()
+    {
+        declarations.insert(
+            index,
+            json!({
+                "type": "namespace",
+                "name": FUNCTION_NAMESPACE,
+                "description": description,
+                "tools": functions,
+            }),
+        );
+    }
+    declarations
+}
+
+/// rust-v0.167.0 login/src/auth/default_client.rs `get_codex_user_agent`.
+pub(super) fn user_agent() -> String {
+    format!("{ORIGINATOR}/{CLIENT_VERSION} {USER_AGENT_PLATFORM} ({ORIGINATOR}; {CLIENT_VERSION})")
 }
 
 fn scoped_affinity<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a str> {
@@ -151,18 +548,41 @@ fn scoped_affinity<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a 
         .filter(|value| !value.is_empty())
 }
 
-/// UUIDv7 bit representation only: hash-derived bits are not a wall clock and
-/// do not preserve official UUIDv7 creation-time ordering.
 fn native_uuid(namespace: &str, affinity: &str) -> String {
+    derived_uuid(&[namespace.as_bytes(), affinity.as_bytes()])
+}
+
+/// UUIDv7 bit representation only: hash-derived bits are not a wall clock and
+/// do not preserve official UUIDv7 creation-time ordering. Parts are
+/// NUL-separated so two-part derivations keep their existing values.
+fn derived_uuid(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
-    hash.update(namespace.as_bytes());
-    hash.update([0]);
-    hash.update(affinity.as_bytes());
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            hash.update([0]);
+        }
+        hash.update(part);
+    }
     let digest = hash.finalize();
     let mut bytes: [u8; 16] = digest[..16].try_into().expect("digest has 16 bytes");
     bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+/// core/src/client.rs request-time prefix: UUIDv5 of the payload in a
+/// namespace that is itself the UUIDv5 of the thread ID under `NAMESPACE_OID`.
+fn request_prefix_uuid(thread_id: &str, payload: &[u8]) -> String {
+    let namespace = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, thread_id.as_bytes());
+    uuid::Uuid::new_v5(&namespace, payload).to_string()
+}
+
+/// core/src/session/mod.rs `response_item_create_time`: fractional Unix
+/// seconds as a JSON number, integral seconds if not representable.
+fn response_item_create_time() -> Value {
+    let now = chrono::Utc::now();
+    let seconds = now.timestamp() as f64 + f64::from(now.timestamp_subsec_nanos()) / 1e9;
+    serde_json::Number::from_f64(seconds).map_or_else(|| now.timestamp().into(), Value::Number)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -237,8 +657,17 @@ fn write_identities(
 pub(super) enum BodyOperation {
     Http,
     WebSocket,
+    /// Standalone remote compaction over the HTTP Responses wire.
+    Compaction,
     Search,
     Image,
+}
+
+impl BodyOperation {
+    /// Requests the official client itself sends from a conversation turn.
+    fn is_inference(self) -> bool {
+        matches!(self, Self::Http | Self::WebSocket | Self::Compaction)
+    }
 }
 
 pub(super) fn encode_tools(
@@ -277,30 +706,74 @@ pub(super) fn encode_tools(
     tools
 }
 
-// Closed wire contracts: codex-api/src/common.rs ResponsesApiRequest and
-// ResponseCreateWsRequest; installed official codex-cli 0.159.2 HTTP capture.
-// `instructions` is emitted by that release (newer main uses input items).
-const RESPONSE_FIELDS: &[&str] = &[
+// Closed wire contract in declaration order: rust-v0.167.0
+// codex-api/src/common.rs `ResponseCreateWsRequest` after its `type` tag;
+// `ResponsesApiRequest` is the same sequence without the WS-only fields. The
+// official client keeps routing fields ahead of the potentially multi-megabyte
+// input so gateways can inspect them incrementally. That release has no
+// top-level `instructions`; NativeSession::project_body moves them into the
+// input prefix.
+const WIRE_FIELDS: &[&str] = &[
+    "type",
     "model",
-    "instructions",
+    "stream",
+    "service_tier",
+    "previous_response_id",
     "input",
     "tools",
     "tool_choice",
     "parallel_tool_calls",
     "reasoning",
     "store",
-    "stream",
+    "stream_options",
     "include",
-    "service_tier",
     "prompt_cache_key",
     "text",
+    "generate",
     "client_metadata",
+    "access_programs",
+];
+const WS_ONLY_FIELDS: &[&str] = &["previous_response_id", "generate"];
+// Plugin-owned or unsupported: never forwarded from the caller. Client
+// metadata has one authority, NativeSession::apply_client_metadata.
+const SESSION_FIELDS: &[&str] = &[
+    "type",
+    "stream_options",
+    "client_metadata",
+    "access_programs",
 ];
 
-pub(super) fn prepare_body(body: &mut Value) -> Result<(), stravia_vendor_sdk::PluginError> {
-    prepare_operation_body(body, BodyOperation::Http)
+/// A projected body serialized in the official field order. A `Value` map
+/// sorts its keys, which would put `input` ahead of `model`.
+pub(super) struct WireBody<'a>(pub(super) &'a Value);
+
+impl Serialize for WireBody<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeMap};
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| S::Error::custom("Codex request body must be an object"))?;
+        if let Some(key) = object
+            .keys()
+            .find(|key| !WIRE_FIELDS.contains(&key.as_str()))
+        {
+            return Err(S::Error::custom(format!(
+                "Codex request field {key} is outside the official wire contract"
+            )));
+        }
+        let mut map = serializer.serialize_map(Some(object.len()))?;
+        for key in WIRE_FIELDS {
+            if let Some(value) = object.get(*key) {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
 }
 
+/// Closed-field projection only; NativeSession::project_body owns the rest of
+/// the official request shape.
 pub(super) fn prepare_operation_body(
     body: &mut Value,
     operation: BodyOperation,
@@ -309,10 +782,11 @@ pub(super) fn prepare_operation_body(
         .as_object_mut()
         .ok_or_else(|| invalid("Codex Responses request body must be an object"))?;
     object.retain(|key, value| {
+        let key = key.as_str();
         !value.is_null()
-            && (RESPONSE_FIELDS.contains(&key.as_str())
-                || (operation == BodyOperation::WebSocket
-                    && matches!(key.as_str(), "previous_response_id" | "generate")))
+            && WIRE_FIELDS.contains(&key)
+            && !SESSION_FIELDS.contains(&key)
+            && (operation == BodyOperation::WebSocket || !WS_ONLY_FIELDS.contains(&key))
     });
     object.insert("store".into(), Value::Bool(false));
     // The native endpoint rejects stream:false. Client delivery remains
@@ -328,8 +802,6 @@ pub(super) fn prepare_operation_body(
             &["type", "strict", "schema", "name"],
         );
     }
-    // Client metadata has one authority: NativeSession::apply_body.
-    object.remove("client_metadata");
     let dropped_all_tools = if let Some(Value::Array(tools)) = object.get_mut("tools") {
         let had_tools = !tools.is_empty();
         tools.retain_mut(|tool| restrict_native_tool(tool, operation, false));
@@ -420,40 +892,47 @@ fn retain_control_fields(value: Option<&mut Value>, fields: &[&str]) {
     }
 }
 
+/// Header order follows the official 0.167.0 HTTP capture: core/src/client.rs
+/// request headers, transport headers, then codex-api auth and identity.
 pub(super) fn append_runtime_headers(
     provider: &ProviderSnapshot,
     body: &Value,
     session: &NativeSession,
-    operation: BodyOperation,
     headers: &mut Vec<(String, String)>,
 ) -> Result<(), stravia_vendor_sdk::PluginError> {
     // Codec/ingress headers are not native identity authority. Build this
     // target's complete header set rather than retaining alternate session keys.
-    headers.retain(|(name, _)| {
-        name.eq_ignore_ascii_case("content-type") || name.eq_ignore_ascii_case("accept")
+    let mut transport = std::mem::take(headers);
+    transport.retain(|(name, _)| {
+        name.eq_ignore_ascii_case("accept") || name.eq_ignore_ascii_case("content-type")
     });
-    append_identity_headers(provider, headers)?;
-    let websocket = matches!(operation, BodyOperation::WebSocket);
-    for (name, value) in &session.headers {
-        // 连接跨 turn 复用；动态快照和 sticky state 只随每帧 client_metadata 发送。
-        if websocket
-            && matches!(
-                name.as_str(),
-                "x-codex-turn-metadata" | "x-codex-turn-state"
-            )
-        {
-            continue;
+    headers.push(("version".into(), CLIENT_VERSION.into()));
+    headers.push(("x-codex-beta-features".into(), BETA_FEATURES.into()));
+    headers.push(("x-codex-window-id".into(), session.window_id.clone()));
+    // A pooled WS connection spans turns; its per-turn snapshot and the Lite
+    // marker travel in each frame's client_metadata instead. The host matches
+    // reusable sockets by exact handshake headers.
+    if session.operation != BodyOperation::WebSocket {
+        let turn_metadata = body
+            .pointer("/client_metadata/x-codex-turn-metadata")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("Codex native turn metadata is missing"))?;
+        headers.push((TURN_METADATA_KEY.into(), turn_metadata.to_owned()));
+        if session.model.responses_lite {
+            headers.push((RESPONSES_LITE_HEADER.into(), "true".into()));
         }
-        set_header(headers, name, value.clone());
     }
-    // rust-v0.162.1 binds this header to the thread on both Responses HTTP
+    headers.push(("x-codex-routing-hint".into(), routing_hint(body)?));
+    // The official client binds the request ID to the thread on both HTTP
     // (codex-api/endpoint/responses.rs) and WS (core/client.rs).
-    let request_id = session.metadata["thread_id"]
-        .as_str()
-        .expect("native thread ID");
-    set_header(headers, "x-client-request-id", request_id.to_owned());
-    set_header(headers, "x-codex-routing-hint", routing_hint(body)?);
-    Ok(())
+    headers.push(("x-client-request-id".into(), session.thread_id.clone()));
+    headers.push(("session-id".into(), session.thread_id.clone()));
+    headers.push(("thread-id".into(), session.thread_id.clone()));
+    if let Some(parent_thread_id) = &session.parent_thread_id {
+        headers.push(("x-codex-parent-thread-id".into(), parent_thread_id.clone()));
+    }
+    headers.append(&mut transport);
+    append_identity_headers(provider, headers)
 }
 
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
@@ -461,19 +940,13 @@ fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
     headers.push((name.into(), value));
 }
 
+/// codex-api bearer auth plus the default client's originator and user agent.
 pub(super) fn append_identity_headers(
     provider: &ProviderSnapshot,
     headers: &mut Vec<(String, String)>,
 ) -> Result<(), stravia_vendor_sdk::PluginError> {
     let access_token = secret(provider, "access_token")?;
     set_header(headers, "authorization", format!("Bearer {access_token}"));
-    set_header(headers, "originator", ORIGINATOR.into());
-    set_header(
-        headers,
-        "user-agent",
-        format!("{ORIGINATOR}/{CLIENT_VERSION}"),
-    );
-    set_header(headers, "version", CLIENT_VERSION.into());
     if let Some(account_id) = provider
         .credentials
         .get("account_id")
@@ -485,7 +958,37 @@ pub(super) fn append_identity_headers(
     {
         set_header(headers, "chatgpt-account-id", account_id);
     }
+    set_header(headers, "originator", ORIGINATOR.into());
+    set_header(headers, "user-agent", user_agent());
     Ok(())
+}
+
+/// The official client zstd-encodes Responses bodies only for ChatGPT auth on
+/// the built-in OpenAI provider; a custom base URL is a different provider.
+pub(super) fn start_responses_http(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    request: stravia_vendor_sdk::wit::types::HttpRequest,
+) -> Result<stravia_vendor_sdk::HttpResponse, stravia_vendor_sdk::PluginError> {
+    if !official_endpoint(&provider.base_url) {
+        return host.http_start(request);
+    }
+    host.http_start_with_compression(
+        request,
+        stravia_vendor_sdk::HttpCompression {
+            request: Some(stravia_vendor_sdk::HttpContentCoding::Zstd),
+            // The official client advertises no response codings.
+            response: Vec::new(),
+        },
+    )
+}
+
+fn official_endpoint(base_url: &str) -> bool {
+    url::Url::parse(base_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("chatgpt.com")
+            && url.port_or_known_default() == Some(443)
+    })
 }
 
 fn routing_hint(body: &Value) -> Result<String, stravia_vendor_sdk::PluginError> {
@@ -510,12 +1013,7 @@ fn routing_hint(body: &Value) -> Result<String, stravia_vendor_sdk::PluginError>
 }
 
 pub(super) fn websocket_available(provider: &ProviderSnapshot) -> bool {
-    configured_websocket_url(provider).is_some()
-        || url::Url::parse(&provider.base_url).is_ok_and(|url| {
-            url.scheme() == "https"
-                && url.host_str() == Some("chatgpt.com")
-                && url.port_or_known_default() == Some(443)
-        })
+    configured_websocket_url(provider).is_some() || official_endpoint(&provider.base_url)
 }
 
 /// The native continuation the frame actually asks the upstream to resume.
@@ -535,13 +1033,7 @@ pub(super) fn infer_websocket(
     preserve_upstream_errors: bool,
 ) -> Result<AiResponse, stravia_vendor_sdk::PluginError> {
     let mut headers = Vec::new();
-    append_runtime_headers(
-        provider,
-        body,
-        session,
-        BodyOperation::WebSocket,
-        &mut headers,
-    )?;
+    append_runtime_headers(provider, body, session, &mut headers)?;
     set_header(
         &mut headers,
         "openai-beta",
@@ -551,16 +1043,13 @@ pub(super) fn infer_websocket(
     let url = if let Some(url) = configured_websocket_url(provider) {
         url.to_owned()
     } else {
-        let mut url = url::Url::parse(&endpoint(&provider.base_url, "/responses"))
-            .map_err(|_| invalid("Codex base URL is invalid"))?;
-        if url.scheme() != "https"
-            || url.host_str() != Some("chatgpt.com")
-            || url.port_or_known_default() != Some(443)
-        {
+        if !official_endpoint(&provider.base_url) {
             return Err(invalid(
                 "custom Codex base URLs require an authorized websocket_url option",
             ));
         }
+        let mut url = url::Url::parse(&endpoint(&provider.base_url, "/responses"))
+            .map_err(|_| invalid("Codex base URL is invalid"))?;
         url.set_scheme("wss")
             .map_err(|_| invalid("Codex WebSocket URL could not be constructed"))?;
         url.to_string()
@@ -586,11 +1075,24 @@ pub(super) fn infer_websocket(
     // This body was projected as WebSocket before the scoped identity was
     // attached. The WS schema includes stream and service_tier as well.
     object.insert("type".into(), Value::String("response.create".into()));
+    // core/src/client.rs: WS frames carry the HTTP-only Lite header and the
+    // dispatch time as reserved client_metadata keys.
+    let metadata = object
+        .get_mut("client_metadata")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| invalid("Codex native client metadata is missing"))?;
+    metadata.insert(
+        WS_REQUEST_START_METADATA_KEY.into(),
+        chrono::Utc::now().timestamp_millis().to_string().into(),
+    );
+    if session.model.responses_lite {
+        metadata.insert(RESPONSES_LITE_WS_METADATA_KEY.into(), "true".into());
+    }
     host.emit_started()?;
-    connection
-        .send(&WsMessage::Text(serde_json::to_string(&frame).map_err(
-            |_| invalid("Codex WebSocket request could not be encoded"),
-        )?))?;
+    connection.send(&WsMessage::Text(
+        serde_json::to_string(&WireBody(&frame))
+            .map_err(|_| invalid("Codex WebSocket request could not be encoded"))?,
+    ))?;
 
     stravia_vendor_common::common::decode_ai_response_websocket_with_error_classifier(
         host,
@@ -650,29 +1152,26 @@ pub(super) fn search(
         "stream": true,
         "include": ["reasoning.encrypted_content", "web_search_call.action.sources"]
     });
-    prepare_operation_body(&mut body, BodyOperation::Search)?;
-    let mut session = NativeSession::new(provider);
+    let mut session = NativeSession::new(provider, BodyOperation::Search);
     session.resolve_identity(host, provider)?;
-    session.apply_body(&mut body);
+    session.project_body(&mut body)?;
     let mut headers = vec![
-        ("content-type".into(), "application/json".into()),
         ("accept".into(), "text/event-stream".into()),
+        ("content-type".into(), "application/json".into()),
     ];
-    append_runtime_headers(
-        provider,
-        &body,
-        &session,
-        BodyOperation::Search,
-        &mut headers,
-    )?;
+    append_runtime_headers(provider, &body, &session, &mut headers)?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: "POST".into(),
-        url: endpoint(&provider.base_url, "/responses"),
-        headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| invalid("Codex Search request could not be encoded"))?,
-    })?;
+    let response = start_responses_http(
+        host,
+        provider,
+        stravia_vendor_sdk::wit::types::HttpRequest {
+            method: "POST".into(),
+            url: endpoint(&provider.base_url, "/responses"),
+            headers,
+            body: serde_json::to_vec(&WireBody(&body))
+                .map_err(|_| invalid("Codex Search request could not be encoded"))?,
+        },
+    )?;
     ensure_success(&response, "Codex Search")?;
     let bytes = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES)?;
     let response = parse_responses_body(&bytes)?;
@@ -1005,11 +1504,11 @@ mod tests {
         .unwrap()
         .body;
         body["tools"] = encode_tools(&request, BodyOperation::Http).into();
-        prepare_body(&mut body).unwrap();
+        prepare_operation_body(&mut body, BodyOperation::Http).unwrap();
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert_eq!(body["tool_choice"], json!({"type":"web_search"}));
         body["tool_choice"] = json!({"type":"code_interpreter"});
-        prepare_body(&mut body).unwrap();
+        prepare_operation_body(&mut body, BodyOperation::Http).unwrap();
         assert!(body.get("tool_choice").is_none());
     }
 
@@ -1037,16 +1536,22 @@ mod tests {
         for operation in [
             BodyOperation::Http,
             BodyOperation::WebSocket,
+            BodyOperation::Compaction,
             BodyOperation::Search,
             BodyOperation::Image,
         ] {
             let mut body = original.clone();
             prepare_operation_body(&mut body, operation).unwrap();
+            // 0.167.0 has no top-level instructions or caller-owned stream
+            // options; access programs are session-owned.
             for absent in [
                 "private_parameter",
                 "metadata",
                 "prompt_cache_retention",
                 "client_metadata",
+                "instructions",
+                "stream_options",
+                "access_programs",
             ] {
                 assert!(body.get(absent).is_none(), "{absent}");
             }
@@ -1102,6 +1607,388 @@ mod tests {
         }
     }
 
+    /// The official `/models` row of a Responses Lite model.
+    fn lite_provider() -> ProviderSnapshot {
+        let mut provider = provider();
+        provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            extensions: BTreeMap::from([
+                ("use_responses_lite".into(), json!(true)),
+                ("support_verbosity".into(), json!(true)),
+                ("default_verbosity".into(), json!("low")),
+                ("default_reasoning_level".into(), json!("medium")),
+                ("node_repl_auto_review_required".into(), json!(true)),
+                ("node_repl_disabled".into(), json!(false)),
+            ]),
+            ..Default::default()
+        });
+        provider
+    }
+
+    fn turn_body() -> Value {
+        json!({
+            "model":"gpt-6-astra",
+            "instructions":"base instructions",
+            "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+            "tools":[
+                {"type":"web_search"},
+                {"type":"function","name":"read","parameters":{"type":"object"}},
+                {"type":"namespace","name":"clock","description":"clock tools","tools":[
+                    {"type":"function","name":"now","parameters":{"type":"object"}}
+                ]},
+                {"type":"custom","name":"exec","format":{"type":"text"}}
+            ],
+            "parallel_tool_calls":true,
+            "reasoning":{"effort":"low"}
+        })
+    }
+
+    fn project(session: &NativeSession, mut body: Value) -> Value {
+        session.project_body(&mut body).unwrap();
+        body
+    }
+
+    fn client_metadata(session: &NativeSession) -> Value {
+        project(session, json!({"model":"gpt-6-astra", "input":[]}))["client_metadata"].clone()
+    }
+
+    fn turn_metadata(metadata: &Value) -> Value {
+        serde_json::from_str(metadata["x-codex-turn-metadata"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn lite_turn_moves_tools_and_instructions_into_the_input_prefix() {
+        let provider = lite_provider();
+        let session = NativeSession::new(&provider, BodyOperation::Http);
+        let body = project(&session, turn_body());
+        for absent in ["tools", "instructions"] {
+            assert!(body.get(absent).is_none(), "{absent}");
+        }
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort":"low", "context":"all_turns"})
+        );
+        assert_eq!(body["text"], json!({"verbosity":"low"}));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["access_programs"], json!({"cyber":"standard"}));
+        assert_eq!(
+            body["prompt_cache_key"],
+            body["client_metadata"]["thread_id"]
+        );
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        let declarations = &input[0];
+        assert_eq!(declarations["type"], "additional_tools");
+        assert_eq!(declarations["role"], "developer");
+        assert!(declarations["id"].as_str().unwrap().starts_with("at_"));
+        // Function and freeform tools join `functions` where the first of them
+        // appeared; other declarations keep their relative order.
+        assert_eq!(
+            declarations["tools"],
+            json!([
+                {"type":"web_search"},
+                {"type":"namespace","name":"functions","description":"","tools":[
+                    {"type":"function","name":"read","parameters":{"type":"object"}},
+                    {"type":"custom","name":"exec","format":{"type":"text"}}
+                ]},
+                {"type":"namespace","name":"clock","description":"clock tools","tools":[
+                    {"type":"function","name":"now","parameters":{"type":"object"}}
+                ]}
+            ])
+        );
+        let instructions = &input[1];
+        assert_eq!(instructions["role"], "developer");
+        assert!(instructions["id"].as_str().unwrap().starts_with("msg_"));
+        assert_eq!(
+            instructions["content"],
+            json!([{"type":"input_text","text":"base instructions"}])
+        );
+        let passthrough = &instructions["internal_chat_message_metadata_passthrough"];
+        let create_time = passthrough["create_time"].as_f64().unwrap();
+        let started = turn_metadata(&body["client_metadata"])["turn_started_at_unix_ms"]
+            .as_i64()
+            .unwrap();
+        // Fractional Unix seconds stamped when this request recorded the item.
+        assert!(create_time * 1000.0 >= started as f64 - 1.0);
+        assert!(create_time < 1e11);
+        assert_eq!(
+            passthrough,
+            &json!({
+                "turn_id": body["client_metadata"]["turn_id"],
+                "create_time": passthrough["create_time"],
+                "content_item_kinds": ["model.base_instructions"],
+                "content_item_metadata": [{"provenance":{"type":"harness","hook":false}}],
+            })
+        );
+        assert_eq!(input[2]["role"], "user");
+
+        // Prefix IDs are thread- and content-derived, so a retry or the next
+        // stateless turn in the same thread keeps the same prompt prefix.
+        let retry = project(
+            &NativeSession::new(&provider, BodyOperation::Http),
+            turn_body(),
+        );
+        assert_eq!(retry["input"][0]["id"], input[0]["id"]);
+        assert_eq!(retry["input"][1]["id"], input[1]["id"]);
+        let mut changed = turn_body();
+        changed["instructions"] = "other instructions".into();
+        let changed = project(&NativeSession::new(&provider, BodyOperation::Http), changed);
+        assert_eq!(changed["input"][0]["id"], input[0]["id"]);
+        assert_ne!(changed["input"][1]["id"], input[1]["id"]);
+    }
+
+    #[test]
+    fn websocket_continuation_sends_only_the_appended_items() {
+        let session = NativeSession::new(&lite_provider(), BodyOperation::WebSocket);
+        let mut body = turn_body();
+        body["previous_response_id"] = "resp_previous".into();
+        let body = project(&session, body);
+        assert_eq!(body["previous_response_id"], "resp_previous");
+        assert_eq!(body["input"], turn_body()["input"]);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("instructions").is_none());
+        assert_eq!(body["reasoning"]["context"], "all_turns");
+
+        let full = project(&session, turn_body());
+        assert_eq!(full["input"][0]["type"], "additional_tools");
+    }
+
+    /// Top-level keys in wire order; a `Value` would sort them.
+    fn wire_keys(body: &Value) -> Vec<String> {
+        struct Keys(Vec<String>);
+        impl<'de> Deserialize<'de> for Keys {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = Keys;
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        formatter.write_str("an object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Keys, A::Error> {
+                        let mut keys = Vec::new();
+                        while let Some((key, _)) =
+                            map.next_entry::<String, serde::de::IgnoredAny>()?
+                        {
+                            keys.push(key);
+                        }
+                        Ok(Keys(keys))
+                    }
+                }
+                deserializer.deserialize_map(Visitor)
+            }
+        }
+        let encoded = serde_json::to_string(&WireBody(body)).unwrap();
+        serde_json::from_str::<Keys>(&encoded).unwrap().0
+    }
+
+    #[test]
+    fn wire_body_keeps_the_official_declaration_order() {
+        let http = project(
+            &NativeSession::new(&lite_provider(), BodyOperation::Http),
+            turn_body(),
+        );
+        assert_eq!(
+            wire_keys(&http),
+            [
+                "model",
+                "stream",
+                "input",
+                "tool_choice",
+                "parallel_tool_calls",
+                "reasoning",
+                "store",
+                "include",
+                "prompt_cache_key",
+                "text",
+                "client_metadata",
+                "access_programs",
+            ]
+        );
+
+        let mut body = turn_body();
+        body["service_tier"] = "priority".into();
+        body["text"] = json!({"verbosity":"low"});
+        body["previous_response_id"] = "resp_previous".into();
+        body["generate"] = false.into();
+        let mut frame = project(
+            &NativeSession::new(&provider(), BodyOperation::WebSocket),
+            body,
+        );
+        frame["type"] = "response.create".into();
+        assert_eq!(
+            wire_keys(&frame),
+            [
+                "type",
+                "model",
+                "stream",
+                "service_tier",
+                "previous_response_id",
+                "input",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+                "reasoning",
+                "store",
+                "include",
+                "prompt_cache_key",
+                "text",
+                "generate",
+                "client_metadata",
+                "access_programs",
+            ]
+        );
+
+        frame["instructions"] = "unprojected".into();
+        assert!(serde_json::to_string(&WireBody(&frame)).is_err());
+    }
+
+    #[test]
+    fn non_lite_turn_keeps_top_level_tools_but_moves_instructions() {
+        let session = NativeSession::new(&provider(), BodyOperation::Http);
+        let body = project(&session, turn_body());
+        assert_eq!(body["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["reasoning"], json!({"effort":"low"}));
+        assert!(body.get("instructions").is_none());
+        let instructions = &body["input"][0];
+        assert_eq!(instructions["role"], "developer");
+        // Request-time prefix: UUIDv5 in the thread namespace, without the
+        // history-only turn and time stamps or Lite-only attribution. The
+        // expected ID is an independent Python `uuid.uuid5` computation.
+        assert_eq!(
+            body["client_metadata"]["thread_id"],
+            "cc39dd30-b6dd-72f8-b778-d6c48c3af5fa"
+        );
+        assert_eq!(
+            instructions["id"],
+            "msg_4c3b149e-bd99-5f82-9911-26ce2fcc49d7"
+        );
+        assert_eq!(
+            instructions["internal_chat_message_metadata_passthrough"],
+            json!({"content_item_kinds": ["model.base_instructions"]})
+        );
+        assert_eq!(body["input"][1]["role"], "user");
+    }
+
+    #[test]
+    fn model_defaults_fill_only_unset_controls() {
+        let provider = lite_provider();
+        let session = NativeSession::new(&provider, BodyOperation::Http);
+        let body = project(
+            &session,
+            json!({"model":"gpt-6-astra", "input":"hello", "text":{"verbosity":"high"}}),
+        );
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["text"]["verbosity"], "high");
+        assert_eq!(
+            body["input"],
+            json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}])
+        );
+
+        let mut unsupported = provider.clone();
+        unsupported
+            .model_metadata
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert("support_verbosity".into(), json!(false));
+        let session = NativeSession::new(&unsupported, BodyOperation::Http);
+        let body = project(
+            &session,
+            json!({"model":"gpt-6-astra", "input":[], "text":{"verbosity":"high"}}),
+        );
+        assert!(body.get("text").is_none());
+
+        // Auxiliary constructors own their controls and keep the public wire.
+        let session = NativeSession::new(&provider, BodyOperation::Image);
+        let body = project(
+            &session,
+            json!({"model":"gpt-6-astra", "input":[], "tools":[{"type":"image_generation"}],
+                "include":[]}),
+        );
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("text").is_none());
+        assert!(body.get("access_programs").is_none());
+        assert_eq!(body["include"], json!([]));
+        assert_eq!(body["tools"][0]["type"], "image_generation");
+    }
+
+    #[test]
+    fn turn_metadata_follows_the_official_snapshot() {
+        let session = NativeSession::new(&lite_provider(), BodyOperation::Http);
+        let body = project(&session, turn_body());
+        let metadata = &body["client_metadata"];
+        let raw = metadata["x-codex-turn-metadata"].as_str().unwrap();
+        let turn = turn_metadata(metadata);
+        // Header and client_metadata carry the same string, so field order is
+        // part of the wire contract (official CodexTurnMetadataPayload).
+        let order = [
+            "session_id",
+            "thread_id",
+            "agent_name",
+            "turn_id",
+            "window_id",
+            "window_number",
+            "context_window_id",
+            "request_kind",
+            "history_initialization",
+            "root_turn_id",
+            "thread_source",
+            "turn_trigger",
+            "sandbox",
+            "sandbox_mode",
+            "auto_review_enabled",
+            "node_repl_auto_review_required",
+            "node_repl_disabled",
+            "turn_started_at_unix_ms",
+            "analytics_enabled",
+            "model",
+            "reasoning_effort",
+        ];
+        let positions: Vec<_> = order
+            .iter()
+            .map(|key| raw.find(&format!("\"{key}\":")).unwrap())
+            .collect();
+        assert!(positions.is_sorted(), "{raw}");
+        assert_eq!(turn.as_object().unwrap().len(), order.len());
+        assert_eq!(turn["agent_name"], "/root");
+        assert_eq!(turn["request_kind"], "turn");
+        assert_eq!(turn["thread_source"], "user");
+        assert_eq!(turn["turn_trigger"], "user");
+        assert_eq!(turn["root_turn_id"], turn["turn_id"]);
+        assert_eq!(turn["analytics_enabled"], false);
+        assert_eq!(turn["auto_review_enabled"], false);
+        assert_eq!(turn["node_repl_auto_review_required"], true);
+        assert_eq!(turn["model"], "gpt-6-astra");
+        assert_eq!(turn["reasoning_effort"], "low");
+        assert_eq!(metadata["root_turn_id"], turn["turn_id"]);
+        assert_eq!(metadata["mcp_attribution"], r#"{"status":"none"}"#);
+        assert_eq!(metadata["guardian_credits_requested"], "true");
+    }
+
+    #[test]
+    fn compaction_reports_a_standalone_remote_compaction() {
+        let session = NativeSession::new(&lite_provider(), BodyOperation::Compaction);
+        let body = project(&session, turn_body());
+        let turn = turn_metadata(&body["client_metadata"]);
+        assert_eq!(turn["request_kind"], "compaction");
+        assert_eq!(
+            turn["compaction"],
+            json!({"trigger":"manual","reason":"user_requested",
+                "implementation":"responses_compaction_v2","phase":"standalone_turn",
+                "strategy":"memento"})
+        );
+        for absent in ["turn_trigger", "model", "reasoning_effort"] {
+            assert!(turn.get(absent).is_none(), "{absent}");
+        }
+        assert!(body.get("access_programs").is_none());
+        assert_eq!(body["input"][0]["type"], "additional_tools");
+    }
+
     #[test]
     fn scoped_parent_thread_and_fork_lineage_match_previous_native_thread_identity() {
         let mut provider = provider();
@@ -1117,58 +2004,78 @@ mod tests {
             "context_window_transport_affinity".into(),
             "scoped-window".into(),
         );
-        let child = NativeSession::new(&provider);
+        let child = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
         let mut earlier_parent = provider.clone();
         earlier_parent
             .operation_metadata
             .insert("transport_affinity".into(), "scoped-parent".into());
-        let parent = NativeSession::new(&earlier_parent);
-        assert_eq!(
-            child.metadata["x-codex-parent-thread-id"],
-            parent.metadata["thread_id"]
-        );
-        let turn: Value =
-            serde_json::from_str(child.metadata["x-codex-turn-metadata"].as_str().unwrap())
-                .unwrap();
-        assert_eq!(turn["parent_thread_id"], parent.metadata["thread_id"]);
+        let parent = client_metadata(&NativeSession::new(&earlier_parent, BodyOperation::Http));
+        assert_eq!(child["x-codex-parent-thread-id"], parent["thread_id"]);
+        let turn = turn_metadata(&child);
+        assert_eq!(turn["parent_thread_id"], parent["thread_id"]);
         assert_eq!(
             turn["forked_from_thread_id"],
             native_uuid("openai-codex", "scoped-fork")
         );
-        assert!(turn.get("root_turn_id").is_none());
+        assert_eq!(turn["history_initialization"], "cold_fork");
+        assert_eq!(turn["thread_source"], "subagent");
+        for absent in ["root_turn_id", "agent_name", "turn_trigger"] {
+            assert!(turn.get(absent).is_none(), "{absent}");
+        }
+        assert!(child.get("root_turn_id").is_none());
         assert!(uuid::Uuid::parse_str(turn["context_window_id"].as_str().unwrap()).is_ok());
-        assert!(child.metadata.get("forked_from_thread_id").is_none());
-        assert!(child.metadata.get("context_window_id").is_none());
+        assert!(child.get("forked_from_thread_id").is_none());
+        assert!(child.get("context_window_id").is_none());
         provider.operation_metadata.insert(
             "parent_thread_transport_affinity".into(),
             "other-principal-target-parent".into(),
         );
-        let other = NativeSession::new(&provider);
+        let other = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
         assert_ne!(
-            other.metadata["x-codex-parent-thread-id"],
-            child.metadata["x-codex-parent-thread-id"]
+            other["x-codex-parent-thread-id"],
+            child["x-codex-parent-thread-id"]
         );
     }
 
     #[test]
     fn native_identity_is_shared_and_scoped_not_raw_client_identity() {
-        let provider = provider();
-        let session = NativeSession::new(&provider);
-        let mut body = json!({"model":"gpt-6-astra", "client_metadata":{"session_id":"spoofed"}});
-        session.apply_body(&mut body);
+        let provider = lite_provider();
+        let session = NativeSession::new(&provider, BodyOperation::Http);
+        let body = project(
+            &session,
+            json!({"model":"gpt-6-astra", "input":[], "client_metadata":{"session_id":"spoofed"}}),
+        );
         let mut headers = vec![
             ("session_id".into(), "codec-raw-session".into()),
             ("conversation_id".into(), "codec-raw-conversation".into()),
             ("x-unapproved".into(), "not-native".into()),
+            ("accept".into(), "text/event-stream".into()),
+            ("content-type".into(), "application/json".into()),
         ];
-        append_runtime_headers(
-            &provider,
-            &body,
-            &session,
-            BodyOperation::Http,
-            &mut headers,
-        )
-        .unwrap();
+        append_runtime_headers(&provider, &body, &session, &mut headers).unwrap();
+        // Official 0.167.0 HTTP capture order.
+        assert_eq!(
+            headers
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "version",
+                "x-codex-beta-features",
+                "x-codex-window-id",
+                "x-codex-turn-metadata",
+                "x-openai-internal-codex-responses-lite",
+                "x-codex-routing-hint",
+                "x-client-request-id",
+                "session-id",
+                "thread-id",
+                "accept",
+                "content-type",
+                "authorization",
+                "originator",
+                "user-agent",
+            ]
+        );
         let headers: BTreeMap<_, _> = headers.into_iter().collect();
         for (header, key) in [
             ("session-id", "session_id"),
@@ -1191,14 +2098,15 @@ mod tests {
             headers["x-codex-window-id"],
             format!("{}:0", headers["thread-id"])
         );
-        assert!(!headers.contains_key("x-codex-beta-features"));
-        assert!(!headers.contains_key("x-codex-turn-state"));
-        assert!(!headers.contains_key("x-openai-subagent"));
-        assert!(!headers.contains_key("session_id"));
-        assert!(!headers.contains_key("conversation_id"));
-        assert!(!headers.contains_key("x-unapproved"));
-        assert!(!headers.contains_key("openai-beta"));
-        let turn: Value = serde_json::from_str(&headers["x-codex-turn-metadata"]).unwrap();
+        assert_eq!(headers["x-codex-beta-features"], "remote_compaction_v2");
+        assert_eq!(headers["version"], "0.167.0");
+        assert_eq!(headers["originator"], "codex-tui");
+        assert_eq!(
+            headers["user-agent"],
+            "codex-tui/0.167.0 (Linux Unknown; x86_64) unknown (codex-tui; 0.167.0)"
+        );
+        assert_eq!(headers["x-codex-routing-hint"], "model=gpt-6-astra");
+        let turn = turn_metadata(&body["client_metadata"]);
         assert_eq!(turn["thread_id"], body["client_metadata"]["thread_id"]);
         assert_eq!(turn["session_id"], body["client_metadata"]["session_id"]);
         assert_ne!(turn["turn_id"], "canonical-turn");
@@ -1210,6 +2118,17 @@ mod tests {
         );
         assert!(turn.get("custom_hint").is_none());
         assert!(body["client_metadata"].get("custom_hint").is_none());
+
+        // A pooled socket spans turns: the handshake carries neither the
+        // per-turn snapshot nor the HTTP-only Lite header.
+        let session = NativeSession::new(&provider, BodyOperation::WebSocket);
+        let body = project(&session, json!({"model":"gpt-6-astra", "input":[]}));
+        let mut headers = Vec::new();
+        append_runtime_headers(&provider, &body, &session, &mut headers).unwrap();
+        let headers: BTreeMap<_, _> = headers.into_iter().collect();
+        assert!(!headers.contains_key("x-codex-turn-metadata"));
+        assert!(!headers.contains_key("x-openai-internal-codex-responses-lite"));
+        assert_eq!(headers["x-codex-beta-features"], "remote_compaction_v2");
     }
 
     #[test]
@@ -1222,33 +2141,32 @@ mod tests {
         provider
             .operation_metadata
             .insert("context_window_transport_affinity".into(), source.into());
-        let first = NativeSession::new(&provider);
-        let reloaded = NativeSession::new(&provider.clone());
+        let first = NativeSession::new(&provider, BodyOperation::Http);
+        let first_metadata = client_metadata(&first);
+        let reloaded = client_metadata(&NativeSession::new(&provider.clone(), BodyOperation::Http));
         assert_eq!(
-            first.metadata["thread_id"],
+            first_metadata["thread_id"],
             "5d42eca3-00ce-7fd9-879a-2f189010d915"
         );
-        assert_eq!(first.metadata["thread_id"], reloaded.metadata["thread_id"]);
-        assert_ne!(first.metadata["turn_id"], reloaded.metadata["turn_id"]);
-        let turn: Value =
-            serde_json::from_str(first.metadata["x-codex-turn-metadata"].as_str().unwrap())
-                .unwrap();
+        assert_eq!(first_metadata["thread_id"], reloaded["thread_id"]);
+        assert_ne!(first_metadata["turn_id"], reloaded["turn_id"]);
+        let turn = turn_metadata(&first_metadata);
         assert_eq!(
             turn["context_window_id"],
             "8d48e1ac-0b84-75f1-b2c8-f17313c5b686"
         );
         assert!(turn.get("parent_turn_id").is_none());
-        assert!(turn.get("root_turn_id").is_none());
         for operation in [
             BodyOperation::Http,
             BodyOperation::WebSocket,
+            BodyOperation::Compaction,
             BodyOperation::Search,
             BodyOperation::Image,
         ] {
-            let mut body = json!({"model":"gpt-6-astra"});
-            first.apply_body(&mut body);
+            let session = NativeSession::new(&provider, operation);
+            let body = project(&session, json!({"model":"gpt-6-astra", "input":[]}));
             let mut headers = provider.client_headers.clone();
-            append_runtime_headers(&provider, &body, &first, operation, &mut headers).unwrap();
+            append_runtime_headers(&provider, &body, &session, &mut headers).unwrap();
             let headers: BTreeMap<_, _> = headers.into_iter().collect();
             assert_eq!(headers["thread-id"], "5d42eca3-00ce-7fd9-879a-2f189010d915");
             assert_eq!(headers["x-client-request-id"], headers["thread-id"]);
@@ -1263,8 +2181,8 @@ mod tests {
                 .operation_metadata
                 .insert("transport_affinity".into(), other.into());
             assert_ne!(
-                NativeSession::new(&provider).metadata["thread_id"],
-                first.metadata["thread_id"]
+                client_metadata(&NativeSession::new(&provider, BodyOperation::Http))["thread_id"],
+                first_metadata["thread_id"]
             );
         }
         let prefix = "会话😀".repeat(4096);
@@ -1276,30 +2194,27 @@ mod tests {
             .operation_metadata
             .insert("transport_affinity".into(), "".into());
         assert_ne!(
-            NativeSession::new(&provider).metadata["thread_id"],
-            NativeSession::new(&provider).metadata["thread_id"]
+            client_metadata(&NativeSession::new(&provider, BodyOperation::Http))["thread_id"],
+            client_metadata(&NativeSession::new(&provider, BodyOperation::Http))["thread_id"]
         );
     }
 
     #[test]
     fn scoped_sessions_are_stable_but_native_turns_are_distinct() {
         let mut provider = provider();
-        let first = NativeSession::new(&provider);
-        let second = NativeSession::new(&provider);
-        assert_eq!(first.metadata["session_id"], second.metadata["session_id"]);
-        assert_eq!(first.metadata["thread_id"], second.metadata["thread_id"]);
-        assert_ne!(first.metadata["turn_id"], second.metadata["turn_id"]);
+        let first = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
+        let second = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
+        assert_eq!(first["session_id"], second["session_id"]);
+        assert_eq!(first["thread_id"], second["thread_id"]);
+        assert_ne!(first["turn_id"], second["turn_id"]);
         provider
             .operation_metadata
             .insert("transport_affinity".into(), "other-principal-target".into());
-        let other = NativeSession::new(&provider);
-        assert_ne!(first.metadata["session_id"], other.metadata["session_id"]);
+        let other = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
+        assert_ne!(first["session_id"], other["session_id"]);
         provider.operation_metadata.remove("transport_affinity");
-        let isolated = NativeSession::new(&provider);
-        let another = NativeSession::new(&provider);
-        assert_ne!(
-            isolated.metadata["session_id"],
-            another.metadata["session_id"]
-        );
+        let isolated = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
+        let another = client_metadata(&NativeSession::new(&provider, BodyOperation::Http));
+        assert_ne!(isolated["session_id"], another["session_id"]);
     }
 }

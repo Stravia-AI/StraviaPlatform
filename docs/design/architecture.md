@@ -506,7 +506,7 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并计一次
 
 HTTP ingress 与内部 Model Turn 的 extra-header 入口都消费会话／关联 header 别名。`x-session-id`、`session-id`、`session_id` 等按固定优先级归一到 `session.id`；匹配的非空 header 可以覆盖 body 身份。`x-client-request-id`／`x-request-id` 只写 `session.request_id`。这些别名与 Codex 专有 headers 从通用转发集合移除，不能直接送到任意上游；认证、Cookie 和客户端网络身份仍由原有 header 安全策略隔离。
 
-Canonical 请求不保存供应商原生上下文。Model Turn 只把统一 session 身份按 Principal、Target 与根请求作用域派生为 `transport_affinity` 等 operation metadata，插件从这些宿主派生值生成原生会话标识，不读取客户端原始 ID。官方工具私有身份由插件自行维护：Codex `x-codex-installation-id` 是按凭据持久化在插件私有状态中的 UUID，`x-codex-turn-state` 只取自同一 turn 的上游响应头；客户端的 `x-codex-beta-features`、`x-openai-subagent` 与 `x-codex-turn-metadata` 不转发。
+Canonical 请求不保存供应商原生上下文。Model Turn 只把统一 session 身份按 Principal、Target 与根请求作用域派生为 `transport_affinity` 等 operation metadata，插件从这些宿主派生值生成原生会话标识，不读取客户端原始 ID。官方工具私有身份由插件自行维护：Codex installation ID 是按凭据持久化在插件私有状态中的 UUID，只写入请求 body 的 `client_metadata` 与 turn metadata，`x-codex-turn-state` 只取自同一 turn 的上游响应头；客户端的 `x-codex-beta-features`、`x-openai-subagent` 与 `x-codex-turn-metadata` 不转发。
 
 目标 body、会话 headers 及其参数型嵌套对象采用正向白名单，由所属 codec／插件从 canonical 控制重新投影。标准 API 以对应官方协议为边界；OAuth／订阅插件以对应官方工具实际会产出的字段为边界，不能把公共 API 的字段全集当作私有端点支持范围。字段清单依据官方源码、schema 和实际请求核对，已确认的官方字段必须完整建模，新增支持须显式更新 canonical 字段及目标投影。白名单外参数透明丢弃，不转发、不报参数错误，也不触发额外重试；官方声明为任意业务映射的 metadata、工具 schema、工具入参与结果中的对象键不是请求控制，不能按参数清单递归删除。CLI 身份 metadata 等结构化控制不属于任意业务映射，其成员同样受白名单约束。
 
