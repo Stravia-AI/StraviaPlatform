@@ -24,6 +24,10 @@ let
     url = "https://static.crates.io/crates/rustls/rustls-0.23.46.crate";
     hash = "sha256-SOE72MDpNlxDz6XJ6PmtSdPIREkmyarIGeDk3FA8j98=";
   };
+  ramaHttpCoreCrate = fetchurl {
+    url = "https://static.crates.io/crates/rama-http-core/rama-http-core-0.4.0.crate";
+    hash = "sha256-vYMlYwApeXVOYZU3oNWGGx8cjftQW3HDFMzXgbJpcyQ=";
+  };
 
   # 用白名单界定源码，避免把开发数据库、凭据和已有产物送入 store。
   cleanSource =
@@ -182,7 +186,9 @@ stdenv.mkDerivation {
     export CARGO_BUILD_JOBS="$NIX_BUILD_CORES"
     mkdir -p "$CARGO_HOME" frontend/stravia-webui/dist
     cp -r ${webui}/. frontend/stravia-webui/dist/
-    python3 patches/cargo/prepare.py --offline --crate-file ${rustlsCrate}
+    python3 patches/cargo/prepare.py --offline \
+      --crate-file rustls=${rustlsCrate} \
+      --crate-file rama-http-core=${ramaHttpCoreCrate}
     cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors
     cargo build --locked --offline --release -p stravia-server --bin stravia-server
     runHook postBuild

@@ -187,7 +187,7 @@ Rust 工具链以 [`rust-toolchain.toml`](rust-toolchain.toml) 为准 · Bun `1.
 
 项目的 JavaScript 开发、构建与测试命令统一使用 Bun。Rust 和 Python 测试保留各自的原生运行器。
 
-直接运行 Cargo 或在 IDE 中打开工作区前，先运行 `task prepare:crates`（需要 Python 3 和 Git）。该命令下载并校验固定版本的 rustls crate，然后应用仓库补丁；Task 的 Rust 命令会自动准备。离线时可运行 `python3 patches/cargo/prepare.py --offline --crate-file /path/to/rustls-0.23.46.crate`。如果 Cargo 提示缺少补丁 crate，请重新运行 `task prepare:crates`。准备好的 crate 目录不可变：更改归档、补丁或准备脚本时，须同时更新 `patches/cargo/crates.json` 的 `directory`、Cargo 补丁路径和工作区排除项，以及 Task 戳文件路径。
+直接运行 Cargo 或在 IDE 中打开工作区前，先运行 `task prepare:crates`（需要 Python 3 和 Git）。该命令下载并校验固定版本的 rustls 和 rama-http-core crate，然后应用仓库补丁；Task 的 Rust 命令会自动准备。离线时可运行 `python3 patches/cargo/prepare.py --offline --crate-file rustls=/path/to/rustls-0.23.46.crate --crate-file rama-http-core=/path/to/rama-http-core-0.4.0.crate`（也可从 Cargo 缓存中获取任一经过校验的归档）。如果 Cargo 提示缺少补丁 crate，请重新运行 `task prepare:crates`。准备好的 crate 目录不可变：更改归档、补丁或准备脚本时，须同时更新 `patches/cargo/crates.json` 的 `directory`、Cargo 补丁路径和工作区排除项，以及 Task 戳文件路径。
 
 | 命令                     | 用途                                                 |
 | ------------------------ | ---------------------------------------------------- |
