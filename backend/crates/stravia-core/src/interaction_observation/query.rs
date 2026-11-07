@@ -3034,37 +3034,15 @@ impl ObservationStore {
         &self,
         ids: &[i64],
     ) -> anyhow::Result<Vec<VisibleContent>> {
-        let mut visible = Vec::new();
-        for chunk in ids.chunks(IN_LIST_BATCH) {
-            match self {
-                Self::Sqlite(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Sqlite>::new(VISIBLE_CONTENT_HEAD);
-                    let mut separated = query.separated(",");
-                    for id in chunk {
-                        separated.push_bind(*id);
-                    }
-                    separated.push_unseparated(VISIBLE_CONTENT_TAIL);
-                    visible.extend(query.build_query_scalar::<i64>().fetch_all(pool).await?);
-                }
-                Self::Postgres(pool, _) => {
-                    let mut query = QueryBuilder::<sqlx::Postgres>::new(VISIBLE_CONTENT_HEAD);
-                    let mut separated = query.separated(",");
-                    for id in chunk {
-                        separated.push_bind(*id);
-                    }
-                    separated.push_unseparated(VISIBLE_CONTENT_TAIL);
-                    visible.extend(query.build_query_scalar::<i64>().fetch_all(pool).await?);
-                }
-            }
-        }
         let bodies = match self {
             Self::Sqlite(pool, _) => {
                 let mut connection = pool.acquire().await?;
-                crate::content_store::sqlite::read_any_scope(&mut connection, &visible).await?
+                crate::content_store::sqlite::read_observation_visible(&mut connection, ids).await?
             }
             Self::Postgres(pool, _) => {
                 let mut connection = pool.acquire().await?;
-                crate::content_store::postgres::read_any_scope(&mut connection, &visible).await?
+                crate::content_store::postgres::read_observation_visible(&mut connection, ids)
+                    .await?
             }
         };
         let mut by_id = std::collections::HashMap::with_capacity(bodies.len());
@@ -3091,11 +3069,6 @@ impl ObservationStore {
             .collect())
     }
 }
-
-/// 可见性查询：给定的内容 id 中被可见 Interaction 的 Observation 事件或工具结果引用者。
-const VISIBLE_CONTENT_HEAD: &str = "SELECT c.id FROM contents c WHERE c.id IN (";
-const VISIBLE_CONTENT_TAIL: &str = ") AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=c.id AND e.interaction_id IS NOT NULL) \
-     OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=c.id AND e.interaction_id IS NOT NULL))";
 
 struct VisibleBlockRow {
     sequence: i64,

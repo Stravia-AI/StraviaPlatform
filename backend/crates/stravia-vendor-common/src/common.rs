@@ -117,7 +117,9 @@ pub fn apply_anthropic_output_limit(provider: &ProviderSnapshot, request: &mut A
 /// Converts HeaderMap iteration order and lowercase names to ordered fields.
 /// Plugins requiring exact spelling and interleaving should construct Fields
 /// themselves after the codec has produced its headers.
-pub fn header_pairs(headers: &http::HeaderMap) -> Result<stravia_vendor_sdk::net::Fields, PluginError> {
+pub fn header_pairs(
+    headers: &http::HeaderMap,
+) -> Result<stravia_vendor_sdk::net::Fields, PluginError> {
     let mut fields = stravia_vendor_sdk::net::Fields::new();
     for (name, value) in headers {
         fields.append(name.as_str(), value.as_bytes());
@@ -376,6 +378,15 @@ pub enum HttpResponseMode {
     Streaming,
 }
 
+type ToolCallback<'a> = &'a mut dyn FnMut(&str) -> Result<(), PluginError>;
+type EventObserver<'a> = &'a mut dyn FnMut(&serde_json::Value) -> Result<(), PluginError>;
+
+#[derive(Default)]
+struct ResponseToolHooks<'a> {
+    rename_tool: Option<fn(&str) -> Option<String>>,
+    callback: Option<ToolCallback<'a>>,
+}
+
 pub fn decode_ai_response_with_error_classifier(
     host: &GuestHost,
     protocol: &str,
@@ -390,7 +401,7 @@ pub fn decode_ai_response_with_error_classifier(
         mode,
         classify_error,
         false,
-        None,
+        ResponseToolHooks::default(),
     )
 }
 
@@ -412,7 +423,38 @@ pub fn decode_ai_response_renaming_tools(
         HttpResponseMode::HeaderDetected,
         classify_error,
         false,
-        Some(rename_tool),
+        ResponseToolHooks {
+            rename_tool: Some(rename_tool),
+            callback: None,
+        },
+    )
+}
+
+/// Decode with a fallible hook before a named tool start or completed call
+/// becomes visible. The hook receives the renamed tool name. It may be called more than once for
+/// a call represented by multiple completion events and must therefore be
+/// idempotent. An error aborts decoding before the corresponding emission.
+/// Guest host operations are synchronous at this API boundary, including calls
+/// that suspend while the host performs asynchronous work.
+pub fn decode_ai_response_renaming_tools_with_callback(
+    host: &GuestHost,
+    protocol: &str,
+    response: HttpResponse,
+    classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
+    rename_tool: fn(&str) -> Option<String>,
+    callback: &mut dyn FnMut(&str) -> Result<(), PluginError>,
+) -> Result<AiResponse, PluginError> {
+    decode_ai_response_with_error_policy(
+        host,
+        protocol,
+        response,
+        HttpResponseMode::HeaderDetected,
+        classify_error,
+        false,
+        ResponseToolHooks {
+            rename_tool: Some(rename_tool),
+            callback: Some(callback),
+        },
     )
 }
 
@@ -449,7 +491,15 @@ pub fn decode_ai_response_preserving_upstream_errors(
     mode: HttpResponseMode,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
 ) -> Result<AiResponse, PluginError> {
-    decode_ai_response_with_error_policy(host, protocol, response, mode, classify_error, true, None)
+    decode_ai_response_with_error_policy(
+        host,
+        protocol,
+        response,
+        mode,
+        classify_error,
+        true,
+        ResponseToolHooks::default(),
+    )
 }
 
 fn decode_ai_response_with_error_policy(
@@ -459,8 +509,12 @@ fn decode_ai_response_with_error_policy(
     mode: HttpResponseMode,
     classify_error: fn(&serde_json::Value, bool) -> Option<PluginError>,
     preserve_upstream_errors: bool,
-    rename_tool: Option<fn(&str) -> Option<String>>,
+    tool_hooks: ResponseToolHooks<'_>,
 ) -> Result<AiResponse, PluginError> {
+    let ResponseToolHooks {
+        rename_tool,
+        mut callback,
+    } = tool_hooks;
     let status = response.status()?;
     let headers = response.headers()?;
     if !(200..300).contains(&status) {
@@ -520,6 +574,7 @@ fn decode_ai_response_with_error_policy(
                 rename_item_tools(item, rename);
             }
         }
+        notify_item_tools(&decoded.items, &mut callback)?;
         return Ok(decoded);
     }
 
@@ -528,6 +583,7 @@ fn decode_ai_response_with_error_policy(
         .map_err(map_response_transform_error)?;
     let mut accumulator = StreamResponseAccumulator::default();
     let mut saw_response_event = false;
+    let mut observed_tool_starts = std::collections::BTreeSet::new();
     while let Some(chunk) = response.read_body()? {
         let mut deltas = decoder
             .decode_chunk(&chunk)
@@ -546,7 +602,14 @@ fn decode_ai_response_with_error_policy(
             )?;
         }
         saw_response_event |= deltas.iter().any(is_response_event);
-        emit_deltas_with_policy(host, &mut accumulator, &deltas, preserve_upstream_errors)?;
+        emit_deltas_with_callback(
+            host,
+            &mut accumulator,
+            &deltas,
+            preserve_upstream_errors,
+            &mut callback,
+            &mut observed_tool_starts,
+        )?;
     }
     let mut deltas = decoder.finish().map_err(map_response_transform_error)?;
     if let Some(rename) = rename_tool {
@@ -562,8 +625,16 @@ fn decode_ai_response_with_error_policy(
             classify_error,
         )?;
     }
-    emit_deltas_with_policy(host, &mut accumulator, &deltas, preserve_upstream_errors)?;
+    emit_deltas_with_callback(
+        host,
+        &mut accumulator,
+        &deltas,
+        preserve_upstream_errors,
+        &mut callback,
+        &mut observed_tool_starts,
+    )?;
     let complete = accumulator.into_ai_response();
+    notify_item_tools(&complete.items, &mut callback)?;
     host.emit_completed(&complete)?;
     Ok(complete)
 }
@@ -571,6 +642,8 @@ fn decode_ai_response_with_error_policy(
 /// Decode Open Responses-style WebSocket JSON events through the same shared
 /// stream codec. Each text frame is wrapped as one SSE event solely for the
 /// codec parser; canonical deltas are still emitted immediately.
+/// The observer sees the already parsed original event before normalization or
+/// emission. Its failure aborts the stream; observing never consumes an event.
 pub fn decode_ai_response_websocket_with_error_classifier(
     host: &GuestHost,
     protocol: &str,
@@ -578,6 +651,7 @@ pub fn decode_ai_response_websocket_with_error_classifier(
     preserve_upstream_errors: bool,
     continuation_requested: bool,
     classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
+    observe_event: Option<EventObserver<'_>>,
 ) -> Result<AiResponse, PluginError> {
     decode_normalized_websocket(
         host,
@@ -586,6 +660,7 @@ pub fn decode_ai_response_websocket_with_error_classifier(
         preserve_upstream_errors,
         continuation_requested,
         classify_error,
+        observe_event,
     )
 }
 
@@ -596,6 +671,7 @@ fn decode_normalized_websocket(
     preserve_upstream_errors: bool,
     continuation_requested: bool,
     classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
+    mut observe_event: Option<EventObserver<'_>>,
 ) -> Result<AiResponse, PluginError> {
     let mut reusable = false;
     let result = (|| {
@@ -632,6 +708,9 @@ fn decode_normalized_websocket(
                     format!("inference WebSocket returned invalid JSON: {error}"),
                 )
             })?;
+            if let Some(observer) = observe_event.as_deref_mut() {
+                observer(&value)?;
+            }
             let original_type = value
                 .get("type")
                 .and_then(serde_json::Value::as_str)
@@ -826,11 +905,44 @@ pub fn emit_deltas(
     emit_deltas_with_policy(host, accumulator, deltas, false)
 }
 
+fn notify_item_tools(
+    items: &[AiItem],
+    callback: &mut Option<ToolCallback<'_>>,
+) -> Result<(), PluginError> {
+    if let Some(callback) = callback.as_mut() {
+        for call in items
+            .iter()
+            .flat_map(|item| item.tool_calls.iter().flatten())
+        {
+            callback(&call.name)?;
+        }
+    }
+    Ok(())
+}
+
 fn emit_deltas_with_policy(
     host: &GuestHost,
     accumulator: &mut StreamResponseAccumulator,
     deltas: &[AiStreamDelta],
     preserve_upstream_errors: bool,
+) -> Result<(), PluginError> {
+    emit_deltas_with_callback(
+        host,
+        accumulator,
+        deltas,
+        preserve_upstream_errors,
+        &mut None,
+        &mut std::collections::BTreeSet::new(),
+    )
+}
+
+fn emit_deltas_with_callback(
+    host: &GuestHost,
+    accumulator: &mut StreamResponseAccumulator,
+    deltas: &[AiStreamDelta],
+    preserve_upstream_errors: bool,
+    callback: &mut Option<ToolCallback<'_>>,
+    observed_tool_starts: &mut std::collections::BTreeSet<usize>,
 ) -> Result<(), PluginError> {
     const MESSAGE: &str = "upstream inference stream ended with an error";
     let terminal = deltas.iter().find_map(|delta| match delta {
@@ -843,6 +955,37 @@ fn emit_deltas_with_policy(
         _ => None,
     });
     for delta in deltas {
+        match delta {
+            AiStreamDelta::ToolCallStart { index, name, .. } => {
+                if let Some(callback) = callback.as_mut() {
+                    if name.is_empty() {
+                        return Err(model_error(
+                            AiErrorKind::ServerError,
+                            "upstream tool call started without a name",
+                        ));
+                    }
+                    callback(name)?;
+                    observed_tool_starts.insert(*index);
+                }
+            }
+            AiStreamDelta::ToolCallDelta { index, .. }
+                if callback.is_some() && !observed_tool_starts.contains(index) =>
+            {
+                return Err(model_error(
+                    AiErrorKind::ServerError,
+                    "upstream tool arguments preceded their named start",
+                ));
+            }
+            AiStreamDelta::ToolCallComplete { tool_call, .. } => {
+                if let Some(callback) = callback.as_mut() {
+                    callback(&tool_call.name)?;
+                }
+            }
+            AiStreamDelta::ItemDone { item, .. } => {
+                notify_item_tools(std::slice::from_ref(item), callback)?;
+            }
+            _ => {}
+        }
         if let AiStreamDelta::StreamError { error } = delta {
             if preserve_upstream_errors {
                 host.emit_delta(delta)?;
@@ -910,7 +1053,11 @@ pub fn anthropic_protected_reasoning_message(message: &str) -> bool {
 
 /// Token endpoints only prove revoked authorization with an explicit OAuth
 /// rejection or HTTP 401. Transient statuses always retain their upstream facts.
-pub fn oauth_token_error(status: u16, headers: &stravia_vendor_sdk::net::Fields, body: &[u8]) -> PluginError {
+pub fn oauth_token_error(
+    status: u16,
+    headers: &stravia_vendor_sdk::net::Fields,
+    body: &[u8],
+) -> PluginError {
     let mut error = upstream_error(status, headers, body);
     let value = serde_json::from_slice::<serde_json::Value>(body).unwrap_or_default();
     let permanent = (400..500).contains(&status)
@@ -931,7 +1078,11 @@ pub fn oauth_token_error(status: u16, headers: &stravia_vendor_sdk::net::Fields,
     error
 }
 
-pub fn upstream_error(status: u16, headers: &stravia_vendor_sdk::net::Fields, body: &[u8]) -> PluginError {
+pub fn upstream_error(
+    status: u16,
+    headers: &stravia_vendor_sdk::net::Fields,
+    body: &[u8],
+) -> PluginError {
     let value = serde_json::from_slice::<serde_json::Value>(body).unwrap_or_default();
     let message = value
         .pointer("/error/message")

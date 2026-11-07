@@ -262,8 +262,8 @@ world vendor {
     import wasi:clocks/wall-clock@0.2.12;
     import wasi:random/random@0.2.12;
 
-    import stravia:net/http@1.0.0;
-    import stravia:net/websocket@1.0.0;
+    import stravia:net/http@1.1.0;
+    import stravia:net/websocket@1.1.0;
     import host;
 
     use types.{canonical-payload, operation-kind, operation-input, plugin-error, provider-snapshot};

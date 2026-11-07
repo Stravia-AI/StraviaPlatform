@@ -2,11 +2,14 @@ use std::{collections::HashSet, time::Duration};
 
 use rama_http_types::proto::h2::{
     PseudoHeader, PseudoHeaderOrder,
-    frame::{EarlyFrame, Priority, SettingId, SettingOrder, SettingsConfig, StreamDependency, StreamId, WindowUpdate},
+    frame::{
+        EarlyFrame, Priority, SettingId, SettingOrder, SettingsConfig, StreamDependency, StreamId,
+        WindowUpdate,
+    },
 };
 
-use super::{EarlyFrameShape, Http2Shape, ShapeError};
 use super::super::transport::H2Settings;
+use super::{EarlyFrameShape, Http2Shape, ShapeError};
 
 const MAX_STREAM_ID: u32 = 0x7fff_ffff;
 
@@ -19,21 +22,60 @@ pub(super) fn resolve(shape: &Http2Shape) -> Result<H2Settings, ShapeError> {
         let mut seen = HashSet::new();
         for (name, value) in &shape.settings {
             if !seen.insert(name.as_str()) {
-                return Err(ShapeError::field("http2.settings", format!("duplicate setting: {name}")));
+                return Err(ShapeError::field(
+                    "http2.settings",
+                    format!("duplicate setting: {name}"),
+                ));
             }
             let id = match name.as_str() {
-                "HEADER_TABLE_SIZE" => { config.header_table_size = Some(*value); SettingId::HeaderTableSize }
-                "ENABLE_PUSH" if *value <= 1 => { config.enable_push = Some(*value); SettingId::EnablePush }
-                "MAX_CONCURRENT_STREAMS" => { config.max_concurrent_streams = Some(*value); SettingId::MaxConcurrentStreams }
-                "INITIAL_WINDOW_SIZE" if *value <= MAX_STREAM_ID => { config.initial_window_size = Some(*value); SettingId::InitialWindowSize }
-                "MAX_FRAME_SIZE" if (16_384..=16_777_215).contains(value) => { config.max_frame_size = Some(*value); SettingId::MaxFrameSize }
-                "MAX_HEADER_LIST_SIZE" => { config.max_header_list_size = Some(*value); SettingId::MaxHeaderListSize }
-                "ENABLE_CONNECT_PROTOCOL" if *value <= 1 => { config.enable_connect_protocol = Some(*value); SettingId::EnableConnectProtocol }
-                "NO_RFC7540_PRIORITIES" if *value <= 1 => { config.no_rfc7540_priorities = Some(*value); SettingId::NoRfc7540Priorities }
-                "ENABLE_PUSH" | "INITIAL_WINDOW_SIZE" | "MAX_FRAME_SIZE" | "ENABLE_CONNECT_PROTOCOL" | "NO_RFC7540_PRIORITIES" => {
-                    return Err(ShapeError::field("http2.settings", format!("invalid value {value} for {name}")));
+                "HEADER_TABLE_SIZE" => {
+                    config.header_table_size = Some(*value);
+                    SettingId::HeaderTableSize
                 }
-                _ => return Err(ShapeError::field("http2.settings", format!("unknown setting: {name}"))),
+                "ENABLE_PUSH" if *value <= 1 => {
+                    config.enable_push = Some(*value);
+                    SettingId::EnablePush
+                }
+                "MAX_CONCURRENT_STREAMS" => {
+                    config.max_concurrent_streams = Some(*value);
+                    SettingId::MaxConcurrentStreams
+                }
+                "INITIAL_WINDOW_SIZE" if *value <= MAX_STREAM_ID => {
+                    config.initial_window_size = Some(*value);
+                    SettingId::InitialWindowSize
+                }
+                "MAX_FRAME_SIZE" if (16_384..=16_777_215).contains(value) => {
+                    config.max_frame_size = Some(*value);
+                    SettingId::MaxFrameSize
+                }
+                "MAX_HEADER_LIST_SIZE" => {
+                    config.max_header_list_size = Some(*value);
+                    SettingId::MaxHeaderListSize
+                }
+                "ENABLE_CONNECT_PROTOCOL" if *value <= 1 => {
+                    config.enable_connect_protocol = Some(*value);
+                    SettingId::EnableConnectProtocol
+                }
+                "NO_RFC7540_PRIORITIES" if *value <= 1 => {
+                    config.no_rfc7540_priorities = Some(*value);
+                    SettingId::NoRfc7540Priorities
+                }
+                "ENABLE_PUSH"
+                | "INITIAL_WINDOW_SIZE"
+                | "MAX_FRAME_SIZE"
+                | "ENABLE_CONNECT_PROTOCOL"
+                | "NO_RFC7540_PRIORITIES" => {
+                    return Err(ShapeError::field(
+                        "http2.settings",
+                        format!("invalid value {value} for {name}"),
+                    ));
+                }
+                _ => {
+                    return Err(ShapeError::field(
+                        "http2.settings",
+                        format!("unknown setting: {name}"),
+                    ));
+                }
             };
             order.push(id);
         }
@@ -51,15 +93,26 @@ pub(super) fn resolve(shape: &Http2Shape) -> Result<H2Settings, ShapeError> {
                 "s" => PseudoHeader::Scheme,
                 "a" => PseudoHeader::Authority,
                 "p" => PseudoHeader::Path,
-                _ => return Err(ShapeError::field("http2.pseudo_order", format!("unknown pseudo-header: {name}"))),
+                _ => {
+                    return Err(ShapeError::field(
+                        "http2.pseudo_order",
+                        format!("unknown pseudo-header: {name}"),
+                    ));
+                }
             };
             if !seen.insert(header) {
-                return Err(ShapeError::field("http2.pseudo_order", format!("duplicate pseudo-header: {name}")));
+                return Err(ShapeError::field(
+                    "http2.pseudo_order",
+                    format!("duplicate pseudo-header: {name}"),
+                ));
             }
             order.push(header);
         }
         if seen.len() != 4 {
-            return Err(ShapeError::field("http2.pseudo_order", "must contain m, s, a, and p exactly once"));
+            return Err(ShapeError::field(
+                "http2.pseudo_order",
+                "must contain m, s, a, and p exactly once",
+            ));
         }
         result.pseudo_header_order = Some(order);
     }
@@ -89,7 +142,10 @@ pub(super) fn resolve(shape: &Http2Shape) -> Result<H2Settings, ShapeError> {
     }
 
     if !matches!(shape.content_length.as_str(), "auto" | "omit") {
-        return Err(ShapeError::field("http2.content_length", "must be auto or omit"));
+        return Err(ShapeError::field(
+            "http2.content_length",
+            "must be auto or omit",
+        ));
     }
     result.keep_alive_interval = shape.keepalive.interval_ms.map(Duration::from_millis);
     result.keep_alive_timeout = Duration::from_millis(shape.keepalive.timeout_ms);

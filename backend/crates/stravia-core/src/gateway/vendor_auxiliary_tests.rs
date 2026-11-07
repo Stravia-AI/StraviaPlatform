@@ -28,6 +28,15 @@ use crate::auth::{
 use crate::config::GatewayConfig;
 use crate::db::models::{CreateProvider, ProviderCredentialInput, ProviderSourceInput};
 
+#[path = "vendor_antigravity_shape_acceptance_tests.rs"]
+mod antigravity_shape_acceptance_tests;
+#[path = "vendor_claude_shape_acceptance_tests.rs"]
+mod claude_shape_acceptance_tests;
+#[path = "vendor_cli_shape_acceptance_tests.rs"]
+mod cli_shape_acceptance_tests;
+#[path = "vendor_codex_shape_acceptance_tests.rs"]
+mod codex_shape_acceptance_tests;
+
 const DEEPSEEK_HOST: &str = "api.deepseek.com";
 const DEVIN_HOST: &str = "server.codeium.com";
 const DEVIN_BASE_URL: &str = "https://server.codeium.com";
@@ -112,26 +121,36 @@ struct LoopbackOnlyResolver {
     address: SocketAddr,
 }
 
-impl reqwest::dns::Resolve for LoopbackOnlyResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        if matches!(
-            name.as_str(),
-            DEEPSEEK_HOST
-                | DEVIN_HOST
-                | "oauth2.googleapis.com"
-                | "daily-cloudcode-pa.googleapis.com"
-                | "auth.openai.com"
-                | "chatgpt.com"
-        ) {
-            let addresses: reqwest::dns::Addrs = Box::new(std::iter::once(self.address));
-            Box::pin(std::future::ready(Ok(addresses)))
-        } else {
-            let error = io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("test DNS blocked undeclared host {}", name.as_str()),
-            );
-            Box::pin(std::future::ready(Err(error.into())))
-        }
+impl crate::plugin::network::transport::Resolver for LoopbackOnlyResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        _port: u16,
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async move {
+            if matches!(
+                host,
+                DEEPSEEK_HOST
+                    | DEVIN_HOST
+                    | "oauth2.googleapis.com"
+                    | "daily-cloudcode-pa.googleapis.com"
+                    | "auth.openai.com"
+                    | "chatgpt.com"
+                    | "api.anthropic.com"
+                    | "claude.ai"
+                    | "opencode.ai"
+                    | "api.commandcode.ai"
+                    | "api.x.ai"
+                    | "localhost"
+            ) {
+                Ok(vec![self.address])
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("test DNS blocked undeclared host {host}"),
+                ))
+            }
+        })
     }
 }
 
@@ -154,6 +173,9 @@ async fn local_tls_server(
             "daily-cloudcode-pa.googleapis.com",
             "auth.openai.com",
             "chatgpt.com",
+            "api.anthropic.com",
+            "claude.ai",
+            "localhost",
         ]
         .into_iter()
         .map(str::to_string)
@@ -277,31 +299,38 @@ async fn gateway_for_storage(
     storage: crate::storage::traits::DynStorage,
 ) -> anyhow::Result<(tempfile::TempDir, Gateway)> {
     let directory = tempfile::tempdir()?;
-    let mut gateway = Gateway::from_storage(
+    let gateway = Gateway::from_storage_with_vendor_network(
         GatewayConfig {
             data_dir: directory.path().to_path_buf(),
             ..Default::default()
         },
         storage,
+        local_vendor_network(server.address, &server.certificate_der)?,
     )
     .await?;
     for vendor in vendors {
         crate::plugin::test_support::install_distributed_vendor(&gateway, vendor).await?;
     }
-    let root = reqwest::tls::Certificate::from_der(&server.certificate_der)?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .https_only(true)
-        .http1_only()
-        .tls_certs_only([root])
-        .dns_resolver(LoopbackOnlyResolver {
-            address: server.address,
-        })
-        .build()?;
-    gateway.vendor_http_client = client.clone();
-    gateway.vendor_websocket_client = client;
     Ok((directory, gateway))
+}
+
+fn local_vendor_network(
+    address: SocketAddr,
+    certificate_der: &[u8],
+) -> anyhow::Result<crate::plugin::network::VendorNetworkConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(rustls::pki_types::CertificateDer::from(certificate_der))?;
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+    )
+    .build()?;
+    Ok(crate::plugin::network::VendorNetworkConfig {
+        shapes: Arc::new(
+            crate::plugin::network::shape::ShapeRegistry::builtin_with_verifier(verifier)?,
+        ),
+        resolver: Arc::new(LoopbackOnlyResolver { address }),
+    })
 }
 
 async fn create_vendor_provider(
@@ -672,11 +701,7 @@ async fn antigravity_independent_image_recovery_case(
             "content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": PNG}}]},
             "finishReason": "STOP"
         }]}});
-        LocalResponse {
-            content_type: "text/event-stream",
-            body: format!("data: {event}\n\n").into_bytes(),
-            ..LocalResponse::json(Value::Null)
-        }
+        LocalResponse::json(event)
     })
     .await?;
     // The real capability send boundary authorizes an API-key principal.
@@ -852,7 +877,7 @@ async fn antigravity_independent_image_recovery_case(
     );
     for (index, request) in images.iter().enumerate() {
         assert_eq!(request.method, "POST");
-        assert_eq!(request.path, "/v1internal:streamGenerateContent?alt=sse");
+        assert_eq!(request.path, "/v1internal:generateContent");
         assert_eq!(
             request.headers.get("authorization").map(String::as_str),
             Some(if index == 0 {
@@ -1364,6 +1389,9 @@ struct PeerRefreshObservedStorage {
 }
 
 impl crate::storage::Storage for PeerRefreshObservedStorage {
+    fn prompt_admissions(&self) -> Arc<dyn crate::storage::PromptAdmissionStore> {
+        self.inner.prompt_admissions()
+    }
     fn vendor_plugins(&self) -> &crate::plugin::PluginStore {
         self.inner.vendor_plugins()
     }
@@ -1408,7 +1436,14 @@ impl crate::storage::Storage for PeerRefreshObservedStorage {
 #[async_trait::async_trait]
 impl crate::storage::traits::OAuthCredentialStore for PeerRefreshObservedStorage {
     async fn get(&self, id: &str) -> anyhow::Result<Option<crate::db::models::OAuthCredential>> {
-        self.inner.oauth_credentials().get(id).await
+        let credential = self.inner.oauth_credentials().get(id).await?;
+        if credential
+            .as_ref()
+            .is_some_and(|credential| credential.status == "refreshing")
+        {
+            self.observed.notify_one();
+        }
+        Ok(credential)
     }
     async fn upsert(
         &self,
@@ -1460,13 +1495,10 @@ impl crate::storage::traits::OAuthCredentialStore for PeerRefreshObservedStorage
         self.inner.oauth_credentials().list_expiring(before).await
     }
     async fn recover_stale_refreshing(&self, timeout: Duration) -> anyhow::Result<u64> {
-        let recovered = self
-            .inner
+        self.inner
             .oauth_credentials()
             .recover_stale_refreshing(timeout)
-            .await?;
-        self.observed.notify_one();
-        Ok(recovered)
+            .await
     }
 }
 
@@ -1492,28 +1524,36 @@ async fn codex_cross_gateway_refresh_failure_preserves_retryable_peer_error_and_
         }
     })
     .await?;
-    let storage: crate::storage::traits::DynStorage = Arc::new(crate::storage::MemoryStorage::new(
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    ));
-    let (_leader_directory, leader_gateway) =
-        gateway_for_storage(&server, &["openai-codex"], storage.clone()).await?;
+    // 共享持久库承载跨 Gateway 刷新租约；MemoryStorage 的历史池只允许绑定一次。
+    let pool = crate::test_support::migrated_sqlite_pool().await?;
+    let storage: crate::storage::traits::DynStorage =
+        Arc::new(crate::storage::SqliteStorage::from_pool(pool));
+    let (leader_directory, leader_gateway) =
+        gateway_for_storage(&server, &["openai-codex"], storage.clone())
+            .await
+            .context("initialize leader gateway")?;
     let observed = Arc::new(Notify::new());
-    let (_follower_directory, follower_gateway) = gateway_for_storage(
-        &server,
-        &["openai-codex"],
+    // 重新导入会先使 leader 的插件代际失效，掩盖这里要验证的跨实例刷新租约。
+    let follower_gateway = Gateway::from_storage_with_vendor_network(
+        GatewayConfig {
+            data_dir: leader_directory.path().to_path_buf(),
+            ..Default::default()
+        },
         Arc::new(PeerRefreshObservedStorage {
             inner: storage.clone(),
             observed: observed.clone(),
         }),
+        local_vendor_network(server.address, &server.certificate_der)?,
     )
-    .await?;
+    .await
+    .context("initialize follower on the same installation")?;
     assert!(!Arc::ptr_eq(
         &leader_gateway.oauth_refresh,
         &follower_gateway.oauth_refresh
     ));
-    let provider = synthetic_oauth_provider(&leader_gateway, "openai-codex", false).await?;
+    let provider = synthetic_oauth_provider(&leader_gateway, "openai-codex", false)
+        .await
+        .context("create provider after follower startup")?;
     let before = storage
         .oauth_credentials()
         .get(&provider.id)
@@ -1599,7 +1639,8 @@ async fn codex_cross_gateway_refresh_failure_preserves_retryable_peer_error_and_
     follower_gateway
         .admin()
         .reconnect_provider_oauth(&provider.id)
-        .await?;
+        .await
+        .context("reconnect after the peer refresh failure")?;
     let credential = storage
         .oauth_credentials()
         .get(&provider.id)
@@ -1771,27 +1812,20 @@ async fn guard_save_after_suspension_submission_gets_successor_evidence() -> any
     // Exercise the production SQLite provider repository while retaining an
     // independently gateable memory sample store for the publication boundary.
     let directory = tempfile::tempdir()?;
-    let mut gateway = Gateway::new(GatewayConfig {
-        data_dir: directory.path().to_path_buf(),
-        ..Default::default()
-    })
+    let pool = crate::db::init_pool(directory.path()).await?;
+    crate::migrations::migrate_sqlite(&pool, None).await?;
+    let mut gateway = Gateway::from_storage_with_vendor_network(
+        GatewayConfig {
+            data_dir: directory.path().to_path_buf(),
+            ..Default::default()
+        },
+        Arc::new(crate::storage::SqliteStorage::from_pool(pool)),
+        local_vendor_network(server.address, &server.certificate_der)?,
+    )
     .await?;
     // Keep the sample tail independently gateable without locking provider DB writes.
     gateway.allowance_samples = crate::admin::provider_allowance::AllowanceSampleStore::memory();
     crate::plugin::test_support::install_distributed_vendor(&gateway, "devin").await?;
-    let root = reqwest::tls::Certificate::from_der(&server.certificate_der)?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .https_only(true)
-        .http1_only()
-        .tls_certs_only([root])
-        .dns_resolver(LoopbackOnlyResolver {
-            address: server.address,
-        })
-        .build()?;
-    gateway.vendor_http_client = client.clone();
-    gateway.vendor_websocket_client = client;
     let authorization = sign_in_devin_manually(&gateway, &mut server).await?;
     let provider = gateway
         .admin()

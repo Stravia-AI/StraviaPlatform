@@ -203,7 +203,7 @@ impl Gateway {
         principal: &Principal,
         route: &RouteConfig,
         request: VendorRequest,
-        context: VendorCallContext,
+        mut context: VendorCallContext,
     ) -> anyhow::Result<VendorRouteExecution> {
         let cancellation = context.cancellation.clone();
         tokio::select! {
@@ -215,8 +215,52 @@ impl Gateway {
             VendorRequest::MediaImage(_) => (Capability::MediaImage, Operation::MediaImage),
             _ => anyhow::bail!("independent Vendor Routes support only search and image media"),
         };
-        self.validate_vendor_route_capability(route, capability)
-            .await?;
+        // Independent operations have no durable Generation or Agent admission.
+        // Allocate their identity and state lineage once, outside the retry loop.
+        // A caller that already supplied lineage keeps ownership of its lease.
+        // Hold the memory backend's history gate through epoch capture and fork;
+        // SQL backends fence the fork against the captured epoch transactionally.
+        let _atomic_guard = if context.atomic_state.is_none() {
+            let admissions = self.storage.prompt_admissions();
+            let memory_guard = match admissions.memory_history_lock() {
+                Some(lock) => Some(lock.read_owned().await),
+                None => None,
+            };
+            let history_epoch = admissions.history_epoch().await?;
+            let admission_id = uuid::Uuid::new_v4();
+            let principal = principal.continuation_key();
+            anyhow::ensure!(admissions.history_epoch().await? == history_epoch, "history changed during capability admission");
+            let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::fork_at_epoch(
+                self.vendor_plugins.store.clone(),
+                principal.clone(),
+                admission_id,
+                None,
+                history_epoch,
+            ).await?;
+            drop(memory_guard);
+            context.cancellation.cancel_with(&guard.cancellation());
+            context.atomic_state = Some(crate::plugin::execution::AtomicConversationContext {
+                principal,
+                admission_id,
+                atomic_lease_id: guard.lease_id(),
+            });
+            Some(guard)
+        } else {
+            None
+        };
+        context.metadata.entry("logical_turn_id".into()).or_insert_with(|| {
+            serde_json::Value::String(uuid::Uuid::new_v4().to_string())
+        });
+        context.metadata.entry("logical_turn_started_at_ms".into()).or_insert_with(|| {
+            serde_json::Value::from(chrono::Utc::now().timestamp_millis())
+        });
+        context.metadata.entry("context_window_id".into()).or_insert_with(|| {
+            serde_json::Value::String(uuid::Uuid::new_v4().to_string())
+        });
+        context.metadata.entry("context_window_index".into()).or_insert_with(|| {
+            serde_json::Value::from(0)
+        });
+        self.validate_vendor_route_capability(route, capability).await?;
 
         let requires_image =
             matches!(&request, VendorRequest::MediaImage(request) if !request.references.is_empty());
@@ -890,6 +934,8 @@ fn clone_request(request: &VendorRequest) -> VendorRequest {
 
 fn clone_context(context: &VendorCallContext) -> VendorCallContext {
     let mut cloned = VendorCallContext::new(context.cancellation.clone(), context.deadline.clone());
+    cloned.atomic_state = context.atomic_state.clone();
+    cloned.history_boundary_candidate = context.history_boundary_candidate.clone();
     cloned.observer = context.observer.clone();
     cloned.model_turn_id = context.model_turn_id.clone();
     cloned.attempt_id = context.attempt_id.clone();

@@ -3,21 +3,33 @@ version: "3"
 vars:
   DESKTOP_DIR: backend/apps/stravia-desktop
   TAURI_CLI_VERSION: 2.12.3
-  PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
 
 tasks:
+  install:patch-crate:
+    desc: Install the pinned Cargo patch manager when absent or outdated.
+    status:
+      - 'test "$(cargo patch-crate --version)" = "patch-crate 0.1.13"'
+    cmds:
+      - |
+        if [ "$(cargo patch-crate --version 2>/dev/null)" != "patch-crate 0.1.13" ]; then
+          cargo install --locked --version 0.1.13 patch-crate
+        fi
+
   prepare:crates:
     desc: Prepare patched Cargo dependencies before resolving the workspace.
+    deps: [install:patch-crate]
+    run: once
     sources:
-      - patches/cargo/**/*
+      - Cargo.toml
+      - Cargo.lock
+      - Taskfile.yml
+      - patches/*+*.patch
     generates:
-      - .stravia-patched-crates/rustls-0.23.46-shape2/.prepare-stamp.json
-      - .stravia-patched-crates/rama-http-core-0.4.0-shape1/.prepare-stamp.json
-      - .stravia-patched-crates/rama-http-types-0.4.0-shape1/.prepare-stamp.json
-    status:
-      - '{{.PYTHON}} patches/cargo/prepare.py --check'
+      - target/patch/rustls-0.23.46/Cargo.toml
+      - target/patch/rama-http-core-0.4.0/Cargo.toml
+      - target/patch/rama-http-types-0.4.0/Cargo.toml
     cmds:
-      - '{{.PYTHON}} patches/cargo/prepare.py'
+      - cargo patch-crate --force
   brand:generate:
     desc: Generate SVG brand variants and required native icons from the Cadence master.
     cmds:
@@ -38,7 +50,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - patches/cargo/**/*
+      - patches/*+*.patch
       - backend/crates/stravia-vendor-base/Cargo.toml
       - backend/crates/stravia-vendor-base/build.rs
       - backend/crates/stravia-vendor-base/src/**/*.rs
@@ -68,7 +80,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - patches/cargo/**/*
+      - patches/*+*.patch
       - .cargo/config.toml
       - backend/crates/stravia-vendor-*/Cargo.toml
       - backend/crates/stravia-vendor-*/build.rs
@@ -95,7 +107,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - patches/cargo/**/*
+      - patches/*+*.patch
       - target/vendor-plugins/manifest.json
       - backend/crates/stravia-vendor-sdk/Cargo.toml
       - backend/crates/stravia-vendor-sdk/fixtures/build.ts
@@ -204,7 +216,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
-      - patches/cargo/**/*
+      - patches/*+*.patch
       - .cargo/config.toml
       - backend/**/*.rs
       - backend/**/*.toml
@@ -308,14 +320,14 @@ tasks:
     cmds:
       - cargo fmt --all -- --check
       - cargo run --locked -p stravia-devtools --bin stravia-tools -- wit-compat
-      - cargo clippy --locked --workspace --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture --all-targets -- -D warnings
+      - cargo clippy --locked --workspace --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture --exclude stravia-vendor-state-contract-fixture --all-targets -- -D warnings
 
   test:
     desc: Run WebUI and supported Rust unit tests without building embedded WebUI assets.
     deps: [install:web, build:vendor-fixtures]
     cmds:
       - bun tests/common/run-in-tempdir.ts bun run --filter stravia-webui test:unit
-      - bun tests/common/run-in-tempdir.ts cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture
+      - bun tests/common/run-in-tempdir.ts cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture --exclude stravia-vendor-state-contract-fixture
 
   test:all:
     desc: Run every local test surface, including incremental builds and cleanup, with a five-minute budget.

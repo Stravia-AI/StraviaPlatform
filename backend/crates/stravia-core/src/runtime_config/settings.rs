@@ -5,6 +5,13 @@ use crate::storage::traits::SettingsStore;
 
 #[async_trait]
 impl SettingsStore for RuntimeConfig {
+    async fn get_or_insert(&self, key: &str, value: &str) -> anyhow::Result<String> {
+        let mutation = self.projection.begin();
+        let result = self.source.settings().get_or_insert(key, value).await;
+        mutation.finish();
+        result
+    }
+
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         if key != crate::outbound_proxy::SETTINGS_KEY {
             return self.source.settings().get(key).await;

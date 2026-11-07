@@ -289,12 +289,15 @@ fn infer_gitlab(
         headers.set(name.as_str(), value.as_bytes());
     }
     host.emit_started()?;
-    let response = host.http_start(Request {
-        method: "POST".into(),
-        url,
-        headers,
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "POST".into(),
+            url,
+            headers,
+            body,
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if status == 401 {
         // A model request may already have executed. Return the typed fact to
@@ -364,12 +367,15 @@ fn send_inference(
         headers.append("content-type", "application/json");
     }
     host.emit_started()?;
-    let response = host.http_start(Request {
-        method: method.into(),
-        url: url.into(),
-        headers,
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: method.into(),
+            url: url.into(),
+            headers,
+            body,
+        },
+        &crate::net_options(),
+    )?;
     crate::decode_inference(host, protocol, response)
 }
 
@@ -566,12 +572,15 @@ fn discover_json(
     url: &str,
     headers: Vec<(String, String)>,
 ) -> Result<OperationOutput, PluginError> {
-    let response = host.http_start(Request {
-        method: "GET".into(),
-        url: url.into(),
-        headers: crate::fields(headers),
-        body: Vec::new(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "GET".into(),
+            url: url.into(),
+            headers: crate::fields(headers),
+            body: Vec::new(),
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
@@ -698,12 +707,15 @@ fn discover_vertex(
     }
     let (token, _) = vertex_access_token(host, provider, true)?;
     let url = vertex_anthropic_models_url(provider, cursor)?;
-    let response = host.http_start(Request {
-        method: "GET".into(),
-        url,
-        headers: crate::fields(vec![("authorization".into(), format!("Bearer {token}"))]),
-        body: Vec::new(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "GET".into(),
+            url,
+            headers: crate::fields(vec![("authorization".into(), format!("Bearer {token}"))]),
+            body: Vec::new(),
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
@@ -1044,12 +1056,15 @@ fn token_post_bytes(
         "content-type",
         "application/x-www-form-urlencoded",
     );
-    let response = host.http_start(Request {
-        method: "POST".into(),
-        url: url.into(),
-        headers: crate::fields(headers),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "POST".into(),
+            url: url.into(),
+            headers: crate::fields(headers),
+            body,
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let bytes = read_http_body(&response, 1024 * 1024)?;
@@ -1129,15 +1144,18 @@ fn gitlab_direct_access(
         }
     }
     let url = format!("{instance}/api/v4/ai/third_party_agents/direct_access");
-    let response = host.http_start(Request {
-        method: "POST".into(),
-        url,
-        headers: crate::fields(vec![
-            ("authorization".into(), format!("Bearer {api_key}")),
-            ("content-type".into(), "application/json".into()),
-        ]),
-        body: b"{}".to_vec(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "POST".into(),
+            url,
+            headers: crate::fields(vec![
+                ("authorization".into(), format!("Bearer {api_key}")),
+                ("content-type".into(), "application/json".into()),
+            ]),
+            body: b"{}".to_vec(),
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
@@ -1237,7 +1255,12 @@ fn sign_bedrock(
         .map(|field| {
             std::str::from_utf8(&field.bytes)
                 .map(|value| (field.name.as_str(), value))
-                .map_err(|_| common::plugin_error(ErrorKind::Invalid, "Bedrock signing requires UTF-8 header values"))
+                .map_err(|_| {
+                    common::plugin_error(
+                        ErrorKind::Invalid,
+                        "Bedrock signing requires UTF-8 header values",
+                    )
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let signable = SignableRequest::new(

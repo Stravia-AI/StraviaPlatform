@@ -1,0 +1,15 @@
+[package]
+name = "stravia-vendor-state-contract-fixture"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk = { workspace = true }
+serde_json.workspace = true

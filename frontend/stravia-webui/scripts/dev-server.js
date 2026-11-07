@@ -7,10 +7,7 @@ import { createServer } from 'vite'
 
 const webuiRoot = fileURLToPath(new URL('../', import.meta.url))
 const repositoryRoot = resolve(webuiRoot, '../..')
-const preparation = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['patches/cargo/prepare.py'], {
-  cwd: repositoryRoot,
-  stdio: 'inherit',
-})
+const preparation = spawnSync('task', ['prepare:crates'], { cwd: repositoryRoot, stdio: 'inherit' })
 if (preparation.error) throw preparation.error
 if (preparation.status !== 0) throw new Error('Failed to prepare patched Cargo crates')
 const webui = await createServer({ root: webuiRoot, server: { host: true } })

@@ -1,9 +1,12 @@
 [workspace]
 resolver = "2"
-exclude = [".stravia-patched-crates/rustls-0.23.46-shape2", ".stravia-patched-crates/rama-http-core-0.4.0-shape1", ".stravia-patched-crates/rama-http-types-0.4.0-shape1"]
-members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-protocol-codec", "backend/crates/stravia-vendor-sdk", "backend/crates/stravia-vendor-runtime", "backend/crates/stravia-vendor-common", "backend/crates/stravia-vendor-base", "backend/crates/stravia-vendor-codex", "backend/crates/stravia-vendor-grok", "backend/crates/stravia-vendor-command-code", "backend/crates/stravia-vendor-devin", "backend/crates/stravia-vendor-opencode-free", "backend/crates/stravia-vendor-claudecode", "backend/crates/stravia-vendor-antigravity", "backend/crates/stravia-vendor-muse-code", "backend/crates/stravia-vendor-kilo", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection", "backend/crates/stravia-vendor-sdk/fixtures/capability-contract", "backend/crates/stravia-vendor-sdk/fixtures/lifecycle-contract", "backend/crates/stravia-vendor-sdk/fixtures/management-contract", "backend/crates/stravia-vendor-sdk/fixtures/manual-contract", "backend/crates/stravia-vendor-sdk/fixtures/net-1.0-compat"]
+exclude = ["target/patch"]
+members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-protocol-codec", "backend/crates/stravia-vendor-sdk", "backend/crates/stravia-vendor-runtime", "backend/crates/stravia-vendor-common", "backend/crates/stravia-vendor-base", "backend/crates/stravia-vendor-codex", "backend/crates/stravia-vendor-grok", "backend/crates/stravia-vendor-command-code", "backend/crates/stravia-vendor-devin", "backend/crates/stravia-vendor-opencode-free", "backend/crates/stravia-vendor-claudecode", "backend/crates/stravia-vendor-antigravity", "backend/crates/stravia-vendor-muse-code", "backend/crates/stravia-vendor-kilo", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection", "backend/crates/stravia-vendor-sdk/fixtures/capability-contract", "backend/crates/stravia-vendor-sdk/fixtures/lifecycle-contract", "backend/crates/stravia-vendor-sdk/fixtures/management-contract", "backend/crates/stravia-vendor-sdk/fixtures/manual-contract", "backend/crates/stravia-vendor-sdk/fixtures/net-1.0-compat", "backend/crates/stravia-vendor-sdk/fixtures/state-contract"]
 # 与 dev:server 保持相同的依赖特性图，避免裸 build 先构建桌面特性并集。
 default-members = ["backend/apps/stravia-server"]
+
+[workspace.metadata.patch]
+crates = ["rustls@0.23.46", "rama-http-core@0.4.0", "rama-http-types@0.4.0"]
 
 [workspace.package]
 version = "0.6.4"
@@ -32,6 +35,7 @@ sse-stream = "=0.2.6"
 # 与桌面更新器统一 TLS/代理编译特性；运行时代理由客户端显式选择。
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy", "socks"] }
 reqwest-websocket = "0.6"
+cookie_store = { version = "=0.22.1", default-features = false }
 # 固定 Codex 使用的 RFC 7692 实现；不全局替换其他客户端的 WebSocket 依赖。
 tungstenite-deflate = { package = "tungstenite", git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f", default-features = false, features = ["deflate", "handshake"] }
 tokio-tungstenite-deflate = { package = "tokio-tungstenite", git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", default-features = false }
@@ -197,9 +201,9 @@ debug = 1
 debug = true
 
 [patch.crates-io]
-rustls = { path = ".stravia-patched-crates/rustls-0.23.46-shape2" }
-rama-http-core = { path = ".stravia-patched-crates/rama-http-core-0.4.0-shape1" }
-rama-http-types = { path = ".stravia-patched-crates/rama-http-types-0.4.0-shape1" }
+rustls = { path = "target/patch/rustls-0.23.46" }
+rama-http-core = { path = "target/patch/rama-http-core-0.4.0" }
+rama-http-types = { path = "target/patch/rama-http-types-0.4.0" }
 
 [profile.dev.package.glob]
 debug = true

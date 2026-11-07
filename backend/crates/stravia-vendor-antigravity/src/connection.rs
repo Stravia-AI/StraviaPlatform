@@ -2,8 +2,8 @@ use serde_json::{Value, json};
 use stravia_vendor_common::common::plugin_error;
 use stravia_vendor_common::connection_check;
 use stravia_vendor_sdk::{
-    ConnectionCheckResponse, ConnectionCheckVerification, ErrorKind, GuestHost,
-    PluginError, ProviderSnapshot, net::Request,
+    ConnectionCheckResponse, ConnectionCheckVerification, ErrorKind, GuestHost, PluginError,
+    ProviderSnapshot, net::Request,
 };
 
 use crate::client;

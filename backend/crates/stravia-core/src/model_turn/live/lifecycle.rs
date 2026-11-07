@@ -267,6 +267,14 @@ impl Operation<'_, '_> {
         context.attempt_id = Some(attempt.id.clone());
         context.client_headers = prepared.client_headers.clone();
         context.metadata = prepared.metadata.clone();
+        if let Some(map) = &prepared.history_boundaries {
+            context.metadata.insert(
+                "history_boundaries".into(),
+                serde_json::to_value(map).expect("history boundary map is serializable"),
+            );
+        }
+        context.history_boundary_candidate = prepared.history_boundary_candidate.clone();
+        context.atomic_state = prepared.atomic_conversation.clone();
         context.websocket_affinity = prepared.websocket_affinity.clone();
         context.response_continuation_available = prepared.response_continuation_available.clone();
 

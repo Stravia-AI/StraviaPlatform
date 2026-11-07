@@ -8,7 +8,8 @@
 //!
 //! 引用方删除引用时，必须在同一事务内调用 [`enqueue_unreferenced`]，把失去最后引用的
 //! 内容登记进 `content_gc`；最终删除只发生在 [`sweep_sqlite`] / [`sweep_postgres`]，
-//! 它在锁协议内重检四类反向引用。写入方没有固定先后角色：先到的一方插入正文，其余
+//! 它在锁协议内重检历史、Observation 与 journal 的反向引用；旧迁移阶段尚无 journal
+//! 表时跳过该项。写入方没有固定先后角色：先到的一方插入正文，其余
 //! 方按摘要命中已有行、只写引用。摘要命中只是提示，事务内重检。
 
 use std::collections::HashMap;

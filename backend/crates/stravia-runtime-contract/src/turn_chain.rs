@@ -379,6 +379,8 @@ pub struct TurnCommit {
     pub redaction_references: Vec<String>,
     /// 节点保存的原生压缩登记 ID；缺失即视为依赖不可用。
     pub compaction_record_ids: Vec<String>,
+    /// Immutable, principal-scoped atomic state snapshot retained by this node.
+    pub atomic_checkpoint_id: Option<String>,
     pub reusable_prefix: Option<ReusablePrefixMetadata>,
 }
 /// Version of the optional controls/client-context exclusion proof. Unknown
@@ -444,6 +446,8 @@ pub enum TurnCommitError {
     AlreadyExists,
     #[error("turn dependency unavailable")]
     DependencyUnavailable,
+    #[error("turn atomic state unavailable")]
+    AtomicStateUnavailable,
     #[error("turn storage failed: {0}")]
     Storage(String),
 }

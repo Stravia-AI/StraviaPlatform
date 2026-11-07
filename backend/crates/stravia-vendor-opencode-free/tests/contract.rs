@@ -16,8 +16,8 @@ use stravia_runtime_contract::protocol::ir::request::{ToolChoice, ToolSpec};
 use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
-    LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin, LogLevel,
+    OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::net::{self, ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{ErrorKind, OperationInput, OperationOutput, ProviderSnapshot};
@@ -59,7 +59,10 @@ impl HostHttpResponse for MockResponse {
     }
 
     async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
-        Ok(vec![Field { name: "content-type".into(), bytes: b"text/event-stream".to_vec() }])
+        Ok(vec![Field {
+            name: "content-type".into(),
+            bytes: b"text/event-stream".to_vec(),
+        }])
     }
 
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -81,7 +84,11 @@ struct MockServices {
 
 #[async_trait]
 impl HostServices for MockServices {
-    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: HttpRequest,
+        _options: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let rejects_tool_choice = request.method == "POST"
             && serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
                 let model = body["model"].as_str().unwrap_or_default();
@@ -152,7 +159,21 @@ fn provider(model: &str) -> ProviderSnapshot {
         model: Some(model.into()),
         model_metadata: None,
         client_headers: Vec::new(),
-        operation_metadata: BTreeMap::new(),
+        operation_metadata: BTreeMap::from([
+            (
+                "client_conversation_id".into(),
+                json!("00000000-0000-4000-8000-000000000001"),
+            ),
+            (
+                "client_conversation_created_at_ms".into(),
+                json!(1700000000000_u64),
+            ),
+            (
+                "user_prompt_id".into(),
+                json!("00000000-0000-4000-8000-000000000001"),
+            ),
+            ("user_prompt_created_at_ms".into(), json!(1700000000000_u64)),
+        ]),
     }
 }
 
@@ -280,7 +301,7 @@ async fn required_choice_with_complete_tools_does_not_trigger_native_400() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn separate_component_stores_derive_session_without_private_state() {
+async fn prompt_and_session_identity_survive_component_stores_without_private_state() {
     let (runtime, plugin) = load_plugin().await;
     let recorded = Arc::new(Recorded::default());
     let mut provider = provider("big-pickle");
@@ -293,12 +314,32 @@ async fn separate_component_stores_derive_session_without_private_state() {
         ("x-opencode-request".into(), "injected-request".into()),
     ];
     *recorded.private_state.lock() = Some(b"obsolete state must not be read".to_vec());
-    for index in 0..3 {
+    for index in 0..4 {
         if index == 2 {
             provider.operation_metadata.insert(
-                "session_affinity".into(),
-                json!("主体/other-Target/链路\0\r\n🙂"),
+                "user_prompt_id".into(),
+                json!("00000000-0000-4000-8000-000000000002"),
             );
+            provider
+                .operation_metadata
+                .insert("user_prompt_created_at_ms".into(), json!(1700000001000_u64));
+        }
+        if index == 3 {
+            provider.operation_metadata.insert(
+                "client_conversation_id".into(),
+                json!("00000000-0000-4000-8000-000000000003"),
+            );
+            provider.operation_metadata.insert(
+                "client_conversation_created_at_ms".into(),
+                json!(1700000002000_u64),
+            );
+            provider.operation_metadata.insert(
+                "user_prompt_id".into(),
+                json!("00000000-0000-4000-8000-000000000003"),
+            );
+            provider
+                .operation_metadata
+                .insert("user_prompt_created_at_ms".into(), json!(1700000002000_u64));
         }
         let mut input = request("big-pickle");
         input.parameters.session.id = Some("client-session".into());
@@ -308,7 +349,7 @@ async fn separate_component_stores_derive_session_without_private_state() {
             .expect("inference succeeds");
     }
     let requests = recorded.requests.lock();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     let header = |index: usize, name: &str| {
         requests[index]
             .headers
@@ -318,21 +359,29 @@ async fn separate_component_stores_derive_session_without_private_state() {
     };
     assert_eq!(
         header(0, "x-opencode-session"),
-        "ses_2d6e2675e3a3B8feCq4rWYOa0e"
+        header(1, "x-opencode-session")
     );
     assert_eq!(
         header(0, "x-opencode-session"),
-        header(1, "x-opencode-session")
-    );
-    assert_ne!(
-        header(0, "x-opencode-session"),
         header(2, "x-opencode-session")
     );
-    assert_ne!(
+    assert_eq!(
         header(0, "x-opencode-request"),
         header(1, "x-opencode-request")
     );
-    for index in 0..3 {
+    assert_ne!(
+        header(0, "x-opencode-session"),
+        header(3, "x-opencode-session")
+    );
+    assert_ne!(
+        header(0, "x-opencode-request"),
+        header(2, "x-opencode-request")
+    );
+    assert_ne!(
+        header(2, "x-opencode-request"),
+        header(3, "x-opencode-request")
+    );
+    for index in 0..4 {
         assert!(header(index, "x-opencode-request").starts_with("msg_"));
         let body: Value = serde_json::from_slice(&requests[index].body).unwrap();
         for name in [
@@ -479,7 +528,10 @@ impl RealResponse {
                 let headers = response
                     .headers()
                     .iter()
-                    .map(|(n, v)| Field { name: n.as_str().to_owned(), bytes: v.as_bytes().to_vec() })
+                    .map(|(n, v)| Field {
+                        name: n.as_str().to_owned(),
+                        bytes: v.as_bytes().to_vec(),
+                    })
                     .collect();
                 let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
                 Ok((status, headers, body))
@@ -512,7 +564,11 @@ impl HostHttpResponse for RealResponse {
 
 #[async_trait]
 impl HostServices for RealServices {
-    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: HttpRequest,
+        _options: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let client = reqwest::Client::new();
         let method: reqwest::Method = request
             .method

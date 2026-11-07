@@ -29,8 +29,10 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigGroup, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    net::{self, Fields, Request}, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
+    NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
+    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind,
+    net::{self, Fields, Request},
+    read_http_body,
 };
 
 const VENDOR_ID: &str = "opencode-free";
@@ -59,8 +61,15 @@ fn set_header(headers: &mut Fields, name: &str, value: String) {
 
 fn bun_options() -> net::Options {
     let mut options = net::Options::new();
-    options.shape("bun").expect("valid bun shape");
-    options.response_decoding(&[net::Coding::Gzip, net::Coding::Deflate, net::Coding::Br, net::Coding::Zstd]).expect("valid response codings");
+    options.shape("bun-1-3-14").expect("valid bun shape");
+    options
+        .response_decoding(&[
+            net::Coding::Gzip,
+            net::Coding::Deflate,
+            net::Coding::Br,
+            net::Coding::Zstd,
+        ])
+        .expect("valid response codings");
     options
 }
 
@@ -78,7 +87,7 @@ fn apply_auth(provider: &ProviderSnapshot, headers: &mut Fields) {
     // Zen 官方客户端无 key 时发送字面量 `Bearer public`，上游对
     // `allowAnonymous` 免费模型放行并改用 IP 限流。
     let token = setting(provider, "apiKey").unwrap_or("public");
-    set_header(headers, "authorization", format!("Bearer {token}"));
+    set_header(headers, "Authorization", format!("Bearer {token}"));
 }
 
 fn check_provider(channel: &str, provider: &ProviderSnapshot) -> Result<(), PluginError> {
@@ -131,11 +140,25 @@ fn project_body(body: &mut Value) {
                 | "user"
         )
     });
+    let streaming = object.get("stream").and_then(Value::as_bool) == Some(true);
     if let Some(options) = object
         .get_mut("stream_options")
         .and_then(Value::as_object_mut)
     {
         options.retain(|name, _| name == "include_usage");
+        // Native streaming always requests usage, independently of downstream usage events.
+        if streaming {
+            if let Some(include_usage) = options.get_mut("include_usage") {
+                *include_usage = Value::Bool(true);
+            } else {
+                options.insert("include_usage".into(), Value::Bool(true));
+            }
+        }
+    } else if streaming {
+        object.insert(
+            "stream_options".into(),
+            serde_json::json!({"include_usage": true}),
+        );
     }
     if let Some(tools) = object.get_mut("tools").and_then(Value::as_array_mut) {
         tools.retain(|tool| tool.get("type").and_then(Value::as_str) == Some("function"));
@@ -182,11 +205,14 @@ fn execute_inference(
     let mut encoded = common::encode_inference_request(PROTOCOL, request)?;
     project_body(&mut encoded.body);
     let mut headers = Fields::new();
-    native_identity::apply(provider, &mut headers)?;
-    set_header(&mut headers, "content-type", "application/json".into());
     apply_auth(provider, &mut headers);
-    headers.append("accept", b"*/*".to_vec());
-    headers.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
+    headers.append("Content-Type", b"application/json".to_vec());
+    native_identity::apply(provider, &mut headers, Operation::Infer)?;
+    headers.append("Connection", b"keep-alive".to_vec());
+    headers.append("Accept", b"*/*".to_vec());
+    headers.slot("Host");
+    headers.append("Accept-Encoding", b"gzip, deflate, br, zstd".to_vec());
+    headers.slot("Content-Length");
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = serde_json::to_vec(&encoded.body).map_err(|error| {
         common::plugin_error(
@@ -195,12 +221,15 @@ fn execute_inference(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(Request {
-        method: "POST".to_owned(),
-        url,
-        headers,
-        body,
-    }, &bun_options())?;
+    let response = host.http_start(
+        Request {
+            method: "POST".to_owned(),
+            url,
+            headers,
+            body,
+        },
+        &bun_options(),
+    )?;
     common::decode_inference(host, PROTOCOL, response)
 }
 
@@ -208,15 +237,18 @@ fn discover(host: &GuestHost, provider: &ProviderSnapshot) -> Result<OperationOu
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
     let mut headers = Fields::new();
     headers.append("accept", b"application/json".to_vec());
-    native_identity::apply(provider, &mut headers)?;
+    native_identity::apply(provider, &mut headers, Operation::Discover)?;
     apply_auth(provider, &mut headers);
     headers.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
-    let response = host.http_start(Request {
-        method: "GET".to_owned(),
-        url,
-        headers,
-        body: Vec::new(),
-    }, &bun_options())?;
+    let response = host.http_start(
+        Request {
+            method: "GET".to_owned(),
+            url,
+            headers,
+            body: Vec::new(),
+        },
+        &bun_options(),
+    )?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let body = read_http_body(&response, MAX_MODELS_BODY)?;
@@ -436,7 +468,7 @@ mod tests {
     fn native_body_projection_drops_unknown_controls_not_schema_data() {
         let mut body = json!({
             "model":"big-pickle","messages":[{"role":"user","content":"hello"}],
-            "stream":true,"stream_options":{"include_usage":true,"future":true},
+            "stream":true,"stream_options":{"include_usage":false,"future":true},
             "verbosity":"low","top_k":99,"parallel_tool_calls":false,
             "extra_body":{"tools":[{"type":"computer"}]},"metadata":{"injected":true},
             "tools":[{"type":"function","future":true,"function":{

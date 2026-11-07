@@ -304,6 +304,7 @@ fn infer(
             .as_ref()
             .map(|assignment| assignment.jwt.as_str()),
         platform,
+        &crate::fingerprint(&provider, token)?,
     )
     .map_err(|err| {
         error(
@@ -318,12 +319,15 @@ fn infer(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: endpoint(&provider, GET_CHAT_MESSAGE_PATH),
-        headers: crate::net_fields(connect_headers(token, true)),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: endpoint(&provider, GET_CHAT_MESSAGE_PATH),
+            headers: crate::inference_fields(connect_headers(token, true)),
+            body,
+        },
+        &crate::inference_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(
@@ -420,7 +424,7 @@ fn emit_deltas(
             upstream_status: status,
         };
         host.emit_failed(PluginError {
-            kind: failure.kind,
+            kind: failure.kind.clone(),
             message: failure.message.clone(),
             upstream_status: failure.upstream_status,
         })?;
@@ -475,12 +479,21 @@ fn resolve_assignment(
     if let Some(assignment) = state.assignments.get(&key) {
         return Ok(Some(assignment.clone()));
     }
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: endpoint(provider, ASSIGN_MODEL_PATH),
-        headers: crate::net_fields(connect_headers(token, false)),
-        body: encode_assign_model_request_with_platform(token, router_uid, cascade_id, platform),
-    }, &crate::net_options());
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: endpoint(provider, ASSIGN_MODEL_PATH),
+            headers: crate::net_fields(connect_headers(token, false)),
+            body: encode_assign_model_request_with_platform(
+                token,
+                router_uid,
+                cascade_id,
+                platform,
+                &crate::fingerprint(provider, token)?,
+            ),
+        },
+        &crate::net_options(),
+    );
     let response = match response {
         Ok(response) => response,
         Err(_) if !required => return Ok(None),
@@ -529,12 +542,20 @@ fn discover(
 ) -> Result<DiscoverResponse, PluginError> {
     let token = session_token(provider)?;
     let platform = client_platform(provider)?;
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: endpoint(provider, CATALOG_PATH),
-        headers: crate::net_fields(catalog_headers(token)),
-        body: encode_client_metadata_request_with_platform(token, true, platform),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: endpoint(provider, CATALOG_PATH),
+            headers: crate::net_fields(catalog_headers(token)),
+            body: encode_client_metadata_request_with_platform(
+                token,
+                true,
+                platform,
+                &crate::fingerprint(provider, token)?,
+            ),
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(
@@ -610,6 +631,17 @@ fn session_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
 fn connect_headers(token: &str, streaming: bool) -> Vec<(String, String)> {
     let trace = uuid::Uuid::new_v4().simple().to_string();
     let span = uuid::Uuid::new_v4().simple().to_string();
+    if streaming {
+        return vec![
+            ("authorization".into(), format!("Basic {token}-{token}")),
+            ("sentry-trace".into(), format!("{trace}-{}-1", &span[..16])),
+            ("content-type".into(), "application/connect+proto".into()),
+            ("connect-protocol-version".into(), "1".into()),
+            ("accept".into(), "*/*".into()),
+            ("host".into(), String::new()),
+            ("content-length".into(), String::new()),
+        ];
+    }
     vec![
         (
             "content-type".into(),
@@ -709,6 +741,28 @@ fn error(kind: ErrorKind, message: impl Into<String>) -> PluginError {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    #[test]
+    fn interactive_inference_headers_match_cli_order() {
+        let headers = connect_headers("token", true);
+        let names: Vec<&str> = headers.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "authorization",
+                "sentry-trace",
+                "content-type",
+                "connect-protocol-version",
+                "accept",
+                "host",
+                "content-length"
+            ]
+        );
+        assert_eq!(headers[0].1, "Basic token-token");
+        assert_eq!(headers[2].1, "application/connect+proto");
+        assert!(headers[5].1.is_empty());
+        assert!(headers[6].1.is_empty());
+    }
 
     #[test]
     fn connect_rejection_requires_json_true_declaration() {
@@ -833,6 +887,7 @@ mod session_tests {
             shape,
             None,
             DevinClientPlatform::Linux,
+            "test-fingerprint",
         )
         .unwrap();
         let fields = parse_fields(&body).unwrap();

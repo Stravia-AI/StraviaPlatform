@@ -28,7 +28,7 @@ impl TransportFailure {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "websocket" => Some(Self::Websocket),
             _ => None,
@@ -90,7 +90,7 @@ impl ErrorKind {
             Self::Upstream(failure) => failure
                 .transport_failure
                 .as_deref()
-                .and_then(TransportFailure::from_str),
+                .and_then(TransportFailure::parse),
             _ => None,
         }
     }
@@ -188,7 +188,11 @@ mod error_conversion_tests {
 
     #[test]
     fn lifecycle_errors_have_no_upstream_retry_facts() {
-        for kind in [ErrorKind::Cancelled, ErrorKind::DeadlineExceeded, ErrorKind::Trapped] {
+        for kind in [
+            ErrorKind::Cancelled,
+            ErrorKind::DeadlineExceeded,
+            ErrorKind::Trapped,
+        ] {
             assert!(!kind.is_upstream_failure());
             assert_eq!(kind.model_error_kind(), None);
             assert_eq!(kind.retry_after(), None);

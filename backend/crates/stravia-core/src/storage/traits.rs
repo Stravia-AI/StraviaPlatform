@@ -591,6 +591,8 @@ pub trait ProviderModelStore: Send + Sync {
 pub trait SettingsStore: Send + Sync {
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>>;
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+    /// Atomically preserve an existing setting or insert and return the supplied value.
+    async fn get_or_insert(&self, key: &str, value: &str) -> anyhow::Result<String>;
 }
 
 /// Durable cumulative spend for one API Key. A missing row is zero.
@@ -863,7 +865,61 @@ pub trait StorageBootstrap: Send + Sync {
     async fn health(&self) -> anyhow::Result<StorageHealth>;
 }
 
+/// An immutable admission of a client prompt, independent of a delivered generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAdmission {
+    pub id: String,
+    pub principal: String,
+    pub parent_id: Option<String>,
+    pub atomic_lineage_created: bool,
+    pub ordinal: i64,
+    pub user_turn_index: Option<i64>,
+    pub dialogue_prompt_index: Option<i64>,
+    pub context_window_id: Option<uuid::Uuid>,
+    pub context_window_index: Option<u64>,
+    pub created_at_ms: i64,
+    pub conversation_id: String,
+    pub conversation_created_at_ms: i64,
+    pub user_prompt_id: Option<String>,
+    pub user_prompt_created_at_ms: Option<i64>,
+    pub logical_turn_id: String,
+    pub logical_turn_created_at_ms: i64,
+    pub history_count: i64,
+    pub prefix_digest: String,
+    pub controls_digest: String,
+}
+
+#[async_trait]
+pub trait PromptAdmissionStore: Send + Sync {
+    fn memory_history_lock(&self) -> Option<Arc<tokio::sync::RwLock<()>>> {
+        None
+    }
+    async fn history_epoch(&self) -> anyhow::Result<i64>;
+    async fn insert_at_epoch(
+        &self,
+        admission: &PromptAdmission,
+        expected_epoch: i64,
+    ) -> anyhow::Result<()>;
+    async fn insert(&self, admission: &PromptAdmission) -> anyhow::Result<()> {
+        let epoch = self.history_epoch().await?;
+        self.insert_at_epoch(admission, epoch).await
+    }
+    async fn get(&self, principal: &str, id: &str) -> anyhow::Result<Option<PromptAdmission>>;
+    /// Returns all matches, without truncation or deduplication of admissions.
+    async fn find_prefixes(
+        &self,
+        principal: &str,
+        controls_digest: &str,
+        prefixes: &[(i64, String)],
+    ) -> anyhow::Result<Vec<PromptAdmission>>;
+    /// Removes expired admissions except ancestors of live admissions.
+    async fn prune_before(&self, cutoff_ms: i64) -> anyhow::Result<u64>;
+    async fn purge_principal(&self, principal: &str) -> anyhow::Result<u64>;
+    async fn clear(&self) -> anyhow::Result<u64>;
+}
+
 pub trait Storage: Send + Sync {
+    fn prompt_admissions(&self) -> Arc<dyn PromptAdmissionStore>;
     fn vendor_plugins(&self) -> &crate::plugin::PluginStore;
     fn providers(&self) -> &dyn ProviderStore;
     fn web_providers(&self) -> Option<&dyn WebProviderStore> {

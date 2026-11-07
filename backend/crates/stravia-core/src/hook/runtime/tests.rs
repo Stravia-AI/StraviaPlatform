@@ -506,11 +506,132 @@ async fn request_hooks_run_in_order_and_observe_prior_changes() {
         )
         .unwrap();
 
-    let control = run.on_request(&mut request).await.unwrap();
+    let control = run
+        .on_request_with_provenance(&mut request)
+        .await
+        .unwrap()
+        .control;
 
     assert!(matches!(control, HookControl::Continue));
     assert_eq!(request.model, "model-a-b");
     assert_eq!(seen.lock().await.as_slice(), ["model", "model-a"]);
+}
+
+#[derive(Clone, Copy)]
+enum ProvenancePatch {
+    ModelAndTools,
+    SameCanonical,
+    SameSpan,
+    Reject,
+}
+
+struct ProvenanceSession(ProvenancePatch);
+
+#[async_trait]
+impl HookSession for ProvenanceSession {
+    async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
+        let HookEvent::Request {
+            current, context, ..
+        } = event
+        else {
+            return Ok(ActionBatch::default());
+        };
+        let actions = match self.0 {
+            ProvenancePatch::ModelAndTools => vec![
+                HookAction::PatchRequest(Box::new(RequestPatch::SetModel("other".into()))),
+                HookAction::PatchRequest(Box::new(RequestPatch::ReplaceTools(None))),
+            ],
+            ProvenancePatch::SameCanonical => vec![HookAction::PatchRequest(Box::new(
+                RequestPatch::ReplaceCanonical(Box::new(current.clone())),
+            ))],
+            ProvenancePatch::SameSpan => {
+                let item = &context.items[0];
+                vec![HookAction::PatchRequest(Box::new(
+                    RequestPatch::ReplaceContextSpans(vec![ReplaceContextSpan {
+                        start: item.id().clone(),
+                        end: item.id().clone(),
+                        replacement: vec![ContextItem::message(AiItem::output_text("visible"))],
+                    }]),
+                ))]
+            }
+            ProvenancePatch::Reject => vec![HookAction::Reject(HookRejection {
+                status: 403,
+                code: "denied".into(),
+                message: "denied".into(),
+            })],
+        };
+        Ok(ActionBatch { actions })
+    }
+}
+
+fn provenance_runtime(patches: &[ProvenancePatch]) -> HookRuntime {
+    HookRuntime::new(
+        patches
+            .iter()
+            .copied()
+            .map(|patch| {
+                Arc::new(TestHook {
+                    descriptor: HookDescriptor::all("provenance"),
+                    make: Arc::new(move || Box::new(ProvenanceSession(patch))),
+                }) as Arc<dyn Hook>
+            })
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn request_provenance_distinguishes_controls_from_structural_replacements() {
+    for (patches, expected) in [
+        (vec![], false),
+        (vec![ProvenancePatch::ModelAndTools], false),
+        (vec![ProvenancePatch::SameCanonical], true),
+        (vec![ProvenancePatch::SameSpan], true),
+        (
+            vec![
+                ProvenancePatch::SameCanonical,
+                ProvenancePatch::ModelAndTools,
+            ],
+            true,
+        ),
+    ] {
+        let runtime = provenance_runtime(&patches);
+        let mut request = AiRequest::new("model", vec![AiItem::output_text("visible")]);
+        let mut run = runtime
+            .begin(
+                session_context(RequestKind::Generation),
+                &request,
+                ContextCompleteness::Full,
+            )
+            .unwrap();
+        let outcome = run.on_request_with_provenance(&mut request).await.unwrap();
+        assert!(matches!(outcome.control, HookControl::Continue));
+        assert_eq!(outcome.canonical_structure_changed, expected);
+        assert_eq!(
+            serde_json::to_value(&request.items).unwrap(),
+            serde_json::to_value(vec![AiItem::output_text("visible")]).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn request_provenance_survives_early_hook_control() {
+    let runtime = provenance_runtime(&[
+        ProvenancePatch::SameCanonical,
+        ProvenancePatch::Reject,
+        ProvenancePatch::ModelAndTools,
+    ]);
+    let mut request = AiRequest::new("model", vec![AiItem::output_text("visible")]);
+    let mut run = runtime
+        .begin(
+            session_context(RequestKind::Generation),
+            &request,
+            ContextCompleteness::Full,
+        )
+        .unwrap();
+    let outcome = run.on_request_with_provenance(&mut request).await.unwrap();
+    assert!(matches!(outcome.control, HookControl::Reject(_)));
+    assert!(outcome.canonical_structure_changed);
+    assert_eq!(request.model, "model");
 }
 
 #[tokio::test]
@@ -528,9 +649,9 @@ async fn invalid_action_batch_leaves_request_unchanged() {
         )
         .unwrap();
 
-    let error = run.on_request(&mut request).await.unwrap_err();
+    let outcome = run.on_request_with_provenance(&mut request).await;
 
-    assert!(matches!(error, HookError::InvalidAction { .. }));
+    assert!(matches!(outcome, Err(HookError::InvalidAction { .. })));
     assert_eq!(request.model, "model");
 }
 
@@ -564,7 +685,7 @@ async fn hook_requiring_full_context_is_skipped_for_partial_request() {
         )
         .unwrap();
 
-    run.on_request(&mut request).await.unwrap();
+    run.on_request_with_provenance(&mut request).await.unwrap();
 
     assert_eq!(request.model, "model");
     assert!(calls.lock().await.is_empty());
@@ -653,7 +774,7 @@ async fn completing_partial_context_enables_later_full_context_consumers() {
         )
         .unwrap();
 
-    run.on_request(&mut request).await.unwrap();
+    run.on_request_with_provenance(&mut request).await.unwrap();
 
     assert_eq!(request.model, "observed-complete-context");
 }
@@ -702,7 +823,7 @@ async fn failed_context_completion_does_not_enable_full_context_response_hooks()
         )
         .unwrap();
     assert!(matches!(
-        run.on_request(&mut request).await,
+        run.on_request_with_provenance(&mut request).await,
         Err(HookError::InvalidAction { .. })
     ));
     run.set_route(route_context());
@@ -735,7 +856,10 @@ async fn no_hooks_preserve_route_errors_and_client_tool_ownership() {
         )
         .unwrap();
     assert!(matches!(
-        run.on_request(&mut request).await.unwrap(),
+        run.on_request_with_provenance(&mut request)
+            .await
+            .unwrap()
+            .control,
         HookControl::Continue
     ));
     let mut response = AiResponse::new("response", "model");
@@ -1273,7 +1397,7 @@ async fn exposed_platform_tool_is_classified_without_claiming_client_tool() {
             ContextCompleteness::Full,
         )
         .unwrap();
-    run.on_request(&mut request).await.unwrap();
+    run.on_request_with_provenance(&mut request).await.unwrap();
     let platform_name = request
         .tools
         .as_ref()
@@ -1440,7 +1564,7 @@ async fn valid_platform_call_does_not_block_malformed_client_arguments() {
             ContextCompleteness::Full,
         )
         .unwrap();
-    run.on_request(&mut request).await.unwrap();
+    run.on_request_with_provenance(&mut request).await.unwrap();
     run.set_route(route_context());
     let platform_name = request
         .tools
@@ -1492,7 +1616,7 @@ async fn platform_tool_malformed_arguments_are_refused_at_execution() {
             ContextCompleteness::Full,
         )
         .unwrap();
-    run.on_request(&mut request).await.unwrap();
+    run.on_request_with_provenance(&mut request).await.unwrap();
     run.set_route(route_context());
     let platform_name = request
         .tools

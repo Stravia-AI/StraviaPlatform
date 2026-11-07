@@ -48,7 +48,10 @@ fn add_anthropic_compaction_beta(headers: &mut stravia_vendor_sdk::net::Fields) 
             bytes.trim_ascii()
         }
     }
-    if value.split(|byte| *byte == b',').any(|beta| trim(beta) == ANTHROPIC_COMPACTION_BETA.as_bytes()) {
+    if value
+        .split(|byte| *byte == b',')
+        .any(|beta| trim(beta) == ANTHROPIC_COMPACTION_BETA.as_bytes())
+    {
         return;
     }
     let has_value = !trim(value).is_empty();
@@ -59,7 +62,9 @@ fn add_anthropic_compaction_beta(headers: &mut stravia_vendor_sdk::net::Fields) 
             if has_value {
                 field.bytes.push(b',');
             }
-            field.bytes.extend_from_slice(ANTHROPIC_COMPACTION_BETA.as_bytes());
+            field
+                .bytes
+                .extend_from_slice(ANTHROPIC_COMPACTION_BETA.as_bytes());
             updated = true;
         }
         headers.append(field.name, field.bytes);

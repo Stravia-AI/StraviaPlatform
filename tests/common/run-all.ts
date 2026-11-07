@@ -13,7 +13,7 @@ import { finished } from "node:stream/promises";
 
 const started = performance.now();
 const repository = resolve(import.meta.dir, "../..");
-const preparation = spawnSync(process.platform === "win32" ? "python" : "python3", ["patches/cargo/prepare.py"], {
+const preparation = spawnSync("task", ["prepare:crates"], {
   cwd: repository,
   stdio: "inherit",
 });
@@ -151,12 +151,16 @@ const workspace = [
   "stravia-vendor-manual-contract-fixture",
   "--exclude",
   "stravia-vendor-net-1-0-compat-fixture",
+  "--exclude",
+  "stravia-vendor-state-contract-fixture",
   "--features",
   "stravia-server/test-harness",
 ];
 const localIgnored: Record<string, true> = {
   "agent::artifact::tests::postgres_download_lifecycle_survives_reconstruction": true,
   "compaction::retention_tests::postgres_retention_contracts": true,
+  "plugin::store::atomic_journal_tests::postgres_journal_persistence": true,
+  "plugin::store::atomic_state_tests::postgres_atomic_operations_do_not_serialize_on_unrelated_provider": true,
   "interaction_observation::snapshot_tests::postgres_credential_discoveries_match_persisted_contract": true,
   postgres_admin_history_preserves_batches_and_retention: true,
   postgres_upgrade_defaults_unconfigured_routes_to_text_and_preserves_identity: true,

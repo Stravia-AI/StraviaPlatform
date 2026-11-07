@@ -29,6 +29,7 @@ use stravia_runtime_contract::turn_chain::TurnNodeId;
 use stravia_runtime_contract::turn_chain::TurnNodeKind;
 use stravia_runtime_contract::turn_chain::TurnUnavailable;
 
+mod admission;
 mod continuation;
 pub(crate) use continuation::GenerationParentTarget;
 mod materialize;
@@ -36,7 +37,12 @@ pub(crate) use materialize::PrefixRebuild;
 mod pending;
 mod project;
 mod store;
+mod window;
 mod write;
+pub(crate) use window::{
+    SourceHistoryProof, VirtualWindow, history_boundary_candidate, project_history_boundaries,
+    source_history_proof,
+};
 
 use materialize::*;
 pub(crate) use pending::GenerationCommitFence;
@@ -204,6 +210,8 @@ pub(crate) struct GenerationChain {
     /// 提交时是否登记节点引用的映射占位符；只在装配了可逆脱敏的网关里开启。
     records_redaction_references: bool,
     compaction: Option<crate::compaction::Compaction>,
+    prompt_admissions: Option<Arc<dyn crate::storage::PromptAdmissionStore>>,
+    atomic_state: Option<crate::plugin::PluginStore>,
 }
 
 pub(crate) struct GenerationChainWrite {
@@ -213,6 +221,15 @@ pub(crate) struct GenerationChainWrite {
     // only their effective request, never the client delta or another leg.
     parent: Arc<ActiveGenerationChain>,
     request_delta: Arc<AiRequest>,
+    admission_input: Arc<AiRequest>,
+    prompt_admission: Option<crate::storage::PromptAdmission>,
+    atomic_context: Option<crate::plugin::execution::AtomicConversationContext>,
+    atomic_guard: Option<crate::plugin::atomic_lease::AtomicLeaseGuard>,
+    virtual_window: Option<VirtualWindow>,
+    logical_turn: Option<LogicalTurn>,
+    history_delta_start: Option<usize>,
+    pending_window_boundary: Option<Arc<crate::compaction::ResolvedCompaction>>,
+    window_proof_missing: bool,
     request: Arc<AiRequest>,
     provider_context: Option<ProviderHistoryContext>,
     id: String,
@@ -235,6 +252,15 @@ impl Clone for GenerationChainWrite {
             principal: self.principal.clone(),
             parent: Arc::clone(&self.parent),
             request_delta: Arc::clone(&self.request_delta),
+            admission_input: Arc::clone(&self.admission_input),
+            prompt_admission: self.prompt_admission.clone(),
+            atomic_context: self.atomic_context.clone(),
+            atomic_guard: self.atomic_guard.clone(),
+            virtual_window: self.virtual_window,
+            logical_turn: self.logical_turn,
+            history_delta_start: self.history_delta_start,
+            pending_window_boundary: self.pending_window_boundary.clone(),
+            window_proof_missing: self.window_proof_missing,
             request: Arc::clone(&self.request),
             provider_context: self.provider_context.clone(),
             id: self.id.clone(),
@@ -317,14 +343,129 @@ impl std::fmt::Display for PersistError {
 
 impl std::error::Error for PersistError {}
 
+/// Original canonical gap provenance, created before request transformations.
+/// The identifier is reused for all transport attempts of one ModelTurn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HistoryBoundaryCandidate {
+    pub id: uuid::Uuid,
+    pub window_id: uuid::Uuid,
+    pub source_admission_id: uuid::Uuid,
+    pub source_item_gap: u64,
+    pub source_unit_gap: u64,
+    pub source_prefix_hash: [u8; 32],
+    pub source_controls_hash: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LogicalTurn {
+    pub id: uuid::Uuid,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UserPromptMetadata {
+    pub user_prompt_index: u64,
+    pub user_turn_index: Option<u64>,
+    #[serde(default)]
+    pub dialogue_prompt_index: Option<u64>,
+    #[serde(default)]
+    pub context_window_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub context_window_index: Option<u64>,
+    pub user_prompt_id: String,
+    pub user_prompt_created_at_ms: i64,
+    pub client_conversation_id: String,
+    pub client_conversation_created_at_ms: i64,
+}
+
 pub(crate) struct PreparedCompactionInput {
     pub request: Arc<AiRequest>,
     pub parent_id: Option<String>,
     pub root_id: Option<String>,
     pub has_new_user: bool,
+    pub user_prompt_metadata: Option<UserPromptMetadata>,
+    compact_prompt_counts: Option<(u64, u64)>,
+    prompt_count_proven: bool,
+    pub atomic_parent_checkpoint_id: Option<uuid::Uuid>,
+    source_window: Option<VirtualWindow>,
+    source_logical_turn: Option<LogicalTurn>,
     pub has_matching_pending_tool_result: bool,
     pub parent_target: crate::router::GenerationParentTarget,
     pub discovery_workspace: Option<GenerationDiscoveryWorkspace>,
+}
+
+impl PreparedCompactionInput {
+    pub(crate) fn logical_turn_for_admission(
+        &self,
+        admission_id: uuid::Uuid,
+        created_at_ms: i64,
+    ) -> Option<LogicalTurn> {
+        let (prompts, _) = self.compact_prompt_counts?;
+        if prompts == 0
+            && let Some(turn) = self.source_logical_turn
+        {
+            return Some(turn);
+        }
+        Some(LogicalTurn {
+            id: admission_id,
+            created_at_ms,
+        })
+    }
+    /// An unproved legacy or standalone source is an isolated virtual root.
+    pub(crate) fn source_window_for_admission(&self, root_window_id: uuid::Uuid) -> VirtualWindow {
+        self.source_window.unwrap_or(VirtualWindow {
+            id: root_window_id,
+            index: 0,
+        })
+    }
+    /// Bind standalone compaction to its actual admitted execution identity.
+    /// Pure compaction retains exact source metadata; a newly admitted
+    /// client prompt advances it only when the source ordinal is proven.
+    pub(crate) fn user_prompt_metadata_for_admission(
+        &self,
+        admission_id: uuid::Uuid,
+        created_at_ms: i64,
+    ) -> Option<UserPromptMetadata> {
+        if !self.prompt_count_proven {
+            return None;
+        }
+        let (prompts, turns) = self.compact_prompt_counts?;
+        if let Some(mut metadata) = self.user_prompt_metadata.clone() {
+            metadata.user_prompt_index = metadata.user_prompt_index.checked_add(prompts)?;
+            metadata.user_turn_index = match metadata.user_turn_index {
+                Some(index) => Some(index.checked_add(turns)?),
+                None => None,
+            };
+            metadata.dialogue_prompt_index = match metadata.dialogue_prompt_index {
+                Some(index) => Some(index.checked_add(turns)?),
+                None => None,
+            };
+            if prompts != 0 {
+                metadata.user_prompt_id = admission_id.to_string();
+                metadata.user_prompt_created_at_ms = created_at_ms;
+            }
+            Some(metadata)
+        } else if prompts != 0 {
+            let id = admission_id.to_string();
+            let (conversation_id, conversation_created_at_ms) = self
+                .source_logical_turn
+                .map(|turn| (turn.id.to_string(), turn.created_at_ms))
+                .unwrap_or_else(|| (id.clone(), created_at_ms));
+            Some(UserPromptMetadata {
+                user_prompt_index: prompts,
+                user_turn_index: Some(turns),
+                dialogue_prompt_index: Some(turns),
+                context_window_id: None,
+                context_window_index: None,
+                user_prompt_id: id.clone(),
+                user_prompt_created_at_ms: created_at_ms,
+                client_conversation_id: conversation_id,
+                client_conversation_created_at_ms: conversation_created_at_ms,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl GenerationChain {
@@ -341,7 +482,22 @@ impl GenerationChain {
             history_markers: None,
             records_redaction_references: false,
             compaction: None,
+            prompt_admissions: None,
+            atomic_state: None,
         }
+    }
+
+    pub(crate) fn with_prompt_admissions(
+        mut self,
+        store: Arc<dyn crate::storage::PromptAdmissionStore>,
+    ) -> Self {
+        self.prompt_admissions = Some(store);
+        self
+    }
+
+    pub(crate) fn with_atomic_state(mut self, store: crate::plugin::PluginStore) -> Self {
+        self.atomic_state = Some(store);
+        self
     }
 
     /// Rebuild derived Generation prefix indexes before accepting requests.
@@ -382,6 +538,68 @@ impl GenerationChain {
             .any(|item| item.role == stravia_runtime_contract::protocol::ir::Role::User);
         let has_matching_pending_tool_result =
             has_new_user && write.has_matching_pending_tool_result();
+        let delta_counts = admission::compaction_prompt_counts(&write.request_delta.items, None);
+        let source_proven = (write.parent.parent_prompt_metadata.is_some()
+            || write.parent.parent_prompt_zero_proven)
+            && (!write.parent.ordinal_delta_unproven
+                || delta_counts.is_some_and(|counts| counts.0 == 0));
+        let user_prompt_metadata = if source_proven {
+            write.parent.parent_prompt_metadata.clone()
+        } else {
+            None
+        };
+        let source_logical_turn = if write.parent.parent_logical_turn.is_some()
+            && (!write.parent.ordinal_delta_unproven
+                || delta_counts.is_some_and(|counts| counts.0 == 0))
+            && (write.chain.atomic_state.is_none()
+                || write.parent.parent_atomic_checkpoint_id.is_some())
+        {
+            write.parent.parent_logical_turn
+        } else {
+            None
+        };
+        let prompt_count_proven = source_proven
+            || (write.parent.parent_id.is_none()
+                && write.parent.compaction_input_range.is_none()
+                && !write.parent.ordinal_delta_unproven
+                && write.parent.parent_logical_turn.is_none()
+                && !write
+                    .admission_input
+                    .items
+                    .iter()
+                    .any(AiItem::is_compaction));
+        let compact_prompt_counts = if source_proven || source_logical_turn.is_some() {
+            delta_counts
+        } else {
+            admission::compaction_prompt_counts(
+                &write.admission_input.items,
+                write.parent.compaction_input_range.as_ref(),
+            )
+        };
+        let atomic_parent_checkpoint_id = write.parent.parent_atomic_checkpoint_id;
+        let source_window = if write.window_proof_missing {
+            None
+        } else if let Some(boundary) = write.pending_window_boundary.as_ref() {
+            match boundary.source_window {
+                Some(source) => {
+                    if write
+                        .parent
+                        .parent_virtual_window
+                        .is_some_and(|parent| parent != source)
+                    {
+                        return Err(BeginError::CompactionConflict);
+                    }
+                    Some(
+                        source
+                            .install(&write.principal, boundary)
+                            .map_err(|_| BeginError::CompactionConflict)?,
+                    )
+                }
+                None => None,
+            }
+        } else {
+            write.parent.parent_virtual_window
+        };
         let parent_id = write.parent.parent_id.clone();
         let root_id = if parent_id.is_some() {
             write.parent.root_id.clone()
@@ -395,6 +613,12 @@ impl GenerationChain {
             parent_id,
             root_id,
             has_new_user,
+            user_prompt_metadata,
+            compact_prompt_counts,
+            prompt_count_proven,
+            atomic_parent_checkpoint_id,
+            source_window,
+            source_logical_turn,
             has_matching_pending_tool_result,
             parent_target,
             discovery_workspace,
@@ -581,6 +805,7 @@ impl GenerationChain {
     ) -> Result<GenerationChainWrite, BeginError> {
         // The client delta and execution request start as one immutable snapshot.
         // History/control preparation detaches only the side it actually edits.
+        let admission_input = Arc::clone(&request);
         let mut request_delta = Arc::clone(&request);
         if ProtocolTransform::inferred_ingress(&request_delta)
             == Some(stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
@@ -616,6 +841,8 @@ impl GenerationChain {
                 })?;
         }
 
+        let mut install_window_boundary = false;
+        let mut window_proof_missing = false;
         let mut parent = if let Some(native) = native.as_ref() {
             let matched_start = request
                 .items
@@ -630,8 +857,13 @@ impl GenerationChain {
                 .store
                 .discover_parent(&principal, &mut discovered_request, workspace)
                 .await
-                .map_err(|_| BeginError::CompactionUnavailable)?
-                .filter(|prefix| prefix.matched_items >= native_range.end);
+                .map_err(|_| BeginError::CompactionUnavailable)?;
+            let retained_discovered_source = discovered.as_ref().is_some_and(|prefix| {
+                prefix.matched_items <= native_range.start
+                    && prefix.active.parent_id.as_deref() == native.source_generation_id.as_deref()
+                    && native.source_generation_id.is_some()
+            });
+            let discovered = discovered.filter(|prefix| prefix.matched_items >= native_range.end);
             if let Some(discovered) = discovered {
                 let parent_id = discovered
                     .active
@@ -655,11 +887,31 @@ impl GenerationChain {
                 // 但只能继承祖先关系，不能恢复旧控制或已替换的执行窗口。
                 let leading_controls =
                     request.items.len() - canonical_client_history_request(&request).items.len();
-                let source_prefix = self
+                let observed_source_prefix = self
                     .store
                     .compaction_source_from_items(&principal, &request, workspace)
-                    .await?
+                    .await?;
+                let source_prefix_range = native.source_history.and_then(|proof| {
+                    window::source_prefix_before_boundary(&request, native_range.start, proof)
+                });
+                let retained_source = source_prefix_range.is_some()
+                    || retained_discovered_source
+                    || observed_source_prefix.as_ref().is_some_and(|(count, id)| {
+                        leading_controls + *count <= native_range.start
+                            && native.source_generation_id.as_deref() == Some(id.as_str())
+                    });
+                let source_prefix = observed_source_prefix
                     .filter(|(count, _)| leading_controls + *count >= native_range.end);
+                if source_prefix.is_none() && !retained_source {
+                    if native.source_generation_id.is_some()
+                        && native.source_history.is_some()
+                        && native.source_window.is_some()
+                    {
+                        install_window_boundary = true;
+                    } else {
+                        window_proof_missing = true;
+                    }
+                }
                 let parent_id = source_prefix
                     .as_ref()
                     .map(|(_, id)| id.as_str())
@@ -693,7 +945,31 @@ impl GenerationChain {
                     Arc::make_mut(&mut request_delta)
                         .items
                         .drain(..leading_controls + count);
+                } else if native.user_prompt_metadata.is_some() || native.logical_turn.is_some() {
+                    // Only a proved source prefix before the native window is
+                    // old. A matching suffix remains newly admitted input.
+                    if let Some(source_range) = source_prefix_range.as_ref() {
+                        let mut position = 0;
+                        Arc::make_mut(&mut request_delta).items.retain(|_| {
+                            let keep = !source_range.contains(&position)
+                                && !native_range.contains(&position);
+                            position += 1;
+                            keep
+                        });
+                    } else if native.source_history.is_some() {
+                        Arc::make_mut(&mut request_delta)
+                            .items
+                            .drain(native_range.clone());
+                    } else {
+                        if native_range.start > leading_controls {
+                            parent.ordinal_delta_unproven = true;
+                        }
+                        Arc::make_mut(&mut request_delta)
+                            .items
+                            .drain(..native_range.end);
+                    }
                 } else {
+                    parent.ordinal_delta_unproven = true;
                     Arc::make_mut(&mut request_delta).items.drain(native_range);
                 }
                 crate::router::clear_previous_response_id(Arc::make_mut(&mut request));
@@ -724,10 +1000,35 @@ impl GenerationChain {
                 Ok(None) | Err(_) => ActiveGenerationChain::default(),
             }
         };
-        if let Some(native) = native {
-            parent.compaction_record_ids.extend(native.record_ids);
+        let mut pending_window_boundary = None;
+        if let Some(mut native) = native {
+            // The compaction checkpoint replaces its exact source state, but
+            // never a separately proved later Generation descendant.
+            if parent.parent_id.as_deref() == native.source_generation_id.as_deref() {
+                if parent.parent_virtual_window.is_none() && native.source_history.is_some() {
+                    parent.parent_virtual_window = native.source_window;
+                }
+                if let Some(checkpoint) = native.atomic_checkpoint_id {
+                    parent.parent_atomic_checkpoint_id = Some(checkpoint);
+                }
+                if let Some(turn) = native.logical_turn {
+                    parent.parent_logical_turn = Some(turn);
+                }
+                if let Some(metadata) = native.user_prompt_metadata.clone() {
+                    parent.parent_prompt_metadata = Some(metadata);
+                    // Compaction has its own admission, not the source node's
+                    // admission row. The immutable record is its proof.
+                    parent.parent_prompt_admission_id = None;
+                }
+            }
+            parent
+                .compaction_record_ids
+                .extend(std::mem::take(&mut native.record_ids));
             parent.compaction_record_ids.sort();
             parent.compaction_record_ids.dedup();
+            if install_window_boundary {
+                pending_window_boundary = Some(Arc::new(native));
+            }
         }
 
         if store::request_has_response_artifact_references(&request) {
@@ -748,6 +1049,15 @@ impl GenerationChain {
             principal,
             parent: Arc::new(parent),
             request_delta,
+            admission_input,
+            prompt_admission: None,
+            atomic_context: None,
+            atomic_guard: None,
+            virtual_window: None,
+            logical_turn: None,
+            history_delta_start: None,
+            pending_window_boundary,
+            window_proof_missing,
             request,
             provider_context: None,
             id: self.store.allocate_id(),
@@ -828,10 +1138,31 @@ impl GenerationChain {
             .source_parent(&write.principal, &source_id, workspace)
             .await
             .map_err(|_| BeginError::CompactionUnavailable)?;
+        if write.parent.parent_id.as_deref() == Some(source_id.as_str()) {
+            if write.parent.parent_atomic_checkpoint_id.is_some() {
+                parent.parent_atomic_checkpoint_id = write.parent.parent_atomic_checkpoint_id;
+            }
+            if write.parent.parent_logical_turn.is_some() {
+                parent.parent_logical_turn = write.parent.parent_logical_turn;
+            }
+            if write.parent.parent_prompt_metadata.is_some() {
+                parent.parent_prompt_metadata = write.parent.parent_prompt_metadata.clone();
+                parent.parent_prompt_admission_id = write.parent.parent_prompt_admission_id.clone();
+            }
+        }
         parent.replace_effective_history = true;
         // `client_request` is owned and never read again; move its items into
         // shared handles instead of freezing a borrowed copy.
         parent.replacement_client_items = Some(freeze_items(client_request.items));
+        if write
+            .parent
+            .compaction_input_range
+            .as_ref()
+            .is_some_and(|range| leading_controls + matched_items >= range.end)
+        {
+            write.pending_window_boundary = None;
+            write.window_proof_missing = false;
+        }
         parent.compaction_input_range = write.parent.compaction_input_range.clone();
         parent.compaction_record_ids.extend(std::mem::take(
             &mut Arc::make_mut(&mut write.parent).compaction_record_ids,
@@ -908,9 +1239,27 @@ struct GenerationChainState {
     canonical_controls_fingerprint: String,
     pub target_namespace: String,
     pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_admission_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_metadata: Option<UserPromptMetadata>,
+    #[serde(default)]
+    prompt_zero_proven: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    atomic_checkpoint_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    virtual_window: Option<VirtualWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    logical_turn: Option<LogicalTurn>,
 }
 
 impl GenerationChainState {
+    fn prompt_zero_proven(&self) -> bool {
+        self.prompt_admission_id.is_some()
+            && self.prompt_metadata.is_none()
+            && self.prompt_zero_proven
+    }
+
     fn heap_bytes(&self) -> usize {
         let Self {
             context_fingerprint,
@@ -921,6 +1270,12 @@ impl GenerationChainState {
             canonical_controls_fingerprint,
             target_namespace,
             protocol,
+            prompt_admission_id,
+            prompt_metadata,
+            prompt_zero_proven: _,
+            atomic_checkpoint_id: _,
+            virtual_window: _,
+            logical_turn: _,
         } = self;
         [
             context_fingerprint,
@@ -932,9 +1287,13 @@ impl GenerationChainState {
             protocol,
         ]
         .into_iter()
-        .fold(0usize, |bytes, value| {
-            bytes.saturating_add(value.capacity())
-        })
+        .fold(
+            prompt_admission_id.as_ref().map_or(0, String::capacity)
+                + prompt_metadata.as_ref().map_or(0, |metadata| {
+                    metadata.user_prompt_id.capacity() + metadata.client_conversation_id.capacity()
+                }),
+            |bytes, value| bytes.saturating_add(value.capacity()),
+        )
     }
 
     pub(crate) fn from_request(
@@ -1034,6 +1393,13 @@ struct ActiveGenerationChain {
     pub parent_id: Option<String>,
     pub parent_upstream_response_id: Option<String>,
     pub parent_state: Option<GenerationChainState>,
+    parent_prompt_admission_id: Option<String>,
+    parent_prompt_metadata: Option<UserPromptMetadata>,
+    parent_prompt_zero_proven: bool,
+    parent_atomic_checkpoint_id: Option<uuid::Uuid>,
+    parent_virtual_window: Option<VirtualWindow>,
+    parent_logical_turn: Option<LogicalTurn>,
+    ordinal_delta_unproven: bool,
     // Ancestry-only parents retain affinity without restoring execution state.
     parent_target_key: Option<String>,
     parent_expires_at: Option<std::time::Instant>,

@@ -10,13 +10,13 @@ use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::common;
 use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_common::plan::display_name;
+use stravia_vendor_sdk::net::Request;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
     AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
-    ConnectionCheckVerification, GuestHost, ModelAllowance, PluginError,
-    ProviderSnapshot, read_http_body,
+    ConnectionCheckVerification, GuestHost, ModelAllowance, PluginError, ProviderSnapshot,
+    read_http_body,
 };
-use stravia_vendor_sdk::net::Request;
 
 use crate::request::{DEFAULT_CLIENT_VERSION, cli_user_agent};
 use crate::{access_token, retryable};
@@ -64,7 +64,10 @@ pub(crate) fn connection_check(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
-    let response = host.http_start(usage_request(access_token(provider)?), &crate::net_options())?;
+    let response = host.http_start(
+        usage_request(access_token(provider)?),
+        &crate::net_options(),
+    )?;
     let value = connection_check::read_json(&response)?;
     validate_usage(&value)?;
     Ok(ConnectionCheckResponse {
@@ -73,13 +76,18 @@ pub(crate) fn connection_check(
 }
 
 fn usage_request(access_token: &str) -> Request {
-    crate::net_request("GET", USAGE_URL, vec![
+    crate::net_request(
+        "GET",
+        USAGE_URL,
+        vec![
             ("accept".into(), "application/json, text/plain, */*".into()),
             ("anthropic-beta".into(), USAGE_BETAS.into()),
             ("content-type".into(), "application/json".into()),
             ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
             ("authorization".into(), format!("Bearer {access_token}")),
-        ], Vec::new())
+        ],
+        Vec::new(),
+    )
 }
 
 /// 接受 `limits` 的空列表和缺省窗口；只要出现的已知字段类型正确即可通过，
@@ -122,13 +130,21 @@ fn validate_usage(value: &Value) -> Result<(), PluginError> {
 /// 失败或无 `user:profile` 权限时降级为 `None`，不让一次附加请求拖垮额度刷新。
 fn fetch_profile_plan(host: &GuestHost, access_token: &str) -> Option<String> {
     let response = host
-        .http_start(crate::net_request("GET", PROFILE_URL, vec![
-                ("accept".into(), "application/json, text/plain, */*".into()),
-                ("anthropic-beta".into(), "oauth-2025-04-20".into()),
-                ("content-type".into(), "application/json".into()),
-                ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
-                ("authorization".into(), format!("Bearer {access_token}")),
-            ], Vec::new()), &crate::net_options())
+        .http_start(
+            crate::net_request(
+                "GET",
+                PROFILE_URL,
+                vec![
+                    ("accept".into(), "application/json, text/plain, */*".into()),
+                    ("anthropic-beta".into(), "oauth-2025-04-20".into()),
+                    ("content-type".into(), "application/json".into()),
+                    ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
+                    ("authorization".into(), format!("Bearer {access_token}")),
+                ],
+                Vec::new(),
+            ),
+            &crate::net_options(),
+        )
         .ok()?;
     if !(200..300).contains(&response.status().ok()?) {
         return None;

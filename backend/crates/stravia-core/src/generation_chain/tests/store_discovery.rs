@@ -823,6 +823,7 @@ async fn discovery_workspace_rechecks_candidate_priority_after_a_previous_match(
     );
     durable
         .commit(TurnCommit {
+            atomic_checkpoint_id: None,
             id: TurnNodeId::new("bad-priority"),
             kind: TurnNodeKind::Response,
             parent_id: None,
@@ -937,6 +938,7 @@ async fn discovery_projection_skips_only_proven_incompatible_corrupt_candidates(
         // of IDs and proves that a successful first hit never reads later payloads.
         durable
             .commit(TurnCommit {
+                atomic_checkpoint_id: None,
                 id: TurnNodeId::new("corrupt-projection"),
                 kind: TurnNodeKind::Response,
                 parent_id: None,
@@ -1868,6 +1870,7 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
         };
         backend
             .commit(TurnCommit {
+                atomic_checkpoint_id: None,
                 principal: owner.clone(),
                 id: node.id,
                 kind: node.kind,
@@ -4903,6 +4906,7 @@ async fn commit_observation_node(
 ) {
     store
         .commit(TurnCommit {
+            atomic_checkpoint_id: None,
             id: TurnNodeId::new(id),
             kind: TurnNodeKind::Response,
             parent_id: parent.map(TurnNodeId::new),

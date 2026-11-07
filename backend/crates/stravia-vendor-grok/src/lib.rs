@@ -18,8 +18,8 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     AuthDescriptor, AuthFlow, AuthRequest, AuthResponse, AuthStep, CANONICAL_FORMAT_VERSION,
     Capability, ChannelDescriptor, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration,
-    Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation,
+    OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
     ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
 
@@ -217,10 +217,7 @@ fn execute_inference(
         }
     }
     project_body(&mut encoded.body);
-    let mut headers = Vec::new();
-    headers.push(("content-type".into(), "application/json".into()));
-    apply_auth_headers(provider, &mut headers)?;
-    apply_session_headers(provider, model, &mut headers);
+    let headers = inference_headers(provider, model)?;
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = serde_json::to_vec(&encoded.body).map_err(|error| {
         common::plugin_error(
@@ -229,12 +226,15 @@ fn execute_inference(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url,
-        headers: crate::net_fields(headers),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url,
+            headers: crate::net_fields(headers),
+            body,
+        },
+        &grok_net_options(),
+    )?;
     common::decode_inference(host, OPEN_RESPONSES_PROTOCOL, response)
 }
 
@@ -348,6 +348,76 @@ fn project_body(body: &mut Value) {
     }
 }
 
+fn inference_headers(
+    provider: &ProviderSnapshot,
+    model: &str,
+) -> Result<Vec<(String, String)>, PluginError> {
+    let mut headers = vec![
+        ("content-type".into(), "application/json".into()),
+        (
+            "user-agent".into(),
+            format!(
+                "grok-pager/{XAI_CLIENT_VERSION} grok-shell/{XAI_CLIENT_VERSION} (linux; x86_64)"
+            ),
+        ),
+        ("x-grok-client-mode".into(), "interactive".into()),
+        ("x-xai-token-auth".into(), "xai-grok-cli".into()),
+        (
+            "x-authenticateresponse".into(),
+            "authenticate-response".into(),
+        ),
+        ("x-grok-client-version".into(), XAI_CLIENT_VERSION.into()),
+    ];
+    let user_id = oauth_user_id(provider).ok_or_else(|| {
+        common::plugin_error(
+            ErrorKind::Auth,
+            "xAI OAuth user identity is missing from credentials",
+        )
+    })?;
+    headers.push(("x-grok-user-id".into(), user_id));
+    let affinity = common::session_affinity(provider).ok_or_else(|| {
+        common::plugin_error(
+            ErrorKind::Invalid,
+            "Grok inference requires operation_metadata.session_affinity",
+        )
+    })?;
+    let session = native_session_id(affinity);
+    let group_input = format!("xai:grok-build:conversation-group:{session}");
+    let group = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, group_input.as_bytes());
+    headers.push(("x-grok-conv-group-id".into(), group.to_string()));
+    headers.extend([
+        ("x-grok-client-identifier".into(), "grok-pager".into()),
+        (
+            "authorization".into(),
+            format!("Bearer {}", access_token(provider)?),
+        ),
+    ]);
+    let trace = uuid::Uuid::new_v4().simple().to_string();
+    let span = uuid::Uuid::new_v4().simple().to_string();
+    headers.push((
+        "traceparent".into(),
+        format!("00-{trace}-{}-01", &span[..16]),
+    ));
+    apply_session_headers(provider, model, &mut headers);
+    let agent = provider.operation_metadata.get("client_installation_id").and_then(Value::as_str)
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "Grok inference requires operation_metadata.client_installation_id as a stable device UUID"))?;
+    headers.push(("x-grok-agent-id".into(), agent.to_string()));
+    let turn = provider.operation_metadata.get("user_prompt_index").and_then(Value::as_u64)
+        .filter(|turn| *turn > 0)
+        .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "Grok inference requires operation_metadata.user_prompt_index as a positive prompt index"))?;
+    headers.push(("x-grok-turn-idx".into(), turn.to_string()));
+    headers.extend([
+        ("accept".into(), "text/event-stream".into()),
+        ("x-grok-doom-loop-check".into(), "1024".into()),
+        ("x-grok-exact-repetition-check".into(), "64".into()),
+        ("accept-encoding".into(), "gzip, br, deflate".into()),
+        ("host".into(), String::new()),
+        ("content-length".into(), String::new()),
+    ]);
+    Ok(headers)
+}
+
 fn apply_session_headers(
     provider: &ProviderSnapshot,
     model: &str,
@@ -355,16 +425,17 @@ fn apply_session_headers(
 ) {
     // Session identity is host-derived. Downstream session/agent/turn headers
     // and arbitrary provider options cannot become native routing authority.
-    if let Some(affinity) = common::session_affinity(provider) {
-        let session = native_session_id(affinity);
+    let session = common::session_affinity(provider).map(native_session_id);
+    if let Some(session) = &session {
         headers.push(("x-grok-conv-id".into(), session.clone()));
-        headers.push(("x-grok-session-id".into(), session));
     }
     headers.extend([
         ("x-grok-req-id".into(), uuid::Uuid::new_v4().to_string()),
         ("x-grok-model-override".into(), model.to_owned()),
-        ("x-grok-agent-id".into(), String::new()),
     ]);
+    if let Some(session) = session {
+        headers.push(("x-grok-session-id".into(), session));
+    }
 }
 
 fn native_session_id(affinity: &str) -> String {
@@ -434,12 +505,15 @@ fn discover(
         url.push_str("after=");
         url.push_str(&urlencoding::encode(cursor));
     }
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "GET".into(),
-        url,
-        headers: crate::net_fields(headers),
-        body: Vec::new(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "GET".into(),
+            url,
+            headers: crate::net_fields(headers),
+            body: Vec::new(),
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let body = read_http_body(&response, MAX_JSON_BODY)?;
@@ -723,6 +797,11 @@ fn xai_auth_refresh(
         TokenResult::Ready(mut response) => {
             if let AuthResponse::Credentials { values, .. } = &mut response {
                 inherit_email(values, &provider.credentials);
+                if !values.contains_key("user_id")
+                    && let Some(user_id) = oauth_user_id(provider)
+                {
+                    values.insert("user_id".into(), Value::String(user_id));
+                }
             }
             Ok(response)
         }
@@ -758,18 +837,21 @@ fn token_request(
     body: Vec<u8>,
     fallback_refresh: Option<&str>,
 ) -> Result<TokenResult, PluginError> {
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: endpoint.into(),
-        headers: crate::net_fields(vec![
-            (
-                "content-type".into(),
-                "application/x-www-form-urlencoded".into(),
-            ),
-            ("accept".into(), "application/json".into()),
-        ]),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: endpoint.into(),
+            headers: crate::net_fields(vec![
+                (
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
+                ("accept".into(), "application/json".into()),
+            ]),
+            body,
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let bytes = read_http_body(&response, MAX_JSON_BODY)?;
@@ -813,6 +895,9 @@ fn token_response(
         .max(1);
     let now = chrono::Utc::now().timestamp_millis();
     let mut values = BTreeMap::new();
+    if let Some(user_id) = team_principal_id(&access_token) {
+        values.insert("user_id".into(), Value::String(user_id));
+    }
     values.insert("access_token".into(), Value::String(access_token));
     if let Some(refresh_token) = refresh_token {
         values.insert("refresh_token".into(), Value::String(refresh_token));
@@ -838,6 +923,11 @@ fn token_response(
         .and_then(Value::as_str)
         .and_then(jwt_claims);
     if let Some(claims) = &claims {
+        if !values.contains_key("user_id")
+            && let Some(user_id) = claim_text(claims, &["sub"])
+        {
+            values.insert("user_id".into(), Value::String(user_id));
+        }
         if let Some(subject) = claim_text(claims, &["email", "sub"]) {
             values.insert("subject_id".into(), Value::String(subject));
         }
@@ -861,12 +951,15 @@ fn json_request(
     body: Vec<u8>,
 ) -> Result<Value, PluginError> {
     headers.push(("accept".into(), "application/json".into()));
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: method.into(),
-        url: url.into(),
-        headers: crate::net_fields(headers),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: method.into(),
+            url: url.into(),
+            headers: crate::net_fields(headers),
+            body,
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let bytes = read_http_body(&response, MAX_JSON_BODY)?;
@@ -925,6 +1018,35 @@ fn claim_text(claims: &Value, names: &[&str]) -> Option<String> {
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn team_principal_id(token: &str) -> Option<String> {
+    let claims = jwt_claims(token)?;
+    if claim_text(&claims, &["principal_type", "principalType"]).as_deref() == Some("Team") {
+        claim_text(&claims, &["principal_id", "principalId"])
+    } else {
+        None
+    }
+}
+
+fn oauth_user_id(provider: &ProviderSnapshot) -> Option<String> {
+    provider
+        .credentials
+        .get("user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .or_else(|| access_token(provider).ok().and_then(team_principal_id))
+        .or_else(|| {
+            provider
+                .credentials
+                .get("raw")?
+                .get("id_token")?
+                .as_str()
+                .and_then(jwt_claims)
+                .and_then(|claims| claim_text(&claims, &["sub"]))
+        })
 }
 
 fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
@@ -986,6 +1108,42 @@ impl VendorGuest for GrokVendor {
 #[cfg(target_arch = "wasm32")]
 stravia_vendor_sdk::export_vendor!(GrokVendor);
 
+fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
+    let mut fields = stravia_vendor_sdk::net::Fields::new();
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
+    if fields.get("accept").is_none() {
+        fields.append("accept", b"*/*".to_vec());
+    }
+    if fields.get("accept-encoding").is_none() {
+        fields.append("accept-encoding", b"identity".to_vec());
+    }
+    if fields.get("user-agent").is_none() {
+        fields.append("user-agent", b"Stravia".to_vec());
+    }
+    fields
+}
+
+fn grok_net_options() -> stravia_vendor_sdk::net::Options {
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("grok").expect("grok shape is valid");
+    options
+        .response_decoding(&[
+            stravia_vendor_sdk::net::Coding::Gzip,
+            stravia_vendor_sdk::net::Coding::Br,
+            stravia_vendor_sdk::net::Coding::Deflate,
+        ])
+        .expect("Grok response codings are valid");
+    options
+}
+
+fn net_options() -> stravia_vendor_sdk::net::Options {
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("default").expect("default shape is valid");
+    options
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,9 +1200,25 @@ mod tests {
             credential_values(id_token(json!({"email":" a@example.test ","sub":"u-1"})));
         assert_eq!(with_email["email"], "a@example.test");
         assert_eq!(with_email["subject_id"], "a@example.test");
+        assert_eq!(with_email["user_id"], "u-1");
         let subject_only = credential_values(id_token(json!({"sub":"u-1"})));
         assert_eq!(subject_only["subject_id"], "u-1");
         assert!(!subject_only.contains_key("email"));
+    }
+
+    #[test]
+    fn team_access_token_supplies_native_user_identity() {
+        let token = id_token(json!({"principalType":"Team", "principalId":"team-1"}));
+        let result = token_response(
+            json!({"access_token": token, "id_token": id_token(json!({"sub":"user-1"}))}),
+            "https://auth.x.ai/oauth2/token",
+            None,
+        )
+        .unwrap();
+        let TokenResult::Ready(AuthResponse::Credentials { values, .. }) = result else {
+            panic!("expected credentials");
+        };
+        assert_eq!(values["user_id"], "team-1");
     }
 
     #[test]
@@ -1131,6 +1305,88 @@ mod tests {
     }
 
     #[test]
+    fn interactive_inference_headers_use_pager_wire_identity() {
+        let provider = ProviderSnapshot {
+            provider_id: VENDOR_ID.into(),
+            channel: CHANNEL_ID.into(),
+            base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+            protocol: OPEN_RESPONSES_PROTOCOL.into(),
+            options: BTreeMap::new(),
+            credentials: BTreeMap::from([
+                ("access_token".into(), json!("placeholder")),
+                ("user_id".into(), json!("local-test")),
+            ]),
+            model: Some("grok-4.6".into()),
+            model_metadata: None,
+            client_headers: vec![],
+            operation_metadata: BTreeMap::from([
+                ("session_affinity".into(), json!("test-session")),
+                (
+                    "client_installation_id".into(),
+                    json!("55fabbff-01a2-5fb4-9941-3daf7f0699eb"),
+                ),
+                ("user_prompt_index".into(), json!(2)),
+            ]),
+        };
+        let headers = inference_headers(&provider, "grok-4.6").unwrap();
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(
+            get("user-agent"),
+            Some("grok-pager/1.0.52 grok-shell/1.0.52 (linux; x86_64)")
+        );
+        assert_eq!(get("x-grok-client-mode"), Some("interactive"));
+        assert_eq!(get("x-grok-client-identifier"), Some("grok-pager"));
+        assert_eq!(get("authorization"), Some("Bearer placeholder"));
+        assert_eq!(get("x-grok-user-id"), Some("local-test"));
+        assert_eq!(
+            get("x-grok-agent-id"),
+            Some("55fabbff-01a2-5fb4-9941-3daf7f0699eb")
+        );
+        assert_eq!(get("x-grok-turn-idx"), Some("2"));
+        let session = native_session_id("test-session");
+        assert_eq!(get("x-grok-session-id"), Some(session.as_str()));
+        let group = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("xai:grok-build:conversation-group:{session}").as_bytes(),
+        )
+        .to_string();
+        assert_eq!(get("x-grok-conv-group-id"), Some(group.as_str()));
+        assert_eq!(get("traceparent").unwrap().len(), 55);
+        assert_eq!(get("accept"), Some("text/event-stream"));
+        assert_eq!(get("accept-encoding"), Some("gzip, br, deflate"));
+        assert_eq!(get("x-grok-doom-loop-check"), Some("1024"));
+        assert_eq!(get("x-grok-exact-repetition-check"), Some("64"));
+        assert_eq!(get("host"), Some(""));
+        assert_eq!(get("content-length"), Some(""));
+        let mut other_installation = provider.clone();
+        other_installation.operation_metadata.insert(
+            "client_installation_id".into(),
+            json!("8c0bc85e-7f8e-4b7e-a739-a3b92c85f9c9"),
+        );
+        let other_headers = inference_headers(&other_installation, "grok-4.6").unwrap();
+        assert!(
+            other_headers
+                .iter()
+                .any(|(name, value)| name == "x-grok-agent-id"
+                    && value == "8c0bc85e-7f8e-4b7e-a739-a3b92c85f9c9")
+        );
+        let mut missing = provider.clone();
+        missing.operation_metadata.remove("client_installation_id");
+        assert!(inference_headers(&missing, "grok-4.6").is_err());
+        missing = provider.clone();
+        missing.operation_metadata.remove("user_prompt_index");
+        assert!(inference_headers(&missing, "grok-4.6").is_err());
+        missing = provider.clone();
+        missing.credentials.remove("user_id");
+        assert!(inference_headers(&missing, "grok-4.6").is_err());
+    }
+
+    #[test]
     fn native_search_projects_domains_without_unsupported_controls() {
         use stravia_runtime_contract::protocol::ir::{
             CodeExecutionTool, NativeTool, WebSearchTool,
@@ -1203,22 +1459,4 @@ mod tests {
         );
         assert!(body["text"].get("verbosity").is_none());
     }
-}
-
-
-fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
-    let mut fields = stravia_vendor_sdk::net::Fields::new();
-    for (name, value) in headers {
-        fields.append(name, value.into_bytes());
-    }
-    if fields.get("accept").is_none() { fields.append("accept", b"*/*".to_vec()); }
-    if fields.get("accept-encoding").is_none() { fields.append("accept-encoding", b"identity".to_vec()); }
-    if fields.get("user-agent").is_none() { fields.append("user-agent", b"Stravia".to_vec()); }
-    fields
-}
-
-fn net_options() -> stravia_vendor_sdk::net::Options {
-    let mut options = stravia_vendor_sdk::net::Options::new();
-    options.shape("default").expect("default shape is valid");
-    options
 }

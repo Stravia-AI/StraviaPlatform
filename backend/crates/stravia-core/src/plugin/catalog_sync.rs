@@ -14,15 +14,19 @@ use anyhow::Context;
 use async_trait::async_trait;
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LogLevel,
-    OperationScope, RuntimeError, RuntimeEvent,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LogLevel, OperationScope,
+    RuntimeError, RuntimeEvent,
 };
 use stravia_vendor_sdk::{CatalogSyncOutcome, CatalogSyncRequest, ErrorKind, net};
 use tokio::sync::Mutex;
 
 use super::lifecycle::VendorOperation;
 use super::manager::VendorPlugins;
-use super::network::{VendorNetwork, shape::ShapeRegistry, transport::VendorTransport};
+use super::network::{
+    VendorNetwork,
+    shape::ShapeRegistry,
+    transport::{Resolver, VendorTransport},
+};
 use super::permissions::{NetworkOrigin, NetworkPolicy};
 use crate::provider_catalog::{
     CatalogError, CatalogModelList, CatalogProviderScope, CatalogRefreshSummary, ProviderCatalog,
@@ -44,6 +48,7 @@ pub struct VendorCatalogSync {
     catalog_base_url: Option<String>,
     transport: Arc<VendorTransport>,
     shapes: Arc<ShapeRegistry>,
+    resolver: Arc<dyn Resolver>,
     lock: Arc<Mutex<()>>,
 }
 
@@ -54,6 +59,7 @@ impl VendorCatalogSync {
         catalog_base_url: Option<String>,
         transport: Arc<VendorTransport>,
         shapes: Arc<ShapeRegistry>,
+        resolver: Arc<dyn Resolver>,
     ) -> Self {
         Self {
             plugins,
@@ -61,6 +67,7 @@ impl VendorCatalogSync {
             catalog_base_url,
             transport,
             shapes,
+            resolver,
             lock: Arc::new(Mutex::new(())),
         }
     }
@@ -219,7 +226,10 @@ impl VendorCatalogSync {
         )?;
         let network = VendorNetwork::new(
             Arc::clone(&self.transport),
-            Arc::clone(&self.shapes),
+            super::network::VendorNetworkConfig {
+                shapes: Arc::clone(&self.shapes),
+                resolver: Arc::clone(&self.resolver),
+            },
             crate::outbound_proxy::OutboundProxySettings::default(),
             origins,
             operation.clone(),
@@ -299,7 +309,11 @@ impl HostServices for CatalogSyncServices {
         self.network.validate_net_option(key, value)
     }
 
-    fn http_start(&self, request: net::Request, options: net::Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: net::Request,
+        options: net::Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.ensure_current()?;
         self.network.http_start(request, options)
     }

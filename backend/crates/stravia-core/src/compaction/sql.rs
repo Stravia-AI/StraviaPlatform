@@ -57,7 +57,7 @@ impl Store {
             .map(|state| serde_json::to_string(&state.payload).map_err(storage))
             .collect::<Result<Vec<_>, _>>()?;
         macro_rules! insert {
-            ($pool:expr, $begin:literal, $for_key_share:literal) => {{
+            ($pool:expr, $begin:literal, $for_key_share:literal, $lease_lock:literal) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
                 let mut tx = connection.begin_with($begin).await.map_err(storage)?;
                 if let Some(source) = record.source_generation_id.as_deref() {
@@ -85,6 +85,27 @@ impl Store {
                 sqlx::query("INSERT INTO native_compactions (id, principal, source_generation_id, operation_id, payload, created_at, pending_until) VALUES ($1, $2, $3, $4, $5, $6, $7)")
                     .bind(&record.id).bind(&principal).bind(&record.source_generation_id).bind(&record.operation_id).bind(&payload).bind(now).bind(pending_until)
                     .execute(&mut *tx).await.map_err(storage)?;
+                if let Some(checkpoint) = record.atomic_checkpoint_id {
+                    // Hold the exact lease and checkpoint rows through reference insertion.
+                    let query = format!(
+                        "SELECT l.expires_at_ms FROM vendor_atomic_leases l \
+                         JOIN vendor_atomic_checkpoints c ON c.principal=l.principal AND c.admission_id=l.admission_id AND c.lease_id=l.lease_id \
+                         WHERE c.principal=$1 AND c.checkpoint_id=$2{}",
+                        $lease_lock,
+                    );
+                    let checkpoint = checkpoint.to_string();
+                    let expires_at: Option<i64> = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str()))
+                        .bind(&principal).bind(&checkpoint).fetch_optional(&mut *tx).await.map_err(storage)?;
+                    if !expires_at.is_some_and(|expiry| expiry > chrono::Utc::now().timestamp_millis()) {
+                        return Err(CompactionError::Unavailable);
+                    }
+                    let query = format!("SELECT CAST(1 AS BIGINT) FROM vendor_atomic_checkpoints WHERE principal=$1 AND checkpoint_id=$2{}", $for_key_share);
+                    let exists: Option<i64> = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query.as_str()))
+                        .bind(&principal).bind(&checkpoint).fetch_optional(&mut *tx).await.map_err(storage)?;
+                    if exists.is_none() { return Err(CompactionError::Unavailable); }
+                    sqlx::query("INSERT INTO native_compaction_atomic_checkpoints (record_id, principal, checkpoint_id) VALUES ($1, $2, $3)")
+                        .bind(&record.id).bind(&principal).bind(&checkpoint).execute(&mut *tx).await.map_err(storage)?;
+                }
                 for predecessor in &record.source_record_ids {
                     sqlx::query("INSERT INTO native_compaction_sources (record_id, source_id) VALUES ($1, $2)")
                         .bind(&record.id).bind(predecessor).execute(&mut *tx).await.map_err(storage)?;
@@ -100,8 +121,8 @@ impl Store {
             }};
         }
         match self {
-            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE", ""),
-            Self::Postgres(pool) => insert!(pool, "BEGIN", " FOR KEY SHARE"),
+            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE", "", ""),
+            Self::Postgres(pool) => insert!(pool, "BEGIN", " FOR KEY SHARE", " FOR UPDATE OF l"),
         }
     }
 

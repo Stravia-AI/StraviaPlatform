@@ -1,0 +1,5 @@
+package fixture:state-compat;
+
+world state-imports {
+    import stravia:state/store@1.0.0;
+}

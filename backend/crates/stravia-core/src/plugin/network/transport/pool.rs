@@ -15,9 +15,13 @@ use tokio::time::Instant;
 
 use rama_core::ServiceInput;
 use rama_http_core::client::conn::http1;
-use rustls::{client::Resumption, ClientConfig};
+use rustls::ClientConfig;
 
-use super::{body::RequestBody, connector::{self, Resolver, Route}, h2::{self, H2PeerSettingsHandle, H2Settings}};
+use super::{
+    body::RequestBody,
+    connector::{self, Resolver, Route},
+    h2::{self, H2PeerSettingsHandle, H2Settings},
+};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -41,6 +45,7 @@ pub struct ConnectOptions {
     /// Either `http` or `https`.
     pub scheme: String,
     pub target_tls: Option<Arc<ClientConfig>>,
+    pub tls_session_policy: super::super::shape::SessionPolicy,
     pub proxy_tls: Option<Arc<ClientConfig>>,
     pub resolver: Arc<dyn Resolver>,
     pub shape_name: String,
@@ -72,20 +77,29 @@ pub struct PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        let Some(Sender::Http1(mut sender)) = self.sender.take() else { return };
-        let Some(guard) = self.guard.take() else { return };
+        let Some(Sender::Http1(mut sender)) = self.sender.take() else {
+            return;
+        };
+        let Some(guard) = self.guard.take() else {
+            return;
+        };
         let authorization = self.proxy_authorization.clone();
         let forward_proxy = self.forward_proxy;
         // Keep the entry alive until the body releases the HTTP/1 connection.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                if sender.ready().await.is_ok() {
-                    if let Some(pool) = guard.pool.upgrade() {
-                        let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(entry) = state.entries.get_mut(&guard.key) {
-                            entry.h1.push(IdleH1 { sender, authorization, forward_proxy, since: Instant::now() });
-                            schedule_h1_expiry(&pool, guard.key.clone());
-                        }
+                if sender.ready().await.is_ok()
+                    && let Some(pool) = guard.pool.upgrade()
+                {
+                    let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(entry) = state.entries.get_mut(&guard.key) {
+                        entry.h1.push(IdleH1 {
+                            sender,
+                            authorization,
+                            forward_proxy,
+                            since: Instant::now(),
+                        });
+                        schedule_h1_expiry(&pool, guard.key.clone());
                     }
                 }
             });
@@ -116,7 +130,9 @@ impl Hash for ConfigIdentity {
 #[derive(Clone)]
 struct ResolverIdentity(Arc<dyn Resolver>);
 impl PartialEq for ResolverIdentity {
-    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 impl Eq for ResolverIdentity {}
 impl Hash for ResolverIdentity {
@@ -133,6 +149,7 @@ struct Key {
     port: u16,
     scheme: String,
     target_tls: ConfigIdentity,
+    tls_session_policy: super::super::shape::SessionPolicy,
     proxy_tls: ConfigIdentity,
     shape_name: String,
     shape_revision: u64,
@@ -166,9 +183,11 @@ struct State {
 }
 
 fn remove_unused(state: &mut State, key: &Key) {
-    if state.entries.get(key).is_some_and(|entry| {
-        entry.active == 0 && entry.h1.is_empty() && entry.h2.is_none()
-    }) {
+    if state
+        .entries
+        .get(key)
+        .is_some_and(|entry| entry.active == 0 && entry.h1.is_empty() && entry.h2.is_none())
+    {
         state.entries.remove(key);
     }
 }
@@ -198,7 +217,9 @@ fn schedule_h1_expiry(pool: &Arc<Mutex<State>>, key: Key) {
         if let Some(pool) = pool.upgrade() {
             let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = state.entries.get_mut(&key) {
-                entry.h1.retain(|idle| idle.since.elapsed() < IDLE_TIMEOUT && !idle.sender.is_closed());
+                entry
+                    .h1
+                    .retain(|idle| idle.since.elapsed() < IDLE_TIMEOUT && !idle.sender.is_closed());
             }
             remove_unused(&mut state, &key);
         }
@@ -213,7 +234,9 @@ fn schedule_h2_expiry(pool: &Arc<Mutex<State>>, key: Key) {
             tokio::time::sleep(delay).await;
             let Some(pool) = pool.upgrade() else { break };
             let mut state = pool.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(entry) = state.entries.get_mut(&key) else { break };
+            let Some(entry) = state.entries.get_mut(&key) else {
+                break;
+            };
             let Some(idle) = entry.h2.as_ref() else { break };
             if idle.sender.is_closed() || idle.since.elapsed() >= IDLE_TIMEOUT {
                 // The h2 driver keeps active streams alive after the last sender
@@ -234,10 +257,13 @@ pub struct Pool {
     state: Arc<Mutex<State>>,
 }
 
-fn isolated(config: &Option<Arc<ClientConfig>>) -> Option<Arc<ClientConfig>> {
+fn isolated(
+    config: &Option<Arc<ClientConfig>>,
+    policy: super::super::shape::SessionPolicy,
+) -> Option<Arc<ClientConfig>> {
     config.as_ref().map(|config| {
         let mut config = (**config).clone();
-        config.resumption = Resumption::in_memory_sessions(256);
+        config.resumption = policy.resumption();
         Arc::new(config)
     })
 }
@@ -249,84 +275,156 @@ fn other(error: impl std::fmt::Display) -> io::Error {
 impl Pool {
     pub async fn acquire(&self, options: ConnectOptions) -> io::Result<PooledConnection> {
         if !matches!(options.scheme.as_str(), "http" | "https") || options.port == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid destination scheme or port"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid destination scheme or port",
+            ));
         }
         let key = Key {
-            route: options.route.clone(), resolver: ResolverIdentity(options.resolver.clone()), host: options.host.clone(), port: options.port,
-            scheme: options.scheme.clone(), target_tls: ConfigIdentity(options.target_tls.clone()),
-            proxy_tls: ConfigIdentity(options.proxy_tls.clone()), shape_name: options.shape_name.clone(),
-            shape_revision: options.shape_revision, alpn: options.alpn,
+            route: options.route.clone(),
+            resolver: ResolverIdentity(options.resolver.clone()),
+            host: options.host.clone(),
+            port: options.port,
+            scheme: options.scheme.clone(),
+            target_tls: ConfigIdentity(options.target_tls.clone()),
+            tls_session_policy: options.tls_session_policy,
+            proxy_tls: ConfigIdentity(options.proxy_tls.clone()),
+            shape_name: options.shape_name.clone(),
+            shape_revision: options.shape_revision,
+            alpn: options.alpn,
         };
         let (target_tls, proxy_tls, guard) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let entry = state.entries.entry(key.clone()).or_insert_with(|| Entry {
-                active: 0, h1: Vec::new(), h2: None,
-                target_tls: isolated(&options.target_tls), proxy_tls: isolated(&options.proxy_tls),
+                active: 0,
+                h1: Vec::new(),
+                h2: None,
+                target_tls: isolated(&options.target_tls, options.tls_session_policy),
+                proxy_tls: isolated(
+                    &options.proxy_tls,
+                    super::super::shape::SessionPolicy::Standard,
+                ),
             });
             entry.active += 1;
-            let guard = EntryGuard { pool: Arc::downgrade(&self.state), key: key.clone() };
-            entry.h1.retain(|idle| idle.since.elapsed() < IDLE_TIMEOUT && !idle.sender.is_closed());
+            let guard = EntryGuard {
+                pool: Arc::downgrade(&self.state),
+                key: key.clone(),
+            };
+            entry
+                .h1
+                .retain(|idle| idle.since.elapsed() < IDLE_TIMEOUT && !idle.sender.is_closed());
             if let Some(h2) = entry.h2.as_mut() {
                 if h2.since.elapsed() < IDLE_TIMEOUT && !h2.sender.is_closed() {
                     h2.since = Instant::now();
                     return Ok(PooledConnection {
-                        sender: Some(Sender::Http2(h2.sender.clone())), peer_settings: Some(h2.peer_settings.clone()),
-                        forward_proxy: false, proxy_authorization: None, guard: Some(guard),
+                        sender: Some(Sender::Http2(h2.sender.clone())),
+                        peer_settings: Some(h2.peer_settings.clone()),
+                        forward_proxy: false,
+                        proxy_authorization: None,
+                        guard: Some(guard),
                     });
                 }
                 entry.h2 = None;
             }
             if let Some(idle) = entry.h1.pop() {
                 return Ok(PooledConnection {
-                    sender: Some(Sender::Http1(idle.sender)), peer_settings: None,
-                    forward_proxy: idle.forward_proxy, proxy_authorization: idle.authorization,
+                    sender: Some(Sender::Http1(idle.sender)),
+                    peer_settings: None,
+                    forward_proxy: idle.forward_proxy,
+                    proxy_authorization: idle.authorization,
                     guard: Some(guard),
                 });
             }
             (entry.target_tls.clone(), entry.proxy_tls.clone(), guard)
         };
 
-        let forward_proxy = options.scheme == "http" && matches!(&options.route, Route::Proxy(proxy) if proxy.is_http_forward_proxy());
+        let forward_proxy = options.scheme == "http"
+            && matches!(&options.route, Route::Proxy(proxy) if proxy.is_http_forward_proxy());
         let (stream, authorization, negotiated) = if forward_proxy {
             if options.alpn == AlpnPreference::Http2Only {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "HTTP forwarding requires HTTP/1.1"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "HTTP forwarding requires HTTP/1.1",
+                ));
             }
-            let Route::Proxy(proxy) = &options.route else { unreachable!() };
-            let (stream, authorization) = connector::connect_http_forward(proxy, proxy_tls, options.resolver.as_ref()).await?;
+            let Route::Proxy(proxy) = &options.route else {
+                unreachable!()
+            };
+            let (stream, authorization) =
+                connector::connect_http_forward(proxy, proxy_tls, options.resolver.as_ref())
+                    .await?;
             (stream, authorization, None)
         } else if options.scheme == "https" {
-            let config = target_tls.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "HTTPS requires target TLS configuration"))?;
+            let config = target_tls.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "HTTPS requires target TLS configuration",
+                )
+            })?;
             let mut config = (*config).clone();
             match options.alpn {
                 AlpnPreference::Http2ThenHttp1 => {}
-                AlpnPreference::Http1Only => config.alpn_protocols = vec![b"http/1.1".to_vec()],
+                AlpnPreference::Http1Only => config
+                    .alpn_protocols
+                    .retain(|protocol| protocol == b"http/1.1"),
                 AlpnPreference::Http2Only => config.alpn_protocols = vec![b"h2".to_vec()],
             }
-            let (stream, negotiated) = connector::connect_tls(&options.host, options.port, &options.route, proxy_tls, Arc::new(config), options.resolver.as_ref()).await?;
+            let (stream, negotiated) = connector::connect_tls(
+                &options.host,
+                options.port,
+                &options.route,
+                proxy_tls,
+                Arc::new(config),
+                options.resolver.as_ref(),
+            )
+            .await?;
             (stream, None, negotiated)
         } else {
-            (connector::connect(&options.host, options.port, &options.route, proxy_tls, options.resolver.as_ref()).await?, None, None)
+            (
+                connector::connect(
+                    &options.host,
+                    options.port,
+                    &options.route,
+                    proxy_tls,
+                    options.resolver.as_ref(),
+                )
+                .await?,
+                None,
+                None,
+            )
         };
         let use_h2 = if options.scheme == "https" {
             match negotiated.as_deref() {
                 Some(b"h2") => true,
                 None | Some(b"http/1.1") if options.alpn != AlpnPreference::Http2Only => false,
-                _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported or missing negotiated ALPN")),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unsupported or missing negotiated ALPN",
+                    ));
+                }
             }
         } else {
             !forward_proxy && options.alpn == AlpnPreference::Http2Only
         };
         let io = ServiceInput::new(stream);
         let (sender, peer_settings) = if use_h2 {
-            let (sender, peer_settings) = h2::connect(io, options.h2_settings).await.map_err(other)?;
+            let (sender, peer_settings) =
+                h2::connect(io, options.h2_settings).await.map_err(other)?;
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = state.entries.get_mut(&key) {
-                entry.h2 = Some(IdleH2 { sender: sender.clone(), peer_settings: peer_settings.clone(), since: Instant::now() });
+                entry.h2 = Some(IdleH2 {
+                    sender: sender.clone(),
+                    peer_settings: peer_settings.clone(),
+                    since: Instant::now(),
+                });
                 schedule_h2_expiry(&self.state, key.clone());
             }
             (Sender::Http2(sender), Some(peer_settings))
         } else {
-            let (sender, connection) = http1::handshake::<_, RequestBody>(io).await.map_err(other)?;
+            let (sender, connection) = http1::handshake::<_, RequestBody>(io)
+                .await
+                .map_err(other)?;
             tokio::spawn(async move {
                 if let Err(error) = connection.with_upgrades().await {
                     tracing::debug!(%error, "HTTP/1 connection closed with an error");
@@ -334,6 +432,12 @@ impl Pool {
             });
             (Sender::Http1(sender), None)
         };
-        Ok(PooledConnection { sender: Some(sender), forward_proxy, proxy_authorization: authorization, peer_settings, guard: Some(guard) })
+        Ok(PooledConnection {
+            sender: Some(sender),
+            forward_proxy,
+            proxy_authorization: authorization,
+            peer_settings,
+            guard: Some(guard),
+        })
     }
 }

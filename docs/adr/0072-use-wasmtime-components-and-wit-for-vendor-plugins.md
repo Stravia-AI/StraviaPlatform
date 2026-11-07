@@ -4,7 +4,7 @@ status: accepted
 
 # 使用 Wasmtime Component Model 与 WIT 统一 Vendor 插件契约
 
-修订：Vendor 1.0 的网络拆包、主版本准入与发布快照遵循 [ADR-0093](0093-split-controlled-network-into-stravia-net-with-major-version-admission.md)。
+修订：Vendor 1.0 的网络拆包、主版本准入与发布快照遵循 [ADR-0093](0093-split-controlled-network-into-stravia-net-with-major-version-admission.md)。末段记录决策时的未决状态，不是当前依赖选择或验证状态的断言。
 
 Vendor Plugin 使用 Wasmtime 执行 WebAssembly Component，以版本化 WIT 定义供应商导出能力和受控宿主 imports。发布单个自包含 Component，携带锁定的 codec 依赖；首先提供 Rust SDK 迁移既有实现，但不将契约限定为 Rust。
 

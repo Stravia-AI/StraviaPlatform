@@ -470,6 +470,56 @@ async fn sqlite_deadline_and_lost_lease_become_distinct_terminal_errors() {
 }
 
 #[tokio::test]
+async fn resolver_maps_identity_empty_expansions_and_storage_errors() {
+    let pool = sqlite_pool().await;
+    let store = SqlHistoryMarkerStore::sqlite(pool.clone());
+    let owner = principal("owner");
+
+    let mut empty = AiRequest::new("model", vec![]);
+    let summary = resolve_request_markers(&store, &owner, &mut empty)
+        .await
+        .unwrap();
+    assert_eq!(summary.source_item_gaps, vec![0]);
+
+    let mut ordinary = AiRequest::new(
+        "model",
+        vec![AiItem::output_text("same"), AiItem::output_text("same")],
+    );
+    let summary = resolve_request_markers(&store, &owner, &mut ordinary)
+        .await
+        .unwrap();
+    assert_eq!(summary.source_item_gaps, vec![0, 1, 2]);
+
+    let unknown = HistoryMarker {
+        reference: "ffffffffffffffffffffffffffff".into(),
+        kind: HistoryMarkerKind::Thinking,
+        activity: "Unknown".into(),
+    };
+    let mut removed = AiRequest::new(
+        "model",
+        vec![
+            AiItem::output_text(render_history_marker(&unknown)),
+            AiItem::output_text("after"),
+        ],
+    );
+    let summary = resolve_request_markers(&store, &owner, &mut removed)
+        .await
+        .unwrap();
+    assert_eq!(summary.source_item_gaps, vec![0, 0, 1]);
+    assert_eq!(removed.items[0].output_text_ref(), Some("after"));
+
+    pool.close().await;
+    let mut failing = AiRequest::new(
+        "model",
+        vec![AiItem::output_text(render_history_marker(&unknown))],
+    );
+    assert!(matches!(
+        resolve_request_markers(&store, &owner, &mut failing).await,
+        Err(HistoryMarkerError::Storage(_))
+    ));
+}
+
+#[tokio::test]
 async fn resolver_restores_trailing_marker_at_its_exact_position_and_preserves_edits() {
     let store = sqlite_store().await;
     let owner = principal("owner");
@@ -506,6 +556,7 @@ async fn resolver_restores_trailing_marker_at_its_exact_position_and_preserves_e
         .unwrap();
 
     assert_eq!(summary.restored_thinking_segments, 1);
+    assert_eq!(summary.source_item_gaps, vec![0, 2, 2, 3]);
     assert_eq!(request.items.len(), 3);
     assert_eq!(request.items[0].output_text_ref(), Some("client edit\n"));
     assert!(matches!(
@@ -562,10 +613,11 @@ async fn resolver_collapses_legacy_marker_item_duplicate_without_losing_public_c
         ],
     );
 
-    resolve_request_markers(store.as_ref(), &owner, &mut request)
+    let summary = resolve_request_markers(store.as_ref(), &owner, &mut request)
         .await
         .unwrap();
 
+    assert_eq!(summary.source_item_gaps, vec![0, 3, 3, 4]);
     assert_eq!(
         request
             .items
@@ -625,7 +677,8 @@ async fn resolver_removes_unknown_and_unauthorized_private_markers() {
         .await
         .unwrap();
 
-    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(summary.restored_platform_segments, 0);
+    assert_eq!(summary.restored_thinking_segments, 0);
     assert_eq!(request.items.len(), 1);
     assert_eq!(request.items[0].output_text_ref(), Some("\n"));
 }
@@ -691,6 +744,7 @@ async fn resolver_restores_projected_text_and_platform_segment_at_exact_marker_p
         .unwrap();
 
     assert_eq!(summary.restored_platform_segments, 1);
+    assert_eq!(summary.source_item_gaps, vec![0, 5, 6]);
     assert_eq!(request.items.len(), 6);
     assert!(matches!(
         request.items[0].thinking_ref(),
@@ -921,7 +975,8 @@ async fn resolver_never_forwards_an_unresolvable_reasoning_marker_token() {
             .await
             .unwrap();
 
-        assert_eq!(summary, MarkerResolution::default());
+        assert_eq!(summary.restored_platform_segments, 0);
+        assert_eq!(summary.restored_thinking_segments, 0);
         let wire = serde_json::to_string(&request.items).unwrap();
         assert!(!wire.contains(HISTORY_MARKER_PREFIX), "{wire}");
         assert!(!wire.contains("foreign"), "{wire}");
@@ -1023,7 +1078,8 @@ async fn resolver_keeps_content_preview_as_text_after_marker_deletion() {
         .await
         .unwrap();
 
-    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(summary.restored_platform_segments, 0);
+    assert_eq!(summary.restored_thinking_segments, 0);
     assert_eq!(
         request.items[0].output_text_ref(),
         Some("\n> retained client text\n")
@@ -1321,7 +1377,8 @@ async fn resolver_treats_marker_removal_as_an_explicit_projection_edit() {
         .await
         .unwrap();
 
-    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(summary.restored_platform_segments, 0);
+    assert_eq!(summary.restored_thinking_segments, 0);
     assert_eq!(request.items.len(), 1);
     assert!(matches!(
         request.items[0].thinking_ref(),
@@ -1436,7 +1493,8 @@ async fn resolver_strips_unpublished_and_expired_markers_without_losing_visible_
         .await
         .unwrap();
 
-    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(summary.restored_platform_segments, 0);
+    assert_eq!(summary.restored_thinking_segments, 0);
     assert_eq!(request.items.len(), 1);
     assert!(matches!(
         request.items[0].thinking_ref(),
@@ -1493,7 +1551,8 @@ async fn resolver_leaves_private_syntax_inside_tool_output_unchanged() {
         .await
         .expect("tool output must bypass History Marker resolution");
 
-    assert_eq!(summary, MarkerResolution::default());
+    assert_eq!(summary.restored_platform_segments, 0);
+    assert_eq!(summary.restored_thinking_segments, 0);
     assert!(matches!(
         &request.items[0].content,
         MessageContent::Text(text) if text.as_str() == fixture

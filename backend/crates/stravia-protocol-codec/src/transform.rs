@@ -11,7 +11,7 @@ use stravia_runtime_contract::protocol::ir::AiResponse;
 use stravia_runtime_contract::protocol::ir::AiStreamDelta;
 
 mod replay;
-pub use replay::prepare_thinking_replay;
+pub use replay::{prepare_thinking_replay, prepare_thinking_replay_with_removals};
 
 pub trait ProtocolAdapter: Send + Sync + 'static {
     fn id(&self) -> ProtocolEndpoint;
@@ -175,7 +175,22 @@ impl ProtocolTransform {
             ingress: Self::inferred_ingress(canonical).unwrap_or(endpoint),
             egress: endpoint,
         };
-        prune_request(pair, canonical, capabilities)
+        prune_request(pair, canonical, capabilities, None)
+    }
+
+    /// Prune a request and report sorted indices into its original item sequence.
+    pub fn prune_request_for_with_removals(
+        endpoint: ProtocolEndpoint,
+        capabilities: &EndpointCapabilities,
+        canonical: &mut AiRequest,
+    ) -> Vec<usize> {
+        let pair = ProtocolPair {
+            ingress: Self::inferred_ingress(canonical).unwrap_or(endpoint),
+            egress: endpoint,
+        };
+        let mut removed = Vec::new();
+        prune_request(pair, canonical, capabilities, Some(&mut removed));
+        removed
     }
 
     /// Decode a unary response with a plugin-owned adapter.
@@ -252,7 +267,7 @@ impl ProtocolPair {
         mut canonical: AiRequest,
     ) -> Result<EncodedRequest, TransformError> {
         let target = adapter(self.egress)?;
-        prune_request(self, &mut canonical, target.capabilities());
+        prune_request(self, &mut canonical, target.capabilities(), None);
         let path = target.request_path(&canonical.model, canonical.stream.enabled);
         let (body, headers) =
             target
@@ -706,7 +721,12 @@ fn stream_closed(endpoint: ProtocolEndpoint, direction: TransformDirection) -> T
     }
 }
 
-fn prune_request(pair: ProtocolPair, request: &mut AiRequest, capabilities: &EndpointCapabilities) {
+fn prune_request(
+    pair: ProtocolPair,
+    request: &mut AiRequest,
+    capabilities: &EndpointCapabilities,
+    mut removed: Option<&mut Vec<usize>>,
+) {
     use stravia_runtime_contract::protocol::ir::{ResponseFormat, ToolChoice};
     // Normalize before dropping foreign protocol fidelity state.
     request.normalize_parameters();
@@ -793,22 +813,53 @@ fn prune_request(pair: ProtocolPair, request: &mut AiRequest, capabilities: &End
             request.tool_choice = None;
         }
         request.meta.vendor.passthrough_safe.clear();
+        let mut index = 0;
         request.items.retain(|item| {
-            item.unknown_ref().is_none()
+            let original_index = index;
+            index += 1;
+            let keep = item.unknown_ref().is_none()
                 && (pair.egress.protocol == Protocol::OpenResponses
                     || (!item.is_compaction_trigger()
                         && (!item.is_compaction()
                             || pair.egress.protocol == Protocol::AnthropicMessages
-                                && compaction_summary(item).is_some())))
+                                && compaction_summary(item).is_some())));
+            if !keep && let Some(removed) = removed.as_deref_mut() {
+                removed.push(original_index);
+            }
+            keep
         });
     }
-    prune_items(
-        pair.egress.protocol,
-        &mut request.items,
-        capabilities.function_calling,
-        false,
-        pair.ingress == pair.egress,
-    );
+    if let Some(removed) = removed {
+        let original_count = request.items.len() + removed.len();
+        let mut first_removed = removed.iter().copied().peekable();
+        let survivors: Vec<usize> = (0..original_count)
+            .filter(|index| {
+                if first_removed.peek() == Some(index) {
+                    first_removed.next();
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        prune_items_with_removals(
+            pair.egress.protocol,
+            &mut request.items,
+            capabilities.function_calling,
+            false,
+            pair.ingress == pair.egress,
+            |index| removed.push(survivors[index]),
+        );
+        removed.sort_unstable();
+    } else {
+        prune_items(
+            pair.egress.protocol,
+            &mut request.items,
+            capabilities.function_calling,
+            false,
+            pair.ingress == pair.egress,
+        );
+    }
 }
 
 /// The readable summary of an Anthropic-origin compaction state, if `item` is one.
@@ -881,6 +932,24 @@ fn prune_items(
     output: bool,
     preserve_blocks: bool,
 ) {
+    prune_items_with_removals(
+        target,
+        items,
+        tools_supported,
+        output,
+        preserve_blocks,
+        |_| {},
+    );
+}
+
+fn prune_items_with_removals(
+    target: Protocol,
+    items: &mut Vec<stravia_runtime_contract::protocol::ir::AiItem>,
+    tools_supported: bool,
+    output: bool,
+    preserve_blocks: bool,
+    mut removed: impl FnMut(usize),
+) {
     let mut dropped_calls = std::collections::HashSet::new();
     for item in items.iter_mut() {
         prune_item(
@@ -892,7 +961,16 @@ fn prune_items(
             &mut dropped_calls,
         );
     }
-    items.retain_mut(|item| retain_pruned_item(target, item, tools_supported, &dropped_calls));
+    let mut index = 0;
+    items.retain_mut(|item| {
+        let original_index = index;
+        index += 1;
+        let keep = retain_pruned_item(target, item, tools_supported, &dropped_calls);
+        if !keep {
+            removed(original_index);
+        }
+        keep
+    });
 }
 
 fn prune_item(

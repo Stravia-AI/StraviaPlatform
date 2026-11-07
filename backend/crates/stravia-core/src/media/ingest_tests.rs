@@ -1098,6 +1098,10 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
         gateway.turn_chains.clone(),
     )
     .unwrap()
+    .with_atomic_state_store(
+        gateway.storage.vendor_plugins().clone(),
+        gateway.storage.prompt_admissions(),
+    )
     .with_artifact_store(gateway.artifact_store.clone());
     let events = runner
         .run(AgentInput {

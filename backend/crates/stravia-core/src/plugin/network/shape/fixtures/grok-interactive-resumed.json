@@ -1,0 +1,382 @@
+{
+  "provenance": {
+    "client": "grok",
+    "client_version": "1.0.52 (0920c8169e27)",
+    "mode": "interactive",
+    "invocation": "grok; PTY Enter, Enter, local capture only + Enter",
+    "operation": "Foreground OAuth POST /v1/responses, grok-4.6, stream=true, turn 1: 26 offered tools; system plus three user messages. Separate prior title-generation request has one tool and no turn header.",
+    "environment": "fresh HOME, placeholder OAuth state, local CA, isolated user/mount/network namespaces; loopback only; local models bootstrap; HTTP/1.1 selected by mock",
+    "normalization": "ClientHello decoder omits random/session/keyshare and sensitive extension payloads; authorization, host, trace and generated IDs replaced; body summarized without prompt or system text. Content-Length preserved.",
+    "limitations": "Local server supplies model catalog with api_backend=responses and returns 401; no production service. Resumed TLS session; H2 not negotiated. Host systemd-resolved NSS socket was not isolated, so DNS lookups could have reached the host resolver."
+  },
+  "clienthello": {
+    "alpn": [
+      "h2",
+      "http/1.1"
+    ],
+    "cipher_suites": [
+      4866,
+      4865,
+      4867,
+      49196,
+      49195,
+      52393,
+      49200,
+      49199,
+      52392,
+      255
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": [
+          0,
+          12,
+          2,
+          104,
+          50,
+          8,
+          104,
+          116,
+          116,
+          112,
+          47,
+          49,
+          46,
+          49
+        ],
+        "decoded": null,
+        "length": 14,
+        "payload_omitted": null,
+        "type": 16
+      },
+      {
+        "body": [
+          0,
+          20,
+          5,
+          3,
+          4,
+          3,
+          6,
+          3,
+          8,
+          7,
+          8,
+          6,
+          8,
+          5,
+          8,
+          4,
+          6,
+          1,
+          5,
+          1,
+          4,
+          1
+        ],
+        "decoded": {
+          "algorithms": [
+            1283,
+            1027,
+            1539,
+            2055,
+            2054,
+            2053,
+            2052,
+            1537,
+            1281,
+            1025
+          ]
+        },
+        "length": 22,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      },
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": [
+          0,
+          8,
+          17,
+          236,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            29,
+            23,
+            24
+          ]
+        },
+        "length": 10,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "status_request": true
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 283,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 41
+      }
+    ],
+    "extensions": [
+      51,
+      45,
+      16,
+      13,
+      23,
+      43,
+      0,
+      11,
+      10,
+      5,
+      41
+    ],
+    "ja3": "771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,51-45-16-13-23-43-0-11-10-5-41,4588-29-23-24,0",
+    "ja3_hash": "b7ca98d48475b0eb6efd5d4135716872",
+    "ja4": "t13d1011h2_61a7ad8aa9b6_35d235a1c490",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      1283,
+      1027,
+      1539,
+      2055,
+      2054,
+      2053,
+      2052,
+      1537,
+      1281,
+      1025
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      4588,
+      29,
+      23,
+      24
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "headers": [
+      {
+        "name": "content-type",
+        "value": "application/json"
+      },
+      {
+        "name": "user-agent",
+        "value": "grok-pager/1.0.52 grok-shell/1.0.52 (linux; x86_64)"
+      },
+      {
+        "name": "x-grok-client-mode",
+        "value": "interactive"
+      },
+      {
+        "name": "x-xai-token-auth",
+        "value": "xai-grok-cli"
+      },
+      {
+        "name": "x-authenticateresponse",
+        "value": "authenticate-response"
+      },
+      {
+        "name": "x-grok-client-version",
+        "value": "1.0.52"
+      },
+      {
+        "name": "x-grok-user-id",
+        "value": "local-test"
+      },
+      {
+        "name": "x-grok-conv-group-id",
+        "value": "<dynamic>"
+      },
+      {
+        "name": "x-grok-client-identifier",
+        "value": "grok-pager"
+      },
+      {
+        "name": "authorization",
+        "value": "Bearer <placeholder>"
+      },
+      {
+        "name": "traceparent",
+        "value": "<dynamic>"
+      },
+      {
+        "name": "x-grok-conv-id",
+        "value": "<dynamic>"
+      },
+      {
+        "name": "x-grok-req-id",
+        "value": "<dynamic>"
+      },
+      {
+        "name": "x-grok-model-override",
+        "value": "grok-4.6"
+      },
+      {
+        "name": "x-grok-session-id",
+        "value": "<dynamic>"
+      },
+      {
+        "name": "x-grok-agent-id",
+        "value": "<dynamic>"
+      },
+      {
+        "name": "x-grok-turn-idx",
+        "value": "1"
+      },
+      {
+        "name": "accept",
+        "value": "text/event-stream"
+      },
+      {
+        "name": "x-grok-doom-loop-check",
+        "value": "1024"
+      },
+      {
+        "name": "x-grok-exact-repetition-check",
+        "value": "64"
+      },
+      {
+        "name": "accept-encoding",
+        "value": "gzip, br, deflate"
+      },
+      {
+        "name": "host",
+        "value": "<loopback-host>"
+      },
+      {
+        "name": "content-length",
+        "value": "47927"
+      }
+    ],
+    "raw_head": "POST /v1/responses HTTP/1.1\r\ncontent-type: application/json\r\nuser-agent: grok-pager/1.0.52 grok-shell/1.0.52 (linux; x86_64)\r\nx-grok-client-mode: interactive\r\nx-xai-token-auth: xai-grok-cli\r\nx-authenticateresponse: authenticate-response\r\nx-grok-client-version: 1.0.52\r\nx-grok-user-id: local-test\r\nx-grok-conv-group-id: <dynamic>\r\nx-grok-client-identifier: grok-pager\r\nauthorization: Bearer <placeholder>\r\ntraceparent: <dynamic>\r\nx-grok-conv-id: <dynamic>\r\nx-grok-req-id: <dynamic>\r\nx-grok-model-override: grok-4.6\r\nx-grok-session-id: <dynamic>\r\nx-grok-agent-id: <dynamic>\r\nx-grok-turn-idx: 1\r\naccept: text/event-stream\r\nx-grok-doom-loop-check: 1024\r\nx-grok-exact-repetition-check: 64\r\naccept-encoding: gzip, br, deflate\r\nhost: <loopback-host>\r\ncontent-length: 47927\r\n\r\n"
+  },
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "body_keys": [
+      "include",
+      "input",
+      "model",
+      "prompt_cache_key",
+      "reasoning",
+      "store",
+      "stream",
+      "tools"
+    ],
+    "model": "grok-4.6",
+    "stream": true,
+    "synthetic_prompt_present": true
+  }
+}

@@ -4,10 +4,15 @@
     "version": "1.5.2",
     "os": "linux",
     "arch": "amd64",
-    "capture": "Local dummy Cloud Code bootstrap with fake consumer token; isolated user, mount and network namespaces, loopback only, temporary local CA mounted as system trust. TLS ClientHello was peeked from the exact socket later carrying inference and decoded in memory using capture_client/hello.rs; only sanitized output persisted.",
+    "mode": "interactive",
+    "invocation": "/tmp/net1-client-home/bin/agy",
+    "pty_steps": "Select terminal theme; opt out of interaction-data collection; select Done; trust the fresh empty workspace; enter Reply OK and press Enter.",
+    "capture": "Fresh HOME/XDG and empty workspace with dummy consumer OAuth token; local Cloud Code bootstrap, isolated user/mount/network namespaces and loopback only. Local CA mounted as system trust, TLS verification enabled and Go TLS defaults unchanged. ClientHello decoded from the exact connection carrying this inference request.",
     "method": "POST /v1internal:streamGenerateContent?alt=sse",
-    "normalization": "ClientHello random/session/keyshare and secret or unknown extensions removed by capture decoder; Host and Authorization values redacted. Request body not saved.",
-    "limitations": "Inference request head observed; local upstream stopped the CLI before sending an inference response."
+    "model": "gemini-3.5-flash-low",
+    "connection_id": 9,
+    "normalization": "ClientHello random/session/keyshare and sensitive or unknown extensions removed by capture decoder; Host and Authorization redacted. Body values and dynamic array contents omitted; only structural keys and synthetic prompt presence retained.",
+    "limitations": "Local bootstrap and local response only; no production API or real credentials."
   },
   "clienthello": {
     "alpn": [],
@@ -354,5 +359,39 @@
         "value": "gzip"
       }
     ]
+  },
+  "body_pattern": {
+    "envelope_keys": [
+      "project",
+      "requestId",
+      "request",
+      "model",
+      "userAgent",
+      "requestType"
+    ],
+    "request_keys": [
+      "contents",
+      "systemInstruction",
+      "tools",
+      "labels",
+      "generationConfig",
+      "sessionId"
+    ],
+    "generation_config_keys": [
+      "maxOutputTokens",
+      "thinkingConfig"
+    ],
+    "labels_keys": [
+      "cascade_id",
+      "last_step_index",
+      "model_enum",
+      "request_id",
+      "root_cascade_id",
+      "trajectory_id",
+      "used_claude",
+      "used_claude_conservative",
+      "used_non_gemini_model"
+    ],
+    "synthetic_prompt_present": true
   }
 }

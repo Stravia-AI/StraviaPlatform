@@ -881,9 +881,16 @@ async fn transcript_aware_output_validation_runs_before_commit_and_can_repair_on
     let mut repaired = AiResponse::new("response-2", "model-1");
     repaired.push_output_text(r#"{"answer":"verified"}"#);
     let validator = Arc::new(RejectFirstOutput::default());
-    let model = Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
-        first, repaired,
-    ]));
+    let model = Arc::new(OrdinalRecordingExecutor {
+        inner: crate::agent::InMemoryModelTurnExecutor::scripted([first, repaired]),
+        ordinals: Mutex::new(Vec::new()),
+        user_turns: Mutex::new(Vec::new()),
+        dialogue: Mutex::new(Vec::new()),
+        windows: Mutex::new(Vec::new()),
+        candidates: Mutex::new(Vec::new()),
+        logical_turns: Mutex::new(Vec::new()),
+        facts: Mutex::new(Vec::new()),
+    });
     let runner = AgentRunner::new(
         enabled_registry().await,
         model.clone(),
@@ -911,7 +918,9 @@ async fn transcript_aware_output_validation_runs_before_commit_and_can_repair_on
     };
     assert_eq!(result.output, serde_json::json!({"answer": "verified"}));
     assert_eq!(validator.calls.load(Ordering::SeqCst), 2);
-    let requests = model.requests();
+    assert_eq!(*model.ordinals.lock(), vec![Some(1), Some(1)]);
+    assert_eq!(*model.user_turns.lock(), vec![Some(1), Some(2)]);
+    let requests = model.inner.requests();
     assert_eq!(
         request_session_fingerprint(&requests[0]),
         request_session_fingerprint(&requests[1]),
@@ -1270,4 +1279,178 @@ async fn child_turn_reuses_parent_transcript_without_mutating_parent() {
         requests[2].instructions.as_deref(),
         Some(expected_system.as_str())
     );
+}
+
+type RecordedPromptIdentity = (Option<String>, Option<i64>, Option<String>, Option<i64>);
+
+struct OrdinalRecordingExecutor {
+    inner: crate::agent::InMemoryModelTurnExecutor,
+    ordinals: Mutex<Vec<Option<u64>>>,
+    user_turns: Mutex<Vec<Option<u64>>>,
+    dialogue: Mutex<Vec<Option<u64>>>,
+    windows: Mutex<Vec<(Option<uuid::Uuid>, Option<u64>)>>,
+    candidates: Mutex<Vec<Option<crate::generation_chain::HistoryBoundaryCandidate>>>,
+    logical_turns: Mutex<Vec<(Option<uuid::Uuid>, Option<i64>)>>,
+    facts: Mutex<Vec<RecordedPromptIdentity>>,
+}
+
+#[async_trait]
+impl ModelTurnExecutor for OrdinalRecordingExecutor {
+    async fn execute(
+        &self,
+        input: TurnInput,
+    ) -> Result<crate::model_turn::ModelTurn, stravia_runtime_contract::model_turn::ModelTurnError>
+    {
+        self.ordinals.lock().push(input.user_prompt_index);
+        self.user_turns.lock().push(input.user_turn_index);
+        self.dialogue.lock().push(input.dialogue_prompt_index);
+        self.windows
+            .lock()
+            .push((input.context_window_id, input.context_window_index));
+        self.candidates
+            .lock()
+            .push(input.history_boundary_candidate.clone());
+        self.logical_turns
+            .lock()
+            .push((input.logical_turn_id, input.logical_turn_started_at_ms));
+        self.facts.lock().push((
+            input.user_prompt_id.clone(),
+            input.user_prompt_created_at_ms,
+            input.client_conversation_id.clone(),
+            input.client_conversation_created_at_ms,
+        ));
+        self.inner.execute(input).await
+    }
+}
+
+#[tokio::test]
+async fn agent_prompt_ordinals_follow_forks_across_runner_recreation_and_tool_loops() {
+    let mut tool_response = AiResponse::new("tool", "model-1");
+    tool_response.extend_tool_calls(vec![ToolCall {
+        id: "call-1".into(),
+        name: "echo".into(),
+        arguments: "{}".into(),
+    }]);
+    tool_response.stop_reason = Some("tool_calls".into());
+    let response = || {
+        let mut response = AiResponse::new("answer", "model-1");
+        response.push_output_text(r#"{"answer":"done"}"#);
+        response
+    };
+    let model = Arc::new(OrdinalRecordingExecutor {
+        inner: crate::agent::InMemoryModelTurnExecutor::scripted([
+            tool_response,
+            response(),
+            response(),
+            response(),
+            response(),
+            response(),
+        ]),
+        ordinals: Mutex::new(Vec::new()),
+        user_turns: Mutex::new(Vec::new()),
+        dialogue: Mutex::new(Vec::new()),
+        windows: Mutex::new(Vec::new()),
+        candidates: Mutex::new(Vec::new()),
+        logical_turns: Mutex::new(Vec::new()),
+        facts: Mutex::new(Vec::new()),
+    });
+    let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+    let registry = enabled_registry().await;
+    let make_runner = || {
+        AgentRunner::new(
+            registry.clone(),
+            model.clone(),
+            vec![Arc::new(EchoTool)],
+            Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
+                pool.clone(),
+                crate::history_retention::HistoryRetention::for_tests(),
+            )),
+        )
+        .unwrap()
+    };
+    let run = |runner: AgentRunner, principal: Principal, parent_turn_id: Option<AgentTurnId>| async move {
+        runner
+            .run(AgentInput {
+                principal,
+                definition_id: AgentDefinitionId::new("research"),
+                parent_turn_id,
+                prompt: "question".into(),
+                artifacts: Vec::new(),
+                cancellation: CancellationToken::new(),
+            })
+            .collect::<Vec<_>>()
+            .await
+    };
+    let completed = |events: Vec<AgentEvent>| match events.last().unwrap() {
+        AgentEvent::Completed(result) => result.turn_id.clone(),
+        other => panic!("unexpected terminal: {other:?}"),
+    };
+    let owner = Principal::new("owner");
+    let root = completed(run(make_runner(), owner.clone(), None).await);
+    let child = completed(run(make_runner(), owner.clone(), Some(root.clone())).await);
+    let _sibling = completed(run(make_runner(), owner.clone(), Some(root.clone())).await);
+    let _grandchild = completed(run(make_runner(), owner.clone(), Some(child)).await);
+    let _independent = completed(run(make_runner(), Principal::new("other"), None).await);
+    let denied = run(make_runner(), Principal::new("other"), Some(root)).await;
+    assert!(matches!(denied.last(), Some(AgentEvent::Failed { .. })));
+    assert_eq!(
+        *model.ordinals.lock(),
+        vec![Some(1), Some(1), Some(2), Some(2), Some(3), Some(1)]
+    );
+    assert_eq!(
+        *model.user_turns.lock(),
+        vec![Some(1), Some(1), Some(2), Some(2), Some(3), Some(1)]
+    );
+    assert_eq!(
+        *model.dialogue.lock(),
+        vec![Some(1), Some(1), Some(2), Some(2), Some(3), Some(1)]
+    );
+    let windows = model.windows.lock();
+    assert!(windows[0].0.is_some());
+    assert_eq!(windows[0].1, Some(0));
+    assert!(windows[1..5].iter().all(|window| *window == windows[0]));
+    assert_eq!(windows[5].1, Some(0));
+    assert_ne!(windows[5].0, windows[0].0);
+    drop(windows);
+    let candidates = model.candidates.lock();
+    let first = candidates[0].as_ref().unwrap();
+    let second = candidates[1].as_ref().unwrap();
+    assert_eq!(first.source_item_gap, 0);
+    assert!(second.source_item_gap > 0);
+    assert_eq!(first.source_admission_id, second.source_admission_id);
+    assert_ne!(first.id, second.id);
+    assert_ne!(
+        candidates[2].as_ref().unwrap().id,
+        candidates[3].as_ref().unwrap().id
+    );
+    assert_ne!(
+        candidates[0].as_ref().unwrap().window_id,
+        candidates[5].as_ref().unwrap().window_id
+    );
+    drop(candidates);
+    let facts = model.facts.lock();
+    let logical_turns = model.logical_turns.lock();
+    for (logical, fact) in logical_turns.iter().zip(facts.iter()) {
+        assert_eq!(logical.0.map(|id| id.to_string()), fact.0);
+        assert_eq!(logical.1, fact.1);
+    }
+    assert_eq!(logical_turns[0], logical_turns[1]);
+    assert_ne!(logical_turns[0].0, logical_turns[2].0);
+    assert_ne!(logical_turns[2].0, logical_turns[3].0);
+    assert_eq!(facts[0], facts[1], "tool loops reuse the admission facts");
+    assert_eq!(facts[0].0, facts[0].2);
+    assert_eq!(facts[0].1, facts[0].3);
+    assert!(facts[0].1.is_some());
+    for fact in &facts[2..5] {
+        assert_eq!(fact.2, facts[0].2);
+        assert_eq!(fact.3, facts[0].3);
+        assert_ne!(fact.0, facts[0].0);
+        assert!(fact.1.is_some());
+        uuid::Uuid::parse_str(fact.0.as_deref().unwrap()).unwrap();
+    }
+    assert_ne!(facts[2].0, facts[3].0);
+    assert_ne!(facts[2].0, facts[4].0);
+    assert_ne!(facts[5].2, facts[0].2);
+    assert_eq!(facts[5].0, facts[5].2);
+    uuid::Uuid::parse_str(facts[0].0.as_deref().unwrap()).unwrap();
 }

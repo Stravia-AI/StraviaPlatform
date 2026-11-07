@@ -274,7 +274,7 @@ impl AdminService {
     }
 
     pub async fn clear_observation_history(&self) -> anyhow::Result<ClearHistoryResult> {
-        self.gw.observation.clear_history().await
+        self.gw.history_maintenance().clear_history().await
     }
 
     pub async fn issue_observation_bundle_ticket(

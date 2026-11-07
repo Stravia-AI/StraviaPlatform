@@ -3,13 +3,11 @@
 use std::time::Duration;
 
 use rama_core::{extensions::ExtensionsRef, rt::Executor};
-use rama_http_core::client::conn::http2::{Builder, SendRequest};
 pub use rama_http_core::client::conn::http2::H2PeerSettingsHandle;
-use rama_http_types::{
-    proto::h2::{
-        PseudoHeaderOrder,
-        frame::{EarlyFrame, SettingOrder, SettingsConfig},
-    },
+use rama_http_core::client::conn::http2::{Builder, SendRequest};
+use rama_http_types::proto::h2::{
+    PseudoHeaderOrder,
+    frame::{EarlyFrame, SettingOrder, SettingsConfig},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 

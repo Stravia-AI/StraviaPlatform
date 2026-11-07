@@ -1,0 +1,506 @@
+{
+  "provenance": {
+    "client": "command-code",
+    "version": "1.82.1",
+    "runtime": "Node.js 24.21.0",
+    "os": "linux",
+    "arch": "x86_64",
+    "mode": "interactive",
+    "operation": "POST /alpha/generate",
+    "invocation": "cmd --trust --skip-onboarding --no-auto-update",
+    "input": "PTY 120x40; type Reply OK, then press Enter",
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; fresh HOME, XDG and workspace",
+    "auth_mode": "COMMAND_CODE_API_KEY placeholder; bearer",
+    "configuration": "COMMANDCODE_SANDBOX=true; COMMANDCODE_API_URL local HTTPS; NODE_EXTRA_CA_CERTS local CA; no upstream forwarding; CMD_ZDR=1; project settings.local.json tasteLearning=false",
+    "capture_tool": "local loopback TLS server; hello-decode from capture-client module; same TLS socket for ClientHello and request",
+    "capture_round": 2,
+    "response": "local HTTP 401; process stopped after capture",
+    "model": "deepseek/deepseek-v4-flash",
+    "operation_classification": "Main agent request: 13 tool definitions, structured system, user message Reply OK, stream=true, standard permission mode; no mode key"
+  },
+  "clienthello": {
+    "alpn": [
+      "http/1.1"
+    ],
+    "cipher_suites": [
+      4866,
+      4867,
+      4865,
+      49199,
+      49195,
+      49200,
+      49196,
+      158,
+      49191,
+      103,
+      49192,
+      107,
+      163,
+      159,
+      52393,
+      52392,
+      52394,
+      49325,
+      49311,
+      49245,
+      49249,
+      49239,
+      49235,
+      162,
+      49324,
+      49310,
+      49244,
+      49248,
+      49238,
+      49234,
+      49188,
+      106,
+      49187,
+      64,
+      49162,
+      49172,
+      57,
+      56,
+      49161,
+      49171,
+      51,
+      50,
+      157,
+      49309,
+      49233,
+      156,
+      49308,
+      49232,
+      61,
+      60,
+      53,
+      47
+    ],
+    "ec_point_formats": [
+      0,
+      1,
+      2
+    ],
+    "extension_details": [
+      {
+        "body": [
+          0
+        ],
+        "decoded": {
+          "renegotiation_info": true
+        },
+        "length": 1,
+        "payload_omitted": null,
+        "type": 65281
+      },
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [
+          3,
+          0,
+          1,
+          2
+        ],
+        "decoded": {
+          "point_formats": [
+            0,
+            1,
+            2
+          ]
+        },
+        "length": 4,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": [
+          0,
+          16,
+          17,
+          236,
+          0,
+          29,
+          0,
+          23,
+          0,
+          30,
+          0,
+          24,
+          0,
+          25,
+          1,
+          0,
+          1,
+          1
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            29,
+            23,
+            30,
+            24,
+            25,
+            256,
+            257
+          ]
+        },
+        "length": 18,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 35
+      },
+      {
+        "body": [
+          0,
+          9,
+          8,
+          104,
+          116,
+          116,
+          112,
+          47,
+          49,
+          46,
+          49
+        ],
+        "decoded": null,
+        "length": 11,
+        "payload_omitted": null,
+        "type": 16
+      },
+      {
+        "body": [],
+        "decoded": {
+          "encrypt_then_mac": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 22
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          0,
+          52,
+          9,
+          5,
+          9,
+          6,
+          9,
+          4,
+          4,
+          3,
+          5,
+          3,
+          6,
+          3,
+          8,
+          7,
+          8,
+          8,
+          8,
+          26,
+          8,
+          27,
+          8,
+          28,
+          8,
+          9,
+          8,
+          10,
+          8,
+          11,
+          8,
+          4,
+          8,
+          5,
+          8,
+          6,
+          4,
+          1,
+          5,
+          1,
+          6,
+          1,
+          3,
+          3,
+          3,
+          1,
+          3,
+          2,
+          4,
+          2,
+          5,
+          2,
+          6,
+          2
+        ],
+        "decoded": {
+          "algorithms": [
+            2309,
+            2310,
+            2308,
+            1027,
+            1283,
+            1539,
+            2055,
+            2056,
+            2074,
+            2075,
+            2076,
+            2057,
+            2058,
+            2059,
+            2052,
+            2053,
+            2054,
+            1025,
+            1281,
+            1537,
+            771,
+            769,
+            770,
+            1026,
+            1282,
+            1538
+          ]
+        },
+        "length": 54,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      }
+    ],
+    "extensions": [
+      65281,
+      0,
+      11,
+      10,
+      35,
+      16,
+      22,
+      23,
+      13,
+      43,
+      45,
+      51
+    ],
+    "ja3": "771,4866-4867-4865-49199-49195-49200-49196-158-49191-103-49192-107-163-159-52393-52392-52394-49325-49311-49245-49249-49239-49235-162-49324-49310-49244-49248-49238-49234-49188-106-49187-64-49162-49172-57-56-49161-49171-51-50-157-49309-49233-156-49308-49232-61-60-53-47,65281-0-11-10-35-16-22-23-13-43-45-51,4588-29-23-30-24-25-256-257,0-1-2",
+    "ja3_hash": "d67b094811e5145139d7cea5f014309f",
+    "ja4": "t13d5212h1_b262b3658495_8e6e362c5eac",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      2309,
+      2310,
+      2308,
+      1027,
+      1283,
+      1539,
+      2055,
+      2056,
+      2074,
+      2075,
+      2076,
+      2057,
+      2058,
+      2059,
+      2052,
+      2053,
+      2054,
+      1025,
+      1281,
+      1537,
+      771,
+      769,
+      770,
+      1026,
+      1282,
+      1538
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      4588,
+      29,
+      23,
+      30,
+      24,
+      25,
+      256,
+      257
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "headers": [
+      {
+        "name": "host",
+        "value": "localhost:<ephemeral-port>"
+      },
+      {
+        "name": "connection",
+        "value": "keep-alive"
+      },
+      {
+        "name": "content-type",
+        "value": "application/json, application/json"
+      },
+      {
+        "name": "User-Agent",
+        "value": "cli"
+      },
+      {
+        "name": "x-command-code-version",
+        "value": "1.82.1"
+      },
+      {
+        "name": "x-cli-environment",
+        "value": "production"
+      },
+      {
+        "name": "x-project-slug",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-taste-learning",
+        "value": "false"
+      },
+      {
+        "name": "x-session-id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Authorization",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-cmd-zdr",
+        "value": "1"
+      },
+      {
+        "name": "traceparent",
+        "value": "<redacted>"
+      },
+      {
+        "name": "accept",
+        "value": "*/*"
+      },
+      {
+        "name": "accept-language",
+        "value": "*"
+      },
+      {
+        "name": "sec-fetch-mode",
+        "value": "cors"
+      },
+      {
+        "name": "accept-encoding",
+        "value": "br, gzip, deflate"
+      },
+      {
+        "name": "content-length",
+        "value": "<body-length>"
+      }
+    ],
+    "raw_head": "POST /alpha/generate HTTP/1.1\r\nhost: localhost:<ephemeral-port>\r\nconnection: keep-alive\r\ncontent-type: application/json, application/json\r\nUser-Agent: cli\r\nx-command-code-version: 1.82.1\r\nx-cli-environment: production\r\nx-project-slug: <redacted>\r\nx-taste-learning: false\r\nx-session-id: <redacted>\r\nAuthorization: <redacted>\r\nx-cmd-zdr: 1\r\ntraceparent: <redacted>\r\naccept: */*\r\naccept-language: *\r\nsec-fetch-mode: cors\r\naccept-encoding: br, gzip, deflate\r\ncontent-length: <body-length>\r\n\r\n"
+  },
+  "ws": null,
+  "body_pattern": {
+    "top_level_keys": [
+      "config",
+      "memory",
+      "taste",
+      "skills",
+      "permissionMode",
+      "threadId",
+      "params"
+    ],
+    "params_keys": [
+      "model",
+      "messages",
+      "tools",
+      "system",
+      "max_tokens",
+      "stream"
+    ],
+    "model": "deepseek/deepseek-v4-flash",
+    "stream": true,
+    "prompt": "Reply OK",
+    "tool_count": 13,
+    "permission_mode": "standard",
+    "mode_present": false
+  }
+}

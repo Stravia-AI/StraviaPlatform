@@ -105,6 +105,9 @@ pub struct GatewayConfig {
     /// default so tests never reach the network; production deployments opt
     /// in explicitly.
     pub catalog_background_refresh: bool,
+    /// 仅测试构建：在持久 handoff 提交前与 loopback 控制器同步，不改变产品超时。
+    #[cfg(feature = "test-support")]
+    pub test_handoff_barrier: Option<std::net::SocketAddr>,
 }
 
 impl Default for GatewayConfig {
@@ -118,6 +121,8 @@ impl Default for GatewayConfig {
             config_poll_interval: Duration::ZERO,
             catalog_base_url: None,
             catalog_background_refresh: false,
+            #[cfg(feature = "test-support")]
+            test_handoff_barrier: None,
         }
     }
 }

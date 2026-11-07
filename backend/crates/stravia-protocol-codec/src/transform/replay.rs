@@ -13,8 +13,20 @@ pub fn prepare_thinking_replay(
     request: &mut AiRequest,
     preserve_protected: impl Fn(&AiItem, &ContentBlock) -> bool,
 ) -> bool {
+    prepare_thinking_replay_with_removals(request, preserve_protected, |_| {})
+}
+
+/// Report removed item indices in the original request, in chronological order.
+pub fn prepare_thinking_replay_with_removals(
+    request: &mut AiRequest,
+    preserve_protected: impl Fn(&AiItem, &ContentBlock) -> bool,
+    mut removed: impl FnMut(usize),
+) -> bool {
     let mut changed = false;
+    let mut index = 0;
     request.items.retain_mut(|item| {
+        let original_index = index;
+        index += 1;
         let MessageContent::Blocks(blocks) = &item.content else {
             return true;
         };
@@ -111,7 +123,11 @@ pub fn prepare_thinking_replay(
                 .expect("native item fields key is not reserved");
         }
         changed = true;
-        !(assistant && blocks.is_empty() && thinking_only)
+        let keep = !(assistant && blocks.is_empty() && thinking_only);
+        if !keep {
+            removed(original_index);
+        }
+        keep
     });
     changed
 }

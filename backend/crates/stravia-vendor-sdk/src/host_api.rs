@@ -20,12 +20,20 @@ impl GuestHost {
     }
 
     /// Start a host-authorized request using a snapshot of the options.
-    pub fn http_start(&self, request: crate::net::Request, options: &crate::net::Options) -> Result<crate::net::HttpResponse, PluginError> {
+    pub fn http_start(
+        &self,
+        request: crate::net::Request,
+        options: &crate::net::Options,
+    ) -> Result<crate::net::HttpResponse, PluginError> {
         crate::net::start(request, options)
     }
 
     /// Connect a host-authorized WebSocket using a snapshot of the options.
-    pub fn ws_connect(&self, request: crate::net::ConnectRequest, options: &crate::net::Options) -> Result<crate::net::WebSocket, PluginError> {
+    pub fn ws_connect(
+        &self,
+        request: crate::net::ConnectRequest,
+        options: &crate::net::Options,
+    ) -> Result<crate::net::WebSocket, PluginError> {
         crate::net::connect(request, options)
     }
 

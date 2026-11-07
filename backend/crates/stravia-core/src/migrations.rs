@@ -1479,7 +1479,14 @@ mod tests {
         .await
         .unwrap();
 
-        migrate_sqlite(&pool, None)
+        let index_upgrade = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 44)
+                .cloned()
+                .collect(),
+        );
+        super::run_sqlite_migrator(&pool, &index_upgrade, None)
             .await
             .expect("adding indexes must not audit every foreign key in the database");
         let indexes: i64 = sqlx::query_scalar(

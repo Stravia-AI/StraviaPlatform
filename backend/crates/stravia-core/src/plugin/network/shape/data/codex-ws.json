@@ -1,7 +1,7 @@
 {
   "name": "codex-ws",
   "revision": 1,
-  "source": { "client": "Codex 0.167.0 WebSocket", "runtime": "rustls linux x86_64", "captured": "2026-11-07", "ja4": "t13d101000_61a7ad8aa9b6_0d308c48d2a3" },
+  "source": { "client": "Codex 0.167.0 interactive TUI WebSocket", "runtime": "rustls linux x86_64", "captured": "2026-11-07", "ja4": "t13d101000_61a7ad8aa9b6_0d308c48d2a3" },
   "tls": {
     "versions": ["1.2", "1.3"],
     "cipher_suites": ["0x1302", "0x1301", "0x1303", "0xc02c", "0xc02b", "0xcca9", "0xc030", "0xc02f", "0xcca8", "0x00ff"],

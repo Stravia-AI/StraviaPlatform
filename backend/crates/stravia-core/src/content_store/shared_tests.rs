@@ -107,6 +107,7 @@ impl Stores {
         let item = serde_json::to_value(AiItem::output_text(text)).unwrap();
         self.turns
             .commit(TurnCommit {
+                atomic_checkpoint_id: None,
                 id: id.clone(),
                 kind: TurnNodeKind::Response,
                 parent_id: None,

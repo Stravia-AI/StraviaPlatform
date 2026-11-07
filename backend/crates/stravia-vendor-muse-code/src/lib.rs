@@ -60,7 +60,14 @@ fn headers(token: &str) -> net::Fields {
 fn bun_options() -> net::Options {
     let mut options = net::Options::new();
     options.shape("bun").expect("valid bun shape");
-    options.response_decoding(&[net::Coding::Gzip, net::Coding::Deflate, net::Coding::Br, net::Coding::Zstd]).expect("valid response codings");
+    options
+        .response_decoding(&[
+            net::Coding::Gzip,
+            net::Coding::Deflate,
+            net::Coding::Br,
+            net::Coding::Zstd,
+        ])
+        .expect("valid response codings");
     options
 }
 
@@ -79,12 +86,15 @@ fn seed(id: &str) -> Option<(&'static str, bool)> {
     })
 }
 fn discover(host: &GuestHost, provider: &ProviderSnapshot) -> Result<OperationOutput, PluginError> {
-    let response = host.http_start(net::Request {
-        method: "GET".into(),
-        url: format!("{BASE}/models"),
-        headers: headers(key(provider)?),
-        body: Vec::new(),
-    }, &bun_options())?;
+    let response = host.http_start(
+        net::Request {
+            method: "GET".into(),
+            url: format!("{BASE}/models"),
+            headers: headers(key(provider)?),
+            body: Vec::new(),
+        },
+        &bun_options(),
+    )?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let bytes = read_http_body(&response, 4 * 1024 * 1024)?;
@@ -328,12 +338,15 @@ fn infer(
     let body = serde_json::to_vec(&encoded.body)
         .map_err(|_| invalid("Responses request could not be encoded"))?;
     host.emit_started()?;
-    let response = host.http_start(net::Request {
-        method: "POST".into(),
-        url: format!("{BASE}/responses"),
-        headers,
-        body,
-    }, &bun_options())?;
+    let response = host.http_start(
+        net::Request {
+            method: "POST".into(),
+            url: format!("{BASE}/responses"),
+            headers,
+            body,
+        },
+        &bun_options(),
+    )?;
     common::decode_inference(host, PROTOCOL, response)
 }
 

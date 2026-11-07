@@ -9,8 +9,8 @@ use std::{
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
-    LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin, LogLevel,
+    OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::{
     AuthRequest, AuthResponse, AuthStep, ErrorKind, OperationInput, OperationOutput,
@@ -29,7 +29,10 @@ impl HostHttpResponse for Response {
         Ok(self.status)
     }
     async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
-        Ok(vec![Field { name: "content-type".into(), bytes: self.mime.as_bytes().to_vec() }])
+        Ok(vec![Field {
+            name: "content-type".into(),
+            bytes: self.mime.as_bytes().to_vec(),
+        }])
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
         Ok(self.chunks.lock().pop_front())
@@ -53,7 +56,11 @@ impl Services {
 }
 #[async_trait]
 impl HostServices for Services {
-    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: HttpRequest,
+        _options: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.requests.lock().push(request);
         self.responses
             .lock()
@@ -337,11 +344,7 @@ async fn signed_in_catalog_and_organization_balance() {
         panic!("discover")
     };
     assert_eq!(out.models.len(), 2);
-    assert!(
-        s.requests.lock()[0]
-            .headers
-            .get("authorization") == Some(b"Bearer key".as_slice())
-    );
+    assert!(s.requests.lock()[0].headers.get("authorization") == Some(b"Bearer key".as_slice()));
     p.credentials
         .insert("organizations".into(), json!([{"id":"org/id"}]));
     p.options.insert("organizationId".into(), json!("org/id"));
@@ -365,11 +368,7 @@ async fn signed_in_catalog_and_organization_balance() {
     assert!(out.billing.is_none());
     let request = s.requests.lock()[1].clone();
     assert!(request.url.ends_with("/api/profile/balance"));
-    assert!(
-        request
-            .headers
-            .get("X-KiloCode-OrganizationId") == Some(b"org/id".as_slice())
-    );
+    assert!(request.headers.get("X-KiloCode-OrganizationId") == Some(b"org/id".as_slice()));
     let count = s.requests.lock().len();
     assert!(
         run(
@@ -433,11 +432,7 @@ async fn route_alias_uses_the_target_model_and_requires_sign_in() {
     let requests = services.requests.lock();
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
     assert_eq!(body["model"], "vendor/free:free");
-    assert!(
-        requests[0]
-            .headers
-            .get("authorization") == Some(b"Bearer key".as_slice())
-    );
+    assert!(requests[0].headers.get("authorization") == Some(b"Bearer key".as_slice()));
 }
 
 #[tokio::test(flavor = "current_thread")]

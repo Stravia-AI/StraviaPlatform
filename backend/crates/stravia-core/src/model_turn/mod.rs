@@ -107,6 +107,58 @@ pub(crate) enum CompactionReceipt {
 
 pub(crate) type CompactionPublications = Arc<parking_lot::Mutex<Vec<CompactionPublication>>>;
 
+/// Trusted coordinates into the exact canonical request, expressed as item gaps.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct HistoryBoundaryMap {
+    pub(crate) version: u32,
+    pub(crate) window_id: String,
+    pub(crate) coverage: String,
+    pub(crate) boundaries: Vec<HistoryBoundary>,
+    pub(crate) current_boundary_id: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HistoryBoundary {
+    pub(crate) id: String,
+    pub(crate) item_index: usize,
+}
+
+impl HistoryBoundaryMap {
+    /// Project original item gaps through a stable deletion of canonical items.
+    fn remove_items(&mut self, removed: &[usize]) {
+        for boundary in &mut self.boundaries {
+            boundary.item_index -= removed.partition_point(|index| *index < boundary.item_index);
+        }
+    }
+
+    /// A continuation exposes only its current boundary; full replay retains all.
+    fn retain_suffix(&mut self, start: usize) {
+        let current_boundary_id = &self.current_boundary_id;
+        self.boundaries
+            .retain(|boundary| &boundary.id == current_boundary_id && boundary.item_index >= start);
+        for boundary in &mut self.boundaries {
+            boundary.item_index -= start;
+        }
+        if !self
+            .boundaries
+            .iter()
+            .any(|boundary| boundary.id == self.current_boundary_id)
+        {
+            self.coverage = "incomplete".into();
+        }
+    }
+
+    fn valid_for(&self, item_count: usize) -> bool {
+        self.boundaries
+            .iter()
+            .all(|boundary| boundary.item_index <= item_count)
+            && self
+                .boundaries
+                .windows(2)
+                .all(|pair| pair[0].item_index <= pair[1].item_index)
+    }
+}
+
 pub struct TurnInput {
     pub purpose: ModelTurnPurpose,
     pub principal: Principal,
@@ -126,6 +178,26 @@ pub struct TurnInput {
     /// 派生 `session_affinity` 交给插件，同一链路各轮与压缩共享上游会话键；
     /// 与客户端自报的 session 无关。
     pub(crate) generation_root_id: Option<String>,
+    /// Source before hooks and the proven source-gap to request-gap projection.
+    pub(crate) history_boundary_source: Option<Arc<AiRequest>>,
+    pub(crate) history_boundary_gaps: Option<Vec<usize>>,
+    /// Host-owned source proof; never reconstructed from guest metadata.
+    pub(crate) history_boundary_candidate:
+        Option<crate::generation_chain::HistoryBoundaryCandidate>,
+    /// Accepted logical user prompt ordinal, when established by authoritative lineage.
+    pub(crate) user_prompt_index: Option<u64>,
+    pub(crate) user_turn_index: Option<u64>,
+    pub(crate) dialogue_prompt_index: Option<u64>,
+    pub(crate) context_window_id: Option<uuid::Uuid>,
+    pub(crate) context_window_index: Option<u64>,
+    pub(crate) logical_turn_id: Option<uuid::Uuid>,
+    pub(crate) logical_turn_started_at_ms: Option<i64>,
+    pub(crate) atomic_conversation: Option<crate::plugin::execution::AtomicConversationContext>,
+    pub(crate) atomic_lease: Option<crate::plugin::atomic_lease::AtomicLeaseGuard>,
+    pub(crate) user_prompt_id: Option<String>,
+    pub(crate) user_prompt_created_at_ms: Option<i64>,
+    pub(crate) client_conversation_id: Option<String>,
+    pub(crate) client_conversation_created_at_ms: Option<i64>,
     /// Trusted parent resolution; never populated from client request metadata.
     pub(crate) generation_parent_target: crate::router::GenerationParentTarget,
     pub(crate) root_request: crate::rpm::RootRequest,
@@ -149,6 +221,22 @@ impl TurnInput {
             compaction_records: Arc::default(),
             compaction_source_generation_id: None,
             generation_root_id: None,
+            history_boundary_source: None,
+            history_boundary_gaps: None,
+            history_boundary_candidate: None,
+            user_prompt_index: None,
+            user_turn_index: None,
+            dialogue_prompt_index: None,
+            context_window_id: None,
+            context_window_index: None,
+            logical_turn_id: None,
+            logical_turn_started_at_ms: None,
+            atomic_conversation: None,
+            atomic_lease: None,
+            user_prompt_id: None,
+            user_prompt_created_at_ms: None,
+            client_conversation_id: None,
+            client_conversation_created_at_ms: None,
             generation_parent_target: crate::router::GenerationParentTarget::Unresolved,
             root_request: crate::rpm::RootRequest::default(),
         }

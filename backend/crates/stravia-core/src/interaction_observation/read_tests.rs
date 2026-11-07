@@ -349,10 +349,43 @@ async fn contents_are_visible_only_through_observation_refs(
 
     // 其他主体 scope 里没有任何 Observation 引用的正文（等价于只被 Turn / Marker 引用）。
     let orphan = intern_unreferenced(observation, "turn-only-principal", "turn only body").await?;
+    // A journal-only body in the same scope as an observed interaction must not
+    // become visible by guessing its ID. A body also referenced by observation
+    // remains visible, even when a journal references it too.
+    let private = intern_unreferenced(observation, "reader-a", "private journal body").await?;
+    let insert = "INSERT INTO vendor_atomic_journal_nodes \
+        (node_id, principal, vendor_id, provider_id, data_epoch, content_id, logical_size, document_size) \
+        VALUES ($1, 'api-key:reader-a', 'vendor', 'provider', 0, $2, 1, 1)";
+    match &observation.inner.store {
+        store::ObservationStore::Sqlite(pool, _) => {
+            sqlx::query(insert)
+                .bind("private-test-node")
+                .bind(private)
+                .execute(pool)
+                .await?;
+            sqlx::query(insert)
+                .bind("shared-test-node")
+                .bind(output_id)
+                .execute(pool)
+                .await?;
+        }
+        store::ObservationStore::Postgres(pool, _) => {
+            sqlx::query(insert)
+                .bind("private-test-node")
+                .bind(private)
+                .execute(pool)
+                .await?;
+            sqlx::query(insert)
+                .bind("shared-test-node")
+                .bind(output_id)
+                .execute(pool)
+                .await?;
+        }
+    }
     let missing = 9_000_000_000_i64;
 
     let contents = observation
-        .observation_contents(&[output_id, orphan, input_id, missing, output_id])
+        .observation_contents(&[output_id, orphan, private, input_id, missing, output_id])
         .await?;
     let ids: Vec<i64> = contents
         .iter()

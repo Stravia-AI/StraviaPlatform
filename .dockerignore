@@ -2,7 +2,6 @@
 .github
 .agents
 .scratch
-.stravia-patched-crates
 .stravia-dev
 .pytest_cache
 .venv

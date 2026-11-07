@@ -1,4 +1,32 @@
 use super::*;
+use crate::plugin::network::VendorNetworkConfig;
+
+const CLIENT_INSTALLATION_ID_KEY: &str = "client_installation_id";
+
+async fn load_client_installation_id(
+    settings: &dyn storage::SettingsStore,
+) -> anyhow::Result<Arc<str>> {
+    let stored = match settings
+        .get(CLIENT_INSTALLATION_ID_KEY)
+        .await
+        .context("failed to load client installation identity")?
+    {
+        Some(stored) => stored,
+        None => {
+            let candidate = uuid::Uuid::new_v4().to_string();
+            settings
+                .get_or_insert(CLIENT_INSTALLATION_ID_KEY, &candidate)
+                .await
+                .context("failed to create client installation identity")?
+        }
+    };
+    let parsed = uuid::Uuid::parse_str(&stored).context("invalid client installation identity")?;
+    anyhow::ensure!(
+        parsed.to_string() == stored && !parsed.is_nil(),
+        "invalid client installation identity"
+    );
+    Ok(Arc::from(stored))
+}
 
 const FIRST_ALLOWANCE_SAMPLE_DELAY: Duration = Duration::from_secs(35 * 60);
 
@@ -205,8 +233,15 @@ impl PreparedGateway {
     /// 不重新连接、迁移数据库，也不把持久存储当作内存存储装配。
     pub async fn start(self) -> anyhow::Result<Gateway> {
         let (kind, storage, sqlite_pool, postgres_pool) = self.runtime;
-        Gateway::from_storage_with_kind(self.config, storage, kind, sqlite_pool, postgres_pool)
-            .await
+        Gateway::from_storage_with_kind(
+            self.config,
+            storage,
+            kind,
+            sqlite_pool,
+            postgres_pool,
+            None,
+        )
+        .await
     }
 }
 
@@ -250,7 +285,32 @@ impl Gateway {
     }
 
     pub async fn from_storage(config: GatewayConfig, storage: DynStorage) -> anyhow::Result<Self> {
-        Self::from_storage_with_kind(config, storage, RuntimeStorageKind::Memory, None, None).await
+        Self::from_storage_with_kind(
+            config,
+            storage,
+            RuntimeStorageKind::Memory,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn from_storage_with_vendor_network(
+        config: GatewayConfig,
+        storage: DynStorage,
+        network: VendorNetworkConfig,
+    ) -> anyhow::Result<Self> {
+        Self::from_storage_with_kind(
+            config,
+            storage,
+            RuntimeStorageKind::Memory,
+            None,
+            None,
+            Some(network),
+        )
+        .await
     }
 
     async fn from_storage_with_kind(
@@ -259,7 +319,19 @@ impl Gateway {
         storage_kind: RuntimeStorageKind,
         sqlite_pool: Option<SqlitePool>,
         postgres_pool: Option<Pool<Postgres>>,
+        vendor_network: Option<VendorNetworkConfig>,
     ) -> anyhow::Result<Self> {
+        // 注入持久存储时沿用同一连接池，避免历史与插件状态落入两个数据库。
+        let sqlite_pool = sqlite_pool.or_else(|| storage.vendor_plugins().sqlite_pool().cloned());
+        let postgres_pool =
+            postgres_pool.or_else(|| storage.vendor_plugins().postgres_pool().cloned());
+        let storage_kind = if postgres_pool.is_some() {
+            RuntimeStorageKind::Postgres
+        } else if sqlite_pool.is_some() {
+            RuntimeStorageKind::Sqlite
+        } else {
+            storage_kind
+        };
         crate::startup_progress::report("gateway_initialize", "Initializing gateway", 0, None);
         config.data_dir = crate::data_paths::resolve_data_dir(&config.data_dir)?;
         let runtime_cache = open_runtime_cache(&config, storage_kind).await?;
@@ -275,6 +347,18 @@ impl Gateway {
         } else {
             sqlite_pool.clone()
         };
+        if sqlite_pool.is_none() && postgres_pool.is_none() {
+            storage
+                .vendor_plugins()
+                .attach_atomic_history_pool(
+                    history_sqlite_pool
+                        .as_ref()
+                        .expect("memory history pool")
+                        .clone(),
+                    storage.prompt_admissions().as_ref(),
+                )
+                .await?;
+        }
         crate::startup_progress::report(
             "gateway_initialize",
             "Initializing gateway services",
@@ -286,10 +370,21 @@ impl Gateway {
             .no_proxy()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
-        let vendor_shapes = Arc::new(
-            crate::plugin::network::shape::ShapeRegistry::builtin()
-                .context("failed to initialize vendor egress shapes")?,
-        );
+        // Resolve networking before creating model-turn or background clones so
+        // every consumer inherits the same trust, DNS and pool identities.
+        let VendorNetworkConfig {
+            shapes: vendor_shapes,
+            resolver: vendor_resolver,
+        } = match vendor_network {
+            Some(network) => network,
+            None => VendorNetworkConfig {
+                shapes: Arc::new(
+                    crate::plugin::network::shape::ShapeRegistry::builtin()
+                        .context("failed to initialize vendor egress shapes")?,
+                ),
+                resolver: Arc::new(crate::plugin::network::transport::SystemResolver),
+            },
+        };
         let vendor_transport = Arc::new(crate::plugin::network::transport::VendorTransport::new());
 
         crate::startup_progress::report(
@@ -298,11 +393,15 @@ impl Gateway {
             0,
             None,
         );
+        let client_installation_id = load_client_installation_id(storage.settings()).await?;
         let storage = if storage_kind == RuntimeStorageKind::Postgres {
             storage
         } else {
             crate::runtime_config::RuntimeConfig::attach(storage).await?
         };
+        storage.vendor_plugins().attach_volatile_store(
+            crate::plugin::volatile_state::VolatileStore::for_installation(&client_installation_id),
+        );
         let model_cache = Arc::new(tokio::sync::RwLock::new(
             router::RouteCache::load(storage.routes()).await?,
         ));
@@ -460,6 +559,8 @@ impl Gateway {
         )
         .with_history_markers(Arc::clone(&history_markers))
         .with_redaction_references()
+        .with_prompt_admissions(storage.prompt_admissions())
+        .with_atomic_state(storage.vendor_plugins().clone())
         .with_compaction(compaction.clone());
         generation_chains.rebuild_prefixes().await?;
         let observation = interaction_observation::InteractionObservation::new(
@@ -513,10 +614,12 @@ impl Gateway {
             config,
             storage,
             storage_kind,
+            client_installation_id,
             runtime_cache: runtime_cache.clone(),
             http_client,
             vendor_transport: Arc::clone(&vendor_transport),
             vendor_shapes: Arc::clone(&vendor_shapes),
+            vendor_resolver: Arc::clone(&vendor_resolver),
             vendor_plugins: vendor_plugins.clone(),
             vendor_websocket_pool: Arc::new(crate::plugin::network::VendorWebSocketPool::default()),
             provider_catalog: provider_catalog.clone(),
@@ -526,6 +629,7 @@ impl Gateway {
                 catalog_base_url,
                 vendor_transport,
                 vendor_shapes,
+                vendor_resolver,
             ),
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::new(
                 runtime_cache.clone(),
@@ -833,6 +937,8 @@ impl Gateway {
             retention: self.retention.clone(),
             observation: self.observation.clone(),
             turn_chain: Arc::clone(&self.turn_chains),
+            prompt_admissions: self.storage.prompt_admissions(),
+            atomic_state: self.storage.vendor_plugins().clone(),
             history_markers: Arc::clone(&self.history_markers),
             mappings: Arc::clone(&self.redaction.mappings),
             compaction: self.compaction.clone(),
@@ -1012,13 +1118,15 @@ impl EffectiveVendorProxy {
     pub(crate) fn into_settings(self) -> crate::outbound_proxy::OutboundProxySettings {
         match self {
             Self::Direct => crate::outbound_proxy::OutboundProxySettings::default(),
-            Self::Explicit { proxy_url, bypass, force_http1 } => {
-                crate::outbound_proxy::OutboundProxySettings {
-                    url: proxy_url,
-                    bypass,
-                    force_http1,
-                }
-            }
+            Self::Explicit {
+                proxy_url,
+                bypass,
+                force_http1,
+            } => crate::outbound_proxy::OutboundProxySettings {
+                url: proxy_url,
+                bypass,
+                force_http1,
+            },
         }
     }
 
@@ -1057,6 +1165,90 @@ fn to_sql_backend_config(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn installation_identity_survives_concurrent_initialization_and_restart()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(directory.path().join("identity.sqlite"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options.clone())
+            .await?;
+        migrations::migrate_sqlite(&pool, None).await?;
+        let storage: DynStorage = Arc::new(SqliteStorage::from_pool(pool.clone()));
+        let first_dir = tempfile::tempdir()?;
+        let second_dir = tempfile::tempdir()?;
+        let first_config = GatewayConfig {
+            data_dir: first_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let second_config = GatewayConfig {
+            data_dir: second_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let (first, second) = tokio::join!(
+            Gateway::from_storage(first_config.clone(), Arc::clone(&storage)),
+            Gateway::from_storage(second_config, Arc::clone(&storage))
+        );
+        let first = first?;
+        let second = second?;
+        let identity = Arc::clone(&first.client_installation_id);
+        assert_eq!(identity, second.client_installation_id);
+        assert_eq!(
+            uuid::Uuid::parse_str(&identity)?.to_string(),
+            identity.as_ref()
+        );
+        first.shutdown().await;
+        second.shutdown().await;
+        drop(first);
+        drop(second);
+        drop(storage);
+        pool.close().await;
+
+        let reopened = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_with(options)
+            .await?;
+        let reopened_storage: DynStorage = Arc::new(SqliteStorage::from_pool(reopened.clone()));
+        let restarted =
+            Gateway::from_storage(first_config.clone(), Arc::clone(&reopened_storage)).await?;
+        assert_eq!(identity, restarted.client_installation_id);
+        restarted.shutdown().await;
+        drop(restarted);
+
+        let isolated_storage: DynStorage = Arc::new(crate::storage::MemoryStorage::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let isolated = Gateway::from_storage(first_config.clone(), isolated_storage).await?;
+        assert_ne!(identity, isolated.client_installation_id);
+        isolated.shutdown().await;
+        drop(isolated);
+
+        reopened_storage
+            .settings()
+            .set(CLIENT_INSTALLATION_ID_KEY, "corrupt")
+            .await?;
+        let error = match Gateway::from_storage(first_config, Arc::clone(&reopened_storage)).await {
+            Ok(_) => panic!("corrupt identity was accepted"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("invalid client installation identity"));
+        assert_eq!(
+            reopened_storage
+                .settings()
+                .get(CLIENT_INSTALLATION_ID_KEY)
+                .await?
+                .as_deref(),
+            Some("corrupt")
+        );
+        Ok(())
+    }
+
     fn vendor_request(
         gateway: &Gateway,
         proxy: EffectiveVendorProxy,
@@ -1064,7 +1256,7 @@ mod tests {
         url: &str,
     ) -> anyhow::Result<Arc<dyn stravia_vendor_runtime::HostHttpResponse>> {
         use crate::plugin::{
-            lifecycle::VendorOperationTracker,
+            VendorOperationTracker,
             network::VendorNetwork,
             permissions::{NetworkOrigin, NetworkPolicy},
         };
@@ -1074,7 +1266,10 @@ mod tests {
         let origin = url::Url::parse(url)?.origin().ascii_serialization();
         let network = VendorNetwork::new(
             Arc::clone(&gateway.vendor_transport),
-            Arc::clone(&gateway.vendor_shapes),
+            VendorNetworkConfig {
+                shapes: Arc::clone(&gateway.vendor_shapes),
+                resolver: Arc::clone(&gateway.vendor_resolver),
+            },
             proxy.into_settings(),
             NetworkPolicy::compile([NetworkOrigin::Exact(origin)])?,
             operation,
@@ -1082,8 +1277,13 @@ mod tests {
             "openai".into(),
         );
         let mut options = Options::new();
-        options.http_version(if http1 { HttpVersion::Http1 } else { HttpVersion::Auto })?;
-        network.http_start(Request::new("GET", url), options)
+        options.http_version(if http1 {
+            HttpVersion::Http1
+        } else {
+            HttpVersion::Auto
+        })?;
+        network
+            .http_start(Request::new("GET", url), options)
             .map_err(|failure| anyhow::anyhow!(failure.message))
     }
 
@@ -1094,9 +1294,19 @@ mod tests {
         url: &str,
     ) -> anyhow::Result<String> {
         let response = vendor_request(gateway, proxy, http1, url)?;
-        assert_eq!(response.status().await.map_err(|failure| anyhow::anyhow!(failure.message))?, 200);
+        assert_eq!(
+            response
+                .status()
+                .await
+                .map_err(|failure| anyhow::anyhow!(failure.message))?,
+            200
+        );
         let mut body = Vec::new();
-        while let Some(chunk) = response.read_body().await.map_err(|failure| anyhow::anyhow!(failure.message))? {
+        while let Some(chunk) = response
+            .read_body()
+            .await
+            .map_err(|failure| anyhow::anyhow!(failure.message))?
+        {
             body.extend_from_slice(&chunk);
         }
         Ok(String::from_utf8(body)?)
@@ -1283,7 +1493,10 @@ mod tests {
                             tokio::time::advance(Duration::from_secs(101)).await;
                             tokio::time::resume();
                             sender.send(Bytes::copy_from_slice(part)).await?;
-                            assert_eq!(response.read_body().await.unwrap().unwrap().as_slice(), part);
+                            assert_eq!(
+                                response.read_body().await.unwrap().unwrap().as_slice(),
+                                part
+                            );
                         }
                         drop(sender);
                         assert!(response.read_body().await.unwrap().is_none());

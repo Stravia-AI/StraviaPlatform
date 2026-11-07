@@ -18,13 +18,81 @@
     ],
     "extension_details": [
       {
-        "body": [],
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
         "decoded": {
-          "extended_master_secret": true
+          "status_request": true
         },
-        "length": 0,
+        "length": 5,
         "payload_omitted": null,
-        "type": 23
+        "type": 5
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": [
+          0,
+          8,
+          17,
+          236,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            29,
+            23,
+            24
+          ]
+        },
+        "length": 10,
+        "payload_omitted": null,
+        "type": 10
       },
       {
         "body": null,
@@ -88,29 +156,6 @@
       {
         "body": null,
         "decoded": {
-          "server_name_present": true
-        },
-        "length": 14,
-        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
-        "type": 0
-      },
-      {
-        "body": [
-          1,
-          0
-        ],
-        "decoded": {
-          "point_formats": [
-            0
-          ]
-        },
-        "length": 2,
-        "payload_omitted": null,
-        "type": 11
-      },
-      {
-        "body": null,
-        "decoded": {
           "groups": [
             4588,
             29
@@ -121,19 +166,13 @@
         "type": 51
       },
       {
-        "body": [
-          1,
-          0,
-          0,
-          0,
-          0
-        ],
+        "body": [],
         "decoded": {
-          "status_request": true
+          "extended_master_secret": true
         },
-        "length": 5,
+        "length": 0,
         "payload_omitted": null,
-        "type": 5
+        "type": 23
       },
       {
         "body": [
@@ -152,61 +191,22 @@
         "length": 5,
         "payload_omitted": null,
         "type": 43
-      },
-      {
-        "body": [
-          0,
-          8,
-          17,
-          236,
-          0,
-          29,
-          0,
-          23,
-          0,
-          24
-        ],
-        "decoded": {
-          "groups": [
-            4588,
-            29,
-            23,
-            24
-          ]
-        },
-        "length": 10,
-        "payload_omitted": null,
-        "type": 10
-      },
-      {
-        "body": [
-          1,
-          1
-        ],
-        "decoded": {
-          "psk_key_exchange_modes": [
-            1
-          ]
-        },
-        "length": 2,
-        "payload_omitted": null,
-        "type": 45
       }
     ],
     "extensions": [
-      23,
+      5,
+      11,
+      0,
+      45,
+      10,
       35,
       13,
-      0,
-      11,
       51,
-      5,
-      43,
-      10,
-      45
+      23,
+      43
     ],
-    "ja3": "771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,23-35-13-0-11-51-5-43-10-45,4588-29-23-24,0",
-    "ja3_hash": "5a248c5ab184b65aa5026854e270f556",
+    "ja3": "771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,5-11-0-45-10-35-13-51-23-43,4588-29-23-24,0",
+    "ja3_hash": "0431c55aa19b93ab0edc29d6f3c9f0b4",
     "ja4": "t13d101000_61a7ad8aa9b6_0d308c48d2a3",
     "key_share_groups": [
       4588,
@@ -264,24 +264,28 @@
         "value": "<redacted>"
       },
       {
+        "name": "chatgpt-account-id",
+        "value": "<redacted>"
+      },
+      {
         "name": "authorization",
         "value": "<redacted>"
       },
       {
         "name": "user-agent",
-        "value": "codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)"
+        "value": "codex-tui/0.167.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.167.0)"
       },
       {
         "name": "originator",
-        "value": "codex_exec"
+        "value": "codex-tui"
       },
       {
         "name": "openai-beta",
         "value": "responses_websockets=2026-02-06"
       },
       {
-        "name": "x-codex-turn-metadata",
-        "value": "<redacted>"
+        "name": "version",
+        "value": "0.167.0"
       },
       {
         "name": "x-codex-beta-features",
@@ -304,71 +308,104 @@
         "value": "<redacted>"
       },
       {
+        "name": "x-codex-turn-metadata",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-codex-routing-hint",
+        "value": "model=gpt-6-astra"
+      },
+      {
         "name": "sec-websocket-extensions",
         "value": "permessage-deflate; client_max_window_bits"
       }
     ],
     "method": "GET",
+    "target": "<redacted>",
+    "version": "HTTP/1.1",
+    "raw_head": "GET <redacted> HTTP/1.1\r\nHost: <redacted>\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: <redacted>\r\nchatgpt-account-id: <redacted>\r\nauthorization: <redacted>\r\nuser-agent: codex-tui/0.167.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.167.0)\r\noriginator: codex-tui\r\nopenai-beta: responses_websockets=2026-02-06\r\nversion: 0.167.0\r\nx-codex-beta-features: remote_compaction_v2\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\nx-codex-window-id: <redacted>\r\nx-codex-turn-metadata: <redacted>\r\nx-codex-routing-hint: model=gpt-6-astra\r\nsec-websocket-extensions: permessage-deflate; client_max_window_bits\r\n\r\n",
     "normalizations": [
       {
         "header_index": 0,
-        "reason": "unclassified"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 4,
-        "reason": "credential_or_dynamic"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 5,
-        "reason": "credential_or_dynamic"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
-        "header_index": 9,
-        "reason": "unclassified"
-      },
-      {
-        "header_index": 11,
-        "reason": "credential_or_dynamic"
+        "header_index": 6,
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 12,
-        "reason": "credential_or_dynamic"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 13,
-        "reason": "unclassified"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 14,
-        "reason": "unclassified"
+        "reason": "credential, ephemeral endpoint, or per-session value"
+      },
+      {
+        "header_index": 15,
+        "reason": "credential, ephemeral endpoint, or per-session value"
+      },
+      {
+        "header_index": 16,
+        "reason": "credential, ephemeral endpoint, or per-session value"
       }
-    ],
-    "raw_head": "GET <redacted> HTTP/1.1\r\nHost: <redacted>\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: <redacted>\r\nauthorization: <redacted>\r\nuser-agent: codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)\r\noriginator: codex_exec\r\nopenai-beta: responses_websockets=2026-02-06\r\nx-codex-turn-metadata: <redacted>\r\nx-codex-beta-features: remote_compaction_v2\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\nx-codex-window-id: <redacted>\r\nsec-websocket-extensions: permessage-deflate; client_max_window_bits\r\n\r\n",
-    "target": "<redacted>",
-    "version": "HTTP/1.1"
+    ]
   },
   "provenance": {
-    "arch": "x86_64",
-    "captured_at": "2026-11-07T05:27:08.117440922+00:00",
-    "client": "codex-ws-default",
-    "os": "linux",
+    "client": "codex",
     "version": "0.167.0",
+    "mode": "interactive",
     "capture_round": 2,
-    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; temporary HOME and placeholder credentials",
-    "target": "https://localhost:<ephemeral-port>",
-    "capture_tool": "stravia-tools capture-client module, standalone harness",
-    "invocation": "codex exec --skip-git-repo-check with -c provider configuration and prompt \"local capture only\"",
-    "configuration": "temporary CODEX_HOME; model=gpt-5.4; custom provider base_url=local target/v1, env_key=OPENAI_API_KEY, wire_api=responses, supports_websockets=true; OPENAI_API_KEY=placeholder",
-    "trust": "SSL_CERT_DIR with OpenSSL-hash-named temporary capture CA; CODEX_CA_CERTIFICATE and SSL_CERT_FILE unset"
+    "os": "linux",
+    "arch": "x86_64",
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; fresh HOME, CODEX_HOME and XDG; empty working directory",
+    "authentication": "Built-in openai provider with local-only placeholder ChatGPT auth.json, JWT claims and Bearer token; no OPENAI_API_KEY or login; account ID header present",
+    "invocation": "codex -c model=\"gpt-6-astra\" -c cli_auth_credentials_store=\"file\" -c chatgpt_base_url=\"https://localhost:<ephemeral-port>/backend-api\" -c openai_base_url=\"https://localhost:<ephemeral-port>/backend-api/codex\"",
+    "pty": "Normal TUI; type Reply OK, pause, press Enter",
+    "trust": "Local capture CA bind-mounted over system CA bundle inside mount namespace; SSL_CERT_FILE and CODEX_CA_CERTIFICATE unset; TLS verification enabled",
+    "capture_tool": "same-socket loopback TLS server and compiled capture-client hello-decode",
+    "connection_id": 11,
+    "operation": "response.create",
+    "model": "gpt-6-astra",
+    "prompt_present": true,
+    "body_keys": [
+      "client_metadata",
+      "include",
+      "input",
+      "model",
+      "parallel_tool_calls",
+      "previous_response_id",
+      "prompt_cache_key",
+      "reasoning",
+      "store",
+      "stream",
+      "text",
+      "tool_choice",
+      "type"
+    ],
+    "transport": "WebSocket",
+    "warmup": "generate=false response.create answered locally before prompt inference on same socket",
+    "response": "capture server closes after receiving inference; no production API called",
+    "authorization_scheme": "Bearer",
+    "account_header_present": true
   },
   "ws": {
-    "first_frame": {
-      "fin": true,
-      "length": 36021,
-      "masked": true,
-      "opcode": 1,
+    "inference_frame": {
+      "type": "response.create",
       "payload": "<redacted>",
-      "rsv": 0
+      "prompt_present": true
     }
   }
 }

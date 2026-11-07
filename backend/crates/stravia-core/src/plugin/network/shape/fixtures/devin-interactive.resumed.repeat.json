@@ -1,0 +1,343 @@
+{
+  "provenance": {
+    "client": "official Devin CLI (chisel)",
+    "version": "3000.11.3",
+    "os": "linux",
+    "arch": "x86_64",
+    "mode": "interactive",
+    "invocation": "/tmp/net1-devin-interactive/bin/devin",
+    "pty_steps": "Trust the fresh empty workspace; type local capture only and press Enter.",
+    "capture": "Separate fresh HOME/XDG with placeholder stored windsurf_api_key and localhost api_server_url; local protobuf bootstrap with empty success responses; user/mount/network namespaces, loopback only, local CA mounted as system trust, TLS verification enabled. Decoder applied to the same accepted socket as the request.",
+    "method": "POST /exa.api_server_pb.ApiServerService/GetChatMessage",
+    "model": "swe-1-6-fast",
+    "connection_id": 23,
+    "terminal_transcript": "/tmp/net1-devin-interactive/interactive3.pty",
+    "normalization": "Decoder removes ClientHello random, session and keyshare bytes; authorization, trace, host, content length, fingerprint and request dynamic values omitted.",
+    "limitations": "Local response is empty and does not demonstrate successful inference output; this is the user-turn request, not the separate session-title request.",
+    "tls_session": "resumed; bootstrap server issued TLS tickets; PSK extension present",
+    "main_turn_evidence": "The connection 23 body contains the interactive user prompt, a system prompt identifying SWE-1.6 Fast, 24 tool definitions (protobuf field 10), 3 message records (field 3), and model UID swe-1-6-fast. Connection 24 uses the same RPC and repeats the prompt but its system prompt identifies it as a session title generator; excluded."
+  },
+  "clienthello": {
+    "alpn": [],
+    "cipher_suites": [
+      4866,
+      4865,
+      4867,
+      49196,
+      49195,
+      52393,
+      49200,
+      49199,
+      52392,
+      255
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "status_request": true
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": [
+          0,
+          20,
+          5,
+          3,
+          4,
+          3,
+          6,
+          3,
+          8,
+          7,
+          8,
+          6,
+          8,
+          5,
+          8,
+          4,
+          6,
+          1,
+          5,
+          1,
+          4,
+          1
+        ],
+        "decoded": {
+          "algorithms": [
+            1283,
+            1027,
+            1539,
+            2055,
+            2054,
+            2053,
+            2052,
+            1537,
+            1281,
+            1025
+          ]
+        },
+        "length": 22,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      },
+      {
+        "body": [
+          0,
+          8,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24,
+          17,
+          236
+        ],
+        "decoded": {
+          "groups": [
+            29,
+            23,
+            24,
+            4588
+          ]
+        },
+        "length": 10,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 267,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 41
+      }
+    ],
+    "extensions": [
+      5,
+      13,
+      0,
+      45,
+      11,
+      23,
+      43,
+      10,
+      51,
+      41
+    ],
+    "ja3": "771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,5-13-0-45-11-23-43-10-51-41,29-23-24-4588,0",
+    "ja3_hash": "e9570a4ba0e9140f29ae89c428bb25ba",
+    "ja4": "t13d101000_61a7ad8aa9b6_35d235a1c490",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      1283,
+      1027,
+      1539,
+      2055,
+      2054,
+      2053,
+      2052,
+      1537,
+      1281,
+      1025
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      29,
+      23,
+      24,
+      4588
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "method": "POST",
+    "path": "/exa.api_server_pb.ApiServerService/GetChatMessage",
+    "raw_head": "POST /exa.api_server_pb.ApiServerService/GetChatMessage HTTP/1.1\r\nauthorization: <redacted>\r\nsentry-trace: <redacted>\r\ncontent-type: application/connect+proto\r\nconnect-protocol-version: 1\r\naccept: */*\r\nhost: <redacted>\r\ncontent-length: <redacted>\r\n\r\n",
+    "headers": [
+      {
+        "name": "authorization",
+        "value": "<redacted>"
+      },
+      {
+        "name": "sentry-trace",
+        "value": "<redacted>"
+      },
+      {
+        "name": "content-type",
+        "value": "application/connect+proto"
+      },
+      {
+        "name": "connect-protocol-version",
+        "value": "1"
+      },
+      {
+        "name": "accept",
+        "value": "*/*"
+      },
+      {
+        "name": "host",
+        "value": "<redacted>"
+      },
+      {
+        "name": "content-length",
+        "value": "<redacted>"
+      }
+    ]
+  },
+  "body_pattern": {
+    "wire": "connect+proto",
+    "envelope_flag": 0,
+    "envelope_length_matches": true,
+    "top_level_field_numbers": [
+      1,
+      2,
+      3,
+      3,
+      3,
+      7,
+      8,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      10,
+      15,
+      16,
+      20,
+      21,
+      28
+    ],
+    "client_metadata": {
+      "field_1": "devin-cli",
+      "field_2": "3000.11.3",
+      "field_3": "<redacted>",
+      "field_4": "en",
+      "field_5": "linux",
+      "field_7": "3000.11.3",
+      "field_12": "chisel",
+      "field_28": "chisel",
+      "field_31_hex_length": 400
+    },
+    "model_uid": "swe-1-6-fast",
+    "synthetic_prompt_present": true,
+    "tool_definition_count": 24,
+    "message_record_count": 3
+  }
+}

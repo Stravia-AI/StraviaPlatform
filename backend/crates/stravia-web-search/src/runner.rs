@@ -596,6 +596,7 @@ impl WebSearchRunner {
             elapsed_ms: started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
         };
         let commit = self.turns.commit(TurnCommit {
+            atomic_checkpoint_id: None,
             id: turn_id,
             kind: TurnNodeKind::WebSearch,
             parent_id: input.previous_turn_id.clone(),

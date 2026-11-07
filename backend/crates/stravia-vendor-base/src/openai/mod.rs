@@ -14,9 +14,9 @@ use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
     DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
-    TransportPreference, ValidationIssue,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput, OperationOutput,
+    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, TransportPreference,
+    ValidationIssue,
 };
 
 const VENDOR_ID: &str = "openai";
@@ -260,13 +260,16 @@ fn infer(
         headers.append("authorization", format!("Bearer {api_key}"));
     }
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url,
-        headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| invalid("OpenAI request could not be encoded"))?,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url,
+            headers,
+            body: serde_json::to_vec(&body)
+                .map_err(|_| invalid("OpenAI request could not be encoded"))?,
+        },
+        &crate::net_options(),
+    )?;
     match operation {
         Operation::Infer => {
             let decoded = if preserve_upstream_errors {
@@ -355,10 +358,7 @@ fn infer_responses_websocket(
         .flatten();
     execute_responses_websocket(
         host,
-        stravia_vendor_sdk::net::ConnectRequest {
-            url,
-            headers,
-        },
+        stravia_vendor_sdk::net::ConnectRequest { url, headers },
         continuation_id,
         body,
         preserve_upstream_errors,
@@ -386,7 +386,9 @@ pub(crate) fn execute_responses_websocket(
     object.insert("type".into(), Value::String("response.create".into()));
     let mut options = crate::net_options();
     if let Some(id) = continuation_id.as_deref() {
-        options.continuation(id).map_err(|error| invalid(error.to_string()))?;
+        options
+            .continuation(id)
+            .map_err(|error| invalid(error.to_string()))?;
     }
     let connection = host.ws_connect(request, &options)?;
     host.emit_started()?;
@@ -401,6 +403,7 @@ pub(crate) fn execute_responses_websocket(
         preserve_upstream_errors,
         continuation_requested,
         classify_error,
+        None,
     )
 }
 
@@ -435,12 +438,15 @@ fn discover(
     if let Some(api_key) = credential(&provider, "apiKey") {
         headers.append("authorization", format!("Bearer {api_key}"));
     }
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "GET".into(),
-        url,
-        headers,
-        body: Vec::new(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "GET".into(),
+            url,
+            headers,
+            body: Vec::new(),
+        },
+        &crate::net_options(),
+    )?;
     ensure_success(&response, "OpenAI model discovery")?;
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&body)

@@ -1,4 +1,7 @@
-use std::{net::{IpAddr, Ipv4Addr, Ipv6Addr}, time::Duration};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -43,12 +46,17 @@ async fn socks_exchange(scheme: &str, target: &str, remote_dns: bool) {
                     socket.read_exact(&mut octets).await.unwrap();
                     assert_eq!(Ipv6Addr::from(octets), Ipv6Addr::LOCALHOST);
                 }
-                address_type => panic!("unexpected SOCKS address type {address_type} (remote DNS: {remote_dns})"),
+                address_type => panic!(
+                    "unexpected SOCKS address type {address_type} (remote DNS: {remote_dns})"
+                ),
             }
             let mut port = [0; 2];
             socket.read_exact(&mut port).await.unwrap();
             assert_eq!(u16::from_be_bytes(port), TARGET_PORT);
-            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await.unwrap();
+            socket
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
             let mut payload = [0; 4];
             socket.read_exact(&mut payload).await.unwrap();
             assert_eq!(&payload, b"ping");
@@ -56,13 +64,17 @@ async fn socks_exchange(scheme: &str, target: &str, remote_dns: bool) {
         });
 
         let route = Route::Proxy(Proxy::from_url(&format!("{scheme}://{proxy_addr}")).unwrap());
-        let mut stream = connector::connect(target, TARGET_PORT, &route, None, &SystemResolver).await.unwrap();
+        let mut stream = connector::connect(target, TARGET_PORT, &route, None, &SystemResolver)
+            .await
+            .unwrap();
         stream.write_all(b"ping").await.unwrap();
         let mut payload = [0; 4];
         stream.read_exact(&mut payload).await.unwrap();
         assert_eq!(&payload, b"pong");
         server.await.unwrap();
-    }).await.expect("SOCKS loopback exchange timed out");
+    })
+    .await
+    .expect("SOCKS loopback exchange timed out");
 }
 
 #[tokio::test]

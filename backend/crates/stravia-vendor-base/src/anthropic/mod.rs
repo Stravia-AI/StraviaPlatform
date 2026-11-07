@@ -10,8 +10,8 @@ use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
     DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
-    OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput, OperationOutput,
+    PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
 };
 
 const VENDOR_ID: &str = "anthropic";
@@ -200,13 +200,16 @@ fn infer(
         headers.append("x-api-key", api_key.as_bytes());
     }
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: endpoint(&provider.base_url, &egress_path),
-        headers,
-        body: serde_json::to_vec(&body)
-            .map_err(|_| invalid("Anthropic request could not be encoded"))?,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: endpoint(&provider.base_url, &egress_path),
+            headers,
+            body: serde_json::to_vec(&body)
+                .map_err(|_| invalid("Anthropic request could not be encoded"))?,
+        },
+        &crate::net_options(),
+    )?;
     if operation == Operation::Compact {
         return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
             .map(OperationOutput::Compact);
@@ -257,12 +260,15 @@ fn discover(
     if let Some(api_key) = credential(&provider, "apiKey") {
         headers.push(("x-api-key".into(), api_key.into()));
     }
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "GET".into(),
-        url,
-        headers: crate::fields(headers),
-        body: Vec::new(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "GET".into(),
+            url,
+            headers: crate::fields(headers),
+            body: Vec::new(),
+        },
+        &crate::net_options(),
+    )?;
     ensure_success(&response, "Anthropic model discovery", None)?;
     let bytes = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&bytes)

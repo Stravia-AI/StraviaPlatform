@@ -199,11 +199,16 @@ fn token_request(host: &GuestHost, params: &[(&str, &str)]) -> Result<Value, Plu
     headers.slot("Host");
     headers.append("User-Agent", b"Go-http-client/2.0".as_slice());
     headers.slot("Content-Length");
-    headers.append("Content-Type", b"application/x-www-form-urlencoded".as_slice());
+    headers.append(
+        "Content-Type",
+        b"application/x-www-form-urlencoded".as_slice(),
+    );
     headers.append("Accept-Encoding", b"gzip".as_slice());
     let mut options = stravia_vendor_sdk::net::Options::new();
     options.shape("antigravity").expect("valid shape");
-    options.response_decoding(&[stravia_vendor_sdk::net::Coding::Gzip]).expect("valid decoding");
+    options
+        .response_decoding(&[stravia_vendor_sdk::net::Coding::Gzip])
+        .expect("valid decoding");
     let response = host.http_start(
         stravia_vendor_sdk::net::Request {
             method: "POST".into(),

@@ -29,6 +29,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }
+rustls = { workspace = true }
 tungstenite-deflate = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }

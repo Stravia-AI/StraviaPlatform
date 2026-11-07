@@ -1051,6 +1051,33 @@ fn explicit_chat_reasoning_presence_stays_native_across_response_roundtrips() {
 }
 
 #[test]
+fn prune_reports_original_indices_across_both_removal_passes() {
+    let duplicate = AiItem::output_text("same");
+    let mut empty = AiItem::output_text("discarded");
+    empty.content = MessageContent::Blocks(Vec::new());
+    let mut request = AiRequest::new(
+        "model",
+        vec![
+            duplicate.clone(),
+            AiItem::unknown(json!({"type":"unknown"})),
+            duplicate,
+            empty,
+        ],
+    );
+    request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
+    let capabilities = super::adapter(ANTHROPIC_MESSAGES_2023_06_01)
+        .unwrap()
+        .capabilities();
+    let removed = ProtocolTransform::prune_request_for_with_removals(
+        ANTHROPIC_MESSAGES_2023_06_01,
+        capabilities,
+        &mut request,
+    );
+    assert_eq!(removed, vec![1, 3]);
+    assert_eq!(request.items.len(), 2);
+}
+
+#[test]
 fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     let pair = ProtocolTransform::global()
         .bind(

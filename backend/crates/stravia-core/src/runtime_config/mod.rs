@@ -165,6 +165,9 @@ impl RuntimeConfig {
 }
 
 impl Storage for RuntimeConfig {
+    fn prompt_admissions(&self) -> Arc<dyn crate::storage::PromptAdmissionStore> {
+        self.source.prompt_admissions()
+    }
     fn vendor_plugins(&self) -> &PluginStore {
         &self.plugins
     }

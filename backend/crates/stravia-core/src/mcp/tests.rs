@@ -1085,6 +1085,7 @@ async fn turn_continuation_rejects_fields_that_do_not_fit_the_turn_kind() {
         app.gateway
             .turn_chains
             .commit(TurnCommit {
+                atomic_checkpoint_id: None,
                 id: id.clone(),
                 kind,
                 parent_id: None,

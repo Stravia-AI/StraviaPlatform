@@ -1,6 +1,5 @@
 # Rust
 /target/
-/.stravia-patched-crates/
 **/*.rs.bk
 /.task/
 
@@ -31,7 +30,6 @@
 *.db-shm
 *.patch
 !/patches/*.patch
-!/patches/cargo/*.patch
 /.stravia-dev/
 /.devenv-worktree-init-*/
 /.stravia-desktop-e2e/

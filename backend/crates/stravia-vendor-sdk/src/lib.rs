@@ -26,10 +26,11 @@ mod descriptor;
 mod envelope;
 #[doc(hidden)]
 pub mod guest;
-pub mod net;
 mod host_api;
 mod language_tag;
+pub mod net;
 mod request_compat;
+pub mod state;
 
 #[cfg(test)]
 #[allow(dead_code)]
@@ -37,7 +38,6 @@ mod request_compat;
 mod message_build_support;
 
 pub use crate::bindings::stravia::vendor::host::LogLevel;
-pub use net::{Coding, ConnectRequest, Field, Fields, HttpResponse, HttpVersion, OptionError, Options, Request, WebSocket, WsCompression, WsMessage, WsTransport};
 pub use descriptor::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, DataCompatibility,
@@ -62,6 +62,10 @@ pub use guest::{
     UpstreamFailure, ValidationIssue, VendorGuest,
 };
 pub use host_api::{GuestHost, read_http_body};
+pub use net::{
+    Coding, ConnectRequest, Field, Fields, HttpResponse, HttpVersion, OptionError, Options,
+    Request, WebSocket, WsCompression, WsMessage, WsTransport,
+};
 pub use stravia_runtime_contract::protocol::ir::{
     AiError, AiErrorKind, AiRequest, AiResponse, AiStreamDelta, NativeCompactionResponse,
 };

@@ -12,10 +12,10 @@ use stravia_vendor_sdk::{
     AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse,
     AuthStep, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
     ConfigFieldKind, ConfigGroup, ConnectionCheckResponse, ConnectionCheckVerification,
-    DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, Fields, Options, Request,
-    ModelAllowance, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorGuest, VendorKind,
-    read_http_body,
+    DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, Fields, GuestHost,
+    ModelAllowance, NetworkDeclaration, Operation, OperationInput, OperationOutput, Options,
+    PluginError, ProviderDescriptor, ProviderSnapshot, Request, VendorDescriptor, VendorGuest,
+    VendorKind, read_http_body,
 };
 
 struct ManagementContractVendor;
@@ -567,12 +567,15 @@ fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     }
     let mut options = Options::new();
     options.shape("default").map_err(invalid)?;
-    let response = host.http_start(Request {
-        method: "POST".into(),
-        url: format!("{}{}", provider.base_url.trim_end_matches('/'), path),
-        headers: fields,
-        body: serde_json::to_vec(&body).map_err(invalid)?,
-    }, &options)?;
+    let response = host.http_start(
+        Request {
+            method: "POST".into(),
+            url: format!("{}{}", provider.base_url.trim_end_matches('/'), path),
+            headers: fields,
+            body: serde_json::to_vec(&body).map_err(invalid)?,
+        },
+        &options,
+    )?;
     let status = response.status()?;
     let bytes = read_http_body(&response, 1024 * 1024)?;
     if !(200..300).contains(&status) {

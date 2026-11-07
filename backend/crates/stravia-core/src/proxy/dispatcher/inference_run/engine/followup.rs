@@ -117,6 +117,7 @@ pub(super) struct FollowupLeg<'a> {
     pub projection: &'a mut ClientProjectionSession,
     pub phase: &'a mut PhaseTracker,
     pub generation: &'a mut GenerationChainRun,
+    pub history_boundary_gap: usize,
     pub fixed_media_plan:
         Option<&'a stravia_runtime_contract::protocol::ir::request::MediaRoutingPlan>,
 }
@@ -163,15 +164,37 @@ pub(super) async fn acquire_followup_model_turn(
         projection,
         phase,
         generation,
+        history_boundary_gap,
         fixed_media_plan,
     } = leg;
     if request_context.cancellation.is_cancelled() {
         return Err(buffered_response(error_response(499, "request cancelled")));
     }
-    match inference_run
-        .on_request(std::sync::Arc::make_mut(request))
-        .await
-    {
+    let history_boundary_source = Arc::clone(request);
+    let mut history_boundary = generation.write.as_ref().and_then(|write| {
+        let atomic = write.atomic_conversation_context()?;
+        let window = write.virtual_window()?;
+        Some(HistoryBoundaryInput {
+            candidate: crate::generation_chain::history_boundary_candidate(
+                atomic.admission_id,
+                window,
+                &history_boundary_source,
+                history_boundary_gap,
+            )?,
+            gaps: (0..=history_boundary_source.items.len()).collect(),
+            source: history_boundary_source,
+        })
+    });
+    let hook_outcome = inference_run
+        .on_request_with_provenance(std::sync::Arc::make_mut(request))
+        .await;
+    let hook_outcome = hook_outcome.map(|outcome| {
+        if outcome.canonical_structure_changed {
+            history_boundary = None;
+        }
+        outcome.control
+    });
+    match hook_outcome {
         Ok(stravia_runtime_contract::hook::HookControl::Continue) => {}
         Ok(stravia_runtime_contract::hook::HookControl::Respond(response)) => {
             let plan = prepare_hook_response(
@@ -229,6 +252,7 @@ pub(super) async fn acquire_followup_model_turn(
         request_context,
         ledger,
         generation,
+        history_boundary,
     )
     .await?;
     inference_run.set_route(turn.route.clone());

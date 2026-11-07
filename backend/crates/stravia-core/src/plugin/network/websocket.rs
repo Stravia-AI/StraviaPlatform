@@ -2,40 +2,66 @@
 
 use std::{collections::BTreeSet, io};
 
+use super::transport::{
+    Head, RequestPlan, Route, TransportError, UpgradeResponse, UpgradedIo, VendorTransport,
+};
 use bytes::Bytes;
 use futures::{SinkExt as _, StreamExt as _};
-use url::Url;
 use stravia_vendor_runtime::HostFailure;
 use stravia_vendor_sdk::net::{Field, WsCompression};
-use super::transport::{Head, RequestPlan, Route, TransportError, UpgradeResponse, UpgradedIo, VendorTransport};
 use tungstenite_deflate::{
     extensions::compression::deflate::DeflateConfig,
     handshake::{client::generate_key, derive_accept_key},
     protocol::{Role, WebSocketConfig},
 };
+use url::Url;
 
 /// Limit decompression while it happens, not after allocating the expansion.
 pub(super) const MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
-pub(super) fn validate_headers(fields: &[Field], compression: WsCompression) -> Result<(), HostFailure> {
-    let controlled = ["upgrade", "connection", "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions", "sec-websocket-protocol"];
+pub(super) fn validate_headers(
+    fields: &[Field],
+    compression: WsCompression,
+) -> Result<(), HostFailure> {
+    let controlled = [
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-protocol",
+    ];
     for name in controlled {
-        if fields.iter().filter(|field| field.name.eq_ignore_ascii_case(name)).count() > 1 {
+        if fields
+            .iter()
+            .filter(|field| field.name.eq_ignore_ascii_case(name))
+            .count()
+            > 1
+        {
             return Err(super::invalid("duplicate WebSocket handshake header"));
         }
     }
-    if let Some(key) = fields.iter().find(|field| field.name.eq_ignore_ascii_case("sec-websocket-key")) {
-        if !key.bytes.is_empty() { return Err(super::invalid("WebSocket key must be an empty slot")); }
+    if let Some(key) = fields
+        .iter()
+        .find(|field| field.name.eq_ignore_ascii_case("sec-websocket-key"))
+        && !key.bytes.is_empty()
+    {
+        return Err(super::invalid("WebSocket key must be an empty slot"));
     }
-    let extension = fields.iter().find(|field| field.name.eq_ignore_ascii_case("sec-websocket-extensions"));
+    let extension = fields
+        .iter()
+        .find(|field| field.name.eq_ignore_ascii_case("sec-websocket-extensions"));
     if let Some(field) = extension {
         if compression == WsCompression::Disabled {
             return Err(super::invalid("WebSocket compression is disabled"));
         }
-        let offer = std::str::from_utf8(&field.bytes).map_err(|_| super::invalid("invalid WebSocket extension offer"))?;
+        let offer = std::str::from_utf8(&field.bytes)
+            .map_err(|_| super::invalid("invalid WebSocket extension offer"))?;
         validate_offer(offer).map_err(|_| super::invalid("invalid WebSocket extension offer"))?;
     } else if compression == WsCompression::Required {
-        return Err(super::invalid("required WebSocket compression needs an offer"));
+        return Err(super::invalid(
+            "required WebSocket compression needs an offer",
+        ));
     }
     Ok(())
 }
@@ -50,77 +76,159 @@ pub(super) struct Handshake {
 }
 
 impl Handshake {
-    pub(super) fn new(url: &Url, mut fields: Vec<Field>, compression: WsCompression) -> Result<Self, HostFailure> {
+    pub(super) fn new(
+        url: &Url,
+        mut fields: Vec<Field>,
+        compression: WsCompression,
+    ) -> Result<Self, HostFailure> {
         validate_headers(&fields, compression)?;
         if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") {
             return Err(super::invalid("invalid WebSocket URL scheme"));
         }
         let mut protocols = Vec::new();
-        if let Some(field) = fields.iter().find(|field| field.name.eq_ignore_ascii_case("sec-websocket-protocol")) {
-            let text = std::str::from_utf8(&field.bytes).map_err(|_| super::invalid("invalid WebSocket subprotocol"))?;
+        if let Some(field) = fields
+            .iter()
+            .find(|field| field.name.eq_ignore_ascii_case("sec-websocket-protocol"))
+        {
+            let text = std::str::from_utf8(&field.bytes)
+                .map_err(|_| super::invalid("invalid WebSocket subprotocol"))?;
             let mut seen = BTreeSet::new();
             for protocol in text.split(',').map(str::trim) {
-                if protocol.is_empty() || !protocol.bytes().all(is_token) || !seen.insert(protocol) {
+                if protocol.is_empty() || !protocol.bytes().all(is_token) || !seen.insert(protocol)
+                {
                     return Err(super::invalid("invalid or duplicate WebSocket subprotocol"));
                 }
                 protocols.push(protocol.to_owned());
             }
         }
-        let offer = fields.iter().find(|field| field.name.eq_ignore_ascii_case("sec-websocket-extensions"))
+        let offer = fields
+            .iter()
+            .find(|field| field.name.eq_ignore_ascii_case("sec-websocket-extensions"))
             .map(|field| String::from_utf8(field.bytes.clone()).expect("offer validated"));
         let key = generate_key();
         let accept = derive_accept_key(key.as_bytes());
-        for (name, value) in [("Connection", "Upgrade"), ("Upgrade", "websocket"), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Key", key.as_str())] {
-            if let Some(field) = fields.iter_mut().find(|field| field.name.eq_ignore_ascii_case(name)) {
+        for (name, value) in [
+            ("Connection", "Upgrade"),
+            ("Upgrade", "websocket"),
+            ("Sec-WebSocket-Version", "13"),
+            ("Sec-WebSocket-Key", key.as_str()),
+        ] {
+            if let Some(field) = fields
+                .iter_mut()
+                .find(|field| field.name.eq_ignore_ascii_case(name))
+            {
                 if !field.bytes.is_empty() && !field.bytes.eq_ignore_ascii_case(value.as_bytes()) {
                     return Err(super::invalid("invalid WebSocket handshake slot value"));
                 }
                 field.bytes = value.as_bytes().to_vec();
             } else {
-                fields.push(Field { name: name.to_owned(), bytes: value.as_bytes().to_vec() });
+                fields.push(Field {
+                    name: name.to_owned(),
+                    bytes: value.as_bytes().to_vec(),
+                });
             }
         }
-        Ok(Self { url: url.clone(), headers: fields, protocols, compression, offer, accept })
+        Ok(Self {
+            url: url.clone(),
+            headers: fields,
+            protocols,
+            compression,
+            offer,
+            accept,
+        })
     }
 
-    pub(super) fn headers(&self) -> &[Field] { &self.headers }
-
-    pub(super) async fn send(&self, transport: &VendorTransport, route: Route, observer: Option<Box<dyn FnOnce(super::transport::RequestHead) + Send>>) -> Result<UpgradeResponse, TransportError> {
-        transport.upgrade(RequestPlan { method: "GET".into(), uri: self.url.to_string(), fields: self.headers.clone(), body: Bytes::new(), observer }, route).await
+    #[cfg(test)]
+    pub(super) fn headers(&self) -> &[Field] {
+        &self.headers
     }
 
-    pub(super) async fn finish(self, head: &Head, io: UpgradedIo) -> Result<WebSocket, HostFailure> {
-        let extension = self.validate(head).map_err(super::websocket_transport_failure)?;
+    pub(super) fn headers_mut(&mut self) -> &mut Vec<Field> {
+        &mut self.headers
+    }
+
+    pub(super) async fn send(
+        &self,
+        transport: &VendorTransport,
+        route: Route,
+        observer: Option<Box<dyn FnOnce(super::transport::RequestHead) + Send>>,
+    ) -> Result<UpgradeResponse, TransportError> {
+        transport
+            .upgrade(
+                RequestPlan {
+                    method: "GET".into(),
+                    uri: self.url.to_string(),
+                    fields: self.headers.clone(),
+                    body: Bytes::new(),
+                    observer,
+                },
+                route,
+            )
+            .await
+    }
+
+    pub(super) async fn finish(
+        self,
+        head: &Head,
+        io: UpgradedIo,
+    ) -> Result<WebSocket, HostFailure> {
+        let extension = self
+            .validate(head)
+            .map_err(super::websocket_transport_failure)?;
         let compressed = extension.is_some();
-        let socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(io, Role::Client, Some(options(extension))).await;
-        Ok(WebSocket { socket, compressed, ended: false })
+        let socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(
+            io,
+            Role::Client,
+            Some(options(extension)),
+        )
+        .await;
+        Ok(WebSocket {
+            socket,
+            compressed,
+            ended: false,
+        })
     }
 
     fn validate(&self, head: &Head) -> io::Result<Option<DeflateConfig>> {
         match head.status {
             101 => {
                 if !contains_token(&head.fields, "connection", "upgrade")?
-                    || !single_header(&head.fields, "upgrade")?.is_some_and(|value| value.eq_ignore_ascii_case("websocket")) {
-                    return Err(protocol_error("invalid WebSocket Connection/Upgrade headers"));
+                    || !single_header(&head.fields, "upgrade")?
+                        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+                {
+                    return Err(protocol_error(
+                        "invalid WebSocket Connection/Upgrade headers",
+                    ));
                 }
-                if single_header(&head.fields, "sec-websocket-accept")? != Some(self.accept.as_str()) {
+                if single_header(&head.fields, "sec-websocket-accept")?
+                    != Some(self.accept.as_str())
+                {
                     return Err(protocol_error("invalid WebSocket accept nonce"));
                 }
             }
-            200 => {},
+            200 => {}
             _ => return Err(protocol_error("invalid WebSocket upgrade status")),
         }
-        if let Some(version) = single_header(&head.fields, "sec-websocket-version")? && version != "13" {
+        if let Some(version) = single_header(&head.fields, "sec-websocket-version")?
+            && version != "13"
+        {
             return Err(protocol_error("unsupported WebSocket version"));
         }
         if let Some(selected) = single_header(&head.fields, "sec-websocket-protocol")?
-            && !self.protocols.iter().any(|offered| offered == selected) {
-            return Err(protocol_error("server selected an unoffered WebSocket subprotocol"));
+            && !self.protocols.iter().any(|offered| offered == selected)
+        {
+            return Err(protocol_error(
+                "server selected an unoffered WebSocket subprotocol",
+            ));
         }
         let extension = single_header(&head.fields, "sec-websocket-extensions")?;
         match (self.compression, self.offer.as_deref(), extension) {
-            (_, None, Some(_)) | (WsCompression::Disabled, _, Some(_)) => Err(protocol_error("server selected an unoffered WebSocket extension")),
-            (WsCompression::Required, _, None) => Err(protocol_error("server did not accept required permessage-deflate")),
+            (_, None, Some(_)) | (WsCompression::Disabled, _, Some(_)) => Err(protocol_error(
+                "server selected an unoffered WebSocket extension",
+            )),
+            (WsCompression::Required, _, None) => Err(protocol_error(
+                "server did not accept required permessage-deflate",
+            )),
             (_, _, None) => Ok(None),
             (_, Some(offer), Some(value)) => {
                 validate_selection(offer, value)?;
@@ -135,17 +243,34 @@ fn is_token(byte: u8) -> bool {
 }
 
 fn single_header<'a>(fields: &'a [Field], name: &str) -> io::Result<Option<&'a str>> {
-    let mut values = fields.iter().filter(|field| field.name.eq_ignore_ascii_case(name));
-    let value = values.next().map(|field| std::str::from_utf8(&field.bytes).map(str::trim)).transpose().map_err(protocol_error)?;
-    if values.next().is_some() { return Err(protocol_error("duplicate WebSocket handshake header")); }
+    let mut values = fields
+        .iter()
+        .filter(|field| field.name.eq_ignore_ascii_case(name));
+    let value = values
+        .next()
+        .map(|field| std::str::from_utf8(&field.bytes).map(str::trim))
+        .transpose()
+        .map_err(protocol_error)?;
+    if values.next().is_some() {
+        return Err(protocol_error("duplicate WebSocket handshake header"));
+    }
     Ok(value)
 }
 
 fn contains_token(fields: &[Field], name: &str, expected: &str) -> io::Result<bool> {
     let mut found = false;
-    for field in fields.iter().filter(|field| field.name.eq_ignore_ascii_case(name)) {
-        for token in std::str::from_utf8(&field.bytes).map_err(protocol_error)?.split(',').map(str::trim) {
-            if token.is_empty() || !token.bytes().all(is_token) { return Err(protocol_error("invalid HTTP upgrade token")); }
+    for field in fields
+        .iter()
+        .filter(|field| field.name.eq_ignore_ascii_case(name))
+    {
+        for token in std::str::from_utf8(&field.bytes)
+            .map_err(protocol_error)?
+            .split(',')
+            .map(str::trim)
+        {
+            if token.is_empty() || !token.bytes().all(is_token) {
+                return Err(protocol_error("invalid HTTP upgrade token"));
+            }
             found |= token.eq_ignore_ascii_case(expected);
         }
     }
@@ -163,27 +288,46 @@ fn validate_selection(offer: &str, selection: &str) -> io::Result<()> {
     fn lookup<'a>(text: &'a str, name: &str) -> Option<Option<&'a str>> {
         text.split(';').skip(1).find_map(|part| {
             let part = part.trim();
-            let (n, v) = part.split_once('=').map_or((part, None), |(n, v)| (n.trim(), Some(v.trim())));
+            let (n, v) = part
+                .split_once('=')
+                .map_or((part, None), |(n, v)| (n.trim(), Some(v.trim())));
             (n == name).then_some(v)
         })
     }
     fn number(text: &str) -> u8 {
-        text.bytes().filter(u8::is_ascii_digit).fold(0, |n, b| n * 10 + b - b'0')
+        text.bytes()
+            .filter(u8::is_ascii_digit)
+            .fold(0, |n, b| n * 10 + b - b'0')
     }
-    if lookup(offer, "server_no_context_takeover").is_some() && lookup(selection, "server_no_context_takeover").is_none() {
-        return Err(protocol_error("server ignored required no-context-takeover"));
+    if lookup(offer, "server_no_context_takeover").is_some()
+        && lookup(selection, "server_no_context_takeover").is_none()
+    {
+        return Err(protocol_error(
+            "server ignored required no-context-takeover",
+        ));
     }
     if let Some(Some(limit)) = lookup(offer, "server_max_window_bits") {
-        let actual = lookup(selection, "server_max_window_bits").flatten().ok_or_else(|| protocol_error("server ignored offered window limit"))?;
-        if number(actual) > number(limit) { return Err(protocol_error("server exceeded offered window limit")); }
-    }
-    if let Some(Some(limit)) = lookup(offer, "client_max_window_bits") {
-        if let Some(Some(actual)) = lookup(selection, "client_max_window_bits") {
-            if number(actual) > number(limit) { return Err(protocol_error("server exceeded offered client window limit")); }
+        let actual = lookup(selection, "server_max_window_bits")
+            .flatten()
+            .ok_or_else(|| protocol_error("server ignored offered window limit"))?;
+        if number(actual) > number(limit) {
+            return Err(protocol_error("server exceeded offered window limit"));
         }
     }
-    if lookup(selection, "client_max_window_bits").is_some() && lookup(offer, "client_max_window_bits").is_none() {
-        return Err(protocol_error("server selected unoffered client window parameter"));
+    if let Some(Some(limit)) = lookup(offer, "client_max_window_bits")
+        && let Some(Some(actual)) = lookup(selection, "client_max_window_bits")
+        && number(actual) > number(limit)
+    {
+        return Err(protocol_error(
+            "server exceeded offered client window limit",
+        ));
+    }
+    if lookup(selection, "client_max_window_bits").is_some()
+        && lookup(offer, "client_max_window_bits").is_none()
+    {
+        return Err(protocol_error(
+            "server selected unoffered client window parameter",
+        ));
     }
     Ok(())
 }
@@ -247,7 +391,9 @@ fn validate_extension_inner(value: &str, offer: bool) -> io::Result<DeflateConfi
                 }
                 // 服务端 8 位窗口的合法输出可由较大的解码窗口安全读取；
                 // zlib 不能表达客户端 8 位压缩窗口，不能假装支持该协商结果。
-                if !(8..=15).contains(&bits) || (!offer && name == "client_max_window_bits" && bits == 8) {
+                if !(8..=15).contains(&bits)
+                    || (!offer && name == "client_max_window_bits" && bits == 8)
+                {
                     return Err(protocol_error("unsupported permessage-deflate window bits"));
                 }
                 config = config

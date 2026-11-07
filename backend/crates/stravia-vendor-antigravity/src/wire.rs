@@ -273,7 +273,9 @@ pub(crate) fn infer(
     }
     let streaming = headers.iter().any(|field| {
         field.name.eq_ignore_ascii_case("content-type")
-            && String::from_utf8_lossy(&field.bytes).to_ascii_lowercase().contains("text/event-stream")
+            && String::from_utf8_lossy(&field.bytes)
+                .to_ascii_lowercase()
+                .contains("text/event-stream")
     });
     if !streaming {
         let bytes = read_http_body(&response, MAX_BODY)?;
@@ -405,7 +407,10 @@ pub(crate) fn normalize_final_usage(response: &mut Value) {
         .or_insert_with(|| json!(0));
 }
 
-pub(crate) fn response_error(value: &Value, headers: &stravia_vendor_sdk::net::Fields) -> Option<PluginError> {
+pub(crate) fn response_error(
+    value: &Value,
+    headers: &stravia_vendor_sdk::net::Fields,
+) -> Option<PluginError> {
     let error = value
         .get("error")
         .or_else(|| value.pointer("/response/error"))?;

@@ -273,13 +273,16 @@ async fn ordered_wire_headers_preserve_bytes_and_redact_every_authorization() {
     assert_eq!(handle.finish().await.status, "complete");
     let records = persisted_records(&handle).await;
     assert_eq!(records[0].schema_version, 3);
-    assert_eq!(records[0].headers, serde_json::json!([
-        {"name": "X-Test", "bytes": [255, 0, 65]},
-        {"name": "Authorization", "bytes": [42, 42, 42]},
-        {"name": "Cookie", "bytes": [1, 2]},
-        {"name": "aUtHoRiZaTiOn", "bytes": [42, 42, 42]},
-        {"name": "X-Test", "bytes": [66]}
-    ]));
+    assert_eq!(
+        records[0].headers,
+        serde_json::json!([
+            {"name": "X-Test", "bytes": [255, 0, 65]},
+            {"name": "Authorization", "bytes": [42, 42, 42]},
+            {"name": "Cookie", "bytes": [1, 2]},
+            {"name": "aUtHoRiZaTiOn", "bytes": [42, 42, 42]},
+            {"name": "X-Test", "bytes": [66]}
+        ])
+    );
     assert_eq!(records[0].redactions, [RedactionKind::CredentialHeader]);
     manager.shutdown().await;
 }

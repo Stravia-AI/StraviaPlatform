@@ -87,6 +87,12 @@ struct RuntimeSession {
     delayed_events: usize,
     held_variants: Vec<SemanticVariant>,
 }
+pub(crate) struct RequestHookOutcome {
+    pub control: HookControl,
+    /// Structural replacement invalidates item provenance even when content is unchanged.
+    pub canonical_structure_changed: bool,
+}
+
 pub(crate) struct InferenceRun {
     cancellation: stravia_runtime_contract::CancellationToken,
     context: SessionContext,
@@ -175,7 +181,11 @@ impl InferenceRun {
             cancellation,
         )
     }
-    pub async fn on_request(&mut self, request: &mut AiRequest) -> Result<HookControl, HookError> {
+    pub(crate) async fn on_request_with_provenance(
+        &mut self,
+        request: &mut AiRequest,
+    ) -> Result<RequestHookOutcome, HookError> {
+        let mut canonical_structure_changed = false;
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
                 .descriptor
@@ -217,6 +227,13 @@ impl InferenceRun {
                 self.cancellation.clone(),
             )
             .await?;
+            let structural_patch = batch.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    HookAction::PatchRequest(patch)
+                        if matches!(patch.as_ref(), RequestPatch::ReplaceCanonical(_) | RequestPatch::ReplaceContextSpans(_))
+                )
+            });
             let control = apply_request_actions(
                 &runtime_session.descriptor.id,
                 request,
@@ -231,6 +248,7 @@ impl InferenceRun {
                 &self.tools,
                 batch,
             )?;
+            canonical_structure_changed |= structural_patch;
             self.completeness = self
                 .current
                 .as_ref()
@@ -238,10 +256,16 @@ impl InferenceRun {
                 .completeness
                 .clone();
             if !matches!(control, HookControl::Continue) {
-                return Ok(control);
+                return Ok(RequestHookOutcome {
+                    control,
+                    canonical_structure_changed,
+                });
             }
         }
-        Ok(HookControl::Continue)
+        Ok(RequestHookOutcome {
+            control: HookControl::Continue,
+            canonical_structure_changed,
+        })
     }
 
     #[cfg(test)]

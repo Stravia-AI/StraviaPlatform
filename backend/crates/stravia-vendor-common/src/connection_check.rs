@@ -1,9 +1,7 @@
 //! 连接检查只复用请求与解码，不触发模型同步、账号绑定或生成。
 
 use serde_json::Value;
-use stravia_vendor_sdk::{
-    ErrorKind, HttpResponse, PluginError, read_http_body,
-};
+use stravia_vendor_sdk::{ErrorKind, HttpResponse, PluginError, read_http_body};
 
 use crate::common::{plugin_error, upstream_error};
 

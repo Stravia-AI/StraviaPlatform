@@ -7,7 +7,7 @@
 //! GetChatMessageRequest
 //!   #1  ClientMetadata { #1 client_name, #2 client_version, #3 session_token,
 //!                        #4 language, #5 platform, #7 client_version,
-//!                        #12 client_name, #28 ide_type, #31 fingerprint (732 hex chars) }
+//!                        #12 client_name, #28 ide_type, #31 encrypted fingerprint }
 //!   #2  system prompt
 //!   #3  repeated ChatMessagePrompt { #1 uuid, #2 source, #3 prompt,
 //!                              #6 ChatToolCall{#1 id,#2 name,#3 args_json},
@@ -66,6 +66,7 @@
 
 use std::collections::HashMap;
 
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -89,10 +90,9 @@ use stravia_runtime_contract::protocol::ir::ServiceTier;
 /// Connect-RPC method path on the Devin api-server host.
 pub const GET_CHAT_MESSAGE_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 
-/// ClientMetadata constants observed on live CLI requests. `chisel` is the
-/// CLI's internal client name; the version tracks the Devin CLI build —
-/// upstream serves a reduced model catalog to older versions, so this must
-/// stay near the current release.
+/// ClientMetadata identity differs by operation: interactive GetChatMessage
+/// uses `devin-cli` at #1 while GetUserStatus uses `chisel`; both use
+/// `chisel` at #12 and #28 in the 3000.11.3 captures.
 const CLIENT_NAME: &str = "chisel";
 const CLIENT_VERSION: &str = "3000.11.3";
 const CLIENT_LANGUAGE: &str = "en";
@@ -207,6 +207,7 @@ pub(crate) fn encode_get_chat_message_request_with_platform(
         shape,
         assignment_jwt,
         platform,
+        "test-fingerprint",
     )
 }
 
@@ -216,6 +217,7 @@ pub(crate) fn encode_prepared_request(
     shape: &SessionShape,
     assignment_jwt: Option<&str>,
     platform: DevinClientPlatform,
+    fingerprint: &str,
 ) -> anyhow::Result<Vec<u8>> {
     if session_token.trim().is_empty() {
         bail!("Devin Connect request is missing the session token");
@@ -246,7 +248,7 @@ pub(crate) fn encode_prepared_request(
     write_message_field(
         &mut out,
         1,
-        &client_metadata(session_token, false, platform),
+        &client_metadata(session_token, false, platform, "devin-cli", fingerprint),
     );
     write_string_field(&mut out, 2, &system_prompt);
     for message in &chat_messages {
@@ -302,12 +304,13 @@ pub fn encode_assign_model_request_with_platform(
     router_uid: &str,
     cascade_id: &str,
     platform: DevinClientPlatform,
+    fingerprint: &str,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     write_message_field(
         &mut out,
         1,
-        &client_metadata(session_token, false, platform),
+        &client_metadata(session_token, false, platform, CLIENT_NAME, fingerprint),
     );
     write_string_field(&mut out, 2, router_uid);
     write_string_field(&mut out, 3, cascade_id);
@@ -346,12 +349,13 @@ pub fn encode_client_metadata_request_with_platform(
     session_token: &str,
     displays: bool,
     platform: DevinClientPlatform,
+    fingerprint: &str,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     write_message_field(
         &mut out,
         1,
-        &client_metadata(session_token, displays, platform),
+        &client_metadata(session_token, displays, platform, CLIENT_NAME, fingerprint),
     );
     out
 }
@@ -516,14 +520,18 @@ fn decode_model_cost(config: &[ProtoField<'_>]) -> Option<DevinModelCost> {
     (cost != DevinModelCost::default()).then_some(cost)
 }
 
-/// ClientMetadata field set per 3000.10.x captures: GetChatMessage and
-/// GetUserStatus send {1,2,3,4,5,7,12,28,31}; GetCliModelConfigs adds #30
-/// (`displays`). Fields absent in captures (9 request_id, 10 session_id,
-/// 13 user_agent, 15 auth_source, 24 device_fingerprint, 32 team_id) are
-/// never emitted.
-fn client_metadata(session_token: &str, displays: bool, platform: DevinClientPlatform) -> Vec<u8> {
+/// ClientMetadata field set: the 3000.11.3 interactive GetChatMessage and
+/// GetUserStatus captures contain {1,2,3,4,5,7,12,28,31}; the earlier
+/// GetCliModelConfigs capture adds #30 (`displays`). Other fields are omitted.
+fn client_metadata(
+    session_token: &str,
+    displays: bool,
+    platform: DevinClientPlatform,
+    client_name: &str,
+    fingerprint: &str,
+) -> Vec<u8> {
     let mut out = Vec::new();
-    write_string_field(&mut out, 1, CLIENT_NAME);
+    write_string_field(&mut out, 1, client_name);
     write_string_field(&mut out, 2, CLIENT_VERSION);
     write_string_field(&mut out, 3, session_token);
     write_string_field(&mut out, 4, CLIENT_LANGUAGE);
@@ -534,33 +542,89 @@ fn client_metadata(session_token: &str, displays: bool, platform: DevinClientPla
     if displays {
         write_message_field(&mut out, 30, &[3, 4, 6, 7, 8]);
     }
-    write_string_field(&mut out, 31, &device_fingerprint(session_token));
+    write_string_field(&mut out, 31, fingerprint);
     out
 }
 
-/// ClientMetadata #31: 366 bytes rendered as 732 lowercase hex chars. The
-/// existing codec derives a deterministic per-credential value instead of
-/// reading host device identifiers. The official 3000.11.3 binary contains
-/// `windsurf-api-client/src/fingerprint.rs` and `has_fingerprint_set`, but
-/// those strings alone do not prove its generation algorithm, validation,
-/// or server acceptance. This synthetic value is not an official machine
-/// fingerprint implementation; keep its existing mapping unchanged.
-fn device_fingerprint(session_token: &str) -> String {
-    // Counter-mode expand: block_i = SHA256(token || "devin-clientmeta" || i).
-    // 12 blocks × 32 bytes covers 366.
-    let mut bytes = Vec::with_capacity(384);
-    for index in 0u32..12 {
-        let mut hasher = Sha256::new();
-        hasher.update(session_token.as_bytes());
-        hasher.update(b"devin-clientmeta");
-        hasher.update(index.to_be_bytes());
-        bytes.extend_from_slice(&hasher.finalize());
+/// Derive virtual hardware from the persistent installation UUID, never from
+/// actual host hardware or user identity. The native CLI hashes sorted MACs,
+/// serial and username, then encrypts that digest with the session token and
+/// Unix nanoseconds using AES-256-GCM.
+pub(crate) fn device_fingerprint(
+    session_token: &str,
+    installation_id: Uuid,
+) -> anyhow::Result<String> {
+    let identity = virtual_device_fingerprint(installation_id);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_nanos();
+    let random = Uuid::new_v4();
+    let bytes = random.as_bytes();
+    let mut nonce = [0u8; 12];
+    nonce[..6].copy_from_slice(&bytes[..6]);
+    nonce[6] = bytes[7];
+    nonce[7..].copy_from_slice(&bytes[9..14]);
+    encrypt_fingerprint(&identity, session_token, nanos, &nonce)
+}
+
+fn virtual_device_fingerprint(installation_id: Uuid) -> String {
+    fn derive(label: &[u8], id: Uuid) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(label);
+        hash.update(id.as_bytes());
+        hash.finalize().into()
     }
-    let mut hex = String::with_capacity(732);
-    for byte in &bytes[..366] {
-        hex.push_str(&format!("{byte:02x}"));
+    let mac = derive(b"stravia:devin:virtual-mac:v1\0", installation_id);
+    let serial = derive(b"stravia:devin:virtual-serial:v1\0", installation_id);
+    let username = derive(b"stravia:devin:virtual-username:v1\0", installation_id);
+    let mac = format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        (mac[0] | 2) & 0xfe,
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
+    );
+    let serial = hex_bytes(&serial);
+    let username = format!("stravia-{}", hex_bytes(&username[..8]));
+    use sha2::Sha512;
+    let mut hash = Sha512::new();
+    hash.update(mac.as_bytes());
+    hash.update(serial.as_bytes());
+    hash.update(username.as_bytes());
+    hex_bytes(&hash.finalize())
+}
+
+fn encrypt_fingerprint(
+    identity: &str,
+    token: &str,
+    nanos: u128,
+    nonce: &[u8; 12],
+) -> anyhow::Result<String> {
+    let key = Sha256::digest(b"df97465349f38646af1d66c263e25e08");
+    let cipher = Aes256Gcm::new_from_slice(&key).expect("SHA-256 produces a 256-bit key");
+    let plaintext = format!("{identity}|{token}|{nanos}");
+    let nonce: &Nonce<_> = nonce.into();
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|_| anyhow::anyhow!("failed to encrypt Devin fingerprint"))?;
+    let mut result = String::with_capacity((nonce.len() + ciphertext.len()) * 2);
+    use std::fmt::Write as _;
+    for byte in nonce.iter().chain(ciphertext.iter()) {
+        write!(&mut result, "{byte:02x}").expect("writing to String cannot fail");
     }
-    hex
+    Ok(result)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut result, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    result
 }
 
 fn completion_config(req: &AiRequest) -> Vec<u8> {
@@ -1658,6 +1722,7 @@ mod tests {
             router_uid,
             cascade_id,
             DevinClientPlatform::Linux,
+            "test-fingerprint",
         )
     }
 
@@ -1679,8 +1744,15 @@ mod tests {
         let shape = shape(&request);
         for token in ["", " \t"] {
             assert!(
-                encode_prepared_request(&request, token, &shape, None, DevinClientPlatform::Linux,)
-                    .is_err()
+                encode_prepared_request(
+                    &request,
+                    token,
+                    &shape,
+                    None,
+                    DevinClientPlatform::Linux,
+                    "test-fingerprint"
+                )
+                .is_err()
             );
         }
     }
@@ -1893,6 +1965,50 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_matches_two_independent_cli_vectors() {
+        // Captured from the native 3000.11.3 CLI with synthetic device digests,
+        // placeholder token and fixed clock; nonce values are from each capture.
+        let vectors = [
+            (
+                '0',
+                1700000000000000001u128,
+                [
+                    0xc8, 0xb3, 0xb3, 0x9a, 0xc7, 0x8c, 0x09, 0x14, 0xf8, 0x6d, 0x3e, 0x12,
+                ],
+                "c8b3b39ac78c0914f86d3e125b50b429f6b83dee8c517f5267010d72d41e4192998697f7ff5b0394bb1502b336db3d3685715acf420a5eca0fd52f73ddadf12a634f4cce1ab62280591364d62c0f1efacb944f56875a4e743a464442bfe5189280765b1ff93407c3d322bb4eb26df9e18efe1901b039875be8712cf791d9c1d23561591f5a3cef5926fe1400cb3df0dca13cd2501960241a2f1a138da5b1f58654f25d711b67c8c77b27049397ecda1a2d7341f3c4dee14fe5f03cbcd0ad00d7f53657a30410ee6b",
+            ),
+            (
+                '1',
+                1700000000000000002u128,
+                [
+                    0x1c, 0x73, 0xf4, 0x70, 0xa9, 0x71, 0x97, 0xab, 0x58, 0x07, 0x8b, 0x7b,
+                ],
+                "1c73f470a97197ab58078b7b94c5862441a818f042755ce42267cf1f9b7bc777de4190174cadcd6f066e0974d86e1afb5aa64c4eb1836952051ee1e66832fae8dc7dc90e4dc1d62d6e2e4b8cd1d0bad69373d11c9bc8a022a423099e760e9838c94729eff664c316d84602f5562cac9f38abee796415e03556ccbf0a920e23c0e0bb4409d4acd164547bb6799deef0fb00d42b909a38b362d1e2d673502b3da4802357225c81f9d94426737106cfe9c4730e72d533e41be2ba42110a011607cc4bf4bda9106071a6",
+            ),
+        ];
+        for (digit, nanos, nonce, expected) in vectors {
+            let identity = digit.to_string().repeat(128);
+            assert_eq!(
+                encrypt_fingerprint(&identity, "capture-placeholder-key", nanos, &nonce).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_device_is_stable_per_installation() {
+        let id = Uuid::nil();
+        assert_eq!(
+            virtual_device_fingerprint(id),
+            "2ed2e21403cdd6cad0f9e4ca251f46151df4e00b6e7cef39178cf604bb4d4e8aa9f0012c87439a0d4b2c59d1461ce8cfe0f2eb74b90cb6e36c70e8199e0e2483"
+        );
+        assert_eq!(
+            virtual_device_fingerprint(Uuid::from_u128(1)),
+            "0d1b94397fc3f1c7be512ab8e28eea20630ccc13936004776c2297e03d46632f546208aa3ce4099f37728ef7be02fa1dac07ebf25f0fa00b8b3635ceb41fcdea"
+        );
+    }
+
+    #[test]
     fn request_carries_metadata_system_and_model() {
         let req = AiRequest::new(
             "swe-1-7",
@@ -1905,12 +2021,16 @@ mod tests {
         let meta = sub_message(&fields, 1, 0);
         // #3 carries the SINGLE session token (header doubling is separate).
         assert!(meta.iter().any(|f| f.number == 3 && f.bytes == b"tok"));
-        assert!(meta.iter().any(|f| f.number == 1 && f.bytes == b"chisel"));
-        assert!(meta.iter().any(|f| f.number == 31 && f.bytes.len() == 732));
-        // The fingerprint is deterministic per session token — the same
-        // credential always presents the same device id.
-        assert_eq!(device_fingerprint("tok"), device_fingerprint("tok"));
-        assert_ne!(device_fingerprint("tok"), device_fingerprint("tok2"));
+        assert!(
+            meta.iter()
+                .any(|f| f.number == 1 && f.bytes == b"devin-cli")
+        );
+        assert!(meta.iter().any(|f| f.number == 12 && f.bytes == b"chisel"));
+        assert!(meta.iter().any(|f| f.number == 28 && f.bytes == b"chisel"));
+        assert!(
+            meta.iter()
+                .any(|f| f.number == 31 && f.bytes == b"test-fingerprint")
+        );
         assert!(
             fields
                 .iter()
@@ -3055,14 +3175,20 @@ mod tests {
             "tok",
             false,
             DevinClientPlatform::Windows,
+            "test-fingerprint",
         );
         let metadata = parse_fields(&request)
             .unwrap()
             .into_iter()
             .find(|field| field.number == 1)
             .expect("client metadata");
-        let platform = parse_fields(metadata.bytes)
-            .unwrap()
+        let metadata_fields = parse_fields(metadata.bytes).unwrap();
+        assert!(
+            metadata_fields
+                .iter()
+                .any(|field| field.number == 1 && field.bytes == b"chisel")
+        );
+        let platform = metadata_fields
             .into_iter()
             .find(|field| field.number == 5)
             .expect("client platform");

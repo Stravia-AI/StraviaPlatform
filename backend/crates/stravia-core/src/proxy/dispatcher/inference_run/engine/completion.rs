@@ -246,7 +246,7 @@ impl PlatformOnlyContinuation {
         request: &mut AiRequest,
         run: &mut crate::hook::InferenceRun,
         phase: &mut PhaseTracker,
-    ) -> Result<(), CompletionFailure> {
+    ) -> Result<usize, CompletionFailure> {
         ledger.record_hidden_round(&self.projected_response);
         let mut executions = context
             .gateway
@@ -258,7 +258,8 @@ impl PlatformOnlyContinuation {
         let terminal = wait_platform_markers(context, &self.markers)
             .await
             .map_err(|error| CompletionFailure::hook(error, self.commit))?;
-        append_restored_platform_round(request, &self.canonical_response, terminal);
+        let mut result_gap =
+            append_restored_platform_round(request, &self.canonical_response, terminal);
         {
             let states = ledger
                 .compaction_records
@@ -280,13 +281,15 @@ impl PlatformOnlyContinuation {
                 )
             {
                 request.items.drain(..start);
+                result_gap = result_gap.saturating_sub(start);
                 crate::router::clear_previous_response_id(request);
             }
         }
         run.next_round();
         phase
             .transition(Phase::HiddenRound)
-            .map_err(|error| CompletionFailure::hook(error, self.commit))
+            .map_err(|error| CompletionFailure::hook(error, self.commit))?;
+        Ok(result_gap)
     }
 }
 
@@ -470,7 +473,7 @@ fn append_restored_platform_round(
     request: &mut AiRequest,
     response: &AiResponse,
     terminal: Vec<HiddenHistorySegment>,
-) {
+) -> usize {
     let output_start = request.items.len();
     request.items.extend(response.items.iter().cloned());
     crate::model_turn::support::restore_response_history(
@@ -482,6 +485,7 @@ fn append_restored_platform_round(
             .ingress
             .get(stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META),
     );
+    let result_gap = request.items.len();
     request.items.extend(terminal.into_iter().map(|segment| {
         let HiddenHistorySegment::Platform { result, .. } = segment else {
             unreachable!("terminal Platform markers contain Platform segments");
@@ -511,6 +515,7 @@ fn append_restored_platform_round(
         }
     }));
     crate::history_marker::mark_current_run_projected(&mut request.items[output_start..]);
+    result_gap
 }
 
 pub(super) async fn complete_canonical_response(

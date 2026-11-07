@@ -375,6 +375,11 @@ async fn delivered_native_state_survives_later_failure_but_unexposed_states_expi
             .register(
                 &principal,
                 CompactionRegistration {
+                    logical_turn: None,
+                    source_history: None,
+                    source_window: None,
+                    user_prompt_metadata: None,
+                    atomic_checkpoint_id: None,
                     source_generation_id: None,
                     source_record_ids: Vec::new(),
                     operation_id: name.into(),
@@ -527,6 +532,11 @@ async fn standalone_sse_receipt_requires_the_complete_http_body() {
             .register(
                 &principal,
                 CompactionRegistration {
+                    logical_turn: None,
+                    source_history: None,
+                    source_window: None,
+                    user_prompt_metadata: None,
+                    atomic_checkpoint_id: None,
                     source_generation_id: None,
                     source_record_ids: Vec::new(),
                     operation_id: "standalone-operation".into(),

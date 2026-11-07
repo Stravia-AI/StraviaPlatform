@@ -1,0 +1,17 @@
+package stravia:vendor@1.0.0;
+
+/// Opt-in vendor world with operation-scoped atomic state.
+world vendor-with-state {
+    include vendor;
+    import stravia:state/store@1.1.0;
+    import stravia:state/journal@1.1.0;
+    import stravia:state/volatile@1.1.0;
+}
+
+// The SDK links this import metadata only when its state helper is used. It
+// combines with the existing vendor export metadata to form the extended world.
+world state-imports {
+    import stravia:state/store@1.1.0;
+    import stravia:state/journal@1.1.0;
+    import stravia:state/volatile@1.1.0;
+}

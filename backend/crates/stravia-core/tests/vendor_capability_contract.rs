@@ -1140,6 +1140,138 @@ async fn external_search_retry_after_outside_window() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn external_search_lineage_survives_retry_and_failover_and_isolates_principals()
+-> anyhow::Result<()> {
+    let harness = TestHarness::new().await?;
+    install_fixture(&harness.gateway, "capability-pure-search.wasm", false).await?;
+    let primary_upstream = LocalUpstream::start().await?;
+    let fallback_upstream = LocalUpstream::start().await?;
+    let primary = create_provider(
+        &harness.gateway,
+        "Lineage primary",
+        "fixture.capability-search",
+        &primary_upstream.url,
+        "fixture-search",
+    )
+    .await?;
+    let fallback = create_provider(
+        &harness.gateway,
+        "Lineage fallback",
+        "fixture.capability-search",
+        &fallback_upstream.url,
+        "fixture-search",
+    )
+    .await?;
+    let route = create_route(
+        &harness.gateway,
+        "lineage-search",
+        vec![
+            (&primary, "research-model", 20),
+            (&fallback, "research-model", 10),
+        ],
+        1,
+        stravia_core::db::models::RouteOutputModality::Text,
+    )
+    .await?;
+    configure_external_search(&harness.gateway, &route.model_id).await?;
+    for _ in 0..2 {
+        primary_upstream
+            .push_json(
+                "/search",
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error":{"message":"retryable"}}),
+            )
+            .await;
+    }
+    fallback_upstream
+        .push_json(
+            "/search",
+            StatusCode::OK,
+            search_response("First answer [sc:fixture-source]"),
+        )
+        .await;
+    completed_search(
+        terminal_search(
+            &harness.gateway,
+            Principal::new(harness.key_id.clone()),
+            "lineage-probe first",
+            None,
+            CancellationToken::new(),
+        )
+        .await,
+    );
+    let primary_requests = primary_upstream.requests().await;
+    let fallback_requests = fallback_upstream.requests().await;
+    assert_eq!(primary_requests.len(), 2);
+    assert_eq!(fallback_requests.len(), 1);
+    let first = &primary_requests[0].headers;
+    for name in [
+        "x-probe-logical-turn-id",
+        "x-probe-logical-turn-started-at-ms",
+        "x-probe-context-window-id",
+        "x-probe-context-window-index",
+    ] {
+        let expected = first.get(name).expect("lineage metadata");
+        assert_eq!(primary_requests[1].headers.get(name), Some(expected));
+        assert_eq!(fallback_requests[0].headers.get(name), Some(expected));
+    }
+    uuid::Uuid::parse_str(first["x-probe-logical-turn-id"].to_str()?)?;
+    uuid::Uuid::parse_str(first["x-probe-context-window-id"].to_str()?)?;
+    assert!(
+        first["x-probe-logical-turn-started-at-ms"]
+            .to_str()?
+            .parse::<i64>()?
+            > 0
+    );
+    assert_eq!(first["x-probe-context-window-index"], "0");
+    assert_eq!(first["x-probe-state-before"], "0");
+    assert_eq!(primary_requests[1].headers["x-probe-state-before"], "1");
+    // Conversation cells are also scoped by Provider, even across failover.
+    assert_eq!(fallback_requests[0].headers["x-probe-state-before"], "0");
+
+    let route = create_route(
+        &harness.gateway,
+        "lineage-second-principal",
+        vec![(&fallback, "research-model", 10)],
+        0,
+        stravia_core::db::models::RouteOutputModality::Text,
+    )
+    .await?;
+    configure_external_search(&harness.gateway, &route.model_id).await?;
+    let (other_key, _) = harness.create_key("Other lineage owner").await?;
+    fallback_upstream
+        .push_json(
+            "/search",
+            StatusCode::OK,
+            search_response("Second answer [sc:fixture-source]"),
+        )
+        .await;
+    completed_search(
+        terminal_search(
+            &harness.gateway,
+            Principal::new(other_key),
+            "lineage-probe second",
+            None,
+            CancellationToken::new(),
+        )
+        .await,
+    );
+    let requests = fallback_upstream.requests().await;
+    assert_eq!(requests.len(), 2);
+    let second = &requests[1].headers;
+    assert_eq!(second["x-probe-state-before"], "0");
+    assert_ne!(
+        second["x-probe-logical-turn-id"],
+        first["x-probe-logical-turn-id"]
+    );
+    assert_ne!(
+        second["x-probe-context-window-id"],
+        first["x-probe-context-window-id"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn external_search_switches_only_retryable_started_failures() -> anyhow::Result<()> {
     let harness = TestHarness::new().await?;
     install_fixture(&harness.gateway, "capability-pure-search.wasm", false).await?;
@@ -4286,7 +4418,8 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
         .build()?;
     let mut history = vec![json!({"role":"user","content":"Look up both steps, then summarize."})];
     let mut tool_results = Vec::new();
-    for turn in 0..3 {
+    let follow_up = "Now give a short follow-up.";
+    for turn in 0..4 {
         let response = client
             .post(harness.endpoint.trim_end_matches("/mcp").to_owned() + "/v1/responses")
             .bearer_auth(&harness.token)
@@ -4330,6 +4463,10 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
                 output[0]["content"][0]["text"],
                 "Both tool results received"
             );
+            if turn == 2 {
+                history.extend(output.iter().cloned());
+                history.push(json!({"role":"user","content":follow_up}));
+            }
         }
     }
 
@@ -4337,7 +4474,7 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
     let handshakes = upstream.state.handshakes.lock().await;
     assert_eq!(
         frames.len(),
-        3,
+        4,
         "one response.create per public turn: {frames:?}"
     );
     assert_eq!(
@@ -4349,7 +4486,6 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
         handshakes[0]["authorization"],
         "Bearer controlled-codex-continuation-token"
     );
-    assert!(!handshakes[0].contains_key("x-codex-turn-metadata"));
     assert!(!handshakes[0].contains_key("x-codex-turn-state"));
     for (turn, (socket, frame)) in frames.iter().enumerate() {
         assert_eq!(*socket, 0);
@@ -4363,20 +4499,21 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
                 .as_str()
                 .expect("per-frame Codex turn context"),
         )?;
-        assert!(
-            metadata["turn_id"]
-                .as_str()
-                .is_some_and(|id| !id.is_empty())
-        );
+        uuid::Uuid::parse_str(metadata["turn_id"].as_str().expect("native turn UUID"))?;
         assert_eq!(context["turn_id"], metadata["turn_id"]);
         assert_eq!(
             metadata["session_id"],
             frames[0].1["client_metadata"]["session_id"]
         );
-        for (_, earlier) in &frames[..turn] {
+        if turn < 3 {
+            assert_eq!(
+                metadata["turn_id"], frames[0].1["client_metadata"]["turn_id"],
+                "tool continuations retain the logical user turn"
+            );
+        } else {
             assert_ne!(
-                metadata["turn_id"], earlier["client_metadata"]["turn_id"],
-                "turn metadata must not freeze at the socket handshake"
+                metadata["turn_id"], frames[0].1["client_metadata"]["turn_id"],
+                "a new user prompt changes turn metadata on the same socket"
             );
         }
         if turn == 0 {
@@ -4386,11 +4523,18 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
                 frame["previous_response_id"],
                 format!("resp_codex_{}", turn - 1)
             );
-            assert_eq!(
-                frame["input"],
-                json!([tool_results[turn - 1]]),
-                "only the new client tool result is sent, never full history"
-            );
+            if turn < 3 {
+                assert_eq!(
+                    frame["input"],
+                    json!([tool_results[turn - 1]]),
+                    "only the new client tool result is sent, never full history"
+                );
+            } else {
+                let input = frame["input"].as_array().expect("follow-up input");
+                assert_eq!(input.len(), 1, "only the new user prompt is sent");
+                assert_eq!(input[0]["role"], "user");
+                assert_eq!(input[0]["content"][0]["text"], follow_up);
+            }
         }
     }
     Ok(())

@@ -39,6 +39,87 @@ fn admission_run(gateway: Gateway, headers: HeaderMap, model: &str) -> RunInput 
     }
 }
 
+struct RejectFirstTwoRequests(Arc<AtomicUsize>);
+struct RejectFirstTwoSession(Arc<AtomicUsize>);
+
+impl stravia_runtime_contract::hook::Hook for RejectFirstTwoRequests {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("reject-first-two-admissions")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
+        Box::new(RejectFirstTwoSession(Arc::clone(&self.0)))
+    }
+}
+
+#[async_trait]
+impl stravia_runtime_contract::hook::HookSession for RejectFirstTwoSession {
+    async fn handle(
+        &mut self,
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        use stravia_runtime_contract::hook::{ActionBatch, HookAction, HookEvent, HookRejection};
+        if matches!(event, HookEvent::Request { .. }) && self.0.fetch_add(1, Ordering::SeqCst) < 2 {
+            return Ok(ActionBatch::one(HookAction::Reject(HookRejection {
+                status: 451,
+                code: "fixture_rejection".into(),
+                message: "reject after admission".into(),
+            })));
+        }
+        Ok(ActionBatch::default())
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_failed_admissions_reach_ordinary_http_upstream() {
+    let (base_url, calls) = serve_openai_response(200, openai_response("upstream answer")).await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().into(),
+        ..Default::default()
+    })
+    .hook(Arc::new(RejectFirstTwoRequests(Arc::new(
+        AtomicUsize::new(0),
+    ))))
+    .build()
+    .await
+    .unwrap();
+    let model = "ambiguous-http";
+    configure_route(&gateway, model, &[base_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let authorization = headers.get(header::AUTHORIZATION).unwrap();
+    let router = crate::proxy::server::create_router(gateway.clone());
+    for (index, messages) in [
+        serde_json::json!([{ "role": "user", "content": "one" }]),
+        serde_json::json!([{ "role": "user", "content": "one" }]),
+        serde_json::json!([{ "role": "user", "content": "one" }, { "role": "user", "content": "two" }]),
+    ].into_iter().enumerate() {
+        let response = router.clone().oneshot(
+            Request::post("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(header::AUTHORIZATION, authorization.clone())
+                .body(Body::from(serde_json::json!({ "model": model, "messages": messages }).to_string()))
+                .unwrap(),
+        ).await.unwrap();
+        if index < 2 {
+            assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("upstream answer"));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    close_test_gateway(gateway, data_dir).await;
+}
+
 async fn assert_rpm_rejection(response: axum::response::Response, retry_after: u64) {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(

@@ -24,6 +24,11 @@ pub(crate) struct CompactionTarget {
 }
 
 pub(crate) struct CompactionRegistration {
+    pub logical_turn: Option<crate::generation_chain::LogicalTurn>,
+    pub source_history: Option<crate::generation_chain::SourceHistoryProof>,
+    pub source_window: Option<crate::generation_chain::VirtualWindow>,
+    pub user_prompt_metadata: Option<crate::generation_chain::UserPromptMetadata>,
+    pub atomic_checkpoint_id: Option<uuid::Uuid>,
     pub source_generation_id: Option<String>,
     pub source_record_ids: Vec<String>,
     pub operation_id: String,
@@ -34,6 +39,16 @@ pub(crate) struct CompactionRegistration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CompactionRecord {
+    #[serde(default)]
+    pub logical_turn: Option<crate::generation_chain::LogicalTurn>,
+    #[serde(default)]
+    pub source_history: Option<crate::generation_chain::SourceHistoryProof>,
+    #[serde(default)]
+    pub source_window: Option<crate::generation_chain::VirtualWindow>,
+    #[serde(default)]
+    pub user_prompt_metadata: Option<crate::generation_chain::UserPromptMetadata>,
+    #[serde(default)]
+    pub atomic_checkpoint_id: Option<uuid::Uuid>,
     pub id: String,
     pub source_generation_id: Option<String>,
     pub source_record_ids: Vec<String>,
@@ -44,6 +59,11 @@ pub(crate) struct CompactionRecord {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedCompaction {
+    pub logical_turn: Option<crate::generation_chain::LogicalTurn>,
+    pub source_history: Option<crate::generation_chain::SourceHistoryProof>,
+    pub source_window: Option<crate::generation_chain::VirtualWindow>,
+    pub user_prompt_metadata: Option<crate::generation_chain::UserPromptMetadata>,
+    pub atomic_checkpoint_id: Option<uuid::Uuid>,
     pub record_ids: Vec<String>,
     pub source_generation_id: Option<String>,
     pub operation_id: String,
@@ -125,6 +145,11 @@ impl Compaction {
             }
         }
         let record = CompactionRecord {
+            logical_turn: input.logical_turn,
+            source_history: input.source_history,
+            source_window: input.source_window,
+            user_prompt_metadata: input.user_prompt_metadata,
+            atomic_checkpoint_id: input.atomic_checkpoint_id,
             id: stravia_runtime_contract::identifier::new_id(),
             source_generation_id: input.source_generation_id,
             source_record_ids: input.source_record_ids,
@@ -229,6 +254,11 @@ impl Compaction {
         // 客户端回传即视为交付确认（规格：首次交付确认或回传解析，取先到者）。
         self.store.confirm_pending(principal, &record_ids).await?;
         Ok(Some(ResolvedCompaction {
+            logical_turn: tip.logical_turn,
+            source_history: tip.source_history,
+            source_window: tip.source_window,
+            user_prompt_metadata: tip.user_prompt_metadata.clone(),
+            atomic_checkpoint_id: tip.atomic_checkpoint_id,
             record_ids,
             source_generation_id: tip.source_generation_id.clone(),
             operation_id: tip.operation_id.clone(),
@@ -261,6 +291,11 @@ fn same_boundary(left: &CompactionRecord, right: &CompactionRecord) -> bool {
         || left.operation_id == right.operation_id)
         && left.source_generation_id == right.source_generation_id
         && left.source_record_ids == right.source_record_ids
+        && left.atomic_checkpoint_id == right.atomic_checkpoint_id
+        && left.user_prompt_metadata == right.user_prompt_metadata
+        && left.source_window == right.source_window
+        && left.source_history == right.source_history
+        && left.logical_turn == right.logical_turn
         && left.target == right.target
         && canonical::history_items_equal(&left.window, &right.window)
 }
@@ -315,6 +350,11 @@ mod tests {
 
     fn registration(operation: &str) -> CompactionRegistration {
         CompactionRegistration {
+            logical_turn: None,
+            source_history: None,
+            source_window: None,
+            user_prompt_metadata: None,
+            atomic_checkpoint_id: None,
             source_generation_id: None,
             source_record_ids: Vec::new(),
             operation_id: operation.into(),

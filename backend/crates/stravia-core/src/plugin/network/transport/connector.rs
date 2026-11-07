@@ -8,14 +8,20 @@
 //! for their respective peers; the dialer supplies each peer's actual hostname
 //! (or IP address) to rustls for verification.
 
-use std::{future::Future, io, net::{IpAddr, SocketAddr}, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    io,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
+    sync::Arc,
+};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use percent_encoding::percent_decode_str;
-use rustls::{pki_types::ServerName, ClientConfig};
+use rustls::{ClientConfig, pki_types::ServerName};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{lookup_host, TcpStream},
+    net::{TcpStream, lookup_host},
 };
 use tokio_rustls::TlsConnector;
 use url::{Host, Url};
@@ -28,17 +34,22 @@ pub type BoxStream = Box<dyn IoStream>;
 /// Resolves locally dialed hosts. SOCKS5h destination names are deliberately
 /// never passed to this resolver; the proxy resolves them instead.
 pub trait Resolver: Send + Sync {
-    fn resolve<'a>(&'a self, host: &'a str, port: u16)
-        -> Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>>;
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>>;
 }
 
 /// The Tokio/system DNS resolver, usable when no custom override is needed.
 pub struct SystemResolver;
 
 impl Resolver for SystemResolver {
-    fn resolve<'a>(&'a self, host: &'a str, port: u16)
-        -> Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>>
-    {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send + 'a>> {
         Box::pin(async move { Ok(lookup_host((host, port)).await?.collect()) })
     }
 }
@@ -48,15 +59,23 @@ async fn resolve(resolver: &dyn Resolver, host: &str, port: u16) -> io::Result<V
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
-    let addresses = resolver.resolve(host, port).await.map_err(|e| stage(ErrorCategory::Dns, e))?;
+    let addresses = resolver
+        .resolve(host, port)
+        .await
+        .map_err(|e| stage(ErrorCategory::Dns, e))?;
     if addresses.is_empty() {
-        return Err(stage(ErrorCategory::Dns, io::Error::new(io::ErrorKind::NotFound, "DNS lookup returned no addresses")));
+        return Err(stage(
+            ErrorCategory::Dns,
+            io::Error::new(io::ErrorKind::NotFound, "DNS lookup returned no addresses"),
+        ));
     }
     Ok(addresses)
 }
 
 async fn dial(resolver: &dyn Resolver, host: &str, port: u16) -> io::Result<TcpStream> {
-    TcpStream::connect(resolve(resolver, host, port).await?.as_slice()).await.map_err(|e| stage(ErrorCategory::Connect, e))
+    TcpStream::connect(resolve(resolver, host, port).await?.as_slice())
+        .await
+        .map_err(|e| stage(ErrorCategory::Connect, e))
 }
 
 /// Routes compare and hash by their complete configuration, including credentials.
@@ -86,10 +105,18 @@ pub struct Proxy {
 
 /// Stage at which a connection attempt failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorCategory { Dns, Connect, Proxy, Tls }
+pub enum ErrorCategory {
+    Dns,
+    Connect,
+    Proxy,
+    Tls,
+}
 
 #[derive(Debug)]
-struct StageError { category: ErrorCategory, source: io::Error }
+struct StageError {
+    category: ErrorCategory,
+    source: io::Error,
+}
 
 impl std::fmt::Display for StageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -97,7 +124,9 @@ impl std::fmt::Display for StageError {
     }
 }
 impl std::error::Error for StageError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.source) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 fn stage(category: ErrorCategory, source: io::Error) -> io::Error {
@@ -107,11 +136,18 @@ fn stage(category: ErrorCategory, source: io::Error) -> io::Error {
 /// Classify a dial failure without inspecting error text. Invalid caller input
 /// may be unclassified; the original error remains available as its source.
 pub fn error_category(error: &io::Error) -> Option<ErrorCategory> {
-    error.get_ref()?.downcast_ref::<StageError>().map(|e| e.category)
+    error
+        .get_ref()?
+        .downcast_ref::<StageError>()
+        .map(|e| e.category)
 }
 
 fn proxy_error(error: io::Error) -> io::Error {
-    if error_category(&error).is_some() { error } else { stage(ErrorCategory::Proxy, error) }
+    if error_category(&error).is_some() {
+        error
+    } else {
+        stage(ErrorCategory::Proxy, error)
+    }
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -139,9 +175,14 @@ impl Proxy {
             _ => return Err(invalid("unsupported proxy URL scheme")),
         };
         if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
-            return Err(invalid("proxy URL must not contain a path, query or fragment"));
+            return Err(invalid(
+                "proxy URL must not contain a path, query or fragment",
+            ));
         }
-        let host = match url.host().ok_or_else(|| invalid("proxy URL requires a host"))? {
+        let host = match url
+            .host()
+            .ok_or_else(|| invalid("proxy URL requires a host"))?
+        {
             Host::Domain(host) => host.to_owned(),
             Host::Ipv4(host) => host.to_string(),
             Host::Ipv6(host) => host.to_string(),
@@ -157,11 +198,19 @@ impl Proxy {
                     .map(|s| s.into_owned())
                     .map_err(|_| invalid("proxy credentials must be UTF-8"))
             };
-            Some((decode(url.username())?, decode(url.password().unwrap_or(""))?))
+            Some((
+                decode(url.username())?,
+                decode(url.password().unwrap_or(""))?,
+            ))
         } else {
             None
         };
-        Ok(Self { kind, host, port, credentials })
+        Ok(Self {
+            kind,
+            host,
+            port,
+            credentials,
+        })
     }
 }
 
@@ -183,16 +232,26 @@ pub async fn connect_http_forward(
     Ok((stream, authorization))
 }
 
-async fn connect_proxy(proxy: &Proxy, proxy_tls: Option<Arc<ClientConfig>>, resolver: &dyn Resolver) -> io::Result<BoxStream> {
+async fn connect_proxy(
+    proxy: &Proxy,
+    proxy_tls: Option<Arc<ClientConfig>>,
+    resolver: &dyn Resolver,
+) -> io::Result<BoxStream> {
     let tcp = dial(resolver, &proxy.host, proxy.port).await?;
     match proxy.kind {
         ProxyKind::Https => {
-            let config = proxy_tls.ok_or_else(|| invalid("HTTPS proxy requires a TLS configuration"))?;
+            let config =
+                proxy_tls.ok_or_else(|| invalid("HTTPS proxy requires a TLS configuration"))?;
             // Both CONNECT and absolute-form forwarding below speak HTTP/1.1.
             let mut config = (*config).clone();
             config.alpn_protocols = vec![b"http/1.1".to_vec()];
             let server_name = server_name(&proxy.host)?;
-            Ok(Box::new(TlsConnector::from(Arc::new(config)).connect(server_name, tcp).await.map_err(|e| stage(ErrorCategory::Tls, e))?))
+            Ok(Box::new(
+                TlsConnector::from(Arc::new(config))
+                    .connect(server_name, tcp)
+                    .await
+                    .map_err(|e| stage(ErrorCategory::Tls, e))?,
+            ))
         }
         _ => Ok(Box::new(tcp)),
     }
@@ -224,10 +283,21 @@ pub async fn connect(
             let mut stream = connect_proxy(proxy, proxy_tls, resolver).await?;
             match proxy.kind {
                 ProxyKind::Http | ProxyKind::Https => {
-                    http_connect(&mut stream, &target, port, proxy.credentials.as_ref()).await.map_err(proxy_error)?;
+                    http_connect(&mut stream, &target, port, proxy.credentials.as_ref())
+                        .await
+                        .map_err(proxy_error)?;
                 }
                 ProxyKind::Socks5 | ProxyKind::Socks5h => {
-                    socks_connect(&mut stream, &target, port, proxy.credentials.as_ref(), matches!(proxy.kind, ProxyKind::Socks5h), resolver).await.map_err(proxy_error)?;
+                    socks_connect(
+                        &mut stream,
+                        &target,
+                        port,
+                        proxy.credentials.as_ref(),
+                        matches!(proxy.kind, ProxyKind::Socks5h),
+                        resolver,
+                    )
+                    .await
+                    .map_err(proxy_error)?;
                 }
             }
             Ok(stream)
@@ -253,13 +323,19 @@ pub async fn connect_tls(
     };
     let name = server_name(&name)?;
     let stream = connect(host, port, route, proxy_tls, resolver).await?;
-    let stream = TlsConnector::from(target_tls).connect(name, stream).await.map_err(|e| stage(ErrorCategory::Tls, e))?;
+    let stream = TlsConnector::from(target_tls)
+        .connect(name, stream)
+        .await
+        .map_err(|e| stage(ErrorCategory::Tls, e))?;
     let alpn = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
     Ok((Box::new(stream), alpn))
 }
 
 fn parse_target(host: &str) -> io::Result<Host<String>> {
-    let unbracketed = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
     if let Ok(ip) = unbracketed.parse::<IpAddr>() {
         return Ok(match ip {
             IpAddr::V4(ip) => Host::Ipv4(ip),
@@ -274,11 +350,16 @@ fn server_name(host: &str) -> io::Result<ServerName<'static>> {
 }
 
 fn basic_authorization(credentials: Option<&(String, String)>) -> io::Result<Option<String>> {
-    let Some((user, password)) = credentials else { return Ok(None) };
+    let Some((user, password)) = credentials else {
+        return Ok(None);
+    };
     if user.contains(':') {
         return Err(invalid("HTTP proxy username must not contain a colon"));
     }
-    Ok(Some(format!("Basic {}", STANDARD.encode(format!("{user}:{password}")))))
+    Ok(Some(format!(
+        "Basic {}",
+        STANDARD.encode(format!("{user}:{password}"))
+    )))
 }
 
 async fn http_connect(
@@ -310,21 +391,33 @@ async fn http_connect(
             return Err(protocol_error("proxy response headers too large"));
         }
         if header.ends_with(b"\r\n\r\n") {
-            let line_end = header.windows(2).position(|w| w == b"\r\n").ok_or_else(|| protocol_error("invalid proxy response"))?;
-            let line = std::str::from_utf8(&header[..line_end]).map_err(|_| protocol_error("invalid proxy status line"))?;
+            let line_end = header
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .ok_or_else(|| protocol_error("invalid proxy response"))?;
+            let line = std::str::from_utf8(&header[..line_end])
+                .map_err(|_| protocol_error("invalid proxy status line"))?;
             let mut parts = line.splitn(3, ' ');
             let version = parts.next().unwrap_or("");
             let code = parts.next().unwrap_or("");
-            if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || code.len() != 3 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+                || code.len() != 3
+                || !code.bytes().all(|b| b.is_ascii_digit())
+            {
                 return Err(protocol_error("invalid proxy status line"));
             }
-            let status: u16 = code.parse().map_err(|_| protocol_error("invalid proxy status"))?;
+            let status: u16 = code
+                .parse()
+                .map_err(|_| protocol_error("invalid proxy status"))?;
             if (100..200).contains(&status) {
                 header.clear();
                 continue;
             }
             if !(200..300).contains(&status) {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("proxy CONNECT failed with status {status}")));
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("proxy CONNECT failed with status {status}"),
+                ));
             }
             return Ok(());
         }
@@ -354,7 +447,9 @@ async fn socks_connect(
         2 if credentials.is_some() => {
             let (user, password) = credentials.unwrap();
             if user.is_empty() || user.len() > 255 || password.is_empty() || password.len() > 255 {
-                return Err(invalid("SOCKS credentials must each contain 1 to 255 bytes"));
+                return Err(invalid(
+                    "SOCKS credentials must each contain 1 to 255 bytes",
+                ));
             }
             let mut auth = Vec::with_capacity(3 + user.len() + password.len());
             auth.extend_from_slice(&[1, user.len() as u8]);
@@ -364,10 +459,18 @@ async fn socks_connect(
             stream.write_all(&auth).await?;
             stream.read_exact(&mut reply).await?;
             if reply != [1, 0] {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "SOCKS authentication failed"));
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "SOCKS authentication failed",
+                ));
             }
         }
-        _ => return Err(io::Error::new(io::ErrorKind::PermissionDenied, "SOCKS proxy rejected authentication methods")),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "SOCKS proxy rejected authentication methods",
+            ));
+        }
     }
     let mut request = vec![5, 1, 0];
     match target {
@@ -385,8 +488,14 @@ async fn socks_connect(
                 Host::Domain(name) => resolve(resolver, name, port).await?[0].ip(),
             };
             match ip {
-                IpAddr::V4(ip) => { request.push(1); request.extend_from_slice(&ip.octets()); }
-                IpAddr::V6(ip) => { request.push(4); request.extend_from_slice(&ip.octets()); }
+                IpAddr::V4(ip) => {
+                    request.push(1);
+                    request.extend_from_slice(&ip.octets());
+                }
+                IpAddr::V6(ip) => {
+                    request.push(4);
+                    request.extend_from_slice(&ip.octets());
+                }
             }
         }
     }
@@ -398,12 +507,19 @@ async fn socks_connect(
         return Err(protocol_error("invalid SOCKS response"));
     }
     if prefix[1] != 0 {
-        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!("SOCKS proxy connect failed with code {}", prefix[1])));
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("SOCKS proxy connect failed with code {}", prefix[1]),
+        ));
     }
     let address_len = match prefix[3] {
         1 => 4,
         4 => 16,
-        3 => { let mut len = [0]; stream.read_exact(&mut len).await?; usize::from(len[0]) }
+        3 => {
+            let mut len = [0];
+            stream.read_exact(&mut len).await?;
+            usize::from(len[0])
+        }
         _ => return Err(protocol_error("invalid SOCKS address type")),
     };
     let mut address = [0u8; 257];

@@ -21,6 +21,10 @@ impl GenerationChainWrite {
         &self.request
     }
 
+    pub(crate) fn request_snapshot(&self) -> Arc<AiRequest> {
+        Arc::clone(&self.request)
+    }
+
     pub(crate) fn request_mut(&mut self) -> &mut AiRequest {
         Arc::make_mut(&mut self.request)
     }
@@ -276,6 +280,30 @@ impl GenerationChainWrite {
         let staged = self.staged.as_mut().ok_or(PersistError::NotStaged)?;
         let projection = staged.projection.take();
         let mut staged = staged.clone();
+        staged.effective_state.prompt_admission_id = self
+            .prompt_admission
+            .as_ref()
+            .map(|admission| admission.id.clone());
+        staged.effective_state.prompt_metadata = self.user_prompt_metadata();
+        staged.effective_state.prompt_zero_proven =
+            self.prompt_admission.as_ref().is_some_and(|admission| {
+                admission.ordinal == 0 && admission.user_turn_index == Some(0)
+            });
+        staged.effective_state.virtual_window = self.virtual_window;
+        staged.effective_state.logical_turn = self.logical_turn;
+        if let Some(guard) = &self.atomic_guard {
+            let checkpoint = uuid::Uuid::new_v4();
+            guard.checkpoint(checkpoint).await.map_err(|error| {
+                PersistError::Store(match error {
+                    crate::plugin::PluginStorageError::StaleOperation
+                    | crate::plugin::PluginStorageError::MissingLineage => {
+                        TurnCommitError::AtomicStateUnavailable
+                    }
+                    other => TurnCommitError::Storage(other.to_string()),
+                })
+            })?;
+            staged.effective_state.atomic_checkpoint_id = Some(checkpoint);
+        }
         let redaction_references = if self.chain.records_redaction_references {
             self.request
                 .meta

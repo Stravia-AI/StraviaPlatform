@@ -583,7 +583,7 @@ impl TurnChainStore for SqlTurnChainStore {
         compaction_record_ids.sort_unstable();
         compaction_record_ids.dedup();
         macro_rules! persist {
-            ($pool:expr, $begin:literal, $lock:literal, $resolve_scope:path, $deps:ident, $put:ident) => {{
+            ($pool:expr, $begin:literal, $lock:literal, $checkpoint_lock:literal, $lineage_lock:literal, $resolve_scope:path, $deps:ident, $put:ident) => {{
                 let mut connection = $pool.acquire_write().await.map_err(commit_storage)?;
                 let mut transaction = connection.begin_with($begin).await.map_err(commit_storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(commit_storage)?; }
@@ -678,6 +678,35 @@ impl TurnChainStore for SqlTurnChainStore {
                         }
                     }
                 }
+                if let Some(checkpoint_id) = commit.atomic_checkpoint_id.as_ref() {
+                    // SQLite serializes publication and collection with its write transaction.
+                    // PostgreSQL uses the lease and checkpoint row locks below.
+                    if !$checkpoint_lock.is_empty() {
+                        sqlx::query($checkpoint_lock)
+                            .execute(&mut *transaction).await.map_err(commit_storage)?;
+                    }
+                    let lease_sql = concat!(
+                        "SELECT l.expires_at_ms FROM vendor_atomic_leases l ",
+                        "JOIN vendor_atomic_checkpoints c ON c.principal=l.principal AND c.admission_id=l.admission_id AND c.lease_id=l.lease_id ",
+                        "WHERE c.principal=$1 AND c.checkpoint_id=$2", $lineage_lock
+                    );
+                    let expires_at: Option<i64> = sqlx::query_scalar(lease_sql)
+                        .bind(&principal).bind(checkpoint_id)
+                        .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
+                    if !expires_at.is_some_and(|expiry| expiry > chrono::Utc::now().timestamp_millis()) {
+                        return Err(TurnCommitError::AtomicStateUnavailable);
+                    }
+                    let found = $deps(
+                        &mut transaction, &principal, "vendor_atomic_checkpoints", "checkpoint_id",
+                        std::slice::from_ref(checkpoint_id),
+                    ).await?;
+                    if found.is_empty() {
+                        return Err(TurnCommitError::AtomicStateUnavailable);
+                    }
+                    sqlx::query("INSERT INTO turn_node_atomic_checkpoints(node_pk,principal,checkpoint_id) VALUES($1,$2,$3)")
+                        .bind(node_pk).bind(&principal).bind(checkpoint_id)
+                        .execute(&mut *transaction).await.map_err(commit_storage)?;
+                }
                 content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await.map_err(commit_storage)?;
                 transaction.commit().await.map_err(commit_storage)?;
                 connection.finish().await.map_err(commit_storage)?;
@@ -689,6 +718,8 @@ impl TurnChainStore for SqlTurnChainStore {
                     pool,
                     "BEGIN IMMEDIATE",
                     "",
+                    "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                    "",
                     crate::content_store::sqlite::resolve_scope,
                     dependency_references_sqlite,
                     put_sqlite
@@ -698,6 +729,8 @@ impl TurnChainStore for SqlTurnChainStore {
                 pool,
                 "BEGIN",
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE",
+                "",
+                " FOR UPDATE OF l",
                 crate::content_store::postgres::resolve_scope,
                 dependency_references_postgres,
                 put_postgres

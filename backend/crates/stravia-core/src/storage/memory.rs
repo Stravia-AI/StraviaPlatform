@@ -30,8 +30,34 @@ use crate::storage::money;
 
 use std::sync::Arc;
 
+#[derive(Default)]
+struct MemoryAdmissions {
+    records: HashMap<String, (super::traits::PromptAdmission, i64)>,
+    prefixes: HashMap<(String, String, i64, String), Vec<String>>,
+}
+
+impl MemoryAdmissions {
+    fn rebuild_prefixes(&mut self) {
+        self.prefixes.clear();
+        for (id, (record, _)) in &self.records {
+            self.prefixes
+                .entry((
+                    record.principal.clone(),
+                    record.controls_digest.clone(),
+                    record.history_count,
+                    record.prefix_digest.clone(),
+                ))
+                .or_default()
+                .push(id.clone());
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MemoryStorage {
+    memory_history_lock: Arc<RwLock<()>>,
+    fallback_history_epoch: Arc<std::sync::atomic::AtomicI64>,
+    prompt_admissions: Arc<RwLock<MemoryAdmissions>>,
     providers: Arc<RwLock<Vec<Provider>>>,
     models: Arc<RwLock<Vec<RouteConfig>>>,
     settings: Arc<RwLock<Vec<(String, String)>>>,
@@ -71,12 +97,17 @@ impl MemoryStorage {
         let oauth_credentials = Arc::new(MemoryOAuthCredentialStore {
             credentials: RwLock::new(std::collections::HashMap::new()),
         });
+        let fallback_history_epoch = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let plugin_store = PluginStore::memory(
             providers.clone(),
             provider_models.clone(),
             oauth_credentials.clone(),
+            fallback_history_epoch.clone(),
         );
         Self {
+            memory_history_lock: Arc::new(RwLock::new(())),
+            fallback_history_epoch,
+            prompt_admissions: Arc::new(RwLock::new(MemoryAdmissions::default())),
             providers,
             models: Arc::new(RwLock::new(models)),
             settings: Arc::new(RwLock::new(settings)),
@@ -97,7 +128,200 @@ pub(crate) struct MemoryOAuthCredentialStore {
     pub(crate) credentials: RwLock<std::collections::HashMap<String, OAuthCredential>>,
 }
 
+#[async_trait]
+impl super::traits::PromptAdmissionStore for MemoryStorage {
+    fn memory_history_lock(&self) -> Option<Arc<RwLock<()>>> {
+        Some(self.memory_history_lock.clone())
+    }
+
+    async fn history_epoch(&self) -> anyhow::Result<i64> {
+        self.plugin_store
+            .history_epoch()
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    async fn insert_at_epoch(
+        &self,
+        admission: &super::traits::PromptAdmission,
+        expected_epoch: i64,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.history_epoch().await? == expected_epoch,
+            "history was cleared during admission"
+        );
+        super::validate_admission(admission)?;
+        anyhow::ensure!(
+            admission.ordinal >= 0
+                && admission.history_count >= 0
+                && admission.user_turn_index.is_none_or(|index| index >= 0)
+                && admission
+                    .dialogue_prompt_index
+                    .is_none_or(|index| index >= 0),
+            "invalid admission position or history count"
+        );
+        let mut ledger = self.prompt_admissions.write().await;
+        let records = &mut ledger.records;
+        anyhow::ensure!(
+            !records.contains_key(&admission.id),
+            "admission id already exists"
+        );
+        if let Some(parent_id) = &admission.parent_id {
+            let parent = records
+                .get(parent_id)
+                .map(|(record, _)| record)
+                .filter(|parent| parent.principal == admission.principal)
+                .ok_or_else(|| anyhow::anyhow!("admission parent not found"))?;
+            anyhow::ensure!(
+                admission.ordinal >= parent.ordinal
+                    && admission
+                        .user_turn_index
+                        .zip(parent.user_turn_index)
+                        .is_none_or(|(child, parent)| child >= parent),
+                "admission position precedes parent"
+            );
+            anyhow::ensure!(
+                admission
+                    .dialogue_prompt_index
+                    .zip(parent.dialogue_prompt_index)
+                    .is_none_or(|(child, parent)| child >= parent),
+                "dialogue position precedes parent"
+            );
+            anyhow::ensure!(
+                admission.conversation_id == parent.conversation_id
+                    && admission.conversation_created_at_ms == parent.conversation_created_at_ms,
+                "admission conversation does not match parent"
+            );
+            anyhow::ensure!(
+                admission.ordinal != parent.ordinal
+                    || (admission.logical_turn_id == parent.logical_turn_id
+                        && admission.logical_turn_created_at_ms
+                            == parent.logical_turn_created_at_ms),
+                "admission logical turn does not match parent"
+            );
+            anyhow::ensure!(
+                admission.ordinal != parent.ordinal
+                    || (admission.user_prompt_id == parent.user_prompt_id
+                        && admission.user_prompt_created_at_ms == parent.user_prompt_created_at_ms),
+                "admission prompt does not match parent"
+            );
+        }
+        records.insert(
+            admission.id.clone(),
+            (admission.clone(), admission.created_at_ms),
+        );
+        ledger
+            .prefixes
+            .entry((
+                admission.principal.clone(),
+                admission.controls_digest.clone(),
+                admission.history_count,
+                admission.prefix_digest.clone(),
+            ))
+            .or_default()
+            .push(admission.id.clone());
+        Ok(())
+    }
+
+    async fn get(
+        &self,
+        principal: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<super::traits::PromptAdmission>> {
+        Ok(self
+            .prompt_admissions
+            .read()
+            .await
+            .records
+            .get(id)
+            .map(|(record, _)| record)
+            .filter(|record| record.principal == principal)
+            .cloned())
+    }
+
+    async fn find_prefixes(
+        &self,
+        principal: &str,
+        controls_digest: &str,
+        prefixes: &[(i64, String)],
+    ) -> anyhow::Result<Vec<super::traits::PromptAdmission>> {
+        let ledger = self.prompt_admissions.read().await;
+        let unique: std::collections::HashSet<_> = prefixes.iter().collect();
+        let mut found = Vec::new();
+        for (count, digest) in unique {
+            if let Some(ids) = ledger.prefixes.get(&(
+                principal.to_owned(),
+                controls_digest.to_owned(),
+                *count,
+                digest.clone(),
+            )) {
+                found.extend(
+                    ids.iter()
+                        .filter_map(|id| ledger.records.get(id).map(|(record, _)| record.clone())),
+                );
+            }
+        }
+        Ok(found)
+    }
+
+    async fn prune_before(&self, cutoff_ms: i64) -> anyhow::Result<u64> {
+        let mut ledger = self.prompt_admissions.write().await;
+        let records = &mut ledger.records;
+        let mut keep: std::collections::HashSet<String> = records
+            .iter()
+            .filter(|(_, (_, created))| *created >= cutoff_ms)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut pending: Vec<String> = keep.iter().cloned().collect();
+        while let Some(id) = pending.pop() {
+            if let Some(parent) = records
+                .get(&id)
+                .and_then(|(record, _)| record.parent_id.as_ref())
+                && keep.insert(parent.clone())
+            {
+                pending.push(parent.clone());
+            }
+        }
+        let before = records.len();
+        records.retain(|id, _| keep.contains(id));
+        let deleted = before - records.len();
+        ledger.rebuild_prefixes();
+        Ok(deleted as u64)
+    }
+
+    async fn purge_principal(&self, principal: &str) -> anyhow::Result<u64> {
+        let mut ledger = self.prompt_admissions.write().await;
+        let before = ledger.records.len();
+        ledger
+            .records
+            .retain(|_, (record, _)| record.principal != principal);
+        let deleted = before - ledger.records.len();
+        ledger.rebuild_prefixes();
+        Ok(deleted as u64)
+    }
+
+    async fn clear(&self) -> anyhow::Result<u64> {
+        let mut ledger = self.prompt_admissions.write().await;
+        if !self.plugin_store.has_history_pool() {
+            self.fallback_history_epoch
+                .try_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |epoch| epoch.checked_add(1),
+                )
+                .map_err(|_| anyhow::anyhow!("history epoch exhausted"))?;
+        }
+        let count = ledger.records.len() as u64;
+        ledger.records.clear();
+        ledger.prefixes.clear();
+        Ok(count)
+    }
+}
+
 impl Storage for MemoryStorage {
+    fn prompt_admissions(&self) -> Arc<dyn super::traits::PromptAdmissionStore> {
+        Arc::new(self.clone())
+    }
     fn vendor_plugins(&self) -> &PluginStore {
         &self.plugin_store
     }
@@ -250,6 +474,11 @@ impl ProviderStore for MemoryStorage {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let volatile = self.plugin_store.volatile_store();
+        let guard = match &volatile {
+            Some(store) => Some(store.lock().await),
+            None => None,
+        };
         let mut providers = self.providers.write().await;
         let mut routes = self.models.write().await;
         let mut provider_models = self.provider_models.write().await;
@@ -299,6 +528,16 @@ impl ProviderStore for MemoryStorage {
             route.refresh_supported_thinking_levels();
         }
         routes.retain(|route| !route.targets.is_empty());
+        if let Some(guard) = guard {
+            guard.invalidate_provider_id(id).await;
+        }
+        drop(oauth_credentials);
+        drop(provider_models);
+        drop(routes);
+        drop(providers);
+        if self.plugin_store.sweep_atomic_journal().await.is_err() {
+            tracing::warn!("atomic journal cleanup deferred");
+        }
         Ok(())
     }
 
@@ -680,6 +919,15 @@ impl RouteStore for MemoryStorage {
 
 #[async_trait]
 impl SettingsStore for MemoryStorage {
+    async fn get_or_insert(&self, key: &str, value: &str) -> anyhow::Result<String> {
+        let mut settings = self.settings.write().await;
+        if let Some((_, existing)) = settings.iter().find(|(name, _)| name == key) {
+            return Ok(existing.clone());
+        }
+        settings.push((key.to_owned(), value.to_owned()));
+        Ok(value.to_owned())
+    }
+
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         let settings = self.settings.read().await;
         Ok(settings

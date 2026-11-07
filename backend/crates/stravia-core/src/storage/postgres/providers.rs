@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct PostgresProviderStore {
     pub(super) pool: Pool<Postgres>,
+    pub(super) plugin_store: PluginStore,
 }
 
 #[async_trait]
@@ -143,7 +144,16 @@ impl ProviderStore for PostgresProviderStore {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let volatile = self.plugin_store.volatile_store();
+        let guard = match &volatile {
+            Some(store) => Some(store.lock().await),
+            None => None,
+        };
         let mut tx = self.pool.begin().await?;
+        // Serialize provider removal with atomic journal root and lifecycle updates.
+        sqlx::query("SELECT pg_advisory_xact_lock(7342179085017261)")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query_scalar::<_, String>("SELECT id FROM providers WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut *tx)
@@ -208,6 +218,12 @@ impl ProviderStore for PostgresProviderStore {
             .await?;
 
         tx.commit().await?;
+        if let Some(guard) = guard {
+            guard.invalidate_provider_id(id).await;
+        }
+        if let Err(error) = self.plugin_store.sweep_atomic_journal().await {
+            tracing::warn!(%error, "failed to sweep atomic journal after provider deletion");
+        }
         Ok(())
     }
 
@@ -485,7 +501,14 @@ mod tests {
             .max_connections(1)
             .connect_with(options.options([("search_path", schema.as_str())]))
             .await?;
-        Ok(Some((admin, schema, PostgresProviderStore { pool })))
+        Ok(Some((
+            admin,
+            schema,
+            PostgresProviderStore {
+                plugin_store: PluginStore::postgres(pool.clone()),
+                pool,
+            },
+        )))
     }
 
     #[tokio::test]

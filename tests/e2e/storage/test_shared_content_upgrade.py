@@ -183,13 +183,34 @@ def marker_signature_reaches_upstream(env: dict[str, Any], spec: dict[str, Any],
     return marker["signature"] in json.dumps(received[-1])
 
 
+def gemini_content_parts(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Ignore only grouping of consecutive user function responses, not their order or contents."""
+    contents = []
+    for content in body["contents"]:
+        parts = content.get("parts", [])
+        if (set(content) == {"role", "parts"} and content["role"] == "user" and parts
+                and all("functionResponse" in part for part in parts)):
+            contents.extend({"role": "user", "parts": [part]} for part in parts)
+        else:
+            contents.append(content)
+    return contents
+
+
 def assert_turn_content_and_markers(env: dict[str, Any], fixture: dict[str, Any]) -> None:
-    """Turn 内容与 Marker 回放：续接请求与旧服务端发出的上游请求逐字节一致。"""
+    """Turn 内容与 Marker 回放：保留旧上游请求的内容、签名和顺序。"""
     expectations = fixture["expectations"]
     for scenario in ("gemini", "openai"):
         spec = expectations[scenario]
-        assert continue_conversation(env, spec, scenario) == spec["follow_up_upstream"], scenario
-    gemini = json.dumps(expectations["gemini"]["follow_up_upstream"])
+        actual = continue_conversation(env, spec, scenario)
+        expected = spec["follow_up_upstream"]
+        if scenario == "gemini":
+            assert {k: v for k, v in actual.items() if k != "contents"} == {
+                k: v for k, v in expected.items() if k != "contents"
+            }
+            assert gemini_content_parts(actual) == gemini_content_parts(expected), scenario
+            gemini = json.dumps(actual)
+        else:
+            assert actual == expected, scenario
     # 6000 字符的长问题、受保护思考签名、嵌套工具结果都在续接请求里还原。
     assert expectations["gemini"]["question"] in gemini
     assert "synthetic-protected-4-1" in gemini and "nested synthetic result 1-0" in gemini

@@ -1,0 +1,67 @@
+package stravia:state@1.1.0;
+
+/// Operation-bound, host-scoped atomic state cells.
+interface store {
+    /// Provider state is bound to the admitted vendor and provider.
+    /// Conversation state additionally belongs to the admitted lineage.
+    enum scope { provider, conversation }
+
+    /// Revision zero represents a cell that has never existed. Deletion leaves
+    /// a tombstone with a fresh revision, preventing stale writes from succeeding.
+    record snapshot {
+        revision: u64,
+        payload: option<list<u8>>,
+    }
+
+    /// Extensible error code and a message safe to expose to the guest.
+    record error {
+        code: string,
+        message: string,
+    }
+
+    resource cell {
+        load: func() -> result<snapshot, error>;
+        /// Returns false only when the expected revision conflicts.
+        compare-exchange: func(expected-revision: u64, payload: option<list<u8>>) -> result<bool, error>;
+    }
+
+    /// Keys are stable UTF-8 names of at most 128 bytes. Each scope supports
+    /// at most 16 keys; each payload is limited to 64 KiB.
+    open: func(scope: scope, key: string) -> result<cell, error>;
+}
+
+/// Immutable, operation-bound journal entries attached atomically to cells.
+interface journal {
+    use store.{cell, error};
+
+    resource entry {
+        read: func() -> result<entry-data, error>;
+    }
+
+    record entry-data {
+        text: string,
+        previous: option<entry>,
+    }
+
+    record snapshot {
+        revision: u64,
+        payload: option<list<u8>>,
+        head: option<entry>,
+    }
+
+    /// Reads the revision, payload and head from one atomic snapshot.
+    load: func(cell: borrow<cell>) -> result<snapshot, error>;
+    /// Creates an immutable entry in the active conversation operation.
+    append: func(cell: borrow<cell>, text: string, previous: option<borrow<entry>>) -> result<entry, error>;
+    /// Returns false only when the expected revision conflicts.
+    compare-exchange: func(cell: borrow<cell>, expected-revision: u64, payload: option<list<u8>>, head: option<borrow<entry>>) -> result<bool, error>;
+}
+
+/// Process-volatile provider state. The host selects the vendor, provider and
+/// data epoch; the guest cannot choose an identity. Values are never persisted.
+interface volatile {
+    use store.{cell, error};
+
+    /// Uses the same key and payload limits and CAS semantics as store.
+    open: func(key: string) -> result<cell, error>;
+}

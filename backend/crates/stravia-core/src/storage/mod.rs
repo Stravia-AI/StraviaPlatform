@@ -3,11 +3,41 @@ pub mod memory;
 mod model_changes;
 pub mod money;
 pub mod postgres;
+#[cfg(test)]
+mod prompt_admission_tests;
 pub mod sql;
 pub mod sqlite;
 pub mod traits;
 
 pub use money::CUSTOM_CURRENCY_SETTING_KEY;
+
+fn validate_admission(admission: &PromptAdmission) -> anyhow::Result<Option<i64>> {
+    anyhow::ensure!(
+        (admission.ordinal == 0
+            && admission.user_prompt_id.is_none()
+            && admission.user_prompt_created_at_ms.is_none())
+            || (admission.ordinal > 0
+                && admission.user_prompt_id.is_some()
+                && admission.user_prompt_created_at_ms.is_some()),
+        "admission prompt identity does not match ordinal"
+    );
+    anyhow::ensure!(
+        admission.ordinal == 0
+            || (admission.user_prompt_id.as_deref() == Some(admission.logical_turn_id.as_str())
+                && admission.user_prompt_created_at_ms
+                    == Some(admission.logical_turn_created_at_ms)),
+        "logical turn does not match user prompt"
+    );
+    anyhow::ensure!(
+        admission.context_window_id.is_some() == admission.context_window_index.is_some(),
+        "incomplete context window position"
+    );
+    admission
+        .context_window_index
+        .map(i64::try_from)
+        .transpose()
+        .map_err(Into::into)
+}
 
 /// 供运行实例发现已提交配置变化的存储键。
 pub const CONFIG_EPOCH_KEY: &str = "config_epoch";
@@ -31,6 +61,7 @@ pub use sqlite::SqliteStorage;
 pub use traits::{
     AdminIdentityRecord, AdminIdentityStore, AdminSessionRecord, ApiKeyAccessRecord, ApiKeySpend,
     ApiKeyStore, AuthAccessStore, DynStorage, MoneyStore, NewAdminIdentity, NewAdminSession,
-    NewProviderCostPlan, ProviderCostPlan, ProviderModelStore, ProviderStore, RouteSchedulingUsage,
-    RouteStore, SettingsStore, Storage, StorageBootstrap, UsageStatsStore,
+    NewProviderCostPlan, PromptAdmission, PromptAdmissionStore, ProviderCostPlan,
+    ProviderModelStore, ProviderStore, RouteSchedulingUsage, RouteStore, SettingsStore, Storage,
+    StorageBootstrap, UsageStatsStore,
 };

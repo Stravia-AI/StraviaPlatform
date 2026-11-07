@@ -1,5 +1,5 @@
 /// Controlled operation-scoped networking for vendor components.
-package stravia:net@1.0.0;
+package stravia:net@1.1.0;
 
 interface types {
     /// Ordered field. Preserve name spelling and bytes except for protocol-required
@@ -79,6 +79,9 @@ interface websocket {
     resource connection {
         handshake-status: func() -> u16;
         handshake-headers: func() -> list<field>;
+        /// True only when this checkout established a new handshake; false for
+        /// a reused pooled connection. The fact is fixed for this resource.
+        is-fresh-handshake: func() -> result<bool, net-error>;
         send: func(msg: message) -> result<_, net-error>;
         /// Returns none on clean close.
         next: func() -> result<option<message>, net-error>;

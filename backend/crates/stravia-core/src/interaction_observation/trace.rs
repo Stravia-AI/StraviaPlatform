@@ -89,8 +89,12 @@ pub(super) fn redact_authorization_headers(headers: &mut Value) -> bool {
         }
         Value::Array(fields) => {
             for field in fields {
-                let Value::Object(field) = field else { continue };
-                if field.get("name").and_then(Value::as_str)
+                let Value::Object(field) = field else {
+                    continue;
+                };
+                if field
+                    .get("name")
+                    .and_then(Value::as_str)
                     .is_some_and(|name| name.eq_ignore_ascii_case("authorization"))
                 {
                     field.insert("bytes".into(), serde_json::json!([42, 42, 42]));

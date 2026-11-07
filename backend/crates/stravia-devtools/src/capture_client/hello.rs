@@ -1,6 +1,6 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use md5::Md5;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -16,15 +16,24 @@ pub(super) async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(Vec<u8
     let mut handshake = Vec::new();
     for _ in 0..MAX_RECORDS {
         let mut header = [0; 5];
-        stream.read_exact(&mut header).await.context("reading TLS record header")?;
+        stream
+            .read_exact(&mut header)
+            .await
+            .context("reading TLS record header")?;
         ensure!(header[0] == 22, "expected TLS handshake record");
         let length = u16::from_be_bytes([header[3], header[4]]) as usize;
         ensure!(length <= MAX_RECORD, "TLS record exceeds size limit");
-        ensure!(replay.len() + 5 + length <= MAX_HELLO, "ClientHello exceeds size limit");
+        ensure!(
+            replay.len() + 5 + length <= MAX_HELLO,
+            "ClientHello exceeds size limit"
+        );
         replay.extend_from_slice(&header);
         let start = replay.len();
         replay.resize(start + length, 0);
-        stream.read_exact(&mut replay[start..]).await.context("reading TLS record")?;
+        stream
+            .read_exact(&mut replay[start..])
+            .await
+            .context("reading TLS record")?;
         handshake.extend_from_slice(&replay[start..]);
         if handshake.len() >= 4 {
             ensure!(handshake[0] == 1, "first TLS handshake is not ClientHello");
@@ -46,7 +55,9 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self { Self { bytes, pos: 0 } }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self.pos.checked_add(n).context("invalid TLS length")?;
         ensure!(end <= self.bytes.len(), "truncated ClientHello");
@@ -54,42 +65,82 @@ impl<'a> Cursor<'a> {
         self.pos = end;
         Ok(result)
     }
-    fn u8(&mut self) -> Result<u8> { Ok(self.take(1)?[0]) }
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
     fn u16(&mut self) -> Result<u16> {
         let b = self.take(2)?;
         Ok(u16::from_be_bytes([b[0], b[1]]))
     }
-    fn vec8(&mut self) -> Result<&'a [u8]> { let n = self.u8()? as usize; self.take(n) }
-    fn vec16(&mut self) -> Result<&'a [u8]> { let n = self.u16()? as usize; self.take(n) }
-    fn done(&self) -> bool { self.pos == self.bytes.len() }
-    fn finish(&self) -> Result<()> { ensure!(self.done(), "invalid ClientHello vector length"); Ok(()) }
+    fn vec8(&mut self) -> Result<&'a [u8]> {
+        let n = self.u8()? as usize;
+        self.take(n)
+    }
+    fn vec16(&mut self) -> Result<&'a [u8]> {
+        let n = self.u16()? as usize;
+        self.take(n)
+    }
+    fn done(&self) -> bool {
+        self.pos == self.bytes.len()
+    }
+    fn finish(&self) -> Result<()> {
+        ensure!(self.done(), "invalid ClientHello vector length");
+        Ok(())
+    }
 }
 
 fn words(bytes: &[u8]) -> Result<Vec<u16>> {
-    ensure!(bytes.len() % 2 == 0, "invalid TLS u16 vector");
-    Ok(bytes.chunks_exact(2).map(|v| u16::from_be_bytes([v[0], v[1]])).collect())
+    ensure!(bytes.len().is_multiple_of(2), "invalid TLS u16 vector");
+    Ok(bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|v| u16::from_be_bytes([v[0], v[1]]))
+        .collect())
 }
-fn grease(n: u16) -> bool { n & 0x0f0f == 0x0a0a && (n >> 8) as u8 == n as u8 }
+fn grease(n: u16) -> bool {
+    n & 0x0f0f == 0x0a0a && (n >> 8) as u8 == n as u8
+}
 fn decimal(values: impl IntoIterator<Item = u16>) -> String {
-    values.into_iter().map(|v| v.to_string()).collect::<Vec<_>>().join("-")
+    values
+        .into_iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 fn hex_words(values: &[u16]) -> String {
-    values.iter().map(|v| format!("{v:04x}")).collect::<Vec<_>>().join(",")
+    values
+        .iter()
+        .map(|v| format!("{v:04x}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 fn hash12(bytes: &[u8]) -> String {
-    if bytes.is_empty() { return "000000000000".to_owned(); }
+    if bytes.is_empty() {
+        return "000000000000".to_owned();
+    }
     let digest = Sha256::digest(bytes);
     digest[..6].iter().map(|v| format!("{v:02x}")).collect()
 }
 fn version_code(version: u16) -> &'static str {
-    match version { 0x0304 => "13", 0x0303 => "12", 0x0302 => "11", 0x0301 => "10", 0x0300 => "s3", _ => "00" }
+    match version {
+        0x0304 => "13",
+        0x0303 => "12",
+        0x0302 => "11",
+        0x0301 => "10",
+        0x0300 => "s3",
+        _ => "00",
+    }
 }
 // ALPN identifiers are opaque peer input, so only recognized values are emitted.
 fn safe_alpn(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
-        b"h2" => Some("h2"), b"http/1.1" => Some("http/1.1"),
-        b"http/1.0" => Some("http/1.0"), b"h3" => Some("h3"),
-        b"h3-29" => Some("h3-29"), b"acme-tls/1" => Some("acme-tls/1"),
+        b"h2" => Some("h2"),
+        b"http/1.1" => Some("http/1.1"),
+        b"http/1.0" => Some("http/1.0"),
+        b"h3" => Some("h3"),
+        b"h3-29" => Some("h3-29"),
+        b"acme-tls/1" => Some("acme-tls/1"),
         _ => None,
     }
 }
@@ -102,12 +153,20 @@ fn safe_extension_body(kind: u16, payload: &[u8]) -> bool {
         10 | 11 | 13 | 27 | 43 | 50 => true, // parsed and length-checked below
         16 => {
             let mut outer = Cursor::new(payload);
-            let Ok(list) = outer.vec16() else { return false };
-            if !outer.done() { return false; }
+            let Ok(list) = outer.vec16() else {
+                return false;
+            };
+            if !outer.done() {
+                return false;
+            }
             let mut protocols = Cursor::new(list);
             while !protocols.done() {
-                let Ok(protocol) = protocols.vec8() else { return false };
-                if safe_alpn(protocol).is_none() { return false; }
+                let Ok(protocol) = protocols.vec8() else {
+                    return false;
+                };
+                if safe_alpn(protocol).is_none() {
+                    return false;
+                }
             }
             true
         }
@@ -154,26 +213,60 @@ fn decode(bytes: &[u8]) -> Result<Value> {
             let mut p = Cursor::new(payload);
             let mut decoded = None;
             match kind {
-                0 => { // Server names are sensitive, even for malformed or unknown name types.
+                0 => {
+                    // Server names are sensitive, even for malformed or unknown name types.
                     sni_present = true;
                     let mut names = Cursor::new(p.vec16()?);
                     p.finish()?;
-                    while !names.done() { names.u8()?; names.vec16()?; }
+                    while !names.done() {
+                        names.u8()?;
+                        names.vec16()?;
+                    }
                     decoded = Some(json!({"server_name_present": true}));
                 }
-                10 => { groups = words(p.vec16()?)?; p.finish()?; decoded = Some(json!({"groups": groups})); }
-                11 => { point_formats = p.vec8()?.to_vec(); p.finish()?; decoded = Some(json!({"point_formats": point_formats})); }
-                13 => { signature_algorithms = words(p.vec16()?)?; p.finish()?; decoded = Some(json!({"algorithms": signature_algorithms})); }
-                5 => { decoded = Some(json!({"status_request": true})); }
-                18 => { decoded = Some(json!({"signed_certificate_timestamp": true})); }
-                22 => { decoded = Some(json!({"encrypt_then_mac": true})); }
-                23 => { decoded = Some(json!({"extended_master_secret": true})); }
+                10 => {
+                    groups = words(p.vec16()?)?;
+                    p.finish()?;
+                    decoded = Some(json!({"groups": groups}));
+                }
+                11 => {
+                    point_formats = p.vec8()?.to_vec();
+                    p.finish()?;
+                    decoded = Some(json!({"point_formats": point_formats}));
+                }
+                13 => {
+                    signature_algorithms = words(p.vec16()?)?;
+                    p.finish()?;
+                    decoded = Some(json!({"algorithms": signature_algorithms}));
+                }
+                5 => {
+                    decoded = Some(json!({"status_request": true}));
+                }
+                18 => {
+                    decoded = Some(json!({"signed_certificate_timestamp": true}));
+                }
+                22 => {
+                    decoded = Some(json!({"encrypt_then_mac": true}));
+                }
+                23 => {
+                    decoded = Some(json!({"extended_master_secret": true}));
+                }
                 45 if safe_extension_body(kind, payload) => {
                     decoded = Some(json!({"psk_key_exchange_modes": &payload[1..]}));
                 }
-                65281 => { decoded = Some(json!({"renegotiation_info": true})); }
-                27 => { let algorithms = words(p.vec8()?)?; p.finish()?; decoded = Some(json!({"algorithms": algorithms})); }
-                50 => { let algorithms = words(p.vec16()?)?; p.finish()?; decoded = Some(json!({"algorithms": algorithms})); }
+                65281 => {
+                    decoded = Some(json!({"renegotiation_info": true}));
+                }
+                27 => {
+                    let algorithms = words(p.vec8()?)?;
+                    p.finish()?;
+                    decoded = Some(json!({"algorithms": algorithms}));
+                }
+                50 => {
+                    let algorithms = words(p.vec16()?)?;
+                    p.finish()?;
+                    decoded = Some(json!({"algorithms": algorithms}));
+                }
                 16 => {
                     let mut protocols = Cursor::new(p.vec16()?);
                     p.finish()?;
@@ -181,12 +274,23 @@ fn decode(bytes: &[u8]) -> Result<Value> {
                         let protocol = protocols.vec8()?;
                         ensure!(!protocol.is_empty(), "empty ALPN identifier");
                         let safe = safe_alpn(protocol);
-                        if first_alpn.is_none() { first_alpn = Some(safe); }
-                        if let Some(name) = safe { alpn.push(name); }
+                        if first_alpn.is_none() {
+                            first_alpn = Some(safe);
+                        }
+                        if let Some(name) = safe {
+                            alpn.push(name);
+                        }
                     }
                 }
-                21 => { padding_length = Some(payload.len()); decoded = Some(json!({"padding_length": payload.len()})); }
-                43 => { supported_versions = words(p.vec8()?)?; p.finish()?; decoded = Some(json!({"versions": supported_versions})); }
+                21 => {
+                    padding_length = Some(payload.len());
+                    decoded = Some(json!({"padding_length": payload.len()}));
+                }
+                43 => {
+                    supported_versions = words(p.vec8()?)?;
+                    p.finish()?;
+                    decoded = Some(json!({"versions": supported_versions}));
+                }
                 51 => {
                     let mut shares = Cursor::new(p.vec16()?);
                     p.finish()?;
@@ -208,31 +312,65 @@ fn decode(bytes: &[u8]) -> Result<Value> {
             }));
         }
     }
-    let filtered_ciphers: Vec<_> = cipher_suites.iter().copied().filter(|n| !grease(*n)).collect();
+    let filtered_ciphers: Vec<_> = cipher_suites
+        .iter()
+        .copied()
+        .filter(|n| !grease(*n))
+        .collect();
     let filtered_ext: Vec<_> = extensions.iter().copied().filter(|n| !grease(*n)).collect();
-    let ja3 = format!("{},{},{},{},{}", legacy_version,
-        decimal(filtered_ciphers.iter().copied()), decimal(filtered_ext.iter().copied()),
+    let ja3 = format!(
+        "{},{},{},{},{}",
+        legacy_version,
+        decimal(filtered_ciphers.iter().copied()),
+        decimal(filtered_ext.iter().copied()),
         decimal(groups.iter().copied().filter(|n| !grease(*n))),
-        decimal(point_formats.iter().map(|v| *v as u16)));
-    let ja3_hash = Md5::digest(ja3.as_bytes()).iter().map(|v| format!("{v:02x}")).collect::<String>();
-    let version = supported_versions.iter().copied().filter(|n| !grease(*n)).max().unwrap_or(legacy_version);
+        decimal(point_formats.iter().map(|v| *v as u16))
+    );
+    let ja3_hash = Md5::digest(ja3.as_bytes())
+        .iter()
+        .map(|v| format!("{v:02x}"))
+        .collect::<String>();
+    let version = supported_versions
+        .iter()
+        .copied()
+        .filter(|n| !grease(*n))
+        .max()
+        .unwrap_or(legacy_version);
     let alpn_code = match first_alpn.flatten() {
-        Some(name) => { let b = name.as_bytes(); format!("{}{}", b[0] as char, b[b.len() - 1] as char) }
+        Some(name) => {
+            let b = name.as_bytes();
+            format!("{}{}", b[0] as char, b[b.len() - 1] as char)
+        }
         None => "00".to_owned(),
     };
     let mut sorted_ciphers = filtered_ciphers.clone();
     sorted_ciphers.sort_unstable();
-    let mut sorted_ext: Vec<_> = filtered_ext.iter().copied().filter(|n| *n != 0 && *n != 16).collect();
+    let mut sorted_ext: Vec<_> = filtered_ext
+        .iter()
+        .copied()
+        .filter(|n| *n != 0 && *n != 16)
+        .collect();
     sorted_ext.sort_unstable();
     let mut ext_input = hex_words(&sorted_ext);
-    let ja4_signatures: Vec<_> = signature_algorithms.iter().copied().filter(|n| !grease(*n)).collect();
+    let ja4_signatures: Vec<_> = signature_algorithms
+        .iter()
+        .copied()
+        .filter(|n| !grease(*n))
+        .collect();
     if !ja4_signatures.is_empty() {
         ext_input.push('_');
         ext_input.push_str(&hex_words(&ja4_signatures));
     }
-    let ja4 = format!("t{}{}{:02}{:02}{}_{}_{}", version_code(version),
-        if sni_present { 'd' } else { 'i' }, filtered_ciphers.len().min(99), filtered_ext.len().min(99),
-        alpn_code, hash12(hex_words(&sorted_ciphers).as_bytes()), hash12(ext_input.as_bytes()));
+    let ja4 = format!(
+        "t{}{}{:02}{:02}{}_{}_{}",
+        version_code(version),
+        if sni_present { 'd' } else { 'i' },
+        filtered_ciphers.len().min(99),
+        filtered_ext.len().min(99),
+        alpn_code,
+        hash12(hex_words(&sorted_ciphers).as_bytes()),
+        hash12(ext_input.as_bytes())
+    );
     Ok(json!({
         "legacy_version": legacy_version, "cipher_suites": cipher_suites,
         "extensions": extensions, "extension_details": extension_details,

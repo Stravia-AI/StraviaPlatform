@@ -298,6 +298,8 @@ CREATE TABLE models (
         OR CASE WHEN json_valid(billing_json) THEN json_type(billing_json) = 'object' ELSE 0 END
     ));
 
+CREATE TABLE native_compaction_atomic_checkpoints (record_id TEXT PRIMARY KEY REFERENCES native_compactions(id) ON DELETE CASCADE, principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, FOREIGN KEY(principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id));
+
 CREATE TABLE native_compaction_gc (
     record_id TEXT PRIMARY KEY REFERENCES native_compactions(id) ON DELETE CASCADE
 );
@@ -389,6 +391,35 @@ CREATE TABLE observation_tool_results (
     content_id BIGINT NOT NULL REFERENCES contents(id) ON DELETE RESTRICT,
     PRIMARY KEY(sequence, ordinal)
 ) WITHOUT ROWID;
+
+CREATE TABLE prompt_admission_epoch (id INTEGER PRIMARY KEY CHECK (id = 1), epoch BIGINT NOT NULL);
+
+CREATE TABLE prompt_admissions (
+    id TEXT PRIMARY KEY NOT NULL,
+    principal TEXT NOT NULL,
+    parent_id TEXT,
+    atomic_lineage_created BOOLEAN NOT NULL DEFAULT FALSE,
+    ordinal BIGINT NOT NULL CHECK (ordinal >= 0),
+    user_turn_index BIGINT CHECK (user_turn_index >= 0),
+    dialogue_prompt_index BIGINT CHECK (dialogue_prompt_index >= 0),
+    history_count BIGINT NOT NULL CHECK (history_count >= 0),
+    prefix_digest TEXT NOT NULL,
+    controls_digest TEXT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    conversation_created_at_ms BIGINT NOT NULL,
+    user_prompt_id TEXT,
+    user_prompt_created_at_ms BIGINT,
+    logical_turn_id TEXT NOT NULL,
+    logical_turn_created_at_ms BIGINT NOT NULL,
+    context_window_id TEXT,
+    context_window_index BIGINT CHECK (context_window_index >= 0),
+    CHECK ((ordinal = 0 AND user_prompt_id IS NULL AND user_prompt_created_at_ms IS NULL) OR (ordinal > 0 AND user_prompt_id IS NOT NULL AND user_prompt_created_at_ms IS NOT NULL)),
+    CHECK (ordinal = 0 OR (logical_turn_id = user_prompt_id AND logical_turn_created_at_ms = user_prompt_created_at_ms)),
+    CHECK ((context_window_id IS NULL) = (context_window_index IS NULL)),
+    UNIQUE (principal, id),
+    FOREIGN KEY (principal, parent_id) REFERENCES prompt_admissions(principal, id)
+);
 
 CREATE TABLE provider_allowance_guards (
     provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
@@ -676,6 +707,8 @@ CREATE TABLE target_attempt_observations (
     last_event_sequence INTEGER NOT NULL
 , error_source TEXT, error_message TEXT, upstream_error_code TEXT, cost_basis TEXT, cost_usd_nanos INTEGER, cost_custom_nanos INTEGER, billing_state TEXT, billing_usd_nanos INTEGER, billing_custom_nanos INTEGER);
 
+CREATE TABLE turn_node_atomic_checkpoints (node_pk BIGINT PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE, principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, FOREIGN KEY(principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id) ON DELETE CASCADE);
+
 CREATE TABLE turn_node_compactions (
     node_pk BIGINT NOT NULL REFERENCES turn_nodes(node_pk) ON DELETE CASCADE,
     record_id TEXT NOT NULL REFERENCES native_compactions(id) ON DELETE RESTRICT,
@@ -742,6 +775,61 @@ CREATE TABLE turn_nodes (
         REFERENCES turn_nodes(node_pk, scope_id, kind)
         ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE TABLE vendor_atomic_boundary_facts (
+    node_id TEXT PRIMARY KEY,
+    principal TEXT NOT NULL,
+    vendor_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    provider_fence BIGINT NOT NULL,
+    previous_id TEXT,
+    boundary_id TEXT NOT NULL,
+    window_id TEXT NOT NULL,
+    owner_admission_id TEXT NOT NULL,
+    source_admission_id TEXT NOT NULL,
+    source_item_gap BIGINT NOT NULL,
+    source_unit_gap BIGINT NOT NULL,
+    prefix_hash BLOB NOT NULL,
+    controls_hash BLOB NOT NULL
+);
+
+CREATE TABLE vendor_atomic_cells (vendor_id TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, principal TEXT NOT NULL, admission_id TEXT NOT NULL, cell_key TEXT NOT NULL, revision BIGINT NOT NULL, payload BLOB, journal_head TEXT, PRIMARY KEY (vendor_id, provider_id, principal, admission_id, cell_key));
+
+CREATE TABLE vendor_atomic_checkpoint_cells (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, vendor_id TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, cell_key TEXT NOT NULL, revision BIGINT NOT NULL, payload BLOB, journal_head TEXT, PRIMARY KEY (principal, checkpoint_id, vendor_id, provider_id, cell_key), FOREIGN KEY (principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id) ON DELETE CASCADE);
+
+CREATE TABLE vendor_atomic_checkpoints (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, boundary_head TEXT, PRIMARY KEY (principal, checkpoint_id));
+
+CREATE TABLE vendor_atomic_journal_nodes (
+    node_id TEXT PRIMARY KEY,
+    principal TEXT NOT NULL,
+    vendor_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    data_epoch BIGINT NOT NULL,
+    previous_id TEXT,
+    content_id BIGINT NOT NULL REFERENCES contents(id),
+    logical_size BIGINT NOT NULL CHECK (logical_size >= 0),
+    document_size BIGINT NOT NULL CHECK (document_size >= 0)
+);
+
+CREATE TABLE vendor_atomic_journal_pins (
+    principal TEXT NOT NULL,
+    admission_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    node_id TEXT NOT NULL REFERENCES vendor_atomic_journal_nodes(node_id) ON DELETE CASCADE,
+    staged_bytes BIGINT NOT NULL DEFAULT 0 CHECK (staged_bytes >= 0),
+    PRIMARY KEY (principal, admission_id, lease_id, node_id)
+);
+
+CREATE TABLE vendor_atomic_leases (principal TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL, PRIMARY KEY(principal, admission_id, lease_id));
+
+CREATE TABLE vendor_atomic_lineages (principal TEXT NOT NULL, admission_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, history_epoch BIGINT NOT NULL DEFAULT 0, boundary_head TEXT, PRIMARY KEY (principal, admission_id));
+
+CREATE TABLE vendor_atomic_provider_fences (
+    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    generation BIGINT NOT NULL
+);
+
+CREATE TABLE vendor_atomic_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision BIGINT NOT NULL);
 
 CREATE TABLE vendor_data_recovery (
     provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
@@ -897,6 +985,8 @@ CREATE INDEX model_turns_interaction_idx ON model_turn_observations(interaction_
 
 CREATE INDEX model_turns_run_status_idx ON model_turn_observations(run_id, status);
 
+CREATE INDEX native_compaction_atomic_checkpoints_checkpoint_idx ON native_compaction_atomic_checkpoints(principal, checkpoint_id);
+
 CREATE INDEX native_compactions_confirmed_at_idx ON native_compactions(confirmed_at);
 
 CREATE INDEX native_compactions_generation_idx ON native_compactions(source_generation_id)
@@ -953,6 +1043,12 @@ CREATE INDEX observation_tool_results_content_idx ON observation_tool_results(co
 
 CREATE INDEX observation_tool_results_tool_idx ON observation_tool_results(tool_id, sequence);
 
+CREATE INDEX prompt_admissions_created_idx ON prompt_admissions(created_at_ms);
+
+CREATE INDEX prompt_admissions_parent_idx ON prompt_admissions(parent_id);
+
+CREATE INDEX prompt_admissions_prefix_idx ON prompt_admissions(principal, controls_digest, history_count, prefix_digest);
+
 CREATE INDEX provider_cost_plans_effective
     ON provider_cost_plans (provider_id, effective_from);
 
@@ -986,6 +1082,8 @@ CREATE INDEX target_attempts_upstream_error_window_idx
     ON target_attempt_observations (started_at DESC, id)
     WHERE status='failed' AND error_source='upstream';
 
+CREATE INDEX turn_node_atomic_checkpoints_checkpoint_idx ON turn_node_atomic_checkpoints(principal, checkpoint_id);
+
 CREATE INDEX turn_node_compactions_record_idx ON turn_node_compactions(record_id);
 
 CREATE INDEX turn_node_contents_content_idx ON turn_node_contents(content_id);
@@ -1005,6 +1103,24 @@ CREATE INDEX turn_nodes_prefix_idx
     WHERE prefix_namespace IS NOT NULL;
 
 CREATE INDEX turn_nodes_scope_idx ON turn_nodes(scope_id);
+
+CREATE UNIQUE INDEX vendor_atomic_boundary_facts_candidate_idx ON vendor_atomic_boundary_facts(principal, vendor_id, provider_id, provider_fence, owner_admission_id, boundary_id);
+
+CREATE INDEX vendor_atomic_boundary_facts_previous_idx ON vendor_atomic_boundary_facts(previous_id);
+
+CREATE INDEX vendor_atomic_cells_admission_idx ON vendor_atomic_cells(principal, admission_id);
+
+CREATE INDEX vendor_atomic_checkpoint_cells_provider_idx ON vendor_atomic_checkpoint_cells(provider_id, vendor_id);
+
+CREATE INDEX vendor_atomic_checkpoints_created_idx ON vendor_atomic_checkpoints(created_at_ms);
+
+CREATE INDEX vendor_atomic_journal_nodes_content_idx ON vendor_atomic_journal_nodes(content_id);
+
+CREATE INDEX vendor_atomic_journal_nodes_previous_idx ON vendor_atomic_journal_nodes(previous_id);
+
+CREATE INDEX vendor_atomic_journal_pins_lease_idx ON vendor_atomic_journal_pins(principal, admission_id, lease_id);
+
+CREATE INDEX vendor_atomic_lineages_created_idx ON vendor_atomic_lineages(created_at_ms);
 
 CREATE VIEW stats_usage_attempt_source AS
 SELECT

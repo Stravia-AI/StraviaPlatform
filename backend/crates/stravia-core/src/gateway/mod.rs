@@ -63,10 +63,12 @@ pub struct Gateway {
     pub config: GatewayConfig,
     pub storage: DynStorage,
     pub storage_kind: RuntimeStorageKind,
+    pub(crate) client_installation_id: Arc<str>,
     pub(crate) runtime_cache: crate::runtime_cache::RuntimeCache,
     pub(crate) http_client: reqwest::Client,
     pub(crate) vendor_transport: Arc<crate::plugin::network::transport::VendorTransport>,
     pub(crate) vendor_shapes: Arc<crate::plugin::network::shape::ShapeRegistry>,
+    pub(crate) vendor_resolver: Arc<dyn crate::plugin::network::transport::Resolver>,
     pub(crate) vendor_plugins: Arc<crate::plugin::manager::VendorPlugins>,
     pub(crate) vendor_websocket_pool: Arc<crate::plugin::network::VendorWebSocketPool>,
     pub provider_catalog: provider_catalog::ProviderCatalog,
@@ -128,10 +130,12 @@ impl Gateway {
             config: self.config.clone(),
             storage: Arc::clone(&self.storage),
             storage_kind: self.storage_kind,
+            client_installation_id: Arc::clone(&self.client_installation_id),
             runtime_cache: self.runtime_cache.clone(),
             http_client: self.http_client.clone(),
             vendor_transport: Arc::clone(&self.vendor_transport),
             vendor_shapes: Arc::clone(&self.vendor_shapes),
+            vendor_resolver: Arc::clone(&self.vendor_resolver),
             vendor_plugins: Arc::clone(&self.vendor_plugins),
             vendor_websocket_pool: Arc::clone(&self.vendor_websocket_pool),
             provider_catalog: self.provider_catalog.clone(),
@@ -212,4 +216,3 @@ impl Drop for Gateway {
         }
     }
 }
-

@@ -280,6 +280,8 @@ impl TurnChainStore for CommitBarrierTurnChainStore {
 #[cfg(test)]
 mod projection;
 #[cfg(test)]
+mod prompt_admission;
+#[cfg(test)]
 mod store_discovery;
 #[cfg(test)]
 mod write_markers;

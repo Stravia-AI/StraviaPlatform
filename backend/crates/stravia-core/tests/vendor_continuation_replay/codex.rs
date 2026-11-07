@@ -8,6 +8,7 @@ const CODEX_ROUTE: &str = "codex-media-replay";
 struct SocketUpstream {
     url: String,
     bodies: Arc<Mutex<Vec<Value>>>,
+    reject_upgrade: Arc<std::sync::atomic::AtomicBool>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -15,30 +16,39 @@ impl SocketUpstream {
     async fn start() -> anyhow::Result<Self> {
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let captured = bodies.clone();
+        let reject_upgrade = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rejection = reject_upgrade.clone();
         let router = Router::new().route(
             "/responses",
             axum::routing::get(move |upgrade: WebSocketUpgrade| {
                 let captured = captured.clone();
+                let rejection = rejection.clone();
                 async move {
-                    upgrade.on_upgrade(move |mut socket| async move {
-                        while let Some(Ok(Message::Text(text))) = socket.recv().await {
-                            let body = serde_json::from_str(&text).expect("Codex request JSON");
-                            let turn = {
-                                let mut bodies = captured.lock();
-                                bodies.push(body);
-                                bodies.len()
-                            };
-                            for event in response_frames(turn) {
-                                if socket
-                                    .send(Message::Text(event.to_string().into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
+                    use axum::response::IntoResponse;
+                    if rejection.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    upgrade
+                        .on_upgrade(move |mut socket| async move {
+                            while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                                let body = serde_json::from_str(&text).expect("Codex request JSON");
+                                let turn = {
+                                    let mut bodies = captured.lock();
+                                    bodies.push(body);
+                                    bodies.len()
+                                };
+                                for event in response_frames(turn) {
+                                    if socket
+                                        .send(Message::Text(event.to_string().into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
                                 }
                             }
-                        }
-                    })
+                        })
+                        .into_response()
                 }
             }),
         );
@@ -52,6 +62,7 @@ impl SocketUpstream {
         Ok(Self {
             url,
             bodies,
+            reject_upgrade,
             server,
         })
     }
@@ -142,7 +153,7 @@ async fn configure(gateway: &Gateway, upstream: &SocketUpstream) -> anyhow::Resu
     }).await?;
     let route = gateway.admin().create_model(serde_json::from_value(json!({
         "model_id": CODEX_ROUTE, "output_modality": "text",
-        "targets": [{"provider_id": provider.id, "model": CODEX_MODEL, "enabled": true, "target_retry_budget": 0}]
+        "targets": [{"provider_id": provider.id, "model": CODEX_MODEL, "enabled": true, "target_retry_budget": 0, "target_cooldown_ms": COOLDOWN_MS}]
     }))?).await?;
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({
         "name": "Codex media replay key", "model_ids": [route.id], "transparent_injection_enabled": false
@@ -163,6 +174,17 @@ async fn send(
     input: Value,
     parent: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let (status, body) = send_status(gateway, token, input, parent).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    Ok(body)
+}
+
+async fn send_status(
+    gateway: &Gateway,
+    token: &str,
+    input: Value,
+    parent: Option<&str>,
+) -> anyhow::Result<(StatusCode, Value)> {
     let mut body = json!({
         "model": CODEX_ROUTE, "store": false, "stream": false,
         "prompt_cache_key": "codex-media-replay-session", "input": input
@@ -181,8 +203,7 @@ async fn send(
     let status = response.status();
     let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024).await?;
     let body: Value = serde_json::from_slice(&bytes)?;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    Ok(body)
+    Ok((status, body))
 }
 
 fn image_urls(request: &Value) -> Vec<&str> {
@@ -238,6 +259,37 @@ async fn socket_miss_replays_history_and_new_images_as_inline_bytes() -> anyhow:
     gateway.shutdown().await;
     drop(gateway);
     let gateway = Gateway::new(config).await?;
+    // A genuine failed upgrade cools the target on the restarted gateway,
+    // independently of the persisted parent whose socket was lost.
+    upstream
+        .reject_upgrade
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = send_status(&gateway, &token, json!("independent failure"), None).await?;
+    assert!(!status.is_success(), "{body}");
+    assert!(
+        !upstream
+            .reject_upgrade
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "expected the upstream upgrade rejection"
+    );
+    let statuses = gateway
+        .admin()
+        .get_model_target_statuses(CODEX_ROUTE)
+        .await?;
+    let state = serde_json::to_value(&statuses[0])?["state"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        matches!(state.as_str(), "cooling_down" | "half_open"),
+        "{state}"
+    );
+    tokio::time::sleep(Duration::from_millis(COOLDOWN_MS as u64 + 150)).await;
+    let statuses = gateway
+        .admin()
+        .get_model_target_statuses(CODEX_ROUTE)
+        .await?;
+    assert_eq!(serde_json::to_value(&statuses[0])?["state"], "half_open");
     let response = send(
         &gateway,
         &token,
@@ -251,6 +303,11 @@ async fn socket_miss_replays_history_and_new_images_as_inline_bytes() -> anyhow:
     assert_eq!(response["output"][0]["content"][0]["text"], "READY");
     {
         let sent = upstream.bodies.lock();
+        assert_eq!(
+            sent.len(),
+            2,
+            "socket miss must not send a continuation frame"
+        );
         let replay = sent.last().expect("replayed request");
         assert!(
             replay.get("previous_response_id").is_none(),
@@ -262,7 +319,16 @@ async fn socket_miss_replays_history_and_new_images_as_inline_bytes() -> anyhow:
             "history and current images must retain their original inline bytes"
         );
     }
-    assert_eq!(attempt_statuses(&gateway).await?, completed(2));
+    let attempts = attempt_statuses(&gateway).await?;
+    assert_eq!(attempts.len(), 3, "{attempts:?}");
+    assert_eq!(attempts[0], ("completed".to_owned(), None));
+    assert_eq!(attempts[1].0, "failed");
+    assert_eq!(attempts[2], ("completed".to_owned(), None));
+    let statuses = gateway
+        .admin()
+        .get_model_target_statuses(CODEX_ROUTE)
+        .await?;
+    assert_eq!(serde_json::to_value(&statuses[0])?["state"], "available");
     gateway.shutdown().await;
     Ok(())
 }

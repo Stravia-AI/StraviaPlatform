@@ -338,6 +338,10 @@
   "h1": {
     "headers": [
       {
+        "name": "version",
+        "value": "0.167.0"
+      },
+      {
         "name": "x-codex-beta-features",
         "value": "remote_compaction_v2"
       },
@@ -348,6 +352,14 @@
       {
         "name": "x-codex-turn-metadata",
         "value": "<redacted>"
+      },
+      {
+        "name": "x-openai-internal-codex-responses-lite",
+        "value": "true"
+      },
+      {
+        "name": "x-codex-routing-hint",
+        "value": "model=gpt-6-astra"
       },
       {
         "name": "x-client-request-id",
@@ -366,6 +378,10 @@
         "value": "text/event-stream"
       },
       {
+        "name": "content-encoding",
+        "value": "zstd"
+      },
+      {
         "name": "content-type",
         "value": "application/json"
       },
@@ -374,12 +390,16 @@
         "value": "<redacted>"
       },
       {
+        "name": "chatgpt-account-id",
+        "value": "<redacted>"
+      },
+      {
         "name": "originator",
-        "value": "codex_exec"
+        "value": "codex-tui"
       },
       {
         "name": "user-agent",
-        "value": "codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)"
+        "value": "codex-tui/0.167.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.167.0)"
       },
       {
         "name": "host",
@@ -391,56 +411,82 @@
       }
     ],
     "method": "POST",
+    "target": "<redacted>",
+    "version": "HTTP/1.1",
+    "raw_head": "POST <redacted> HTTP/1.1\r\nversion: 0.167.0\r\nx-codex-beta-features: remote_compaction_v2\r\nx-codex-window-id: <redacted>\r\nx-codex-turn-metadata: <redacted>\r\nx-openai-internal-codex-responses-lite: true\r\nx-codex-routing-hint: model=gpt-6-astra\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\naccept: text/event-stream\r\ncontent-encoding: zstd\r\ncontent-type: application/json\r\nauthorization: <redacted>\r\nchatgpt-account-id: <redacted>\r\noriginator: codex-tui\r\nuser-agent: codex-tui/0.167.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.167.0)\r\nhost: <redacted>\r\ncontent-length: <redacted>\r\n\r\n",
     "normalizations": [
       {
-        "header_index": 1,
-        "reason": "unclassified"
-      },
-      {
         "header_index": 2,
-        "reason": "unclassified"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 3,
-        "reason": "credential_or_dynamic"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
-        "header_index": 4,
-        "reason": "credential_or_dynamic"
+        "header_index": 6,
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
-        "header_index": 5,
-        "reason": "unclassified"
+        "header_index": 7,
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 8,
-        "reason": "credential_or_dynamic"
-      },
-      {
-        "header_index": 11,
-        "reason": "unclassified"
+        "reason": "credential, ephemeral endpoint, or per-session value"
       },
       {
         "header_index": 12,
-        "reason": "unclassified"
+        "reason": "credential, ephemeral endpoint, or per-session value"
+      },
+      {
+        "header_index": 13,
+        "reason": "credential, ephemeral endpoint, or per-session value"
+      },
+      {
+        "header_index": 16,
+        "reason": "credential, ephemeral endpoint, or per-session value"
+      },
+      {
+        "header_index": 17,
+        "reason": "credential, ephemeral endpoint, or per-session value"
       }
-    ],
-    "raw_head": "POST <redacted> HTTP/1.1\r\nx-codex-beta-features: remote_compaction_v2\r\nx-codex-window-id: <redacted>\r\nx-codex-turn-metadata: <redacted>\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\naccept: text/event-stream\r\ncontent-type: application/json\r\nauthorization: <redacted>\r\noriginator: codex_exec\r\nuser-agent: codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)\r\nhost: <redacted>\r\ncontent-length: <redacted>\r\n\r\n",
-    "target": "<redacted>",
-    "version": "HTTP/1.1"
+    ]
   },
   "provenance": {
-    "arch": "x86_64",
-    "captured_at": "2026-11-07T05:27:07.699678036+00:00",
-    "client": "codex-http-native",
-    "os": "linux",
+    "client": "codex",
     "version": "0.167.0",
+    "mode": "interactive",
     "capture_round": 2,
-    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; temporary HOME and placeholder credentials",
-    "target": "https://localhost:<ephemeral-port>",
-    "capture_tool": "stravia-tools capture-client module, standalone harness",
-    "invocation": "codex exec --skip-git-repo-check with -c provider configuration and prompt \"local capture only\"",
-    "configuration": "temporary CODEX_HOME; model=gpt-5.4; custom provider base_url=local target/v1, env_key=OPENAI_API_KEY, wire_api=responses, supports_websockets=false; OPENAI_API_KEY=placeholder",
-    "trust": "SSL_CERT_DIR with OpenSSL-hash-named temporary capture CA; CODEX_CA_CERTIFICATE and SSL_CERT_FILE unset"
+    "os": "linux",
+    "arch": "x86_64",
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; fresh HOME, CODEX_HOME and XDG; empty working directory",
+    "authentication": "Built-in openai provider with local-only placeholder ChatGPT auth.json, JWT claims and Bearer token; no OPENAI_API_KEY or login; account ID header present",
+    "invocation": "codex -c model=\"gpt-6-astra\" -c cli_auth_credentials_store=\"file\" -c chatgpt_base_url=\"https://localhost:<ephemeral-port>/backend-api\" -c openai_base_url=\"https://localhost:<ephemeral-port>/backend-api/codex\"",
+    "pty": "Normal TUI; type Reply OK, pause, press Enter",
+    "trust": "Local capture CA bind-mounted over system CA bundle inside mount namespace; SSL_CERT_FILE and CODEX_CA_CERTIFICATE unset; TLS verification enabled",
+    "capture_tool": "same-socket loopback TLS server and compiled capture-client hello-decode",
+    "connection_id": 38,
+    "operation": "responses",
+    "model": "gpt-6-astra",
+    "prompt_present": true,
+    "body_keys": [
+      "client_metadata",
+      "include",
+      "input",
+      "model",
+      "parallel_tool_calls",
+      "prompt_cache_key",
+      "reasoning",
+      "store",
+      "stream",
+      "text",
+      "tool_choice"
+    ],
+    "transport": "HTTP",
+    "warmup": "WebSocket upgrade rejected locally; actual Codex fallback HTTP inference captured on subsequent socket",
+    "response": "capture server closes after receiving inference; no production API called",
+    "authorization_scheme": "Bearer",
+    "account_header_present": true
   }
 }

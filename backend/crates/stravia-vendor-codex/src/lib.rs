@@ -2,6 +2,7 @@ mod allowance;
 mod auth;
 mod codex;
 mod compaction;
+mod lite_history;
 mod media_generation;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
@@ -279,7 +280,10 @@ fn infer(
     };
     let mut session = codex::NativeSession::new(&provider, body_operation);
     session.resolve_identity(host, &provider)?;
-    let attempt = prepare_attempt(&protocol.to_string(), request, &session)?;
+    let mut attempt = prepare_attempt(&protocol.to_string(), request, &mut session, &provider)?;
+    if !websocket {
+        lite_history::stabilize(&session, &mut attempt.body)?;
+    }
     if websocket {
         return codex::infer_websocket(
             host,
@@ -372,13 +376,23 @@ fn requests_previous_response(request: &AiRequest) -> bool {
 fn prepare_attempt(
     protocol: &str,
     mut request: AiRequest,
-    session: &codex::NativeSession,
+    session: &mut codex::NativeSession,
+    provider: &ProviderSnapshot,
 ) -> Result<Attempt, PluginError> {
     let native_tools = codex::encode_tools(&request, codex::BodyOperation::Http);
     // 原生工具只编码一次；通用 codec 仍负责历史与统一控制的协议投影。
     request.tools = None;
     request.parameters.native_tools.clear();
-    let encoded = common::encode_inference_request(protocol, request)?;
+    let encoded = if session.uses_lite_history() {
+        let (encoded, gaps) =
+            stravia_protocol_codec::codec::open_responses::adapter::OpenResponses20260424
+                .encode_request_with_input_gaps(request)
+                .map_err(common::map_request_transform_error)?;
+        session.history_boundaries = lite_history::project_boundaries(provider, session, &gaps)?;
+        encoded
+    } else {
+        common::encode_inference_request(protocol, request)?
+    };
     let mut body = encoded.body;
     body["tools"] = native_tools.into();
     session.project_body(&mut body)?;
@@ -418,12 +432,15 @@ fn discover(
     let mut headers = vec![("version".into(), CLIENT_VERSION.into())];
     codex::append_identity_headers(&provider, &mut headers)?;
     headers.push(("accept".into(), "*/*".into()));
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "GET".into(),
-        url,
-        headers: codex::http_fields(headers),
-        body: Vec::new(),
-    }, &codex::http_options()?)?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "GET".into(),
+            url,
+            headers: codex::http_fields(headers),
+            body: Vec::new(),
+        },
+        &codex::http_options()?,
+    )?;
     ensure_success(&response, "Codex model discovery")?;
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&body)

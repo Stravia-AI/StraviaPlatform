@@ -27,7 +27,9 @@ pub(crate) trait ContinuationLookup: Send + Sync {
     }
 
     /// Retain full replay only after eligibility succeeds, before rewriting the
-    /// provider request. A miss leaves `full_fallback` empty.
+    /// provider request. A miss leaves `full_fallback` empty. When a fallback
+    /// is retained, request items may only be changed by removing a prefix;
+    /// callers project trusted canonical item gaps through that suffix cut.
     async fn prepare(
         &self,
         principal: &Principal,

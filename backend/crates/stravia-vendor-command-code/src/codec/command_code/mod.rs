@@ -136,7 +136,6 @@ impl CommandCodeGenerateV1 {
             "taste": Value::Null,
             "skills": Value::Null,
             "permissionMode": "standard",
-            "mode": "agent",
         });
         body.as_object_mut()
             .expect("envelope is an object")

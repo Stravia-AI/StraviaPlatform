@@ -18,7 +18,10 @@ use tokio::{
     time::timeout,
 };
 
-use super::{body::RequestBody, h2::{H2Settings, connect}};
+use super::{
+    body::RequestBody,
+    h2::{H2Settings, connect},
+};
 
 struct Frame {
     kind: u8,
@@ -30,9 +33,8 @@ struct Frame {
 async fn read_frame(stream: &mut TcpStream) -> Frame {
     let mut header = [0; 9];
     stream.read_exact(&mut header).await.unwrap();
-    let len = (usize::from(header[0]) << 16)
-        | (usize::from(header[1]) << 8)
-        | usize::from(header[2]);
+    let len =
+        (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
     let mut payload = vec![0; len];
     stream.read_exact(&mut payload).await.unwrap();
     Frame {
@@ -54,7 +56,10 @@ async fn configured_settings_and_pseudo_headers_reach_the_wire() {
             stream.read_exact(&mut preface).await.unwrap();
             assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
             // An empty server SETTINGS frame allows the client to start streams.
-            stream.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+            stream
+                .write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
 
             let mut settings = None;
             let mut window = None;
@@ -78,7 +83,14 @@ async fn configured_settings_and_pseudo_headers_reach_the_wire() {
                     }
                     8 if frame.stream == 0 => {
                         assert_eq!(frame.payload.len(), 4);
-                        assert!(window.replace(u32::from_be_bytes(frame.payload.try_into().unwrap()) & 0x7fff_ffff).is_none());
+                        assert!(
+                            window
+                                .replace(
+                                    u32::from_be_bytes(frame.payload.try_into().unwrap())
+                                        & 0x7fff_ffff
+                                )
+                                .is_none()
+                        );
                     }
                     1 => {
                         assert_eq!(frame.stream, 1);
@@ -101,13 +113,17 @@ async fn configured_settings_and_pseudo_headers_reach_the_wire() {
             SettingId::MaxFrameSize,
             SettingId::EnablePush,
             SettingId::MaxConcurrentStreams,
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         let pseudo_header_order: PseudoHeaderOrder = [
             PseudoHeader::Path,
             PseudoHeader::Authority,
             PseudoHeader::Method,
             PseudoHeader::Scheme,
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         let settings = H2Settings {
             setting_config: SettingsConfig {
                 header_table_size: Some(8192),
@@ -126,7 +142,8 @@ async fn configured_settings_and_pseudo_headers_reach_the_wire() {
             ..Default::default()
         };
         let socket = TcpStream::connect(address).await.unwrap();
-        let (mut sender, _peer_settings) = connect(ServiceInput::new(socket), settings).await.unwrap();
+        let (mut sender, _peer_settings) =
+            connect(ServiceInput::new(socket), settings).await.unwrap();
         sender.ready().await.unwrap();
         let request = Request::builder()
             .uri("http://example.test/wire?x=1")
@@ -137,27 +154,52 @@ async fn configured_settings_and_pseudo_headers_reach_the_wire() {
         response.abort();
 
         assert_eq!(settings.len() % 6, 0);
-        let entries: Vec<(u16, u32)> = settings.chunks_exact(6).map(|entry| (
-            u16::from_be_bytes(entry[..2].try_into().unwrap()),
-            u32::from_be_bytes(entry[2..].try_into().unwrap()),
-        )).collect();
-        assert_eq!(entries, vec![
-            (6, 54_321), (4, 100_002), (1, 8192),
-            (5, 32_768), (2, 0), (3, 123),
-        ]);
+        let entries: Vec<(u16, u32)> = settings
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|entry| {
+                (
+                    u16::from_be_bytes(entry[..2].try_into().unwrap()),
+                    u32::from_be_bytes(entry[2..].try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (6, 54_321),
+                (4, 100_002),
+                (1, 8192),
+                (5, 32_768),
+                (2, 0),
+                (3, 123),
+            ]
+        );
         assert_eq!(window, 200_000 - 65_535);
 
         let mut names = Vec::new();
-        Decoder::new(4096).decode(&mut Cursor::new(&mut headers), |header| {
-            names.push(header.name().as_slice().to_vec());
-            ControlFlow::Continue(())
-        }).unwrap();
-        let pseudo_names: Vec<&[u8]> = names.iter().map(Vec::as_slice)
+        Decoder::new(4096)
+            .decode(&mut Cursor::new(&mut headers), |header| {
+                names.push(header.name().as_slice().to_vec());
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        let pseudo_names: Vec<&[u8]> = names
+            .iter()
+            .map(Vec::as_slice)
             .filter(|name| name.starts_with(b":"))
             .collect();
-        assert_eq!(pseudo_names, vec![
-            b":path".as_slice(), b":authority".as_slice(),
-            b":method".as_slice(), b":scheme".as_slice(),
-        ]);
-    }).await.expect("HTTP/2 wire capture timed out");
+        assert_eq!(
+            pseudo_names,
+            vec![
+                b":path".as_slice(),
+                b":authority".as_slice(),
+                b":method".as_slice(),
+                b":scheme".as_slice(),
+            ]
+        );
+    })
+    .await
+    .expect("HTTP/2 wire capture timed out");
 }

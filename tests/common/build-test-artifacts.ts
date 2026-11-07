@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { cpus } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 
 const repository = resolve(import.meta.dir, '../..')
-const preparation = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['patches/cargo/prepare.py'], {
+const preparation = spawnSync('task', ['prepare:crates'], {
   cwd: repository,
   stdio: 'inherit',
 })
@@ -32,6 +32,8 @@ const workspace = [
   'stravia-vendor-manual-contract-fixture',
   '--exclude',
   'stravia-vendor-net-1-0-compat-fixture',
+  '--exclude',
+  'stravia-vendor-state-contract-fixture',
   '--features',
   'stravia-server/test-harness',
 ]
@@ -139,7 +141,10 @@ const signature = createHash('sha256')
       arch: process.arch,
       cpu: cpus()[0]?.model,
       command: plan.command,
-      patchedCrates: ['rustls-0.23.46-shape2', 'rama-http-core-0.4.0-shape1', 'rama-http-types-0.4.0-shape1'].map((crate) => readFileSync(join(repository, '.stravia-patched-crates', crate, '.prepare-stamp.json'), 'utf8')),
+      patchInputs: [
+        'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml',
+        ...readdirSync(join(repository, 'patches')).filter((name) => name.endsWith('.patch') && name.includes('+')).sort().map((name) => `patches/${name}`),
+      ].map((path) => [path, readFileSync(join(repository, path)).toString('base64')]),
       environment: compilerEnvironment,
     }),
   )

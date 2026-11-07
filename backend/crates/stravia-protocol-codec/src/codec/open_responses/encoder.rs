@@ -18,12 +18,21 @@ pub struct ResponsesEncoder;
 
 // Open Responses fields are emitted only from the canonical IR and dated extension.
 impl ResponsesEncoder {
-    pub fn encode_request(&self, mut req: AiRequest) -> Result<(Value, HeaderMap)> {
+    pub fn encode_request(&self, req: AiRequest) -> Result<(Value, HeaderMap)> {
+        self.encode_request_observing_gaps(req, |_| {})
+    }
+
+    pub(super) fn encode_request_observing_gaps(
+        &self,
+        mut req: AiRequest,
+        mut observe_gap: impl FnMut(usize),
+    ) -> Result<(Value, HeaderMap)> {
         req.normalize_parameters();
         validate_target_thinking_control(&req)?;
         let mut input: Vec<Value> = Vec::new();
 
         for mut item in std::mem::take(&mut req.items) {
+            observe_gap(input.len());
             if let Some(native) = take_native_compaction_item(&mut item) {
                 input.push(native);
                 continue;
@@ -166,6 +175,7 @@ impl ResponsesEncoder {
             }
         }
 
+        observe_gap(input.len());
         if input.is_empty() && req.parameters.continuation.is_none() {
             anyhow::bail!("responses request requires input or previous_response_id");
         }

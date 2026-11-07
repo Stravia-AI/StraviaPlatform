@@ -12,7 +12,7 @@ pub(super) fn check(
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
     let mut headers = Fields::new();
     headers.append("accept", b"application/json".to_vec());
-    native_identity::apply(provider, &mut headers)?;
+    native_identity::apply(provider, &mut headers, Operation::ConnectionCheck)?;
     apply_auth(provider, &mut headers);
     headers.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
     let response = host.http_start(

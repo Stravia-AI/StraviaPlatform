@@ -9,12 +9,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use stravia_runtime_contract::CancellationToken;
 use stravia_vendor_runtime::{HostWebSocket, WebSocketMessage};
-use stravia_vendor_sdk::{AiErrorKind, net::{Coding, ConnectRequest, Fields, HttpVersion, Options, Request, WsCompression}};
+use stravia_vendor_sdk::{
+    AiErrorKind, ErrorKind,
+    net::{Coding, ConnectRequest, Fields, HttpVersion, Options, Request, WsCompression},
+};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use super::{
-    MAX_WEBSOCKET_AGE, VendorNetwork, VendorWebSocketPool, bytes_value, ws_message_type, ws_payload,
+    MAX_WEBSOCKET_AGE, VendorNetwork, VendorWebSocketPool, bytes_value, http, ws_message_type,
+    ws_payload,
 };
 use crate::plugin::lifecycle::VendorOperationTracker;
 
@@ -126,13 +130,16 @@ fn network(url: &str, pool: Arc<VendorWebSocketPool>) -> VendorNetwork {
     let operation = VendorOperationTracker::default()
         .begin("websocket-lifetime-test")
         .expect("begin vendor operation");
-    let origin = reqwest::Url::parse(url)
+    let origin = url::Url::parse(url)
         .expect("parse local WebSocket URL")
         .origin()
         .ascii_serialization();
     VendorNetwork::new(
         Arc::new(super::transport::VendorTransport::new()),
-        Arc::new(super::shape::ShapeRegistry::builtin().expect("load shapes")),
+        super::VendorNetworkConfig {
+            shapes: Arc::new(super::shape::ShapeRegistry::builtin().expect("load shapes")),
+            resolver: Arc::new(super::transport::SystemResolver),
+        },
         crate::outbound_proxy::OutboundProxySettings::default(),
         crate::plugin::permissions::NetworkPolicy::compile([
             crate::plugin::permissions::NetworkOrigin::Exact(origin),
@@ -186,6 +193,109 @@ async fn regex_policy_reauthorizes_http_redirect_before_sending() {
         std::io::ErrorKind::WouldBlock,
     );
     task.abort();
+}
+
+#[tokio::test]
+async fn websocket_redirects_preserve_only_negotiation_across_origins() {
+    use tokio::io::AsyncWriteExt;
+    use tungstenite_deflate::handshake::derive_accept_key;
+
+    for compression in [
+        WsCompression::Disabled,
+        WsCompression::Preferred,
+        WsCompression::Required,
+    ] {
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_url = format!("ws://{}/start", source.local_addr().unwrap());
+        let destination_url = format!("ws://{}/final", destination.local_addr().unwrap());
+        let source_task = tokio::spawn({
+            let destination_url = destination_url.clone();
+            async move {
+                let mut requests = Vec::new();
+                for location in ["/same-origin", destination_url.as_str()] {
+                    let (mut socket, _) = source.accept().await.unwrap();
+                    requests.push(capture_request(&mut socket).await.0);
+                    socket.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+                }
+                requests
+            }
+        });
+        let destination_task = tokio::spawn(async move {
+            let (mut socket, _) = destination.accept().await.unwrap();
+            let (head, _) = capture_request(&mut socket).await;
+            let key = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+                .unwrap()
+                .1
+                .trim();
+            let accept = derive_accept_key(key.as_bytes());
+            let extension = if compression == WsCompression::Disabled {
+                ""
+            } else {
+                "Sec-WebSocket-Extensions: permessage-deflate\r\n"
+            };
+            socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: chat\r\n{extension}\r\n").as_bytes()).await.unwrap();
+            head
+        });
+        let mut network = network(&source_url, Arc::new(VendorWebSocketPool::default()));
+        network.origins = crate::plugin::permissions::NetworkPolicy::compile([
+            crate::plugin::permissions::NetworkOrigin::Exact(
+                url::Url::parse(&source_url)
+                    .unwrap()
+                    .origin()
+                    .ascii_serialization(),
+            ),
+            crate::plugin::permissions::NetworkOrigin::Exact(
+                url::Url::parse(&destination_url)
+                    .unwrap()
+                    .origin()
+                    .ascii_serialization(),
+            ),
+        ])
+        .unwrap();
+        let mut fields = Fields::new();
+        fields.append("Authorization", b"Bearer test-secret".to_vec());
+        fields.append("Cookie", b"session=test-secret".to_vec());
+        fields.append("X-Custom", b"private".to_vec());
+        fields.append("sEc-WebSocket-Protocol", b"chat, other".to_vec());
+        if compression != WsCompression::Disabled {
+            fields.append(
+                "sEc-WebSocket-Extensions",
+                b"permessage-deflate; client_max_window_bits".to_vec(),
+            );
+        }
+        let mut options = http1();
+        options.ws_compression(compression).unwrap();
+        let _socket = network
+            .ws_connect(ConnectRequest::new(&source_url).fields(fields), options)
+            .await
+            .expect("redirected handshake succeeds");
+        let source_heads = source_task.await.unwrap();
+        for head in source_heads {
+            let head = head.to_ascii_lowercase();
+            assert!(head.contains("authorization: bearer test-secret\r\n"));
+            assert!(head.contains("cookie: session=test-secret\r\n"));
+            assert!(head.contains("x-custom: private\r\n"));
+        }
+        let head = destination_task.await.unwrap().to_ascii_lowercase();
+        assert!(!head.contains("authorization:"));
+        assert!(!head.contains("cookie:"));
+        assert!(!head.contains("x-custom:"));
+        assert!(head.contains("sec-websocket-protocol: chat, other\r\n"));
+        assert_eq!(
+            head.contains(
+                "sec-websocket-extensions: permessage-deflate; client_max_window_bits\r\n"
+            ),
+            compression != WsCompression::Disabled
+        );
+        assert!(head.contains(&format!(
+            "host: {}\r\n",
+            url::Url::parse(&destination_url).unwrap().authority()
+        )));
+    }
 }
 
 #[tokio::test]
@@ -333,7 +443,9 @@ async fn require_tip_with_age(
         options.reuse_max_age(Duration::from_millis(age)).unwrap();
     }
     let mut fields = Fields::new();
-    for (name, value) in headers { fields.append(name, value.into_bytes()); }
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
     network
         .ws_connect(ConnectRequest::new(url).fields(fields), options)
         .await
@@ -774,9 +886,14 @@ async fn continuation_does_not_cross_scope_affinity_or_credentials() {
     let network = network(&server.url, Arc::clone(&pool));
     let headers: Vec<(String, String)> = vec![("authorization".into(), "Bearer first".into())];
     let mut fields = Fields::new();
-    for (name, value) in &headers { fields.append(name.clone(), value.as_bytes().to_vec()); }
+    for (name, value) in &headers {
+        fields.append(name.clone(), value.as_bytes().to_vec());
+    }
     let socket = network
-        .ws_connect(ConnectRequest::new(&server.url).fields(fields), Options::new())
+        .ws_connect(
+            ConnectRequest::new(&server.url).fields(fields),
+            Options::new(),
+        )
         .await
         .expect("open credential-bound socket");
     complete_and_park(&socket, "response", Some("response")).await;
@@ -902,11 +1019,27 @@ async fn read_all(response: &dyn stravia_vendor_runtime::HostHttpResponse) -> Ve
 async fn compression_policy_isolates_pool_checkout_and_continuation() {
     let server = test_server().await;
     let network = network(&server.url, Arc::new(VendorWebSocketPool::default()));
-    for (compression, tip) in [(WsCompression::Disabled, "disabled"), (WsCompression::Preferred, "preferred")] {
+    for (compression, tip) in [
+        (WsCompression::Disabled, "disabled"),
+        (WsCompression::Preferred, "preferred"),
+    ] {
+        let mut fields = Fields::new();
+        if compression == WsCompression::Preferred {
+            fields.append(
+                "Sec-WebSocket-Extensions",
+                b"permessage-deflate; client_max_window_bits".to_vec(),
+            );
+        }
         for _ in 0..2 {
             let mut options = Options::new();
             options.ws_compression(compression).unwrap();
-            let socket = network.ws_connect(ConnectRequest::new(&server.url), options).await.unwrap();
+            let socket = network
+                .ws_connect(
+                    ConnectRequest::new(&server.url).fields(fields.clone()),
+                    options,
+                )
+                .await
+                .unwrap();
             complete_and_park(&socket, tip, Some(tip)).await;
         }
     }
@@ -914,7 +1047,16 @@ async fn compression_policy_isolates_pool_checkout_and_continuation() {
     let mut options = Options::new();
     options.ws_compression(WsCompression::Required).unwrap();
     options.continuation("preferred").unwrap();
-    let error = network.ws_connect(ConnectRequest::new(&server.url), options).await.err().expect("compression policy cannot cross a socket tip");
+    let mut fields = Fields::new();
+    fields.append(
+        "Sec-WebSocket-Extensions",
+        b"permessage-deflate; client_max_window_bits".to_vec(),
+    );
+    let error = network
+        .ws_connect(ConnectRequest::new(&server.url).fields(fields), options)
+        .await
+        .err()
+        .expect("compression policy cannot cross a socket tip");
     assert_local_miss(error);
     assert_eq!(server.connections.load(Ordering::SeqCst), 2);
 }
@@ -924,15 +1066,35 @@ async fn websocket_extension_policy_is_validated_before_pool_reuse() {
     let server = test_server().await;
     let network = network(&server.url, Arc::new(VendorWebSocketPool::default()));
     let mut fields = Fields::new();
-    fields.append("Sec-WebSocket-Extensions", b"permessage-deflate; client_max_window_bits".to_vec());
+    fields.append(
+        "Sec-WebSocket-Extensions",
+        b"permessage-deflate; client_max_window_bits".to_vec(),
+    );
     let mut preferred = Options::new();
     preferred.ws_compression(WsCompression::Preferred).unwrap();
-    let socket = network.ws_connect(ConnectRequest::new(&server.url).fields(fields.clone()), preferred.clone()).await.unwrap();
+    let socket = network
+        .ws_connect(
+            ConnectRequest::new(&server.url).fields(fields.clone()),
+            preferred.clone(),
+        )
+        .await
+        .unwrap();
     complete_and_park(&socket, "offered", Some("offered")).await;
     let mut disabled = Options::new();
     disabled.ws_compression(WsCompression::Disabled).unwrap();
-    assert!(network.ws_connect(ConnectRequest::new(&server.url).fields(fields.clone()), disabled).await.is_err());
-    let socket = network.ws_connect(ConnectRequest::new(&server.url).fields(fields), preferred).await.unwrap();
+    assert!(
+        network
+            .ws_connect(
+                ConnectRequest::new(&server.url).fields(fields.clone()),
+                disabled
+            )
+            .await
+            .is_err()
+    );
+    let socket = network
+        .ws_connect(ConnectRequest::new(&server.url).fields(fields), preferred)
+        .await
+        .unwrap();
     complete_and_park(&socket, "reused", None).await;
     assert_eq!(server.connections.load(Ordering::SeqCst), 1);
 }
@@ -948,9 +1110,12 @@ async fn capture_request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>
         assert!(bytes.len() < 65536, "request head exceeds test bound");
     }
     let head = String::from_utf8(bytes).unwrap();
-    let length = head.lines().filter_map(|line| line.split_once(':'))
+    let length = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .map(|(_, value)| value.trim().parse::<usize>().unwrap()).unwrap_or(0);
+        .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+        .unwrap_or(0);
     let mut body = vec![0; length];
     socket.read_exact(&mut body).await.unwrap();
     (head, body)
@@ -970,7 +1135,10 @@ async fn http_wire_preserves_accept_absence_order_duplicates_and_framing_slots()
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = capture_request(&mut socket).await;
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .await
+            .unwrap();
         request
     });
     let url = format!("http://{address}/ordered");
@@ -982,11 +1150,23 @@ async fn http_wire_preserves_accept_absence_order_duplicates_and_framing_slots()
     fields.slot("Content-Length");
     fields.append("x-repeat", b"second".to_vec());
     fields.append("X-Last", b"end".to_vec());
-    let response = network.http_start(Request::new("POST", url).fields(fields).body(b"abc".to_vec()), http1()).unwrap();
+    let response = network
+        .http_start(
+            Request::new("POST", url)
+                .fields(fields)
+                .body(b"abc".to_vec()),
+            http1(),
+        )
+        .unwrap();
     assert_eq!(response.status().await.unwrap(), 200);
     assert_eq!(read_all(response.as_ref()).await, b"OK");
     let (head, body) = server.await.unwrap();
-    assert_eq!(head, format!("POST /ordered HTTP/1.1\r\nX-First: one\r\nHost: {address}\r\nX-Repeat: first\r\nContent-Length: 3\r\nx-repeat: second\r\nX-Last: end\r\n\r\n"));
+    assert_eq!(
+        head,
+        format!(
+            "POST /ordered HTTP/1.1\r\nX-First: one\r\nHost: {address}\r\nX-Repeat: first\r\nContent-Length: 3\r\nx-repeat: second\r\nX-Last: end\r\n\r\n"
+        )
+    );
     assert_eq!(body, b"abc");
 }
 
@@ -998,7 +1178,16 @@ async fn explicit_accept_and_compression_are_sent_and_decoded() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = capture_request(&mut socket).await;
-        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n", GZIP_BODY.len()).as_bytes()).await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                    GZIP_BODY.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
         socket.write_all(GZIP_BODY).await.unwrap();
         request
     });
@@ -1009,21 +1198,36 @@ async fn explicit_accept_and_compression_are_sent_and_decoded() {
     fields.append("Accept-Encoding", b"gzip".to_vec());
     let mut options = http1();
     options.response_decoding(&[Coding::Gzip]).unwrap();
-    let response = network.http_start(Request::new("GET", url).fields(fields), options).unwrap();
+    let response = network
+        .http_start(Request::new("GET", url).fields(fields), options)
+        .unwrap();
     assert_eq!(response.status().await.unwrap(), 200);
     assert_eq!(read_all(response.as_ref()).await, b"decoded upstream body");
     let headers = response.headers().await.unwrap();
-    assert!(!headers.iter().any(|f| f.name.eq_ignore_ascii_case("content-encoding")));
+    assert!(
+        !headers
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("content-encoding"))
+    );
     let (head, _) = server.await.unwrap();
-    assert!(head.contains("Accept: application/json\r\nAccept-Encoding: gzip\r\n"), "{head:?}");
+    assert!(
+        head.contains("Accept: application/json\r\nAccept-Encoding: gzip\r\n"),
+        "{head:?}"
+    );
 }
 
 #[tokio::test]
 async fn explicit_accept_encoding_order_and_duplicates_are_not_rewritten() {
     use tokio::io::AsyncWriteExt;
     for (value, codings) in [
-        ("br, gzip, deflate", vec![Coding::Br, Coding::Gzip, Coding::Deflate]),
-        ("zstd, br, zstd, gzip", vec![Coding::Zstd, Coding::Br, Coding::Gzip]),
+        (
+            "br, gzip, deflate",
+            vec![Coding::Br, Coding::Gzip, Coding::Deflate],
+        ),
+        (
+            "zstd, br, zstd, gzip",
+            vec![Coding::Zstd, Coding::Br, Coding::Gzip],
+        ),
         ("identity", Vec::new()),
     ] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1031,7 +1235,10 @@ async fn explicit_accept_encoding_order_and_duplicates_are_not_rewritten() {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = capture_request(&mut socket).await;
-            socket.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
             request
         });
         let network = network(&url, Arc::new(VendorWebSocketPool::default()));
@@ -1039,39 +1246,83 @@ async fn explicit_accept_encoding_order_and_duplicates_are_not_rewritten() {
         fields.append("Accept-Encoding", value.as_bytes().to_vec());
         let mut options = http1();
         options.response_decoding(&codings).unwrap();
-        let response = network.http_start(Request::new("GET", url).fields(fields), options).unwrap();
+        let response = network
+            .http_start(Request::new("GET", url).fields(fields), options)
+            .unwrap();
         assert_eq!(response.status().await.unwrap(), 204);
         let (head, _) = server.await.unwrap();
-        assert!(head.contains(&format!("Accept-Encoding: {value}\r\n")), "{head:?}");
-        assert_eq!(head.to_ascii_lowercase().matches("accept-encoding:").count(), 1);
+        assert!(
+            head.contains(&format!("Accept-Encoding: {value}\r\n")),
+            "{head:?}"
+        );
+        assert_eq!(
+            head.to_ascii_lowercase()
+                .matches("accept-encoding:")
+                .count(),
+            1
+        );
     }
 }
 
 #[tokio::test]
 async fn compression_declarations_are_required_and_wire_response_can_remain_encoded() {
     let app = Router::new()
-        .route("/gzip", get(|| async { ([ ("content-encoding", "gzip") ], GZIP_BODY) }))
-        .route("/unknown", get(|| async { ([ ("content-encoding", "custom") ], GZIP_BODY) }));
+        .route(
+            "/gzip",
+            get(|| async { ([("content-encoding", "gzip")], GZIP_BODY) }),
+        )
+        .route(
+            "/unknown",
+            get(|| async { ([("content-encoding", "custom")], GZIP_BODY) }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/gzip", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let network = network(&url, Arc::new(VendorWebSocketPool::default()));
-    let plain = network.http_start(Request::new("GET", &url), http1()).unwrap();
+    let plain = network
+        .http_start(Request::new("GET", &url), http1())
+        .unwrap();
     assert_eq!(read_all(plain.as_ref()).await, GZIP_BODY);
     let unknown_url = url.replace("/gzip", "/unknown");
-    let unknown = network.http_start(Request::new("GET", unknown_url), http1()).unwrap();
+    let unknown = network
+        .http_start(Request::new("GET", unknown_url), http1())
+        .unwrap();
     let headers = unknown.headers().await.unwrap();
-    assert!(headers.iter().any(|f| f.name.eq_ignore_ascii_case("content-encoding") && f.bytes == b"custom"));
+    assert!(
+        headers
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("content-encoding") && f.bytes == b"custom")
+    );
     assert_eq!(read_all(unknown.as_ref()).await, GZIP_BODY);
     let mut decoding = http1();
     decoding.response_decoding(&[Coding::Gzip]).unwrap();
-    assert!(network.http_start(Request::new("GET", &url), decoding).is_err());
+    assert!(
+        network
+            .http_start(Request::new("GET", &url), decoding)
+            .is_err()
+    );
     let mut encoding = http1();
     encoding.request_encoding(Coding::Gzip).unwrap();
-    assert!(network.http_start(Request::new("POST", &url).body(b"body".to_vec()), encoding.clone()).is_err());
+    assert!(
+        network
+            .http_start(
+                Request::new("POST", &url).body(b"body".to_vec()),
+                encoding.clone()
+            )
+            .is_err()
+    );
     let mut fields = Fields::new();
     fields.append("Content-Encoding", b"br".to_vec());
-    assert!(network.http_start(Request::new("POST", &url).fields(fields).body(b"body".to_vec()), encoding).is_err());
+    assert!(
+        network
+            .http_start(
+                Request::new("POST", &url)
+                    .fields(fields)
+                    .body(b"body".to_vec()),
+                encoding
+            )
+            .is_err()
+    );
     server.abort();
 }
 
@@ -1084,8 +1335,12 @@ async fn fixed_length_redirects_preserve_body_and_rewrite_removes_body_headers()
             let (parts, body) = request.into_parts();
             let path = parts.uri.path().to_owned();
             let body = axum::body::to_bytes(body, 1024).await.unwrap();
-            if path == "/temporary" { return axum::response::Redirect::temporary("/received").into_response(); }
-            if path == "/see-other" { return axum::response::Redirect::to("/received").into_response(); }
+            if path == "/temporary" {
+                return axum::response::Redirect::temporary("/received").into_response();
+            }
+            if path == "/see-other" {
+                return axum::response::Redirect::to("/received").into_response();
+            }
             tx.send((parts, body)).await.unwrap();
             axum::http::StatusCode::NO_CONTENT.into_response()
         }
@@ -1097,7 +1352,14 @@ async fn fixed_length_redirects_preserve_body_and_rewrite_removes_body_headers()
     for path in ["temporary", "see-other"] {
         let mut fields = Fields::new();
         fields.append("Content-Type", b"application/json".to_vec());
-        let response = network.http_start(Request::new("POST", format!("{base}/{path}")).fields(fields).body(b"payload".to_vec()), http1()).unwrap();
+        let response = network
+            .http_start(
+                Request::new("POST", format!("{base}/{path}"))
+                    .fields(fields)
+                    .body(b"payload".to_vec()),
+                http1(),
+            )
+            .unwrap();
         assert_eq!(response.status().await.unwrap(), 204);
         let (parts, body) = rx.recv().await.unwrap();
         if path == "temporary" {
@@ -1118,75 +1380,283 @@ async fn fixed_length_redirects_preserve_body_and_rewrite_removes_body_headers()
 async fn cross_origin_redirect_with_body_is_rejected_before_destination_io() {
     let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let destination_url = format!("http://{}/received", destination.local_addr().unwrap());
-    let app = Router::new().route("/", axum::routing::post(move || {
-        let destination_url = destination_url.clone();
-        async move { axum::response::Redirect::temporary(&destination_url) }
-    }));
+    let app = Router::new().route(
+        "/",
+        axum::routing::post(move || {
+            let destination_url = destination_url.clone();
+            async move { axum::response::Redirect::temporary(&destination_url) }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let destination_origin = format!("http://{}", destination.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut network = network(&url, Arc::new(VendorWebSocketPool::default()));
-    let source_origin = reqwest::Url::parse(&url).unwrap().origin().ascii_serialization();
+    let source_origin = reqwest::Url::parse(&url)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
     network.origins = crate::plugin::permissions::NetworkPolicy::compile([
         crate::plugin::permissions::NetworkOrigin::Exact(source_origin),
         crate::plugin::permissions::NetworkOrigin::Exact(destination_origin),
-    ]).unwrap();
-    let response = network.http_start(Request::new("POST", url).body(b"private".to_vec()), http1()).unwrap();
+    ])
+    .unwrap();
+    let response = network
+        .http_start(Request::new("POST", url).body(b"private".to_vec()), http1())
+        .unwrap();
     assert!(response.status().await.is_err());
-    assert_eq!(destination.into_std().unwrap().accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        destination.into_std().unwrap().accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     server.abort();
+}
+
+#[tokio::test]
+async fn invalid_request_fields_fail_before_connecting() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let network = network(&url, Arc::new(VendorWebSocketPool::default()));
+    for (name, value) in [
+        ("bad name", &b"x"[..]),
+        ("x-header", &b"bad\r\nvalue"[..]),
+        ("Proxy-Authorization", &b"secret"[..]),
+        ("Host", &b"other.example"[..]),
+        ("Content-Length", &b"99"[..]),
+    ] {
+        let mut fields = Fields::new();
+        fields.append(name, value.to_vec());
+        let failure = match network.http_start(
+            Request::new("POST", &url)
+                .fields(fields)
+                .body(b"body".to_vec()),
+            http1(),
+        ) {
+            Err(failure) => failure,
+            Ok(_) => panic!("invalid {name} accepted"),
+        };
+        assert!(matches!(failure.kind, ErrorKind::Invalid), "{name}");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn invalid_websocket_fields_fail_before_connecting() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/", listener.local_addr().unwrap());
+    let network = network(&url, Arc::new(VendorWebSocketPool::default()));
+    for (name, value) in [
+        ("Host", "other.example"),
+        ("Proxy-Connection", "close"),
+        ("Sec-WebSocket-Key", "not-a-slot"),
+    ] {
+        let mut fields = Fields::new();
+        fields.append(name, value.as_bytes().to_vec());
+        let failure = match network
+            .ws_connect(ConnectRequest::new(&url).fields(fields), Options::new())
+            .await
+        {
+            Err(failure) => failure,
+            Ok(_) => panic!("invalid {name} accepted"),
+        };
+        assert!(matches!(failure.kind, ErrorKind::Invalid), "{name}");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn compressed_content_length_is_checked_against_wire_body() {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let network = network(&url, Arc::new(VendorWebSocketPool::default()));
+    let body = b"body to compress".to_vec();
+    let mut options = http1();
+    options.request_encoding(Coding::Gzip).unwrap();
+    let encoded = http::encode(body.clone(), &options).await.unwrap();
+    assert_ne!(encoded.len(), body.len());
+
+    let mut malformed = Fields::new();
+    malformed.append("Content-Encoding", b"gzip".to_vec());
+    malformed.append("Content-Length", b"not-a-length".to_vec());
+    let failure = match network.http_start(
+        Request::new("POST", &url)
+            .fields(malformed)
+            .body(body.clone()),
+        options.clone(),
+    ) {
+        Err(failure) => failure,
+        Ok(_) => panic!("malformed length admitted while awaiting content encoding"),
+    };
+    assert!(matches!(failure.kind, ErrorKind::Invalid));
+
+    let mut fields = Fields::new();
+    fields.append("Content-Encoding", b"gzip".to_vec());
+    fields.append("Content-Length", body.len().to_string().into_bytes());
+    let response = network
+        .http_start(
+            Request::new("POST", &url).fields(fields).body(body.clone()),
+            options.clone(),
+        )
+        .unwrap();
+    let failure = match response.status().await {
+        Err(failure) => failure,
+        Ok(_) => panic!("bad encoded length accepted"),
+    };
+    assert!(matches!(failure.kind, ErrorKind::Invalid));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = capture_request(&mut socket).await;
+        socket
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .await
+            .unwrap();
+        request
+    });
+    let mut fields = Fields::new();
+    fields.append("Content-Encoding", b"gzip".to_vec());
+    fields.append("Content-Length", encoded.len().to_string().into_bytes());
+    let response = network
+        .http_start(
+            Request::new("POST", &url).fields(fields).body(body),
+            options,
+        )
+        .unwrap();
+    assert_eq!(response.status().await.unwrap(), 204);
+    let (_, wire_body) = server.await.unwrap();
+    assert_eq!(wire_body, encoded.as_ref());
 }
 
 #[tokio::test]
 async fn chunked_wire_framing_and_invalid_header_combinations() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    for payload in [Vec::new(), (0..=255).cycle().take(128 * 1024 + 19).collect::<Vec<u8>>()] {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/chunked", listener.local_addr().unwrap());
-    let network = network(&url, Arc::new(VendorWebSocketPool::default()));
-    for invalid in [vec![("Transfer-Encoding", "gzip")], vec![("Transfer-Encoding", "chunked"), ("Content-Length", "7")], vec![("Transfer-Encoding", "chunked"), ("transfer-encoding", "chunked")]] {
-        let mut fields = Fields::new();
-        for (name, value) in invalid { fields.append(name, value.as_bytes().to_vec()); }
-        let response = network.http_start(Request::new("POST", &url).fields(fields).body(b"payload".to_vec()), http1()).unwrap();
-        assert!(response.status().await.is_err());
-    }
-    let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.unwrap();
-        let mut socket = BufReader::new(socket);
-        let mut line = String::new();
-        let mut head = String::new();
-        loop {
-            line.clear();
-            socket.read_line(&mut line).await.unwrap();
-            head.push_str(&line);
-            if line == "\r\n" { break; }
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        for (payload, encoding) in [
+            (Vec::new(), ""),
+            (Vec::new(), "chunked"),
+            (
+                (0..=255).cycle().take(128 * 1024 + 19).collect::<Vec<u8>>(),
+                "",
+            ),
+            (
+                (0..=255).cycle().take(128 * 1024 + 19).collect::<Vec<u8>>(),
+                "chunked",
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/chunked", listener.local_addr().unwrap());
+            let network = network(&url, Arc::new(VendorWebSocketPool::default()));
+            for invalid in [
+                vec![("Transfer-Encoding", "gzip")],
+                vec![("Transfer-Encoding", " ")],
+                vec![("Transfer-Encoding", "chunked"), ("Content-Length", "7")],
+                vec![("Transfer-Encoding", ""), ("Content-Length", "7")],
+                vec![
+                    ("Transfer-Encoding", "chunked"),
+                    ("transfer-encoding", "chunked"),
+                ],
+            ] {
+                let mut fields = Fields::new();
+                for (name, value) in invalid {
+                    fields.append(name, value.as_bytes().to_vec());
+                }
+                let failure = match network.http_start(
+                    Request::new("POST", &url)
+                        .fields(fields)
+                        .body(b"payload".to_vec()),
+                    http1(),
+                ) {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("invalid fields accepted"),
+                };
+                assert!(matches!(failure.kind, ErrorKind::Invalid));
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(10), listener.accept())
+                        .await
+                        .is_err()
+                );
+            }
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut line = String::new();
+                let mut head = String::new();
+                loop {
+                    line.clear();
+                    assert_ne!(
+                        socket.read_line(&mut line).await.unwrap(),
+                        0,
+                        "EOF before end of request head"
+                    );
+                    head.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut body = Vec::new();
+                loop {
+                    line.clear();
+                    assert_ne!(
+                        socket.read_line(&mut line).await.unwrap(),
+                        0,
+                        "EOF before final chunk"
+                    );
+                    let size = usize::from_str_radix(line.trim(), 16).unwrap();
+                    let start = body.len();
+                    body.resize(start + size, 0);
+                    socket.read_exact(&mut body[start..]).await.unwrap();
+                    let mut crlf = [0; 2];
+                    socket.read_exact(&mut crlf).await.unwrap();
+                    assert_eq!(&crlf, b"\r\n");
+                    if size == 0 {
+                        break;
+                    }
+                }
+                socket
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                    .await
+                    .unwrap();
+                (head, body)
+            });
+            let mut fields = Fields::new();
+            fields.append("X-Before", b"one".to_vec());
+            fields.append("tRaNsFeR-EnCoDiNg", encoding.as_bytes().to_vec());
+            fields.append("x-After", b"two".to_vec());
+            let response = network
+                .http_start(
+                    Request::new("POST", url)
+                        .fields(fields)
+                        .body(payload.clone()),
+                    http1(),
+                )
+                .unwrap();
+            assert_eq!(response.status().await.unwrap(), 204);
+            let (head, body) = server.await.unwrap();
+            assert!(
+                head.contains("X-Before: one\r\ntRaNsFeR-EnCoDiNg: chunked\r\nx-After: two\r\n"),
+                "{head:?}"
+            );
+            assert!(!head.to_ascii_lowercase().contains("content-length:"));
+            assert_eq!(body, payload);
         }
-        let mut body = Vec::new();
-        loop {
-            line.clear();
-            socket.read_line(&mut line).await.unwrap();
-            let size = usize::from_str_radix(line.trim(), 16).unwrap();
-            let start = body.len();
-            body.resize(start + size, 0);
-            socket.read_exact(&mut body[start..]).await.unwrap();
-            let mut crlf = [0; 2];
-            socket.read_exact(&mut crlf).await.unwrap();
-            assert_eq!(&crlf, b"\r\n");
-            if size == 0 { break; }
-        }
-        socket.get_mut().write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
-        (head, body)
-    });
-    let mut fields = Fields::new();
-    fields.append("Transfer-Encoding", b"chunked".to_vec());
-    let response = network.http_start(Request::new("POST", url).fields(fields).body(payload.clone()), http1()).unwrap();
-    assert_eq!(response.status().await.unwrap(), 204);
-    let (head, body) = server.await.unwrap();
-    assert!(head.to_ascii_lowercase().contains("transfer-encoding: chunked\r\n"));
-    assert!(!head.to_ascii_lowercase().contains("content-length:"));
-    assert_eq!(body, payload);
-    }
+    })
+    .await
+    .expect("chunked request did not complete");
 }
 
 #[tokio::test]
@@ -1194,12 +1664,28 @@ async fn chunked_redirect_preserves_encoded_body_or_removes_all_body_headers() {
     use tokio::io::AsyncReadExt;
     let (tx, mut rx) = mpsc::channel(2);
     let app = Router::new()
-        .route("/temporary", axum::routing::post(|| async { axum::response::Redirect::temporary("/received") }))
-        .route("/see-other", axum::routing::post(|| async { axum::response::Redirect::to("/received") }))
-        .route("/received", axum::routing::any(move |method: axum::http::Method, headers: axum::http::HeaderMap, body: bytes::Bytes| {
-            let tx = tx.clone();
-            async move { tx.send((method, headers, body)).await.unwrap(); axum::http::StatusCode::NO_CONTENT }
-        }));
+        .route(
+            "/temporary",
+            axum::routing::post(|| async { axum::response::Redirect::temporary("/received") }),
+        )
+        .route(
+            "/see-other",
+            axum::routing::post(|| async { axum::response::Redirect::to("/received") }),
+        )
+        .route(
+            "/received",
+            axum::routing::any(
+                move |method: axum::http::Method,
+                      headers: axum::http::HeaderMap,
+                      body: bytes::Bytes| {
+                    let tx = tx.clone();
+                    async move {
+                        tx.send((method, headers, body)).await.unwrap();
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1212,7 +1698,14 @@ async fn chunked_redirect_preserves_encoded_body_or_removes_all_body_headers() {
         fields.append("Content-Encoding", b"gzip".to_vec());
         let mut options = http1();
         options.request_encoding(Coding::Gzip).unwrap();
-        let response = network.http_start(Request::new("POST", format!("{base}/{path}")).fields(fields).body(original.to_vec()), options).unwrap();
+        let response = network
+            .http_start(
+                Request::new("POST", format!("{base}/{path}"))
+                    .fields(fields)
+                    .body(original.to_vec()),
+                options,
+            )
+            .unwrap();
         assert_eq!(response.status().await.unwrap(), 204);
         let (method, headers, body) = rx.recv().await.unwrap();
         if path == "temporary" {
@@ -1221,7 +1714,10 @@ async fn chunked_redirect_preserves_encoded_body_or_removes_all_body_headers() {
             assert!(!headers.contains_key("content-length"));
             assert_eq!(headers["content-encoding"], "gzip");
             let mut decoded = Vec::new();
-            async_compression::tokio::bufread::GzipDecoder::new(body.as_ref()).read_to_end(&mut decoded).await.unwrap();
+            async_compression::tokio::bufread::GzipDecoder::new(body.as_ref())
+                .read_to_end(&mut decoded)
+                .await
+                .unwrap();
             assert_eq!(decoded, original);
         } else {
             assert_eq!(method, axum::http::Method::GET);
@@ -1239,11 +1735,20 @@ async fn gzip_request_encoding_survives_a_307_redirect() {
     use tokio::io::AsyncReadExt;
     let (tx, mut rx) = mpsc::channel(1);
     let app = Router::new()
-        .route("/redirect", axum::routing::post(|| async { axum::response::Redirect::temporary("/received") }))
-        .route("/received", axum::routing::post(move |headers: axum::http::HeaderMap, body: bytes::Bytes| {
-            let tx = tx.clone();
-            async move { tx.send((headers, body)).await.unwrap(); axum::http::StatusCode::NO_CONTENT }
-        }));
+        .route(
+            "/redirect",
+            axum::routing::post(|| async { axum::response::Redirect::temporary("/received") }),
+        )
+        .route(
+            "/received",
+            axum::routing::post(move |headers: axum::http::HeaderMap, body: bytes::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    tx.send((headers, body)).await.unwrap();
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1252,12 +1757,22 @@ async fn gzip_request_encoding_survives_a_307_redirect() {
     fields.append("Content-Encoding", b"gzip".to_vec());
     let mut options = http1();
     options.request_encoding(Coding::Gzip).unwrap();
-    let response = network.http_start(Request::new("POST", format!("{base}/redirect")).fields(fields).body(b"replay this body".to_vec()), options).unwrap();
+    let response = network
+        .http_start(
+            Request::new("POST", format!("{base}/redirect"))
+                .fields(fields)
+                .body(b"replay this body".to_vec()),
+            options,
+        )
+        .unwrap();
     assert_eq!(response.status().await.unwrap(), 204);
     let (headers, body) = rx.recv().await.unwrap();
     assert_eq!(headers["content-encoding"], "gzip");
     let mut decoded = Vec::new();
-    async_compression::tokio::bufread::GzipDecoder::new(body.as_ref()).read_to_end(&mut decoded).await.unwrap();
+    async_compression::tokio::bufread::GzipDecoder::new(body.as_ref())
+        .read_to_end(&mut decoded)
+        .await
+        .unwrap();
     assert_eq!(decoded, b"replay this body");
     server.abort();
 }
@@ -1265,8 +1780,19 @@ async fn gzip_request_encoding_survives_a_307_redirect() {
 #[tokio::test]
 async fn decoded_response_rejects_unknown_and_truncated_codings() {
     let app = Router::new()
-        .route("/unknown", get(|| async { ([ ("content-encoding", "custom") ], GZIP_BODY) }))
-        .route("/truncated", get(|| async { ([ ("content-encoding", "gzip") ], &GZIP_BODY[..GZIP_BODY.len() - 5]) }));
+        .route(
+            "/unknown",
+            get(|| async { ([("content-encoding", "custom")], GZIP_BODY) }),
+        )
+        .route(
+            "/truncated",
+            get(|| async {
+                (
+                    [("content-encoding", "gzip")],
+                    &GZIP_BODY[..GZIP_BODY.len() - 5],
+                )
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1275,9 +1801,19 @@ async fn decoded_response_rejects_unknown_and_truncated_codings() {
     fields.append("Accept-Encoding", b"gzip".to_vec());
     let mut options = http1();
     options.response_decoding(&[Coding::Gzip]).unwrap();
-    let unknown = network.http_start(Request::new("GET", format!("{base}/unknown")).fields(fields.clone()), options.clone()).unwrap();
+    let unknown = network
+        .http_start(
+            Request::new("GET", format!("{base}/unknown")).fields(fields.clone()),
+            options.clone(),
+        )
+        .unwrap();
     assert!(unknown.status().await.is_err());
-    let truncated = network.http_start(Request::new("GET", format!("{base}/truncated")).fields(fields), options).unwrap();
+    let truncated = network
+        .http_start(
+            Request::new("GET", format!("{base}/truncated")).fields(fields),
+            options,
+        )
+        .unwrap();
     assert_eq!(truncated.status().await.unwrap(), 200);
     loop {
         match truncated.read_body().await {
@@ -1297,10 +1833,13 @@ async fn gzip_response_is_decoded_in_bounded_chunks() {
     encoder.write_all(&expected).await.unwrap();
     encoder.shutdown().await.unwrap();
     let compressed = encoder.into_inner();
-    let app = Router::new().route("/", get(move || {
-        let compressed = compressed.clone();
-        async move { ([ ("content-encoding", "gzip") ], compressed) }
-    }));
+    let app = Router::new().route(
+        "/",
+        get(move || {
+            let compressed = compressed.clone();
+            async move { ([("content-encoding", "gzip")], compressed) }
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1309,7 +1848,9 @@ async fn gzip_response_is_decoded_in_bounded_chunks() {
     fields.append("Accept-Encoding", b"gzip".to_vec());
     let mut options = http1();
     options.response_decoding(&[Coding::Gzip]).unwrap();
-    let response = network.http_start(Request::new("GET", url).fields(fields), options).unwrap();
+    let response = network
+        .http_start(Request::new("GET", url).fields(fields), options)
+        .unwrap();
     let mut decoded = Vec::new();
     let mut chunks = 0;
     while let Some(chunk) = response.read_body().await.unwrap() {
@@ -1329,16 +1870,36 @@ async fn host_validates_options_before_http_or_websocket_io() {
     let url = format!("http://{address}/");
     let host_network = network(&url, Arc::new(VendorWebSocketPool::default()));
     assert!(host_network.validate_net_option("shape", "default").is_ok());
-    for (key, value) in [("shape", "does-not-exist"), ("http.version", "http3"), ("ws.reuse-max-age-millis", "18446744073709551616"), ("future.option", "x")] {
-        assert!(host_network.validate_net_option(key, value).is_err(), "{key}={value}");
+    for (key, value) in [
+        ("shape", "does-not-exist"),
+        ("http.version", "http3"),
+        ("ws.reuse-max-age-millis", "18446744073709551616"),
+        ("future.option", "x"),
+    ] {
+        assert!(
+            host_network.validate_net_option(key, value).is_err(),
+            "{key}={value}"
+        );
     }
     let mut options = Options::new();
     options.set("future.option", "x").unwrap();
-    assert!(host_network.http_start(Request::new("GET", &url), options.clone()).is_err());
+    assert!(
+        host_network
+            .http_start(Request::new("GET", &url), options.clone())
+            .is_err()
+    );
     let ws_url = format!("ws://{address}/");
     let ws_network = network(&ws_url, Arc::new(VendorWebSocketPool::default()));
-    assert!(ws_network.ws_connect(ConnectRequest::new(ws_url), options).await.is_err());
-    assert_eq!(listener.into_std().unwrap().accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        ws_network
+            .ws_connect(ConnectRequest::new(ws_url), options)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        listener.into_std().unwrap().accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[tokio::test]
@@ -1353,12 +1914,24 @@ async fn cancellation_interrupts_pending_http_response() {
         let _ = seen_tx.send(());
         std::future::pending::<()>().await;
     });
-    let response = network.http_start(Request::new("GET", url), http1()).unwrap();
+    let response = network
+        .http_start(Request::new("GET", url), http1())
+        .unwrap();
     let waiting = tokio::spawn(async move { response.status().await });
-    tokio::time::timeout(Duration::from_secs(2), seen_rx).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), seen_rx)
+        .await
+        .unwrap()
+        .unwrap();
     network.cancellation.cancel();
-    let error = tokio::time::timeout(Duration::from_secs(2), waiting).await.unwrap().unwrap().unwrap_err();
-    assert!(matches!(error.kind, stravia_vendor_sdk::ErrorKind::Cancelled));
+    let error = tokio::time::timeout(Duration::from_secs(2), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error.kind,
+        stravia_vendor_sdk::ErrorKind::Cancelled
+    ));
     server.abort();
 }
 

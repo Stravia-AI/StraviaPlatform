@@ -768,12 +768,13 @@ impl ModelLegConsume {
             LegFlow::Faulted => return LegAdvance::Aborted,
             LegFlow::Failed(failure) => return LegAdvance::Failed(failure),
         }
-        if let Err(failure) = continuation
+        let history_boundary_gap = match continuation
             .finish(&self.completion, ledger, Arc::make_mut(request), run, phase)
             .await
         {
-            return LegAdvance::Failed(LegFailure::Completion(failure));
-        }
+            Ok(gap) => gap,
+            Err(failure) => return LegAdvance::Failed(LegFailure::Completion(failure)),
+        };
         drop(vendor_guard);
         if let Some(publication) = vendor_publication {
             // 隐藏轮已完成自己的受栅栏写入；仍保留轻量结果 fence，确保最终
@@ -791,6 +792,7 @@ impl ModelLegConsume {
             projection,
             phase,
             generation: env.generation,
+            history_boundary_gap,
             fixed_media_plan: env.fixed_media_plan,
         })
         .await
@@ -1117,6 +1119,7 @@ mod tests {
             previous_response_id: None,
             compaction_source_generation_id: None,
             vendor_publications: Vec::new(),
+            initial_history_boundary: None,
         };
         LegFixture {
             gateway,

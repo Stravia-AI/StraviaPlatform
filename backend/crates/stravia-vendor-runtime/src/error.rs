@@ -9,13 +9,17 @@ pub enum LoadError {
     InvalidComponent(String),
     #[error("plugin imports forbidden interface `{0}`")]
     ForbiddenImport(String),
-    #[error("plugin interface `{interface}` requires ABI {required}, but this host supports {available}; rebuild the plugin for this host")]
+    #[error(
+        "plugin interface `{interface}` requires ABI {required}, but this host supports {available}; rebuild the plugin for this host"
+    )]
     IncompatibleAbi {
         interface: String,
         required: String,
         available: &'static str,
     },
-    #[error("plugin interface `{interface}` requires ABI {required}, but this host supports {available}")]
+    #[error(
+        "plugin interface `{interface}` requires ABI {required}, but this host supports {available}"
+    )]
     RequiresNewerHost {
         interface: String,
         required: String,

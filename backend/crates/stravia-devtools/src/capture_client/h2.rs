@@ -1,5 +1,5 @@
-use anyhow::{bail, ensure, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail, ensure};
+use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -17,7 +17,10 @@ async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Frame> {
     let mut header = [0; 9];
     stream.read_exact(&mut header).await?;
     let length = ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize;
-    ensure!(length <= MAX_FRAME, "HTTP/2 frame exceeds advertised maximum");
+    ensure!(
+        length <= MAX_FRAME,
+        "HTTP/2 frame exceeds advertised maximum"
+    );
     let mut payload = vec![0; length];
     stream.read_exact(&mut payload).await?;
     Ok(Frame {
@@ -28,10 +31,26 @@ async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Frame> {
     })
 }
 
-async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, kind: u8, flags: u8, id: u32, payload: &[u8]) -> Result<()> {
+async fn write_frame<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    kind: u8,
+    flags: u8,
+    id: u32,
+    payload: &[u8],
+) -> Result<()> {
     let length = payload.len();
     let id = id.to_be_bytes();
-    let header = [(length >> 16) as u8, (length >> 8) as u8, length as u8, kind, flags, id[0], id[1], id[2], id[3]];
+    let header = [
+        (length >> 16) as u8,
+        (length >> 8) as u8,
+        length as u8,
+        kind,
+        flags,
+        id[0],
+        id[1],
+        id[2],
+        id[3],
+    ];
     stream.write_all(&header).await?;
     stream.write_all(payload).await?;
     stream.flush().await?;
@@ -66,7 +85,10 @@ where
     loop {
         let frame = read_frame(stream).await?;
         if first {
-            ensure!(frame.kind == 4 && frame.stream == 0 && frame.flags & 1 == 0, "expected HTTP/2 client SETTINGS");
+            ensure!(
+                frame.kind == 4 && frame.stream == 0 && frame.flags & 1 == 0,
+                "expected HTTP/2 client SETTINGS"
+            );
             first = false;
         }
         match frame.kind {
@@ -76,8 +98,8 @@ where
                     ensure!(frame.payload.is_empty(), "invalid SETTINGS acknowledgement");
                     frames.push(json!({"type": "settings_ack"}));
                 } else {
-                    ensure!(frame.payload.len() % 6 == 0, "invalid SETTINGS length");
-                    let settings: Vec<_> = frame.payload.chunks_exact(6).map(|s| json!({"id": u16::from_be_bytes([s[0], s[1]]), "value": u32::from_be_bytes([s[2], s[3], s[4], s[5]])})).collect();
+                    ensure!(frame.payload.len().is_multiple_of(6), "invalid SETTINGS length");
+                    let settings: Vec<_> = frame.payload.as_chunks::<6>().0.iter().map(|s| json!({"id": u16::from_be_bytes([s[0], s[1]]), "value": u32::from_be_bytes([s[2], s[3], s[4], s[5]])})).collect();
                     frames.push(json!({"type": "settings", "settings": settings}));
                     write_frame(stream, 4, 1, 0, &[]).await?;
                 }

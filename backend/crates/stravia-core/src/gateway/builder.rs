@@ -69,7 +69,10 @@ impl GatewayBuilder {
             gateway.retention.clone(),
         )
         .with_history_markers(Arc::clone(&gateway.history_markers))
-        .with_redaction_references();
+        .with_redaction_references()
+        .with_prompt_admissions(gateway.storage.prompt_admissions())
+        .with_atomic_state(gateway.storage.vendor_plugins().clone())
+        .with_compaction(gateway.compaction.clone());
         gateway.install_model_turn();
         configure_gateway_extensions(&mut gateway, hooks, tools, mcp_tools, agent_definitions)
             .await?;

@@ -176,7 +176,9 @@ pub(super) fn decode(
     let endpoint = common::endpoint(protocol)?;
     if !headers.iter().any(|field| {
         field.name.eq_ignore_ascii_case("content-type")
-            && field.bytes.windows(b"text/event-stream".len())
+            && field
+                .bytes
+                .windows(b"text/event-stream".len())
                 .any(|window| window.eq_ignore_ascii_case(b"text/event-stream"))
     }) {
         let bytes = read_http_body(&response, MAX_BODY)?;

@@ -12,20 +12,27 @@ use tokio::{
     time::timeout,
 };
 
-use super::{Field, H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, TransportError, UpgradeResponse, VendorTransport};
+use super::{
+    Field, H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, TransportError,
+    UpgradeResponse, VendorTransport,
+};
 use crate::outbound_proxy::OutboundProxySettings;
 
 fn route(version: HttpVersionPref) -> Route {
     // These peers use cleartext; the unused TLS configurations must still fail closed.
-    let tls = Arc::new(ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions().unwrap()
-    .with_root_certificates(RootCertStore::empty())
-    .with_no_client_auth());
+    let tls = Arc::new(
+        ClientConfig::builder_with_provider(
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth(),
+    );
     Route {
         shape_name: "upgrade-test".into(),
         shape_revision: 1,
+        tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,
         proxy: OutboundProxySettings::default(),
@@ -41,9 +48,18 @@ fn plan(uri: String) -> RequestPlan {
         method: "GET".into(),
         uri,
         fields: vec![
-            Field { name: "Connection".into(), bytes: b"Upgrade".to_vec() },
-            Field { name: "Upgrade".into(), bytes: b"websocket".to_vec() },
-            Field { name: "Sec-WebSocket-Key".into(), bytes: b"dGhlIHNhbXBsZSBub25jZQ==".to_vec() },
+            Field {
+                name: "Connection".into(),
+                bytes: b"Upgrade".to_vec(),
+            },
+            Field {
+                name: "Upgrade".into(),
+                bytes: b"websocket".to_vec(),
+            },
+            Field {
+                name: "Sec-WebSocket-Key".into(),
+                bytes: b"dGhlIHNhbXBsZSBub25jZQ==".to_vec(),
+            },
         ],
         body: Bytes::new(),
         observer: None,
@@ -135,11 +151,13 @@ struct Frame {
 async fn read_frame(socket: &mut TcpStream) -> Frame {
     let mut header = [0; 9];
     socket.read_exact(&mut header).await.unwrap();
-    let len = (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
+    let len =
+        (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
     let mut payload = vec![0; len];
     socket.read_exact(&mut payload).await.unwrap();
     Frame {
-        kind: header[3], flags: header[4],
+        kind: header[3],
+        flags: header[4],
         stream: u32::from_be_bytes(header[5..9].try_into().unwrap()) & 0x7fff_ffff,
         payload,
     }
@@ -151,9 +169,15 @@ async fn h2_preface(socket: &mut TcpStream, enable_connect: bool) {
     assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
     if enable_connect {
         // SETTINGS_ENABLE_CONNECT_PROTOCOL (0x8) = 1, RFC 8441.
-        socket.write_all(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 1]).await.unwrap();
+        socket
+            .write_all(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 1])
+            .await
+            .unwrap();
     } else {
-        socket.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+        socket
+            .write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
     }
 }
 
@@ -169,7 +193,11 @@ async fn h2_extended_connect_negotiates_and_transfers_both_directions() {
                 let frame = read_frame(&mut socket).await;
                 if frame.kind == 1 {
                     assert_ne!(frame.stream, 0);
-                    assert_eq!(frame.flags & 1, 0, "CONNECT request must leave its stream open");
+                    assert_eq!(
+                        frame.flags & 1,
+                        0,
+                        "CONNECT request must leave its stream open"
+                    );
                     assert_eq!(frame.flags & 0x28, 0, "unexpected padding or priority");
                     let mut headers = BytesMut::from(frame.payload.as_slice());
                     let mut flags = frame.flags;
@@ -183,19 +211,42 @@ async fn h2_extended_connect_negotiates_and_transfers_both_directions() {
                 }
             };
             let mut fields = Vec::new();
-            Decoder::new(4096).decode(&mut Cursor::new(&mut headers), |header| {
-                fields.push((header.name().as_slice().to_vec(), header.value_slice().to_vec()));
-                ControlFlow::Continue(())
-            }).unwrap();
-            assert!(fields.iter().any(|(name, value)| name == b":method" && value == b"CONNECT"));
-            assert!(fields.iter().any(|(name, value)| name == b":protocol" && value == b"websocket"));
-            assert!(fields.iter().any(|(name, value)| name == b":path" && value == b"/socket"));
+            Decoder::new(4096)
+                .decode(&mut Cursor::new(&mut headers), |header| {
+                    fields.push((
+                        header.name().as_slice().to_vec(),
+                        header.value_slice().to_vec(),
+                    ));
+                    ControlFlow::Continue(())
+                })
+                .unwrap();
+            assert!(
+                fields
+                    .iter()
+                    .any(|(name, value)| name == b":method" && value == b"CONNECT")
+            );
+            assert!(
+                fields
+                    .iter()
+                    .any(|(name, value)| name == b":protocol" && value == b"websocket")
+            );
+            assert!(
+                fields
+                    .iter()
+                    .any(|(name, value)| name == b":path" && value == b"/socket")
+            );
             assert!(!fields.iter().any(|(name, _)| name == b"sec-websocket-key"));
 
             // HEADERS with indexed :status 200, then DATA without END_STREAM.
             let id = stream.to_be_bytes();
-            socket.write_all(&[0, 0, 1, 1, 4, id[0], id[1], id[2], id[3], 0x88]).await.unwrap();
-            socket.write_all(&[0, 0, 12, 0, 0, id[0], id[1], id[2], id[3]]).await.unwrap();
+            socket
+                .write_all(&[0, 0, 1, 1, 4, id[0], id[1], id[2], id[3], 0x88])
+                .await
+                .unwrap();
+            socket
+                .write_all(&[0, 0, 12, 0, 0, id[0], id[1], id[2], id[3]])
+                .await
+                .unwrap();
             socket.write_all(b"server-first").await.unwrap();
             let mut data = Vec::new();
             while data.len() < 12 {
@@ -208,8 +259,15 @@ async fn h2_extended_connect_negotiates_and_transfers_both_directions() {
         });
 
         let UpgradeResponse::Upgraded(head, mut io) = VendorTransport::new()
-            .upgrade(plan(format!("http://{address}/socket")), route(HttpVersionPref::Http2))
-            .await.unwrap() else { panic!("expected a successful HTTP/2 upgrade") };
+            .upgrade(
+                plan(format!("http://{address}/socket")),
+                route(HttpVersionPref::Http2),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected a successful HTTP/2 upgrade")
+        };
         assert_eq!(head.status, 200);
         let mut first = [0; 12];
         io.read_exact(&mut first).await.unwrap();
@@ -217,7 +275,9 @@ async fn h2_extended_connect_negotiates_and_transfers_both_directions() {
         io.write_all(b"client-reply").await.unwrap();
         io.flush().await.unwrap();
         server.await.unwrap();
-    }).await.expect("HTTP/2 extended CONNECT timed out");
+    })
+    .await
+    .expect("HTTP/2 extended CONNECT timed out");
 }
 
 #[tokio::test]

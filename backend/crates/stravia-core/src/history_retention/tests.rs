@@ -163,9 +163,24 @@ impl Fixture {
             chain.clone(),
         )
         .await;
+        use crate::storage::Storage;
+        let prompt_admissions = match &db {
+            Db::Sqlite(pool) => {
+                crate::storage::SqliteStorage::from_pool(pool.clone()).prompt_admissions()
+            }
+            Db::Postgres(pool) => {
+                crate::storage::PostgresStorage::from_pool(pool.clone()).prompt_admissions()
+            }
+        };
+        let atomic_state = match &db {
+            Db::Sqlite(pool) => crate::plugin::PluginStore::sqlite(pool.clone()),
+            Db::Postgres(pool) => crate::plugin::PluginStore::postgres(pool.clone()),
+        };
         let maintenance = HistoryMaintenance {
             retention: retention.clone(),
             observation,
+            prompt_admissions,
+            atomic_state,
             turn_chain: Arc::clone(&turns),
             history_markers: Arc::clone(&markers),
             mappings: Arc::clone(&mappings),
@@ -429,6 +444,11 @@ impl Fixture {
             .register(
                 &self.owner,
                 CompactionRegistration {
+                    logical_turn: None,
+                    source_history: None,
+                    source_window: None,
+                    user_prompt_metadata: None,
+                    atomic_checkpoint_id: None,
                     source_generation_id: source_generation_id.map(str::to_owned),
                     source_record_ids: source_record_ids
                         .iter()
@@ -937,6 +957,311 @@ fn retention_days_are_clamped_to_the_documented_minimum() {
 // ---------------------------------------------------------------------------
 // 场景
 // ---------------------------------------------------------------------------
+
+fn admission(
+    id: &str,
+    parent: Option<&crate::storage::PromptAdmission>,
+    ordinal: i64,
+) -> crate::storage::PromptAdmission {
+    let now = now_ms();
+    crate::storage::PromptAdmission {
+        id: id.into(),
+        principal: "retention-owner".into(),
+        parent_id: parent.map(|admission| admission.id.clone()),
+        atomic_lineage_created: false,
+        ordinal,
+        user_turn_index: None,
+        dialogue_prompt_index: None,
+        context_window_id: None,
+        context_window_index: None,
+        created_at_ms: now,
+        conversation_id: parent
+            .map_or_else(|| "conversation".into(), |a| a.conversation_id.clone()),
+        conversation_created_at_ms: parent.map_or(now, |a| a.conversation_created_at_ms),
+        user_prompt_id: Some(id.into()),
+        user_prompt_created_at_ms: Some(now),
+        logical_turn_id: id.into(),
+        logical_turn_created_at_ms: now,
+        history_count: ordinal,
+        prefix_digest: format!("prefix-{id}"),
+        controls_digest: "controls".into(),
+    }
+}
+
+async fn admission_retention_tracks_the_configured_window_and_live_descendants(fx: Fixture) {
+    let store = &fx.maintenance.prompt_admissions;
+    let root = admission("root", None, 1);
+    store.insert(&root).await.unwrap();
+    store.insert(&admission("orphan", None, 1)).await.unwrap();
+    let boundary = fx.tick().await;
+    store
+        .insert(&admission("child", Some(&root), 2))
+        .await
+        .unwrap();
+
+    let sweep_at = boundary + DAY + 1;
+    fx.sweep(sweep_at).await;
+    assert!(
+        store
+            .get("retention-owner", "orphan")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    fx.retention.set_days(1);
+    fx.sweep(sweep_at).await;
+    assert!(
+        store
+            .get("retention-owner", "orphan")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get("retention-owner", "root")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get("retention-owner", "child")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    fx.sweep(now_ms() + DAY + 1).await;
+    assert!(
+        store
+            .get("retention-owner", "root")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get("retention-owner", "child")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+both_backends!(
+    sqlite_admission_retention_tracks_window_and_descendants,
+    postgres_admission_retention_tracks_window_and_descendants,
+    2,
+    admission_retention_tracks_the_configured_window_and_live_descendants
+);
+
+async fn atomic_checkpoints_survive_active_leases_and_expire_after_release(fx: Fixture) {
+    let store = &fx.maintenance.atomic_state;
+    store
+        .fork_atomic_state("retention-owner", "pending", None, "lease")
+        .await
+        .unwrap();
+    store
+        .checkpoint_atomic_state("retention-owner", "pending", "checkpoint", "lease")
+        .await
+        .unwrap();
+    // Even when the configured retention horizon is in the future, an active
+    // operation can still publish this snapshot.
+    fx.sweep(now_ms() + 2 * DAY).await;
+    store
+        .fork_atomic_state(
+            "retention-owner",
+            "child",
+            Some("checkpoint"),
+            "child-lease",
+        )
+        .await
+        .unwrap();
+
+    // End the durable operation leases without waiting for the heartbeat timeout.
+    match &fx.db {
+        Db::Sqlite(pool) => {
+            sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms = 0")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Db::Postgres(pool) => {
+            sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms = 0")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    };
+    fx.sweep(now_ms() + 2 * DAY).await;
+    assert!(
+        store
+            .fork_atomic_state(
+                "retention-owner",
+                "after-expiry",
+                Some("checkpoint"),
+                "new-lease"
+            )
+            .await
+            .is_err()
+    );
+}
+both_backends!(
+    sqlite_atomic_checkpoints_survive_active_leases,
+    postgres_atomic_checkpoints_survive_active_leases,
+    1,
+    atomic_checkpoints_survive_active_leases_and_expire_after_release
+);
+
+async fn history_clear_fences_inflight_admissions(fx: Fixture) {
+    use crate::plugin::atomic_lease::AtomicLeaseGuard;
+    let store = &fx.maintenance.prompt_admissions;
+    let atomic = &fx.maintenance.atomic_state;
+    let principal = "retention-owner".to_owned();
+    let stale_epoch = store.history_epoch().await.unwrap();
+    let pending_id = uuid::Uuid::new_v4();
+    let pending = AtomicLeaseGuard::fork_at_epoch(
+        atomic.clone(),
+        principal.clone(),
+        pending_id,
+        None,
+        stale_epoch,
+    )
+    .await
+    .unwrap();
+
+    // Clearing between fork and proof insertion fences both halves of the
+    // old admission; clearing before fork is fenced by the same epoch.
+    fx.maintenance.clear_history().await.unwrap();
+    assert!(
+        store
+            .insert_at_epoch(&admission(&pending_id.to_string(), None, 1), stale_epoch)
+            .await
+            .is_err()
+    );
+    assert!(pending.checkpoint(uuid::Uuid::new_v4()).await.is_err());
+    assert!(
+        AtomicLeaseGuard::fork_at_epoch(
+            atomic.clone(),
+            principal.clone(),
+            uuid::Uuid::new_v4(),
+            None,
+            stale_epoch,
+        )
+        .await
+        .is_err()
+    );
+
+    let current_epoch = store.history_epoch().await.unwrap();
+    assert_ne!(current_epoch, stale_epoch);
+    let fresh_id = uuid::Uuid::new_v4();
+    let fresh =
+        AtomicLeaseGuard::fork_at_epoch(atomic.clone(), principal, fresh_id, None, current_epoch)
+            .await
+            .unwrap();
+    store
+        .insert_at_epoch(&admission(&fresh_id.to_string(), None, 1), current_epoch)
+        .await
+        .unwrap();
+    fresh.checkpoint(uuid::Uuid::new_v4()).await.unwrap();
+    assert!(
+        store
+            .get("retention-owner", &fresh_id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+both_backends!(
+    sqlite_history_clear_fences_inflight_admissions,
+    postgres_history_clear_fences_inflight_admissions,
+    1,
+    history_clear_fences_inflight_admissions
+);
+
+async fn clear_history_reports_multiple_failures_after_clearing_admissions(fx: Fixture) {
+    let admissions = &fx.maintenance.prompt_admissions;
+    admissions
+        .insert(&admission("root", None, 1))
+        .await
+        .unwrap();
+
+    for statement in [
+        "ALTER TABLE interaction_observations RENAME TO interaction_observations_broken",
+        "ALTER TABLE vendor_atomic_journal_pins RENAME TO vendor_atomic_journal_pins_broken",
+    ] {
+        match &fx.db {
+            Db::Sqlite(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
+            Db::Postgres(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
+        }
+        .expect("inject a storage failure");
+    }
+
+    let failure = fx
+        .maintenance
+        .clear_history()
+        .await
+        .expect_err("clear is partial");
+    let message = format!("{failure:#}");
+    assert!(message.contains("observation"), "{message}");
+    assert!(message.contains("interaction_observations"), "{message}");
+    assert!(message.contains("atomic state journal"), "{message}");
+    assert!(message.contains("vendor_atomic_journal_pins"), "{message}");
+    assert!(
+        message.contains("some cleanup may have succeeded"),
+        "{message}"
+    );
+    assert!(
+        admissions
+            .get("retention-owner", "root")
+            .await
+            .unwrap()
+            .is_none(),
+        "the atomic clear succeeded despite the observation failure"
+    );
+}
+both_backends!(
+    sqlite_clear_history_reports_multiple_failures_after_clearing_admissions,
+    postgres_clear_history_reports_multiple_failures_after_clearing_admissions,
+    1,
+    clear_history_reports_multiple_failures_after_clearing_admissions
+);
+
+async fn clearing_history_also_clears_live_admissions(fx: Fixture) {
+    let store = &fx.maintenance.prompt_admissions;
+    let root = admission("root", None, 1);
+    store.insert(&root).await.unwrap();
+    store
+        .insert(&admission("child", Some(&root), 2))
+        .await
+        .unwrap();
+    let mut other = admission("other", None, 1);
+    other.principal = "other-owner".into();
+    store.insert(&other).await.unwrap();
+
+    fx.maintenance.clear_history().await.unwrap();
+    assert!(
+        store
+            .get("retention-owner", "root")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get("retention-owner", "child")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.get("other-owner", "other").await.unwrap().is_none());
+}
+both_backends!(
+    sqlite_clearing_history_also_clears_live_admissions,
+    postgres_clearing_history_also_clears_live_admissions,
+    1,
+    clearing_history_also_clears_live_admissions
+);
 
 /// 子树：最晚的 `created_at + N` 之前，节点及其祖先都可读、可续接；整棵子树到期后，
 /// 一轮扫描自下而上删除。

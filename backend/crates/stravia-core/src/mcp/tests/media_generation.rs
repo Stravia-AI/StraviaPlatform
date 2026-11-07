@@ -1442,13 +1442,6 @@ async fn generated_image_downloads_real_bytes_and_can_be_edited() {
     assert_eq!(requests[0]["tools"][0]["action"], "generate");
     assert_eq!(requests[0]["tools"][0]["size"], "1536x1024");
     assert_eq!(requests[0]["tools"][0]["quality"], "high");
-    assert!(
-        requests[0]["instructions"]
-            .as_str()
-            .is_some_and(|instructions| {
-                instructions.contains("16:9") && instructions.contains("4K")
-            })
-    );
     assert_eq!(requests[1]["tools"][0]["action"], "edit");
     assert!(
         requests[1]

@@ -137,7 +137,10 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn execute_request(host: &GuestHost, request: stravia_vendor_sdk::net::Request) -> Result<Vec<u8>, PluginError> {
+fn execute_request(
+    host: &GuestHost,
+    request: stravia_vendor_sdk::net::Request,
+) -> Result<Vec<u8>, PluginError> {
     let response = host.http_start(request, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
@@ -146,7 +149,10 @@ fn execute_request(host: &GuestHost, request: stravia_vendor_sdk::net::Request) 
     read_http_body(&response, MAX_RESPONSE_BYTES)
 }
 
-fn optional_request(host: &GuestHost, request: stravia_vendor_sdk::net::Request) -> Option<Vec<u8>> {
+fn optional_request(
+    host: &GuestHost,
+    request: stravia_vendor_sdk::net::Request,
+) -> Option<Vec<u8>> {
     execute_request(host, request).ok()
 }
 

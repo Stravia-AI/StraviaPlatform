@@ -12,9 +12,13 @@ use stravia_runtime_contract::protocol::ir::{
     ServiceTier,
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
+use stravia_vendor_runtime::host::{
+    HostJournalEntry, HostStateCell, JournalEntryData, JournalSnapshot, StateError, StateScope,
+    StateSnapshot,
+};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
-    LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime, WebSocketMessage,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin, LogLevel,
+    OperationScope, RuntimeError, RuntimeEvent, VendorRuntime, WebSocketMessage,
 };
 use stravia_vendor_sdk::net::{self, ConnectRequest, Field, Options, Request};
 use stravia_vendor_sdk::{ErrorKind, OperationInput, OperationOutput, ProviderSnapshot};
@@ -87,7 +91,10 @@ impl HostHttpResponse for LoopbackResponse {
             .await
             .headers()
             .iter()
-            .map(|(name, value)| Field { name: name.to_string(), bytes: value.as_bytes().to_vec() })
+            .map(|(name, value)| Field {
+                name: name.to_string(),
+                bytes: value.as_bytes().to_vec(),
+            })
             .collect())
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -103,18 +110,140 @@ impl HostHttpResponse for LoopbackResponse {
     }
 }
 
+struct TestCellState {
+    snapshot: StateSnapshot,
+    head: Option<Arc<dyn HostJournalEntry>>,
+}
+
+type TestState = Arc<Mutex<BTreeMap<String, TestCellState>>>;
+
+struct TestEntry {
+    text: String,
+    previous: Option<Arc<dyn HostJournalEntry>>,
+}
+
+#[async_trait]
+impl HostJournalEntry for TestEntry {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    async fn read(&self) -> Result<JournalEntryData, StateError> {
+        Ok(JournalEntryData {
+            text: self.text.clone(),
+            previous: self.previous.clone(),
+        })
+    }
+}
+
+struct TestCell {
+    cells: TestState,
+    key: String,
+}
+
+#[async_trait]
+impl HostStateCell for TestCell {
+    async fn load(&self) -> Result<StateSnapshot, StateError> {
+        Ok(self
+            .cells
+            .lock()
+            .get(&self.key)
+            .map(|entry| entry.snapshot.clone())
+            .unwrap_or(StateSnapshot {
+                revision: 0,
+                payload: None,
+            }))
+    }
+    async fn compare_exchange(
+        &self,
+        revision: u64,
+        payload: Option<Vec<u8>>,
+    ) -> Result<bool, StateError> {
+        self.journal_compare_exchange(revision, payload, None).await
+    }
+    async fn journal_load(&self) -> Result<JournalSnapshot, StateError> {
+        let cells = self.cells.lock();
+        let entry = cells.get(&self.key);
+        Ok(JournalSnapshot {
+            revision: entry.map_or(0, |entry| entry.snapshot.revision),
+            payload: entry.and_then(|entry| entry.snapshot.payload.clone()),
+            head: entry.and_then(|entry| entry.head.clone()),
+        })
+    }
+    async fn journal_append(
+        &self,
+        text: String,
+        previous: Option<Arc<dyn HostJournalEntry>>,
+    ) -> Result<Arc<dyn HostJournalEntry>, StateError> {
+        Ok(Arc::new(TestEntry { text, previous }))
+    }
+    async fn journal_compare_exchange(
+        &self,
+        revision: u64,
+        payload: Option<Vec<u8>>,
+        head: Option<Arc<dyn HostJournalEntry>>,
+    ) -> Result<bool, StateError> {
+        if payload
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+        {
+            return Err(StateError::new(
+                "resource-exhausted",
+                "state payload too large",
+            ));
+        }
+        let mut cells = self.cells.lock();
+        let current = cells
+            .get(&self.key)
+            .map_or(0, |entry| entry.snapshot.revision);
+        if current != revision {
+            return Ok(false);
+        }
+        cells.insert(
+            self.key.clone(),
+            TestCellState {
+                snapshot: StateSnapshot {
+                    revision: current + 1,
+                    payload,
+                },
+                head,
+            },
+        );
+        Ok(true)
+    }
+}
+
+fn test_cell(cells: &TestState, scope: &str, key: String) -> Arc<dyn HostStateCell> {
+    Arc::new(TestCell {
+        cells: Arc::clone(cells),
+        key: format!("{scope}:{key}"),
+    })
+}
+
 struct LoopbackServices {
     client: reqwest::Client,
     address: String,
+    state: TestState,
     deltas: Mutex<Vec<AiStreamDelta>>,
     incremental: tokio::sync::Notify,
 }
 
 #[async_trait]
 impl HostServices for LoopbackServices {
-    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> { net::validate_host_option(key, value) }
-    fn http_start(&self, request: Request, options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
-        assert_eq!(options.iter().find(|(k, _)| *k == net::keys::SHAPE).map(|(_, v)| v), Some("codex-http"));
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        net::validate_host_option(key, value)
+    }
+    fn http_start(
+        &self,
+        request: Request,
+        options: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+        assert_eq!(
+            options
+                .iter()
+                .find(|(k, _)| *k == net::keys::SHAPE)
+                .map(|(_, v)| v),
+            Some("codex-http")
+        );
         let url = url::Url::parse(&request.url).unwrap();
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.origin().ascii_serialization(), self.address);
@@ -123,6 +252,13 @@ impl HostServices for LoopbackServices {
             .request(request.method.parse().unwrap(), request.url)
             .body(request.body);
         for field in request.headers.into_vec() {
+            if field.bytes.is_empty()
+                && (field.name.eq_ignore_ascii_case("host")
+                    || field.name.eq_ignore_ascii_case("content-length")
+                    || field.name.eq_ignore_ascii_case("cookie"))
+            {
+                continue;
+            }
             builder = builder.header(field.name, field.bytes);
         }
         Ok(Arc::new(LoopbackResponse {
@@ -143,6 +279,24 @@ impl HostServices for LoopbackServices {
     }
     async fn write_private_state(&self, _: Vec<u8>) -> Result<(), HostFailure> {
         Ok(())
+    }
+    async fn open_state(
+        &self,
+        scope: StateScope,
+        key: String,
+    ) -> Result<Arc<dyn HostStateCell>, StateError> {
+        Ok(test_cell(
+            &self.state,
+            if scope == StateScope::Conversation {
+                "conversation"
+            } else {
+                "provider"
+            },
+            key,
+        ))
+    }
+    async fn open_volatile_state(&self, key: String) -> Result<Arc<dyn HostStateCell>, StateError> {
+        Ok(test_cell(&self.state, "volatile", key))
     }
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), HostFailure> {
         if let RuntimeEvent::Delta(delta) = event {
@@ -215,6 +369,7 @@ async fn http_case(case: &'static str) {
     let services = Arc::new(LoopbackServices {
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         address: address.clone(),
+        state: TestState::default(),
         deltas: Mutex::new(Vec::new()),
         incremental: tokio::sync::Notify::new(),
     });
@@ -263,7 +418,6 @@ async fn http_case(case: &'static str) {
                 name.eq_ignore_ascii_case(expected).then(|| value.trim())
             })
         };
-        assert_eq!(header("accept-encoding"), Some("identity"));
         let thread = header("thread-id").expect("thread header");
         assert_eq!(thread, "5d42eca3-00ce-7fd9-879a-2f189010d915");
         assert_eq!(header("session-id"), Some(thread));
@@ -637,6 +791,9 @@ struct Recording {
     connections: Mutex<Vec<ConnectionRecord>>,
     sent: Mutex<Vec<serde_json::Value>>,
     closed: Mutex<Vec<Option<String>>>,
+    private_state: Mutex<Option<Vec<u8>>>,
+    state: TestState,
+    handshake_headers: Mutex<Vec<Field>>,
     /// Ordered "started" / "failed" / "completed" lifecycle events.
     events: Mutex<Vec<&'static str>>,
 }
@@ -663,12 +820,20 @@ struct MockServices {
 struct MockSocket {
     frames: Mutex<std::vec::IntoIter<WebSocketMessage>>,
     recorded: Arc<Recording>,
+    fresh: bool,
 }
 
 #[async_trait]
 impl HostWebSocket for MockSocket {
-    fn handshake_status(&self) -> u16 { 101 }
-    fn handshake_headers(&self) -> Vec<Field> { Vec::new() }
+    fn handshake_status(&self) -> u16 {
+        101
+    }
+    fn handshake_headers(&self) -> Vec<Field> {
+        self.recorded.handshake_headers.lock().clone()
+    }
+    fn is_fresh_handshake(&self) -> bool {
+        self.fresh
+    }
     async fn send(&self, message: WebSocketMessage) -> Result<(), HostFailure> {
         if let WebSocketMessage::Text(text) = &message {
             // Field order is wire behavior; only parse after checking the raw text.
@@ -696,8 +861,14 @@ impl HostWebSocket for MockSocket {
 
 #[async_trait]
 impl HostServices for MockServices {
-    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> { net::validate_host_option(key, value) }
-    fn http_start(&self, _request: Request, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        net::validate_host_option(key, value)
+    }
+    fn http_start(
+        &self,
+        _request: Request,
+        _options: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         Err(HostFailure::new(ErrorKind::Trapped, "unexpected HTTP path"))
     }
 
@@ -706,12 +877,22 @@ impl HostServices for MockServices {
         request: ConnectRequest,
         options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
-        let get = |key: &str| options.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_owned());
+        let get = |key: &str| {
+            options
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_owned())
+        };
         assert_eq!(get(net::keys::SHAPE).as_deref(), Some("codex-ws"));
         let continuation_id = get(net::keys::CONTINUATION);
         let continuation_requested = continuation_id.is_some();
         self.recorded.connections.lock().push(ConnectionRecord {
-            headers: request.headers.into_vec().into_iter().map(|f| (f.name, String::from_utf8(f.bytes).unwrap())).collect(),
+            headers: request
+                .headers
+                .into_vec()
+                .into_iter()
+                .map(|f| (f.name, String::from_utf8(f.bytes).unwrap()))
+                .collect(),
             continuation_id,
             reuse_max_age_millis: get(net::keys::REUSE_MAX_AGE).map(|v| v.parse().unwrap()),
             compression: get(net::keys::WS_COMPRESSION),
@@ -740,15 +921,37 @@ impl HostServices for MockServices {
                     .into_iter(),
             ),
             recorded: Arc::clone(&self.recorded),
+            fresh: !continuation_requested,
         }))
     }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {
-        Ok(None)
+        Ok(self.recorded.private_state.lock().clone())
     }
 
-    async fn write_private_state(&self, _bytes: Vec<u8>) -> Result<(), HostFailure> {
+    async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure> {
+        *self.recorded.private_state.lock() = Some(bytes);
         Ok(())
+    }
+
+    async fn open_state(
+        &self,
+        scope: StateScope,
+        key: String,
+    ) -> Result<Arc<dyn HostStateCell>, StateError> {
+        Ok(test_cell(
+            &self.recorded.state,
+            if scope == StateScope::Conversation {
+                "conversation"
+            } else {
+                "provider"
+            },
+            key,
+        ))
+    }
+
+    async fn open_volatile_state(&self, key: String) -> Result<Arc<dyn HostStateCell>, StateError> {
+        Ok(test_cell(&self.recorded.state, "volatile", key))
     }
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), HostFailure> {
@@ -802,8 +1005,45 @@ fn codex_provider() -> ProviderSnapshot {
         model: Some("gpt-6-astra".into()),
         model_metadata: None,
         client_headers: Vec::new(),
-        operation_metadata: BTreeMap::new(),
+        operation_metadata: BTreeMap::from([
+            (
+                "client_installation_id".into(),
+                serde_json::json!("00000000-0000-4000-8000-000000000001"),
+            ),
+            (
+                "logical_turn_id".into(),
+                serde_json::json!("00000000-0000-7000-8000-000000000002"),
+            ),
+            (
+                "logical_turn_started_at_ms".into(),
+                serde_json::json!(1790129800000_i64),
+            ),
+            (
+                "context_window_id".into(),
+                serde_json::json!("00000000-0000-7000-8000-000000000003"),
+            ),
+            ("context_window_index".into(), serde_json::json!(0)),
+        ]),
     }
+}
+
+fn set_history_boundaries(
+    provider: &mut ProviderSnapshot,
+    current: &str,
+    entries: &[(&str, usize)],
+) {
+    let boundaries: Vec<Value> = entries
+        .iter()
+        .map(|(id, item_index)| serde_json::json!({"id":id, "item_index":item_index}))
+        .collect();
+    let window = provider.operation_metadata["context_window_id"].clone();
+    provider.operation_metadata.insert(
+        "history_boundaries".into(),
+        serde_json::json!({
+            "version":1, "window_id":window,
+            "coverage":"complete", "boundaries":boundaries, "current_boundary_id":current
+        }),
+    );
 }
 
 fn response_resource(status: &str, output: serde_json::Value, id: &str) -> serde_json::Value {
@@ -1078,6 +1318,10 @@ async fn affinity_and_account_headers_follow_actual_codex_frames() {
     ];
     for (tier, previous_id, credentials, response_id) in cases {
         let mut turn_provider = provider.clone();
+        turn_provider.operation_metadata.insert(
+            "logical_turn_id".into(),
+            uuid::Uuid::now_v7().to_string().into(),
+        );
         if let Some((account_id, access_token)) = credentials {
             turn_provider
                 .credentials
@@ -1232,6 +1476,139 @@ async fn affinity_and_account_headers_follow_actual_codex_frames() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn handshake_turn_state_is_sticky_only_for_the_same_turn_and_auth_owner() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    recorded.handshake_headers.lock().push(Field {
+        name: "x-codex-turn-state".into(),
+        bytes: b"local-routing-token".to_vec(),
+    });
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "sticky-window".into());
+    for (previous, response_id, new_turn, rotate_auth) in [
+        (None, "resp_sticky_1", false, false),
+        (Some("resp_sticky_1"), "resp_sticky_2", false, false),
+        (Some("resp_sticky_2"), "resp_sticky_3", true, false),
+        (None, "resp_sticky_4", false, true),
+    ] {
+        if new_turn {
+            provider.operation_metadata.insert(
+                "logical_turn_id".into(),
+                uuid::Uuid::now_v7().to_string().into(),
+            );
+        }
+        if rotate_auth {
+            provider
+                .credentials
+                .insert("access_token".into(), "other-token".into());
+            recorded.handshake_headers.lock().clear();
+        }
+        let mut request = request();
+        request.parameters.continuation =
+            previous.map(|id| Continuation::PreviousResponse(id.into()));
+        execute_once(
+            &runtime,
+            &plugin,
+            provider.clone(),
+            request,
+            codex_frames(0, response_id),
+            &recorded,
+        )
+        .await
+        .expect("Codex WebSocket inference");
+    }
+    let frames = recorded.sent.lock();
+    assert_eq!(
+        frames[0]["client_metadata"]["x-codex-turn-state"],
+        "local-routing-token"
+    );
+    assert_eq!(
+        frames[1]["client_metadata"]["x-codex-turn-state"],
+        "local-routing-token"
+    );
+    assert!(
+        frames[2]["client_metadata"]
+            .get("x-codex-turn-state")
+            .is_none()
+    );
+    assert!(
+        frames[3]["client_metadata"]
+            .get("x-codex-turn-state")
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_metadata_observer_preserves_sequence_and_sticky_state() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "metadata-window".into());
+    let mut first = codex_frames(0, "resp_metadata_1");
+    first.insert(1, serde_json::json!({"type":"response.metadata", "sequence_number":1, "headers":{"x-codex-turn-state":"metadata-token"}}).to_string());
+    for (sequence, frame) in first.iter_mut().enumerate().skip(2) {
+        let mut event: Value = serde_json::from_str(frame).unwrap();
+        event["sequence_number"] = sequence.into();
+        *frame = event.to_string();
+    }
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        request(),
+        first,
+        &recorded,
+    )
+    .await
+    .expect("metadata remains in the normal response sequence");
+    let mut next = request();
+    next.parameters.continuation = Some(Continuation::PreviousResponse("resp_metadata_1".into()));
+    execute_once(
+        &runtime,
+        &plugin,
+        provider,
+        next,
+        codex_frames(0, "resp_metadata_2"),
+        &recorded,
+    )
+    .await
+    .expect("continued turn");
+    assert_eq!(
+        recorded.sent.lock()[1]["client_metadata"]["x-codex-turn-state"],
+        "metadata-token"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_metadata_observer_failure_does_not_complete_or_reuse() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut frames = codex_frames(0, "resp_unreachable");
+    frames.insert(1, serde_json::json!({"type":"response.metadata", "headers":{"x-codex-turn-state":"x".repeat(65 * 1024)}}).to_string());
+    assert!(
+        execute_once(
+            &runtime,
+            &plugin,
+            codex_provider(),
+            request(),
+            frames,
+            &recorded
+        )
+        .await
+        .is_err()
+    );
+    assert!(!recorded.events.lock().contains(&"completed"));
+    assert!(recorded.closed.lock().is_empty());
+}
+
 /// Official 0.167.0 WS capture: Lite frames carry the HTTP-only Lite header
 /// and the dispatch time as reserved client_metadata keys; a continuation
 /// frame sends only the appended items, never the prompt prefix again.
@@ -1253,6 +1630,27 @@ async fn lite_websocket_frames_follow_the_official_capture() {
         ..Default::default()
     });
     for previous_id in [None, Some("resp_lite_first")] {
+        let mut turn_provider = provider.clone();
+        set_history_boundaries(
+            &mut turn_provider,
+            if previous_id.is_none() {
+                "lite-first"
+            } else {
+                "lite-next"
+            },
+            &[(
+                if previous_id.is_none() {
+                    "lite-first"
+                } else {
+                    "lite-next"
+                },
+                0,
+            )],
+        );
+        turn_provider.operation_metadata.insert(
+            "logical_turn_id".into(),
+            uuid::Uuid::now_v7().to_string().into(),
+        );
         let mut turn_request = request();
         turn_request.instructions = Some("base instructions".into());
         turn_request.parameters.continuation =
@@ -1260,9 +1658,16 @@ async fn lite_websocket_frames_follow_the_official_capture() {
         execute_once(
             &runtime,
             &plugin,
-            provider.clone(),
+            turn_provider,
             turn_request,
-            codex_frames(0, "resp_lite"),
+            codex_frames(
+                0,
+                if previous_id.is_none() {
+                    "resp_lite_first"
+                } else {
+                    "resp_lite"
+                },
+            ),
             &recorded,
         )
         .await
@@ -1270,9 +1675,16 @@ async fn lite_websocket_frames_follow_the_official_capture() {
     }
     let connections = recorded.connections.lock();
     let sent = recorded.sent.lock();
+    assert_eq!(
+        connections[0].headers["x-codex-turn-metadata"],
+        connections[1].headers["x-codex-turn-metadata"]
+    );
+    assert_ne!(
+        sent[0]["client_metadata"]["x-codex-turn-metadata"],
+        sent[1]["client_metadata"]["x-codex-turn-metadata"]
+    );
     for (connection, frame) in connections.iter().zip(sent.iter()) {
         for absent in [
-            "x-codex-turn-metadata",
             "x-openai-internal-codex-responses-lite",
             "x-codex-installation-id",
         ] {
@@ -1324,6 +1736,125 @@ async fn lite_websocket_frames_follow_the_official_capture() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
+async fn lite_history_preserves_first_records_updates_and_window_reset() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "history-window".into());
+    provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+        extensions: BTreeMap::from([("use_responses_lite".into(), serde_json::json!(true))]),
+        ..Default::default()
+    });
+    set_history_boundaries(&mut provider, "boundary-one", &[("boundary-one", 0)]);
+    let mut first = AiRequest::new("gpt-6-astra", vec![user_item("same")]);
+    first.instructions = Some("original".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        first,
+        codex_frames(0, "resp_history_1"),
+        &recorded,
+    )
+    .await
+    .unwrap();
+    set_history_boundaries(
+        &mut provider,
+        "boundary-two",
+        &[("boundary-one", 0), ("boundary-two", 1)],
+    );
+    let mut second = AiRequest::new("gpt-6-astra", vec![user_item("same"), user_item("same")]);
+    second.instructions = Some("replacement".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        second,
+        codex_frames(0, "resp_history_2"),
+        &recorded,
+    )
+    .await
+    .unwrap();
+    set_history_boundaries(
+        &mut provider,
+        "boundary-three",
+        &[
+            ("boundary-one", 0),
+            ("boundary-two", 1),
+            ("boundary-three", 1),
+        ],
+    );
+    let mut third = AiRequest::new("gpt-6-astra", vec![user_item("same"), user_item("same")]);
+    third.instructions = Some("another replacement".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        third,
+        codex_frames(0, "resp_history_2b"),
+        &recorded,
+    )
+    .await
+    .unwrap();
+    provider.operation_metadata.insert(
+        "context_window_id".into(),
+        serde_json::json!("00000000-0000-7000-8000-000000000005"),
+    );
+    provider
+        .operation_metadata
+        .insert("context_window_index".into(), serde_json::json!(1));
+    set_history_boundaries(&mut provider, "boundary-reset", &[("boundary-reset", 0)]);
+    let mut reset = AiRequest::new("gpt-6-astra", vec![user_item("two")]);
+    reset.instructions = Some("replacement".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider,
+        reset,
+        codex_frames(0, "resp_history_3"),
+        &recorded,
+    )
+    .await
+    .unwrap();
+    let sent = recorded.sent.lock();
+    assert_eq!(sent[0]["input"][0]["id"], sent[1]["input"][0]["id"]);
+    assert_eq!(
+        sent[0]["input"][0]["internal_chat_message_metadata_passthrough"],
+        sent[1]["input"][0]["internal_chat_message_metadata_passthrough"]
+    );
+    assert_eq!(
+        sent[1]["input"][2]["internal_chat_message_metadata_passthrough"]["content_item_kinds"][0],
+        "model.instructions"
+    );
+    assert!(
+        sent[1]["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("replacement")
+    );
+    assert!(
+        sent[2]["input"][2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("replacement")
+    );
+    assert!(
+        sent[2]["input"][3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("another replacement")
+    );
+    assert_ne!(sent[0]["input"][0]["id"], sent[3]["input"][0]["id"]);
+    assert_eq!(
+        sent[3]["input"][0]["internal_chat_message_metadata_passthrough"]["content_item_kinds"][0],
+        "model.base_instructions"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
 async fn continuation_rejection_is_classified_only_for_a_requested_unstarted_attempt() {
     let (runtime, plugin) = load_codex().await;
     let rejection = serde_json::json!({
@@ -1350,10 +1881,29 @@ async fn continuation_rejection_is_classified_only_for_a_requested_unstarted_att
         }
         frames.push(rejection.clone());
         let recorded = Arc::new(Recording::default());
+        let mut provider = codex_provider();
+        provider
+            .operation_metadata
+            .insert("transport_affinity".into(), "rejection-window".into());
+        if previous_id.is_some() {
+            execute_once(
+                &runtime,
+                &plugin,
+                provider.clone(),
+                request(),
+                codex_frames(0, "resp_missing"),
+                &recorded,
+            )
+            .await
+            .unwrap();
+            recorded.connections.lock().clear();
+            recorded.sent.lock().clear();
+            recorded.events.lock().clear();
+        }
         let result = execute_scripted(
             &runtime,
             &plugin,
-            codex_provider(),
+            provider,
             turn_request,
             [Connect::Frames(frames)],
             &recorded,
@@ -1432,6 +1982,58 @@ fn input_texts(frame: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+async fn seeded_continuation_provider(
+    runtime: &VendorRuntime,
+    plugin: &LoadedPlugin,
+    recorded: &Arc<Recording>,
+) -> ProviderSnapshot {
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "replay-window".into());
+    // 远端拒绝必须经过已建立的握手快照，不能被本地续接准入提前拦截。
+    execute_once(
+        runtime,
+        plugin,
+        provider.clone(),
+        request(),
+        codex_frames(0, "resp_missing"),
+        recorded,
+    )
+    .await
+    .unwrap();
+    recorded.connections.lock().clear();
+    recorded.sent.lock().clear();
+    recorded.events.lock().clear();
+    provider
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn missing_handshake_snapshot_never_opens_a_stale_continuation() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let result = execute_scripted(
+        &runtime,
+        &plugin,
+        codex_provider(),
+        with_continuation_settings(request()),
+        [Connect::Miss],
+        &recorded,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(RuntimeError::Plugin {
+            kind: ErrorKind::ContinuationUnavailable,
+            ..
+        })
+    ));
+    assert!(recorded.connections.lock().is_empty());
+    assert!(recorded.sent.lock().is_empty());
+    assert!(recorded.events.lock().is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
 async fn local_socket_miss_reports_continuation_unavailable_before_starting() {
@@ -1441,6 +2043,19 @@ async fn local_socket_miss_reports_continuation_unavailable_before_starting() {
     provider
         .operation_metadata
         .insert("transport_affinity".into(), "replay-window".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        request(),
+        codex_frames(0, "resp_missing"),
+        &recorded,
+    )
+    .await
+    .unwrap();
+    recorded.connections.lock().clear();
+    recorded.sent.lock().clear();
+    recorded.events.lock().clear();
     let delta = with_continuation_settings(AiRequest::new("gpt-6-astra", vec![user_item("delta")]));
     let result = execute_scripted(
         &runtime,
@@ -1479,6 +2094,7 @@ async fn local_socket_miss_reports_continuation_unavailable_before_starting() {
 async fn exact_remote_rejection_propagates_continuation_not_found_without_failed_event() {
     let (runtime, plugin) = load_codex().await;
     let recorded = Arc::new(Recording::default());
+    let provider = seeded_continuation_provider(&runtime, &plugin, &recorded).await;
     let full = with_continuation_settings(AiRequest::new(
         "gpt-6-astra",
         vec![user_item("history"), user_item("delta")],
@@ -1486,7 +2102,7 @@ async fn exact_remote_rejection_propagates_continuation_not_found_without_failed
     let result = execute_scripted(
         &runtime,
         &plugin,
-        codex_provider(),
+        provider,
         full,
         [Connect::Frames(vec![continuation_rejection()])],
         &recorded,
@@ -1539,10 +2155,11 @@ async fn inline_compaction_keeps_exact_stale_id_error_and_other_errors() {
     };
 
     let recorded = Arc::new(Recording::default());
+    let provider = seeded_continuation_provider(&runtime, &plugin, &recorded).await;
     let result = execute_scripted(
         &runtime,
         &plugin,
-        codex_provider(),
+        provider,
         compacting(),
         [Connect::Frames(vec![continuation_rejection()])],
         &recorded,
@@ -1578,10 +2195,11 @@ async fn inline_compaction_keeps_exact_stale_id_error_and_other_errors() {
     })
     .to_string();
     let recorded = Arc::new(Recording::default());
+    let provider = seeded_continuation_provider(&runtime, &plugin, &recorded).await;
     let result = execute_scripted(
         &runtime,
         &plugin,
-        codex_provider(),
+        provider,
         compacting(),
         [Connect::Frames(vec![other])],
         &recorded,

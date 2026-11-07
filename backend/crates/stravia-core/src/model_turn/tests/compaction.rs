@@ -20,12 +20,25 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             "details": {"retained": true},
         })
     }
+    fn rejects_request(request: &Value) -> bool {
+        request["input"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["role"] == "developer"
+                    && item["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|part| {
+                            part["type"] == "input_text"
+                                && part["text"] == "reject-native-compaction"
+                        })
+                    })
+            })
+        })
+    }
     async fn compact(
         State(calls): State<Arc<AtomicUsize>>,
         Json(body): Json<Value>,
     ) -> axum::response::Response {
         calls.fetch_add(1, Ordering::SeqCst);
-        if body["instructions"] == "reject-native-compaction" {
+        if rejects_request(&body) {
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({"error": compaction_error("invalid_encrypted_content")})),
@@ -92,7 +105,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             while let Some(Ok(Message::Text(text))) = socket.recv().await {
                 calls.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_str(&text).expect("native request");
-                if request["instructions"] == "reject-native-compaction" {
+                if rejects_request(&request) {
                     socket.send(Message::Text(json!({
                         "type": "error",
                         "status": 503,

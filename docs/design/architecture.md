@@ -280,7 +280,7 @@ nix build .#checks.x86_64-linux.service
 
 设置页维护共享代理地址及绕过规则，不再提供全局启用开关。`outbound_proxy` 是 settings 中一行 JSON（`url`、`bypass`、`force_http1`）：一次 PUT 提交完整配置，一次读取取得完整快照，验证或持久化失败保留原配置。URL 为空表示尚未配置；非空仅接受可用的 `http`、`https`、`socks5`、`socks5h` 代理地址。保存和使用边界均拒绝未知 scheme，不静默改为直连；错误不回显可能含凭据的 URL，保存并不检查代理在线或认证成功。Core reqwest 的 `socks5` 在本机解析目标，`socks5h` 将目标域名交给代理解析；LocalWeb 保留 ADR-0026 的既有代理侧 DNS 策略（其 `socks5` 规范化为 `socks5h`），不据此推断 Core 的 DNS 行为。读取迁移留下的非法旧 URL 不阻断管理编辑，使用时仍须校验并失败关闭。
 
-模型 Provider/session 与 Web Provider 各自的 `use_proxy` 是唯一选择：关闭明确直连，开启必须使用已保存的有效配置。产品更新有独立的 `update_use_proxy`（缺省 false），用于 Gateway 的 release/manifest 检查及 Desktop updater 检查、下载；改变更新偏好不修改 Provider 或共享代理配置。Provider Catalog 与 S3 不在这一选择范围。`force_http1` 保留既有 Vendor HTTP 专用行为，不改变 Web Access 或产品更新的 HTTP 协商；Vendor WS 本来就使用 HTTP/1。
+模型 Provider/session 与 Web Provider 各自的 `use_proxy` 是唯一选择：关闭明确直连，开启必须使用已保存的有效配置。产品更新有独立的 `update_use_proxy`（缺省 false），用于 Gateway 的 release/manifest 检查及 Desktop updater 检查、下载；改变更新偏好不修改 Provider 或共享代理配置。Provider Catalog 与 S3 不在这一选择范围。`force_http1` 保留 Vendor HTTP 专用行为，不改变 Web Access 或产品更新的 HTTP 协商；Vendor WebSocket 传输由网络选项和 shape 决定。
 
 显式代理的 `bypass` 按逗号分隔主机/IP/域后缀，匹配不区分大小写并忽略条目周围空白；匹配目标直连，其余目标经代理。绕过应用于模型 HTTP/WS、Web Access 的 HTTP/浏览器出口和更新下载/重定向，不依赖进程全局 `NO_PROXY`，也不放宽目标授权或 SSRF 检查。Vendor HTTP client 缓存与 WS 复用身份同时包含 URL、bypass 和 HTTP/1 标志；后续执行采用新快照，在途执行不重新路由，也不承诺立即关闭旧 socket。
 
@@ -730,6 +730,8 @@ ADR-0083 起统计独立保存请求终态与上游尝试计数：全局的已�
 
 迁移 `0036_request_recovery` 沿用同一 source/checkpoint/delta 链路，为全局请求增加 `recovered_request_count` 与 `recovery_known_request_count`；两者和已终结请求数一样，按 Inference Run 开始时间分桶，每个请求最多贡献一次。恢复成功需要同一 Model Turn 内先失败、后成功的自动重试或切换证据，且所属请求最终成功；普通多轮成功、另一次客户端请求和最终失败不算恢复成功。最终失败的请求可确定没有恢复成功；成功请求缺少完整观察事实且没有恢复证据时保持未知。总览与序列返回两个新增计数，粗化时先分别求和。最终成功率为 `(terminal_request_count - failed_request_count) / terminal_request_count`；只有恢复判定覆盖全部已终结请求时，才显示一次通过率与恢复贡献，分别为 `(terminal_request_count - failed_request_count - recovered_request_count) / terminal_request_count` 和 `recovered_request_count / terminal_request_count`。后者以百分点表达，不与按尝试计算的上游调用成功率相减。
 
+清除历史跨越在途请求时会使其先前的原子会话租约失效；即使响应随后成功交付，旧租约也不能提交 Generation Chain，并可能记录 `atomic_state_unavailable` 观察缺口。此时成功请求及已确认上游和 Token 事实仍计入长期统计，但缺口使没有独立恢复证据的成功请求保持恢复覆盖未知，不能把它计作已知未恢复，也不表示请求统计丢失。
+
 同一迁移把 `0018` 起“整行扣除旧 checkpoint、删除、再插入”的刷新改为差量刷新：来源触发器只对该来源仍产出的行执行 `INSERT … ON CONFLICT DO UPDATE … WHERE` 且仅在指标实际变化时写入，不再产出的行单独删除；checkpoint 的 UPDATE/DELETE 触发器把 `NEW − OLD` 或被撤销的 `OLD` 结转进长期桶。来源行已被保留期清理删除时 reclaim 触发器删除 checkpoint 不扣桶，因此历史总量仍保留。长期桶的结果与整行替换一致，但每个来源每次修订只改写变化的行；恢复覆盖由 writer 刷新 checkpoint，桶随触发器结转，不再由应用层同时写两处。
 
 观察缺口的恢复覆盖由 writer 显式刷新，不挂在缺口标记的联动触发器上。正常事件在同一事实事务内更新覆盖；异步写失败的诊断缺口先独立提交，再以独立事务更新长期桶与 checkpoint，避免统计故障抹掉故障本身。覆盖刷新失败时保留已提交的缺口标记并拒绝清理；可重算的覆盖成功刷新后不新增粘性故障状态，也不阻塞正常推理或改变已交付结果。
@@ -897,7 +899,13 @@ model_turn/                  ← 路由与尝试策略；只调用 Gateway::exec
 
 ### 6.1 Descriptor 与操作入口
 
-WIT 契约为 `stravia:vendor@0.6.0`，新增独立的 `ConnectionCheck` capability / operation、验证范围和 `InvalidResponse` 错误类型。宿主只接受此明确 ABI 版本，旧 `0.5.x` 独立组件必须重建并重新导入，不保留旧 ABI 准入。手动 HTTP header 驱动行为、无压缩 WebSocket 和显式压缩入口仍共用原有传输与生命周期。`VendorDescriptor` 声明稳定 `vendor_id`、版本、展示元数据、canonical format 版本、`kind`（fallback 或 dedicated）及 `providers`；每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、展示元数据、channels、能力、配置字段、网络权限与数据兼容版本。fallback descriptor 的 Vendor 身份必须为 `base`；dedicated descriptor 只能有一个 profile，且其 `provider_id` 必须等于 `vendor_id`。管理面和执行面都从 `VendorPlugins` 当前已安装且已加载的 descriptor 读取，不再聚合协议 registry 伪造插件 inventory。
+WIT 契约为 `stravia:vendor@1.0.0` 和独立的 `stravia:net@1.0.0`。宿主按主版本准入并拒绝高于自身支持的 minor，0.x 独立组件必须重建并重新导入；已发布 WIT 快照保持冻结，细节见 [Vendor Plugin 设计](vendor-plugins.md)。`ConnectionCheck` 为独立操作。`VendorDescriptor` 声明稳定 `vendor_id`、版本、展示元数据、canonical format 版本、`kind`（fallback 或 dedicated）及 `providers`；每个 `ProviderDescriptor` 独立声明 `provider_id`、可选 `catalog_id`、展示元数据、channels、能力、配置字段、网络权限与数据兼容版本。fallback descriptor 的 Vendor 身份必须为 `base`；dedicated descriptor 只能有一个 profile，且其 `provider_id` 必须等于 `vendor_id`。管理面和执行面都从 `VendorPlugins` 当前已安装且已加载的 descriptor 读取，不再聚合协议 registry 伪造插件 inventory。
+
+Vendor 出站使用 rama 与打补丁的 rustls；其他出站消费者仍使用各自的客户端。Cargo 补丁统一由 `patch-crate 0.1.13` 管理：根 `Cargo.toml` 的 `workspace.metadata.patch` 按名称与版本指定目标，补丁保存在 `patches/<crate>+<version>.patch`，生成源码位于 `target/patch/<crate>-<version>`，并由 `patch.crates-io` 引用。仓库不保存生成的第三方源码，也不维护另一套下载、解包或补丁脚本。
+
+直接运行 Cargo 前执行 `task prepare:crates`。它按需安装固定版本的工具；Task 根据清单、锁文件、任务定义、补丁及生成目录判断是否需要运行 `cargo patch-crate --force`。升级补丁无需手动增加目录修订号，但更新 crate 版本时须同步依赖精确版本、metadata、补丁文件名、Cargo path 及 Task 产物路径。修改生成源码后，可用 `cargo patch-crate <crate>@<version>` 导出补丁；生成源码本身不入库。`cargo clean` 会删除生成目录，之后重新准备。需要丢弃手动修改或刷新恢复的缓存时，先停止构建，再运行 `task --force prepare:crates`；不要让刷新与构建并发。准备失败返回非零，不得继续 Cargo 构建。
+
+该版本的 `patch-crate` 没有 `--offline`／`--crate-file`，也不会仅因 `CARGO_NET_OFFLINE=true` 禁止索引刷新。离线环境须预装工具，并通过 Cargo 的目录源替换提供完整 vendor 源，包括根锁文件中已被 path patch 替换的三个原始 crate；只缓存 `.crate` 归档并不足以保证离线准备。Nix 构建使用固定哈希输入和目录源提供这些依赖，不在 sandbox 中下载安装工具。
 
 请求 canonical format 仍为 1；它与 WIT ABI 独立版本化。满足当前 WIT 的 format-1 插件可按兼容读取契约忽略新增且有默认值的 optional 字段；忽略不代表插件支持该新语义。SDK `request_compat.rs` 按目标 family 从唯一 canonical 状态生成旧 `ext`、已知标准字段和 `reasoning.effort` 的 wire 视图，以供兼容读取方使用，不把这些别名恢复成宿主运行时状态，也不把未知 passthrough 提升为上游 body 权限。新增必选语义、破坏读取契约或改变 WIT 仍须版本化，不能以 optional 兼容性绕过。独立插件中的 codec 固化在已安装 WASM 内，须重建并重新导入插件才能获得新 codec／目标投影行为；只升级宿主不会更新旧 WASM。
 
@@ -917,7 +925,7 @@ Wasm guest 不能直接取得宿主网络、存储或任意凭据。host 只提�
 
 - 根据 descriptor 的固定 origin、base URL 字段与显式配置解析最小网络授权；guest 输出不能扩大 origin。
 - HTTP / WebSocket 统一经过 host transport，遵循代理设置、取消、deadline、响应大小与消息大小限制。
-- HTTP 内容编码及 WS `permessage-deflate` 由 guest 的 typed 请求声明、host 协商和编解码，压缩头不接受 guest 手写。连接池保存真实 WS 压缩上下文并按策略隔离；具体编码、协商失败、流式读取及诊断边界见 [Vendor 传输压缩契约](vendor-plugins.md#http-与-websocket-传输压缩)。
+- HTTP 内容编码及 WS `permessage-deflate` 由 guest 的开放网络选项声明，host 负责协商和编解码；请求字段由 guest 提供并按协议校验或填入槽位。连接池保存真实 WS 压缩上下文并按策略隔离；具体行为见 [Vendor Plugin 设计](vendor-plugins.md)。
 - Provider credentials 以 typed snapshot 交给当前操作；私有状态按供应商 profile 身份、已保存 Provider 连接 UUID 和 data epoch 隔离。
 - protocol codec 保持跨厂商通用，只负责 canonical IR 与 wire 表示能力；厂商 URL、headers、认证刷新、模型发现和错误解释留在 guest。
 
@@ -1511,6 +1519,8 @@ Request Records 使用 `/api/v1/observations/interactions`、`/interactions/{id}
 每个有效 API Key 建立的 Principal 按严格滑动 60 秒维护根请求 RPM；Proxy、remote compaction 与 MCP `tools/call` 在认证后、Hook 或工具执行前计一次。根内所有轮次、工具和后台执行共享 RootRequest，每次真实发送另经目的地 RPM。入口超限立即 429 与 `Retry-After`，无入口队列；Target 等待有累计预算与实例队列边界，详见 §8.3–8.4。没有活跃执行并发上限或按执行生命周期释放的名额。
 
 ### 12.3 Fixture 契约测试体系
+
+`tests/e2e/storage/test_tool_executions.py` 通过真实 HTTP 与 SQLite／PostgreSQL 验证持久 handoff。仅 `test-harness` 服务端提供隐藏的 `--test-handoff-barrier <loopback-ip:port>`，Core 实现由 `test-support` 编译门控：默认等待窗口结束后，向控制器发送执行 ID，在收到释放字节前不进入持久提交，随后报告真实提交结果。测试在此处断开请求，并在旧上游与提交屏障都未释放时验证下一请求已被上游受理。普通构建没有该入口；不以数据库全局写锁、修改 busy timeout 或缩短产品窗口模拟交接竞态。
 
 ```
 tests/fixtures/protocol/

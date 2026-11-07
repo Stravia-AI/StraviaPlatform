@@ -86,10 +86,12 @@ enum ParsedItem {
     },
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkerResolution {
     pub restored_platform_segments: usize,
     pub restored_thinking_segments: usize,
+    /// Resolved item gap for each source item gap, including both endpoints.
+    pub source_item_gaps: Vec<usize>,
 }
 
 pub fn render_history_marker(marker: &HistoryMarker) -> String {
@@ -592,6 +594,7 @@ fn segment_items(
                 MarkerResolution {
                     restored_platform_segments: 1,
                     restored_thinking_segments: 0,
+                    ..Default::default()
                 },
             )
         }
@@ -616,6 +619,7 @@ fn segment_items(
                 MarkerResolution {
                     restored_platform_segments: 0,
                     restored_thinking_segments: 1,
+                    ..Default::default()
                 },
             )
         }
@@ -985,7 +989,11 @@ pub async fn resolve_request_markers(
     let mut cache = HashMap::new();
     let mut resolved_items = Vec::with_capacity(parsed_items.len());
     let mut legacy_duplicate_candidate: Option<AiItem> = None;
-    let mut summary = MarkerResolution::default();
+    let mut summary = MarkerResolution {
+        source_item_gaps: Vec::with_capacity(parsed_items.len() + 1),
+        ..Default::default()
+    };
+    summary.source_item_gaps.push(0);
     for parsed in parsed_items {
         let original = match &parsed {
             ParsedItem::Unchanged(item) | ParsedItem::Parsed { original: item, .. } => item,
@@ -1000,6 +1008,7 @@ pub async fn resolve_request_markers(
             })
         {
             legacy_duplicate_candidate = None;
+            summary.source_item_gaps.push(resolved_items.len());
             continue;
         }
         legacy_duplicate_candidate = None;
@@ -1029,6 +1038,7 @@ pub async fn resolve_request_markers(
                 .await?;
             }
         }
+        summary.source_item_gaps.push(resolved_items.len());
     }
     request.items = resolved_items;
     Ok(summary)

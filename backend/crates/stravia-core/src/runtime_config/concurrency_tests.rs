@@ -30,6 +30,10 @@ impl ControlledStorage {
 
 #[async_trait]
 impl SettingsStore for ControlledStorage {
+    async fn get_or_insert(&self, key: &str, value: &str) -> anyhow::Result<String> {
+        self.source.settings().get_or_insert(key, value).await
+    }
+
     async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
         let value = self.source.settings().get(key).await?;
         if self.pause_read.swap(false, Ordering::SeqCst) {
@@ -50,6 +54,9 @@ impl SettingsStore for ControlledStorage {
 }
 
 impl Storage for ControlledStorage {
+    fn prompt_admissions(&self) -> Arc<dyn crate::storage::PromptAdmissionStore> {
+        self.source.prompt_admissions()
+    }
     fn vendor_plugins(&self) -> &PluginStore {
         self.source.vendor_plugins()
     }

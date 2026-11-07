@@ -278,10 +278,15 @@ mod tests {
     #[test]
     fn response_requires_one_valid_image_and_successful_finish() {
         let mut response = json!({"response":{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png", "data":STANDARD.encode(png())}}]}}]}});
-        assert!(decode_response(response.clone(), &stravia_vendor_sdk::net::Fields::new()).is_err());
+        assert!(
+            decode_response(response.clone(), &stravia_vendor_sdk::net::Fields::new()).is_err()
+        );
         response["response"]["candidates"][0]["finishReason"] = json!("STOP");
         assert_eq!(
-            decode_response(response.clone(), &stravia_vendor_sdk::net::Fields::new()).unwrap().artifacts[0].bytes,
+            decode_response(response.clone(), &stravia_vendor_sdk::net::Fields::new())
+                .unwrap()
+                .artifacts[0]
+                .bytes,
             png()
         );
         let parts = response["response"]["candidates"][0]["content"]["parts"]

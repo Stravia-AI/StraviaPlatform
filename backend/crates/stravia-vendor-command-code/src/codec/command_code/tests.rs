@@ -21,7 +21,7 @@ fn unknown_controls_cannot_change_the_native_envelope_or_tool_schema() {
     }]);
     let body = CommandCodeGenerateV1.encode_request(request).unwrap();
     assert_eq!(body["permissionMode"], "standard");
-    assert_eq!(body["mode"], "agent");
+    assert!(body.get("mode").is_none());
     assert!(body["params"].get("future").is_none());
     assert_eq!(
         body["params"]["tools"][0]["input_schema"]["properties"]["options"]["additionalProperties"],
@@ -42,7 +42,7 @@ fn encodes_generate_envelope() {
         }],
     );
     let body = CommandCodeGenerateV1.encode_request(request).unwrap();
-    assert_eq!(body["mode"], "agent");
+    assert!(body.get("mode").is_none());
     assert_eq!(body["permissionMode"], "standard");
     assert_eq!(body["params"]["model"], "deepseek/deepseek-v4-flash");
     assert_eq!(body["params"]["stream"], true);

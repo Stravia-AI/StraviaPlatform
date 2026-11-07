@@ -43,6 +43,8 @@ pub struct AgentRunner {
     model: Arc<dyn ModelTurnExecutor>,
     tools: AgentToolRegistry,
     turns: Arc<dyn TurnChainStore>,
+    atomic_state_store: Option<crate::plugin::PluginStore>,
+    prompt_admissions: Option<Arc<dyn crate::storage::PromptAdmissionStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     run_lifecycles: Arc<[Arc<dyn AgentRunLifecycle>]>,
     tool_authorizer: Option<Arc<dyn AgentToolAuthorizer>>,

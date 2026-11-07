@@ -5,6 +5,13 @@ pub(super) struct ParentAgentContext {
     pub(super) transcript: Vec<AiItem>,
     pub(super) snapshot: Option<ParentAgentSnapshot>,
     pub(super) root_turn_id: Option<AgentTurnId>,
+    pub(super) state_checkpoint_id: Option<uuid::Uuid>,
+    pub(super) context_window_id: Option<uuid::Uuid>,
+    pub(super) context_window_index: Option<u64>,
+    pub(super) user_prompt_index: u64,
+    pub(super) user_turn_index: Option<u64>,
+    pub(super) client_conversation_id: Option<String>,
+    pub(super) client_conversation_created_at_ms: Option<i64>,
 }
 
 pub(super) struct ParentAgentSnapshot {
@@ -205,13 +212,63 @@ impl AgentRunner {
             .materialize(principal, TurnNodeKind::Agent, parent)
             .await
             .map_err(|error| AgentRunError::new("parent_turn_unavailable", error.to_string()))?;
+        if chain.first().is_none_or(|node| node.parent_id.is_some())
+            || chain.last().is_none_or(|node| &node.id != parent)
+            || chain
+                .windows(2)
+                .any(|nodes| nodes[1].parent_id.as_ref() != Some(&nodes[0].id))
+        {
+            return Err(AgentRunError::new(
+                "parent_turn_invalid",
+                "Parent Turn ancestry is incomplete",
+            ));
+        }
+        let user_prompt_index = u64::try_from(chain.len()).map_err(|_| {
+            AgentRunError::new("parent_turn_invalid", "Agent Turn ancestry is too long")
+        })?;
         let root_turn_id = chain
             .first()
             .map(|node| node.id.clone())
             .ok_or_else(|| AgentRunError::new("parent_turn_unavailable", "Parent Turn is empty"))?;
+        let root = &chain[0].payload;
+        let client_conversation_id = root
+            .get("user_prompt_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let client_conversation_created_at_ms = root
+            .get("user_prompt_created_at_ms")
+            .and_then(Value::as_i64);
         let payload = chain
             .last()
             .ok_or_else(|| AgentRunError::new("parent_turn_unavailable", "Parent Turn is empty"))?;
+        let state_checkpoint_id = payload
+            .payload
+            .get("state_checkpoint_id")
+            .map(|value| serde_json::from_value::<Option<uuid::Uuid>>(value.clone()))
+            .transpose()
+            .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))?
+            .flatten();
+        let context_window_id = payload
+            .payload
+            .get("context_window_id")
+            .map(|value| serde_json::from_value::<Option<uuid::Uuid>>(value.clone()))
+            .transpose()
+            .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))?
+            .flatten();
+        let context_window_index = payload
+            .payload
+            .get("context_window_index")
+            .and_then(Value::as_u64);
+        if context_window_id.is_some() != context_window_index.is_some() {
+            return Err(AgentRunError::new(
+                "parent_turn_invalid",
+                "Incomplete Agent context window",
+            ));
+        }
+        let user_turn_index = payload
+            .payload
+            .get("user_turn_index")
+            .and_then(Value::as_u64);
         let transcript = serde_json::from_value(
             payload.payload.get("transcript").cloned().ok_or_else(|| {
                 AgentRunError::new(
@@ -268,6 +325,13 @@ impl AgentRunner {
                 thinking_level,
             }),
             root_turn_id: Some(root_turn_id),
+            state_checkpoint_id,
+            context_window_id,
+            context_window_index,
+            user_prompt_index,
+            user_turn_index,
+            client_conversation_id,
+            client_conversation_created_at_ms,
         })
     }
 }

@@ -24,8 +24,8 @@ use stravia_runtime_contract::protocol::{
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
-    LogLevel, OperationScope, RuntimeEvent, VendorRuntime,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin, LogLevel,
+    OperationScope, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::{
     AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod, AllowanceBillingPrice,
@@ -67,7 +67,10 @@ impl HostHttpResponse for HttpResponse {
             .await
             .headers()
             .iter()
-            .map(|(key, value)| stravia_vendor_sdk::net::Field { name: key.to_string(), bytes: value.as_bytes().to_vec() })
+            .map(|(key, value)| stravia_vendor_sdk::net::Field {
+                name: key.to_string(),
+                bytes: value.as_bytes().to_vec(),
+            })
             .collect())
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -249,10 +252,18 @@ struct Services {
 }
 #[async_trait]
 impl HostServices for Services {
-    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), stravia_vendor_sdk::net::OptionError> {
+    fn validate_net_option(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), stravia_vendor_sdk::net::OptionError> {
         stravia_vendor_sdk::net::validate_host_option(key, value)
     }
-    fn http_start(&self, request: stravia_vendor_sdk::net::Request, _options: stravia_vendor_sdk::net::Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: stravia_vendor_sdk::net::Request,
+        _options: stravia_vendor_sdk::net::Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let url = url::Url::parse(&request.url).unwrap();
         assert!(matches!(
             url.host_str(),
@@ -275,10 +286,16 @@ impl HostServices for Services {
             )
             .body(request.body);
         for field in request.headers.into_vec() {
-            if field.bytes.is_empty() && (field.name.eq_ignore_ascii_case("host") || field.name.eq_ignore_ascii_case("content-length")) {
+            if field.bytes.is_empty()
+                && (field.name.eq_ignore_ascii_case("host")
+                    || field.name.eq_ignore_ascii_case("content-length"))
+            {
                 continue;
             }
-            builder = builder.header(field.name, reqwest::header::HeaderValue::from_bytes(&field.bytes).unwrap());
+            builder = builder.header(
+                field.name,
+                reqwest::header::HeaderValue::from_bytes(&field.bytes).unwrap(),
+            );
         }
         Ok(Arc::new(HttpResponse {
             client: self.client.clone(),

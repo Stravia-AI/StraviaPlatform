@@ -1,5 +1,5 @@
 //! 真实 Vendor Wasm + Core Gateway/HTTP router + 隔离 SQLite + 回环上游：
-//! 线程续接被拒绝或本地连接失效时，宿主在同一次逻辑 attempt 内完整重放一次。
+//! Claude 默认发送完整历史；Codex 本地连接失效时在同一次逻辑 attempt 内恢复。
 //!
 //! 前置：`task build:vendors:all`（读取 target/vendor-plugins-all）。上游、凭据均为假 fixture。
 
@@ -31,8 +31,12 @@ mod sqlite_fixture;
 mod vendor_plugin_artifacts;
 use vendor_plugin_artifacts::install_distributed_vendor_plugin;
 
+#[path = "vendor_continuation_replay/claude_context.rs"]
+mod claude_context;
 #[path = "vendor_continuation_replay/codex.rs"]
 mod codex;
+#[path = "vendor_continuation_replay/grok.rs"]
+mod grok;
 
 const MODEL: &str = "claude-sonnet-4-5";
 const ROUTE: &str = "claude-replay-route";
@@ -43,21 +47,66 @@ const COOLDOWN_MS: i64 = 400;
 struct Upstream {
     script: Arc<Mutex<VecDeque<(u16, Value)>>>,
     bodies: Arc<Mutex<Vec<Value>>>,
+    headers: Arc<Mutex<Vec<axum::http::HeaderMap>>>,
 }
 
 async fn serve_script(State(upstream): State<Upstream>, request: AxumRequest) -> Response {
+    upstream.headers.lock().push(request.headers().clone());
     let bytes = to_bytes(request.into_body(), 4 * 1024 * 1024)
         .await
         .expect("read upstream request");
-    upstream
-        .bodies
-        .lock()
-        .push(serde_json::from_slice(&bytes).expect("upstream request is JSON"));
+    let body: Value = serde_json::from_slice(&bytes).expect("upstream request is JSON");
+    let stream = body["stream"] == true;
+    upstream.bodies.lock().push(body);
     let (status, body) = upstream
         .script
         .lock()
         .pop_front()
         .expect("upstream script exhausted: unexpected extra request");
+    if stream && status == 200 {
+        let mut start = body.clone();
+        start["content"] = json!([]);
+        start["stop_reason"] = Value::Null;
+        start["stop_sequence"] = Value::Null;
+        let mut events = vec![json!({"type":"message_start","message":start})];
+        for (index, block) in body["content"].as_array().unwrap().iter().enumerate() {
+            let mut initial = block.clone();
+            if block["type"] == "text" {
+                initial["text"] = json!("");
+            }
+            if block["type"] == "tool_use" {
+                initial["input"] = json!({});
+            }
+            events
+                .push(json!({"type":"content_block_start","index":index,"content_block":initial}));
+            if block["type"] == "text" {
+                events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":block["text"]}}));
+            } else if block["type"] == "tool_use" {
+                events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":block["input"].to_string()}}));
+            }
+            events.push(json!({"type":"content_block_stop","index":index}));
+        }
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":body["stop_reason"],"stop_sequence":null},"usage":{"output_tokens":5}}));
+        events.push(json!({"type":"message_stop"}));
+        let sse = events
+            .into_iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect::<String>();
+        return Response::builder()
+            .status(status)
+            .header("content-type", "text/event-stream")
+            .header(
+                "request-id",
+                format!("req_{}", upstream.bodies.lock().len()),
+            )
+            .body(Body::from(sse))
+            .expect("upstream stream");
+    }
     Response::builder()
         .status(status)
         .header("content-type", "application/json")
@@ -100,13 +149,23 @@ struct Harness {
 
 impl Harness {
     async fn start() -> anyhow::Result<Self> {
+        Self::start_with_hook(None).await
+    }
+
+    async fn start_with_hook(
+        hook: Option<Arc<dyn stravia_runtime_contract::hook::Hook>>,
+    ) -> anyhow::Result<Self> {
         let directory = tempfile::tempdir()?;
         sqlite_fixture::seed_database(directory.path()).await?;
-        let gateway = Gateway::new(GatewayConfig {
+        let config = GatewayConfig {
             data_dir: directory.path().to_owned(),
             ..GatewayConfig::default()
-        })
-        .await?;
+        };
+        let gateway = if let Some(hook) = hook {
+            Gateway::builder(config).hook(hook).build().await?
+        } else {
+            Gateway::new(config).await?
+        };
         install_distributed_vendor_plugin(&gateway, "claude-code").await?;
 
         let upstream = Upstream::default();
@@ -304,17 +363,13 @@ fn completed(count: usize) -> Vec<(String, Option<String>)> {
     vec![("completed".to_owned(), None); count]
 }
 
-/// 线程失效 → 宿主完整重放含图工具结果：只记录成功 attempt，没有失败事件。
+/// 默认交互模式始终发送完整历史，包括工具结果中的图片。
 #[tokio::test]
-async fn rejected_thread_is_replayed_inside_one_completed_attempt() -> anyhow::Result<()> {
+async fn default_mode_sends_full_history_without_thread() -> anyhow::Result<()> {
     use base64::Engine as _;
 
     let harness = Harness::start().await?;
-    harness.script([
-        message("msg_1"),
-        error(404, Some("thread_not_found")),
-        message("msg_2"),
-    ]);
+    harness.script([message("msg_1"), message("msg_2")]);
 
     assert_eq!(harness.turn(0).await.0, StatusCode::OK);
     let source = json!({
@@ -335,41 +390,37 @@ async fn rejected_thread_is_replayed_inside_one_completed_attempt() -> anyhow::R
 
     {
         let sent = harness.upstream.bodies.lock();
-        assert_eq!(sent.len(), 3, "one rejected send and exactly one replay");
-        assert_eq!(sent[1]["thread"]["type"], "continue");
-        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 3);
-        assert!(sent[2].get("thread").is_none());
-        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 5);
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].get("thread").is_none());
+        assert!(sent[1].get("thread").is_none());
+        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 5);
         assert_eq!(
-            sent[1]["messages"][2]["content"][0]["content"][1]["source"],
-            source
-        );
-        assert_eq!(
-            sent[2]["messages"][4]["content"][0]["content"][1]["source"],
+            sent[1]["messages"][4]["content"][0]["content"][1]["source"],
             source
         );
     }
 
-    // 被消化的线程拒绝不是 attempt：两轮各一条成功，没有任何 failed 记录。
+    // 两轮各一条成功，没有失败记录。
     assert_eq!(harness.attempts().await?, completed(2));
     assert_eq!(harness.target_state().await?, "available");
     Ok(())
 }
 
-/// 重放后的第二次真实错误仍是最终失败：观测为失败，且不会再重放第三次。
+/// 没有发送 thread 时，thread_not_found 只是一次真实上游错误，不得触发重放。
 #[tokio::test]
-async fn second_real_error_after_replay_is_an_observed_failure() -> anyhow::Result<()> {
+async fn thread_error_without_thread_is_an_observed_failure() -> anyhow::Result<()> {
     let harness = Harness::start().await?;
-    harness.script([
-        message("msg_1"),
-        error(404, Some("thread_not_found")),
-        error(400, None),
-    ]);
+    harness.script([message("msg_1"), error(404, Some("thread_not_found"))]);
 
     assert_eq!(harness.turn(0).await.0, StatusCode::OK);
     let (status, body) = harness.turn(1).await;
-    assert!(!status.is_success(), "{body}");
-    assert_eq!(harness.upstream.bodies.lock().len(), 3);
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    {
+        let sent = harness.upstream.bodies.lock();
+        assert_eq!(sent.len(), 2);
+        assert!(sent[1].get("thread").is_none());
+        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 3);
+    }
 
     let attempts = harness.attempts().await?;
     assert_eq!(attempts.len(), 2, "{attempts:?}");
@@ -378,19 +429,14 @@ async fn second_real_error_after_replay_is_an_observed_failure() -> anyhow::Resu
     Ok(())
 }
 
-/// 半开探测同样可以在单个探测 attempt 内完成恢复：成功后 Target 回到 Available。
+/// 半开探测在单个 attempt 中发送完整历史，成功后 Target 回到 Available。
 #[tokio::test]
-async fn half_open_probe_recovers_thread_rejection_in_its_single_attempt() -> anyhow::Result<()> {
+async fn half_open_probe_sends_one_full_history_attempt() -> anyhow::Result<()> {
     let harness = Harness::start().await?;
-    harness.script([
-        message("msg_1"),
-        error(503, None),
-        error(404, Some("thread_not_found")),
-        message("msg_2"),
-    ]);
+    harness.script([message("msg_1"), error(503, None), message("msg_2")]);
 
     assert_eq!(harness.turn(0).await.0, StatusCode::OK);
-    // 重试预算 0：一次上游失败即冷却；插件未提交线程状态，下次仍是 continue。
+    // 重试预算 0：一次上游失败即冷却。
     assert!(!harness.turn(1).await.0.is_success());
     // 慢速 runner 读取状态时可能已经跨过冷却截止时间。
     let state = harness.target_state().await?;
@@ -405,10 +451,9 @@ async fn half_open_probe_recovers_thread_rejection_in_its_single_attempt() -> an
     assert_eq!(status, StatusCode::OK, "{body}");
     {
         let sent = harness.upstream.bodies.lock();
-        assert_eq!(sent.len(), 4);
-        assert_eq!(sent[2]["thread"]["type"], "continue");
-        assert!(sent[3].get("thread").is_none());
-        assert_eq!(sent[3]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(sent.len(), 3);
+        assert!(sent[2].get("thread").is_none());
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
     }
 
     // 仅冷却前的 503 是失败；探测 attempt 本身是一条成功，并关闭了熔断。

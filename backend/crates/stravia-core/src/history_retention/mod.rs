@@ -94,6 +94,7 @@ impl HistoryRetention {
         i64::from(self.days()) * DAY_MILLIS
     }
 
+    #[cfg(test)]
     pub(crate) fn window(&self) -> Duration {
         Duration::from_millis(u64::try_from(self.window_millis()).unwrap_or(u64::MAX))
     }
@@ -110,6 +111,8 @@ pub(crate) struct HistoryMaintenance {
     pub(crate) retention: HistoryRetention,
     pub(crate) observation: crate::interaction_observation::InteractionObservation,
     pub(crate) turn_chain: Arc<dyn TurnChainStore>,
+    pub(crate) prompt_admissions: Arc<dyn crate::storage::PromptAdmissionStore>,
+    pub(crate) atomic_state: crate::plugin::PluginStore,
     pub(crate) history_markers: Arc<dyn crate::history_marker::HistoryMarkerStore>,
     pub(crate) mappings: Arc<dyn MappingStore>,
     pub(crate) compaction: crate::compaction::Compaction,
@@ -117,6 +120,36 @@ pub(crate) struct HistoryMaintenance {
 }
 
 impl HistoryMaintenance {
+    pub(crate) async fn clear_history(
+        &self,
+    ) -> anyhow::Result<crate::interaction_observation::ClearHistoryResult> {
+        let history = self.observation.clear_history().await;
+        let atomic = self
+            .atomic_state
+            .clear_conversation_atomic_state(self.prompt_admissions.as_ref())
+            .await;
+        let journal = self.atomic_state.sweep_atomic_journal().await;
+        let mut failures = Vec::new();
+        for (step, error) in [
+            ("observation", history.as_ref().err()),
+            ("atomic conversation state", atomic.as_ref().err()),
+            ("atomic state journal", journal.as_ref().err()),
+        ] {
+            if let Some(error) = error {
+                tracing::warn!(step, error = %format!("{error:#}"), "history clear step failed");
+                failures.push(format!("{step}: {error:#}"));
+            }
+        }
+        if failures.is_empty() {
+            history
+        } else {
+            anyhow::bail!(
+                "history clear partially failed; some cleanup may have succeeded: {}",
+                failures.join("; ")
+            )
+        }
+    }
+
     #[tracing::instrument(
         target = "stravia::perf",
         name = "history.sweep",
@@ -126,7 +159,8 @@ impl HistoryMaintenance {
     /// 每一步都会尝试：某一步失败只记录并在最后统一返回错误，不会让其余步骤
     /// （尤其是依赖已成功回收之后的正文回收）被跳过。
     pub(crate) async fn sweep_history(&self, now: i64) -> anyhow::Result<u64> {
-        let retention = self.retention.window();
+        let window_ms = self.retention.window_millis();
+        let retention = Duration::from_millis(u64::try_from(window_ms).unwrap_or(u64::MAX));
         let mut failures: Vec<String> = Vec::new();
         macro_rules! step {
             ($name:literal, $call:expr) => {
@@ -164,6 +198,22 @@ impl HistoryMaintenance {
                 break;
             }
         }
+        deleted = deleted.saturating_add(step!(
+            "prompt admissions",
+            self.prompt_admissions
+                .prune_before(now.saturating_sub(window_ms))
+        ));
+        deleted = deleted.saturating_add(step!(
+            "atomic conversation state",
+            self.atomic_state.sweep_conversation_atomic_state(
+                now.saturating_sub(window_ms),
+                self.prompt_admissions.as_ref()
+            )
+        ));
+        deleted = deleted.saturating_add(step!(
+            "atomic state journal",
+            self.atomic_state.sweep_atomic_journal()
+        ));
         deleted = deleted.saturating_add(step!("content", self.content.sweep()));
         tracing::Span::current().record("deleted", deleted);
         if failures.is_empty() {

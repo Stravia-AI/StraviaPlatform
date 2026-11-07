@@ -1,0 +1,30 @@
+{
+  "antigravity": {
+    "revision": 1,
+    "sha256": "d6fa5abb9afcbf68f0b377a32480cc9ecdcf00b2bf87a0d3a74ef215ead9a76b"
+  },
+  "bun": {
+    "revision": 1,
+    "sha256": "3c5d738bd8ed5c73cce175209a1f0f4d6d75ee0fffb5e2cde18ba981d2a71497"
+  },
+  "bun-1-3-14": {
+    "revision": 1,
+    "sha256": "cb8a0c1912fdc8cc73cbfa369dd51669ac021d4f56e7ada55fa6a62b98eb545b"
+  },
+  "claude-code": {
+    "revision": 1,
+    "sha256": "e79a017832b5d76e14381d343e4692bdb0bd7aa596573fa3a28bbd26ec6408fa"
+  },
+  "codex-http": {
+    "revision": 1,
+    "sha256": "8e4542ebeaca1b55d4dc4f96939f3a956716a1ed83f5a27edc138d2bedeaf53a"
+  },
+  "codex-ws": {
+    "revision": 1,
+    "sha256": "1bd29e4bbcc79f8a4cea07a4a4d6b2c765f961c4b8bdbdd9209ade544fa8ba96"
+  },
+  "default": {
+    "revision": 1,
+    "sha256": "2f868232ebc31a156a14542c0ed3dac971b7f40cbf609603e201c48ca4ecc1fe"
+  }
+}

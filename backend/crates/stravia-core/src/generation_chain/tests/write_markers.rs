@@ -130,6 +130,11 @@ async fn completed_inline_window_is_the_parent_after_cold_restore() {
         .register(
             &owner,
             crate::compaction::CompactionRegistration {
+                logical_turn: None,
+                source_history: None,
+                source_window: None,
+                user_prompt_metadata: None,
+                atomic_checkpoint_id: None,
                 source_generation_id: Some(source.id().to_owned()),
                 source_record_ids: Vec::new(),
                 operation_id: write.id().to_owned(),
@@ -357,8 +362,11 @@ async fn native_compaction_source_keeps_reference_and_artifact_resolution() {
 
 #[tokio::test]
 async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_delta() {
+    use crate::storage::Storage;
+    let admissions = crate::storage::MemoryStorage::new(vec![], vec![], vec![]);
     let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
     let compaction = crate::compaction::Compaction::sqlite(pool.clone());
+    let atomic_store = crate::plugin::PluginStore::sqlite(pool.clone());
     let chain = GenerationChain::from_turn_chain(
         Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
             pool,
@@ -368,13 +376,17 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
         crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
         crate::history_retention::HistoryRetention::for_tests(),
     )
-    .with_compaction(compaction.clone());
+    .with_compaction(compaction.clone())
+    .with_prompt_admissions(admissions.prompt_admissions())
+    .with_atomic_state(atomic_store);
     let owner = principal("recompaction-owner");
-    let original = user_message("already delivered user");
+    let original = user_message("continue");
     let mut source = chain
         .begin(owner.clone(), responses_request(vec![original.clone()]))
         .await
         .unwrap();
+    source.admit_user_prompt().await.unwrap();
+    let source_metadata = source.user_prompt_metadata();
     let mut answer = AiResponse::new("source-answer", "model");
     answer.items = vec![AiItem::output_text("already delivered answer")];
     answer.items[0].set_graph_metadata(
@@ -391,6 +403,13 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
     );
     assert!(source.stage(&mut answer, &generation_source(), None));
     source.persist().await.unwrap();
+    let compact_checkpoint = uuid::Uuid::new_v4();
+    source
+        .atomic_lease()
+        .unwrap()
+        .checkpoint(compact_checkpoint)
+        .await
+        .unwrap();
     let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
         &serde_json::json!({"type":"compaction","id":"same-source-state","encrypted_content":"opaque"}),
     ).unwrap().unwrap();
@@ -398,6 +417,14 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
         .register(
             &owner,
             crate::compaction::CompactionRegistration {
+                logical_turn: source.logical_turn(),
+                source_history: Some(source_history_proof(&responses_request(vec![
+                    original.clone(),
+                    answer.items[0].clone(),
+                ]))),
+                source_window: source.virtual_window(),
+                user_prompt_metadata: source_metadata.clone(),
+                atomic_checkpoint_id: Some(compact_checkpoint),
                 source_generation_id: Some(source.id().to_owned()),
                 source_record_ids: Vec::new(),
                 operation_id: "first-boundary".into(),
@@ -413,6 +440,78 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
         )
         .await
         .unwrap();
+    let mut resumed = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![state.clone(), user_message("after compaction")]),
+        )
+        .await
+        .unwrap();
+    resumed.admit_user_prompt().await.unwrap();
+    let resumed_metadata = resumed.user_prompt_metadata().unwrap();
+    let source_window = source.virtual_window().unwrap();
+    let resumed_window = resumed.virtual_window().unwrap();
+    assert_eq!(resumed_window.index, source_window.index + 1);
+    assert_ne!(resumed_window.id, source_window.id);
+    assert_eq!(resumed_metadata.context_window_id, Some(resumed_window.id));
+    let mut replay = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![state.clone(), user_message("another fork")]),
+        )
+        .await
+        .unwrap();
+    replay.admit_user_prompt().await.unwrap();
+    assert_eq!(replay.virtual_window(), Some(resumed_window));
+    let mut repeated = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![state.clone(), user_message("continue")]),
+        )
+        .await
+        .unwrap();
+    repeated.admit_user_prompt().await.unwrap();
+    assert_eq!(repeated.user_prompt_index(), Some(2));
+    assert_eq!(repeated.virtual_window(), Some(resumed_window));
+    let mut retained = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![
+                state.clone(),
+                original.clone(),
+                answer.items[0].clone(),
+                user_message("only new"),
+            ]),
+        )
+        .await
+        .unwrap();
+    retained.admit_user_prompt().await.unwrap();
+    assert_eq!(retained.virtual_window(), Some(resumed_window));
+    assert_eq!(retained.user_prompt_index(), Some(3));
+    assert_eq!(resumed_metadata.user_prompt_index, 2);
+    assert_eq!(resumed_metadata.user_turn_index, Some(2));
+    assert_eq!(
+        resumed_metadata.client_conversation_id,
+        source_metadata.as_ref().unwrap().client_conversation_id
+    );
+    let mut resumed_answer = AiResponse::new("resumed-answer", "model");
+    resumed_answer.push_output_text("continued answer");
+    assert!(resumed.stage(&mut resumed_answer, &generation_source(), None));
+    resumed.persist().await.unwrap();
+    let mut after = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![
+                state.clone(),
+                user_message("after compaction"),
+                AiItem::output_text("continued answer"),
+                user_message("third"),
+            ]),
+        )
+        .await
+        .unwrap();
+    after.admit_user_prompt().await.unwrap();
+    assert_eq!(after.user_prompt_index(), Some(3));
     let trigger = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
         &serde_json::json!({"type":"compaction_trigger"}),
     )
@@ -423,6 +522,19 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
     items.extend([state, trigger.clone()]);
     let mut request = responses_request(items.clone());
     request.instructions = Some("New compact instructions".into());
+    let prepared = chain
+        .prepare_compaction(owner.clone(), request.clone())
+        .await
+        .unwrap();
+    assert_eq!(prepared.user_prompt_metadata, source_metadata);
+    assert_eq!(
+        prepared.atomic_parent_checkpoint_id,
+        Some(compact_checkpoint)
+    );
+    assert_eq!(
+        prepared.source_window_for_admission(uuid::Uuid::new_v4()),
+        source_window
+    );
     let write = chain
         .begin_native_compaction(owner.clone(), request.clone())
         .await
@@ -439,6 +551,111 @@ async fn recompaction_excludes_source_prefix_and_native_window_from_new_user_del
     let prepared = chain.prepare_compaction(owner, request).await.unwrap();
     assert_eq!(prepared.parent_id.as_deref(), Some(source.id()));
     assert!(!prepared.has_new_user);
+}
+
+#[tokio::test]
+async fn sourceless_compaction_requires_exact_source_displacement() {
+    use crate::storage::Storage;
+    let admissions = crate::storage::MemoryStorage::new(vec![], vec![], vec![]);
+    let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+    let compaction = crate::compaction::Compaction::sqlite(pool.clone());
+    // The Generation store resolves compaction dependencies in the same durable
+    // database as the registered window, as it does in production.
+    let chain = GenerationChain::from_turn_chain(
+        Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
+            pool,
+            crate::history_retention::HistoryRetention::for_tests(),
+        )),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+        crate::history_retention::HistoryRetention::for_tests(),
+    )
+    .with_compaction(compaction.clone())
+    .with_prompt_admissions(admissions.prompt_admissions());
+    let owner = principal("sourceless-window");
+    let old = user_message("full source input");
+    let state = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(
+        &serde_json::json!({"type":"compaction","id":"source-proof-state","encrypted_content":"opaque"}),
+    ).unwrap().unwrap();
+    let source = VirtualWindow::root();
+    compaction
+        .register(
+            &owner,
+            crate::compaction::CompactionRegistration {
+                logical_turn: None,
+                source_history: Some(source_history_proof(&responses_request(vec![old.clone()]))),
+                source_window: Some(source),
+                user_prompt_metadata: None,
+                atomic_checkpoint_id: None,
+                source_generation_id: None,
+                source_record_ids: Vec::new(),
+                operation_id: "source-proof".into(),
+                target: crate::compaction::CompactionTarget {
+                    target_key: "target".into(),
+                    namespace: "namespace".into(),
+                    model: "model".into(),
+                    protocol: OPEN_RESPONSES_2026_04_24.to_string(),
+                },
+                window: vec![state.clone()],
+                state_items: vec![state.clone()],
+            },
+        )
+        .await
+        .unwrap();
+    let mut retained = chain
+        .begin(owner.clone(), responses_request(vec![old, state.clone()]))
+        .await
+        .unwrap();
+    retained.admit_user_prompt().await.unwrap();
+    assert_eq!(retained.virtual_window(), Some(source));
+    let mut retained_after = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![state.clone(), user_message("full source input")]),
+        )
+        .await
+        .unwrap();
+    retained_after.admit_user_prompt().await.unwrap();
+    assert_eq!(retained_after.virtual_window().unwrap().index, 0);
+    assert_ne!(retained_after.virtual_window(), Some(source));
+    let request = responses_request(vec![state.clone(), user_message("new")]);
+    let prepared = chain
+        .prepare_compaction(owner.clone(), request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.user_prompt_metadata_for_admission(uuid::Uuid::new_v4(), 42),
+        None
+    );
+    let mut replaced = chain.begin(owner.clone(), request).await.unwrap();
+    replaced.admit_user_prompt().await.unwrap();
+    assert_eq!(replaced.user_prompt_index(), None);
+    assert_eq!(replaced.user_prompt_metadata(), None);
+    let next = replaced.virtual_window().unwrap();
+    assert_eq!(next.index, 0);
+    assert_ne!(next.id, source.id);
+    // An admitted prefix must carry the absence of proof, including when a
+    // later request adds a visible prompt after the compacted window.
+    let mut continuation = chain
+        .begin(
+            owner.clone(),
+            responses_request(vec![state, user_message("new"), user_message("later")]),
+        )
+        .await
+        .unwrap();
+    continuation.admit_user_prompt().await.unwrap();
+    assert_eq!(continuation.user_prompt_index(), None);
+    assert_eq!(continuation.user_prompt_metadata(), None);
+    let mut answer = AiResponse::new("legacy-continuation", "model");
+    answer.push_output_text("continued");
+    assert!(continuation.stage(&mut answer, &generation_source(), None));
+    continuation.persist().await.unwrap();
+    let mut next_request = responses_request(vec![user_message("another")]);
+    crate::router::stamp_previous_response_id(&mut next_request, continuation.id());
+    let mut next = chain.begin(owner, next_request).await.unwrap();
+    next.admit_user_prompt().await.unwrap();
+    assert_eq!(next.user_prompt_index(), None);
+    assert_eq!(next.user_prompt_metadata(), None);
 }
 
 #[tokio::test]
@@ -470,6 +687,11 @@ async fn explicit_parent_native_compacted_continuation_reads_source_without_disc
         .register(
             &owner,
             crate::compaction::CompactionRegistration {
+                logical_turn: None,
+                source_history: None,
+                source_window: None,
+                user_prompt_metadata: None,
+                atomic_checkpoint_id: None,
                 source_generation_id: Some(source.id().to_owned()),
                 source_record_ids: Vec::new(),
                 operation_id: "explicit-source-boundary".into(),
@@ -542,6 +764,11 @@ async fn native_window_excludes_only_verified_items_from_new_input() {
         .register(
             &owner,
             crate::compaction::CompactionRegistration {
+                logical_turn: None,
+                source_history: None,
+                source_window: None,
+                user_prompt_metadata: None,
+                atomic_checkpoint_id: None,
                 source_generation_id: None,
                 source_record_ids: Vec::new(),
                 operation_id: "leading-boundary".into(),

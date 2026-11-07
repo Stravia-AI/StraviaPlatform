@@ -14,13 +14,13 @@ use stravia_runtime_contract::protocol::ids::{
     OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, Protocol,
 };
 use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_vendor_sdk::net::{ConnectRequest, Fields, Request};
 use stravia_vendor_sdk::{
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
     DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
     MODELS_SOURCE_CATALOG, Operation, OperationInput, OperationOutput, PluginError,
     ProviderSnapshot, TransportPreference, ValidationIssue, read_http_body,
 };
-use stravia_vendor_sdk::net::{ConnectRequest, Fields, Request};
 
 use crate::metadata::ACCOUNT_DISCOVERY_PROVIDER_IDS;
 
@@ -227,12 +227,15 @@ pub(crate) fn execute_inference(
     })?;
     drop(encoded);
     host.emit_started()?;
-    let response = host.http_start(Request {
-        method: "POST".to_owned(),
-        url,
-        headers,
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "POST".to_owned(),
+            url,
+            headers,
+            body,
+        },
+        &crate::net_options(),
+    )?;
     if operation == Operation::Compact {
         return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
             .map(OperationOutput::Compact);
@@ -895,7 +898,10 @@ fn discover(
     provider: &ProviderSnapshot,
     request: DiscoverRequest,
 ) -> Result<DiscoverResponse, PluginError> {
-    let response = host.http_start(model_discovery_request(vendor_id, provider, &request)?, &crate::net_options())?;
+    let response = host.http_start(
+        model_discovery_request(vendor_id, provider, &request)?,
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_JSON_BODY)?;
@@ -1040,12 +1046,15 @@ fn prepare_ollama_request(
     let body = serde_json::to_vec(&json!({"name": model})).map_err(|error| {
         common::plugin_error(ErrorKind::Trapped, format!("encode Ollama probe: {error}"))
     })?;
-    let response = host.http_start(Request {
-        method: "POST".to_owned(),
-        url: base.to_string(),
-        headers: crate::fields(headers),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        Request {
+            method: "POST".to_owned(),
+            url: base.to_string(),
+            headers: crate::fields(headers),
+            body,
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(common::plugin_error(

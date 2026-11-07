@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
@@ -176,6 +177,16 @@ fn publication_frame(event: Value) -> Result<axum::body::Bytes, std::io::Error> 
 
 #[tokio::test]
 async fn registry_failure_gates_http_native_publication_and_standalone_compaction() {
+    // Gateway initialization performs independent local fixture preparation; keep the
+    // scenario watchdog focused on configuration and the actual HTTP exchanges.
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let stage = std::cell::Cell::new("provider setup");
     tokio::time::timeout(Duration::from_secs(20), async {
         let (requests, mut received) = mpsc::channel::<PublicationRequest>(1);
         let (compact_requests, mut compact_received) = mpsc::channel::<ProviderRequest>(1);
@@ -186,11 +197,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let provider_server = tokio::spawn(async move {
             axum::serve(provider_listener, provider_router).await.unwrap();
         });
-        let directory = tempfile::tempdir().unwrap();
-        let gateway = Gateway::new(GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        }).await.unwrap();
+        stage.set("provider and route configuration");
         let admin = gateway.admin();
         let provider = admin.create_provider(CreateProvider {
             name: Some("local publication fault Provider".into()),
@@ -234,8 +241,16 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
             .json(&json!({"model":"native-publication","stream":true,"input":"publish public text before native state","context_management":[{"type":"compaction","compact_threshold":128}]}));
-        let sending = tokio::spawn(async move { sending.send().await });
-        let provider_request = received.recv().await.unwrap();
+        stage.set("inline provider request and headers");
+        let mut sending = tokio::spawn(async move { sending.send().await });
+        let (provider_request, early_response) = tokio::select! {
+            request = received.recv() => (request.expect("inline Provider request"), None),
+            response = &mut sending => {
+                let response = response.unwrap().unwrap();
+                assert!(response.status().is_success(), "Gateway rejected the inline request before reaching the Provider: {}", response.status());
+                (received.recv().await.expect("inline Provider request"), Some(response))
+            }
+        };
         assert_eq!(provider_request.body["stream"], true);
         let text = "public text delivered before registration";
         let message = json!({"type":"message","id":"public-message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]});
@@ -248,7 +263,11 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         provider_request.frames.send(publication_frame(json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"public-message","role":"assistant","status":"in_progress","content":[]}}))).await.unwrap();
         provider_request.frames.send(publication_frame(json!({"type":"response.content_part.added","output_index":0,"item_id":"public-message","content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}))).await.unwrap();
         provider_request.frames.send(publication_frame(json!({"type":"response.output_text.delta","output_index":0,"item_id":"public-message","content_index":0,"delta":text}))).await.unwrap();
-        let response = sending.await.unwrap().unwrap();
+        stage.set("public text delivery");
+        let response = match early_response {
+            Some(response) => response,
+            None => sending.await.unwrap().unwrap(),
+        };
         assert!(response.status().is_success());
         let mut bytes = response.bytes_stream();
         let mut wire = String::new();
@@ -264,6 +283,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
             json!({"type":"response.output_item.done","output_index":1,"item":native}),
             json!({"type":"response.completed","response":completed("publication-failure", json!([message,native]))}),
         ].into_iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect::<String>();
+        stage.set("inline registration failure delivery");
         provider_request.frames.send(Ok(native_frames.into())).await.unwrap();
         drop(provider_request.frames);
         while let Some(chunk) = bytes.next().await {
@@ -276,6 +296,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         assert!(!events.iter().any(|event| event["type"] == "response.completed"), "registration failure cannot complete successfully: {wire}");
         assert!(events.iter().any(|event| event["type"] == "error" || event["type"] == "response.failed"), "client must observe terminal failure: {wire}");
 
+        stage.set("standalone registration failure exchange");
         let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
             .json(&json!({"model":"native-publication","stream":true,"input":[
@@ -292,13 +313,13 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
             );
             request.respond.send(json!(v2_compaction_events("standalone-failure", &native))).unwrap();
         };
-        let (response, ()) = tokio::join!(sending, supply);
-        let response = response.unwrap();
+        let response = exchange(sending, supply).await;
         let status = response.status();
         let failure = response.text().await.unwrap();
         assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{failure}");
 
         // 查询路径不再隐式等待观测 writer；显式屏障代替基于时间的轮询。
+        stage.set("failed request observation flush and query");
         admin.observation_flush().await.unwrap();
         let forest = admin.observation_forest(ForestQuery::default()).await.unwrap();
         let interactions: Vec<_> = forest.roots.iter().flat_map(|root| &root.interactions).collect();
@@ -321,6 +342,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         // is removed, ruling out Provider schema/routing errors as the failure cause.
         sqlx::query("DROP TRIGGER deny_native_publication")
             .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
+        stage.set("standalone registration success exchange");
         let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
             .json(&json!({"model":"native-publication","stream":true,"input":[
@@ -337,8 +359,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
             );
             request.respond.send(json!(v2_compaction_events("standalone-success", &native))).unwrap();
         };
-        let (response, ()) = tokio::join!(sending, supply);
-        let response = response.unwrap();
+        let response = exchange(sending, supply).await;
         assert!(response.status().is_success());
         let wire = response.text().await.unwrap();
         assert!(wire.contains("response.output_item.done"));
@@ -350,13 +371,22 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         assert!(gateway.compaction.resolve(&Principal::new(key.id), &decoded.items).await.unwrap().is_some());
         server.abort();
         provider_server.abort();
+        stage.set("observation shutdown");
         gateway.observation.shutdown().await;
-    }).await.expect("registry publication failure scenario timed out");
+    }).await.unwrap_or_else(|_| panic!("registry publication failure scenario timed out at {}", stage.get()));
 }
 
 #[tokio::test]
 async fn inbound_responses_websocket_preserves_inline_native_compaction_and_replays_current_window()
 {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let stage = std::cell::Cell::new("provider setup");
     tokio::time::timeout(Duration::from_secs(20), async {
         let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -369,13 +399,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             .await
             .unwrap();
         });
-        let directory = tempfile::tempdir().unwrap();
-        let gateway = Gateway::new(GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+        stage.set("provider and route configuration");
         let admin = gateway.admin();
         let provider = admin.create_provider(CreateProvider {
             name: Some("local HTTP Responses provider".into()),
@@ -424,6 +448,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
         let address = listener.local_addr().unwrap();
         let router = super::create_router(gateway.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        stage.set("WebSocket upgrade");
         let mut socket = reqwest::Client::new()
             .get(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
@@ -431,11 +456,15 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             .into_websocket().await.unwrap();
         let removed = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"history deliberately removed after compaction"}]});
         let retained = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"retained current question"}]});
+        stage.set("initial inline dispatch");
         socket.send(reqwest_websocket::Message::Text(json!({
             "type":"response.create","model":"native-ws","input":[removed.clone(),retained.clone()],
             "context_management":[{"type":"compaction","compact_threshold":128}]
         }).to_string())).await.unwrap();
-        let first = received.recv().await.unwrap();
+        let first = tokio::select! {
+            request = received.recv() => request.expect("inline Provider request"),
+            event = socket.next() => panic!("Gateway answered before reaching the inline Provider: {event:?}"),
+        };
         assert_eq!(first.body["input"], json!([removed, retained.clone()]));
         assert_eq!(first.body["context_management"], json!([{"type":"compaction","compact_threshold":128}]));
         assert_eq!(first.body["stream"], true);
@@ -444,6 +473,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             "encrypted_content":"opaque+/cipher==",
             "rolling_identity":{"version":7,"cursor":"preserve-me","nested":[1,{"flag":true}]}
         });
+        stage.set("initial native state delivery and registration");
         first.respond.send(completed("first-native", json!([native.clone()]))).unwrap();
         let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
             .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24).unwrap();
@@ -465,6 +495,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
         assert!(exposed, "native output item must reach the inbound WebSocket");
         assert_eq!(terminal["output"], json!([native.clone()]));
         let followup = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"continue with this complete current window"}]});
+        stage.set("native replay dispatch");
         let current_window = json!([retained, terminal["output"][0].clone(), followup]);
         socket.send(reqwest_websocket::Message::Text(json!({
             "type":"response.create","model":"native-ws","input":current_window,
@@ -486,6 +517,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
         assert_eq!(second.body["input"], current_window,
             "replay must retain the whole supplied window without restoring removed history");
         assert!(second.body.get("context_management").is_none());
+        stage.set("native replay terminal delivery");
         second.respond.send(completed("native-replayed", json!([{
             "type":"message","id":"accepted","role":"assistant","status":"completed",
             "content":[{"type":"output_text","text":"native replay accepted","annotations":[]}]
@@ -501,6 +533,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             }
         }
         // 查询路径不再隐式等待观测 writer；显式屏障代替基于时间的轮询。
+        stage.set("replay observation flush and query");
         admin.observation_flush().await.unwrap();
         let forest = admin.observation_forest(ForestQuery::default()).await.unwrap();
         let replay = forest.roots.iter().flat_map(|root| &root.interactions)
@@ -509,16 +542,21 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
         let detail = admin.observation_interaction(&replay.id, ForestQuery::default()).await.unwrap().unwrap();
         assert!(detail.runs.iter().flat_map(|run| &run.events)
             .any(|event| event.kind == "native_compaction_associated"));
+        stage.set("upstream rejection dispatch");
         socket.send(reqwest_websocket::Message::Text(json!({
             "type":"response.create","model":"native-ws","input":"return the upstream error",
             "context_management":[{"type":"compaction","compact_threshold":128}]
         }).to_string())).await.unwrap();
-        let rejected = received.recv().await.expect("client-requested compaction");
+        let rejected = tokio::select! {
+            request = received.recv() => request.expect("client-requested compaction"),
+            event = socket.next() => panic!("Gateway answered before reaching the compaction Provider: {event:?}"),
+        };
         let upstream_error = json!({
             "type":"provider_capacity_error","code":"compaction_unavailable",
             "message":"Compaction capacity is exhausted.","param":"context_management",
             "details":{"retryable":true}
         });
+        stage.set("upstream error delivery");
         rejected.respond.send(json!({"error":upstream_error})).unwrap();
         loop {
             let message = socket.next().await.expect("upstream error event").unwrap();
@@ -531,23 +569,36 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             }
             assert_ne!(event["type"], "response.completed", "{event}");
         }
+        stage.set("WebSocket close");
         socket.close(reqwest_websocket::CloseCode::Normal, None).await.unwrap();
         server.abort();
         provider_server.abort();
+        stage.set("observation shutdown");
         gateway.observation.shutdown().await;
-    }).await.expect("native ingress WebSocket scenario timed out");
+    }).await.unwrap_or_else(|_| panic!("native ingress WebSocket scenario timed out at {}", stage.get()));
 }
 
 #[tokio::test]
 async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_without_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let stage = std::cell::Cell::new("provider and route configuration");
     tokio::time::timeout(Duration::from_secs(20), async {
         let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
-        let harness = Harness::start(
+        let harness = Harness::start_with_gateway(
             "open-responses",
             Router::new()
                 .route("/v1/responses", post(responses).with_state(requests)),
+            gateway,
+            directory,
         )
         .await;
+        stage.set("WebSocket upgrade");
         let mut socket = reqwest::Client::new()
             .get(harness.url("/v1/responses"))
             .bearer_auth(&harness.token)
@@ -560,6 +611,7 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
             .unwrap();
         let history = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"standalone source window"}]});
         let trigger = json!({"type":"compaction_trigger"});
+        stage.set("standalone trigger rejections");
         for input in [
             json!([history.clone(), trigger.clone()]),
             json!([trigger.clone(), history.clone()]),
@@ -593,6 +645,7 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
         );
 
         // Rejections leave the connection usable for an ordinary inference.
+        stage.set("ordinary inference dispatch");
         socket
             .send(reqwest_websocket::Message::Text(
                 json!({"type":"response.create","model":"cross","input":"ordinary request"})
@@ -609,6 +662,7 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
             "{}",
             ordinary.body
         );
+        stage.set("ordinary inference terminal delivery");
         ordinary
             .respond
             .send(completed(
@@ -631,39 +685,37 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
             }
         };
         assert_eq!(terminal["response"]["status"], "completed", "{terminal}");
+        stage.set("WebSocket close");
         socket
             .close(reqwest_websocket::CloseCode::Normal, None)
             .await
             .unwrap();
+        stage.set("observation shutdown");
         harness.finish().await;
     })
     .await
-    .expect("WebSocket standalone compaction rejection timed out");
+    .unwrap_or_else(|_| panic!("WebSocket standalone compaction rejection timed out at {}", stage.get()));
 }
 
 // ── Cross-protocol Remote Compaction (ADR-0089) ─────────────────────────────────
 
-/// Drives a client request against the scripted upstream. If the Gateway answers before
-/// the upstream was ever reached, the answer is the failure; waiting for the upstream
-/// would only hang.
+/// Drives a client request against the scripted upstream. Streaming success headers
+/// can precede upstream dispatch, so keep supplying the upstream in that case.
 async fn exchange(
-    sending: impl std::future::Future<Output = reqwest::Result<reqwest::Response>>,
-    supply: impl std::future::Future<Output = ()>,
+    sending: impl Future<Output = reqwest::Result<reqwest::Response>>,
+    supply: impl Future<Output = ()>,
 ) -> reqwest::Response {
     tokio::pin!(sending);
     tokio::pin!(supply);
     tokio::select! {
         response = &mut sending => {
             let response = response.unwrap();
-            panic!(
-                "Gateway answered before reaching the upstream: {} {}",
-                response.status(),
-                response.text().await.unwrap()
-            );
+            assert!(response.status().is_success(), "Gateway rejected the request before reaching the upstream: {}", response.status());
+            supply.await;
+            response
         }
-        () = &mut supply => {}
+        () = &mut supply => sending.await.unwrap(),
     }
-    sending.await.unwrap()
 }
 
 struct SeenRequest {
@@ -678,7 +730,8 @@ async fn upstream_json(
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> axum::response::Response {
+    let streaming_compaction = body["stream"] == true && body["compaction"].is_object();
     let (respond, response) = oneshot::channel();
     requests
         .send(SeenRequest {
@@ -689,7 +742,31 @@ async fn upstream_json(
         })
         .await
         .unwrap();
-    Json(response.await.expect("test supplies upstream response"))
+    let message = response.await.expect("test supplies upstream response");
+    if !streaming_compaction {
+        return Json(message).into_response();
+    }
+    let mut start = message.clone();
+    start["content"] = json!([]);
+    start["stop_reason"] = Value::Null;
+    start["usage"] = json!({"input_tokens": 0, "output_tokens": 0});
+    let mut events = vec![json!({"type":"message_start", "message":start})];
+    for (index, block) in message["content"].as_array().unwrap().iter().enumerate() {
+        events.push(json!({"type":"content_block_start", "index":index, "content_block":block}));
+        events.push(json!({"type":"content_block_stop", "index":index}));
+    }
+    events.push(json!({"type":"message_delta", "delta":{"stop_reason":message["stop_reason"], "stop_sequence":null}, "usage":message["usage"]}));
+    events.push(json!({"type":"message_stop"}));
+    let frames: String = events
+        .into_iter()
+        .map(|event| {
+            format!(
+                "event: {}\ndata: {event}\n\n",
+                event["type"].as_str().unwrap()
+            )
+        })
+        .collect();
+    ([("content-type", "text/event-stream")], frames).into_response()
 }
 
 struct Harness {
@@ -702,19 +779,17 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start(protocol: &str, upstream: Router) -> Self {
+    async fn start_with_gateway(
+        protocol: &str,
+        upstream: Router,
+        gateway: Gateway,
+        directory: tempfile::TempDir,
+    ) -> Self {
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let provider_address = provider_listener.local_addr().unwrap();
         let provider_server = tokio::spawn(async move {
             axum::serve(provider_listener, upstream).await.unwrap();
         });
-        let directory = tempfile::tempdir().unwrap();
-        let gateway = Gateway::new(GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
         let admin = gateway.admin();
         let provider = admin
             .create_provider(CreateProvider {
@@ -841,15 +916,26 @@ fn anthropic_text_message(text: &str) -> Value {
 
 #[tokio::test]
 async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the_block() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let stage = std::cell::Cell::new("provider and route configuration");
     tokio::time::timeout(Duration::from_secs(60), async {
         let (requests, mut received) = mpsc::channel::<SeenRequest>(2);
-        let harness = Harness::start(
+        let harness = Harness::start_with_gateway(
             "anthropic-messages",
             Router::new()
                 .route("/v1/messages", post(upstream_json))
                 .with_state(requests),
+            gateway,
+            directory,
         )
         .await;
+        stage.set("initial compaction exchange");
         let client = reqwest::Client::new();
         let upstream = anthropic_compaction_message("Summary of the work", "sig-abc");
         let block = upstream["content"][0].clone();
@@ -944,6 +1030,7 @@ async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the
         );
 
         // Replay on the same Target sends the original block, byte for byte.
+        stage.set("replay exchange");
         let sending = client
             .post(harness.url("/v1/responses"))
             .bearer_auth(&harness.token)
@@ -976,21 +1063,33 @@ async fn responses_client_compacts_through_an_anthropic_upstream_and_replays_the
             "{}",
             response.text().await.unwrap()
         );
+        stage.set("observation shutdown");
         harness.finish().await;
     })
     .await
-    .expect("Responses client over Anthropic upstream scenario timed out");
+    .unwrap_or_else(|_| panic!("Responses client over Anthropic upstream scenario timed out at {}", stage.get()));
 }
 
 #[tokio::test]
 async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let stage = std::cell::Cell::new("provider and route configuration");
     tokio::time::timeout(Duration::from_secs(60), async {
         let (requests, mut received) = mpsc::channel::<ProviderRequest>(2);
-        let harness = Harness::start(
+        let harness = Harness::start_with_gateway(
             "open-responses",
             Router::new().route("/v1/responses", post(v2_compaction_responses).with_state(requests)),
+            gateway,
+            directory,
         )
         .await;
+        stage.set("initial compaction exchange");
         let client = reqwest::Client::new();
         let state = |id: &str, cipher: &str| {
             json!({"type": "compaction", "id": id, "encrypted_content": cipher})
@@ -1038,6 +1137,7 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
         assert_eq!(output[0]["encrypted_content"], "opaque-cipher");
 
         // `stream: true` still gets one whole block, framed as Anthropic SSE.
+        stage.set("streaming compaction exchange");
         let sending = client
             .post(harness.url("/v1/messages"))
             .header("x-api-key", &harness.token)
@@ -1070,6 +1170,7 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
         assert!(wire.contains(r#""type":"compaction""#), "{wire}");
 
         // Replay: the one V2 compaction state expands back to a native Responses item.
+        stage.set("replay exchange");
         let sending = client
             .post(harness.url("/v1/messages"))
             .header("x-api-key", &harness.token)
@@ -1097,23 +1198,35 @@ async fn anthropic_client_compacts_through_a_responses_upstream_and_replays_the_
         assert!(response.status().is_success(), "{}", response.text().await.unwrap());
         let reply: Value = response.json().await.unwrap();
         assert_eq!(reply["content"][0]["text"], "replay accepted");
+        stage.set("observation shutdown");
         harness.finish().await;
     })
     .await
-    .expect("Anthropic client over Responses upstream scenario timed out");
+    .unwrap_or_else(|_| panic!("Anthropic client over Responses upstream scenario timed out at {}", stage.get()));
 }
 
 #[tokio::test]
 async fn anthropic_client_gets_the_upstream_compaction_state_through_ir() {
+    let directory = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let stage = std::cell::Cell::new("provider and route configuration");
     tokio::time::timeout(Duration::from_secs(60), async {
         let (requests, mut received) = mpsc::channel::<SeenRequest>(1);
-        let harness = Harness::start(
+        let harness = Harness::start_with_gateway(
             "anthropic-messages",
             Router::new()
                 .route("/v1/messages", post(upstream_json))
                 .with_state(requests),
+            gateway,
+            directory,
         )
         .await;
+        stage.set("compaction exchange");
         let upstream = anthropic_compaction_message("Summary", "sig-same");
         let sending = reqwest::Client::new()
             .post(harness.url("/v1/messages"))
@@ -1153,8 +1266,14 @@ async fn anthropic_client_gets_the_upstream_compaction_state_through_ir() {
             upstream_block["signature"]
         );
         assert_eq!(message["content"][0]["content"], upstream_block["content"]);
+        stage.set("observation shutdown");
         harness.finish().await;
     })
     .await
-    .expect("Anthropic passthrough compaction scenario timed out");
+    .unwrap_or_else(|_| {
+        panic!(
+            "Anthropic passthrough compaction scenario timed out at {}",
+            stage.get()
+        )
+    });
 }

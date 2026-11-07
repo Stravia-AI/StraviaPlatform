@@ -1,4 +1,32 @@
 {
+  "provenance": {
+    "client": "claude",
+    "version": "2.1.319",
+    "os": "linux",
+    "arch": "x86_64",
+    "captured_at": "2026-11-07T08:46:56.949080+00:00",
+    "mode": "interactive",
+    "operation": "POST /v1/messages",
+    "query_keys": [
+      "beta"
+    ],
+    "connection_id": 24,
+    "invocation": "claude --model claude-sonnet-4-5",
+    "input": "PTY: select Yes to trust fresh empty workspace; type local capture only in input and press Enter",
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd and systemd-resolved sockets hidden; fresh HOME and synthetic OAuth bearer",
+    "trust": "NODE_EXTRA_CA_CERTS local CA",
+    "capture_round": 2,
+    "auth_mode": "synthetic stored Claude Pro OAuth bearer; no real login",
+    "capture_tool": "local TLS server on loopback:443 with num_tickets=0; hello-decode capture-client module; same socket for ClientHello and HTTP request",
+    "configuration": "ANTHROPIC_BASE_URL unset; official api.anthropic.com mapped to 127.0.0.1 in private /etc/hosts; private NSS hosts: files dns and resolv.conf nameserver 127.0.0.1; host nscd and systemd-resolved sockets hidden; synthetic ~/.claude/.credentials.json; NODE_EXTRA_CA_CERTS local CA; default traffic settings; hasCompletedOnboarding preseeded in fresh HOME to bypass blocked external onboarding connectivity check",
+    "target": "https://api.anthropic.com/v1/messages?beta=true mapped to loopback",
+    "bootstrap": "All non-main requests received local HTTP 401; remote GrowthBook assignments unavailable. This fixture demonstrates local-failure defaults, not successful bootstrap or account-assigned features.",
+    "response": "synthetic local HTTP 200 SSE; displayed as Local synthetic answer. in PTY; no upstream forwarding",
+    "capture_command": "unshare --user --map-root-user --mount --net sh -c 'mount --bind /dev/null /var/run/nscd/socket && ip link set lo up && exec python3 /tmp/net1-claude-interactive-driver.py official-final-2'",
+    "terminal_transcript": "/tmp/net1-claude-interactive/tty-official-final-2.log",
+    "selection": "POST /v1/messages; stream=true; user message includes synthetic prompt; system blocks and 13 named main tools; excludes auxiliary title JSON-schema generation; TUI visibly rendered response to this same connection",
+    "session": "server issued no TLS tickets; cold handshake on inference connection"
+  },
   "clienthello": {
     "alpn": [
       "http/1.1"
@@ -31,7 +59,7 @@
         "decoded": {
           "server_name_present": true
         },
-        "length": 14,
+        "length": 22,
         "payload_omitted": "extension payload may contain sensitive or unrecognized data",
         "type": 0
       },
@@ -291,12 +319,16 @@
         "value": "application/json"
       },
       {
+        "name": "Authorization",
+        "value": "<redacted>"
+      },
+      {
         "name": "Content-Type",
         "value": "application/json"
       },
       {
         "name": "User-Agent",
-        "value": "claude-cli/2.1.319 (external, sdk-cli)"
+        "value": "claude-cli/2.1.319 (external, cli)"
       },
       {
         "name": "X-Claude-Code-Session-Id",
@@ -336,7 +368,7 @@
       },
       {
         "name": "anthropic-beta",
-        "value": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20"
+        "value": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,tool-provenance-2026-10-26,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
       },
       {
         "name": "anthropic-dangerous-direct-browser-access",
@@ -347,12 +379,24 @@
         "value": "2023-06-01"
       },
       {
-        "name": "x-api-key",
+        "name": "x-app",
+        "value": "cli"
+      },
+      {
+        "name": "x-claude-code-prompt-id",
         "value": "<redacted>"
       },
       {
-        "name": "x-app",
-        "value": "cli"
+        "name": "x-claude-code-request-class",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-claude-code-sandy-plover",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-client-request-id",
+        "value": "<redacted>"
       },
       {
         "name": "Connection",
@@ -372,44 +416,111 @@
       }
     ],
     "method": "POST",
+    "target": "<redacted>",
+    "version": "HTTP/1.1",
     "normalizations": [
       {
-        "header_index": 3,
+        "header_index": 1,
         "reason": "credential_or_dynamic"
       },
       {
-        "header_index": 8,
+        "header_index": 4,
         "reason": "credential_or_dynamic"
       },
       {
-        "header_index": 15,
+        "header_index": 9,
         "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 17,
+        "reason": "unclassified"
       },
       {
         "header_index": 18,
         "reason": "unclassified"
       },
       {
+        "header_index": 19,
+        "reason": "unclassified"
+      },
+      {
         "header_index": 20,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 22,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 24,
         "reason": "unclassified"
       }
     ],
-    "raw_head": "POST <redacted> HTTP/1.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nUser-Agent: claude-cli/2.1.319 (external, sdk-cli)\r\nX-Claude-Code-Session-Id: <redacted>\r\nX-Stainless-Arch: x64\r\nX-Stainless-Lang: js\r\nX-Stainless-OS: Linux\r\nX-Stainless-Package-Version: 0.128.0\r\nX-Stainless-Retry-Count: <redacted>\r\nX-Stainless-Runtime: node\r\nX-Stainless-Runtime-Version: v26.12.1\r\nX-Stainless-Timeout: 600\r\nanthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20\r\nanthropic-dangerous-direct-browser-access: true\r\nanthropic-version: 2023-06-01\r\nx-api-key: <redacted>\r\nx-app: cli\r\nConnection: keep-alive\r\nHost: <redacted>\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: <redacted>\r\n\r\n",
-    "target": "<redacted>",
-    "version": "HTTP/1.1"
+    "raw_head": "POST <redacted> HTTP/1.1\r\nAccept: application/json\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nUser-Agent: claude-cli/2.1.319 (external, cli)\r\nX-Claude-Code-Session-Id: <redacted>\r\nX-Stainless-Arch: x64\r\nX-Stainless-Lang: js\r\nX-Stainless-OS: Linux\r\nX-Stainless-Package-Version: 0.128.0\r\nX-Stainless-Retry-Count: <redacted>\r\nX-Stainless-Runtime: node\r\nX-Stainless-Runtime-Version: v26.12.1\r\nX-Stainless-Timeout: 600\r\nanthropic-beta: claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,tool-provenance-2026-10-26,thinking-token-count-2026-05-13,advanced-tool-use-2025-11-20,thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07\r\nanthropic-dangerous-direct-browser-access: true\r\nanthropic-version: 2023-06-01\r\nx-app: cli\r\nx-claude-code-prompt-id: <redacted>\r\nx-claude-code-request-class: <redacted>\r\nx-claude-code-sandy-plover: <redacted>\r\nx-client-request-id: <redacted>\r\nConnection: keep-alive\r\nHost: <redacted>\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: <redacted>\r\n\r\n"
   },
-  "provenance": {
-    "arch": "x86_64",
-    "captured_at": "2026-11-07T05:27:07.244577797+00:00",
-    "client": "claude",
-    "os": "linux",
-    "version": "2.1.319",
-    "capture_round": 2,
-    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden; temporary HOME and placeholder credentials",
-    "target": "https://localhost:<ephemeral-port>",
-    "capture_tool": "stravia-tools capture-client module, standalone harness",
-    "invocation": "claude --print --no-session-persistence --model claude-sonnet-4-5 \"local capture only\"",
-    "configuration": "ANTHROPIC_BASE_URL=local target; ANTHROPIC_API_KEY=placeholder; NODE_EXTRA_CA_CERTS=temporary capture CA; nonessential traffic, updater, telemetry, error reporting disabled",
-    "trust": "NODE_EXTRA_CA_CERTS"
+  "body_pattern": {
+    "keys": [
+      "model",
+      "messages",
+      "system",
+      "tools",
+      "metadata",
+      "max_tokens",
+      "thinking",
+      "context_management",
+      "diagnostics",
+      "stream"
+    ],
+    "model": "claude-sonnet-4-5",
+    "stream": true,
+    "messages": [
+      {
+        "role": "user",
+        "content_type": "list"
+      }
+    ],
+    "system_type": "list",
+    "synthetic_prompt_present": true,
+    "billing_fields": [
+      "cc_version",
+      "cc_entrypoint",
+      "cch",
+      "cc_prompt_id",
+      "cc_turn_origin",
+      "cc_prompt_index",
+      "cc_turn_index"
+    ],
+    "metadata_user_id_keys": [
+      "device_id",
+      "account_uuid",
+      "session_id"
+    ],
+    "thinking": {
+      "budget_tokens": 31999,
+      "type": "enabled",
+      "display": "updates"
+    },
+    "output_config": null,
+    "temperature": null,
+    "tools_count": 13,
+    "tool_names": [
+      "Agent",
+      "Artifact",
+      "AskUserQuestion",
+      "Bash",
+      "Edit",
+      "ListAgents",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "Skill",
+      "ToolSearch",
+      "DeferredToolPlaceholder",
+      "Write"
+    ],
+    "thread": null,
+    "diagnostics": {
+      "previous_message_id": null
+    }
   }
 }

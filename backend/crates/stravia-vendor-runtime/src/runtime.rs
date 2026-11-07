@@ -16,14 +16,18 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
+use crate::bindings::stravia::net::{http as net_http, types as net_types, websocket as net_ws};
+use crate::bindings::stravia::state::{
+    journal as wit_journal, store as wit_state, volatile as wit_volatile,
+};
 use crate::bindings::stravia::vendor::{host as wit_host, types as wit_types};
-use crate::bindings::stravia::net::{types as net_types, http as net_http, websocket as net_ws};
-use stravia_vendor_sdk::net::{Request, ConnectRequest};
 use crate::error::{LoadError, RuntimeError};
 use crate::host::{
-    HostFailure, HostServices, HttpResponseResource, LogLevel, RuntimeEvent,
-    WebSocketMessage, WebSocketResource, NetOptionsResource,
+    HostFailure, HostServices, HttpResponseResource, JournalEntryResource, LogLevel,
+    NetOptionsResource, RuntimeEvent, StateCellResource, StateError, StateScope, WebSocketMessage,
+    WebSocketResource,
 };
+use stravia_vendor_sdk::net::{ConnectRequest, Request};
 
 mod admission;
 mod compilation_cache;
@@ -542,7 +546,6 @@ impl VendorRuntime {
     }
 
     fn validate_imports(&self, component: &Component) -> Result<(), LoadError> {
-        const AVAILABLE_ABI: &str = "1.0.0";
         for (name, _) in component.component_type().imports(&self.engine) {
             if let Some((interface, version)) = name.rsplit_once('@') {
                 if matches!(
@@ -552,34 +555,65 @@ impl VendorRuntime {
                         | "stravia:net/types"
                         | "stravia:net/http"
                         | "stravia:net/websocket"
+                        | "stravia:state/store"
+                        | "stravia:state/volatile"
+                        | "stravia:state/journal"
                 ) {
+                    let (available_minor, available_abi) =
+                        if interface.starts_with("stravia:vendor/") {
+                            (0, "1.0.0")
+                        } else {
+                            (1, "1.1.0")
+                        };
                     // Compilation validates SemVer; only stable releases are
                     // eligible. Build metadata does not affect compatibility.
-                    let release = version.split_once('+').map_or(version, |(release, _)| release);
+                    let release = version
+                        .split_once('+')
+                        .map_or(version, |(release, _)| release);
                     let mut parts = release.split('.');
                     if let (Some(major), Some(minor), Some(patch), None) =
                         (parts.next(), parts.next(), parts.next(), parts.next())
+                        && let (Ok(major), Ok(minor), Ok(_)) = (
+                            major.parse::<u64>(),
+                            minor.parse::<u64>(),
+                            patch.parse::<u64>(),
+                        )
                     {
-                        if let (Ok(major), Ok(minor), Ok(_)) =
-                            (major.parse::<u64>(), minor.parse::<u64>(), patch.parse::<u64>())
-                        {
-                            if major != 1 {
-                                return Err(LoadError::IncompatibleAbi {
-                                    interface: interface.to_owned(),
-                                    required: version.to_owned(),
-                                    available: AVAILABLE_ABI,
-                                });
-                            }
-                            if minor > 0 {
-                                return Err(LoadError::RequiresNewerHost {
-                                    interface: interface.to_owned(),
-                                    required: version.to_owned(),
-                                    available: AVAILABLE_ABI,
-                                });
-                            }
-                            continue;
+                        if major != 1 {
+                            return Err(LoadError::IncompatibleAbi {
+                                interface: interface.to_owned(),
+                                required: version.to_owned(),
+                                available: available_abi,
+                            });
                         }
+                        if minor > available_minor {
+                            return Err(LoadError::RequiresNewerHost {
+                                interface: interface.to_owned(),
+                                required: version.to_owned(),
+                                available: available_abi,
+                            });
+                        }
+                        continue;
                     }
+                }
+                // A stable, versioned first-party interface that this host does
+                // not recognize is a missing capability, not an invalid guest.
+                // It remains rejected and is never registered with the linker.
+                let release = version
+                    .split_once('+')
+                    .map_or(version, |(release, _)| release);
+                if interface.starts_with("stravia:")
+                    && !release.contains('-')
+                    && release.split('.').count() == 3
+                    && release.split('.').all(|part| {
+                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                {
+                    return Err(LoadError::RequiresNewerHost {
+                        interface: interface.to_owned(),
+                        required: version.to_owned(),
+                        available: "unavailable",
+                    });
                 }
             }
             let allowed = name.rsplit_once('@').is_some_and(|(interface, version)| {
@@ -673,6 +707,9 @@ impl VendorRuntime {
         net_types::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
         net_http::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
         net_ws::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
+        wit_state::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
+        wit_volatile::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
+        wit_journal::add_to_linker::<StoreState, HasSelf<StoreState>>(&mut linker, |state| state)?;
         Ok(linker)
     }
 
@@ -803,7 +840,11 @@ impl StoreState {
             body: request.body,
         };
         match self.services.http_start(request, options) {
-            Ok(response) => self.table.push(HttpResponseResource(response)).map(Ok).map_err(Into::into),
+            Ok(response) => self
+                .table
+                .push(HttpResponseResource(response))
+                .map(Ok)
+                .map_err(Into::into),
             Err(error) => Ok(Err(to_net_failure(error))),
         }
     }
@@ -821,9 +862,16 @@ impl StoreState {
         for field in request.headers {
             headers.append(field.name, field.bytes);
         }
-        let request = stravia_vendor_sdk::net::ConnectRequest { url: request.url, headers };
+        let request = stravia_vendor_sdk::net::ConnectRequest {
+            url: request.url,
+            headers,
+        };
         match self.services.ws_connect(request, options).await {
-            Ok(socket) => self.table.push(WebSocketResource(socket)).map(Ok).map_err(Into::into),
+            Ok(socket) => self
+                .table
+                .push(WebSocketResource(socket))
+                .map(Ok)
+                .map_err(Into::into),
             Err(error) => Ok(Err(to_net_failure(error))),
         }
     }
@@ -831,8 +879,11 @@ impl StoreState {
 
 impl net_types::HostOptions for StoreState {
     async fn new(&mut self) -> wasmtime::Result<Resource<NetOptionsResource>> {
-        self.network_active().map_err(|error| wasmtime::Error::msg(error.message))?;
-        Ok(self.table.push(NetOptionsResource(stravia_vendor_sdk::net::Options::new()))?)
+        self.network_active()
+            .map_err(|error| wasmtime::Error::msg(error.message))?;
+        Ok(self
+            .table
+            .push(NetOptionsResource(stravia_vendor_sdk::net::Options::new()))?)
     }
 
     async fn set(
@@ -848,15 +899,23 @@ impl net_types::HostOptions for StoreState {
             .and_then(|()| self.services.validate_net_option(&key, &value))
         {
             return Ok(Err(net_types::NetError {
-                code: "unsupported-option".into(), message: error.to_string(), status: None,
-                retry_after_millis: None, model_error_kind: None, transport_failure: None,
+                code: "unsupported-option".into(),
+                message: error.to_string(),
+                status: None,
+                retry_after_millis: None,
+                model_error_kind: None,
+                transport_failure: None,
             }));
         }
         // Host validation is stricter than the SDK's local grammar.
         if let Err(error) = self.table.get_mut(&options)?.0.set(&key, &value) {
             return Ok(Err(net_types::NetError {
-                code: "unsupported-option".into(), message: error.to_string(), status: None,
-                retry_after_millis: None, model_error_kind: None, transport_failure: None,
+                code: "unsupported-option".into(),
+                message: error.to_string(),
+                status: None,
+                retry_after_millis: None,
+                model_error_kind: None,
+                transport_failure: None,
             }));
         }
         Ok(Ok(()))
@@ -997,6 +1056,239 @@ impl wit_host::Host for StoreState {
     }
 }
 
+fn state_activity_error(error: HostFailure) -> wit_state::Error {
+    let code = match error.kind {
+        ErrorKind::Cancelled => "cancelled",
+        ErrorKind::DeadlineExceeded => "deadline-exceeded",
+        _ => "unsupported",
+    };
+    to_state_error(StateError::new(code, error.message))
+}
+
+fn to_state_error(error: StateError) -> wit_state::Error {
+    wit_state::Error {
+        code: error.code,
+        message: error.message,
+    }
+}
+
+impl wit_state::Host for StoreState {
+    async fn open(
+        &mut self,
+        scope: wit_state::Scope,
+        key: String,
+    ) -> Result<Result<Resource<StateCellResource>, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        if key.len() > 128 {
+            return Ok(Err(to_state_error(StateError::new(
+                "invalid",
+                "state key exceeds 128 bytes",
+            ))));
+        }
+        let scope = match scope {
+            wit_state::Scope::Provider => StateScope::Provider,
+            wit_state::Scope::Conversation => StateScope::Conversation,
+        };
+        match self.services.open_state(scope, key).await {
+            Ok(cell) => self
+                .table
+                .push(StateCellResource(cell))
+                .map(Ok)
+                .map_err(Into::into),
+            Err(error) => Ok(Err(to_state_error(error))),
+        }
+    }
+}
+
+impl wit_volatile::Host for StoreState {
+    async fn open(
+        &mut self,
+        key: String,
+    ) -> Result<Result<Resource<StateCellResource>, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        if key.len() > 128 {
+            return Ok(Err(to_state_error(StateError::new(
+                "invalid",
+                "state key exceeds 128 bytes",
+            ))));
+        }
+        match self.services.open_volatile_state(key).await {
+            Ok(cell) => self
+                .table
+                .push(StateCellResource(cell))
+                .map(Ok)
+                .map_err(Into::into),
+            Err(error) => Ok(Err(to_state_error(error))),
+        }
+    }
+}
+
+impl wit_journal::Host for StoreState {
+    async fn load(
+        &mut self,
+        cell: Resource<StateCellResource>,
+    ) -> Result<Result<wit_journal::Snapshot, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        let cell = self.table.get(&cell)?.0.clone();
+        let snapshot = match cell.journal_load().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Ok(Err(to_state_error(error))),
+        };
+        let head = snapshot
+            .head
+            .map(|entry| self.table.push(JournalEntryResource(entry)))
+            .transpose()?;
+        Ok(Ok(wit_journal::Snapshot {
+            revision: snapshot.revision,
+            payload: snapshot.payload,
+            head,
+        }))
+    }
+
+    async fn append(
+        &mut self,
+        cell: Resource<StateCellResource>,
+        text: String,
+        previous: Option<Resource<JournalEntryResource>>,
+    ) -> Result<Result<Resource<JournalEntryResource>, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        if text.len() > 64 * 1024 * 1024 {
+            return Ok(Err(to_state_error(StateError::new(
+                "resource-exhausted",
+                "journal document exceeds 64 MiB",
+            ))));
+        }
+        let cell = self.table.get(&cell)?.0.clone();
+        let previous = previous
+            .map(|entry| self.table.get(&entry).map(|entry| entry.0.clone()))
+            .transpose()?;
+        match cell.journal_append(text, previous).await {
+            Ok(entry) => self
+                .table
+                .push(JournalEntryResource(entry))
+                .map(Ok)
+                .map_err(Into::into),
+            Err(error) => Ok(Err(to_state_error(error))),
+        }
+    }
+
+    async fn compare_exchange(
+        &mut self,
+        cell: Resource<StateCellResource>,
+        expected_revision: u64,
+        payload: Option<Vec<u8>>,
+        head: Option<Resource<JournalEntryResource>>,
+    ) -> Result<Result<bool, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        if payload
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+        {
+            return Ok(Err(to_state_error(StateError::new(
+                "resource-exhausted",
+                "state payload exceeds 64 KiB",
+            ))));
+        }
+        let cell = self.table.get(&cell)?.0.clone();
+        let head = head
+            .map(|entry| self.table.get(&entry).map(|entry| entry.0.clone()))
+            .transpose()?;
+        Ok(cell
+            .journal_compare_exchange(expected_revision, payload, head)
+            .await
+            .map_err(to_state_error))
+    }
+}
+
+impl wit_journal::HostEntry for StoreState {
+    async fn read(
+        &mut self,
+        entry: Resource<JournalEntryResource>,
+    ) -> Result<Result<wit_journal::EntryData, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        let entry = self.table.get(&entry)?.0.clone();
+        let data = match entry.read().await {
+            Ok(data) => data,
+            Err(error) => return Ok(Err(to_state_error(error))),
+        };
+        let previous = data
+            .previous
+            .map(|entry| self.table.push(JournalEntryResource(entry)))
+            .transpose()?;
+        Ok(Ok(wit_journal::EntryData {
+            text: data.text,
+            previous,
+        }))
+    }
+
+    async fn drop(&mut self, entry: Resource<JournalEntryResource>) -> wasmtime::Result<()> {
+        self.table.delete(entry)?;
+        Ok(())
+    }
+}
+
+impl wit_state::HostCell for StoreState {
+    async fn load(
+        &mut self,
+        cell: Resource<StateCellResource>,
+    ) -> Result<Result<wit_state::Snapshot, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        let cell = self.table.get(&cell)?.0.clone();
+        Ok(cell
+            .load()
+            .await
+            .map(|snapshot| wit_state::Snapshot {
+                revision: snapshot.revision,
+                payload: snapshot.payload,
+            })
+            .map_err(to_state_error))
+    }
+
+    async fn compare_exchange(
+        &mut self,
+        cell: Resource<StateCellResource>,
+        expected_revision: u64,
+        payload: Option<Vec<u8>>,
+    ) -> Result<Result<bool, wit_state::Error>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(state_activity_error(error)));
+        }
+        if payload
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+        {
+            return Ok(Err(to_state_error(StateError::new(
+                "resource-exhausted",
+                "state payload exceeds 64 KiB",
+            ))));
+        }
+        let cell = self.table.get(&cell)?.0.clone();
+        Ok(cell
+            .compare_exchange(expected_revision, payload)
+            .await
+            .map_err(to_state_error))
+    }
+
+    async fn drop(&mut self, cell: Resource<StateCellResource>) -> wasmtime::Result<()> {
+        self.table.delete(cell)?;
+        Ok(())
+    }
+}
+
 impl net_http::HostResponse for StoreState {
     async fn status(
         &mut self,
@@ -1027,9 +1319,19 @@ impl net_http::HostResponse for StoreState {
             return Ok(Err(to_net_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
-        Ok(response.headers().await.map(|fields| fields.into_iter().map(|field| net_types::Field {
-            name: field.name, bytes: field.bytes,
-        }).collect()).map_err(to_net_failure))
+        Ok(response
+            .headers()
+            .await
+            .map(|fields| {
+                fields
+                    .into_iter()
+                    .map(|field| net_types::Field {
+                        name: field.name,
+                        bytes: field.bytes,
+                    })
+                    .collect()
+            })
+            .map_err(to_net_failure))
     }
 
     async fn read_body(
@@ -1050,16 +1352,42 @@ impl net_http::HostResponse for StoreState {
 }
 
 impl net_ws::HostConnection for StoreState {
-    async fn handshake_status(&mut self, socket: Resource<WebSocketResource>) -> wasmtime::Result<u16> {
-        self.operation_active().map_err(|error| wasmtime::Error::msg(error.message))?;
+    async fn is_fresh_handshake(
+        &mut self,
+        socket: Resource<WebSocketResource>,
+    ) -> Result<Result<bool, net_types::NetError>, wasmtime::Error> {
+        if let Err(error) = self.operation_active() {
+            return Ok(Err(to_net_failure(error)));
+        }
+        Ok(Ok(self.table.get(&socket)?.0.is_fresh_handshake()))
+    }
+
+    async fn handshake_status(
+        &mut self,
+        socket: Resource<WebSocketResource>,
+    ) -> wasmtime::Result<u16> {
+        self.operation_active()
+            .map_err(|error| wasmtime::Error::msg(error.message))?;
         Ok(self.table.get(&socket)?.0.handshake_status())
     }
 
-    async fn handshake_headers(&mut self, socket: Resource<WebSocketResource>) -> wasmtime::Result<Vec<net_types::Field>> {
-        self.operation_active().map_err(|error| wasmtime::Error::msg(error.message))?;
-        Ok(self.table.get(&socket)?.0.handshake_headers().into_iter().map(|field| net_types::Field {
-            name: field.name, bytes: field.bytes,
-        }).collect())
+    async fn handshake_headers(
+        &mut self,
+        socket: Resource<WebSocketResource>,
+    ) -> wasmtime::Result<Vec<net_types::Field>> {
+        self.operation_active()
+            .map_err(|error| wasmtime::Error::msg(error.message))?;
+        Ok(self
+            .table
+            .get(&socket)?
+            .0
+            .handshake_headers()
+            .into_iter()
+            .map(|field| net_types::Field {
+                name: field.name,
+                bytes: field.bytes,
+            })
+            .collect())
     }
 
     async fn send(
@@ -1083,7 +1411,11 @@ impl net_ws::HostConnection for StoreState {
             return Ok(Err(to_net_failure(error)));
         }
         let socket = self.table.get(&socket)?.0.clone();
-        Ok(socket.next().await.map(|message| message.map(convert_ws_to_wit)).map_err(to_net_failure))
+        Ok(socket
+            .next()
+            .await
+            .map(|message| message.map(convert_ws_to_wit))
+            .map_err(to_net_failure))
     }
 
     async fn close(
@@ -1264,7 +1596,7 @@ fn to_net_failure(failure: HostFailure) -> net_types::NetError {
     use stravia_vendor_sdk::ModelErrorKind as M;
     let (code, retry_after_millis, model_error_kind, transport_failure) = match failure.kind {
         ErrorKind::Unsupported => ("unsupported", None, None, None),
-        ErrorKind::Invalid => ("invalid", None, None, None),
+        ErrorKind::Invalid => ("invalid-request", None, None, None),
         ErrorKind::InvalidResponse => ("invalid-response", None, None, None),
         ErrorKind::Auth => ("auth", None, None, None),
         ErrorKind::ContinuationNotFound => ("continuation-not-found", None, None, None),
@@ -1294,10 +1626,22 @@ fn to_net_failure(failure: HostFailure) -> net_types::NetError {
                 M::Unknown => "unknown".into(),
                 M::Other(value) => value,
             });
-            ("upstream", facts.retry_after_milliseconds, model, facts.transport_failure)
+            (
+                "upstream",
+                facts.retry_after_milliseconds,
+                model,
+                facts.transport_failure,
+            )
         }
     };
-    net_types::NetError { code: code.into(), message: failure.message, status: failure.upstream_status, retry_after_millis, model_error_kind, transport_failure }
+    net_types::NetError {
+        code: code.into(),
+        message: failure.message,
+        status: failure.upstream_status,
+        retry_after_millis,
+        model_error_kind,
+        transport_failure,
+    }
 }
 
 fn to_wit_failure(value: HostFailure) -> wit_types::PluginError {
@@ -1583,6 +1927,34 @@ impl HostServices for DenyServices {
         true
     }
 }
+
+#[cfg(test)]
+mod net_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_network_request_has_documented_code() {
+        let error = to_net_failure(HostFailure::new(ErrorKind::Invalid, "invalid header"));
+        assert_eq!(error.code, "invalid-request");
+        assert_eq!(error.message, "invalid header");
+        assert!(error.status.is_none());
+        assert!(error.retry_after_millis.is_none());
+        assert!(error.model_error_kind.is_none());
+        assert!(error.transport_failure.is_none());
+        assert_eq!(
+            to_net_failure(HostFailure::new(ErrorKind::Unsupported, "option")).code,
+            "unsupported"
+        );
+        assert_eq!(
+            to_net_failure(HostFailure::new(ErrorKind::Trapped, "trap")).code,
+            "trapped"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "runtime/state_tests.rs"]
+mod state_tests;
 
 #[cfg(test)]
 #[path = "compilation_cache_tests.rs"]

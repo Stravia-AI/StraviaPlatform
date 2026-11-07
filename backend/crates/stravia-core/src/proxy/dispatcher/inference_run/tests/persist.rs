@@ -401,13 +401,14 @@ async fn terminal_commit_window_keeps_generation_and_interaction_parentage_align
         .await
         .expect("continuation response body");
     assert!(String::from_utf8_lossy(&continuation_body).contains("second output"));
-    wait_for_observed_run_finish(&mut events).await;
-    wait_for_observed_run_finish(&mut events).await;
+    // 先确认已排队的观测写入落盘；一秒断言只等待订阅交付，不计入存储屏障。
     gateway
         .observation
         .flush()
         .await
         .expect("observation flush");
+    wait_for_observed_run_finish(&mut events).await;
+    wait_for_observed_run_finish(&mut events).await;
 
     let forest = gateway
         .observation

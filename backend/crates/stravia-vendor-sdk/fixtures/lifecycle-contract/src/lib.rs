@@ -8,10 +8,10 @@ use serde_json::Value;
 use stravia_vendor_sdk::{
     AiErrorKind, AiRequest, AiResponse, AiStreamDelta, CANONICAL_FORMAT_VERSION, Capability,
     ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, ConfigValidationResponse,
-    DataCompatibility, EnumOption, ErrorKind, GuestHost, Fields, Options, Request, LocalizedText,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderDescriptor, ProviderSnapshot, ValidationIssue, VendorDescriptor, VendorGuest,
-    VendorKind, read_http_body,
+    DataCompatibility, EnumOption, ErrorKind, Fields, GuestHost, LocalizedText, NetworkDeclaration,
+    Operation, OperationInput, OperationOutput, Options, PluginError, ProviderDescriptor,
+    ProviderSnapshot, Request, ValidationIssue, VendorDescriptor, VendorGuest, VendorKind,
+    read_http_body,
 };
 
 struct LifecycleContractVendor;
@@ -225,7 +225,10 @@ impl VendorGuest for LifecycleContractVendor {
                 let mut options = Options::new();
                 options.shape("default").map_err(invalid)?;
                 GuestHost::new().http_start(
-                    Request::new("GET", format!("{}/selection", provider.base_url.trim_end_matches('/'))),
+                    Request::new(
+                        "GET",
+                        format!("{}/selection", provider.base_url.trim_end_matches('/')),
+                    ),
                     &options,
                 )?;
             }
@@ -305,19 +308,33 @@ impl VendorGuest for LifecycleContractVendor {
                 let mut options = Options::new();
                 options.shape("default").map_err(invalid)?;
                 host.ws_connect(
-                    stravia_vendor_sdk::ConnectRequest::new(configured_url(&provider.options, "targetUrl")?),
+                    stravia_vendor_sdk::ConnectRequest::new(configured_url(
+                        &provider.options,
+                        "targetUrl",
+                    )?),
                     &options,
                 )?;
             }
             "websocket-compression" => {
                 let mut options = Options::new();
                 options.shape("default").map_err(invalid)?;
-                options.reuse_max_age(std::time::Duration::ZERO).map_err(invalid)?;
-                options.ws_compression(stravia_vendor_sdk::WsCompression::Required).map_err(invalid)?;
+                options
+                    .reuse_max_age(std::time::Duration::ZERO)
+                    .map_err(invalid)?;
+                options
+                    .ws_compression(stravia_vendor_sdk::WsCompression::Required)
+                    .map_err(invalid)?;
                 let mut fields = Fields::new();
-                fields.append("sec-websocket-extensions", b"permessage-deflate; client_max_window_bits".to_vec());
+                fields.append(
+                    "sec-websocket-extensions",
+                    b"permessage-deflate; client_max_window_bits".to_vec(),
+                );
                 let socket = host.ws_connect(
-                    stravia_vendor_sdk::ConnectRequest::new(configured_url(&provider.options, "auxUrl")?).fields(fields),
+                    stravia_vendor_sdk::ConnectRequest::new(configured_url(
+                        &provider.options,
+                        "auxUrl",
+                    )?)
+                    .fields(fields),
                     &options,
                 )?;
                 socket.send(&stravia_vendor_sdk::WsMessage::Text(
@@ -406,22 +423,35 @@ impl VendorGuest for LifecycleContractVendor {
         if mode == "compression" {
             fields.append("accept-encoding", b"gzip".to_vec());
             fields.append("content-encoding", b"gzip".to_vec());
-            options.request_encoding(stravia_vendor_sdk::Coding::Gzip).map_err(invalid)?;
-            options.response_decoding(&[stravia_vendor_sdk::Coding::Gzip]).map_err(invalid)?;
+            options
+                .request_encoding(stravia_vendor_sdk::Coding::Gzip)
+                .map_err(invalid)?;
+            options
+                .response_decoding(&[stravia_vendor_sdk::Coding::Gzip])
+                .map_err(invalid)?;
         } else {
             fields.append("accept-encoding", b"identity".to_vec());
         }
-        let response = host.http_start(Request {
-            method: method.into(),
-            url,
-            headers: fields,
-            body,
-        }, &options)?;
+        let response = host.http_start(
+            Request {
+                method: method.into(),
+                url,
+                headers: fields,
+                body,
+            },
+            &options,
+        )?;
         let auxiliary = if mode == "parallel" {
-            Some(host.http_start(Request::new(
-                "GET",
-                format!("{}/aux", configured_url(&provider.options, "auxUrl")?.trim_end_matches('/')),
-            ), &options)?)
+            Some(host.http_start(
+                Request::new(
+                    "GET",
+                    format!(
+                        "{}/aux",
+                        configured_url(&provider.options, "auxUrl")?.trim_end_matches('/')
+                    ),
+                ),
+                &options,
+            )?)
         } else {
             None
         };

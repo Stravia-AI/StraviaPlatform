@@ -124,6 +124,19 @@ struct Args {
     #[cfg(feature = "test-harness")]
     #[arg(long, env = "STRAVIA_TEST_REDIS_URL", hide = true)]
     test_redis_url: Option<String>,
+
+    #[cfg(feature = "test-harness")]
+    #[arg(long, hide = true, value_parser = test_loopback_address)]
+    test_handoff_barrier: Option<std::net::SocketAddr>,
+}
+
+#[cfg(feature = "test-harness")]
+fn test_loopback_address(value: &str) -> Result<std::net::SocketAddr, String> {
+    let address: std::net::SocketAddr = value.parse().map_err(|error| format!("{error}"))?;
+    if !address.ip().is_loopback() {
+        return Err("test handoff barrier must use a loopback address".into());
+    }
+    Ok(address)
 }
 
 #[derive(Subcommand)]
@@ -248,6 +261,8 @@ fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
         catalog_background_refresh: catalog_base_url.is_some(),
         catalog_base_url,
+        #[cfg(feature = "test-harness")]
+        test_handoff_barrier: args.test_handoff_barrier,
         ..Default::default()
     }
 }

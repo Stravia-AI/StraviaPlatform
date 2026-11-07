@@ -5,7 +5,10 @@ use std::{io::Cursor, ops::ControlFlow, sync::Arc, time::Duration};
 use bytes::BytesMut;
 use rama_http_types::proto::h2::hpack::Decoder;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
-use rustls::{ClientConfig, RootCertStore, ServerConfig, pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer}};
+use rustls::{
+    ClientConfig, RootCertStore, ServerConfig,
+    pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -15,8 +18,10 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use url::Url;
 
+use super::super::transport::{
+    H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport,
+};
 use super::{Handshake, Message};
-use super::super::transport::{H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport};
 use crate::outbound_proxy::OutboundProxySettings;
 use stravia_vendor_sdk::net::{Field, WsCompression};
 
@@ -30,7 +35,8 @@ struct Frame {
 async fn read_frame(socket: &mut (impl AsyncRead + Unpin)) -> Frame {
     let mut header = [0; 9];
     socket.read_exact(&mut header).await.unwrap();
-    let len = (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
+    let len =
+        (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
     let mut payload = vec![0; len];
     socket.read_exact(&mut payload).await.unwrap();
     Frame {
@@ -136,6 +142,7 @@ async fn tls_h2_extended_connect_exchanges_websocket_frames() {
         let route = Route {
             shape_name: "websocket-h2-tls-test".into(),
             shape_revision: 1,
+            tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
             tls: Arc::clone(&tls),
             proxy_tls: tls,
             proxy: OutboundProxySettings::default(),

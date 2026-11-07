@@ -97,14 +97,12 @@ async fn seed(gateway: &Gateway, record: ModelChangeRecord) -> anyhow::Result<()
 
 async fn history_contract(storage: DynStorage) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let gateway = Gateway::from_storage(
-        GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        },
-        storage,
-    )
-    .await?;
+    let mut config = GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.cache.redis_url = std::env::var("STRAVIA_TEST_REDIS_URL").ok();
+    let gateway = Gateway::from_storage(config, storage).await?;
     let result = history_assertions(&gateway).await;
     gateway.shutdown().await;
     result
@@ -409,14 +407,12 @@ async fn upgrade_contract(storage: DynStorage, existing_id: &str) -> anyhow::Res
         .create(provider_input("New service"))
         .await?;
     let directory = tempfile::tempdir()?;
-    let gateway = Gateway::from_storage(
-        GatewayConfig {
-            data_dir: directory.path().to_path_buf(),
-            ..Default::default()
-        },
-        storage,
-    )
-    .await?;
+    let mut config = GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.cache.redis_url = std::env::var("STRAVIA_TEST_REDIS_URL").ok();
+    let gateway = Gateway::from_storage(config, storage).await?;
     let existing_state = gateway
         .admin()
         .provider_model_sync_state(existing_id)
@@ -441,7 +437,7 @@ async fn upgrade_contract(storage: DynStorage, existing_id: &str) -> anyhow::Res
 }
 
 #[tokio::test]
-#[ignore = "requires DB_URL pointing to an isolated PostgreSQL test server"]
+#[ignore = "requires isolated DB_URL and STRAVIA_TEST_REDIS_URL"]
 async fn postgres_admin_history_preserves_batches_and_retention() -> anyhow::Result<()> {
     let url = std::env::var("DB_URL")?;
     let admin = sqlx::postgres::PgPoolOptions::new()

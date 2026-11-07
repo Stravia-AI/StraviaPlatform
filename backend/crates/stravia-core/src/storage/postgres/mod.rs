@@ -20,6 +20,7 @@ use crate::storage::traits::{
     Storage, StorageBackend, StorageBootstrap, StorageHealth, UsageStatsStore, WebProviderStore,
 };
 mod admin_identity;
+mod prompt_admissions;
 mod provider_models;
 mod web_providers;
 
@@ -97,9 +98,12 @@ impl PostgresStorage {
         Ok(Self::from_pool(adapter.pool().clone()))
     }
 
-    fn from_pool(pool: Pool<Postgres>) -> Self {
+    pub(crate) fn from_pool(pool: Pool<Postgres>) -> Self {
         let plugin_store = PluginStore::postgres(pool.clone());
-        let provider_store = Arc::new(PostgresProviderStore { pool: pool.clone() });
+        let provider_store = Arc::new(PostgresProviderStore {
+            pool: pool.clone(),
+            plugin_store: plugin_store.clone(),
+        });
         let web_provider_store = Arc::new(PostgresWebProviderStore { pool: pool.clone() });
         let model_store = Arc::new(PostgresRouteStore { pool: pool.clone() });
         let settings_store = Arc::new(PostgresSettingsStore { pool: pool.clone() });
@@ -136,6 +140,9 @@ impl PostgresStorage {
 }
 
 impl Storage for PostgresStorage {
+    fn prompt_admissions(&self) -> Arc<dyn crate::storage::traits::PromptAdmissionStore> {
+        Arc::new(self.clone())
+    }
     fn vendor_plugins(&self) -> &PluginStore {
         &self.plugin_store
     }

@@ -184,16 +184,22 @@ fn inherit_id_token(values: &mut BTreeMap<String, Value>, previous: &BTreeMap<St
 }
 
 fn token_request(host: &GuestHost, form: String) -> Result<TokenResponse, PluginError> {
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: TOKEN_URL.into(),
-        headers: crate::codex::http_fields(vec![
-            ("content-type".into(), "application/x-www-form-urlencoded".into()),
-            ("accept".into(), "application/json".into()),
-            ("user-agent".into(), crate::codex::user_agent()),
-        ]),
-        body: form.into_bytes(),
-    }, &crate::codex::http_options()?)?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: TOKEN_URL.into(),
+            headers: crate::codex::http_fields(vec![
+                (
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
+                ("accept".into(), "application/json".into()),
+                ("user-agent".into(), crate::codex::user_agent()),
+            ]),
+            body: form.into_bytes(),
+        },
+        &crate::codex::http_options()?,
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_TOKEN_BODY)?;

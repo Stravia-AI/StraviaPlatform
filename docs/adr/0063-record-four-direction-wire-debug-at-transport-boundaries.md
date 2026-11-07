@@ -4,7 +4,7 @@ status: accepted
 
 # 在传输收发边界记录四方向 Wire Debug Capture
 
-修订：Vendor 1.0 的上游 HTTP 捕获随 [ADR-0094](0094-own-vendor-egress-with-rama-and-patched-rustls.md) 移到 rama 传输；应用层捕获范围、隐私和权限规则不变。
+修订：Vendor 1.0 的上游 HTTP 捕获随 [ADR-0094](0094-own-vendor-egress-with-rama-and-patched-rustls.md) 移到 rama 传输，取代下文上游 reqwest 边界的实现描述。请求头是依照序列化规则生成的有序应用层快照，不是底层字节抓包；应用层捕获范围、隐私和权限规则不变。
 
 ## 决定
 

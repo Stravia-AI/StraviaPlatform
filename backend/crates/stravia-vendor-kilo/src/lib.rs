@@ -119,12 +119,15 @@ fn http_json(
     method: &str,
     path: &str,
 ) -> Result<Value, PluginError> {
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: method.into(),
-        url: format!("{ORIGIN}{path}"),
-        headers: crate::net_fields(headers(provider)?),
-        body: Vec::new(),
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: method.into(),
+            url: format!("{ORIGIN}{path}"),
+            headers: crate::net_fields(headers(provider)?),
+            body: Vec::new(),
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let bytes = read_http_body(&response, MAX_BODY)?;
@@ -311,15 +314,20 @@ mod tests;
 #[path = "../tests/stream_behavior.rs"]
 mod stream_tests;
 
-
 fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
     let mut fields = stravia_vendor_sdk::net::Fields::new();
     for (name, value) in headers {
         fields.append(name, value.into_bytes());
     }
-    if fields.get("accept").is_none() { fields.append("accept", b"*/*".to_vec()); }
-    if fields.get("accept-encoding").is_none() { fields.append("accept-encoding", b"identity".to_vec()); }
-    if fields.get("user-agent").is_none() { fields.append("user-agent", b"Stravia".to_vec()); }
+    if fields.get("accept").is_none() {
+        fields.append("accept", b"*/*".to_vec());
+    }
+    if fields.get("accept-encoding").is_none() {
+        fields.append("accept-encoding", b"identity".to_vec());
+    }
+    if fields.get("user-agent").is_none() {
+        fields.append("user-agent", b"Stravia".to_vec());
+    }
     fields
 }
 

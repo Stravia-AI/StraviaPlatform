@@ -1,0 +1,95 @@
+/// Controlled operation-scoped networking for vendor components.
+package stravia:net@1.1.0;
+
+interface types {
+    /// Ordered field. Preserve name spelling and bytes except for protocol-required
+    /// normalization; duplicate fields retain their interleaved order.
+    record field {
+        name: string,
+        bytes: list<u8>,
+    }
+
+    /// Open error code and untrusted diagnostic message. Codes include
+    /// unsupported, unsupported-option, invalid, invalid-request,
+    /// invalid-response, auth, continuation-not-found,
+    /// continuation-unavailable, protected-reasoning-rejected, upstream,
+    /// trapped, cancelled, deadline-exceeded, resource-exhausted and
+    /// provider-not-found. Unknown codes must not be treated as retryable.
+    /// Only upstream failures carry retry/model/transport policy facts; these
+    /// facts must never make a lifecycle error safe to replay. Unknown model
+    /// kinds are retained as other(string); unknown transports do not establish
+    /// that WebSocket-specific fallback is safe.
+    record net-error {
+        code: string,
+        message: string,
+        status: option<u16>,
+        retry-after-millis: option<u64>,
+        model-error-kind: option<string>,
+        transport-failure: option<string>,
+    }
+
+    /// Host-owned transport options. Each set validates independently; unknown
+    /// keys and invalid values return unsupported-option. Each send snapshots
+    /// the options. Resources cannot outlive their operation.
+    resource options {
+        constructor();
+        set: func(key: string, value: string) -> result<_, net-error>;
+    }
+}
+
+interface http {
+    use types.{field, net-error, options};
+
+    record request {
+        method: string,
+        url: string,
+        headers: list<field>,
+        body: list<u8>,
+    }
+
+    /// A pending exchange scoped to the operation, with bounded body streaming.
+    resource response {
+        status: func() -> result<u16, net-error>;
+        headers: func() -> result<list<field>, net-error>;
+        /// Returns none at EOF.
+        read-body: func() -> result<option<list<u8>>, net-error>;
+    }
+
+    /// Host authorizes the origin before sending and owns deadline, redirect,
+    /// cancellation and retry policy. Returns an operation-scoped handle.
+    start: func(req: request, opts: borrow<options>) -> result<response, net-error>;
+}
+
+interface websocket {
+    use types.{field, net-error, options};
+
+    record connect-request {
+        url: string,
+        headers: list<field>,
+    }
+
+    variant message {
+        text(string),
+        binary(list<u8>),
+        ping(list<u8>),
+        pong(list<u8>),
+        close(option<tuple<u16, string>>),
+    }
+
+    resource connection {
+        handshake-status: func() -> u16;
+        handshake-headers: func() -> list<field>;
+        /// True only when this checkout established a new handshake; false for
+        /// a reused pooled connection. The fact is fixed for this resource.
+        is-fresh-handshake: func() -> result<bool, net-error>;
+        send: func(msg: message) -> result<_, net-error>;
+        /// Returns none on clean close.
+        next: func() -> result<option<message>, net-error>;
+        /// Release with the latest completed continuation, or clear it with none.
+        close: func(continuation-id: option<string>) -> result<_, net-error>;
+    }
+
+    /// The host authorizes the origin before sending; the connection is scoped
+    /// to the operation and is subject to host lifecycle and retry policy.
+    connect: func(req: connect-request, opts: borrow<options>) -> result<connection, net-error>;
+}

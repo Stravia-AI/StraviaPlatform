@@ -220,6 +220,9 @@ impl std::fmt::Display for SettlementFailure {
             Self::VendorPublication(error) => {
                 write!(f, "settlement_vendor_publication: {error}")
             }
+            Self::GenerationCommit(crate::generation_chain::PersistError::Store(
+                stravia_runtime_contract::turn_chain::TurnCommitError::AtomicStateUnavailable,
+            )) => f.write_str("atomic_state_unavailable"),
             Self::GenerationCommit(error) => write!(f, "settlement_generation_commit: {error}"),
         }
     }

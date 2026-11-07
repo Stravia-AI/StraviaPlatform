@@ -957,9 +957,28 @@ async fn vendor_network_wire_and_observations_only_mask_authorization() -> anyho
                     .is_some_and(|url| url.ends_with("/infer"))
         })
         .expect("actual Wasm HTTP request wire record");
-    assert_eq!(request["headers"]["authorization"], "***");
-    assert_eq!(request["headers"]["x-license"], LICENSE);
-    assert_eq!(request["headers"]["x-plugin-state"], PRIVATE_STATE);
+    let headers = request["headers"]
+        .as_array()
+        .expect("ordered request fields");
+    let header = |name: &str| {
+        let mut matching = headers.iter().filter(|field| {
+            field["name"]
+                .as_str()
+                .is_some_and(|field_name| field_name.eq_ignore_ascii_case(name))
+        });
+        let field = matching.next().expect("captured request field");
+        assert!(matching.next().is_none(), "unexpected duplicate {name}");
+        &field["bytes"]
+    };
+    assert_eq!(
+        header("authorization"),
+        &serde_json::json!(b"***".as_slice())
+    );
+    assert_eq!(header("x-license"), &serde_json::json!(LICENSE.as_bytes()));
+    assert_eq!(
+        header("x-plugin-state"),
+        &serde_json::json!(PRIVATE_STATE.as_bytes())
+    );
     let request_body = wire_payload_bytes(request)?;
     assert!(
         request_body

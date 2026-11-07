@@ -9,7 +9,8 @@ const CONTENT_BATCH: usize = 512;
 const READ_BATCH: usize = 256;
 const CONTENT_BYTES: i64 = 8 * 1024 * 1024;
 
-/// 四类反向引用的唯一清单；新增引用类型时只改这里与 [`enqueue_unreferenced`] 的调用方。
+/// Existing reverse references; the journal table is checked separately because older
+/// migration stages run content GC before that table exists.
 macro_rules! referenced {
     ($c:literal) => {
         concat!(
@@ -48,8 +49,8 @@ macro_rules! claim_columns {
     };
 }
 
-/// SQLite 写租约外的只读预读：按 [`sqlite::enqueue_unreferenced`] 的同一引用检查读一遍
-/// 候选正文，把写事务随后要读的引用索引页带进 OS 页缓存。结果不参与任何判断。
+/// SQLite 写租约外的只读预读：预热历史与 Observation 引用索引页；journal
+/// 表在旧迁移阶段可能不存在，因此只在事务内作权威检查。结果不参与任何判断。
 pub(crate) async fn read_ahead_unreferenced(pool: &SqlitePool, ids: &[i64]) -> anyhow::Result<()> {
     for chunk in ids.chunks(400) {
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
@@ -76,6 +77,7 @@ macro_rules! backend {
         $key_share:literal,
         $no_key_update:literal,
         $skip_locked:literal,
+        $journal_exists:literal,
         $claim_before:expr,
         $claim_after:expr
     ) => {
@@ -300,16 +302,17 @@ macro_rules! backend {
                 scope_id: i64,
                 ids: &[i64],
             ) -> anyhow::Result<Vec<Body>> {
-                read_filtered(connection, Some(scope_id), ids).await
+                read_filtered(connection, Some(scope_id), ids, false).await
             }
 
-            /// 不限 scope 的批量读取：调用方已自行确认这些内容对读者可见（管理端内容端点），
-            /// 校验与 `read` 完全一致。
-            pub(crate) async fn read_any_scope(
+            /// Read only rows with a visible observation reference in the same SQL
+            /// statement as the body, so an ID cannot be reused between authorization
+            /// and retrieval.
+            pub(crate) async fn read_observation_visible(
                 connection: &mut $conn,
                 ids: &[i64],
             ) -> anyhow::Result<Vec<Body>> {
-                read_filtered(connection, None, ids).await
+                read_filtered(connection, None, ids, true).await
             }
 
             /// 内容的原始字节数（`id → raw_len`）；只读元数据列，不读取也不解码正文。
@@ -338,13 +341,14 @@ macro_rules! backend {
                 connection: &mut $conn,
                 scope_id: Option<i64>,
                 ids: &[i64],
+                observation_visible: bool,
             ) -> anyhow::Result<Vec<Body>> {
                 let mut unique: Vec<i64> = ids.to_vec();
                 unique.sort_unstable();
                 unique.dedup();
                 let mut bodies = Vec::with_capacity(unique.len());
                 for chunk in unique.chunks(READ_BATCH) {
-                    for row in read_encoded_filtered(connection, scope_id, chunk).await? {
+                    for row in read_encoded_filtered(connection, scope_id, chunk, observation_visible).await? {
                         bodies.push(super::super::decode_body(row)?);
                     }
                 }
@@ -362,13 +366,14 @@ macro_rules! backend {
                 if ids.is_empty() {
                     return Ok(Vec::new());
                 }
-                read_encoded_filtered(connection, Some(scope_id), ids).await
+                read_encoded_filtered(connection, Some(scope_id), ids, false).await
             }
 
             async fn read_encoded_filtered(
                 connection: &mut $conn,
                 scope_id: Option<i64>,
                 ids: &[i64],
+                observation_visible: bool,
             ) -> anyhow::Result<Vec<super::super::EncodedBody>> {
                 let mut query = sqlx::QueryBuilder::<$db>::new(
                     "SELECT id, digest, CAST(format AS BIGINT), raw_len, body FROM contents WHERE id IN (",
@@ -380,6 +385,9 @@ macro_rules! backend {
                 list.push_unseparated(")");
                 if let Some(scope_id) = scope_id {
                     query.push(" AND scope_id = ").push_bind(scope_id);
+                }
+                if observation_visible {
+                    query.push(" AND (EXISTS(SELECT 1 FROM observation_event_contents ec JOIN observation_events e ON e.sequence=ec.sequence WHERE ec.content_id=contents.id AND e.interaction_id IS NOT NULL) OR EXISTS(SELECT 1 FROM observation_tool_results tr JOIN observation_events e ON e.sequence=tr.sequence WHERE tr.content_id=contents.id AND e.interaction_id IS NOT NULL))");
                 }
                 query.push(" ORDER BY id");
                 Ok(query.build_query_as().fetch_all(&mut *connection).await?)
@@ -398,6 +406,8 @@ macro_rules! backend {
                 if ids.is_empty() {
                     return Ok(0);
                 }
+                let journal_exists: bool = sqlx::query_scalar($journal_exists)
+                    .fetch_one(&mut *connection).await?;
                 let mut unique: Vec<i64> = ids.to_vec();
                 unique.sort_unstable();
                 unique.dedup();
@@ -425,6 +435,9 @@ macro_rules! backend {
                     list.push_unseparated(")");
                     query.push(" AND ");
                     query.push(unreferenced!("c.id"));
+                    if journal_exists {
+                        query.push(" AND NOT EXISTS(SELECT 1 FROM vendor_atomic_journal_nodes r WHERE r.content_id=c.id)");
+                    }
                     query.push(" ON CONFLICT(content_id) DO NOTHING");
                     enqueued += query
                         .build()
@@ -493,6 +506,8 @@ macro_rules! backend {
                 loop {
                     let mut connection = pool.acquire_write().await?;
                     let mut transaction = connection.begin_with($begin).await?;
+                    let journal_exists: bool = sqlx::query_scalar($journal_exists)
+                        .fetch_one(&mut *transaction).await?;
                     let claim_sql = sqlx::AssertSqlSafe(format!(
                         "{}{CONTENT_BATCH}{}",
                         $claim_before, $claim_after
@@ -524,6 +539,9 @@ macro_rules! backend {
                     list.push_unseparated(")");
                     delete.push(" AND ");
                     delete.push(unreferenced!("contents.id"));
+                    if journal_exists {
+                        delete.push(" AND NOT EXISTS(SELECT 1 FROM vendor_atomic_journal_nodes r WHERE r.content_id=contents.id)");
+                    }
                     removed += delete
                         .build()
                         .execute(&mut *transaction)
@@ -558,6 +576,7 @@ backend!(
     "",
     "",
     "",
+    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='vendor_atomic_journal_nodes')",
     "WITH candidates AS MATERIALIZED (SELECT content_id FROM content_gc ORDER BY content_id LIMIT ",
     concat!(
         ") ",
@@ -575,6 +594,7 @@ backend!(
     " FOR KEY SHARE",
     " FOR NO KEY UPDATE",
     " FOR UPDATE SKIP LOCKED",
+    "SELECT to_regclass('vendor_atomic_journal_nodes') IS NOT NULL",
     concat!(
         claim_columns!("CAST(octet_length(c.body) AS BIGINT)"),
         " FROM content_gc g JOIN contents c ON c.id=g.content_id ORDER BY c.id LIMIT "

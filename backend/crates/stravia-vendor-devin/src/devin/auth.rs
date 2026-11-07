@@ -240,12 +240,15 @@ fn token_request(
     if connect_protocol {
         headers.push(("connect-protocol-version".into(), "1".into()));
     }
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: url.into(),
-        headers: crate::net_fields(headers),
-        body,
-    }, &crate::net_options())?;
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: url.into(),
+            headers: crate::net_fields(headers),
+            body,
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let bytes = read_http_body(&response, MAX_AUTH_BODY)?;

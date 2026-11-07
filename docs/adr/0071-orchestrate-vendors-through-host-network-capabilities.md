@@ -4,7 +4,7 @@ status: accepted
 
 # 插件编排供应商流程，宿主执行受控网络操作
 
-修订：Vendor 1.0 的请求字段所有权与出站形态由 [ADR-0095](0095-describe-client-egress-as-host-shapes.md) 明确；本 ADR 的宿主授权和重试职责不变。
+修订：Vendor 1.0 的网络接口版本与准入由 [ADR-0093](0093-split-controlled-network-into-stravia-net-with-major-version-admission.md)，请求字段所有权与出站形态由 [ADR-0095](0095-describe-client-egress-as-host-shapes.md) 明确；本 ADR 的宿主授权和重试职责不变。末段是当时的目标设计说明，并非当前实现状态的判断。
 
 Vendor Plugin 主动调用宿主提供的受控 HTTP / WebSocket Interface，拥有供应商端点、编码、解析及多步辅助调用的编排。宿主拥有实际连接、代理、目标访问限制、取消、deadline 和诊断；推理、OAuth、模型发现及额度查询共用网络能力，但分别受对应操作的权限与生命周期约束，不开放绕过宿主的原生 socket。
 

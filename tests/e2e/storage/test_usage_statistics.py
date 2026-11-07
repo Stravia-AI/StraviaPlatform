@@ -306,12 +306,12 @@ PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY4
 TOOLS = [{"type": "function", "function": {"name": "local_probe", "parameters": {"type": "object"}}}]
 
 
-def assert_split(view, *, terminal, failed, upstream, errors, recovered=0):
+def assert_split(view, *, terminal, failed, upstream, errors, recovered=0, recovery_known=None):
     assert view["terminal_request_count"] == terminal, view
     assert view["failed_request_count"] == failed, view
     assert view["upstream_request_count"] == upstream, view
     assert view["upstream_error_count"] == errors, view
-    assert view["recovery_known_request_count"] == terminal, view
+    assert view["recovery_known_request_count"] == (terminal if recovery_known is None else recovery_known), view
     assert view["recovered_request_count"] == recovered, view
     assert "error_count" not in view, view
 
@@ -531,6 +531,7 @@ def test_unknown_sample_does_not_mask_known_tokens_or_fabricate_tps(usage_env):
     clear(env)
     overview = stats(env)
     assert overview["total_requests"] == 2
+    assert_split(overview, terminal=2, failed=0, upstream=2, errors=0)
     assert overview["total_input_tokens"] == 15
     assert overview["total_output_tokens"] == 7
     assert overview["total_cache_read_tokens"] == 5
@@ -539,7 +540,7 @@ def test_unknown_sample_does_not_mask_known_tokens_or_fabricate_tps(usage_env):
 
 def test_clear_during_inflight_request_keeps_both_contributions(usage_env):
     env = usage_env
-    _route, key = _create_route(env, "usage-concurrent")
+    route, key = _create_route(env, "usage-concurrent")
     status, body = _proxy(env, key, "usage-concurrent", [{"role": "user", "content": "known"}])
     assert status == 200, body
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -551,10 +552,20 @@ def test_clear_during_inflight_request_keeps_both_contributions(usage_env):
             env["release"].set()
         status, body = pending.result(timeout=15)
         assert status == 200, body
+    interaction = _wait_for("retained in-flight interaction", lambda: next(iter(_route_interactions(env, route)), None))
+    detail = _wait_for("terminal in-flight observation", lambda: _finished_detail(env, interaction["id"]))
+    assert len(detail["runs"]) == 1, detail
+    assert detail["runs"][0]["status"] == "completed", detail
+    assert detail["runs"][0]["client_output_committed"] is True, detail
+    assert detail["interaction"]["observation_gap"], detail
+    assert any(
+        event["kind"] == "observation_gap" and event["payload"].get("reason") == "atomic_state_unavailable"
+        for run in detail["runs"] for event in run["events"]
+    ), detail
     clear(env)
     overview = stats(env)
     assert overview["total_requests"] == 2
-    assert_split(overview, terminal=2, failed=0, upstream=2, errors=0)
+    assert_split(overview, terminal=2, failed=0, upstream=2, errors=0, recovery_known=1)
     assert overview["total_input_tokens"] == 30
     assert overview["total_output_tokens"] == 14
 

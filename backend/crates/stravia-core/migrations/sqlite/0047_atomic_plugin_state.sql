@@ -1,0 +1,11 @@
+CREATE TABLE vendor_atomic_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision BIGINT NOT NULL);
+INSERT INTO vendor_atomic_revision (id, revision) VALUES (1, 0);
+CREATE TABLE vendor_atomic_lineages (principal TEXT NOT NULL, admission_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, PRIMARY KEY (principal, admission_id));
+CREATE TABLE vendor_atomic_leases (principal TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL, PRIMARY KEY(principal, admission_id, lease_id));
+CREATE TABLE vendor_atomic_checkpoints (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, PRIMARY KEY (principal, checkpoint_id));
+CREATE TABLE turn_node_atomic_checkpoints (node_pk BIGINT PRIMARY KEY REFERENCES turn_nodes(node_pk) ON DELETE CASCADE, principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, FOREIGN KEY(principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id) ON DELETE CASCADE);
+CREATE INDEX turn_node_atomic_checkpoints_checkpoint_idx ON turn_node_atomic_checkpoints(principal, checkpoint_id);
+CREATE TABLE native_compaction_atomic_checkpoints (record_id TEXT PRIMARY KEY REFERENCES native_compactions(id) ON DELETE CASCADE, principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, FOREIGN KEY(principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id));
+CREATE INDEX native_compaction_atomic_checkpoints_checkpoint_idx ON native_compaction_atomic_checkpoints(principal, checkpoint_id);
+CREATE TABLE vendor_atomic_cells (vendor_id TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, principal TEXT NOT NULL, admission_id TEXT NOT NULL, cell_key TEXT NOT NULL, revision BIGINT NOT NULL, payload BLOB, PRIMARY KEY (vendor_id, provider_id, principal, admission_id, cell_key));
+CREATE TABLE vendor_atomic_checkpoint_cells (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, vendor_id TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, cell_key TEXT NOT NULL, revision BIGINT NOT NULL, payload BLOB, PRIMARY KEY (principal, checkpoint_id, vendor_id, provider_id, cell_key), FOREIGN KEY (principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id) ON DELETE CASCADE);

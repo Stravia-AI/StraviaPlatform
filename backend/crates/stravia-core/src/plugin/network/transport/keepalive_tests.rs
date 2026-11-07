@@ -12,12 +12,15 @@ use tokio::{
     time::timeout,
 };
 
-use super::{body::RequestBody, h2::{H2Settings, connect}};
+use super::{
+    body::RequestBody,
+    h2::{H2Settings, connect},
+};
 
 #[tokio::test]
 async fn silent_peer_before_settings_fails_pending_response() -> anyhow::Result<()> {
-    use std::sync::Arc;
     use super::{HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
+    use std::sync::Arc;
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let uri = format!("http://{}/", listener.local_addr()?);
@@ -36,6 +39,7 @@ async fn silent_peer_before_settings_fails_pending_response() -> anyhow::Result<
         shape_name: shape.name.clone(),
         shape_revision: shape.revision,
         tls: shape.tls_for("direct", false),
+        tls_session_policy: shape.session_policy(false),
         proxy_tls: shapes.proxy_tls(),
         proxy: Default::default(),
         resolver: Arc::new(SystemResolver),
@@ -44,9 +48,20 @@ async fn silent_peer_before_settings_fails_pending_response() -> anyhow::Result<
         omit_h2_content_length: false,
     };
     let transport = VendorTransport::new();
-    let outcome = timeout(Duration::from_secs(5), transport.send(RequestPlan {
-        method: "GET".into(), uri, fields: Vec::new(), body: Bytes::new(), observer: None,
-    }, route)).await;
+    let outcome = timeout(
+        Duration::from_secs(5),
+        transport.send(
+            RequestPlan {
+                method: "GET".into(),
+                uri,
+                fields: Vec::new(),
+                body: Bytes::new(),
+                observer: None,
+            },
+            route,
+        ),
+    )
+    .await;
     server.abort();
     let result = outcome.expect("keepalive must fail before the test deadline");
     assert!(result.is_err(), "a silent peer cannot produce a response");
@@ -66,7 +81,10 @@ async fn unanswered_keepalive_ping_fails_pending_response() {
             socket.read_exact(&mut preface).await.unwrap();
             assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
             // Advertise an empty initial SETTINGS, but never respond to PING.
-            socket.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+            socket
+                .write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
 
             let mut saw_headers = false;
             let mut saw_ping = false;
@@ -102,7 +120,8 @@ async fn unanswered_keepalive_ping_fails_pending_response() {
             ..Default::default()
         };
         let socket = tokio::net::TcpStream::connect(address).await.unwrap();
-        let (mut sender, _peer_settings) = connect(ServiceInput::new(socket), settings).await.unwrap();
+        let (mut sender, _peer_settings) =
+            connect(ServiceInput::new(socket), settings).await.unwrap();
         sender.ready().await.unwrap();
         let request = Request::builder()
             .uri("http://example.test/keepalive")
@@ -110,12 +129,17 @@ async fn unanswered_keepalive_ping_fails_pending_response() {
             .unwrap();
         let response = tokio::spawn(async move { sender.send_request(request).await });
 
-        observed_rx.await.expect("server closed before observing request and PING");
+        observed_rx
+            .await
+            .expect("server closed before observing request and PING");
         let result = timeout(Duration::from_secs(3), response)
             .await
             .expect("pending response did not fail after unanswered PING")
             .expect("request task panicked");
-        assert!(result.is_err(), "unanswered keepalive PING must fail the request");
+        assert!(
+            result.is_err(),
+            "unanswered keepalive PING must fail the request"
+        );
         release_tx.send(()).unwrap();
         server.await.unwrap();
     })

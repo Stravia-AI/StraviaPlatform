@@ -61,9 +61,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Test patched crate preparation
-        run: python3 -m unittest tests.test_prepare_crates
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -75,28 +72,32 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-test-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v2-linux-gnu-pinned-test-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        run: task --force prepare:crates
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: ${{ env.CACHE_WRITE_ALLOWED != 'true' }}
-
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
 
       - name: Install Linux system dependencies
         run: |
@@ -173,20 +174,31 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        if: steps.unit-lane.outputs.run_expensive == 'true'
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
         if: steps.unit-lane.outputs.run_expensive == 'true'
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         if: steps.unit-lane.outputs.run_expensive == 'true'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # Compiler fingerprints separate stable once it differs from pinned.
-          shared-key: ci-v2-linux-gnu-pinned-test-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v2-linux-gnu-pinned-test-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        if: steps.unit-lane.outputs.run_expensive == 'true'
+        run: task --force prepare:crates
 
       - name: Setup Bun
         if: steps.unit-lane.outputs.run_expensive == 'true'
@@ -194,12 +206,6 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: true
-
-      - name: Setup Task
-        if: steps.unit-lane.outputs.run_expensive == 'true'
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
 
       - name: Install Linux system dependencies
         if: steps.unit-lane.outputs.run_expensive == 'true'
@@ -214,7 +220,7 @@ jobs:
 
       - name: Compile Rust unit tests
         if: steps.unit-lane.outputs.run_expensive == 'true'
-        run: cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture --no-run
+        run: cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture --exclude stravia-vendor-state-contract-fixture --no-run
 
       # The cache action reads this at job teardown, even if later tests fail.
       - name: Preserve successfully compiled dependencies
@@ -228,7 +234,7 @@ jobs:
 
       - name: Run Rust compatibility tests
         if: matrix.toolchain != env.RUST_VERSION && steps.unit-lane.outputs.run_expensive == 'true' && steps.unit-lane.outputs.stable_differs == 'true'
-        run: cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture
+        run: cargo test --locked --workspace --exclude stravia-desktop --exclude stravia-vendor-capability-contract-fixture --exclude stravia-vendor-lifecycle-contract-fixture --exclude stravia-vendor-management-contract-fixture --exclude stravia-vendor-manual-contract-fixture --exclude stravia-vendor-net-1-0-compat-fixture --exclude stravia-vendor-state-contract-fixture
 
   web-access-browser:
     needs: reuse-ci
@@ -256,17 +262,26 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v3-windows-msvc-desktop-browser-debug-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v3-windows-msvc-desktop-browser-debug-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        run: task --force prepare:crates
 
       - name: Setup Chrome
         id: chrome
@@ -306,28 +321,32 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' && matrix.suite == 'admin' }}
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        run: task --force prepare:crates
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: true
-
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -413,28 +432,32 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        run: task --force prepare:crates
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: true
-
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -482,28 +505,32 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v2-linux-gnu-pinned-e2e-mixed-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: 'false'
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        run: task --force prepare:crates
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: true
-
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
 
       - name: Install locked WebUI dependencies
         run: task install:web
@@ -554,28 +581,32 @@ jobs:
       - name: Normalize installed Rust toolchains
         run: python .github/scripts/normalize_rust_toolchains.py
 
+      - name: Setup Task
+        uses: go-task/setup-task@v2
+        with:
+          version: ${{ env.TASK_VERSION }}
+
       - name: Prepare patched crates
-        run: python patches/cargo/prepare.py
+        run: task prepare:crates
 
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: ci-v3-windows-msvc-desktop-browser-debug-${{ hashFiles('patches/cargo/**') }}
+          shared-key: ci-v3-windows-msvc-desktop-browser-debug-${{ hashFiles('patches/*+*.patch', 'Cargo.toml', 'Cargo.lock', 'Taskfile.yml', '.cargo/config.toml') }}
           cache-targets: 'true'
           save-if: ${{ env.CACHE_WRITE_ALLOWED == 'true' }}
           cache-on-failure: 'false'
           cache-bin: 'false'
+
+      # The restored target cache may contain patch sources from an earlier run.
+      - name: Refresh patched crates after cache restore
+        run: task --force prepare:crates
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
           no-cache: ${{ env.CACHE_WRITE_ALLOWED != 'true' }}
-
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
 
       - name: Prepare desktop vendor test fixtures
         run: task build:vendor-fixtures

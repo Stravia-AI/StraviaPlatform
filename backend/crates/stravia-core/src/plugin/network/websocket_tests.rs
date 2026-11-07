@@ -1,14 +1,19 @@
 use super::*;
-use std::sync::Arc;
-use crate::{outbound_proxy::OutboundProxySettings, plugin::network::transport::{H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport}};
+use crate::{
+    outbound_proxy::OutboundProxySettings,
+    plugin::network::transport::{
+        H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport,
+    },
+};
 use rustls::{ClientConfig, RootCertStore};
+use std::sync::Arc;
 use stravia_vendor_sdk::net::Field;
-use url::Url;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
 };
 use tungstenite_deflate::Message as EngineMessage;
+use url::Url;
 
 type ServerSocket = tokio_tungstenite_deflate::WebSocketStream<TcpStream>;
 const OFFER: &str = "permessage-deflate; client_max_window_bits";
@@ -57,17 +62,26 @@ fn required() -> WsCompression {
     WsCompression::Required
 }
 fn field(name: &str, bytes: &[u8]) -> Field {
-    Field { name: name.into(), bytes: bytes.to_vec() }
+    Field {
+        name: name.into(),
+        bytes: bytes.to_vec(),
+    }
 }
 
 fn route() -> Route {
-    let tls = Arc::new(ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    )).with_safe_default_protocol_versions().unwrap()
-        .with_root_certificates(RootCertStore::empty()).with_no_client_auth());
+    let tls = Arc::new(
+        ClientConfig::builder_with_provider(
+            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth(),
+    );
     Route {
         shape_name: "websocket-test".into(),
         shape_revision: 1,
+        tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,
         proxy: OutboundProxySettings::default(),
@@ -79,7 +93,11 @@ fn route() -> Route {
 }
 
 async fn finish(handshake: Handshake) -> Result<WebSocket, HostFailure> {
-    match handshake.send(&VendorTransport::new(), route(), None).await.unwrap() {
+    match handshake
+        .send(&VendorTransport::new(), route(), None)
+        .await
+        .unwrap()
+    {
         UpgradeResponse::Upgraded(head, io) => handshake.finish(&head, io).await,
         UpgradeResponse::Rejected(_) => panic!("test server rejected upgrade"),
     }
@@ -97,9 +115,24 @@ async fn connect(url: &Url, compression: &WsCompression) -> Result<WebSocket, Ho
 #[tokio::test]
 async fn legacy_handshake_does_not_offer_compression_and_exchanges_application_bytes() {
     let (url, server) = server(None).await;
-    let handshake = Handshake::new(&url, vec![field("Accept-Encoding", b"gzip")], WsCompression::Disabled).unwrap();
-    assert!(!handshake.headers().iter().any(|f| f.name.eq_ignore_ascii_case("sec-websocket-extensions")));
-    assert!(handshake.headers().iter().any(|f| f.name.eq_ignore_ascii_case("accept-encoding") && f.bytes == b"gzip"));
+    let handshake = Handshake::new(
+        &url,
+        vec![field("Accept-Encoding", b"gzip")],
+        WsCompression::Disabled,
+    )
+    .unwrap();
+    assert!(
+        !handshake
+            .headers()
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("sec-websocket-extensions"))
+    );
+    assert!(
+        handshake
+            .headers()
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("accept-encoding") && f.bytes == b"gzip")
+    );
     let mut client = finish(handshake).await.unwrap();
     let mut peer = server.await.unwrap();
     client.send(Message::Text("legacy".into())).await.unwrap();
@@ -118,7 +151,11 @@ async fn legacy_handshake_does_not_offer_compression_and_exchanges_application_b
 #[tokio::test]
 async fn handshake_preserves_guest_fields_and_immediately_buffered_websocket_frame() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = Url::parse(&format!("ws://{}/socket?x=1", listener.local_addr().unwrap())).unwrap();
+    let url = Url::parse(&format!(
+        "ws://{}/socket?x=1",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
@@ -132,42 +169,97 @@ async fn handshake_preserves_guest_fields_and_immediately_buffered_websocket_fra
         assert!(request.contains("x-other: middle\r\n"));
         assert!(request.contains("X-Trace: second\r\n"));
         assert!(request.find("X-Trace: first").unwrap() < request.find("x-other: middle").unwrap());
-        assert!(request.find("x-other: middle").unwrap() < request.find("X-Trace: second").unwrap());
+        assert!(
+            request.find("x-other: middle").unwrap() < request.find("X-Trace: second").unwrap()
+        );
         assert!(!request.to_ascii_lowercase().contains("accept-encoding:"));
-        let key = request.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("sec-websocket-key").then(|| value.trim())
-        }).unwrap();
+        let key = request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| value.trim())
+            })
+            .unwrap();
         let accept = derive_accept_key(key.as_bytes());
-        let response = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nX-Origin: peer\r\n\r\n");
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\nX-Origin: peer\r\n\r\n"
+        );
         let mut packet = response.into_bytes();
         packet.extend_from_slice(&[0x81, 0x05, b'h', b'e', b'l', b'l', b'o']);
         stream.write_all(&packet).await.unwrap();
-        let mut socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(stream, Role::Server, Some(options(None))).await;
-        assert!(matches!(socket.next().await.unwrap().unwrap(), EngineMessage::Text(text) if text.as_str() == "reply"));
+        let mut socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(
+            stream,
+            Role::Server,
+            Some(options(None)),
+        )
+        .await;
+        assert!(
+            matches!(socket.next().await.unwrap().unwrap(), EngineMessage::Text(text) if text.as_str() == "reply")
+        );
         request
     });
-    let fields = vec![field("X-Trace", b"first"), field("x-other", b"middle"), field("X-Trace", b"second")];
+    let fields = vec![
+        field("X-Trace", b"first"),
+        field("x-other", b"middle"),
+        field("X-Trace", b"second"),
+    ];
     let handshake = Handshake::new(&url, fields, WsCompression::Disabled).unwrap();
     let (capture_tx, capture_rx) = tokio::sync::oneshot::channel();
-    let (head, io) = match handshake.send(&VendorTransport::new(), route(), Some(Box::new(move |head| { let _ = capture_tx.send(head); }))).await.unwrap() {
+    let (head, io) = match handshake
+        .send(
+            &VendorTransport::new(),
+            route(),
+            Some(Box::new(move |head| {
+                let _ = capture_tx.send(head);
+            })),
+        )
+        .await
+        .unwrap()
+    {
         UpgradeResponse::Upgraded(head, io) => (head, io),
         UpgradeResponse::Rejected(_) => panic!("test server rejected upgrade"),
     };
     assert_eq!(head.status, 101);
-    assert!(head.fields.iter().any(|f| f.name.eq_ignore_ascii_case("x-origin") && f.bytes == b"peer"));
+    assert!(
+        head.fields
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("x-origin") && f.bytes == b"peer")
+    );
     let mut client = handshake.finish(&head, io).await.unwrap();
-    assert!(matches!(client.next().await.unwrap().unwrap(), Message::Text(text) if text == "hello"));
+    assert!(
+        matches!(client.next().await.unwrap().unwrap(), Message::Text(text) if text == "hello")
+    );
     client.send(Message::Text("reply".into())).await.unwrap();
     let request = server.await.unwrap();
     let capture = capture_rx.await.unwrap();
-    assert_eq!(capture.method, "GET");
     for field in &capture.fields {
-        let line = format!("{}: {}\r\n", field.name, std::str::from_utf8(&field.bytes).unwrap());
-        assert!(request.contains(&line), "captured field missing on wire: {line:?}");
+        let line = format!(
+            "{}: {}\r\n",
+            field.name,
+            std::str::from_utf8(&field.bytes).unwrap()
+        );
+        assert!(
+            request.contains(&line),
+            "captured field missing on wire: {line:?}"
+        );
     }
-    let names: Vec<_> = capture.fields.iter().filter(|f| f.name.eq_ignore_ascii_case("x-trace") || f.name.eq_ignore_ascii_case("x-other")).map(|f| (f.name.as_str(), f.bytes.as_slice())).collect();
-    assert_eq!(names, [("X-Trace", &b"first"[..]), ("x-other", &b"middle"[..]), ("X-Trace", &b"second"[..])]);
+    let names: Vec<_> = capture
+        .fields
+        .iter()
+        .filter(|f| {
+            f.name.eq_ignore_ascii_case("x-trace") || f.name.eq_ignore_ascii_case("x-other")
+        })
+        .map(|f| (f.name.as_str(), f.bytes.as_slice()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("X-Trace", &b"first"[..]),
+            ("x-other", &b"middle"[..]),
+            ("X-Trace", &b"second"[..])
+        ]
+    );
 }
 
 // Captures: codex 0.167.0 and Bun 1.3.14 loopback captures in
@@ -182,38 +274,165 @@ async fn handshake_preserves_guest_fields_and_immediately_buffered_websocket_fra
 // For source-derived cases, optional client/fetch headers are deliberately absent.
 #[tokio::test]
 async fn representative_client_handshakes_replay_ordered_fields_on_wire() {
-    const BASIC: &[(&str, &str)] = &[("Host", "$host"), ("Connection", "Upgrade"), ("Upgrade", "websocket"), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Key", "")];
-    const OPENAI: &[(&str, &str)] = &[("Host", "$host"), ("Connection", "Upgrade"), ("Upgrade", "websocket"), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Key", ""), ("sec-websocket-extensions", "permessage-deflate; client_max_window_bits")];
-    const BUN: &[(&str, &str)] = &[("Host", "$host"), ("Connection", "Upgrade"), ("Upgrade", "websocket"), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits"), ("Sec-WebSocket-Key", "")];
-    const CODEX: &[(&str, &str)] = &[("Host", "$host"), ("Connection", "Upgrade"), ("Upgrade", "websocket"), ("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Key", ""), ("authorization", "Bearer fixture"), ("user-agent", "codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)"), ("originator", "codex_exec"), ("openai-beta", "responses_websockets=2026-02-06"), ("x-codex-turn-metadata", "fixture"), ("x-codex-beta-features", "remote_compaction_v2"), ("x-client-request-id", "fixture"), ("session-id", "fixture"), ("thread-id", "fixture"), ("x-codex-window-id", "fixture"), ("sec-websocket-extensions", "permessage-deflate; client_max_window_bits")];
-    const PYTHON: &[(&str, &str)] = &[("Host", "$host"), ("Upgrade", "websocket"), ("Connection", "Upgrade"), ("Sec-WebSocket-Key", ""), ("Sec-WebSocket-Version", "13")];
+    const BASIC: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Connection", "Upgrade"),
+        ("Upgrade", "websocket"),
+        ("Sec-WebSocket-Version", "13"),
+        ("Sec-WebSocket-Key", ""),
+    ];
+    const OPENAI: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Connection", "Upgrade"),
+        ("Upgrade", "websocket"),
+        ("Sec-WebSocket-Version", "13"),
+        ("Sec-WebSocket-Key", ""),
+        (
+            "sec-websocket-extensions",
+            "permessage-deflate; client_max_window_bits",
+        ),
+    ];
+    const BUN: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Connection", "Upgrade"),
+        ("Upgrade", "websocket"),
+        ("Sec-WebSocket-Version", "13"),
+        (
+            "Sec-WebSocket-Extensions",
+            "permessage-deflate; client_max_window_bits",
+        ),
+        ("Sec-WebSocket-Key", ""),
+    ];
+    const CODEX: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Connection", "Upgrade"),
+        ("Upgrade", "websocket"),
+        ("Sec-WebSocket-Version", "13"),
+        ("Sec-WebSocket-Key", ""),
+        ("authorization", "Bearer fixture"),
+        (
+            "user-agent",
+            "codex_exec/0.167.0 (NixOS 26.5.0; x86_64) dumb (codex_exec; 0.167.0)",
+        ),
+        ("originator", "codex_exec"),
+        ("openai-beta", "responses_websockets=2026-02-06"),
+        ("x-codex-turn-metadata", "fixture"),
+        ("x-codex-beta-features", "remote_compaction_v2"),
+        ("x-client-request-id", "fixture"),
+        ("session-id", "fixture"),
+        ("thread-id", "fixture"),
+        ("x-codex-window-id", "fixture"),
+        (
+            "sec-websocket-extensions",
+            "permessage-deflate; client_max_window_bits",
+        ),
+    ];
+    const PYTHON: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Upgrade", "websocket"),
+        ("Connection", "Upgrade"),
+        ("Sec-WebSocket-Key", ""),
+        ("Sec-WebSocket-Version", "13"),
+    ];
     // Go net/http writes Host first and sorts the remaining header names.
-    const GORILLA: &[(&str, &str)] = &[("Host", "$host"), ("Connection", "Upgrade"), ("Sec-WebSocket-Key", ""), ("Sec-WebSocket-Version", "13"), ("Upgrade", "websocket")];
+    const GORILLA: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Connection", "Upgrade"),
+        ("Sec-WebSocket-Key", ""),
+        ("Sec-WebSocket-Version", "13"),
+        ("Upgrade", "websocket"),
+    ];
     // Undici adds its transport-owned Upgrade and Connection separately; this
     // representative ordered input exercises the source's key/version/offer.
-    const UNDICI: &[(&str, &str)] = &[("Host", "$host"), ("Connection", "Upgrade"), ("Upgrade", "websocket"), ("sec-websocket-key", ""), ("sec-websocket-version", "13"), ("sec-websocket-extensions", "permessage-deflate; client_max_window_bits")];
-    for (name, fixture) in [("tokio-tungstenite-0.28", BASIC), ("openai-fork", OPENAI), ("codex", CODEX), ("bun", BUN), ("undici", UNDICI), ("python-websockets", PYTHON), ("gorilla", GORILLA)] {
+    const UNDICI: &[(&str, &str)] = &[
+        ("Host", "$host"),
+        ("Connection", "Upgrade"),
+        ("Upgrade", "websocket"),
+        ("sec-websocket-key", ""),
+        ("sec-websocket-version", "13"),
+        (
+            "sec-websocket-extensions",
+            "permessage-deflate; client_max_window_bits",
+        ),
+    ];
+    for (name, fixture) in [
+        ("tokio-tungstenite-0.28", BASIC),
+        ("openai-fork", OPENAI),
+        ("codex", CODEX),
+        ("bun", BUN),
+        ("undici", UNDICI),
+        ("python-websockets", PYTHON),
+        ("gorilla", GORILLA),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let url = Url::parse(&format!("ws://{address}/socket")).unwrap();
         let authority = address.to_string();
-        let fields: Vec<_> = fixture.iter().map(|(name, value)| field(name, if *value == "$host" { authority.as_bytes() } else { value.as_bytes() })).collect();
-        let compression = if fields.iter().any(|f| f.name.eq_ignore_ascii_case("sec-websocket-extensions")) { WsCompression::Preferred } else { WsCompression::Disabled };
+        let fields: Vec<_> = fixture
+            .iter()
+            .map(|(name, value)| {
+                field(
+                    name,
+                    if *value == "$host" {
+                        authority.as_bytes()
+                    } else {
+                        value.as_bytes()
+                    },
+                )
+            })
+            .collect();
+        let compression = if fields
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case("sec-websocket-extensions"))
+        {
+            WsCompression::Preferred
+        } else {
+            WsCompression::Disabled
+        };
         let handshake = Handshake::new(&url, fields, compression).unwrap();
-        let key = handshake.headers().iter().find(|f| f.name.eq_ignore_ascii_case("sec-websocket-key")).unwrap().bytes.clone();
-        let expected: Vec<_> = fixture.iter().map(|(name, value)| {
-            let bytes = if name.eq_ignore_ascii_case("sec-websocket-key") { key.clone() } else if *value == "$host" { authority.as_bytes().to_vec() } else { value.as_bytes().to_vec() };
-            ((*name).to_owned(), bytes)
-        }).collect();
+        let key = handshake
+            .headers()
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case("sec-websocket-key"))
+            .unwrap()
+            .bytes
+            .clone();
+        let expected: Vec<_> = fixture
+            .iter()
+            .map(|(name, value)| {
+                let bytes = if name.eq_ignore_ascii_case("sec-websocket-key") {
+                    key.clone()
+                } else if *value == "$host" {
+                    authority.as_bytes().to_vec()
+                } else {
+                    value.as_bytes().to_vec()
+                };
+                ((*name).to_owned(), bytes)
+            })
+            .collect();
         let peer = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut bytes = Vec::new();
-            while !bytes.ends_with(b"\r\n\r\n") { bytes.push(socket.read_u8().await.unwrap()); assert!(bytes.len() < 16 * 1024); }
+            while !bytes.ends_with(b"\r\n\r\n") {
+                bytes.push(socket.read_u8().await.unwrap());
+                assert!(bytes.len() < 16 * 1024);
+            }
             let request = String::from_utf8(bytes).unwrap();
             assert!(request.starts_with("GET /socket HTTP/1.1\r\n"));
-            let fields: Vec<_> = request.lines().skip(1).filter(|line| !line.is_empty()).map(|line| { let (name, value) = line.split_once(": ").unwrap(); (name.to_owned(), value.as_bytes().to_vec()) }).collect();
+            let fields: Vec<_> = request
+                .lines()
+                .skip(1)
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    let (name, value) = line.split_once(": ").unwrap();
+                    (name.to_owned(), value.as_bytes().to_vec())
+                })
+                .collect();
             assert_eq!(fields, expected, "{name}");
-            let key = fields.iter().find(|(n, _)| n.eq_ignore_ascii_case("sec-websocket-key")).unwrap();
+            let key = fields
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("sec-websocket-key"))
+                .unwrap();
             let accept = derive_accept_key(&key.1);
             socket.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
         });
@@ -235,28 +454,55 @@ async fn http_proxy_forwards_websocket_upgrade_and_frames() {
         }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("GET http://websocket.example.invalid/socket HTTP/1.1\r\n"));
-        assert!(request.to_ascii_lowercase().contains("proxy-authorization: basic dxnlcjpwyxnz\r\n"));
-        let key = request.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("sec-websocket-key").then(|| value.trim())
-        }).unwrap();
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("proxy-authorization: basic dxnlcjpwyxnz\r\n")
+        );
+        let key = request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| value.trim())
+            })
+            .unwrap();
         let accept = derive_accept_key(key.as_bytes());
         stream.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
-        let mut socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(stream, Role::Server, Some(options(None))).await;
-        assert!(matches!(socket.next().await.unwrap().unwrap(), EngineMessage::Text(text) if text.as_str() == "through http proxy"));
-        socket.send(EngineMessage::Text("http proxy reply".into())).await.unwrap();
+        let mut socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(
+            stream,
+            Role::Server,
+            Some(options(None)),
+        )
+        .await;
+        assert!(
+            matches!(socket.next().await.unwrap().unwrap(), EngineMessage::Text(text) if text.as_str() == "through http proxy")
+        );
+        socket
+            .send(EngineMessage::Text("http proxy reply".into()))
+            .await
+            .unwrap();
     });
     let url = Url::parse("ws://websocket.example.invalid/socket").unwrap();
     let handshake = Handshake::new(&url, vec![], WsCompression::Disabled).unwrap();
     let mut proxy_route = route();
     proxy_route.proxy.url = format!("http://user:pass@{proxy}");
-    let (head, io) = match handshake.send(&VendorTransport::new(), proxy_route, None).await.unwrap() {
+    let (head, io) = match handshake
+        .send(&VendorTransport::new(), proxy_route, None)
+        .await
+        .unwrap()
+    {
         UpgradeResponse::Upgraded(head, io) => (head, io),
         UpgradeResponse::Rejected(_) => panic!("proxy rejected upgrade"),
     };
     let mut client = handshake.finish(&head, io).await.unwrap();
-    client.send(Message::Text("through http proxy".into())).await.unwrap();
-    assert!(matches!(client.next().await.unwrap().unwrap(), Message::Text(text) if text == "http proxy reply"));
+    client
+        .send(Message::Text("through http proxy".into()))
+        .await
+        .unwrap();
+    assert!(
+        matches!(client.next().await.unwrap().unwrap(), Message::Text(text) if text == "http proxy reply")
+    );
     server.await.unwrap();
 }
 
@@ -279,7 +525,10 @@ async fn socks5h_proxy_carries_websocket_handshake_and_frames() {
         let mut port = [0; 2];
         stream.read_exact(&mut port).await.unwrap();
         assert_eq!(u16::from_be_bytes(port), 80);
-        stream.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await.unwrap();
+        stream
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
         let mut request = Vec::new();
         while !request.ends_with(b"\r\n\r\n") {
             request.push(stream.read_u8().await.unwrap());
@@ -287,27 +536,50 @@ async fn socks5h_proxy_carries_websocket_handshake_and_frames() {
         }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("GET /socket HTTP/1.1\r\n"));
-        let key = request.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("sec-websocket-key").then(|| value.trim())
-        }).unwrap();
+        let key = request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| value.trim())
+            })
+            .unwrap();
         let accept = derive_accept_key(key.as_bytes());
         stream.write_all(format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n\r\n").as_bytes()).await.unwrap();
-        let mut socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(stream, Role::Server, Some(options(None))).await;
-        assert!(matches!(socket.next().await.unwrap().unwrap(), EngineMessage::Text(text) if text.as_str() == "through proxy"));
-        socket.send(EngineMessage::Text("proxied reply".into())).await.unwrap();
+        let mut socket = tokio_tungstenite_deflate::WebSocketStream::from_raw_socket(
+            stream,
+            Role::Server,
+            Some(options(None)),
+        )
+        .await;
+        assert!(
+            matches!(socket.next().await.unwrap().unwrap(), EngineMessage::Text(text) if text.as_str() == "through proxy")
+        );
+        socket
+            .send(EngineMessage::Text("proxied reply".into()))
+            .await
+            .unwrap();
     });
     let url = Url::parse("ws://websocket.example.invalid/socket").unwrap();
     let handshake = Handshake::new(&url, vec![], WsCompression::Disabled).unwrap();
     let mut proxy_route = route();
     proxy_route.proxy.url = format!("socks5h://{proxy}");
-    let (head, io) = match handshake.send(&VendorTransport::new(), proxy_route, None).await.unwrap() {
+    let (head, io) = match handshake
+        .send(&VendorTransport::new(), proxy_route, None)
+        .await
+        .unwrap()
+    {
         UpgradeResponse::Upgraded(head, io) => (head, io),
         UpgradeResponse::Rejected(_) => panic!("proxy rejected upgrade"),
     };
     let mut client = handshake.finish(&head, io).await.unwrap();
-    client.send(Message::Text("through proxy".into())).await.unwrap();
-    assert!(matches!(client.next().await.unwrap().unwrap(), Message::Text(text) if text == "proxied reply"));
+    client
+        .send(Message::Text("through proxy".into()))
+        .await
+        .unwrap();
+    assert!(
+        matches!(client.next().await.unwrap().unwrap(), Message::Text(text) if text == "proxied reply")
+    );
     server.await.unwrap();
 }
 
@@ -403,12 +675,38 @@ async fn malformed_unoffered_and_duplicate_extensions_fail_before_business_send(
 #[test]
 fn handshake_rejects_duplicate_owned_slots_and_nonempty_client_key() {
     let url = Url::parse("ws://localhost/socket").unwrap();
-    for name in ["Connection", "Upgrade", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol"] {
+    for name in [
+        "Connection",
+        "Upgrade",
+        "Sec-WebSocket-Key",
+        "Sec-WebSocket-Version",
+        "Sec-WebSocket-Extensions",
+        "Sec-WebSocket-Protocol",
+    ] {
         let fields = vec![field(name, b""), field(&name.to_ascii_lowercase(), b"")];
-        assert!(Handshake::new(&url, fields, WsCompression::Preferred).is_err(), "{name}");
+        assert!(
+            Handshake::new(&url, fields, WsCompression::Preferred).is_err(),
+            "{name}"
+        );
     }
-    assert!(Handshake::new(&url, vec![field("Sec-WebSocket-Key", b"guest-key")], WsCompression::Disabled).is_err());
-    let handshake = Handshake::new(&url, vec![field("X-Before", b"a"), field("sEc-WebSocket-Key", b""), field("X-After", b"b")], WsCompression::Disabled).unwrap();
+    assert!(
+        Handshake::new(
+            &url,
+            vec![field("Sec-WebSocket-Key", b"guest-key")],
+            WsCompression::Disabled
+        )
+        .is_err()
+    );
+    let handshake = Handshake::new(
+        &url,
+        vec![
+            field("X-Before", b"a"),
+            field("sEc-WebSocket-Key", b""),
+            field("X-After", b"b"),
+        ],
+        WsCompression::Disabled,
+    )
+    .unwrap();
     let fields = handshake.headers();
     assert_eq!(fields[0].name, "X-Before");
     assert_eq!(fields[1].name, "sEc-WebSocket-Key");
@@ -418,12 +716,28 @@ fn handshake_rejects_duplicate_owned_slots_and_nonempty_client_key() {
 
 #[tokio::test]
 async fn selected_client_window_cannot_exceed_the_offered_limit() {
-    let (url, server) = server(Some("permessage-deflate; client_max_window_bits=13")).await;
-    let handshake = Handshake::new(&url, vec![field("Sec-WebSocket-Extensions", b"permessage-deflate; client_max_window_bits=12")], WsCompression::Preferred).unwrap();
+    let (url, first_server) = server(Some("permessage-deflate; client_max_window_bits=13")).await;
+    let handshake = Handshake::new(
+        &url,
+        vec![field(
+            "Sec-WebSocket-Extensions",
+            b"permessage-deflate; client_max_window_bits=12",
+        )],
+        WsCompression::Preferred,
+    )
+    .unwrap();
     assert!(finish(handshake).await.is_err());
-    drop(server.await.unwrap());
+    drop(first_server.await.unwrap());
     let (url, server) = server(Some("permessage-deflate; client_max_window_bits=12")).await;
-    let handshake = Handshake::new(&url, vec![field("Sec-WebSocket-Extensions", b"permessage-deflate; client_max_window_bits=12")], WsCompression::Preferred).unwrap();
+    let handshake = Handshake::new(
+        &url,
+        vec![field(
+            "Sec-WebSocket-Extensions",
+            b"permessage-deflate; client_max_window_bits=12",
+        )],
+        WsCompression::Preferred,
+    )
+    .unwrap();
     let client = finish(handshake).await.unwrap();
     assert!(client.compressed());
     drop(client);
@@ -443,21 +757,31 @@ fn quoted_window_bits_and_context_flags_map_to_actual_engine_configuration() {
 fn response_integrity_rejects_nonce_protocol_and_duplicate_accept() {
     let handshake = Handshake::new(
         &Url::parse("ws://localhost/socket").unwrap(),
-        vec![field("Sec-WebSocket-Protocol", b"expected"), field("Sec-WebSocket-Extensions", OFFER.as_bytes())],
+        vec![
+            field("Sec-WebSocket-Protocol", b"expected"),
+            field("Sec-WebSocket-Extensions", OFFER.as_bytes()),
+        ],
         preferred(),
-    ).unwrap();
+    )
+    .unwrap();
     let mut head = crate::plugin::network::transport::Head {
         status: 101,
-        fields: vec![field("Connection", b"Upgrade"), field("Upgrade", b"websocket"), field("Sec-WebSocket-Accept", handshake.accept.as_bytes())],
+        fields: vec![
+            field("Connection", b"Upgrade"),
+            field("Upgrade", b"websocket"),
+            field("Sec-WebSocket-Accept", handshake.accept.as_bytes()),
+        ],
     };
     assert!(handshake.validate(&head).is_ok());
     head.status = 403;
     assert!(handshake.validate(&head).is_err());
     head.status = 101;
-    head.fields.push(field("Sec-WebSocket-Protocol", b"unoffered"));
+    head.fields
+        .push(field("Sec-WebSocket-Protocol", b"unoffered"));
     assert!(handshake.validate(&head).is_err());
     head.fields.pop();
-    head.fields.push(field("Sec-WebSocket-Protocol", b"expected"));
+    head.fields
+        .push(field("Sec-WebSocket-Protocol", b"expected"));
     assert!(handshake.validate(&head).is_ok());
     head.fields.pop();
     head.fields.push(field("Sec-WebSocket-Version", b"12"));

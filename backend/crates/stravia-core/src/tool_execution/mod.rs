@@ -31,6 +31,36 @@ use crate::{
 
 const DEFAULT_WAIT: Duration = Duration::from_secs(60);
 
+#[cfg(feature = "test-support")]
+async fn enter_handoff_test_barrier(
+    address: std::net::SocketAddr,
+    id: &str,
+) -> Result<tokio::net::TcpStream, PlatformToolError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    if !address.ip().is_loopback() {
+        return Err(failure("test handoff barrier must use a loopback address"));
+    }
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .map_err(|error| failure(error.to_string()))?;
+    stream
+        .write_all(id.as_bytes())
+        .await
+        .map_err(|error| failure(error.to_string()))?;
+    stream
+        .write_all(b"\n")
+        .await
+        .map_err(|error| failure(error.to_string()))?;
+    let release = stream
+        .read_u8()
+        .await
+        .map_err(|error| failure(error.to_string()))?;
+    if release != 1 {
+        return Err(failure("invalid test handoff barrier release"));
+    }
+    Ok(stream)
+}
+
 tokio::task_local! {
     static EXECUTION_DEADLINE: Instant;
     static ACCEPTED_AT: tokio::time::Instant;
@@ -482,7 +512,22 @@ impl Gateway {
                 let task_principal = principal.clone();
                 let handoff_cancellation = caller_cancellation.clone();
                 let (handoff_tx, mut handoff_rx) = oneshot::channel();
+                #[cfg(feature = "test-support")]
+                let test_barrier = self.config.test_handoff_barrier;
                 self.lifecycle.spawn(async move {
+                    #[cfg(feature = "test-support")]
+                    let mut probe = if let Some(address) = test_barrier {
+                        match enter_handoff_test_barrier(address, &task_id).await {
+                            Ok(stream) => Some(stream),
+                            Err(error) => {
+                                task_live.resolve_handoff(false);
+                                let _ = handoff_tx.send(Err(error));
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let result = if task_live.cancellation.is_cancelled() {
                         Err(failure("Tool execution cancelled before background handoff"))
                     } else {
@@ -499,6 +544,13 @@ impl Gateway {
                         })
                     };
                     task_live.resolve_handoff(result.is_ok());
+                    #[cfg(feature = "test-support")]
+                    if let Some(stream) = probe.as_mut() {
+                        use tokio::io::AsyncWriteExt;
+                        if let Err(error) = stream.write_all(&[u8::from(result.is_ok())]).await {
+                            tracing::warn!(%error, "failed to report test handoff barrier outcome");
+                        }
+                    }
                     let _ = handoff_tx.send(result);
                 });
                 tokio::select! {

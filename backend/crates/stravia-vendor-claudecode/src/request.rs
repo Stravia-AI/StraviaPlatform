@@ -2,12 +2,10 @@
 //!
 //! 形态依据官方 2.1.317 真正终端交互的 200 多轮抓包（默认 system 与自定义 system
 //! 两种 profile）：计费头 `system[0]`、CLI 身份块、`metadata.user_id`
-//! 内嵌 JSON、`thread`/`diagnostics` 线程控制与最终字节 `cch`。业务内容、工具定义和
+//! 内嵌 JSON、`diagnostics` 与最终字节 `cch`。业务内容、工具定义和
 //! JSON schema 不按请求参数递归过滤；自定义工具额外使用 `_` 前缀与内建工具隔离。
 //!
-//! 两阶段：[`prepare`] 一次性完成参数归一与闭集投影，产出完整、与线程无关的请求；
-//! [`encode`] 借用该请求，按 [`WireContext`] 序列化为创建、续接或无状态的线上字节，
-//! 续接只写 `messages[offset..]` 且不重复 system/tools，不复制完整历史。
+//! [`prepare`] 归一参数；[`encode`] 始终发送完整历史、system 和 tools。
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -15,12 +13,12 @@ use sha2::{Digest, Sha256};
 
 use crate::cache;
 use crate::capabilities::{self, ModelCapabilities};
-use crate::session::{ThreadMode, WireContext};
+use crate::session::WireContext;
 use crate::thinking::{self, ModelProfile};
 use crate::xxhash::Xxh64;
 
 /// 未配置覆盖值时上报的 Claude Code CLI 正式发行版本。
-pub(crate) const DEFAULT_CLIENT_VERSION: &str = "2.1.317";
+pub(crate) const DEFAULT_CLIENT_VERSION: &str = "2.1.319";
 /// 与该 Claude Code 发布包内的 `@anthropic-ai/sdk` 身份保持一致。
 pub(crate) const SDK_VERSION: &str = "0.128.0";
 const RUNTIME_VERSION: &str = "v26.12.1";
@@ -46,28 +44,10 @@ const CCH_SYSTEM_PREFIX: &[u8] = b"[{\"type\":\"text\",\"text\":\"x-anthropic-bi
 /// 官方只在 system 值起点之后这么多字节内寻找占位符。
 const CCH_SEARCH_WINDOW: usize = 300;
 
-/// 实测所有 200 请求（含无工具续接）共有、且不依赖具体工具或内容的 beta，按线上顺序。
-const LEADING_BETAS: [&str; 7] = [
-    OAUTH_BETA,
-    "interleaved-thinking-2025-05-14",
-    "context-management-2025-06-27",
-    "prompt-caching-scope-2026-01-05",
-    "claude-code-20250219",
-    "per-turn-control-2026-07-01",
-    "mid-conversation-tool-changes-2026-07-01",
-];
-const THINKING_TOKEN_COUNT_BETA: &str = "thinking-token-count-2026-05-13";
-/// 仅在存在 deferred 工具（`defer_loading`）时出现：默认 profile 有，自定义精简工具集没有。
+/// CLI 2.1.319 first-party beta names; feature-dependent betas are selected below.
 const TOOL_SEARCH_BETA: &str = "advanced-tool-use-2025-11-20";
-const SYSTEM_CLEAR_BETA: &str = "mid-conversation-system-clear-at-2026-08-21";
 const EFFORT_BETA: &str = "effort-2025-11-24";
-const THINKING_TRAILING_BETAS: [&str; 3] = [
-    "thinking-binding-controls-2026-08-01",
-    "thinking-display-updates-2026-08-18",
-    "extended-cache-ttl-2025-04-11",
-];
 const CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
-const THREADS_BETA: &str = "message-threads-2026-08-12";
 
 /// 线上 JSON 的对象键顺序。上游 SDK 按插入顺序序列化；Stravia 入口解析后
 /// 原始顺序已丢失，这里按抓包里的字段构造顺序输出已知键，其余键按字典序排在
@@ -161,8 +141,8 @@ pub(crate) struct ShapedRequest {
 
 /// 把 codec 产出的请求体归一为 Claude Code 的参数闭集，并保持历史完整：
 ///
-/// - 剔除客户端的 `metadata` / `thread` / `diagnostics` 与全部缓存断点（它们由 [`encode`]
-///   按线程状态重建）；
+/// - 剔除客户端的 `metadata` / `thread` / `diagnostics` 与全部缓存断点（可信的
+///   metadata、diagnostics 和缓存断点由 [`encode`] 重建）；
 /// - `system` 归一为客户端自有的块数组，剔除过期计费头和重复的身份块；
 /// - 思考、effort、采样、prefill、上下文编辑按型号能力约束；
 /// - 自定义工具声明、选择、排除列表及历史调用／引用统一加一层 `_` 前缀；
@@ -230,22 +210,15 @@ pub(crate) fn prepare(
 
 /// 把 [`prepare`] 产出的完整请求序列化为最终线上字节（已写入 `cch`）。
 ///
-/// - [`ThreadMode::Create`]：完整 system（计费头 + CLI 身份 + 客户端 system）、tools、
-///   全部 messages，`thread = {type: create}`、`diagnostics.previous_message_id = null`；
-/// - [`ThreadMode::Continue`]：只发 `messages[message_offset..]`，system 只剩计费头，
-///   省略 tools，`thread` 与 `diagnostics` 都指向 `previous_message_id`；
-/// - [`ThreadMode::Disabled`]：与创建相同但不带线程控制，也不声明线程相关 beta。
-///
-/// 压缩请求和携带原生压缩块的回放都属于无状态请求：永不携带线程控制，也不按
-/// `message_offset` 切片，必须发送完整历史（上游要求压缩块位于可回放窗口的起始处）。
-/// 计费指纹、`betas` 与 tools 判定始终基于完整历史，续接不会因省略而改变。
-/// `body` 只被借用；缓存断点只复制承载它的那一条消息。
+/// 全量发送历史和工具；普通请求携带上一次消息 ID 的诊断信息，压缩
+/// 不携带诊断信息。缓存断点只复制承载它的那一条消息。
 pub(crate) fn encode(
     body: &Value,
     client_version: &str,
     identity: &AccountIdentity<'_>,
     context: &WireContext,
-    compact: bool,
+    caps: &ModelCapabilities,
+    suppress_diagnostics: bool,
 ) -> Result<ShapedRequest, String> {
     let object = body
         .as_object()
@@ -255,32 +228,7 @@ pub(crate) fn encode(
         Some(Value::Array(messages)) => messages,
         Some(_) => return Err("Anthropic messages must be an array".into()),
     };
-    if compact && context.mode == ThreadMode::Continue {
-        return Err("a compaction request cannot continue a message thread".into());
-    }
-    let compaction_replay = carries_compaction(object);
-    // 即使会话计划给出 Continue，压缩块回放也不能续接或切片。
-    let continuing = !compaction_replay && context.mode == ThreadMode::Continue;
-    let threaded = !compact && !compaction_replay && context.mode != ThreadMode::Disabled;
-    let previous = if continuing {
-        let id = context
-            .previous_message_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .ok_or("continuing a message thread requires the previous message id")?;
-        if context.message_offset >= history.len() {
-            return Err("continuing a message thread requires at least one new message".into());
-        }
-        Some(id)
-    } else {
-        None
-    };
-    let start = if continuing {
-        context.message_offset
-    } else {
-        0
-    };
-    let messages = &history[start..];
+    let messages = history;
 
     let mut system = vec![json!({
         "type": "text",
@@ -290,26 +238,19 @@ pub(crate) fn encode(
             context,
         ),
     })];
-    if !continuing {
-        system.push(json!({ "type": "text", "text": IDENTITY_TEXT }));
-        match object.get("system") {
-            None => {}
-            Some(Value::Array(blocks)) => system.extend(blocks.iter().cloned()),
-            Some(_) => return Err("Anthropic system must be prepared into an array".into()),
-        }
-        cache::anchor_system(&mut system[1..]);
+    system.push(json!({ "type": "text", "text": IDENTITY_TEXT }));
+    match object.get("system") {
+        None => {}
+        Some(Value::Array(blocks)) => system.extend(blocks.iter().cloned()),
+        Some(_) => return Err("Anthropic system must be prepared into an array".into()),
     }
+    cache::anchor_system(&mut system[1..]);
 
     let mut entries: Vec<(&str, Slot<'_>)> = Vec::with_capacity(object.len() + 4);
     for (key, value) in object {
         match key.as_str() {
-            // 由本函数按线程状态重建，prepare 之后不应存在；存在也不可信。
+            // 丢弃客户端提供的这些字段；本函数重建可信字段。
             "messages" | "system" | "metadata" | "thread" | "diagnostics" => {}
-            "tools" => {
-                if !continuing {
-                    entries.push((key.as_str(), Slot::Borrowed(value)));
-                }
-            }
             _ => entries.push((key.as_str(), Slot::Borrowed(value))),
         }
     }
@@ -325,22 +266,16 @@ pub(crate) fn encode(
         "metadata",
         Slot::Owned(json!({ "user_id": metadata_user_id(&context.session_id, identity) })),
     ));
-    if threaded {
-        let (thread, diagnostics) = match previous {
-            Some(id) => (
-                json!({ "type": "continue", "previous_message_id": id }),
-                json!({ "previous_message_id": id }),
-            ),
-            None => (
-                json!({ "type": "create" }),
-                json!({ "previous_message_id": Value::Null }),
-            ),
-        };
-        entries.push(("thread", Slot::Owned(thread)));
-        entries.push(("diagnostics", Slot::Owned(diagnostics)));
+    if !suppress_diagnostics && !carries_compaction(object) {
+        entries.push((
+            "diagnostics",
+            Slot::Owned(json!({
+                "previous_message_id": context.previous_message_id.as_deref(),
+            })),
+        ));
     }
 
-    let betas = beta_header(object, threaded);
+    let betas = beta_header(object, caps);
     let mut bytes = Vec::new();
     let system_at = write_body(entries, &mut bytes).map_err(|error| error.to_string())?;
     patch_cch(&mut bytes, system_at)?;
@@ -348,18 +283,18 @@ pub(crate) fn encode(
 }
 
 /// Claude Code 推理请求头。压缩策略通过强类型契约交给宿主。
-/// `x-client-request-id` 每次 HTTP 调用（含恢复重放）都是新的 UUIDv4；不属于
-/// 协议语义、且插件无法如实提供的路由/计时类头（工具耗时、路由标记）不发送。
+/// 第一方交互请求包含 prompt、request-class 与每次调用的新客户端请求 ID。
+/// 自定义网关地址的行为不同，不能用于推断第一方请求。
 pub(crate) fn inference_headers(
     access_token: &str,
     client_version: &str,
     context: &WireContext,
     betas: String,
+    tools_used: String,
 ) -> Vec<(String, String)> {
     let mut headers = vec![
         ("Accept".into(), "application/json".into()),
-        ("authorization".into(), format!("Bearer {access_token}")),
-        ("connection".into(), "keep-alive".into()),
+        ("Authorization".into(), format!("Bearer {access_token}")),
         ("Content-Type".into(), "application/json".into()),
         ("User-Agent".into(), cli_user_agent(client_version)),
         (
@@ -386,11 +321,15 @@ pub(crate) fn inference_headers(
         headers.push(("x-claude-code-prompt-id".into(), context.prompt_id.clone()));
     }
     headers.push(("x-claude-code-request-class".into(), "main".into()));
+    headers.push(("x-claude-code-sandy-plover".into(), tools_used));
     headers.push((
         "x-client-request-id".into(),
         uuid::Uuid::new_v4().to_string(),
     ));
+    headers.push(("Connection".into(), "keep-alive".into()));
+    headers.push(("Host".into(), String::new()));
     headers.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
+    headers.push(("Content-Length".into(), String::new()));
     headers
 }
 
@@ -586,8 +525,8 @@ fn prefix_tool_names(object: &mut Map<String, Value>) {
     }
 }
 
-/// 请求历史与成功响应的线程摘要必须使用同一套线上名称，否则工具循环无法续接。
-pub(crate) fn prefix_message_tool_names(messages: &mut [Value]) {
+/// 请求历史中的工具名称与工具声明一致。
+fn prefix_message_tool_names(messages: &mut [Value]) {
     for message in messages {
         if let Some(Value::Array(content)) = message.get_mut("content") {
             prefix_content_tool_names(content);
@@ -741,7 +680,7 @@ fn normalize_system(object: &mut Map<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// 基于完整 canonical 历史的首条用户文本，不因续接只发送尾部而改变。
+/// 基于完整 canonical 历史的首条用户文本。
 /// 原生 CLI 用独立 isMeta 标记排除自己注入的上下文；本插件不注入这些块，也不能
 /// 凭用户文本以 `<system-reminder>` 开头就猜测其来源并忽略它。
 fn first_user_text(messages: &[Value]) -> &str {
@@ -823,7 +762,7 @@ fn billing_header(client_version: &str, fingerprint: &str, context: &WireContext
     if context.turn_index >= 1 {
         text.push_str(&format!(
             " cc_prompt_index={}; cc_turn_index={};",
-            context.turn_index, context.turn_index
+            context.prompt_index, context.turn_index
         ));
     }
     text
@@ -832,10 +771,8 @@ fn billing_header(client_version: &str, fingerprint: &str, context: &WireContext
 /// 字段顺序与官方一致：`device_id`、`account_uuid`、`session_id`。
 #[derive(Serialize)]
 struct MetadataUserId<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    device_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    account_uuid: Option<&'a str>,
+    device_id: &'a str,
+    account_uuid: &'a str,
     session_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_session_id: Option<&'a str>,
@@ -844,18 +781,19 @@ struct MetadataUserId<'a> {
 /// `metadata.user_id` 由上游账号身份和宿主 scoped 会话/父会话标签重建。
 fn metadata_user_id(session_id: &str, identity: &AccountIdentity<'_>) -> String {
     serde_json::to_string(&MetadataUserId {
-        device_id: identity.device_id,
-        account_uuid: identity.account_uuid,
+        device_id: identity.device_id.unwrap_or_default(),
+        account_uuid: identity.account_uuid.unwrap_or_default(),
         session_id,
         parent_session_id: identity.parent_session_id,
     })
     .expect("metadata identity serializes")
 }
 
-/// 按请求实际用到的能力声明 beta。基础集合是实测所有 200 请求共有的；`advisor`、
-/// `inline-tools` 等需要对应工具或内容才有意义的 beta 不声明。线程 beta 仅在
-/// 请求确实携带线程控制时出现。必须基于完整请求（而非续接增量）判定。
-fn beta_header(object: &Map<String, Value>, threaded: bool) -> String {
+/// Client beta selection with documented first-party defaults and discovered
+/// capabilities. Remote feature assignments are intentionally not fetched.
+fn beta_header(object: &Map<String, Value>, caps: &ModelCapabilities) -> String {
+    let model = object.get("model").and_then(Value::as_str).unwrap_or("");
+    let claude_3 = model.contains("claude-3-");
     let thinking = object
         .get("thinking")
         .and_then(|thinking| thinking.get("type"))
@@ -865,43 +803,69 @@ fn beta_header(object: &Map<String, Value>, threaded: bool) -> String {
         .get("tools")
         .and_then(Value::as_array)
         .is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool.get("defer_loading").and_then(Value::as_bool) == Some(true))
+            tools.iter().any(|tool| {
+                tool.get("defer_loading").and_then(Value::as_bool) == Some(true)
+                    || tool.get("name").and_then(Value::as_str) == Some("ToolSearch")
+            })
         });
     let has_effort = object
         .get("output_config")
         .and_then(|config| config.get("effort"))
         .is_some();
-    let mut betas: Vec<&str> = LEADING_BETAS.to_vec();
-    betas.push(THINKING_TOKEN_COUNT_BETA);
+    let mut betas = Vec::new();
+    if !model.contains("haiku") {
+        betas.push("claude-code-20250219");
+    }
+    betas.push(OAUTH_BETA);
+    if !claude_3 {
+        betas.push("interleaved-thinking-2025-05-14");
+    }
+    if !claude_3 && caps.context_management != Some(false) {
+        betas.push("context-management-2025-06-27");
+    }
+    betas.push("prompt-caching-scope-2026-01-05");
+    // The first-party default for the provenance feature is enabled, but remote
+    // overrides and its accompanying provenance details are unavailable here.
+    betas.push("tool-provenance-2026-10-26");
+    // Native first-party defaults PBn and DIr both reject only Claude 3.
+    if !claude_3 && caps.thinking != Some(false) {
+        betas.push("thinking-token-count-2026-05-13");
+    }
     if has_deferred_tools {
         betas.push(TOOL_SEARCH_BETA);
     }
-    betas.push(SYSTEM_CLEAR_BETA);
-    if thinking || has_effort {
+    if has_effort {
         betas.push(EFFORT_BETA);
     }
-    betas.extend(THINKING_TRAILING_BETAS);
-    if threaded {
-        betas.push(CACHE_DIAGNOSIS_BETA);
-        betas.push(THREADS_BETA);
+    if object
+        .get("output_config")
+        .and_then(|v| v.get("task_budget"))
+        .is_some()
+    {
+        betas.push("task-budgets-2026-03-13");
     }
+    if object
+        .get("output_config")
+        .and_then(|v| v.get("format"))
+        .is_some()
+    {
+        betas.push("structured-outputs-2025-12-15");
+    }
+    if thinking {
+        betas.push("thinking-binding-controls-2026-08-01");
+        if object
+            .get("thinking")
+            .and_then(|v| v.get("display"))
+            .and_then(Value::as_str)
+            == Some("updates")
+        {
+            betas.push("thinking-display-updates-2026-08-18");
+        }
+    }
+    // This encoder places a one-hour cache marker on the identity block.
+    betas.push("extended-cache-ttl-2025-04-11");
+    betas.push(CACHE_DIAGNOSIS_BETA);
     for (present, beta) in [
-        (
-            object
-                .get("output_config")
-                .and_then(|v| v.get("format"))
-                .is_some(),
-            "structured-outputs-2025-12-15",
-        ),
-        (
-            object
-                .get("output_config")
-                .and_then(|v| v.get("task_budget"))
-                .is_some(),
-            "task-budgets-2026-03-13",
-        ),
         (
             object
                 .get("cache_control")
@@ -1230,25 +1194,24 @@ mod tests {
         }
     }
 
-    fn context(mode: ThreadMode) -> WireContext {
+    fn context() -> WireContext {
         WireContext {
             session_id: SESSION.into(),
             prompt_id: PROMPT.into(),
+            prompt_index: 1,
             turn_index: 1,
             previous_message_id: None,
             previous_request_id: None,
-            message_offset: 0,
-            mode,
         }
     }
 
-    fn continuing(offset: usize) -> WireContext {
+    fn prior_context() -> WireContext {
         WireContext {
             previous_message_id: Some("msg_previous".into()),
             previous_request_id: Some("req_previous".into()),
-            message_offset: offset,
+            prompt_index: 2,
             turn_index: 2,
-            ..context(ThreadMode::Continue)
+            ..context()
         }
     }
 
@@ -1266,6 +1229,7 @@ mod tests {
             DEFAULT_CLIENT_VERSION,
             &identity(),
             context,
+            &ModelCapabilities::default(),
             false,
         )
         .expect("request encodes");
@@ -1277,7 +1241,7 @@ mod tests {
 
     /// 完整创建请求。
     fn created(body: Value) -> (Value, ShapedRequest) {
-        wire(&prep(body), &context(ThreadMode::Create))
+        wire(&prep(body), &context())
     }
 
     fn betas_of(shaped: &ShapedRequest) -> Vec<&str> {
@@ -1369,7 +1333,7 @@ mod tests {
     #[test]
     fn create_request_matches_the_measured_sdk_shape() {
         let prepared = prep(user_turns());
-        let (body, shaped) = wire(&prepared, &context(ThreadMode::Create));
+        let (body, shaped) = wire(&prepared, &context());
         let text = String::from_utf8(shaped.body.clone()).unwrap();
         assert!(text.starts_with("{\"model\":"));
         let positions: Vec<usize> = [
@@ -1378,7 +1342,6 @@ mod tests {
             "\"tools\":",
             "\"metadata\":",
             "\"max_tokens\":",
-            "\"thread\":",
             "\"diagnostics\":",
             "\"stream\":",
         ]
@@ -1405,7 +1368,7 @@ mod tests {
         assert_eq!(system[2]["text"], "client system");
         assert_eq!(system[2]["cache_control"], one_hour);
 
-        assert_eq!(body["thread"], json!({"type": "create"}));
+        assert!(body.get("thread").is_none());
         assert_eq!(body["diagnostics"], json!({"previous_message_id": null}));
         assert_eq!(body["messages"].as_array().unwrap().len(), 3);
         // 只有最新消息的最后一个可缓存块带断点；tools 从不带。
@@ -1457,101 +1420,50 @@ mod tests {
     }
 
     #[test]
-    fn continue_sends_only_the_delta_without_system_or_tools() {
+    fn later_request_keeps_full_history_and_diagnostics() {
         let prepared = prep(user_turns());
-        let (created_body, _) = wire(&prepared, &context(ThreadMode::Create));
-        let (body, shaped) = wire(&prepared, &continuing(2));
-        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(body["messages"][0]["content"][0]["type"], "tool_result");
-        assert!(body["messages"][0]["content"][0].get("is_error").is_none());
-        assert_eq!(
-            body["messages"][0]["content"][0]["cache_control"],
-            json!({"type": "ephemeral", "ttl": "1h"})
-        );
-        assert!(body.get("tools").is_none());
-        let system = body["system"].as_array().unwrap();
-        assert_eq!(system.len(), 1, "billing only");
-        assert!(system[0].get("cache_control").is_none());
-        assert_eq!(
-            body["thread"],
-            json!({"type": "continue", "previous_message_id": "msg_previous"})
-        );
+        let (body, shaped) = wire(&prepared, &prior_context());
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(body["system"].as_array().unwrap().len(), 3);
+        assert!(body.get("thread").is_none());
         assert_eq!(
             body["diagnostics"],
             json!({"previous_message_id": "msg_previous"})
         );
-        // 续接省略 tools，但 beta 与指纹仍基于完整请求：同一会话里不能漂移。
-        assert!(betas_of(&shaped).contains(&TOOL_SEARCH_BETA));
-        let version = |body: &Value| {
-            let text = body["system"][0]["text"].as_str().unwrap();
-            text[text.find("cc_version=").unwrap()..text.find("; cc_entrypoint").unwrap()]
-                .to_owned()
-        };
-        assert_eq!(version(&body), version(&created_body));
+        assert!(!betas_of(&shaped).contains(&"message-threads-2026-08-12"));
     }
 
     #[test]
-    fn continue_requires_a_previous_message_and_new_messages() {
-        let prepared = prep(user_turns());
-        let encode_with = |context: &WireContext| {
-            encode(
-                &prepared,
-                DEFAULT_CLIENT_VERSION,
-                &identity(),
-                context,
-                false,
-            )
-        };
-        let missing_id = WireContext {
-            previous_message_id: None,
-            ..continuing(2)
-        };
-        assert!(encode_with(&missing_id).is_err());
-        let empty_id = WireContext {
-            previous_message_id: Some(String::new()),
-            ..continuing(2)
-        };
-        assert!(encode_with(&empty_id).is_err());
-        assert!(encode_with(&continuing(3)).is_err(), "nothing new to send");
-        assert!(encode_with(&continuing(9)).is_err());
-        assert!(encode_with(&continuing(2)).is_ok());
-    }
-
-    #[test]
-    fn disabled_threads_send_a_full_stateless_request() {
-        let prepared = prep(user_turns());
-        let stateless = WireContext {
-            message_offset: 2,
-            previous_message_id: Some("msg_stale".into()),
-            ..context(ThreadMode::Disabled)
-        };
-        let (body, shaped) = wire(&prepared, &stateless);
-        assert!(body.get("thread").is_none() && body.get("diagnostics").is_none());
-        assert_eq!(
-            body["messages"].as_array().unwrap().len(),
-            3,
-            "offset is ignored"
-        );
-        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
-        assert_eq!(body["system"].as_array().unwrap().len(), 3);
-        let betas = betas_of(&shaped);
-        assert!(!betas.contains(&THREADS_BETA) && !betas.contains(&CACHE_DIAGNOSIS_BETA));
-        let (_, created) = wire(&prepared, &context(ThreadMode::Create));
-        assert!(betas_of(&created).contains(&THREADS_BETA));
-        assert!(betas_of(&created).contains(&CACHE_DIAGNOSIS_BETA));
-    }
-
-    #[test]
-    fn create_never_carries_a_previous_message_id() {
-        let prepared = prep(user_turns());
-        let recovering = WireContext {
-            previous_message_id: Some("msg_expired".into()),
-            ..context(ThreadMode::Create)
-        };
-        let (body, _) = wire(&prepared, &recovering);
-        assert_eq!(body["thread"], json!({"type": "create"}));
+    fn no_previous_message_still_sends_diagnostics() {
+        let (body, _) = wire(&prep(user_turns()), &context());
         assert_eq!(body["diagnostics"], json!({"previous_message_id": null}));
-        assert!(!body.to_string().contains("msg_expired"));
+    }
+
+    #[test]
+    fn recovery_suppresses_diagnostics_without_slicing() {
+        let prepared = prep(user_turns());
+        let shaped = encode(
+            &prepared,
+            DEFAULT_CLIENT_VERSION,
+            &identity(),
+            &prior_context(),
+            &ModelCapabilities::default(),
+            true,
+        )
+        .unwrap();
+        let body: Value = serde_json::from_slice(&shaped.body).unwrap();
+        assert!(body.get("diagnostics").is_none());
+        assert!(body.get("thread").is_none());
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn prior_message_is_diagnostic_only() {
+        let (body, _) = wire(&prep(user_turns()), &prior_context());
+        assert!(body.get("thread").is_none());
+        assert_eq!(body["diagnostics"]["previous_message_id"], "msg_previous");
     }
 
     #[test]
@@ -1565,7 +1477,7 @@ mod tests {
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         };
-        let first = parts(&context(ThreadMode::Create));
+        let first = parts(&context());
         let keys: Vec<&str> = first
             .iter()
             .map(|part| part.split('=').next().unwrap())
@@ -1585,7 +1497,7 @@ mod tests {
         assert_eq!(first[0], "cc_entrypoint=cli");
         assert_eq!(first[3], "cc_turn_origin=human");
 
-        let later = parts(&continuing(2));
+        let later = parts(&prior_context());
         let keys: Vec<&str> = later
             .iter()
             .map(|part| part.split('=').next().unwrap())
@@ -1608,12 +1520,21 @@ mod tests {
     }
 
     #[test]
+    fn default_cli_keeps_diagnostics_without_thread() {
+        let prepared = prep(user_turns());
+        let (body, shaped) = wire(&prepared, &context());
+        assert!(body.get("thread").is_none());
+        assert_eq!(body["diagnostics"], json!({"previous_message_id": null}));
+        assert!(!betas_of(&shaped).contains(&"message-threads-2026-08-12"));
+    }
+
+    #[test]
     fn billing_header_omits_optional_fields_the_native_client_would_not_emit() {
         let invalid = WireContext {
             prompt_id: "not-a-uuid".into(),
             previous_request_id: Some("msg_wrong prefix; cch=1".into()),
             turn_index: 0,
-            ..continuing(2)
+            ..prior_context()
         };
         let (body, _) = wire(&prep(user_turns()), &invalid);
         let text = body["system"][0]["text"].as_str().unwrap();
@@ -1808,7 +1729,7 @@ mod tests {
         assert_eq!(tools[1]["defer_loading"], json!(true));
         assert!(tools[2].get("eager_input_streaming").is_none());
         // 线上键序：name、description、input_schema 之后才是 eager 标记。
-        let (_, shaped) = wire(&prepared, &context(ThreadMode::Create));
+        let (_, shaped) = wire(&prepared, &context());
         let text = String::from_utf8(shaped.body).unwrap();
         let tool = &text[text.find("\"tools\":").unwrap()..];
         assert!(
@@ -1818,72 +1739,87 @@ mod tests {
     }
 
     #[test]
-    fn betas_follow_the_measured_baseline_and_actual_usage() {
-        let bare = created(json!({
-            "model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}],
-        }))
-        .1;
-        let betas = betas_of(&bare);
-        for required in LEADING_BETAS {
-            assert!(betas.contains(&required), "{required}");
-        }
-        assert!(
-            betas.contains(&THREADS_BETA) && betas.contains(&"thinking-display-updates-2026-08-18")
+    fn betas_follow_first_party_model_and_request_controls() {
+        let request =
+            |value: Value| beta_header(value.as_object().unwrap(), &ModelCapabilities::default());
+        let normal = request(json!({
+            "model": "claude-sonnet-4-5",
+            "thinking": {"type": "enabled", "budget_tokens": 31999, "display": "updates"},
+            "tools": [{"name": "ToolSearch"}]
+        }));
+        assert_eq!(
+            normal,
+            concat!(
+                "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,",
+                "context-management-2025-06-27,prompt-caching-scope-2026-01-05,",
+                "tool-provenance-2026-10-26,thinking-token-count-2026-05-13,",
+                "advanced-tool-use-2025-11-20,thinking-binding-controls-2026-08-01,",
+                "thinking-display-updates-2026-08-18,extended-cache-ttl-2025-04-11,",
+                "cache-diagnosis-2026-04-07"
+            )
         );
-        // 没有对应工具/内容时不声明 advisor、inline-tools、tool search、effort。
+        let bare = request(json!({"model": "claude-haiku-4-5"}));
+        let betas: Vec<_> = bare.split(',').collect();
         for absent in [
-            "advisor-tool-2026-03-01",
-            "inline-tools-2026-09-15",
+            "claude-code-20250219",
+            TOOL_SEARCH_BETA,
+            EFFORT_BETA,
+            "thinking-binding-controls-2026-08-01",
+            "thinking-display-updates-2026-08-18",
+            "per-turn-control-2026-07-01",
+            "mid-conversation-tool-changes-2026-07-01",
+            "mid-conversation-system-clear-at-2026-08-21",
+        ] {
+            assert!(!betas.contains(&absent), "{absent}");
+        }
+        assert!(!betas.contains(&"message-threads-2026-08-12"));
+        assert!(betas.contains(&"thinking-token-count-2026-05-13"));
+        let old = request(json!({"model": "claude-3-opus-20240229"}));
+        for absent in [
+            "interleaved-thinking-2025-05-14",
+            "context-management-2025-06-27",
+            "thinking-token-count-2026-05-13",
+            "message-threads-2026-08-12",
+        ] {
+            assert!(!old.split(',').any(|beta| beta == absent), "{absent}");
+        }
+        let controls = request(json!({
+            "model": "claude-sonnet-4-5",
+            "tools": [{"name": "Read", "defer_loading": true}],
+            "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": {}}}
+        }));
+        for present in [
             TOOL_SEARCH_BETA,
             EFFORT_BETA,
             "structured-outputs-2025-12-15",
         ] {
-            assert!(!betas.contains(&absent), "{absent}");
+            assert!(controls.split(',').any(|beta| beta == present), "{present}");
         }
-        let unique: std::collections::HashSet<_> = betas.iter().collect();
-        assert_eq!(unique.len(), betas.len());
-
-        let deferred = created(user_turns()).1;
-        let betas = betas_of(&deferred);
-        let tool_search = betas
-            .iter()
-            .position(|beta| *beta == TOOL_SEARCH_BETA)
-            .unwrap();
-        let thinking_count = betas
-            .iter()
-            .position(|beta| *beta == THINKING_TOKEN_COUNT_BETA)
-            .unwrap();
-        assert!(
-            thinking_count < tool_search,
-            "tool search keeps its measured position"
-        );
-
-        let thinking = created(json!({
-            "model": "claude-sonnet-4-5", "max_tokens": 8192,
-            "thinking": {"type": "enabled", "budget_tokens": 1024},
-            "messages": [{"role": "user", "content": "hi"}],
-        }))
-        .1;
-        assert!(betas_of(&thinking).contains(&EFFORT_BETA));
-        let effort = created(json!({
-            "model": "m", "max_tokens": 1, "output_config": {"effort": "low"},
-            "messages": [{"role": "user", "content": "hi"}],
-        }))
-        .1;
-        assert!(betas_of(&effort).contains(&EFFORT_BETA));
-        let structured = created(json!({
-            "model": "m", "max_tokens": 1,
-            "output_config": {"format": {"type": "json_schema", "schema": {}}},
-            "messages": [{"role": "user", "content": "hi"}],
-        }))
-        .1;
-        assert!(betas_of(&structured).contains(&"structured-outputs-2025-12-15"));
     }
 
     #[test]
-    fn inference_headers_carry_session_prompt_class_and_fresh_request_ids() {
-        let context = continuing(2);
-        let headers = inference_headers("tok", DEFAULT_CLIENT_VERSION, &context, "b1,b2".into());
+    fn discovered_capabilities_override_default_betas() {
+        let caps = ModelCapabilities::from_wire(&json!({
+            "thinking": {"supported": false},
+            "context_management": {"supported": false}
+        }));
+        let body = json!({"model": "claude-sonnet-4-5"});
+        let beta = beta_header(body.as_object().unwrap(), &caps);
+        assert!(!beta.contains("thinking-token-count-2026-05-13"));
+        assert!(!beta.contains("context-management-2025-06-27"));
+        assert!(beta.contains("interleaved-thinking-2025-05-14"));
+    }
+
+    #[test]
+    fn inference_headers_match_interactive_session_headers() {
+        let context = prior_context();
+        let headers = inference_headers(
+            "tok",
+            DEFAULT_CLIENT_VERSION,
+            &context,
+            "b1,b2".into(),
+            "[]".into(),
+        );
         let get = |name: &str| {
             headers
                 .iter()
@@ -1896,6 +1832,8 @@ mod tests {
         assert_eq!(get("x-claude-code-session-id"), Some(SESSION));
         assert_eq!(get("x-claude-code-prompt-id"), Some(PROMPT));
         assert_eq!(get("x-claude-code-request-class"), Some("main"));
+        assert_eq!(get("x-claude-code-sandy-plover"), Some("[]"));
+        assert!(get("x-client-request-id").is_some_and(is_uuid));
         assert_eq!(get("anthropic-beta"), Some("b1,b2"));
         assert_eq!(get("x-stainless-package-version"), Some(SDK_VERSION));
         assert_eq!(
@@ -1903,21 +1841,9 @@ mod tests {
             Some(cli_user_agent(DEFAULT_CLIENT_VERSION))
         );
         // 工具耗时、路由标记等无法如实提供的头不发送。
-        for name in [
-            "x-claude-code-prev-tool-durations",
-            "x-claude-code-sandy-plover",
-            "anthropic-dispatch-id",
-        ] {
+        for name in ["x-claude-code-prev-tool-durations", "anthropic-dispatch-id"] {
             assert!(get(name).is_none(), "{name}");
         }
-        let first = get("x-client-request-id").unwrap().to_owned();
-        assert!(is_uuid(&first));
-        let again = inference_headers("tok", DEFAULT_CLIENT_VERSION, &context, String::new());
-        let second = again
-            .iter()
-            .find(|(key, _)| key == "x-client-request-id")
-            .unwrap();
-        assert_ne!(first, second.1, "every HTTP call gets its own request id");
         let names: Vec<_> = headers.iter().map(|(key, _)| key.as_str()).collect();
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len());
@@ -1966,11 +1892,11 @@ mod tests {
             ]
         }));
         // 即使持久化计划认为可以续接，压缩块回放也必须全量、无线程控制。
-        let (body, shaped) = wire(&prepared, &continuing(1));
+        let (body, shaped) = wire(&prepared, &prior_context());
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
         assert_eq!(body["messages"][0]["content"][0]["signature"], "sig-1");
         assert!(body.get("thread").is_none() && body.get("diagnostics").is_none());
-        assert!(!betas_of(&shaped).contains(&THREADS_BETA));
+        assert!(!betas_of(&shaped).contains(&"message-threads-2026-08-12"));
         assert!(betas_of(&shaped).contains(&"compact-2026-09-04"));
     }
 
@@ -1996,7 +1922,7 @@ mod tests {
             body.get("thread").is_none() && body.get("diagnostics").is_none(),
             "signed compaction replay cannot be combined with a message thread"
         );
-        assert!(!betas_of(&shaped).contains(&THREADS_BETA));
+        assert!(!betas_of(&shaped).contains(&"message-threads-2026-08-12"));
     }
 
     #[test]
@@ -2420,10 +2346,9 @@ mod tests {
             json!({"type":"dangerous_tool_use","classifier_context":{"business_key":1}})
         );
         assert_eq!(body["fallbacks"], json!([{"model":"claude-sonnet-4-5"}]));
-        let betas = beta_header(body.as_object().unwrap(), true);
+        let betas = beta_header(body.as_object().unwrap(), &ModelCapabilities::default());
         for beta in [
             "task-budgets-2026-03-13",
-            THREADS_BETA,
             "dangerous-tool-use-2026-09-03",
             "fast-mode-2026-02-01",
             "prompt-caching-evict-2026-05-12",
@@ -2432,11 +2357,10 @@ mod tests {
             assert!(betas.split(',').any(|actual| actual == beta), "{beta}");
         }
         // 端到端：账号元数据整体重建，客户端提供的身份与私有字段不会成为权威。
-        let (wire_body, _) = wire(&body, &context(ThreadMode::Create));
+        let (wire_body, _) = wire(&body, &context());
         let user_id: Value =
             serde_json::from_str(wire_body["metadata"]["user_id"].as_str().unwrap()).unwrap();
         assert_eq!(user_id["session_id"], SESSION);
         assert_eq!(wire_body["metadata"].as_object().unwrap().len(), 1);
-        assert_eq!(wire_body["thread"], json!({"type": "create"}));
     }
 }

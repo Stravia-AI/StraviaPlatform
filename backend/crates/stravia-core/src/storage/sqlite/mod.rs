@@ -19,6 +19,7 @@ use crate::storage::traits::{
     Storage, StorageBackend, StorageBootstrap, StorageHealth, UsageStatsStore, WebProviderStore,
 };
 mod admin_identity;
+mod prompt_admissions;
 mod provider_models;
 mod web_providers;
 
@@ -43,7 +44,10 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     pub fn from_pool(pool: SqlitePool) -> Self {
         let plugin_store = PluginStore::sqlite(pool.clone());
-        let provider_store = Arc::new(SqliteProviderStore { pool: pool.clone() });
+        let provider_store = Arc::new(SqliteProviderStore {
+            pool: pool.clone(),
+            plugin_store: plugin_store.clone(),
+        });
         let web_provider_store = Arc::new(SqliteWebProviderStore { pool: pool.clone() });
         let model_store = Arc::new(SqliteRouteStore { pool: pool.clone() });
         let settings_store = Arc::new(SqliteSettingsStore { pool: pool.clone() });
@@ -78,6 +82,9 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
+    fn prompt_admissions(&self) -> Arc<dyn crate::storage::traits::PromptAdmissionStore> {
+        Arc::new(self.clone())
+    }
     fn vendor_plugins(&self) -> &PluginStore {
         &self.plugin_store
     }

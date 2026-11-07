@@ -9,8 +9,8 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use stravia::vendor::{host, types};
 use stravia::net::{http, types as net_types, websocket};
+use stravia::vendor::{host, types};
 
 struct ManualContract;
 
@@ -75,26 +75,35 @@ impl Guest for ManualContract {
         let mode = options["mode"].as_str().unwrap_or("manual");
         let mut headers = vec![net_types::Field {
             name: "authorization".into(),
-            bytes: format!("Bearer {}", secrets["apiKey"].as_str().unwrap_or_default()).into_bytes(),
+            bytes: format!("Bearer {}", secrets["apiKey"].as_str().unwrap_or_default())
+                .into_bytes(),
         }];
         let net_options = net_types::Options::new();
         net_options.set("shape", "default").map_err(net_error)?;
         host::emit_started()?;
         let body = if mode == "websocket" {
-            headers.push(field("connection", "keep-alive"));
+            headers.push(field("connection", ""));
             headers.push(field("accept-encoding", "gzip"));
             headers.push(field("sec-websocket-protocol", "manual-v1"));
-            net_options.set("ws.reuse-max-age-millis", "0").map_err(net_error)?;
-            let socket = websocket::connect(&websocket::ConnectRequest {
-                url: options["auxUrl"]
-                    .as_str()
-                    .ok_or_else(|| invalid("missing manual WebSocket URL"))?
-                    .into(),
-                headers,
-            }, &net_options).map_err(net_error)?;
-            socket.send(&websocket::Message::Text(
-                String::from_utf8(input.input.body).map_err(invalid)?,
-            )).map_err(net_error)?;
+            net_options
+                .set("ws.reuse-max-age-millis", "0")
+                .map_err(net_error)?;
+            let socket = websocket::connect(
+                &websocket::ConnectRequest {
+                    url: options["auxUrl"]
+                        .as_str()
+                        .ok_or_else(|| invalid("missing manual WebSocket URL"))?
+                        .into(),
+                    headers,
+                },
+                &net_options,
+            )
+            .map_err(net_error)?;
+            socket
+                .send(&websocket::Message::Text(
+                    String::from_utf8(input.input.body).map_err(invalid)?,
+                ))
+                .map_err(net_error)?;
             let body = loop {
                 match socket.next().map_err(net_error)? {
                     Some(websocket::Message::Text(text)) => break text.into_bytes(),
@@ -108,7 +117,16 @@ impl Guest for ManualContract {
             let mut body = input.input.body;
             if mode == "manual" {
                 headers.push(field("accept-encoding", "gzip"));
-                net_options.set("http.response-decoding", "gzip").map_err(net_error)?;
+                net_options
+                    .set("http.response-decoding", "gzip")
+                    .map_err(net_error)?;
+            } else if mode == "ordered-headers" {
+                headers.push(field("X-Wire-Duplicate", "first"));
+                headers.push(field("x-Wire-Between", "middle"));
+                headers.push(net_types::Field {
+                    name: "x-wire-duplicate".into(),
+                    bytes: vec![0x80, 0xff],
+                });
             } else if mode == "preencoded" {
                 headers.push(field("content-encoding", "gzip"));
                 let mut encoder =
@@ -116,12 +134,16 @@ impl Guest for ManualContract {
                 encoder.write_all(&body).map_err(invalid)?;
                 body = encoder.finish().map_err(invalid)?;
             }
-            let response = http::start(&http::Request {
-                method: "POST".into(),
-                url: format!("{}/infer", input.provider.base_url.trim_end_matches('/')),
-                headers,
-                body,
-            }, &net_options).map_err(net_error)?;
+            let response = http::start(
+                &http::Request {
+                    method: "POST".into(),
+                    url: format!("{}/infer", input.provider.base_url.trim_end_matches('/')),
+                    headers,
+                    body,
+                },
+                &net_options,
+            )
+            .map_err(net_error)?;
             if response.status().map_err(net_error)? != 200 {
                 return Err(invalid("manual HTTP failed"));
             }
@@ -139,7 +161,8 @@ impl Guest for ManualContract {
             if mode == "raw" {
                 if !body.starts_with(&[0x1f, 0x8b])
                     || !response_headers.iter().any(|field| {
-                        field.name.eq_ignore_ascii_case("content-encoding") && field.bytes == b"gzip"
+                        field.name.eq_ignore_ascii_case("content-encoding")
+                            && field.bytes == b"gzip"
                     })
                     || !response_headers.iter().any(|field| {
                         field.name.eq_ignore_ascii_case("content-length")
@@ -188,7 +211,10 @@ impl Guest for ManualContract {
 }
 
 fn field(name: &str, value: &str) -> net_types::Field {
-    net_types::Field { name: name.into(), bytes: value.as_bytes().to_vec() }
+    net_types::Field {
+        name: name.into(),
+        bytes: value.as_bytes().to_vec(),
+    }
 }
 
 fn net_error(error: net_types::NetError) -> types::PluginError {

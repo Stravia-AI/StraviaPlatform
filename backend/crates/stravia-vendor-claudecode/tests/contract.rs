@@ -1,14 +1,13 @@
-//! 非忽略的 canonical/codec 合同与显式 opt-in 的真实 Component 回归：
-//! 在 HostServices stub 上验证
-//! Claude Code 线上形态（计费关联、工具名前缀往返、多轮线程与请求 ID 生命周期）与
-//! OAuth 授权码交换 / 身份补全。
-//!
-//! 运行：`task build:vendors:all` 后执行
-//! `cargo test -p stravia-vendor-claudecode --test contract -- --ignored`。
+//! Canonical/codec contracts and real Component regressions against isolated host services.
+//! Build the vendor artifacts with `task build:vendors:all` before running this test.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::Duration;
+use stravia_vendor_runtime::host::{HostStateCell, StateError, StateScope, StateSnapshot};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -19,8 +18,8 @@ use stravia_runtime_contract::protocol::ir::{
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
-    LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin, LogLevel,
+    OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::net::{ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{
@@ -31,7 +30,6 @@ use stravia_vendor_sdk::{
 const UPSTREAM: &str = "https://api.anthropic.com";
 const CHANNEL: &str = "oauth";
 const ACCOUNT_UUID: &str = "00000000-0000-4000-8000-0000000000aa";
-const DEVICE_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn artifact() -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -70,9 +68,15 @@ impl HostHttpResponse for MockResponse {
     }
 
     async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
-        let mut headers = vec![Field { name: "content-type".into(), bytes: self.content_type.as_bytes().to_vec() }];
+        let mut headers = vec![Field {
+            name: "content-type".into(),
+            bytes: self.content_type.as_bytes().to_vec(),
+        }];
         if let Some(id) = &self.request_id {
-            headers.push(Field { name: "request-id".into(), bytes: id.as_bytes().to_vec() });
+            headers.push(Field {
+                name: "request-id".into(),
+                bytes: id.as_bytes().to_vec(),
+            });
         }
         Ok(headers)
     }
@@ -84,6 +88,79 @@ impl HostHttpResponse for MockResponse {
 
 type ScriptedReply = (u16, &'static str, String, Option<String>);
 
+#[derive(Default)]
+struct StateStore {
+    cells: Mutex<BTreeMap<(u8, String), StateSnapshot>>,
+    conflicts: AtomicUsize,
+    cancelled: AtomicBool,
+    fail_tool_handoff: AtomicBool,
+    cancel_tool_handoff: AtomicBool,
+}
+
+struct TestCell {
+    store: Arc<StateStore>,
+    key: (u8, String),
+}
+
+#[async_trait]
+impl HostStateCell for TestCell {
+    async fn load(&self) -> Result<StateSnapshot, StateError> {
+        if self.store.cancelled.load(Ordering::SeqCst) {
+            return Err(StateError::new("cancelled", "operation cancelled"));
+        }
+        Ok(self
+            .store
+            .cells
+            .lock()
+            .get(&self.key)
+            .cloned()
+            .unwrap_or(StateSnapshot {
+                revision: 0,
+                payload: None,
+            }))
+    }
+
+    async fn compare_exchange(
+        &self,
+        revision: u64,
+        payload: Option<Vec<u8>>,
+    ) -> Result<bool, StateError> {
+        if self.store.cancelled.load(Ordering::SeqCst) {
+            return Err(StateError::new("cancelled", "operation cancelled"));
+        }
+        let tool_handoff = self.key.1 == "claude-tools-v1"
+            && payload
+                .as_deref()
+                .is_some_and(|bytes| bytes.windows(4).any(|part| part == b"Read"));
+        if tool_handoff && self.store.cancel_tool_handoff.load(Ordering::SeqCst) {
+            self.store.cancelled.store(true, Ordering::SeqCst);
+            return Err(StateError::new("cancelled", "operation cancelled"));
+        }
+        if tool_handoff && self.store.fail_tool_handoff.load(Ordering::SeqCst) {
+            return Err(StateError::new("storage", "state write failed"));
+        }
+        if self
+            .store
+            .conflicts
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Ok(false);
+        }
+        let mut cells = self.store.cells.lock();
+        let entry = cells.entry(self.key.clone()).or_insert(StateSnapshot {
+            revision: 0,
+            payload: None,
+        });
+        if entry.revision != revision {
+            return Ok(false);
+        }
+        entry.revision += 1;
+        entry.payload = payload;
+        Ok(true)
+    }
+}
+
 /// 按 URL 前缀路由的上游桩；未匹配的请求以 404 返回，便于断言调用序列。
 #[derive(Default)]
 struct MockServices {
@@ -91,6 +168,7 @@ struct MockServices {
     script: Mutex<VecDeque<ScriptedReply>>,
     requests: Mutex<Vec<HttpRequest>>,
     private_state: Mutex<Option<Vec<u8>>>,
+    state: Arc<StateStore>,
     deltas: Mutex<Vec<AiStreamDelta>>,
     reject_assistant_prefill: bool,
     /// 宿主可见的有序事件：`start`、`request`、`failed`。
@@ -99,11 +177,19 @@ struct MockServices {
 
 #[async_trait]
 impl HostServices for MockServices {
-    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), stravia_vendor_sdk::net::OptionError> {
+    fn validate_net_option(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), stravia_vendor_sdk::net::OptionError> {
         stravia_vendor_sdk::net::validate_host_option(key, value)
     }
 
-    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: HttpRequest,
+        _options: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.wire_log.lock().push("request");
         if self.reject_assistant_prefill {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
@@ -174,6 +260,24 @@ impl HostServices for MockServices {
     async fn write_private_state(&self, bytes: Vec<u8>) -> Result<(), HostFailure> {
         *self.private_state.lock() = Some(bytes);
         Ok(())
+    }
+
+    async fn open_state(
+        &self,
+        scope: StateScope,
+        key: String,
+    ) -> Result<Arc<dyn HostStateCell>, StateError> {
+        if self.state.cancelled.load(Ordering::SeqCst) {
+            return Err(StateError::new("cancelled", "operation cancelled"));
+        }
+        let scope = match scope {
+            StateScope::Provider => 0,
+            StateScope::Conversation => 1,
+        };
+        Ok(Arc::new(TestCell {
+            store: Arc::clone(&self.state),
+            key: (scope, key),
+        }))
     }
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), HostFailure> {
@@ -298,7 +402,15 @@ fn provider(credentials: BTreeMap<String, Value>) -> ProviderSnapshot {
         model: Some("claude-sonnet-4-5".into()),
         model_metadata: None,
         client_headers: Vec::new(),
-        operation_metadata: BTreeMap::new(),
+        operation_metadata: BTreeMap::from([
+            (
+                "client_installation_id".into(),
+                json!("00000000-0000-4000-8000-000000000001"),
+            ),
+            ("client_tools_used".into(), json!([])),
+            ("dialogue_prompt_index".into(), json!(1)),
+            ("user_turn_index".into(), json!(1)),
+        ]),
     }
 }
 
@@ -306,7 +418,6 @@ fn signed_in() -> ProviderSnapshot {
     provider(BTreeMap::from([
         ("access_token".into(), json!("sk-ant-oat01-test")),
         ("account_uuid".into(), json!(ACCOUNT_UUID)),
-        ("device_id".into(), json!(DEVICE_ID)),
     ]))
 }
 
@@ -410,7 +521,6 @@ async fn run(
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn native_compaction_stream_keeps_signed_state_and_iteration_usage() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
@@ -504,7 +614,6 @@ async fn native_compaction_stream_keeps_signed_state_and_iteration_usage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn native_compaction_stream_truncation_and_errors_are_not_summaries() {
     let (runtime, plugin) = load_plugin().await;
     let complete = native_compaction_stream("compaction", native_compaction_usage());
@@ -583,8 +692,7 @@ async fn native_compaction_stream_truncation_and_errors_are_not_summaries() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn native_compaction_replay_stops_using_an_existing_thread() {
+async fn native_compaction_replay_preserves_retained_history() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
         script: Mutex::new(VecDeque::from([
@@ -606,7 +714,7 @@ async fn native_compaction_replay_stops_using_an_existing_thread() {
                     json!([{"type":"text","text":"Still ready"}]),
                     "end_turn",
                 ),
-                Some("req_thread_continuation".into()),
+                Some("req_before_replay".into()),
             ),
             (
                 200,
@@ -632,18 +740,18 @@ async fn native_compaction_replay_stops_using_an_existing_thread() {
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
-            request: threaded_request(&[json!({"role":"user","content":"Remember the task."})]),
+            request: history_request(&[json!({"role":"user","content":"Remember the task."})]),
         },
     )
     .await
-    .expect("the original turn establishes a message thread");
+    .expect("the original turn succeeds");
     run(
         &runtime,
         &plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
-            request: threaded_request(&[
+            request: history_request(&[
                 json!({"role":"user","content":"Remember the task."}),
                 json!({"role":"assistant","content":[{"type":"text","text":"Ready"}]}),
                 json!({"role":"user","content":"Keep going."}),
@@ -651,7 +759,7 @@ async fn native_compaction_replay_stops_using_an_existing_thread() {
         },
     )
     .await
-    .expect("ordinary history continues the established thread");
+    .expect("ordinary full-history continuation succeeds");
 
     let block = signed_compaction_block();
     let request = anthropic_client_request(json!({
@@ -681,9 +789,15 @@ async fn native_compaction_replay_stops_using_an_existing_thread() {
 
     let requests = services.requests.lock();
     let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(first["thread"]["type"], "create");
+    assert!(first.get("thread").is_none());
+    assert_eq!(first["diagnostics"]["previous_message_id"], Value::Null);
     let ordinary: Value = serde_json::from_slice(&requests[1].body).unwrap();
-    assert_eq!(ordinary["thread"]["type"], "continue");
+    assert!(ordinary.get("thread").is_none());
+    assert_eq!(ordinary["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        ordinary["diagnostics"]["previous_message_id"],
+        "msg_011111111111111111111110"
+    );
     let replay: Value = serde_json::from_slice(&requests[2].body).unwrap();
     assert!(replay.get("thread").is_none() && replay.get("diagnostics").is_none());
     assert!(!wire_header(&requests[2], "anthropic-beta").contains("message-threads"));
@@ -703,7 +817,6 @@ async fn native_compaction_replay_stops_using_an_existing_thread() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn responses_tail_prefill_is_dropped_without_losing_completed_tool_history() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
@@ -755,7 +868,6 @@ async fn responses_tail_prefill_is_dropped_without_losing_completed_tool_history
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn responses_auto_truncation_sends_complete_tool_continuation_history() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
@@ -838,7 +950,6 @@ async fn responses_auto_truncation_sends_complete_tool_continuation_history() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn always_on_default_summary_preserves_explicit_omission_and_effort() {
     let (runtime, plugin) = load_plugin().await;
     for (summary, expected) in [
@@ -877,7 +988,6 @@ async fn always_on_default_summary_preserves_explicit_omission_and_effort() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() {
     let (runtime, plugin) = load_plugin().await;
     // 发现数据里的原生 `max_tokens` 是该型号的输出上限，进入模型元数据扩展；
@@ -995,7 +1105,6 @@ async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn declared_future_native_effort_survives_claude_code_normalization() {
     let (runtime, plugin) = load_plugin().await;
     for (declared, requested, expected, raw_capabilities) in [
@@ -1098,13 +1207,9 @@ async fn declared_future_native_effort_survives_claude_code_normalization() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn scoped_ids_survive_reload_without_reusing_http_request_ids() {
+async fn scoped_ids_survive_reload_without_forwarding_injected_request_ids() {
     let services = Arc::new(MockServices {
         routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
-        private_state: Mutex::new(Some(
-            br#"{"oauth_flow":{"code_verifier":"retained"}}"#.to_vec(),
-        )),
         ..MockServices::default()
     });
     let source = " 空白\0\r\n会话😀 ";
@@ -1139,33 +1244,29 @@ async fn scoped_ids_survive_reload_without_reusing_http_request_ids() {
     }
     let requests = services.requests.lock();
     assert_eq!(requests.len(), 2);
-    let mut http_ids = Vec::new();
     for sent in requests.iter() {
         let header = |name: &str| wire_header(sent, name);
         assert_eq!(
             header("x-claude-code-session-id"),
-            "0a00c8c6-848d-463f-94f9-b8c3e6ce1a14"
+            wire_header(&requests[0], "x-claude-code-session-id")
         );
-        let http_id = header("x-client-request-id");
-        assert_eq!(uuid::Uuid::parse_str(http_id).unwrap().get_version_num(), 4);
-        assert_ne!(http_id, header("x-claude-code-session-id"));
-        http_ids.push(http_id);
+        assert!(uuid::Uuid::parse_str(header("x-claude-code-session-id")).is_ok());
+        assert_ne!(wire_header(sent, "x-client-request-id"), "injected-request");
         let body: Value = serde_json::from_slice(&sent.body).unwrap();
         let identity: Value =
             serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
         assert_eq!(identity["session_id"], header("x-claude-code-session-id"));
         assert_eq!(identity["parent_session_id"], identity["session_id"]);
-        assert_eq!(identity["device_id"], DEVICE_ID);
+        let first_body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let first_identity: Value =
+            serde_json::from_str(first_body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(identity["device_id"], first_identity["device_id"]);
+        assert!(!identity["device_id"].as_str().unwrap().is_empty());
         assert_eq!(identity["account_uuid"], ACCOUNT_UUID);
     }
-    assert_ne!(http_ids[0], http_ids[1]);
-    let state: Value =
-        serde_json::from_slice(services.private_state.lock().as_ref().unwrap()).unwrap();
-    assert_eq!(state["oauth_flow"]["code_verifier"], "retained");
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
@@ -1214,8 +1315,15 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     assert_eq!(requests.len(), 1);
     let sent = &requests[0];
     assert_eq!(sent.url, "https://api.anthropic.com/v1/messages?beta=true");
-    assert_eq!(wire_header(sent, "accept-encoding"), "gzip, deflate, br, zstd");
-    let header = |name: &str| sent.headers.get(name).and_then(|bytes| std::str::from_utf8(bytes).ok());
+    assert_eq!(
+        wire_header(sent, "accept-encoding"),
+        "gzip, deflate, br, zstd"
+    );
+    let header = |name: &str| {
+        sent.headers
+            .get(name)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+    };
     assert_eq!(header("authorization"), Some("Bearer sk-ant-oat01-test"));
     let body: Value = serde_json::from_slice(&sent.body).unwrap();
     assert_eq!(body["system"][2]["text"], "You are a helpful agent.");
@@ -1238,13 +1346,14 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     assert_eq!(web["type"], "web_search_20250305");
     assert!(web.get("cache_control").is_none());
     assert_eq!(body["tool_choice"]["name"], "__read");
-    assert_eq!(body["thread"], json!({"type":"create"}));
+    assert!(body.get("thread").is_none());
     assert_eq!(body["diagnostics"], json!({"previous_message_id":null}));
+    assert!(!wire_header(sent, "anthropic-beta").contains("message-threads"));
     assert_eq!(body["stream"], json!(true));
     let user_id: Value =
         serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
     assert_eq!(user_id["account_uuid"], ACCOUNT_UUID);
-    assert_eq!(user_id["device_id"], DEVICE_ID);
+    assert!(!user_id["device_id"].as_str().unwrap().is_empty());
     assert_ne!(user_id["session_id"], "client-session");
     assert_ne!(user_id["parent_session_id"], "client-parent");
     assert!(uuid::Uuid::parse_str(user_id["parent_session_id"].as_str().unwrap()).is_ok());
@@ -1274,6 +1383,211 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     assert_eq!(starts, [("toolu_1", "_read")]);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn failed_or_cancelled_tool_state_write_never_delivers_completed_tool() {
+    let (runtime, plugin) = load_plugin().await;
+    for cancelled in [false, true] {
+        let services = Arc::new(MockServices {
+            routes: vec![(
+                UPSTREAM,
+                200,
+                "text/event-stream",
+                SSE_TOOL_USE.replace("_read", "_Read"),
+            )],
+            ..Default::default()
+        });
+        services
+            .state
+            .fail_tool_handoff
+            .store(!cancelled, Ordering::SeqCst);
+        services
+            .state
+            .cancel_tool_handoff
+            .store(cancelled, Ordering::SeqCst);
+        let result = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: signed_in(),
+                request: history_request(&[json!({"role":"user","content":"Read a."})]),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(services.requests.lock().len(), 1);
+        let deltas = services.deltas.lock();
+        assert!(
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, AiStreamDelta::ToolCallStart { .. }))
+        );
+        assert!(!deltas.iter().any(|delta| match delta {
+            AiStreamDelta::ToolCallComplete { .. } => true,
+            AiStreamDelta::ItemDone { item, .. } =>
+                item.tool_calls.iter().flatten().next().is_some(),
+            _ => false,
+        }));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retry_fork_and_reload_preserve_visible_prompt_and_tool_lineage() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices {
+        script: Mutex::new(VecDeque::from([
+            (
+                503,
+                "application/json",
+                json!({"type":"error","error":{"type":"overloaded_error","message":"retry"}})
+                    .to_string(),
+                None,
+            ),
+            (
+                200,
+                "text/event-stream",
+                SSE_TOOL_USE.replace("_read", "_Read"),
+                None,
+            ),
+        ])),
+        routes: vec![(
+            UPSTREAM,
+            200,
+            "text/event-stream",
+            SSE_TOOL_USE.replace("_read", "_Read"),
+        )],
+        ..Default::default()
+    });
+    services.state.conflicts.store(2, Ordering::SeqCst);
+    let mut provider = signed_in();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), json!("parent"));
+    let request = history_request(&[json!({"role":"user","content":"Read a."})]);
+    assert!(
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: provider.clone(),
+                request: request.clone()
+            }
+        )
+        .await
+        .is_err()
+    );
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request,
+        },
+    )
+    .await
+    .expect("retry succeeds");
+    let (retry_prompt, parent_session, device) = {
+        let sent = services.requests.lock();
+        assert_eq!(
+            wire_header(&sent[0], "x-claude-code-prompt-id"),
+            wire_header(&sent[1], "x-claude-code-prompt-id")
+        );
+        let body: Value = serde_json::from_slice(&sent[1].body).unwrap();
+        assert!(body.get("thread").is_none());
+        let identity: Value =
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        (
+            wire_header(&sent[1], "x-claude-code-prompt-id").to_owned(),
+            wire_header(&sent[1], "x-claude-code-session-id").to_owned(),
+            identity["device_id"].clone(),
+        )
+    };
+    // The host forks the checkpoint into a distinct conversation cell namespace.
+    let fork = Arc::new(MockServices {
+        state: Arc::new(StateStore {
+            cells: Mutex::new(services.state.cells.lock().clone()),
+            ..Default::default()
+        }),
+        routes: vec![(
+            UPSTREAM,
+            200,
+            "text/event-stream",
+            SSE_TOOL_USE.replace("_read", "_Read"),
+        )],
+        ..Default::default()
+    });
+    provider
+        .operation_metadata
+        .insert("dialogue_prompt_index".into(), json!(2));
+    provider
+        .operation_metadata
+        .insert("user_turn_index".into(), json!(2));
+    let next = history_request(&[json!({"role":"user","content":"What next?"})]);
+    let (reloaded_runtime, reloaded_plugin) = load_plugin().await;
+    run(
+        &reloaded_runtime,
+        &reloaded_plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request: next.clone(),
+        },
+    )
+    .await
+    .expect("parent resumes after reload");
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), json!("child"));
+    provider
+        .operation_metadata
+        .insert("parent_transport_affinity".into(), json!("parent"));
+    run(
+        &reloaded_runtime,
+        &reloaded_plugin,
+        &fork,
+        OperationInput::Infer {
+            provider,
+            request: next,
+        },
+    )
+    .await
+    .expect("fork continues from checkpoint");
+    let parent_requests = services.requests.lock();
+    let child_requests = fork.requests.lock();
+    let parent = &parent_requests[2];
+    let child = &child_requests[0];
+    assert_eq!(
+        wire_header(parent, "x-claude-code-session-id"),
+        parent_session
+    );
+    assert_ne!(
+        wire_header(child, "x-claude-code-session-id"),
+        parent_session
+    );
+    assert_ne!(wire_header(parent, "x-claude-code-prompt-id"), retry_prompt);
+    assert_ne!(
+        wire_header(parent, "x-claude-code-prompt-id"),
+        wire_header(child, "x-claude-code-prompt-id")
+    );
+    for sent in [parent, child] {
+        let history: Value =
+            serde_json::from_str(wire_header(sent, "x-claude-code-sandy-plover")).unwrap();
+        assert!(
+            history
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "Read")
+        );
+        let body: Value = serde_json::from_slice(&sent.body).unwrap();
+        let identity: Value =
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(identity["device_id"], device);
+    }
+}
+
 fn message_reply(id: &str, content: Value, stop_reason: &str) -> String {
     json!({
         "id":id, "type":"message", "role":"assistant",
@@ -1285,11 +1599,16 @@ fn message_reply(id: &str, content: Value, stop_reason: &str) -> String {
 }
 
 fn wire_header<'a>(request: &'a HttpRequest, name: &str) -> &'a str {
-    std::str::from_utf8(request.headers.get(name).unwrap_or_else(|| panic!("missing header {name}")))
-        .expect("header is UTF-8")
+    std::str::from_utf8(
+        request
+            .headers
+            .get(name)
+            .unwrap_or_else(|| panic!("missing header {name}")),
+    )
+    .expect("header is UTF-8")
 }
 
-fn threaded_request(messages: &[Value]) -> AiRequest {
+fn history_request(messages: &[Value]) -> AiRequest {
     anthropic_client_request(json!({
         "model":"claude-sonnet-4-5", "max_tokens":1024,
         "system":"Read only the requested file.",
@@ -1300,358 +1619,67 @@ fn threaded_request(messages: &[Value]) -> AiRequest {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn thread_delta_and_native_ids_survive_tool_loop_and_guest_reload() {
+async fn typed_server_tool_history_is_projected_without_mutation() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
+
     let (runtime, plugin) = load_plugin().await;
-    let replies = [
-        json!([{"type":"text","text":"READY-WIRE317"}]),
-        json!([{"type":"tool_use","id":"toolu_011111111111111111111111","name":"_Read","input":{"path":"numbers.txt"}}]),
-        json!([{"type":"text","text":"SUM=42"}]),
-        json!([{"type":"text","text":"MARKER=WIRE317;SUM=42"}]),
-    ];
     let services = Arc::new(MockServices {
-        script: Mutex::new(
-            replies
-                .iter()
-                .enumerate()
-                .map(|(index, content)| {
-                    (
-                        200,
-                        "application/json",
-                        message_reply(
-                            &format!("msg_01111111111111111111111{index}"),
-                            content.clone(),
-                            if index == 1 { "tool_use" } else { "end_turn" },
-                        ),
-                        Some(format!("req_01111111111111111111111{index}")),
-                    )
-                })
-                .collect(),
-        ),
+        routes: vec![(
+            UPSTREAM,
+            200,
+            "application/json",
+            message_reply(
+                "msg_history",
+                json!([{"type":"text","text":"READY"}]),
+                "end_turn",
+            ),
+        )],
         ..Default::default()
     });
-    let mut provider = signed_in();
-    provider
-        .operation_metadata
-        .insert("transport_affinity".into(), json!("threaded-user"));
-    let prompts = [
-        json!({"role":"user","content":"Remember WIRE317."}),
-        json!({"role":"user","content":"Read numbers.txt and add its numbers."}),
-        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_011111111111111111111111","content":"19\n23\n"}]}),
-        json!({"role":"user","content":"Recall the marker and sum."}),
-    ];
-    let mut history = Vec::new();
-    for (index, prompt) in prompts.into_iter().enumerate() {
-        history.push(prompt);
-        let output = run(
-            &runtime,
-            &plugin,
-            &services,
-            OperationInput::Infer {
-                provider: provider.clone(),
-                request: threaded_request(&history),
-            },
-        )
-        .await
-        .expect("the complete multi-turn transcript is accepted");
-        let OperationOutput::Infer(response) = output else {
-            panic!("expected inference")
-        };
-        assert_eq!(response.id, format!("msg_01111111111111111111111{index}"));
-        if index == 1 {
-            let call = response.tool_calls().next().unwrap();
-            assert_eq!(call.name, "Read");
-            assert_eq!(call.id, "toolu_011111111111111111111111");
-        }
-        let mut replay = stravia_vendor_common::common::encode_inference_request(
-            "anthropic-messages/messages/2023-06-01",
-            AiRequest::new(&response.model, response.items),
-        )
-        .unwrap();
-        history.append(replay.body["messages"].as_array_mut().unwrap());
-    }
-    // 新 Runtime 不共享 guest 内存，仍从宿主私有状态继续。
-    let (reloaded_runtime, reloaded_plugin) = load_plugin().await;
-    services.script.lock().push_back((
-        200,
-        "application/json",
-        message_reply(
-            "msg_011111111111111111111114",
-            json!([{"type":"text","text":"42"}]),
-            "end_turn",
-        ),
-        Some("req_011111111111111111111114".into()),
-    ));
-    history.push(json!({"role":"user","content":"Just the sum."}));
-    run(
-        &reloaded_runtime,
-        &reloaded_plugin,
-        &services,
-        OperationInput::Infer {
-            provider,
-            request: threaded_request(&history),
+    let mut request = history_request(&[
+        json!({"role":"user","content":"Search first."}),
+        json!({"role":"user","content":"Continue."}),
+    ]);
+    request.items.insert(
+        1,
+        AiItem {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ServerToolUse {
+                id: "srv_fixture".into(),
+                name: "web_search".into(),
+                input: json!({"query":"fixture"}),
+                server_type: Some("server_tool_use".into()),
+                cache_control: None,
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
         },
-    )
-    .await
-    .expect("reload continues the same transcript");
-
-    let sent = services.requests.lock();
-    assert_eq!(sent.len(), 5);
-    let mut request_ids = std::collections::BTreeSet::new();
-    let first_session = wire_header(&sent[0], "x-claude-code-session-id");
-    for (index, request) in sent.iter().enumerate() {
-        assert_eq!(
-            wire_header(request, "x-claude-code-session-id"),
-            first_session
-        );
-        for field in [
-            "x-claude-code-session-id",
-            "x-claude-code-prompt-id",
-            "x-client-request-id",
-        ] {
-            assert_eq!(
-                uuid::Uuid::parse_str(wire_header(request, field))
-                    .unwrap()
-                    .get_version_num(),
-                4
-            );
-        }
-        assert!(request_ids.insert(wire_header(request, "x-client-request-id")));
-        let body: Value = serde_json::from_slice(&request.body).unwrap();
-        let billing = body["system"][0]["text"].as_str().unwrap();
-        assert!(billing.contains(&format!(
-            "cc_prompt_id={};",
-            wire_header(request, "x-claude-code-prompt-id")
-        )));
-        assert!(
-            billing.contains("cc_entrypoint=cli;") && billing.contains("cc_turn_origin=human;")
-        );
-        assert!(billing.contains(&format!("cc_prompt_index={};", [1, 2, 2, 3, 4][index])));
-        assert!(billing.contains(&format!("cc_turn_index={};", [1, 2, 2, 3, 4][index])));
-        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
-        if index == 0 {
-            assert_eq!(body["thread"], json!({"type":"create"}));
-            assert_eq!(body["tools"][0]["name"], "_Read");
-        } else {
-            let previous = format!("msg_01111111111111111111111{}", index - 1);
-            assert_eq!(
-                body["thread"],
-                json!({"type":"continue","previous_message_id":previous})
-            );
-            assert_eq!(body["diagnostics"]["previous_message_id"], previous);
-            assert_eq!(body["system"].as_array().unwrap().len(), 1);
-            assert!(body.get("tools").is_none());
-            assert!(billing.contains(&format!(
-                "cc_prev_req=req_01111111111111111111111{};",
-                index - 1
-            )));
-        }
-        if index == 2 {
-            let result = &body["messages"][0]["content"][0];
-            assert_eq!(result["tool_use_id"], "toolu_011111111111111111111111");
-            assert_eq!(result["content"], "19\n23\n");
-            assert!(result.get("is_error").is_none());
-        }
-    }
-    assert_eq!(
-        wire_header(&sent[1], "x-claude-code-prompt-id"),
-        wire_header(&sent[2], "x-claude-code-prompt-id")
     );
-    for (left, right) in [(0, 1), (2, 3), (3, 4)] {
-        assert_ne!(
-            wire_header(&sent[left], "x-claude-code-prompt-id"),
-            wire_header(&sent[right], "x-claude-code-prompt-id")
-        );
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn thread_rejections_are_reported_with_the_original_upstream_status() {
-    let (runtime, plugin) = load_plugin().await;
-    for (code, expected_status) in [
-        ("thread_not_found", 404),
-        ("thread_already_continued", 400),
-        ("thread_continue_in_flight", 400),
-        ("thread_fingerprint_mismatch", 400),
-        ("thread_unsupported_request", 400),
-    ] {
-        let reply = json!([{"type":"text","text":"READY"}]);
-        let services = Arc::new(MockServices {
-            script: Mutex::new(VecDeque::from([
-                (200, "application/json", message_reply("msg_1", reply.clone(), "end_turn"), Some("req_1".into())),
-                (expected_status, "application/json",
-                 json!({"type":"error","error":{"type":"invalid_request_error","message":"thread rejected",
-                     "details":{"error_code":code}}}).to_string(), Some("req_rejected".into())),
-            ])),
-            ..Default::default()
-        });
-        let mut provider = signed_in();
-        provider
-            .operation_metadata
-            .insert("transport_affinity".into(), json!("rejected-session"));
-        let mut history = vec![json!({"role":"user","content":"Remember the marker."})];
-        run(
-            &runtime,
-            &plugin,
-            &services,
-            OperationInput::Infer {
-                provider: provider.clone(),
-                request: threaded_request(&history),
-            },
-        )
-        .await
-        .expect("first turn establishes the native thread");
-        let state_after_first = services.private_state.lock().clone();
-        history.push(json!({"role":"assistant","content":reply}));
-        history.push(json!({"role":"user","content":"Continue."}));
-        let error = run(
-            &runtime,
-            &plugin,
-            &services,
-            OperationInput::Infer {
-                provider,
-                request: threaded_request(&history),
-            },
-        )
-        .await
-        .expect_err("a rejected native thread must fail this operation");
-        match error {
-            RuntimeError::Plugin {
-                kind: ErrorKind::ContinuationNotFound,
-                upstream_status,
-                ..
-            } => assert_eq!(upstream_status, Some(expected_status), "{code}"),
-            other => panic!("{code}: expected continuation-not-found, got {other:?}"),
-        }
-        // 插件不自行重发，也不把已确认未执行的拒绝记成失败事件；失败的轮次
-        // 不改写线程状态，宿主可据此授权一次完整历史重放。
-        assert_eq!(
-            *services.wire_log.lock(),
-            ["start", "request", "start", "request"],
-            "{code}"
-        );
-        let sent = services.requests.lock();
-        assert_eq!(sent.len(), 2, "{code}");
-        let rejected: Value = serde_json::from_slice(&sent[1].body).unwrap();
-        assert_eq!(rejected["thread"]["type"], "continue", "{code}");
-        assert_eq!(rejected["messages"].as_array().unwrap().len(), 1, "{code}");
-        assert_eq!(*services.private_state.lock(), state_after_first, "{code}");
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
-async fn host_authorized_continuation_replay_sends_full_history_without_a_thread() {
-    let (runtime, plugin) = load_plugin().await;
-    let reply = json!([{"type":"text","text":"READY"}]);
-    let services = Arc::new(MockServices {
-        script: Mutex::new(VecDeque::from([
-            (200, "application/json", message_reply("msg_1", reply.clone(), "end_turn"), Some("req_1".into())),
-            (404, "application/json",
-             json!({"type":"error","error":{"type":"invalid_request_error","message":"thread rejected",
-                 "details":{"error_code":"thread_not_found"}}}).to_string(), Some("req_rejected".into())),
-            (200, "application/json", message_reply("msg_2", reply.clone(), "end_turn"), Some("req_2".into())),
-            (200, "application/json", message_reply("msg_3", reply.clone(), "end_turn"), Some("req_3".into())),
-        ])),
-        ..Default::default()
-    });
-    let mut provider = signed_in();
-    provider
-        .operation_metadata
-        .insert("transport_affinity".into(), json!("host-replay-session"));
-    let mut history = vec![json!({"role":"user","content":"Remember the marker."})];
+    let provider = signed_in();
     run(
         &runtime,
         &plugin,
         &services,
-        OperationInput::Infer {
-            provider: provider.clone(),
-            request: threaded_request(&history),
-        },
+        OperationInput::Infer { provider, request },
     )
     .await
-    .expect("first turn establishes the native thread");
-    history.push(json!({"role":"assistant","content":reply}));
-    history.push(json!({"role":"user","content":"Continue."}));
-    let rejected = run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider: provider.clone(),
-            request: threaded_request(&history),
-        },
-    )
-    .await;
-    assert!(matches!(
-        rejected,
-        Err(RuntimeError::Plugin {
-            kind: ErrorKind::ContinuationNotFound,
-            ..
+    .expect("typed server tool history is accepted");
+    let requests = services.requests.lock();
+    let sent = &requests[0];
+    let history: Value =
+        serde_json::from_str(wire_header(sent, "x-claude-code-sandy-plover")).unwrap();
+    assert_eq!(history, json!([{"name":"web_search"}]));
+    let body: Value = serde_json::from_slice(&sent.body).unwrap();
+    assert_eq!(
+        body["messages"][1]["content"][0],
+        json!({
+            "type":"server_tool_use", "id":"srv_fixture", "name":"web_search", "input":{"query":"fixture"}
         })
-    ));
-
-    // 宿主授权一次完整历史重放：本轮必须发送 canonical 全量历史，且不再携带
-    // 被拒绝的 native thread。普通会话（没有该标记）仍按 session 计划续接。
-    provider
-        .operation_metadata
-        .insert("continuation_replay".into(), json!(true));
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider: provider.clone(),
-            request: threaded_request(&history),
-        },
-    )
-    .await
-    .expect("the host-authorized full replay succeeds");
-
-    {
-        let sent = services.requests.lock();
-        assert_eq!(sent.len(), 3);
-        let replay: Value = serde_json::from_slice(&sent[2].body).unwrap();
-        assert!(replay.get("thread").is_none() && replay.get("diagnostics").is_none());
-        assert!(!wire_header(&sent[2], "anthropic-beta").contains("message-threads"));
-        assert_eq!(replay["messages"].as_array().unwrap().len(), 3);
-        assert_eq!(replay["messages"][1]["content"], reply);
-        assert!(replay.get("tools").is_some());
-        // 重放是独立的新插件操作：重试的 HTTP 请求使用新的 request id，但仍不复用
-        // 被拒绝的线程状态。
-        assert_ne!(
-            wire_header(&sent[1], "x-client-request-id"),
-            wire_header(&sent[2], "x-client-request-id")
-        );
-        assert_eq!(
-            *services.wire_log.lock(),
-            ["start", "request", "start", "request", "start", "request"]
-        );
-    }
-
-    provider.operation_metadata.remove("continuation_replay");
-    history.push(json!({"role":"assistant","content":reply}));
-    history.push(json!({"role":"user","content":"Continue with a new thread."}));
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider,
-            request: threaded_request(&history),
-        },
-    )
-    .await
-    .expect("normal requests can create a fresh native thread after recovery");
-    let sent = services.requests.lock();
-    let next: Value = serde_json::from_slice(&sent[3].body).unwrap();
-    assert_eq!(next["thread"], json!({"type":"create"}));
-    assert_eq!(next["messages"].as_array().unwrap().len(), 5);
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn unrelated_upstream_failures_are_not_reclassified_as_continuation_loss() {
     let (runtime, plugin) = load_plugin().await;
     for status in [400, 401, 429, 503] {
@@ -1666,7 +1694,7 @@ async fn unrelated_upstream_failures_are_not_reclassified_as_continuation_loss()
             &services,
             OperationInput::Infer {
                 provider: signed_in(),
-                request: threaded_request(&[json!({"role":"user","content":"Hi"})]),
+                request: history_request(&[json!({"role":"user","content":"Hi"})]),
             },
         )
         .await;
@@ -1681,14 +1709,12 @@ async fn unrelated_upstream_failures_are_not_reclassified_as_continuation_loss()
             other => panic!("{status}: expected a plugin failure, got {other:?}"),
         }
         assert_eq!(services.requests.lock().len(), 1);
-        assert!(services.private_state.lock().is_none());
         // 普通失败只声明一次开始、发送一次，不产生第二次请求。
         assert_eq!(*services.wire_log.lock(), ["start", "request"]);
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "requires task build:vendors:all"]
 async fn authorization_code_exchange_fills_identity_from_bootstrap() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
@@ -1791,7 +1817,7 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
     assert_eq!(values["account_uuid"], ACCOUNT_UUID);
     assert_eq!(values["email"], "user@example.com");
     assert_eq!(values["organization_uuid"], "org-1");
-    assert_eq!(values["device_id"].as_str().unwrap().len(), 64);
+    assert!(!values.contains_key("device_id"));
 
     let requests = services.requests.lock();
     let token: Value = serde_json::from_slice(&requests[0].body).unwrap();

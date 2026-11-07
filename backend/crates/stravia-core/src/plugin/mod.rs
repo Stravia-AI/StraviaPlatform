@@ -4,6 +4,7 @@
 //! 编译期 Vendor inventory 拼成一套伪插件清单。
 
 mod artifacts;
+pub(crate) mod atomic_lease;
 mod builtin;
 pub mod catalog_sync;
 #[cfg(debug_assertions)]
@@ -17,6 +18,9 @@ mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod types;
+pub(crate) mod volatile_state;
+#[cfg(test)]
+mod volatile_state_tests;
 
 pub(crate) use builtin::CompileCache;
 pub(crate) use execution::{
@@ -25,6 +29,7 @@ pub(crate) use execution::{
 #[cfg(test)]
 pub(crate) use lifecycle::VendorOperationTracker;
 pub(crate) use lifecycle::VendorPublicationFence;
+pub(crate) use store::PluginStorageError;
 pub use store::PluginStore;
 pub use types::{
     ConfirmPluginUpdate, PluginBindingImpact, PluginDataDiscard, PluginNetworkPermission,

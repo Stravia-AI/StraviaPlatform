@@ -5,12 +5,12 @@ import http.client
 import json
 import re
 import socket
-import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
+from socketserver import StreamRequestHandler, ThreadingTCPServer
 from typing import Any
 
 import pytest
@@ -29,6 +29,37 @@ from tests.common.helpers import (
 from tests.e2e.storage.test_vendor_plugins import _install_plugin
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+class HandoffController(ThreadingTCPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), HandoffHandler)
+        self.armed = False
+        self.lock = threading.Lock()
+        self.entered: Queue[tuple[str, threading.Event, Queue[bytes]]] = Queue()
+        self.releases: list[threading.Event] = []
+
+
+class HandoffHandler(StreamRequestHandler):
+    server: HandoffController
+
+    def handle(self) -> None:
+        execution_id = self.rfile.readline(64).decode("ascii").strip()
+        assert re.fullmatch("[a-z]{28}", execution_id), execution_id
+        release = None
+        finished: Queue[bytes] = Queue()
+        with self.server.lock:
+            if self.server.armed:
+                self.server.armed = False
+                release = threading.Event()
+                self.server.releases.append(release)
+                self.server.entered.put((execution_id, release, finished))
+        if release is not None:
+            release.wait()
+        self.request.sendall(b"\x01")
+        finished.put(self.rfile.read(1))
 
 
 class ToolUpstream(ThreadingHTTPServer):
@@ -116,6 +147,9 @@ def test_public_tool_execution_cleanup_and_restart(
     upstream = ToolUpstream()
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
+    handoff = HandoffController()
+    handoff_thread = threading.Thread(target=handoff.serve_forever, daemon=True)
+    handoff_thread.start()
     pool = ThreadPoolExecutor(max_workers=3)
     process = None
     logs: list[str] = []
@@ -123,6 +157,7 @@ def test_public_tool_execution_cleanup_and_restart(
     port = find_free_port()
     origin = f"http://127.0.0.1:{port}"
     args = ["--host", "127.0.0.1", "--port", str(port), "--data-dir", str(tmp_path / backend),
+            "--test-handoff-barrier", f"127.0.0.1:{handoff.server_address[1]}",
             "--test-catalog-base-url", upstream.url, *storage_runtime["server_args"](backend)]
 
     def start() -> None:
@@ -269,54 +304,57 @@ def test_public_tool_execution_cleanup_and_restart(
             "durable square", "source-owned square", "interrupted square",
         ], "queries and restart must not repeat an upstream operation"
         release_pending.set()
-        if backend == "sqlite":
-            def disconnecting_generate() -> None:
-                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=61)
-                try:
-                    connection.request("POST", "/mcp", json.dumps({
-                        "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                            "name": "generate", "arguments": {
-                                "type": "image", "input": {"prompt": "disconnected square"},
-                            }, "_meta": {
-                                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                                "io.modelcontextprotocol/clientCapabilities": {},
-                            },
-                        },
-                    }), headers={
-                        "content-type": "application/json", "authorization": "Bearer " + key,
-                        "accept": "application/json, text/event-stream",
-                        "MCP-Protocol-Version": "2026-07-28",
-                        "Mcp-Method": "tools/call", "Mcp-Name": "generate",
-                    })
-                    response = connection.getresponse()
-                    raise AssertionError(("handoff must remain blocked before disconnect", response.status))
-                finally:
-                    connection.close()
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=61)
 
-            disconnect = pool.submit(disconnecting_generate)
-            release_disconnected = upstream.images.get(timeout=30)
-            database_file = next((tmp_path / backend).rglob("gateway.db"))
-            with sqlite3.connect(database_file, timeout=30) as blocker:
-                blocker.execute("BEGIN IMMEDIATE")
-                try:
-                    # 客户端 61 秒期限跨过默认 60 秒窗口；写锁仍阻止持久交接。
-                    with pytest.raises(TimeoutError):
-                        disconnect.result(timeout=90)
-                finally:
-                    blocker.rollback()
-            following = pool.submit(call, key, "generate", {
-                "type": "image", "input": {"prompt": "after disconnect"},
-            })
-            # 不要求供应商关闭 TCP；下一次真正上游受理证明旧本地执行已释放 gate。
-            release_following = upstream.images.get(timeout=30)
-            release_disconnected.set()
-            release_following.set()
-            next_result = following.result(timeout=30)
-            assert not next_result["isError"]
-            assert next_result["structuredContent"]["media"] == {"width": 1, "height": 1}
-            assert [request["prompt"] for request in upstream.image_requests][3:] == [
-                "disconnected square", "after disconnect",
-            ]
+        def disconnecting_generate() -> None:
+            try:
+                connection.request("POST", "/mcp", json.dumps({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                        "name": "generate", "arguments": {
+                            "type": "image", "input": {"prompt": "disconnected square"},
+                        }, "_meta": {
+                            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                            "io.modelcontextprotocol/clientCapabilities": {},
+                        },
+                    },
+                }), headers={
+                    "content-type": "application/json", "authorization": "Bearer " + key,
+                    "accept": "application/json, text/event-stream",
+                    "MCP-Protocol-Version": "2026-07-28",
+                    "Mcp-Method": "tools/call", "Mcp-Name": "generate",
+                })
+                response = connection.getresponse()
+                raise AssertionError(("handoff returned before the controlled disconnect", response.status))
+            finally:
+                connection.close()
+
+        with handoff.lock:
+            handoff.armed = True
+        disconnect = pool.submit(disconnecting_generate)
+        release_disconnected = upstream.images.get(timeout=30)
+        # 等真实默认窗口结束并到达提交点，不用全局写锁阻断无关的租约续期。
+        disconnected_id, release_handoff, handoff_finished = handoff.entered.get(timeout=90)
+        assert connection.sock is not None
+        connection.sock.shutdown(socket.SHUT_RDWR)
+        with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError)):
+            disconnect.result(timeout=30)
+        following = pool.submit(call, key, "generate", {
+            "type": "image", "input": {"prompt": "after disconnect"},
+        })
+        # handoff 和旧上游仍阻塞；新上游受理证明断线已释放本地执行门。
+        release_following = upstream.images.get(timeout=30)
+        release_handoff.set()
+        assert handoff_finished.get(timeout=30) == b"\x00", "cancelled execution must not be handed off"
+        cancelled_execution = read(key, f"stravia://tool-executions/{disconnected_id}")
+        assert cancelled_execution["structuredContent"]["status"] == "failed", cancelled_execution
+        release_disconnected.set()
+        release_following.set()
+        next_result = following.result(timeout=30)
+        assert not next_result["isError"]
+        assert next_result["structuredContent"]["media"] == {"width": 1, "height": 1}
+        assert [request["prompt"] for request in upstream.image_requests][3:] == [
+            "disconnected square", "after disconnect",
+        ]
 
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
         response = None
@@ -375,6 +413,10 @@ def test_public_tool_execution_cleanup_and_restart(
         assert cancelled["error"]["code"] == "cancelled", cancelled
         assert len(upstream.image_requests) == requests_before_restore, "Marker recovery must not replay generation"
     finally:
+        with handoff.lock:
+            handoff.armed = False
+            for release in handoff.releases:
+                release.set()
         for release in upstream.releases:
             release.set()
         if process is not None:
@@ -383,5 +425,8 @@ def test_public_tool_execution_cleanup_and_restart(
         upstream.shutdown()
         upstream.server_close()
         upstream_thread.join(timeout=10)
+        handoff.shutdown()
+        handoff.server_close()
+        handoff_thread.join(timeout=10)
         if schema is not None:
             storage_runtime["run_schema_action"]("drop", pg_url=storage_runtime["pg_url"], schema=schema)

@@ -1,7 +1,7 @@
 //! Claude 订阅（Claude Code OAuth）专用供应商插件。
 //!
 //! 使用 Claude Pro/Max 账号的 OAuth 令牌调用 Anthropic Messages API。请求以
-//! 官方 2.1.317 的真实多轮流量为基准，并保留自定义工具的 `_` 名称隔离
+//! 官方 2.1.319 的第一方交互流量为基准，并保留自定义工具的 `_` 名称隔离
 //! （见 [`request`]）；客户端仍使用原始工具名。
 
 mod allowance;
@@ -11,6 +11,7 @@ mod capabilities;
 mod request;
 mod session;
 mod thinking;
+mod tool_ledger;
 mod xxhash;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
@@ -25,32 +26,139 @@ use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest};
 use stravia_vendor_common::common;
 #[cfg(target_arch = "wasm32")]
 use stravia_vendor_sdk::VendorGuest;
+use stravia_vendor_sdk::net::{Coding, Fields, Options, Request};
 use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigGroup, DataCompatibility, DiscoverRequest, DiscoverResponse, ErrorKind, GuestHost,
-    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration,
-    PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind,
-    read_http_body,
+    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError,
+    ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
-use stravia_vendor_sdk::net::{Coding, Fields, Options, Request};
+
+fn tools_used_header(names: &[String], truncated: bool) -> Result<String, PluginError> {
+    const UNKNOWN: &str = "unreadable-tools-used-before-summary";
+    const LAST: &[&str] = &[
+        "Bash",
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "NotebookEdit",
+        "TodoWrite",
+        "Agent",
+        "Task",
+        "ToolSearch",
+        "EnterPlanMode",
+        "ExitPlanMode",
+    ];
+    let mut names_in_order = Vec::new();
+    for name in names {
+        let name = name.as_str();
+        let valid = !name.is_empty()
+            && name.len() <= 256
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'));
+        let name = if valid { name } else { UNKNOWN };
+        if !names_in_order.contains(&name) {
+            names_in_order.push(name);
+        }
+    }
+    names_in_order.sort_by_key(|name| LAST.contains(name));
+    let encode_prefix = |include_unknown: bool| {
+        let mut out = String::from("[");
+        let mut count = 0;
+        if include_unknown {
+            out.push_str("{\"name\":\"unreadable-tools-used-before-summary\"}");
+            count += 1;
+        }
+        for name in &names_in_order {
+            let item = format!("{{\"name\":\"{name}\"}}");
+            let extra = item.len() + if count > 0 { 1 } else { 0 };
+            if count == 64 || out.len() + extra + 1 > 7168 {
+                break;
+            }
+            if count > 0 {
+                out.push(',');
+            }
+            out.push_str(&item);
+            count += 1;
+        }
+        out.push(']');
+        (out, count - if include_unknown { 1 } else { 0 })
+    };
+    let (out, sent) = encode_prefix(false);
+    if truncated || sent < names_in_order.len() {
+        Ok(encode_prefix(true).0)
+    } else {
+        Ok(out)
+    }
+}
+
+fn prompt_id_for_turn(turn: usize) -> Result<String, PluginError> {
+    let cell = stravia_vendor_sdk::state::open(
+        stravia_vendor_sdk::state::Scope::Conversation,
+        "claude-prompt-v1",
+    )
+    .map_err(PluginError::from)?;
+    let fresh = uuid::Uuid::new_v4().to_string();
+    loop {
+        let snapshot = cell.load().map_err(PluginError::from)?;
+        if let Some(bytes) = snapshot.payload.as_deref() {
+            let existing: Value = serde_json::from_slice(bytes)
+                .map_err(|_| invalid("invalid Claude prompt state"))?;
+            if existing.get("turn").and_then(Value::as_u64) == Some(turn as u64) {
+                return existing
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid("invalid Claude prompt identity"));
+            }
+        }
+        let bytes = serde_json::to_vec(&serde_json::json!({"turn": turn, "id": fresh}))
+            .map_err(|_| invalid("cannot encode Claude prompt state"))?;
+        match cell.compare_exchange(snapshot.revision, Some(&bytes)) {
+            Ok(()) => return Ok(fresh),
+            Err(stravia_vendor_sdk::state::Error::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 
 fn net_options() -> Options {
     let mut options = Options::new();
     options.shape("claude-code").expect("valid shape");
-    options.response_decoding(&[Coding::Gzip, Coding::Deflate, Coding::Br, Coding::Zstd])
+    options
+        .response_decoding(&[Coding::Gzip, Coding::Deflate, Coding::Br, Coding::Zstd])
         .expect("valid response codings");
     options
 }
 
-fn net_request(method: &str, url: impl Into<String>, headers: Vec<(String, String)>, body: Vec<u8>) -> Request {
+fn net_request(
+    method: &str,
+    url: impl Into<String>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Request {
     let mut fields = Fields::new();
     for (name, value) in headers {
-        fields.append(name, value.into_bytes());
+        if value.is_empty()
+            && (name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("content-length"))
+        {
+            fields.slot(name);
+        } else {
+            fields.append(name, value.into_bytes());
+        }
     }
-    if fields.get("accept").is_none() { fields.append("Accept", b"application/json".to_vec()); }
+    if fields.get("accept").is_none() {
+        fields.append("Accept", b"application/json".to_vec());
+    }
     if fields.get("user-agent").is_none() {
-        fields.append("User-Agent", request::cli_user_agent(DEFAULT_CLIENT_VERSION).into_bytes());
+        fields.append(
+            "User-Agent",
+            request::cli_user_agent(DEFAULT_CLIENT_VERSION).into_bytes(),
+        );
     }
     if fields.get("accept-encoding").is_none() {
         fields.append("Accept-Encoding", b"gzip, deflate, br, zstd".to_vec());
@@ -59,7 +167,7 @@ fn net_request(method: &str, url: impl Into<String>, headers: Vec<(String, Strin
 }
 
 use request::{AccountIdentity, DEFAULT_CLIENT_VERSION};
-use session::{SessionStore, ThreadMode};
+use session::SessionStore;
 
 const VENDOR_ID: &str = "claude-code";
 const CATALOG_ID: &str = "anthropic";
@@ -282,9 +390,20 @@ fn infer(
     }
     let client_version = client_version(provider);
     let parent_session_id = parent_session_id(provider);
+    let installation_id = provider
+        .operation_metadata
+        .get("client_installation_id")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .ok_or_else(|| invalid("Claude inference requires host client_installation_id"))?;
+    let mut device_hash = Sha256::new();
+    device_hash.update(b"stravia:claude-code:virtual-installation-device-id:v1\0");
+    device_hash.update(installation_id.as_bytes());
+    let device_id =
+        stravia_runtime_contract::protocol::ir::canonical::hash_hex(&device_hash.finalize().into());
     let identity = AccountIdentity {
         account_uuid: credential(provider, auth::ACCOUNT_UUID),
-        device_id: credential(provider, auth::DEVICE_ID),
+        device_id: Some(&device_id),
         parent_session_id: parent_session_id.as_deref(),
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
@@ -300,44 +419,63 @@ fn infer(
     let body =
         request::prepare(encoded.body, &caps, auto_output_limit, compact).map_err(invalid)?;
     let session_id = fallback_session_id(provider);
-    let scope = thread_scope(provider, &session_id);
-    let state = if compact {
-        None
-    } else {
-        host.read_private_state()?
-    };
-    let store = SessionStore::from_bytes(state.as_deref()).map_err(invalid)?;
+    let scope = diagnostics_scope(provider, &session_id);
+    let cell = stravia_vendor_sdk::state::open(
+        stravia_vendor_sdk::state::Scope::Conversation,
+        "claude-session-v1",
+    )
+    .map_err(PluginError::from)?;
+    let state = cell.load().map_err(PluginError::from)?;
+    let store = SessionStore::from_bytes(state.payload.as_deref()).map_err(invalid)?;
     let mut plan = store
         .plan(&scope, session_id, &body, now_ms()?)
         .map_err(invalid)?;
-    let continuation_replay = provider
-        .operation_metadata
-        .get("continuation_replay")
-        .and_then(Value::as_bool)
-        == Some(true);
-    // 原生压缩块只能作为完整窗口回放：独立压缩和携带压缩块的历史都必须发送全量
-    // 历史，不能续接线程或按 offset 切片。宿主授权的续接恢复同样只发送全量历史，
-    // 不复用已被拒绝的 native thread；普通会话保持原有线程行为。
-    if compact || continuation_replay || body.as_object().is_some_and(request::carries_compaction) {
-        plan.context.mode = ThreadMode::Disabled;
-        plan.context.message_offset = 0;
-        plan.context.previous_message_id = None;
+    let position = |key: &str| -> Result<usize, PluginError> {
+        provider
+            .operation_metadata
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| invalid(format!("Claude inference requires host {key}")))
+    };
+    let prompt_index = position("dialogue_prompt_index")?;
+    let turn_index = position("user_turn_index")?;
+    if turn_index == 0 || prompt_index > turn_index {
+        return Err(invalid(
+            "Claude inference received invalid host turn position",
+        ));
     }
+    plan.context.prompt_index = prompt_index;
+    plan.context.turn_index = turn_index;
+    plan.context.prompt_id = prompt_id_for_turn(turn_index)?;
     let url = format!(
         "{}?beta=true",
         common::endpoint_url(&provider.base_url, &encoded.path)?
     );
-    let shaped = request::encode(&body, client_version, &identity, &plan.context, compact)
-        .map_err(invalid)?;
+    let shaped = request::encode(
+        &body,
+        client_version,
+        &identity,
+        &plan.context,
+        &caps,
+        compact,
+    )
+    .map_err(invalid)?;
+    let tool_cell = tool_ledger::open()?;
+    let tools_used = tool_ledger::seed(&tool_cell, &body)?;
     let headers = request::inference_headers(
         access_token(provider)?,
         client_version,
         &plan.context,
         shaped.betas,
+        tools_used,
     );
     // 每次实际模型请求之前都声明一次开始；宿主恢复重放时已经重置开始槽位。
     host.emit_started()?;
-    let response = host.http_start(net_request("POST", url, headers, shaped.body), &net_options())?;
+    let response = host.http_start(
+        net_request("POST", url, headers, shaped.body),
+        &net_options(),
+    )?;
     if compact {
         return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
             .map(OperationOutput::Compact);
@@ -347,14 +485,6 @@ fn infer(
     if !(200..300).contains(&status) {
         let error_body = read_http_body(&response, 256 * 1024)?;
         let error_value = serde_json::from_slice::<Value>(&error_body).ok();
-        if let Some(error) = error_value
-            .as_ref()
-            .and_then(|value| thread_rejection(status, value, plan.context.mode))
-        {
-            // 明确发生在上游执行前的线程拒绝：只把事实与原始状态交还宿主，
-            // 不在插件内重新编码或重发。恢复、准入与最终结果均由宿主决定。
-            return Err(error);
-        }
         let mut error = error_value
             .as_ref()
             .and_then(|value| common::classify_anthropic_error(value, false))
@@ -362,83 +492,60 @@ fn infer(
         error.upstream_status.get_or_insert(status);
         return Err(error);
     }
-    let complete = common::decode_ai_response_renaming_tools(
+    let mut recorded_tools = BTreeSet::new();
+    let complete = common::decode_ai_response_renaming_tools_with_callback(
         host,
         &protocol,
         response,
         common::classify_anthropic_error,
         request::strip_tool_prefix,
-    )?;
-    if provider
-        .operation_metadata
-        .get("transport_affinity")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
-    {
-        // 只投影本轮输出，不复制完整历史；和下轮请求复用同一个 Anthropic
-        // 编码器，避免签名、工具调用或内容块的另一套哈希表示。
-        let save = (|| {
-            let reusable = !continuation_replay
-                && complete.error.is_none()
-                && matches!(
-                    complete.stop_reason.as_deref(),
-                    Some("stop" | "tool_calls" | "pause_turn")
-                );
-            let mut response_history = reusable
-                .then(|| {
-                    common::encode_inference_request(
-                        &protocol,
-                        AiRequest::new(&complete.model, complete.items.clone()),
-                    )
-                })
-                .transpose()?;
-            let response_messages = match &mut response_history {
-                Some(history) => {
-                    let messages = history
-                        .body
-                        .get_mut("messages")
-                        .and_then(Value::as_array_mut)
-                        .ok_or_else(|| invalid("Claude Code response history is not an array"))?;
-                    request::prefix_message_tool_names(messages);
-                    messages.as_slice()
-                }
-                None => &[],
-            };
-            // 网络调用期间其它会话可能更新连接私有状态；提交前重新读取，
-            // 保留它们以及 OAuth 流程写入的非线程字段。
-            let latest = host.read_private_state()?;
-            let mut latest = SessionStore::from_bytes(latest.as_deref()).map_err(invalid)?;
-            let request_id = response_headers.get("request-id")
-                .and_then(|bytes| std::str::from_utf8(bytes).ok());
-            if continuation_replay {
-                // 本轮未使用 thread，不能保存为续接 tip，也不能永久关闭后续优化。
-                // reusable=false 清除失效 tip，下一轮正常请求重新创建线程。
-                plan.context.mode = ThreadMode::Create;
+        &mut |name| {
+            if recorded_tools.insert(name.to_owned()) {
+                tool_ledger::handoff(&tool_cell, &body, name)?;
             }
-            latest
-                .commit(
-                    plan,
-                    response_messages,
-                    &complete.id,
-                    request_id,
-                    now_ms()?,
-                    reusable,
-                )
-                .map_err(invalid)?;
-            host.write_private_state(&latest.to_bytes().map_err(invalid)?)
+            Ok(())
+        },
+    )?;
+    if complete.error.is_none()
+        && provider
+            .operation_metadata
+            .get("transport_affinity")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    {
+        // Successful responses update scoped diagnostics without retaining content.
+        let save = (|| {
+            let request_id = response_headers
+                .get("request-id")
+                .and_then(|bytes| std::str::from_utf8(bytes).ok());
+            let committed_at = now_ms()?;
+            loop {
+                let snapshot = cell.load().map_err(PluginError::from)?;
+                let mut latest =
+                    SessionStore::from_bytes(snapshot.payload.as_deref()).map_err(invalid)?;
+                latest
+                    .commit(plan.clone(), &complete.id, request_id, committed_at)
+                    .map_err(invalid)?;
+                let bytes = latest.to_bytes().map_err(invalid)?;
+                match cell.compare_exchange(snapshot.revision, Some(&bytes)) {
+                    Ok(()) => break Ok(()),
+                    Err(stravia_vendor_sdk::state::Error::Conflict) => continue,
+                    Err(error) => break Err(PluginError::from(error)),
+                }
+            }
         })();
         if let Err(error) = save {
-            // 已完成的模型响应不因可丢弃的续接优化失效而变成生成失败。
+            // 已完成的模型响应不因可丢弃的诊断状态失效而变成生成失败。
             host.log(
                 stravia_vendor_sdk::LogLevel::Warn,
-                &format!("Claude Code thread state was not saved: {error}"),
+                &format!("Claude Code diagnostics state was not saved: {error}"),
             );
         }
     }
     Ok(OperationOutput::Infer(Box::new(complete)))
 }
 
-fn thread_scope(provider: &ProviderSnapshot, session_id: &str) -> String {
+fn diagnostics_scope(provider: &ProviderSnapshot, session_id: &str) -> String {
     let mut hash = Sha256::new();
     for part in [
         "interactive-cli",
@@ -459,46 +566,6 @@ fn now_ms() -> Result<i64, PluginError> {
         .map_err(|error| common::plugin_error(ErrorKind::Trapped, error.to_string()))?;
     i64::try_from(elapsed.as_millis())
         .map_err(|error| common::plugin_error(ErrorKind::Trapped, error.to_string()))
-}
-
-/// Exact pre-execution evidence that Anthropic rejected the native thread.
-/// The plugin reports the fact and the original upstream status; Core owns the
-/// single full-history replay and all admission/outcome decisions.
-fn thread_rejection(status: u16, error: &Value, mode: ThreadMode) -> Option<PluginError> {
-    if mode == ThreadMode::Disabled || !matches!(status, 400 | 404) {
-        return None;
-    }
-    let rejected = match error
-        .pointer("/error/details/error_code")
-        .and_then(Value::as_str)
-    {
-        Some(
-            "thread_not_found"
-            | "thread_already_continued"
-            | "thread_continue_in_flight"
-            | "thread_fingerprint_mismatch",
-        ) if mode == ThreadMode::Continue => true,
-        Some("thread_unsupported_request") => true,
-        _ => error
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .is_some_and(|message| {
-                status == 400
-                    && message.contains("message-threads-2026-08-12")
-                    && (message.contains("Unsupported") || message.contains("invalid beta"))
-            }),
-    };
-    rejected.then(|| {
-        let detail = error
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .unwrap_or("thread rejected");
-        PluginError {
-            kind: ErrorKind::ContinuationNotFound,
-            message: format!("Anthropic rejected the native continuation: {detail}"),
-            upstream_status: Some(status),
-        }
-    })
 }
 
 /// 仅从宿主 principal/target scoped 传输亲和键派生稳定的 UUID 形态会话 ID，
@@ -554,19 +621,27 @@ fn discover(
         url.push_str("?after_id=");
         url.push_str(cursor);
     }
-    let response = host.http_start(net_request("GET", url, vec![
-            ("Accept".into(), "application/json".into()),
-            ("anthropic-version".into(), "2023-06-01".into()),
-            (
-                "anthropic-dangerous-direct-browser-access".into(),
-                "true".into(),
-            ),
-            ("anthropic-beta".into(), DISCOVERY_BETAS.into()),
-            (
-                "authorization".into(),
-                format!("Bearer {}", access_token(provider)?),
-            ),
-        ], Vec::new()), &net_options())?;
+    let response = host.http_start(
+        net_request(
+            "GET",
+            url,
+            vec![
+                ("Accept".into(), "application/json".into()),
+                ("anthropic-version".into(), "2023-06-01".into()),
+                (
+                    "anthropic-dangerous-direct-browser-access".into(),
+                    "true".into(),
+                ),
+                ("anthropic-beta".into(), DISCOVERY_BETAS.into()),
+                (
+                    "authorization".into(),
+                    format!("Bearer {}", access_token(provider)?),
+                ),
+            ],
+            Vec::new(),
+        ),
+        &net_options(),
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_MODELS_BODY)?;
@@ -750,6 +825,7 @@ mod tests {
                 parent_session_id: Some(&parent),
             },
             &plan.context,
+            &capabilities::ModelCapabilities::default(),
             false,
         )
         .unwrap();
@@ -761,6 +837,7 @@ mod tests {
             DEFAULT_CLIENT_VERSION,
             &plan.context,
             shaped.betas,
+            "[]".into(),
         );
         let header_session = headers
             .iter()

@@ -62,8 +62,12 @@ pub(crate) fn connection_check(
     }
     let header_status = headers
         .get("grpc-status")
-        .map(|bytes| std::str::from_utf8(bytes).ok().and_then(|value| value.parse::<u16>().ok())
-            .ok_or_else(|| invalid_response("Grok response has an invalid grpc-status header")))
+        .map(|bytes| {
+            std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .ok_or_else(|| invalid_response("Grok response has an invalid grpc-status header"))
+        })
         .transpose()?;
     if let Some(code) = header_status.filter(|code| *code != 0) {
         let mut failure = grpc_status_error(code);
@@ -117,20 +121,23 @@ fn usage_request(credential: &str) -> stravia_vendor_sdk::net::Request {
 /// 服务端不返回该字段，因此缺省、空值或请求失败都降级为 None。
 fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
     let response = host
-        .http_start(stravia_vendor_sdk::net::Request {
-            method: "GET".into(),
-            url: USER_URL.into(),
-            headers: crate::net_fields(vec![
-                ("accept".into(), "application/json".into()),
-                ("authorization".into(), format!("Bearer {access_token}")),
-                ("x-xai-token-auth".into(), "xai-grok-cli".into()),
-                (
-                    "x-grok-client-version".into(),
-                    crate::XAI_CLIENT_VERSION.into(),
-                ),
-            ]),
-            body: Vec::new(),
-        }, &crate::net_options())
+        .http_start(
+            stravia_vendor_sdk::net::Request {
+                method: "GET".into(),
+                url: USER_URL.into(),
+                headers: crate::net_fields(vec![
+                    ("accept".into(), "application/json".into()),
+                    ("authorization".into(), format!("Bearer {access_token}")),
+                    ("x-xai-token-auth".into(), "xai-grok-cli".into()),
+                    (
+                        "x-grok-client-version".into(),
+                        crate::XAI_CLIENT_VERSION.into(),
+                    ),
+                ]),
+                body: Vec::new(),
+            },
+            &crate::net_options(),
+        )
         .ok()?;
     if !(200..300).contains(&response.status().ok()?) {
         return None;

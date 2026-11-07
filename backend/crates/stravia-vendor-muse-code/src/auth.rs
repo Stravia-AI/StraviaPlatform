@@ -65,17 +65,24 @@ fn post(
         fields.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
         fields
     });
-    request_headers.append("content-type", if token.is_some() {
-        b"application/json".as_slice()
-    } else {
-        b"application/x-www-form-urlencoded".as_slice()
-    }.to_vec());
-    let response = host.http_start(net::Request {
-        method: "POST".into(),
-        url: url.into(),
-        headers: request_headers,
-        body,
-    }, &crate::bun_options())?;
+    request_headers.append(
+        "content-type",
+        if token.is_some() {
+            b"application/json".as_slice()
+        } else {
+            b"application/x-www-form-urlencoded".as_slice()
+        }
+        .to_vec(),
+    );
+    let response = host.http_start(
+        net::Request {
+            method: "POST".into(),
+            url: url.into(),
+            headers: request_headers,
+            body,
+        },
+        &crate::bun_options(),
+    )?;
     let status = response.status()?;
     let bytes = read_http_body(&response, 1024 * 1024)?;
     // Never reflect auth response text: it may contain account/device/API tokens.

@@ -982,6 +982,24 @@ impl GenerationChainStore {
             root_id,
             parent_id: Some(parent_id.to_owned()),
             parent_target_key,
+            parent_prompt_admission_id: nodes
+                .last()
+                .and_then(|node| node.persisted.effective_state.prompt_admission_id.clone()),
+            parent_prompt_metadata: nodes
+                .last()
+                .and_then(|node| node.persisted.effective_state.prompt_metadata.clone()),
+            parent_prompt_zero_proven: nodes
+                .last()
+                .is_some_and(|node| node.persisted.effective_state.prompt_zero_proven()),
+            parent_atomic_checkpoint_id: nodes
+                .last()
+                .and_then(|node| node.persisted.effective_state.atomic_checkpoint_id),
+            parent_virtual_window: nodes
+                .last()
+                .and_then(|node| node.persisted.effective_state.virtual_window),
+            parent_logical_turn: nodes
+                .last()
+                .and_then(|node| node.persisted.effective_state.logical_turn),
             parent_expires_at: (expires_at > std::time::Instant::now()).then_some(expires_at),
             compaction_record_ids,
             ..ActiveGenerationChain::default()
@@ -1056,6 +1074,13 @@ impl GenerationChainStore {
             parent_id: Some(parent_id.to_owned()),
             parent_upstream_response_id: materialized.upstream_response_id.clone(),
             parent_state: Some(materialized.effective_state.clone()),
+            parent_prompt_admission_id: materialized.effective_state.prompt_admission_id.clone(),
+            parent_prompt_metadata: materialized.effective_state.prompt_metadata.clone(),
+            parent_prompt_zero_proven: materialized.effective_state.prompt_zero_proven(),
+            parent_atomic_checkpoint_id: materialized.effective_state.atomic_checkpoint_id,
+            parent_virtual_window: materialized.effective_state.virtual_window,
+            parent_logical_turn: materialized.effective_state.logical_turn,
+            ordinal_delta_unproven: false,
             parent_target_key: None,
             parent_expires_at: (materialized.expires_at > std::time::Instant::now())
                 .then_some(materialized.expires_at),
@@ -1464,6 +1489,9 @@ impl GenerationChainStore {
             replace_client_history.then(|| EffectiveHistoryMutation::Replace {
                 items: HistoryItems::shared(&client_items[..client_history_end]),
             });
+        let atomic_checkpoint_id = effective_state
+            .atomic_checkpoint_id
+            .map(|id| id.to_string());
         let payload = serde_json::to_value(PersistedResponseNode {
             client_delta: RequestDelta {
                 messages: Cow::Borrowed(&client_delta_items),
@@ -1498,6 +1526,7 @@ impl GenerationChainStore {
                 marker_references,
                 redaction_references,
                 compaction_record_ids: parent.compaction_record_ids.clone(),
+                atomic_checkpoint_id,
                 reusable_prefix,
             })
             .await?;

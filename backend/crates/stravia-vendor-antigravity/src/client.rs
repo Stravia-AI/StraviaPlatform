@@ -12,8 +12,12 @@ pub(crate) fn http_start(
 ) -> Result<stravia_vendor_sdk::HttpResponse, PluginError> {
     let mut options = Options::new();
     options.shape("antigravity").expect("valid shape");
-    options.http_version(HttpVersion::Http1).expect("valid HTTP version");
-    options.response_decoding(&[Coding::Gzip]).expect("valid decoding");
+    options
+        .http_version(HttpVersion::Http1)
+        .expect("valid HTTP version");
+    options
+        .response_decoding(&[Coding::Gzip])
+        .expect("valid decoding");
     host.http_start(request, &options)
 }
 

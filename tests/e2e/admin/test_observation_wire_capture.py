@@ -14,7 +14,9 @@ from urllib.parse import urlparse
 
 import pytest
 
-from tests.common.helpers import _MinimalMockHandler, download_observation_bundle, http_request, observation_bundle_events
+from tests.common.helpers import WebSession, _MinimalMockHandler, download_observation_bundle, http_request, observation_bundle_events
+from tests.e2e.storage.conftest import LifecycleUpstream, _LifecycleHandler
+from tests.e2e.storage.test_vendor_plugins import _create_api_key, _create_connection, _install_plugin
 from tests.common.observation_contents import output_text
 from tests.e2e.admin.test_compaction_diagnostics import _semantic, diagnostic_provider
 from tests.e2e.admin.test_observations import (
@@ -172,6 +174,8 @@ def test_upstream_wire_capture_matches_received_ordered_fields(admin_env: dict[s
             super().do_POST()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.captured_requests = []
+    server.stream_error_release = threading.Event()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -191,6 +195,74 @@ def test_upstream_wire_capture_matches_received_ordered_fields(admin_env: dict[s
             ("authorization", "Bearer upstream-secret")
         ]
         detail = _wait_for("finalized ordered upstream trace", lambda: _finalized_route_detail(admin_env, route_id))
+        _, _, archive = download_observation_bundle(admin_env, detail)
+        records = observation_bundle_events(archive)
+        head = next(record for record in records if record.get("direction") == "upstream_request" and record.get("headers"))
+        assert head["schema_version"] == 3
+        assert head["headers"] == [
+            {"name": name, "bytes": list(("***" if name.lower() == "authorization" else value).encode("latin-1"))}
+            for name, value in fields
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_manual_wasm_preserves_interleaved_headers_on_upstream_wire(
+    admin_env: dict[str, Any], repo_root: Path,
+) -> None:
+    received: list[list[tuple[str, str]]] = []
+
+    class Handler(_LifecycleHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            received.append(list(self.headers.raw_items()))
+            super().do_POST()
+
+    server = LifecycleUpstream()
+    server.RequestHandlerClass = Handler
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        session = WebSession(admin_env["admin"])
+        status, body = session.request(
+            "POST", "/api/v1/auth/login",
+            {"username": admin_env["username"], "password": admin_env["password"]},
+        )
+        assert status == 200, body
+        _install_plugin(session, repo_root / "target" / "vendor-test-fixtures", "manual-entrypoints.wasm")
+        connection = _create_connection(
+            session, vendor="fixture.manual-entrypoints", name="wire-manual-provider",
+            model_id="wire-manual-ordered", base_url=server.base_url,
+            secret="wire-manual-credential",
+        )
+        status, body = session.request(
+            "PUT", f"/api/v1/providers/{connection['provider_id']}",
+            {"vendor_options": {"mode": "ordered-headers"}},
+        )
+        assert status == 200, body
+        key = _create_api_key(session, [connection["route_id"]])["key"]
+        _enable_debug(admin_env)
+        status, body = http_request(
+            "POST", f"{admin_env['proxy']}/v1/responses",
+            payload={"model": connection["model_id"], "input": "exercise ordered headers"},
+            headers={"authorization": f"Bearer {key}"}, timeout=30,
+        )
+        assert status == 200, body
+        assert len(received) == 1
+        fields = received[0]
+        assert all(name.lower() != "accept" for name, _ in fields)
+        assert [(name, value.encode("latin-1")) for name, value in fields if name.lower().startswith("x-wire-")] == [
+            ("X-Wire-Duplicate", b"first"),
+            ("x-Wire-Between", b"middle"),
+            ("x-wire-duplicate", b"\x80\xff"),
+        ]
+        detail = _wait_for(
+            "finalized manual ordered upstream trace",
+            lambda: _finalized_route_detail(admin_env, connection["route_id"]),
+        )
         _, _, archive = download_observation_bundle(admin_env, detail)
         records = observation_bundle_events(archive)
         head = next(record for record in records if record.get("direction") == "upstream_request" and record.get("headers"))

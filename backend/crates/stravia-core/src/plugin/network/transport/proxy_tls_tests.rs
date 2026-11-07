@@ -1,7 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use rcgen::{CertifiedKey, generate_simple_self_signed};
-use rustls::{ClientConfig, RootCertStore, ServerConfig, pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer}};
+use rustls::{
+    ClientConfig, RootCertStore, ServerConfig,
+    pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -18,14 +21,17 @@ fn loopback_tls() -> (Arc<ClientConfig>, TlsAcceptor) {
     roots.add(cert.der().clone()).unwrap();
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let client = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions().unwrap()
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_root_certificates(roots)
         .with_no_client_auth();
     let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
     let server = ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions().unwrap()
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_no_client_auth()
-        .with_single_cert(vec![cert.der().clone()], key).unwrap();
+        .with_single_cert(vec![cert.der().clone()], key)
+        .unwrap();
     (Arc::new(client), TlsAcceptor::from(Arc::new(server)))
 }
 
@@ -50,8 +56,13 @@ async fn tls_request_through_proxy(https_proxy: bool) {
         let target = tokio::spawn(async move {
             let (socket, _) = target_listener.accept().await.unwrap();
             let mut tls = target_acceptor.accept(socket).await.unwrap();
-            assert_eq!(read_headers(&mut tls).await, b"GET /through-proxy HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await.unwrap();
+            assert_eq!(
+                read_headers(&mut tls).await,
+                b"GET /through-proxy HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            );
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
             tls.shutdown().await.unwrap();
         });
         let proxy = tokio::spawn(async move {
@@ -63,19 +74,39 @@ async fn tls_request_through_proxy(https_proxy: bool) {
             };
             let headers = read_headers(&mut inbound).await;
             let request = std::str::from_utf8(&headers).unwrap();
-            assert_eq!(request.lines().next().unwrap(), format!("CONNECT {target_addr} HTTP/1.1"));
+            assert_eq!(
+                request.lines().next().unwrap(),
+                format!("CONNECT {target_addr} HTTP/1.1")
+            );
             let mut outbound = TcpStream::connect(target_addr).await.unwrap();
-            inbound.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
-            tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await.unwrap();
+            inbound
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
+                .await
+                .unwrap();
         });
 
         let scheme = if https_proxy { "https" } else { "http" };
         let route = Route::Proxy(Proxy::from_url(&format!("{scheme}://{proxy_addr}")).unwrap());
         let proxy_tls = https_proxy.then_some(proxy_client);
         let (mut stream, _) = connector::connect_tls(
-            "127.0.0.1", target_addr.port(), &route, proxy_tls, target_client, &SystemResolver,
-        ).await.unwrap();
-        stream.write_all(b"GET /through-proxy HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").await.unwrap();
+            "127.0.0.1",
+            target_addr.port(),
+            &route,
+            proxy_tls,
+            target_client,
+            &SystemResolver,
+        )
+        .await
+        .unwrap();
+        stream
+            .write_all(
+                b"GET /through-proxy HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
         let expected = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
         let mut response = vec![0; expected.len()];
         stream.read_exact(&mut response).await.unwrap();
@@ -84,7 +115,9 @@ async fn tls_request_through_proxy(https_proxy: bool) {
         drop(stream);
         target.await.unwrap();
         proxy.await.unwrap();
-    }).await.expect("TLS request through CONNECT proxy timed out");
+    })
+    .await
+    .expect("TLS request through CONNECT proxy timed out");
 }
 
 #[tokio::test]
@@ -108,8 +141,13 @@ async fn tls_request_through_socks_proxy(remote_dns: bool) {
         let target = tokio::spawn(async move {
             let (socket, _) = target_listener.accept().await.unwrap();
             let mut tls = target_acceptor.accept(socket).await.unwrap();
-            assert_eq!(read_headers(&mut tls).await, b"GET /socks HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await.unwrap();
+            assert_eq!(
+                read_headers(&mut tls).await,
+                b"GET /socks HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            );
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
             tls.shutdown().await.unwrap();
         });
         let proxy = tokio::spawn(async move {
@@ -142,16 +180,31 @@ async fn tls_request_through_socks_proxy(remote_dns: bool) {
             }
             assert_eq!(inbound.read_u16().await.unwrap(), target_addr.port());
             let mut outbound = TcpStream::connect(target_addr).await.unwrap();
-            inbound.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await.unwrap();
-            tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await.unwrap();
+            inbound
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+            tokio::io::copy_bidirectional(&mut inbound, &mut outbound)
+                .await
+                .unwrap();
         });
 
         let scheme = if remote_dns { "socks5h" } else { "socks5" };
         let route = Route::Proxy(Proxy::from_url(&format!("{scheme}://{proxy_addr}")).unwrap());
         let (mut stream, _) = connector::connect_tls(
-            "localhost", target_addr.port(), &route, None, target_client, &SystemResolver,
-        ).await.unwrap();
-        stream.write_all(b"GET /socks HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+            "localhost",
+            target_addr.port(),
+            &route,
+            None,
+            target_client,
+            &SystemResolver,
+        )
+        .await
+        .unwrap();
+        stream
+            .write_all(b"GET /socks HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
         let expected = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
         let mut response = vec![0; expected.len()];
         stream.read_exact(&mut response).await.unwrap();
@@ -160,7 +213,9 @@ async fn tls_request_through_socks_proxy(remote_dns: bool) {
         drop(stream);
         target.await.unwrap();
         proxy.await.unwrap();
-    }).await.expect("TLS request through SOCKS proxy timed out");
+    })
+    .await
+    .expect("TLS request through SOCKS proxy timed out");
 }
 
 #[tokio::test]

@@ -1,0 +1,649 @@
+{
+  "provenance": {
+    "client": "OpenCode",
+    "version": "1.18.25",
+    "os": "linux",
+    "arch": "x86_64",
+    "mode": "interactive",
+    "invocation": "opencode --pure --model opencode/big-pickle; prompt typed through actual PTY after TUI ready",
+    "captured_at": "2026-11-07T08:02:18Z",
+    "network_isolation": "user/mount/network namespace, loopback only, host nscd hidden; fresh HOME/XDG/workdir; public placeholder credential",
+    "target": "https://localhost:<ephemeral-port>/v1",
+    "capture_tool": "official CLI plus local TLS listener and capture-client hello parser",
+    "capture_round": 2,
+    "response": "Local SSE response rendered as INTERACTIVE_CAPTURE_OK in the normal TUI"
+  },
+  "connection_id": 1,
+  "clienthello": {
+    "alpn": [
+      "http/1.1"
+    ],
+    "cipher_suites": [
+      4865,
+      4866,
+      4867,
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49161,
+      49171,
+      49162,
+      49172,
+      156,
+      157,
+      47,
+      53
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [
+          0
+        ],
+        "decoded": {
+          "renegotiation_info": true
+        },
+        "length": 1,
+        "payload_omitted": null,
+        "type": 65281
+      },
+      {
+        "body": [
+          0,
+          6,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24
+        ],
+        "decoded": {
+          "groups": [
+            29,
+            23,
+            24
+          ]
+        },
+        "length": 8,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 35
+      },
+      {
+        "body": [
+          0,
+          9,
+          8,
+          104,
+          116,
+          116,
+          112,
+          47,
+          49,
+          46,
+          49
+        ],
+        "decoded": null,
+        "length": 11,
+        "payload_omitted": null,
+        "type": 16
+      },
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "status_request": true
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": [
+          0,
+          18,
+          4,
+          3,
+          8,
+          4,
+          4,
+          1,
+          5,
+          3,
+          8,
+          5,
+          5,
+          1,
+          8,
+          6,
+          6,
+          1,
+          2,
+          1
+        ],
+        "decoded": {
+          "algorithms": [
+            1027,
+            2052,
+            1025,
+            1283,
+            2053,
+            1281,
+            2054,
+            1537,
+            513
+          ]
+        },
+        "length": 20,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [],
+        "decoded": {
+          "signed_certificate_timestamp": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 18
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            29
+          ]
+        },
+        "length": 38,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      },
+      {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "psk_key_exchange_modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      },
+      {
+        "body": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "padding_length": 239
+        },
+        "length": 239,
+        "payload_omitted": null,
+        "type": 21
+      }
+    ],
+    "extensions": [
+      0,
+      23,
+      65281,
+      10,
+      11,
+      35,
+      16,
+      5,
+      13,
+      18,
+      51,
+      45,
+      43,
+      21
+    ],
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0",
+    "ja3_hash": "d871d02cecbde59abbf8f4806134addf",
+    "ja4": "t13d1714h1_5b57614c22b0_43ade6aba3df",
+    "key_share_groups": [
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": 239,
+    "signature_algorithms": [
+      1027,
+      2052,
+      1025,
+      1283,
+      2053,
+      1281,
+      2054,
+      1537,
+      513
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      29,
+      23,
+      24
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "method": "POST",
+    "target": "<redacted>",
+    "version": "HTTP/1.1",
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Content-Type",
+        "value": "application/json"
+      },
+      {
+        "name": "User-Agent",
+        "value": "opencode/1.18.25 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+      },
+      {
+        "name": "x-opencode-client",
+        "value": "cli"
+      },
+      {
+        "name": "x-opencode-project",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-opencode-request",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-opencode-session",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Connection",
+        "value": "keep-alive"
+      },
+      {
+        "name": "Accept",
+        "value": "*/*"
+      },
+      {
+        "name": "Host",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Accept-Encoding",
+        "value": "gzip, deflate, br, zstd"
+      },
+      {
+        "name": "Content-Length",
+        "value": "<redacted>"
+      }
+    ],
+    "normalizations": [
+      {
+        "header_index": 0,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 4,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 5,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 6,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 9,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 11,
+        "reason": "credential_or_dynamic"
+      }
+    ],
+    "raw_head": "POST <redacted> HTTP/1.1\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nUser-Agent: opencode/1.18.25 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14\r\nx-opencode-client: cli\r\nx-opencode-project: <redacted>\r\nx-opencode-request: <redacted>\r\nx-opencode-session: <redacted>\r\nConnection: keep-alive\r\nAccept: */*\r\nHost: <redacted>\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: <redacted>\r\n\r\n"
+  },
+  "request": {
+    "path": "/v1/chat/completions",
+    "model": "big-pickle",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "tool_choice": "auto",
+    "max_tokens": 16000,
+    "message_roles": [
+      "system",
+      "user"
+    ],
+    "tool_names": [
+      "bash",
+      "edit",
+      "glob",
+      "grep",
+      "question",
+      "read",
+      "skill",
+      "task",
+      "todowrite",
+      "webfetch",
+      "websearch",
+      "write"
+    ],
+    "interactive_prompt_present": true
+  }
+}

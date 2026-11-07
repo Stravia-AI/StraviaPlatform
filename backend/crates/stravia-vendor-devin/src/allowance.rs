@@ -60,20 +60,28 @@ fn fetch_user_status(
 ) -> Result<Vec<u8>, PluginError> {
     let credential = session_token(provider)?;
     let platform = client_platform(provider)?;
-    let response = host.http_start(stravia_vendor_sdk::net::Request {
-        method: "POST".into(),
-        url: endpoint(provider, GET_USER_STATUS_PATH),
-        headers: crate::net_fields(vec![
-            (
-                "authorization".into(),
-                format!("Basic {credential}-{credential}"),
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
+            method: "POST".into(),
+            url: endpoint(provider, GET_USER_STATUS_PATH),
+            headers: crate::net_fields(vec![
+                (
+                    "authorization".into(),
+                    format!("Basic {credential}-{credential}"),
+                ),
+                ("accept".into(), "*/*".into()),
+                ("content-type".into(), "application/proto".into()),
+                ("connect-protocol-version".into(), "1".into()),
+            ]),
+            body: encode_client_metadata_request_with_platform(
+                credential,
+                false,
+                platform,
+                &crate::fingerprint(provider, credential)?,
             ),
-            ("accept".into(), "*/*".into()),
-            ("content-type".into(), "application/proto".into()),
-            ("connect-protocol-version".into(), "1".into()),
-        ]),
-        body: encode_client_metadata_request_with_platform(credential, false, platform),
-    }, &crate::net_options())?;
+        },
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(PluginError {

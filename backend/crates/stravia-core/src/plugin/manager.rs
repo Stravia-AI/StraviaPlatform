@@ -75,6 +75,7 @@ struct ProviderState {
     oauth: Option<crate::db::models::OAuthCredential>,
     models: Vec<crate::provider_models::ProviderModelRecord>,
     private_state: Option<(String, Vec<u8>)>,
+    atomic_state: bool,
 }
 
 pub(crate) struct VendorPlugins {
@@ -611,7 +612,7 @@ impl VendorPlugins {
                         previous.data_compat.model_metadata_format
                             != next.data_compat.model_metadata_format
                     }),
-                private_state: state.private_state.is_some()
+                private_state: (state.private_state.is_some() || state.atomic_state)
                     && previous.is_none_or(|previous| {
                         previous.data_compat.private_state_format
                             != next.data_compat.private_state_format
@@ -985,14 +986,41 @@ impl VendorPlugins {
             let auto_reset = vendor_id.as_str() == "base";
             if auto_reset || preview.discarded_data.is_empty() {
                 let discarded_data = preview.discarded_data;
-                self.confirm(
-                    gw,
-                    ConfirmPluginUpdate {
-                        preview_id: preview.id,
-                        allow_data_discard: auto_reset,
-                    },
-                )
-                .await?;
+                let confirmed = self
+                    .confirm(
+                        gw,
+                        ConfirmPluginUpdate {
+                            preview_id: preview.id,
+                            allow_data_discard: auto_reset,
+                        },
+                    )
+                    .await;
+                if let Err(error) = confirmed {
+                    // 并发启动可能已提交同一内置包；只接纳这一个确定的结果，不重试写入。
+                    // 手动确认、不同来源/摘要/版本及其他存储错误仍保留原有冲突保护。
+                    if matches!(
+                        error.downcast_ref::<super::store::PluginStorageError>(),
+                        Some(super::store::PluginStorageError::Changed)
+                    ) && let Some(mut record) = self.store.get(vendor_id).await?
+                        && record.source == PluginSource::Builtin.as_str()
+                        && record.digest == bundle.digest
+                        && Version::parse(&record.version)
+                            .is_ok_and(|version| version == bundle.loaded.descriptor().version)
+                    {
+                        record.descriptor = serde_json::to_string(bundle.loaded.descriptor())?;
+                        record.component = Bytes::new();
+                        self.entries.write().insert(
+                            vendor_id.clone(),
+                            Entry {
+                                record,
+                                loaded: Some(bundle.loaded.clone()),
+                                retired_profiles: BTreeSet::new(),
+                            },
+                        );
+                        continue;
+                    }
+                    return Err(error);
+                }
                 for discard in discarded_data {
                     tracing::warn!(
                         vendor_id = %vendor_id,
@@ -1334,11 +1362,23 @@ async fn provider_states(
                 &provider.id,
             )
             .await?;
+        let atomic_state = gw
+            .vendor_plugins
+            .store
+            .has_atomic_state(
+                provider
+                    .vendor
+                    .as_deref()
+                    .expect("scoped provider has a vendor"),
+                &provider.id,
+            )
+            .await?;
         states.push(ProviderState {
             provider,
             oauth,
             models,
             private_state,
+            atomic_state,
         });
     }
     Ok(states)
@@ -1361,7 +1401,7 @@ fn provider_fingerprint(states: &[ProviderState], include_data: bool) -> anyhow:
                     .models
                     .iter()
                     .any(|model| has_plugin_model_metadata(&model.metadata)),
-                state.private_state.is_some(),
+                state.private_state.is_some() || state.atomic_state,
             ))?);
         }
     }

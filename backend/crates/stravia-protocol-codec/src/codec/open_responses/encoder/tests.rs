@@ -1,6 +1,94 @@
 use super::*;
 
 #[test]
+fn input_gaps_preserve_repeated_items_pruning_and_tool_expansion() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+    let unknown = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::Unknown {
+            raw: serde_json::json!({"type":"foreign:item", "payload":"not replayable"}),
+        }]),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let assistant = AiItem {
+        role: Role::Assistant,
+        content: MessageContent::Text(Arc::new("inspect".into())),
+        tool_calls: Some(vec![
+            ToolCall {
+                id: "call_a".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "call_b".into(),
+                name: "glob".into(),
+                arguments: "{}".into(),
+            },
+        ]),
+        tool_call_id: None,
+        meta: None,
+    };
+    let tool = AiItem {
+        role: Role::Tool,
+        content: MessageContent::Text(Arc::new("result".into())),
+        tool_calls: None,
+        tool_call_id: Some("call_a".into()),
+        meta: None,
+    };
+    let user = AiItem {
+        role: Role::User,
+        content: MessageContent::Text(Arc::new("repeat".into())),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let mut request = AiRequest::new("gpt", vec![user.clone(), unknown, user, assistant, tool]);
+    request.meta.source_protocol =
+        Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
+    let (encoded, gaps) = super::super::adapter::OpenResponses20260424
+        .encode_request_with_input_gaps(request)
+        .unwrap();
+    assert_eq!(gaps, [0, 1, 1, 2, 5, 6]);
+    assert_eq!(
+        encoded.body["input"][gaps[0]]["content"][0]["text"],
+        "repeat"
+    );
+    assert_eq!(
+        encoded.body["input"][gaps[2]]["content"][0]["text"],
+        "repeat"
+    );
+    assert_eq!(
+        encoded.body["input"][gaps[3]]["content"][0]["text"],
+        "inspect"
+    );
+    assert_eq!(encoded.body["input"][3]["call_id"], "call_a");
+    assert_eq!(encoded.body["input"][4]["call_id"], "call_b");
+    assert_eq!(
+        encoded.body["input"][gaps[4]],
+        serde_json::json!({
+            "type":"function_call_output", "call_id":"call_a", "output":"result",
+        })
+    );
+}
+
+#[test]
+fn input_gaps_include_empty_continuation_position() {
+    let request = ResponsesDecoder
+        .decode_request(serde_json::json!({
+            "model":"gpt", "previous_response_id":"resp_existing",
+        }))
+        .unwrap();
+    let (encoded, gaps) = super::super::adapter::OpenResponses20260424
+        .encode_request_with_input_gaps(request)
+        .unwrap();
+    assert_eq!(gaps, [0]);
+    assert!(encoded.body.get("input").is_none());
+    assert_eq!(encoded.body["previous_response_id"], "resp_existing");
+}
+
+#[test]
 fn unified_controls_project_and_unsupported_vendor_controls_are_dropped() {
     let request = ResponsesDecoder.decode_request(serde_json::json!({
         "model": "gpt", "input": "hello", "generate": false,

@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct SqliteProviderStore {
     pub(super) pool: SqlitePool,
+    pub(super) plugin_store: PluginStore,
 }
 
 #[async_trait]
@@ -148,6 +149,11 @@ impl ProviderStore for SqliteProviderStore {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let volatile = self.plugin_store.volatile_store();
+        let guard = match &volatile {
+            Some(store) => Some(store.lock().await),
+            None => None,
+        };
         let mut connection = self.pool.acquire_write().await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
 
@@ -210,7 +216,13 @@ impl ProviderStore for SqliteProviderStore {
             .await?;
 
         tx.commit().await?;
+        if let Some(guard) = guard {
+            guard.invalidate_provider_id(id).await;
+        }
         connection.finish().await?;
+        if let Err(error) = self.plugin_store.sweep_atomic_journal().await {
+            tracing::warn!(%error, "failed to sweep atomic journal after provider deletion");
+        }
         Ok(())
     }
 
@@ -493,7 +505,57 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
-        SqliteProviderStore { pool }
+        SqliteProviderStore {
+            plugin_store: PluginStore::sqlite(pool.clone()),
+            pool,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_deletion_revokes_all_vendor_scopes() -> anyhow::Result<()> {
+        let store = store().await;
+        let provider = create_provider(&store, "volatile-delete").await;
+        let other = create_provider(&store, "volatile-other").await;
+        let volatile = crate::plugin::volatile_state::VolatileStore::for_installation(&provider.id);
+        store.plugin_store.attach_volatile_store(volatile.clone());
+        let read = volatile.read().await;
+        let first = read
+            .open("vendor-a", &provider.id, 1, 1, "cell".into())
+            .expect("open first scope");
+        let second = read
+            .open("vendor-b", &provider.id, 2, 1, "cell".into())
+            .expect("open second scope");
+        let retained = read
+            .open("vendor-a", &other.id, 1, 1, "cell".into())
+            .expect("open retained scope");
+        drop(read);
+
+        store.delete(&provider.id).await?;
+
+        assert!(first.load().await.is_err());
+        assert!(second.load().await.is_err());
+        assert!(retained.load().await.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_provider_deletion_preserves_volatile_scope() -> anyhow::Result<()> {
+        let store = store().await;
+        let provider = create_provider(&store, "volatile-rollback").await;
+        let volatile = crate::plugin::volatile_state::VolatileStore::for_installation(&provider.id);
+        store.plugin_store.attach_volatile_store(volatile.clone());
+        let read = volatile.read().await;
+        let cell = read
+            .open("vendor-a", &provider.id, 1, 1, "cell".into())
+            .expect("open scope");
+        drop(read);
+        sqlx::query("CREATE TRIGGER prevent_provider_delete BEFORE DELETE ON providers BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+            .execute(&store.pool)
+            .await?;
+
+        assert!(store.delete(&provider.id).await.is_err());
+        assert!(cell.load().await.is_ok());
+        Ok(())
     }
 
     #[tokio::test]

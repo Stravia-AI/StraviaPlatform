@@ -46,23 +46,36 @@ async fn close_test_gateway(gateway: Gateway, data_dir: tempfile::TempDir) {
 async fn wait_for_observed_run_finish(
     events: &mut crate::interaction_observation::ObservationStream,
 ) {
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    let mut received = 0;
+    let mut last_kind = None;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             let event = events
                 .next()
                 .await
                 .expect("Observation stream remains open");
-            if matches!(
-                event,
-                crate::interaction_observation::ObservationUpdate::Change(event)
-                    if event.kind == "run_finished"
-            ) {
-                break;
+            match event {
+                crate::interaction_observation::ObservationUpdate::Change(change) => {
+                    received += 1;
+                    if change.kind == "run_finished" {
+                        break;
+                    }
+                    last_kind = Some(change.kind);
+                }
+                crate::interaction_observation::ObservationUpdate::ResetRequired {
+                    snapshot_sequence,
+                } => {
+                    panic!("observation subscription reset at sequence {snapshot_sequence}");
+                }
+                _ => {}
             }
         }
     })
-    .await
-    .expect("first request completes before continuation");
+    .await;
+    assert!(
+        result.is_ok(),
+        "observed run completion timed out after {received} changes; last kind: {last_kind:?}"
+    );
 }
 
 struct CommitBarrierStore {
@@ -4273,6 +4286,8 @@ mod admission;
 mod auth_hook;
 #[cfg(test)]
 mod continuation;
+#[cfg(test)]
+mod history_boundary;
 #[cfg(test)]
 mod lifecycle;
 #[cfg(test)]

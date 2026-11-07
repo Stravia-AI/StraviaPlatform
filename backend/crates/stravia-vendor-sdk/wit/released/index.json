@@ -1,5 +1,8 @@
 {
   "stravia-net@1.0.0/net.wit": "e1a11dd87523aae519c49850ffbabf1ae43258f48cc0021632db9020aa23dd5a",
+  "stravia-net@1.1.0/net.wit": "c56b8992b4585a4fa8c2f16e9c69664b42b8ba2e37658cbf8cf2def8aec14b72",
+  "stravia-state@1.0.0/state.wit": "f02fc6f3c3ff0cc1532356582d4cc248e532bfc7d9396ff02ee20bf23dbef972",
+  "stravia-state@1.1.0/state.wit": "2cfea514a624a44c21b237faddc999972a598b821e96fb06f271283589f0e629",
   "stravia-vendor@1.0.0/deps/stravia-net/net.wit": "e1a11dd87523aae519c49850ffbabf1ae43258f48cc0021632db9020aa23dd5a",
   "stravia-vendor@1.0.0/deps/wasi-cli/cli.wit": "fb6ac5d23fcaf3d231142a3c2f9bb1e9bc1fe5af6f1f329f6b1a5555ce0d3873",
   "stravia-vendor@1.0.0/deps/wasi-clocks/clocks.wit": "6ed8aa65bb8cbe224a0b2cbac9fc1b3bd25bdb17eda5ae0d23c983ed31c447cc",

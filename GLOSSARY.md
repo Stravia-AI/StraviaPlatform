@@ -103,7 +103,7 @@ _避免使用_：在组件内维护平行的拍平逻辑、把 DOM 操作带进�
 
 ## Wire Debug Capture
 
-Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录 HTTP header 与 body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；仅对 Authorization header 值永久脱敏（header 名不区分大小写），媒体保留捕获内容，不因媒体类型替换为 Artifact 引用，其他内容原样保留。
+Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录传输序列化规整后的有序 HTTP 字段快照、body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；仅对 Authorization header 值永久脱敏（header 名不区分大小写），媒体保留捕获内容，不因媒体类型替换为 Artifact 引用，其他内容原样保留。
 _避免使用_：Network Capture、Packet Capture
 
 ## Inference Run Debug Trace
@@ -805,8 +805,8 @@ _避免使用_：Provider 连接、Protocol Codec
 
 ## Egress Shape（出站形态）
 
-Egress Shape 是某个客户端的连接层出站形态，涵盖握手和传输协议的可观察特征。它不包含供应商身份、请求内容、凭据或重试策略。
-_避免使用_：Profile、Network Profile、供应商 Profile、User-Agent 设置
+Egress Shape 是宿主内置的客户端连接层出站形态数据，涵盖 TLS ClientHello、ALPN、HTTP/1 和 HTTP/2 参数及 WebSocket 传输。它不包含请求头、供应商身份、请求内容、凭据或重试策略。
+_避免使用_：Profile、Network Profile、供应商 Profile、指纹伪装配置、User-Agent 设置
 
 ## Slot Header（槽位头）
 
@@ -827,6 +827,41 @@ _避免使用_：Vendor、Vendor Plugin
 
 Vendor Private State 是 Vendor Plugin 为一条 Provider 保存的、必要时跨重启保留的供应商私有状态，例如设备注册标识与账户绑定信息；连接尚未保存时，其临时状态只归属于对应认证会话。它不替代连接配置、凭据或 Provider Model，也不表示活跃网络连接与请求可以跨重启恢复。
 _避免使用_：凭据存储、Provider Model、可恢复的网络会话
+
+## Vendor Conversation State
+
+Vendor Conversation State 是 Vendor Plugin 在获准的 Provider、Principal 与会话分支内维护的原生请求状态，随确定的历史快照继承而非在不同分支间共享可变进度。它不同于连接级 Vendor Private State，也不意味着上游网络会话可跨进程恢复。
+_避免使用_：全局插件缓存、共享 Session head、可恢复的 WebSocket
+
+## User Prompt Admission
+
+User Prompt Admission 是一次获准用户输入与其会话、逻辑用户轮及来源证明的关联；同一输入的模型工具循环和内部重试不另算用户输入。它不同于只记录已交付 Client Projection 的 Generation，也不把缺少历史证明的轮次当作从第一轮开始。
+_避免使用_：Model Turn 序号、HTTP 请求序号、截断历史消息数
+
+## History Boundary Candidate
+
+History Boundary Candidate 是宿主为原生请求状态提供的、带来源证明的 canonical 历史间隙身份，允许投影变换后仍关联同一位置。它不是实际网络发送、上游接纳或原生压缩已完成的证明。
+_避免使用_：正文 hash 锚点、发送收据、Native Compaction Boundary
+
+## User Prompt Ordinal
+
+User Prompt Ordinal 是已证明会话 lineage 中用户文本或媒体输入的累计序号；纯工具结果不计入，同一输入的重试与工具循环不重复推进。压缩不重置该序号，未知历史不等于零用户历史。
+_避免使用_：Model Turn 序号、当前窗口消息数、HTTP 尝试次数
+
+## User Turn Ordinal
+
+User Turn Ordinal 是已证明会话 lineage 中独立用户对话轮的累计序号；混有工具结果的输入不作为新的独立用户对话轮。它是用户输入的专门投影，不等同于包含这类混合输入的 User Prompt Ordinal。
+_避免使用_：Model Turn 序号、所有用户项计数
+
+## Logical Turn
+
+Logical Turn 是贯穿同一次逻辑输入的模型执行、工具后续调用与内部重试的稳定交互身份，区别于其中的每次 Model Turn。没有用户输入的操作也可有交互身份，但不因此制造一次用户输入。
+_避免使用_：HTTP 请求 ID、Model Turn、Generation
+
+## Virtual Window
+
+Virtual Window 是由已确认历史来源限定的原生请求上下文窗口；安装 Native Compaction Boundary 后形成新的窗口，用户轮身份与累计用户输入序号不随之重置。它不是可变 Session head，也不是从压缩后文本猜测的历史范围。
+_避免使用_：当前消息数组、Session、用户轮次
 
 ## Vendor Write Permit
 

@@ -2270,6 +2270,8 @@ async fn assert_native_compaction_omitted(
     token: &str,
     model: &str,
 ) -> anyhow::Result<()> {
+    // Inline controls and opaque state may be omitted for these protocols;
+    // a compaction_trigger instead selects a standalone compaction operation.
     for control in [
         json!({
             "input": "hello",
@@ -2277,8 +2279,7 @@ async fn assert_native_compaction_omitted(
         }),
         json!({"input": [
             {"role": "user", "content": "hello"},
-            {"type": "compaction", "encrypted_content": "opaque-compaction-state"},
-            {"type": "compaction_trigger"}
+            {"type": "compaction", "encrypted_content": "opaque-compaction-state"}
         ]}),
     ] {
         let mut body = control;
@@ -2347,7 +2348,7 @@ async fn non_responses_plugins_omit_native_compaction_and_deliver_inference() ->
             Value::Null,
         ),
     ] {
-        let request_count = if vendor == "command-code" { 4 } else { 2 };
+        let request_count = if vendor == "command-code" { 6 } else { 2 };
         let (base_url, server) = local_upstream(request_count, move |request| {
             if vendor == "command-code" {
                 if request.path == "/alpha/generate" {
@@ -2705,7 +2706,7 @@ async fn command_code_replays_unmatched_responses_reasoning_before_tool_continua
 #[tokio::test]
 async fn command_code_admin_option_reaches_initialization_and_inference_headers()
 -> anyhow::Result<()> {
-    let (base_url, server) = local_upstream(4, |request| {
+    let (base_url, server) = local_upstream(6, |request| {
         if request.path.contains("generate") {
             // The real upstream labels its NDJSON stream `text/event-stream`.
             MockResponse::bytes(
@@ -2762,7 +2763,21 @@ async fn command_code_admin_option_reaches_initialization_and_inference_headers(
     assert_eq!(response["choices"][0]["message"]["content"], "done");
 
     let requests = server.await??;
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 6);
+    for path in [
+        "/alpha/fingerprint/record",
+        "/alpha/lifecycle-events",
+        "/alpha/generate",
+    ] {
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path == path)
+                .count(),
+            2,
+            "{path}"
+        );
+    }
     for request in requests
         .iter()
         .filter(|request| request.path.contains("generate"))
@@ -3137,7 +3152,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
                     "stream": false,
                     "input": [
                         {"role": "user", "content": "hello"},
-                        {"type": "compaction_trigger"}
+                        {"type": "compaction", "encrypted_content": "opaque-compaction-state"}
                     ]
                 }))?))?,
         )
@@ -3146,7 +3161,10 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024 * 1024).await?)?;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "completed");
     assert_eq!(body["output"][0]["content"][0]["text"], "devin answer");
+    assert_eq!(body["usage"]["input_tokens"], 13);
+    assert_eq!(body["usage"]["output_tokens"], 5);
     let (status, response) = chat(gateway.clone(), &key.token, request).await?;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["choices"][0]["message"]["content"], "devin answer");
@@ -3239,6 +3257,13 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
                 .windows(b"hello".len())
                 .any(|window| window == b"hello"),
             "omission must preserve the original user text"
+        );
+        assert!(
+            !request
+                .body
+                .windows(b"opaque-compaction-state".len())
+                .any(|window| window == b"opaque-compaction-state"),
+            "unsupported compaction state must not be sent upstream"
         );
     }
     let catalog = requests

@@ -66,6 +66,69 @@ impl LiveModelTurnExecutor {
             selector,
         }
     }
+
+    async fn admit_independent_turn(&self, input: &mut TurnInput) -> Result<(), ModelTurnError> {
+        match (&input.atomic_conversation, &input.atomic_lease) {
+            (Some(_), Some(_)) => return Ok(()),
+            (None, None) => {}
+            _ => {
+                return Err(ModelTurnError::new(
+                    "atomic_state_unavailable",
+                    "Incomplete Model Turn admission",
+                ));
+            }
+        }
+        if input.context_window_id.is_some()
+            || input.context_window_index.is_some()
+            || input.logical_turn_id.is_some()
+            || input.logical_turn_started_at_ms.is_some()
+            || input.history_boundary_candidate.is_some()
+        {
+            return Err(ModelTurnError::new(
+                "atomic_state_unavailable",
+                "Model Turn identity lacks an admission",
+            ));
+        }
+        let admissions = self.gateway.storage.prompt_admissions();
+        let memory_guard = match admissions.memory_history_lock() {
+            Some(lock) => Some(lock.read_owned().await),
+            None => None,
+        };
+        let epoch = admissions
+            .history_epoch()
+            .await
+            .map_err(|error| ModelTurnError::new("atomic_state_unavailable", error.to_string()))?;
+        let source = self
+            .gateway
+            .compaction
+            .resolve(&input.principal, &input.request.items)
+            .await
+            .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
+        let admission_id = uuid::Uuid::new_v4();
+        let principal = input.principal.continuation_key();
+        let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::fork_at_epoch(
+            self.gateway.storage.vendor_plugins().clone(),
+            principal.clone(),
+            admission_id,
+            source.and_then(|source| source.atomic_checkpoint_id),
+            epoch,
+        )
+        .await
+        .map_err(|error| ModelTurnError::new("atomic_state_unavailable", error.to_string()))?;
+        drop(memory_guard);
+        input.cancellation.cancel_with(&guard.cancellation());
+        input.atomic_conversation = Some(crate::plugin::execution::AtomicConversationContext {
+            principal,
+            admission_id,
+            atomic_lease_id: guard.lease_id(),
+        });
+        input.atomic_lease = Some(guard);
+        input.logical_turn_id = Some(admission_id);
+        input.logical_turn_started_at_ms = Some(chrono::Utc::now().timestamp_millis());
+        input.context_window_id = Some(uuid::Uuid::new_v4());
+        input.context_window_index = Some(0);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -87,6 +150,14 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                 () = input.deadline.wait() => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
                 result = crate::media::ingest::normalize_shared_request(&self.gateway, &input.principal, &mut input.request, &input.cancellation) => result.map_err(attachment_ingest_error)?,
             }
+        }
+        let admission_cancellation = input.cancellation.clone();
+        let admission_deadline = input.deadline.clone();
+        tokio::select! {
+            biased;
+            _ = admission_cancellation.cancelled() => return Err(interruption_error(&admission_deadline)),
+            () = admission_deadline.wait() => return Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded")),
+            result = self.admit_independent_turn(&mut input) => result?,
         }
         let estimated_input_tokens =
             crate::router::selection::estimate_uncached_input_tokens(&input.request);
@@ -138,8 +209,18 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             span: Some(tracing::Span::current()),
             finished: false,
         });
+        let lease_failure = input.atomic_lease.clone();
+        let interruption = |deadline: &Deadline| {
+            lease_failure
+                .as_ref()
+                .and_then(|lease| lease.failure())
+                .map_or_else(
+                    || interruption_error(deadline),
+                    |failure| ModelTurnError::new("atomic_state_unavailable", failure.to_string()),
+                )
+        };
         let result = if input.cancellation.is_cancelled() {
-            Err(interruption_error(&input.deadline))
+            Err(interruption(&input.deadline))
         } else if input.deadline.is_exceeded() {
             Err(ModelTurnError::new(
                 "deadline_exceeded",
@@ -151,7 +232,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
-                    Err(interruption_error(&deadline))
+                    Err(interruption(&deadline))
                 }
                 () = deadline.wait() => {
                     Err(ModelTurnError::new("deadline_exceeded", "Model Turn deadline exceeded"))
@@ -160,6 +241,7 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let trace = input.request.meta.redaction.clone();
                     let principal = input.principal.clone();
                     let source_generation_id = input.compaction_source_generation_id.clone();
+                    let source_history = crate::generation_chain::source_history_proof(&input.request);
                     let incoming_states = input.request.items.iter().filter_map(stravia_runtime_contract::protocol::ir::canonical::native_compaction_item).collect::<Vec<_>>();
                     let source = self.gateway.compaction.resolve(&principal, &input.request.items).await
                         .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
@@ -177,6 +259,23 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         crate::router::selection::estimate_uncached_input_tokens(&input.request)
                     };
                     let registrations = input.compaction_records.clone();
+                    let atomic_lease = input.atomic_lease.clone();
+                    let stream_lease = atomic_lease.clone();
+                    let source_window = input.context_window_id.zip(input.context_window_index)
+                        .map(|(id, index)| crate::generation_chain::VirtualWindow { id, index });
+                    let logical_turn = input.logical_turn_id.zip(input.logical_turn_started_at_ms)
+                        .map(|(id, created_at_ms)| crate::generation_chain::LogicalTurn { id, created_at_ms });
+                    let user_prompt_metadata = (|| Some(crate::generation_chain::UserPromptMetadata {
+                        user_prompt_index: input.user_prompt_index?,
+                        user_turn_index: input.user_turn_index,
+                        dialogue_prompt_index: input.dialogue_prompt_index,
+                        context_window_id: input.context_window_id,
+                        context_window_index: input.context_window_index,
+                        user_prompt_id: input.user_prompt_id.clone()?,
+                        user_prompt_created_at_ms: input.user_prompt_created_at_ms?,
+                        client_conversation_id: input.client_conversation_id.clone()?,
+                        client_conversation_created_at_ms: input.client_conversation_created_at_ms?,
+                    }))();
                     let mut turn = execute_inner(self.clone(), input, model_turn_id.clone(), routing_estimate).await?;
                     turn.output = self.gateway.redaction.restore_stream(turn.output, mappings, trace.clone(), observer.as_ref());
                     let thinking_source = turn.target.thinking_source();
@@ -212,11 +311,25 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                         source_record_ids: source.map(|source| source.record_ids).unwrap_or_default(),
                         model_turn_id: model_turn_id.clone(),
                         registrations,
+                        atomic_lease,
+                        user_prompt_metadata,
+                        source_window,
+                        logical_turn,
+                        source_history,
                         observer: observer.clone(),
                         incoming_states,
                         operation_started,
                         publication: turn.target.publication.clone(),
                     });
+                    if let Some(lease) = stream_lease {
+                        use futures::StreamExt;
+                        turn.output = Box::pin(turn.output.map(move |event| match event {
+                            Err(error) => Err(lease.failure().map_or(error, |failure| {
+                                ModelTurnError::new("atomic_state_unavailable", failure.to_string())
+                            })),
+                            ok => ok,
+                        }));
+                    }
                     turn.output = completion_stream(CompletionStreamSpec {
                         output: turn.output,
                         redaction: self.gateway.redaction.clone(),
@@ -250,6 +363,11 @@ struct CompactionStreamSpec {
     source_record_ids: Vec<String>,
     model_turn_id: String,
     registrations: super::CompactionPublications,
+    atomic_lease: Option<crate::plugin::atomic_lease::AtomicLeaseGuard>,
+    user_prompt_metadata: Option<crate::generation_chain::UserPromptMetadata>,
+    source_window: Option<crate::generation_chain::VirtualWindow>,
+    logical_turn: Option<crate::generation_chain::LogicalTurn>,
+    source_history: crate::generation_chain::SourceHistoryProof,
     observer: Option<crate::interaction_observation::RunObserver>,
     incoming_states: Vec<serde_json::Value>,
     operation_started: Instant,
@@ -270,6 +388,11 @@ fn register_compaction_stream(spec: CompactionStreamSpec) -> super::CanonicalEve
         spec.source_record_ids,
         spec.model_turn_id,
         spec.registrations,
+        spec.atomic_lease,
+        spec.user_prompt_metadata,
+        spec.source_window,
+        spec.logical_turn,
+        spec.source_history,
         spec.observer,
         spec.incoming_states,
         spec.publication,
@@ -285,6 +408,11 @@ fn register_compaction_stream(spec: CompactionStreamSpec) -> super::CanonicalEve
             source_record_ids,
             model_turn_id,
             registrations,
+            atomic_lease,
+            user_prompt_metadata,
+            source_window,
+            logical_turn,
+            source_history,
             observer,
             seen,
             publication,
@@ -377,6 +505,20 @@ fn register_compaction_stream(spec: CompactionStreamSpec) -> super::CanonicalEve
                     break;
                 }
             };
+            let atomic_checkpoint_id = if let Some(lease) = atomic_lease.as_ref() {
+                let checkpoint = uuid::Uuid::new_v4();
+                if let Err(error) = lease.checkpoint(checkpoint).await {
+                    event = Err(ModelTurnError::new(
+                        "atomic_state_unavailable",
+                        error.to_string(),
+                    ));
+                    *failed = true;
+                    break;
+                }
+                Some(checkpoint)
+            } else {
+                None
+            };
             let result = compaction
                 .register(
                     principal,
@@ -384,6 +526,11 @@ fn register_compaction_stream(spec: CompactionStreamSpec) -> super::CanonicalEve
                         source_generation_id: source_generation_id.clone(),
                         source_record_ids: source_record_ids.clone(),
                         operation_id: operation_id.clone(),
+                        atomic_checkpoint_id,
+                        user_prompt_metadata: user_prompt_metadata.clone(),
+                        source_window: *source_window,
+                        logical_turn: *logical_turn,
+                        source_history: Some(*source_history),
                         target: target.clone(),
                         window,
                         state_items,
@@ -1035,6 +1182,9 @@ struct PreparedAttempt {
     observer: Option<crate::interaction_observation::RunObserver>,
     request: Arc<AiRequest>,
     continuation_fallback: Option<Arc<AiRequest>>,
+    history_boundaries: Option<super::HistoryBoundaryMap>,
+    history_boundary_candidate: Option<crate::generation_chain::HistoryBoundaryCandidate>,
+    fallback_history_boundaries: Option<super::HistoryBoundaryMap>,
     continuation_send_reset: bool,
     dispatch_model: String,
     actual_model: String,
@@ -1043,6 +1193,7 @@ struct PreparedAttempt {
     protocol_hint: String,
     egress_base_url: String,
     metadata: BTreeMap<String, serde_json::Value>,
+    atomic_conversation: Option<crate::plugin::execution::AtomicConversationContext>,
     client_headers: Vec<(String, String)>,
     websocket_affinity: Option<String>,
     execution: Option<PreparedVendorExecution>,
@@ -1190,6 +1341,7 @@ async fn prepare_attempt(
     let mut preparation_context =
         VendorCallContext::new(input.cancellation.clone(), input.deadline.clone());
     preparation_context.observer = input.observer.clone();
+    preparation_context.atomic_state = input.atomic_conversation.clone();
     preparation_context.metadata.insert(
         TRANSPORT_PREFERENCE_METADATA_KEY.into(),
         serde_json::Value::String(transport_preference.as_metadata_value().into()),
@@ -1409,8 +1561,52 @@ async fn prepare_attempt(
             )
         }))
     });
+    let mut history_boundaries = if let (Some(candidate), Some(source), Some(gaps), Some(atomic)) = (
+        input.history_boundary_candidate.as_ref(),
+        input.history_boundary_source.as_ref(),
+        input.history_boundary_gaps.as_ref(),
+        input.atomic_conversation.as_ref(),
+    ) {
+        let retained = gateway
+            .vendor_plugins
+            .store
+            .history_boundary_candidates(
+                &supplier_id,
+                target.provider_id().as_str(),
+                &atomic.principal,
+                &atomic.admission_id.to_string(),
+                &atomic.atomic_lease_id.to_string(),
+            )
+            .await
+            .map_err(|error| {
+                AttemptFailure::terminal("history_boundary_unavailable", error.to_string())
+            })?;
+        if gaps.len() == source.items.len() + 1
+            && gaps.iter().all(|gap| *gap <= provider_request.items.len())
+            && gaps.windows(2).all(|pair| pair[0] <= pair[1])
+        {
+            crate::generation_chain::project_history_boundaries(source, candidate, &retained)
+                .filter(|map| map.valid_for(source.items.len()))
+                .map(|mut map| {
+                    for boundary in &mut map.boundaries {
+                        boundary.item_index = gaps[boundary.item_index];
+                    }
+                    map
+                })
+                .filter(|map| {
+                    map.valid_for(provider_request.items.len())
+                        && map.current_boundary_id == candidate.id.to_string()
+                        && map.window_id == candidate.window_id.to_string()
+                })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut removed_items = Vec::new();
     let thinking_replayed = has_thinking
-        && stravia_protocol_codec::transform::prepare_thinking_replay(
+        && stravia_protocol_codec::transform::prepare_thinking_replay_with_removals(
             Arc::make_mut(&mut provider_request),
             |item, block| {
                 !gateway.reasoning_rejections.rejected(
@@ -1422,7 +1618,15 @@ async fn prepare_attempt(
                     block,
                 )
             },
+            |index| {
+                if history_boundaries.is_some() {
+                    removed_items.push(index);
+                }
+            },
         );
+    if let Some(map) = &mut history_boundaries {
+        map.remove_items(&removed_items);
+    }
     let native_compaction_requested =
         stravia_protocol_codec::codec::compaction::native_compaction_requested(&provider_request);
     let binding = crate::compaction::CompactionTarget {
@@ -1480,6 +1684,7 @@ async fn prepare_attempt(
         })?;
     let require_affinity = request_requires_affinity(&provider_request);
     let mut continuation_fallback = None;
+    let mut fallback_history_boundaries = None;
     // 完整历史已恢复；关闭原生续接只跳过上游优化，不影响本地父链与缓存。
     let use_previous_response_id = provider_snapshot
         .options
@@ -1508,6 +1713,16 @@ async fn prepare_attempt(
                 &mut continuation_fallback,
             )
             .await;
+        if let Some(full) = &continuation_fallback {
+            fallback_history_boundaries = history_boundaries.clone();
+            if let Some(map) = &mut history_boundaries {
+                if let Some(start) = full.items.len().checked_sub(provider_request.items.len()) {
+                    map.retain_suffix(start);
+                } else {
+                    history_boundaries = None;
+                }
+            }
+        }
     }
 
     let session_affinity = crate::generation_chain::generation_session_fingerprint(&input.request);
@@ -1525,6 +1740,66 @@ async fn prepare_attempt(
             .unwrap_or(model_turn_id),
     ));
     let mut metadata = BTreeMap::new();
+    if let Some(index) = input.user_prompt_index.filter(|index| *index > 0) {
+        metadata.insert("user_prompt_index".into(), serde_json::Value::from(index));
+    }
+    if let Some(index) = input.user_turn_index.filter(|index| *index > 0) {
+        metadata.insert("user_turn_index".into(), serde_json::Value::from(index));
+    }
+    if let Some(index) = input.dialogue_prompt_index {
+        metadata.insert(
+            "dialogue_prompt_index".into(),
+            serde_json::Value::from(index),
+        );
+    }
+    if let Some(id) = input.context_window_id {
+        metadata.insert(
+            "context_window_id".into(),
+            serde_json::Value::String(id.to_string()),
+        );
+    }
+    if let Some(index) = input.context_window_index {
+        metadata.insert(
+            "context_window_index".into(),
+            serde_json::Value::from(index),
+        );
+    }
+    if let Some(id) = input.logical_turn_id {
+        metadata.insert(
+            "logical_turn_id".into(),
+            serde_json::Value::String(id.to_string()),
+        );
+    }
+    if let Some(started_at) = input.logical_turn_started_at_ms {
+        metadata.insert(
+            "logical_turn_started_at_ms".into(),
+            serde_json::Value::from(started_at),
+        );
+    }
+    if let Some(id) = &input.user_prompt_id {
+        metadata.insert(
+            "user_prompt_id".into(),
+            serde_json::Value::String(id.clone()),
+        );
+    }
+    if let Some(created_at) = input.user_prompt_created_at_ms {
+        metadata.insert(
+            "user_prompt_created_at_ms".into(),
+            serde_json::Value::from(created_at),
+        );
+    }
+    if let Some(id) = &input.client_conversation_id {
+        metadata.insert(
+            "client_conversation_id".into(),
+            serde_json::Value::String(id.clone()),
+        );
+    }
+    if let Some(created_at) = input.client_conversation_created_at_ms {
+        metadata.insert(
+            "client_conversation_created_at_ms".into(),
+            serde_json::Value::from(created_at),
+        );
+    }
     metadata.insert(
         "transport_affinity".into(),
         serde_json::Value::String(websocket_affinity.clone()),
@@ -1619,6 +1894,9 @@ async fn prepare_attempt(
         observer: input.observer.clone(),
         request: provider_request,
         continuation_fallback,
+        history_boundaries,
+        history_boundary_candidate: input.history_boundary_candidate.clone(),
+        fallback_history_boundaries,
         continuation_send_reset: false,
         dispatch_model: route.model_id.to_string(),
         actual_model,
@@ -1627,6 +1905,7 @@ async fn prepare_attempt(
         protocol_hint: protocol_hint.to_owned(),
         egress_base_url,
         metadata,
+        atomic_conversation: input.atomic_conversation.clone(),
         client_headers: header_pairs(&input.extra_headers),
         websocket_affinity: (input.allow_responses_websocket
             && transport_preference != TransportPreference::HttpOnly)
@@ -2245,14 +2524,16 @@ async fn drive_vendor_attempt(
                 // 重试预算约束；只允许剥离非本上游载荷后重放一次。
                 if let Some(fallback) = prepared.continuation_fallback.take() {
                     prepared.request = fallback;
+                    prepared.history_boundaries = prepared.fallback_history_boundaries.take();
                 }
                 crate::router::clear_previous_response_id(Arc::make_mut(&mut prepared.request));
                 let rejected =
                     rejected_protected_reasoning(&prepared.request, &prepared.thinking_source);
-                if strip_rejected_protected_reasoning(
+                if strip_rejected_protected_reasoning_with_boundaries(
                     Arc::make_mut(&mut prepared.request),
                     &mut protected_reasoning_recovery,
                     &prepared.thinking_source,
+                    prepared.history_boundaries.as_mut(),
                 ) {
                     attempt.finish(
                         "failed",
@@ -2356,6 +2637,7 @@ async fn drive_vendor_attempt(
                 // 恢复仍经完整媒体交付、固定组件租约和发送门禁，真实失败才结算。
                 if let Some(fallback) = prepared.continuation_fallback.take() {
                     prepared.request = fallback;
+                    prepared.history_boundaries = prepared.fallback_history_boundaries.take();
                 }
                 crate::router::clear_previous_response_id(Arc::make_mut(&mut prepared.request));
                 prepared
@@ -2743,18 +3025,41 @@ fn target_namespace(
 }
 
 /// 上游拒绝后只剥离外来与未知来源载荷一次，绝不剥离本上游签发的载荷。
+#[cfg(test)]
 fn strip_rejected_protected_reasoning(
     request: &mut AiRequest,
     stage: &mut u8,
     source: &crate::history_marker::ThinkingSource,
 ) -> bool {
+    strip_rejected_protected_reasoning_with_boundaries(request, stage, source, None)
+}
+
+fn strip_rejected_protected_reasoning_with_boundaries(
+    request: &mut AiRequest,
+    stage: &mut u8,
+    source: &crate::history_marker::ThinkingSource,
+    boundaries: Option<&mut super::HistoryBoundaryMap>,
+) -> bool {
     if *stage != 0 || !has_untrusted_protected_reasoning(request, source) {
         return false;
     }
     *stage = 1;
-    stravia_protocol_codec::transform::prepare_thinking_replay(request, |item, block| {
-        source.provenance(item, block) == crate::history_marker::ThinkingProvenance::Own
-    })
+    let mut removed = Vec::new();
+    let changed = stravia_protocol_codec::transform::prepare_thinking_replay_with_removals(
+        request,
+        |item, block| {
+            source.provenance(item, block) == crate::history_marker::ThinkingProvenance::Own
+        },
+        |index| {
+            if boundaries.is_some() {
+                removed.push(index);
+            }
+        },
+    );
+    if let Some(map) = boundaries {
+        map.remove_items(&removed);
+    }
+    changed
 }
 
 fn rejected_protected_reasoning(

@@ -8,8 +8,7 @@ use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
     AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
-    ConnectionCheckVerification, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
-    net::Request,
+    ConnectionCheckVerification, ErrorKind, GuestHost, PluginError, ProviderSnapshot, net::Request,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -20,7 +19,10 @@ pub(super) fn execute(
     provider: &ProviderSnapshot,
 ) -> Result<AllowanceResponse, PluginError> {
     let access_token = access_token(provider)?;
-    let response = host.http_start(usage_request(provider, access_token), &crate::codex::http_options()?)?;
+    let response = host.http_start(
+        usage_request(provider, access_token),
+        &crate::codex::http_options()?,
+    )?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(PluginError {
@@ -50,7 +52,10 @@ pub(super) fn connection_check(
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
     let access_token = access_token(provider)?;
-    let response = host.http_start(usage_request(provider, access_token), &crate::codex::http_options()?)?;
+    let response = host.http_start(
+        usage_request(provider, access_token),
+        &crate::codex::http_options()?,
+    )?;
     let value = connection_check::read_json(&response)?;
     validate_usage(&value)?;
     Ok(ConnectionCheckResponse {

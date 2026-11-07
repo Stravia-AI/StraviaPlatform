@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use stravia_vendor_sdk::{
-    AuthRequest, AuthResponse, AuthStep, ErrorKind, GuestHost, PluginError,
-    ProviderSnapshot, read_http_body,
+    AuthRequest, AuthResponse, AuthStep, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
+    read_http_body,
 };
 
 use crate::request::{DEFAULT_CLIENT_VERSION, OAUTH_BETA, SDK_VERSION};
@@ -27,18 +27,11 @@ const SCOPE: &str = "org:create_api_key user:profile user:inference user:session
 const MAX_TOKEN_BODY: usize = 512 * 1024;
 
 pub(crate) const ACCOUNT_UUID: &str = "account_uuid";
-pub(crate) const DEVICE_ID: &str = "device_id";
 const EMAIL: &str = "email";
 const ORGANIZATION_UUID: &str = "organization_uuid";
 const ORGANIZATION_NAME: &str = "organization_name";
 /// 刷新响应不重新下发的身份字段；刷新时从已保存凭据继承。
-const INHERITED_FIELDS: [&str; 5] = [
-    ACCOUNT_UUID,
-    DEVICE_ID,
-    EMAIL,
-    ORGANIZATION_UUID,
-    ORGANIZATION_NAME,
-];
+const INHERITED_FIELDS: [&str; 4] = [ACCOUNT_UUID, EMAIL, ORGANIZATION_UUID, ORGANIZATION_NAME];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthState {
@@ -191,7 +184,6 @@ fn exchange(host: &GuestHost, callback_url: String) -> Result<AuthResponse, Plug
     .map_err(|_| invalid("Claude OAuth token request could not be encoded"))?;
     let token = token_request(host, body, Vec::new())?;
     let (mut values, expires_at_unix_ms) = token_values(token, None)?;
-    values.insert(DEVICE_ID.into(), Value::String(hex(&random_bytes::<32>())));
     complete_identity(host, &mut values);
     Ok(AuthResponse::Credentials {
         values,
@@ -235,9 +227,6 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
             values.insert(key.into(), value.clone());
         }
     }
-    if !values.contains_key(DEVICE_ID) {
-        values.insert(DEVICE_ID.into(), Value::String(hex(&random_bytes::<32>())));
-    }
     complete_identity(host, &mut values);
     Ok(AuthResponse::Credentials {
         values,
@@ -255,7 +244,10 @@ fn token_request(
         ("content-type".into(), "application/json".into()),
     ];
     headers.extend(extra_headers);
-    let response = host.http_start(crate::net_request("POST", TOKEN_URL, headers, body), &crate::net_options())?;
+    let response = host.http_start(
+        crate::net_request("POST", TOKEN_URL, headers, body),
+        &crate::net_options(),
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_TOKEN_BODY)?;
@@ -356,16 +348,24 @@ fn complete_identity(host: &GuestHost, values: &mut BTreeMap<String, Value>) {
 
 fn fetch_bootstrap(host: &GuestHost, access_token: &str) -> Option<BootstrapAccount> {
     let response = host
-        .http_start(crate::net_request("GET", BOOTSTRAP_URL, vec![
-                ("accept".into(), "application/json, text/plain, */*".into()),
-                ("authorization".into(), format!("Bearer {access_token}")),
-                ("content-type".into(), "application/json".into()),
-                (
-                    "user-agent".into(),
-                    format!("claude-code/{DEFAULT_CLIENT_VERSION}"),
-                ),
-                ("anthropic-beta".into(), OAUTH_BETA.into()),
-            ], Vec::new()), &crate::net_options())
+        .http_start(
+            crate::net_request(
+                "GET",
+                BOOTSTRAP_URL,
+                vec![
+                    ("accept".into(), "application/json, text/plain, */*".into()),
+                    ("authorization".into(), format!("Bearer {access_token}")),
+                    ("content-type".into(), "application/json".into()),
+                    (
+                        "user-agent".into(),
+                        format!("claude-code/{DEFAULT_CLIENT_VERSION}"),
+                    ),
+                    ("anthropic-beta".into(), OAUTH_BETA.into()),
+                ],
+                Vec::new(),
+            ),
+            &crate::net_options(),
+        )
         .ok()?;
     if !(200..300).contains(&response.status().ok()?) {
         return None;
