@@ -4,6 +4,8 @@ status: accepted
 
 # Own Provider Transport behind the Model Turn Executor
 
+修订：Vendor 1.0 的连接实现采用 [ADR-0094](0094-own-vendor-egress-with-rama-and-patched-rustls.md)，不再依赖 reqwest；本 ADR 的职责及生命周期决定保持不变。
+
 Adding OpenAI Responses WebSocket creates a second real way to execute the same Model Turn. Stravia 决定把 Provider Transport 作为 Model Turn Executor 内部的 seam：HTTP/JSON 与 HTTP/SSE 是一个 adapter，Responses WebSocket 是另一个 adapter。Model Turn Executor 拥有 Route / Target 选择与第一次 canonical 输出之前的 failover（与 ADR-0007 对齐）；Inference Run 继续独占 Hook、Client Output Commit、Generation Chain 落盘与 Delivery。这样 transport 可以变化，而不会在 ingress、Vendor 或客户端交付路径复制一次推理状态机。
 
 

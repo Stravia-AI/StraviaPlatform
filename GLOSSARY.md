@@ -803,6 +803,16 @@ Vendor Plugin 是实现一个 Vendor 的可安装、版本化软件包，可包�
 私有上游协议的身份由插件声明并作为不透明字符串保留，不进入宿主共享协议枚举；私有 wire 与表达能力判断归所属插件。channel 可以精确声明需读取的额外非凭据客户端头，宿主按当前目标及通用安全规则提供上下文，不按供应商名字补齐权限。
 _避免使用_：Provider 连接、Protocol Codec
 
+## Egress Shape（出站形态）
+
+Egress Shape 是某个客户端的连接层出站形态，涵盖握手和传输协议的可观察特征。它不包含供应商身份、请求内容、凭据或重试策略。
+_避免使用_：Profile、Network Profile、供应商 Profile、User-Agent 设置
+
+## Slot Header（槽位头）
+
+Slot Header 是由宿主在插件指定的位置填入协议值的请求字段；它表达字段位置和协议意图，不授予插件覆盖宿主授权或连接凭据的能力。
+_避免使用_：默认头、任意请求头覆盖
+
 ## Vendor Credential Authorization
 
 Vendor Credential Authorization 是管理员为选定 Vendor Plugin 的连接登录或填写凭据时，授予该插件处理本连接上游账户秘密的信任；连接尚未保存时，该信任限定于对应的待配置连接认证会话。它不授予其他 Provider、其他认证会话或 Stravia 平台凭据的访问权，也不表示凭据对插件不可见。

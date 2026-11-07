@@ -4,6 +4,8 @@ status: accepted
 
 # 在传输收发边界记录四方向 Wire Debug Capture
 
+修订：Vendor 1.0 的上游 HTTP 捕获随 [ADR-0094](0094-own-vendor-egress-with-rama-and-patched-rustls.md) 移到 rama 传输；应用层捕获范围、隐私和权限规则不变。
+
 ## 决定
 
 Wire Debug Capture 保持四个方向：Connect Client→Stravia、Stravia→上游、上游→Stravia、Stravia→Connect Client。记录发生在各自传输的收发边界：上游 HTTP 在 reqwest 请求/响应边界捕获；上游 WebSocket 在对应 WebSocket transport 的发送、接收与握手边界捕获；客户端 ingress/egress 在对应传输边界捕获。Debug 不整体迁移为 reqwest 专属路径。
