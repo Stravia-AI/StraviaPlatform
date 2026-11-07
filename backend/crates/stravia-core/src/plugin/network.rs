@@ -28,6 +28,7 @@ use super::lifecycle::VendorOperation;
 use super::permissions::NetworkPolicy;
 
 mod http;
+mod transport;
 mod websocket;
 use http::UpstreamResponse;
 use websocket::{Handshake, Message, WebSocket};
