@@ -1,0 +1,22 @@
+{
+  "name": "antigravity",
+  "revision": 1,
+  "source": { "client": "Antigravity CLI 1.5.2 consumer", "runtime": "Go linux x86_64", "captured": "2026-11-07", "ja4": "t13d131100_f57a46bbacb6_f50d94e863eb" },
+  "tls": {
+    "versions": ["1.2", "1.3"],
+    "cipher_suites": ["0xc02b", "0xc02f", "0xc02c", "0xc030", "0xcca9", "0xcca8", "0xc009", "0xc013", "0xc00a", "0xc014", "0x1301", "0x1302", "0x1303"],
+    "advertise_only_cipher_suites": ["0xc009", "0xc013", "0xc00a", "0xc014"],
+    "groups": ["X25519MLKEM768", "SECP256R1MLKEM768", "SECP384R1MLKEM1024", "X25519", "secp256r1", "secp384r1", "secp521r1"],
+    "key_shares": ["X25519MLKEM768", "X25519"],
+    "signature_algorithms": ["0x0904", "0x0905", "0x0906", "0x0804", "0x0403", "0x0807", "0x0805", "0x0806", "0x0401", "0x0501", "0x0601", "0x0503", "0x0603"],
+    "extension_order": [0, 11, 65281, 23, 18, 5, 10, 13, 50, 43, 51],
+    "omit_extensions": [45],
+    "raw_extensions": [
+      { "type": 18, "data": "" },
+      { "type": 50, "data": "001e090409050906080404030807080508060401050106010503060302010203" }
+    ],
+    "renegotiation": "extension", "ec_point_formats": [0],
+    "session_tickets": false, "alpn": { "http": [], "ws": [] }
+  },
+  "http1": {}, "http2": {}, "ws": { "over_h2": false }
+}
