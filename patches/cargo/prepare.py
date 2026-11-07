@@ -96,8 +96,8 @@ def current(path, wanted):
 
 def acquire(entry, args, temp):
     name = f"{entry['crate']}-{entry['version']}.crate"
-    if args.crate_file:
-        candidates = [Path(args.crate_file)]
+    if entry['crate'] in args.crate_file:
+        candidates = [args.crate_file[entry['crate']]]
     else:
         cargo_home = Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo'))
         candidates = sorted((cargo_home / 'registry' / 'cache').glob(f'*/{name}'))
@@ -158,9 +158,6 @@ def prepare(entry, args):
         raise ValueError(f'invalid crate directory: {directory!r}')
     dest = OUTPUT / directory
     wanted = expected(entry)
-    # An explicit archive must always be checked, even when the output is fresh.
-    if args.crate_file and digest(Path(args.crate_file)) != entry['sha256']:
-        raise ValueError(f'SHA-256 mismatch for {args.crate_file}')
     if current(dest, wanted):
         return
     if args.check:
@@ -182,12 +179,26 @@ def prepare(entry, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--offline', action='store_true', help='never download a crate')
-    parser.add_argument('--crate-file', help='use this crate archive instead of the Cargo cache')
+    parser.add_argument('--crate-file', action='append', default=[], metavar='CRATE=PATH',
+                        help='use this archive for CRATE instead of the Cargo cache (repeatable)')
     parser.add_argument('--check', action='store_true', help='check prepared output without writing')
     args = parser.parse_args()
     entries = json.loads((HERE / 'crates.json').read_text(encoding='utf-8'))
-    if args.crate_file and len(entries) != 1:
-        parser.error('--crate-file requires exactly one manifest entry')
+    entries_by_name = {entry['crate']: entry for entry in entries}
+    mappings = {}
+    for mapping in args.crate_file:
+        name, separator, filename = mapping.partition('=')
+        if not separator or not name or not filename:
+            parser.error('--crate-file must be CRATE=PATH')
+        if name not in entries_by_name:
+            parser.error(f'unknown crate in --crate-file: {name}')
+        if name in mappings:
+            parser.error(f'duplicate --crate-file for {name}')
+        path = Path(filename)
+        if digest(path) != entries_by_name[name]['sha256']:
+            raise ValueError(f'SHA-256 mismatch for {path}')
+        mappings[name] = path
+    args.crate_file = mappings
     if args.check:
         for entry in entries:
             prepare(entry, args)

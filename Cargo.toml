@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = [".stravia-patched-crates/rustls-0.23.46-shape1"]
+exclude = [".stravia-patched-crates/rustls-0.23.46-shape2", ".stravia-patched-crates/rama-http-core-0.4.0-shape1", ".stravia-patched-crates/rama-http-types-0.4.0-shape1"]
 members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "backend/apps/stravia-desktop", "backend/apps/stravia-server", "backend/crates/stravia-web-access", "backend/crates/stravia-web-access-contract", "backend/crates/stravia-runtime-contract", "backend/crates/stravia-protocol-codec", "backend/crates/stravia-vendor-sdk", "backend/crates/stravia-vendor-runtime", "backend/crates/stravia-vendor-common", "backend/crates/stravia-vendor-base", "backend/crates/stravia-vendor-codex", "backend/crates/stravia-vendor-grok", "backend/crates/stravia-vendor-command-code", "backend/crates/stravia-vendor-devin", "backend/crates/stravia-vendor-opencode-free", "backend/crates/stravia-vendor-claudecode", "backend/crates/stravia-vendor-antigravity", "backend/crates/stravia-vendor-muse-code", "backend/crates/stravia-vendor-kilo", "backend/crates/stravia-media", "backend/crates/stravia-web-search", "backend/crates/stravia-credential-protection", "backend/crates/stravia-vendor-sdk/fixtures/capability-contract", "backend/crates/stravia-vendor-sdk/fixtures/lifecycle-contract", "backend/crates/stravia-vendor-sdk/fixtures/management-contract", "backend/crates/stravia-vendor-sdk/fixtures/legacy-contract"]
 # 与 dev:server 保持相同的依赖特性图，避免裸 build 先构建桌面特性并集。
 default-members = ["backend/apps/stravia-server"]
@@ -197,7 +197,9 @@ debug = 1
 debug = true
 
 [patch.crates-io]
-rustls = { path = ".stravia-patched-crates/rustls-0.23.46-shape1" }
+rustls = { path = ".stravia-patched-crates/rustls-0.23.46-shape2" }
+rama-http-core = { path = ".stravia-patched-crates/rama-http-core-0.4.0-shape1" }
+rama-http-types = { path = ".stravia-patched-crates/rama-http-types-0.4.0-shape1" }
 
 [profile.dev.package.glob]
 debug = true
