@@ -11,7 +11,9 @@ tasks:
     sources:
       - patches/cargo/**/*
     generates:
-      - .stravia-patched-crates/rustls-0.23.46-shape1/.prepare-stamp.json
+      - .stravia-patched-crates/rustls-0.23.46-shape2/.prepare-stamp.json
+      - .stravia-patched-crates/rama-http-core-0.4.0-shape1/.prepare-stamp.json
+      - .stravia-patched-crates/rama-http-types-0.4.0-shape1/.prepare-stamp.json
     status:
       - '{{.PYTHON}} patches/cargo/prepare.py --check'
     cmds:

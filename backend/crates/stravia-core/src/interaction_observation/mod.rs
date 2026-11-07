@@ -1263,6 +1263,9 @@ impl RunObserver {
             self.record_failure(error);
         }
     }
+    pub(crate) fn debug_enabled(&self) -> bool {
+        self.inner.debug_enabled
+    }
     pub(crate) fn record_debug(&self, event: impl FnOnce() -> RunEvent) {
         if self.inner.debug_enabled {
             self.record(event());

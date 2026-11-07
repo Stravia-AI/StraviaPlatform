@@ -436,6 +436,23 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 
 `execute` 的宿主绑定使用 owned lowering：参数复制进 guest 线性内存后，宿主不再为整个上游等待保留 canonical JSON 输入缓冲。宿主调度通过 Wasmtime concurrent call API 驱动，但一次调用仍使用独立 Store、只执行一个操作，不并发复用实例或 HostServices。`async | store` 是宿主生成绑定选项，不改变同步 WIT 导出；guest 的 component async、附加 async builtins、stackful async 与 threading 扩展显式禁用。取消、deadline、数据代际校验、受控网络与资源析构边界保持不变。
 
+### Net 1.0 的错误与类型稳定性
+
+`stravia:net@1.0.0` 独立提供 HTTP、WebSocket 和 operation-scoped options 资源。字段为保留次序、大小写和原始值字节的 `field { name, bytes }` 列表；未知选项由宿主在发送前返回 `unsupported-option`。SDK 可以保留未来选项键，但本地构造成功不等于宿主支持该选项。
+
+`net-error.code` 是开放字符串。已定义代码如下：
+
+| 代码 | 契约 |
+| --- | --- |
+| `unsupported`、`unsupported-option` | 当前宿主不支持所请求的能力或选项；不隐式忽略。 |
+| `invalid`、`invalid-request`、`invalid-response` | 输入或请求不合法，或收到无法按契约解析的响应。 |
+| `auth`、`provider-not-found` | 网络或操作准入被拒绝，或指定 Provider 不存在。 |
+| `continuation-not-found`、`continuation-unavailable`、`protected-reasoning-rejected` | 保留宿主既有续接、回放与受保护推理判定，不据此生成通用重试。 |
+| `upstream` | 可以携带 status、retry-after、model-error-kind 与 transport-failure 事实；重试与 failover 决策仍归宿主。 |
+| `trapped`、`cancelled`、`deadline-exceeded`、`resource-exhausted` | 保留独立生命周期失败，不能因为附带上游状态或重试提示而变成可重放请求。 |
+
+未知错误代码保守处理为无法解析的响应，不默认可重试。`transport-failure` 保留开放字符串，但未知值不建立 WebSocket 专属回退安全性；`model-error-kind` 使用带 `other(string)` 的 variant 保存未知模型错误。`operation-kind`、`error-kind` 与既有 record 布局保持封闭；修改它们需要主版本升级。minor 只增加独立可选接口或开放键值能力，不增加必需 export。
+
 ### 实现与验证入口
 
 - 所有 crate（包括 Wasm 契约 fixture）的 package 版本与依赖统一由根 `Cargo.toml` 的 workspace 声明，依赖解析由唯一的根 `Cargo.lock` 管理；子清单继承 workspace，不维护独立版本、依赖版本或锁文件。

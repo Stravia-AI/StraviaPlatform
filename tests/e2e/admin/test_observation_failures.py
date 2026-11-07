@@ -412,7 +412,7 @@ def test_startup_reconciliation_completes_trace_tombstone(stravia_binary: Path) 
             assert trace_directory.is_dir()
             manifest_path = trace_directory / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            assert manifest["schema_version"] == 2
+            assert manifest["schema_version"] == 3
             assert manifest["trace_id"] == trace_id
             manifest["tombstoned"] = True
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

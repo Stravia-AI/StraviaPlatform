@@ -68,9 +68,9 @@ async fn rejects_forbidden_wasi_interfaces_and_versions() {
 #[tokio::test]
 async fn accepts_compatible_vendor_abi_before_descriptor_admission() {
     let runtime = VendorRuntime::new().expect("runtime");
-    for version in ["0.6.0"] {
-        for interface in ["host", "types"] {
-            let name = format!("stravia:vendor/{interface}@{version}");
+    for version in ["1.0.0", "1.0.1", "1.0.99"] {
+        for interface in ["vendor/host", "vendor/types", "net/types", "net/http", "net/websocket"] {
+            let name = format!("stravia:{interface}@{version}");
             let bytes = wat::parse_str(format!("(component (import \"{name}\" (instance)))"))
                 .expect("valid component without guest exports");
             match runtime.load(&bytes).await {
@@ -83,27 +83,55 @@ async fn accepts_compatible_vendor_abi_before_descriptor_admission() {
 }
 
 #[tokio::test]
-async fn rejects_retired_vendor_abi_before_descriptor_admission() {
+async fn rejects_incompatible_vendor_abi_before_descriptor_admission() {
+    let runtime = VendorRuntime::new().expect("runtime");
+    for version in ["0.4.0", "0.5.2", "0.6.0", "0.6.1", "2.0.0"] {
+        for interface in ["vendor/host", "vendor/types", "net/types", "net/http", "net/websocket"] {
+            let name = format!("stravia:{interface}@{version}");
+            let bytes = wat::parse_str(format!("(component (import \"{name}\" (instance)))"))
+                .expect("valid incompatible-ABI component");
+            match runtime.load(&bytes).await {
+                Err(error @ LoadError::IncompatibleAbi { .. }) => {
+                    assert!(error.to_string().contains("rebuild"), "{error}");
+                }
+                Err(other) => panic!("{name}: expected IncompatibleAbi, got {other:?}"),
+                Ok(_) => panic!("{name}: incompatible ABI was admitted"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejects_newer_minor_with_structured_error() {
+    let runtime = VendorRuntime::new().expect("runtime");
+    for interface in ["vendor/host", "vendor/types", "net/types", "net/http", "net/websocket"] {
+        let interface = format!("stravia:{interface}");
+        let name = format!("{interface}@1.1.3");
+        let bytes = wat::parse_str(format!("(component (import \"{name}\" (instance)))"))
+            .expect("valid newer-ABI component");
+        match runtime.load(&bytes).await {
+            Err(LoadError::RequiresNewerHost { interface: actual, required, available }) => {
+                assert_eq!(actual, interface);
+                assert_eq!(required, "1.1.3");
+                assert_eq!(available, "1.0.0");
+            }
+            Err(other) => panic!("{name}: expected RequiresNewerHost, got {other:?}"),
+            Ok(_) => panic!("{name}: newer ABI was admitted"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejects_unknown_and_unstable_vendor_interfaces() {
     let runtime = VendorRuntime::new().expect("runtime");
     for name in [
-        "stravia:vendor/host@0.4.0",
-        "stravia:vendor/types@0.4.0",
-        "stravia:vendor/host@0.5.0",
-        "stravia:vendor/types@0.5.0",
-        "stravia:vendor/host@0.5.1",
-        "stravia:vendor/types@0.5.1",
-        "stravia:vendor/host@0.5.2",
-        "stravia:vendor/types@0.5.2",
-        "stravia:vendor/host@0.6.1",
-        "stravia:vendor/types@0.6.1",
+        "stravia:vendor/other@1.0.0",
+        "stravia:net/other@1.0.0",
+        "stravia:vendor/host@1.0.0-rc.1",
     ] {
         let bytes = wat::parse_str(format!("(component (import \"{name}\" (instance)))"))
-            .expect("valid retired-ABI component");
-        match runtime.load(&bytes).await {
-            Err(LoadError::ForbiddenImport(actual)) => assert_eq!(actual, name),
-            Err(other) => panic!("{name}: expected ForbiddenImport, got {other:?}"),
-            Ok(_) => panic!("{name}: retired vendor ABI was admitted"),
-        }
+            .expect("valid component");
+        assert!(matches!(runtime.load(&bytes).await, Err(LoadError::ForbiddenImport(actual)) if actual == name));
     }
 }
 

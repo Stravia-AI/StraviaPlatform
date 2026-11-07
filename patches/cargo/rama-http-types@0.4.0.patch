@@ -1,0 +1,34 @@
+# Rama 0.4.0 early HTTP/2 frame fidelity fixes.
+# Preserve configured frames and flow-control credit; encode PRIORITY,
+# including idle streams, without panics or waiting for unrelated input.
+diff --git a/src/proto/h2/frame/early_frame.rs b/src/proto/h2/frame/early_frame.rs
+index be94724..b19d4d2 100644
+--- a/src/proto/h2/frame/early_frame.rs
++++ b/src/proto/h2/frame/early_frame.rs
+@@ -17,7 +17,8 @@ impl EarlyFrame {
+     #[must_use]
+     pub fn stream_created(&self, next_stream_id: StreamId) -> bool {
+         match self {
+-            Self::Priority(priority) => next_stream_id > priority.stream_id,
++            // RFC 7540 permits PRIORITY on idle streams without opening them.
++            Self::Priority(_) => true,
+             Self::Settings(_) => true,
+             Self::WindowUpdate(window_update) => next_stream_id > window_update.stream_id,
+         }
+@@ -59,16 +60,6 @@ impl EarlyFrameStreamContext {
+ 
+     #[must_use]
+     pub fn new_replayer(mut frames: Vec<EarlyFrame>) -> (Self, Option<Settings>) {
+-        let mut seen_connection_window_update = false;
+-        frames.retain(|frame| match frame {
+-            EarlyFrame::WindowUpdate(window_update) if window_update.stream_id.is_zero() => {
+-                let keep = !seen_connection_window_update;
+-                seen_connection_window_update = true;
+-                keep
+-            }
+-            _ => true,
+-        });
+-
+         frames.reverse();
+         let settings = match frames.pop() {
+             Some(frame) => match frame {

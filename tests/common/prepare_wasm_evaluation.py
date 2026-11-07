@@ -288,7 +288,11 @@ def prepare(args) -> dict:
                     if record.get("message_type") in {"response_headers", "response_head"}:
                         captured_headers = record.get("headers") or {}
                         allowed = {"content-type", "content-encoding"}
-                        headers = [[k, str(v)] for k, v in captured_headers.items() if k.lower() in allowed]
+                        if isinstance(captured_headers, list):
+                            headers = [[field["name"], bytes(field["bytes"]).decode("latin-1")]
+                                       for field in captured_headers if field["name"].lower() in allowed]
+                        else:
+                            headers = [[k, str(v)] for k, v in captured_headers.items() if k.lower() in allowed]
                         header = {"kind": "http", "status": record.get("status_code") or 200, "headers": headers,
                                   "exchange": max(exchange, 0), "request_path": request_path}
                         continue

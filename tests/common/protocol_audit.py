@@ -150,13 +150,12 @@ def _wire(session: Any, detail: dict, deadline: float, credential_expectations: 
                     if event.get("headers") or event.get("url"):
                         wire_events.append({key: event.get(key) for key in ("direction", "headers", "url")})
                     if event.get("direction") == "client_to_platform":
-                        headers = event.get("headers") or {}
-                        marker = headers.get("x-stravia-benchmark-request")
-                        if isinstance(marker, str):
-                            markers.add(marker)
-                        request_id = headers.get("x-request-id")
-                        if isinstance(request_id, str):
-                            request_ids.add(request_id)
+                        for marker in _header_values(event.get("headers"), "x-stravia-benchmark-request"):
+                            if isinstance(marker, str):
+                                markers.add(marker)
+                        for request_id in _header_values(event.get("headers"), "x-request-id"):
+                            if isinstance(request_id, str):
+                                request_ids.add(request_id)
                     if event.get("direction") in _DIRECTIONS and event.get("message_type") in {"body_chunk", "request", "request_body", "response_body"}:
                         direction = event["direction"]
                         counts[direction] += 1
@@ -179,19 +178,28 @@ def _wire(session: Any, detail: dict, deadline: float, credential_expectations: 
     return result
 
 
+def _header_values(headers: Any, name: str) -> list[Any]:
+    if isinstance(headers, list):
+        return [bytes(field["bytes"]).decode("latin-1") for field in headers
+                if field["name"].lower() == name]
+    values = []
+    for key, raw in (headers or {}).items():
+        if key.lower() == name:
+            values.extend(raw if isinstance(raw, list) else [raw])
+    return values
+
+
 def _credential_wire(expected: dict, events: list[dict], bodies: dict) -> dict:
     """Summarize actual archive bytes without retaining secrets or references."""
     def authorization(direction: str) -> bool:
         values = [value for event in events if event.get("direction") == direction
-                  for key, raw in (event.get("headers") or {}).items() if key.lower() == "authorization"
-                  for value in (raw if isinstance(raw, list) else [raw])]
+                  for value in _header_values(event.get("headers"), "authorization")]
         return bool(values) and all(value == "***" for value in values)
 
     secrets = expected.get("secrets", ())
     native_headers = [
         value for event in events if event.get("direction") == "platform_to_upstream"
-        for key, raw in (event.get("headers") or {}).items() if key.lower() == "x-api-key"
-        for value in (raw if isinstance(raw, list) else [raw])]
+        for value in _header_values(event.get("headers"), "x-api-key")]
     native_query = [
         value for event in events if event.get("direction") == "platform_to_upstream"
         for value in parse_qs(urlsplit(event.get("url") or "").query).get("key", [])]
