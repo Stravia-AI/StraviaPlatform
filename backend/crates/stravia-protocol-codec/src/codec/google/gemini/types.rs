@@ -110,6 +110,8 @@ pub struct GoogleFunctionResponse {
     pub id: Option<String>,
     pub name: String,
     pub response: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<GooglePart>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -21,7 +21,7 @@ pub(crate) fn execute(
             "Antigravity request could not be encoded",
         )
     })?;
-    let payload = connection_check::json(
+    let response = client::http_start(
         host,
         HttpRequest {
             method: "POST".into(),
@@ -30,6 +30,7 @@ pub(crate) fn execute(
             body,
         },
     )?;
+    let payload = connection_check::read_json(&response)?;
     payload
         .get("models")
         .and_then(Value::as_object)

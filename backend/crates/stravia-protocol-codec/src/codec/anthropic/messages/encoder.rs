@@ -1295,7 +1295,7 @@ fn anthropic_tool_result_payload(
                 )
             });
             let mut blocks = blocks;
-            if let Some(index) = result_index {
+            if let Some(index) = result_index.filter(|_| blocks.len() == 1) {
                 match blocks.swap_remove(index) {
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -1316,11 +1316,35 @@ fn anthropic_tool_result_payload(
                     _ => unreachable!("selected a tool result"),
                 }
             }
+            let mut hinted_tool_use_id = None;
             (
                 Value::Array(
                     blocks
                         .into_iter()
                         .flat_map(|block| {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                content_kind,
+                                ..
+                            }
+                            | ContentBlock::ServerToolResult {
+                                tool_use_id,
+                                content,
+                                content_kind,
+                                ..
+                            } = block
+                            {
+                                hinted_tool_use_id.get_or_insert_with(|| tool_use_id.into_string());
+                                return match anthropic_tool_result_content(content, content_kind) {
+                                    Value::String(text) => vec![object([
+                                        ("type", Value::String("text".into())),
+                                        ("text", Value::String(text)),
+                                    ])],
+                                    Value::Array(blocks) => blocks,
+                                    _ => Vec::new(),
+                                };
+                            }
                             encode_content_block_for_anthropic_with_ids(
                                 block,
                                 generated_tool_id_seq,
@@ -1342,7 +1366,7 @@ fn anthropic_tool_result_payload(
                         })
                         .collect(),
                 ),
-                None,
+                hinted_tool_use_id,
             )
         }
     }

@@ -1,6 +1,6 @@
 # Antigravity CLI OAuth 与模型协议调研
 
-调研日期：2026-10-04。对应实现：`backend/crates/stravia-vendor-antigravity/`。
+调研日期：2026-10-04；请求头与工具附件实测更新：2026-11-06。对应实现：`backend/crates/stravia-vendor-antigravity/`。
 
 ## 结论与证据边界
 
@@ -109,15 +109,20 @@ openid
 
 ### 请求头
 
-模型、项目与额度 POST 由插件固定构造：
+模型、项目与额度 POST 采用 2026-11-06 实际捕获的 agy 1.5.1 Linux/amd64 profile，由插件固定构造身份与内容类型，宿主协商响应压缩：
 
 ```text
 Authorization: Bearer <this connection's access token>
 Content-Type: application/json
-User-Agent: antigravity/cli/1.2.16 (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)
+User-Agent: antigravity/cli/1.5.1 (aidev_client; os_type=linux; arch=amd64; cl=1014269460; auth_method=consumer)
+Accept-Encoding: gzip
 ```
 
-`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。官方发布标签 1.2.16 的 Windows 二进制实际请求标识为 `antigravity/cli/1.2.17 (aidev_client; os_type=windows; arch=amd64; cl=993434119; auth_method=consumer)`。插件保留已验证的固定 Linux/amd64 与发布版本声明，没有复制构建号；最小差分验证表明仅补回 `/cli/` 即可恢复清单。实际请求捕获与验证见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。
+`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。早期最小差分验证表明仅补回 `/cli/` 即可恢复清单，见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。当前版本与构建号取自官方 1.5.1 实际请求，不从发布标签或其它平台的二进制推测。
+
+这里的模型后端指 agy 实际访问的 `daily-cloudcode-pa.googleapis.com`，不是另一种客户端。本插件的模型后端操作选择 HTTP/1.1；请求体不压缩，响应只声明 gzip 压缩，未压缩响应也可读取。推理声明唯一 `Transfer-Encoding: chunked` 作为宿主传输选项，由宿主实际分帧，不把已编码 JSON 字节伪装成分块正文。模型目录、项目、额度和生图使用定长 JSON。SSE 不额外声明 `Accept: text/event-stream`；宿主保留未修改 reqwest 自动添加的 `Accept: */*`，接受它与官方样本的差异。头名称大小写与顺序、JSON 排列及 TLS 指纹不宣称与 Go 逐字相同。
+
+OAuth 使用独立的 `oauth2.googleapis.com/token` profile：`Content-Type: application/x-www-form-urlencoded`、`User-Agent: Go-http-client/2.0`、`Accept-Encoding: gzip`，由传输层计算正文长度。官方样本没有 `Accept`，当前宿主仍会添加 `Accept: */*`。它不使用模型后端的 CLI UA 或 HTTP/1-only 选项；保持默认 HTTP 协商，本次官方刷新实际使用 HTTP/2。管理员的代理和强制 HTTP/1 配置仍按现有契约生效，不承诺这种非捕获配置下的协议／UA 组合与官方逐字一致。交换和刷新继续使用原有表单认证方式，不新增 Basic 探测或自动重试。
 
 operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注入社区代理常见的 `X-Goog-Api-Client` 或 `Client-Metadata`；本插件也不注入它们。不读取或合并 ProviderSnapshot.client_headers，不允许下游替换 Bearer、User-Agent 或增加供应商自定义头。Host、Content-Length、HTTP/2 framing 等传输层必需信息由宿主 HTTP 实现负责，不宣称是完整 CLI transport fingerprint。
 
@@ -125,7 +130,7 @@ operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注�
 
 推理统一请求 `POST /v1internal:streamGenerateContent?alt=sse`，非流式下游也由现有累积器收束。
 
-外层只构造 `project`、`model`、`request`、`userAgent`、`requestType`、`requestId`。project 来自该账号，model 来自宿主 Target，requestId 随调用生成；不接受外部 envelope 覆盖。上述字段在实际外层 GenerateContentRequest 描述符中存在；`userAgent=antigravity`、`requestType=agent` 的既有取值参考固定社区源码，不等同于逐条原生抓包证明。2026-10-22 另核对[官方 CLI 1.3.5 Linux 产物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)：`computeRequestID` 无原生操作上下文时使用 `requestType/UUIDv4`，因此文本／图片请求由旧社区形态 `agent-UUID` 改为 `agent/UUID`；`getSessionID` 对完整 UTF-8 使用 FNV-1a64，再以 signed int64 十进制输出。插件只转换可信宿主 session affinity，不捏造原生操作树；上层输入结构的准确字段名及服务端校验尚未证实。算法、作用域、向量与本地验证边界见[会话与请求 ID 契约](../design/vendor-plugins.md#会话与请求-id)。
+外层只构造 `project`、`model`、`request`、`userAgent`、`requestType`、`requestId`。project 来自该账号，model 来自宿主 Target，requestId 随调用生成；不接受外部 envelope 覆盖。上述字段在实际外层 GenerateContentRequest 描述符中存在，2026-11-06 官方 agy 1.5.1 抓包确认推理的 `userAgent=antigravity`、`requestType=agent`，生图则为 `requestType=image_gen`。2026-10-22 核对的[官方 CLI 1.3.5 Linux 产物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)表明，无原生操作上下文时 `computeRequestID` 使用 `requestType/UUIDv4`；文本推理保留 `agent/UUIDv4` fallback，独立生图按新抓包采用 `image_gen/<毫秒时间戳>/<UUIDv4>/1`，不伪造 CLI 的共享操作树或计数。`getSessionID` 对完整 UTF-8 使用 FNV-1a64，再以 signed int64 十进制输出；插件只转换可信宿主 session affinity。上层输入结构的准确字段名及服务端校验尚未证实。算法、作用域、向量与本地验证边界见[会话与请求 ID 契约](../design/vendor-plugins.md#会话与请求-id)。
 
 内层递归投影：
 
@@ -156,6 +161,8 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 
 `args`、工具 `response`、schema `default`/`example` 是业务 JSON，不把其中名为 seed、metadata 或其他任意业务键当成协议参数删除。真实 thoughtSignature 原样保留，绝不生成伪造签名。
 
+`functionResponse.parts` 中的 inlineData/fileData 在 Gemini 解码时转成与业务 ToolResult 同属一个调用的 canonical 媒体块；编码时重新放回该 functionResponse，连续的并行工具结果合并到同一轮 content。上下文重写保持复合结果原子性，Observation 记录完整结果；转换为 Anthropic 或 Responses 时，业务 JSON 与支持的附件仍绑定同一个工具调用。URL 图片沿用现有 canonical 载体，只保证 URL 身份，不承诺保留其可选 MIME 提示；不为仅支持文本工具结果的 Chat Completions 增加多模态扩展。
+
 **删除边界**：cachedContent、labels、metadata、外部 project/session/request 身份、未知 Content/Part/Tool/Schema 字段，以及未纳入子集的 seed、presence/frequency penalty、logprobs、routingConfig、parallel-tool 控制等均不送上游。标准协议编码前先清除不支持的 canonical generation 控制和非 Google 协议扩展，编码后再投影 Google raw 扩展，防止同协议透传绕过白名单；不伪造原始协议标记来绕过共享 codec 校验。
 
 可携带的工具定义、工具选择、stop 和响应格式由插件按 private master 边界构造，再统一投影。工具选择映射为 AUTO/NONE/ANY，具名选择附带 allowedFunctionNames；同协议原始工具配置保留后再清理。函数 `strict`、响应格式的 name/strict 不进入 CLI 请求，实际 schema 约束与业务 default/example 保留。此处理避免公开 Gemini codec 拒绝已经清除的外来控制，或删除私有 Schema 已有的字段；其他插件和共享 codec 校验不变。
@@ -172,6 +179,46 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 依据 [Protobuf field presence](https://protobuf.dev/programming-guides/field_presence/)，上述已存在消息中的隐式 presence 标量省略等于零；缺失整个消息并不等于存在且全零。插件因此仅在已见终态、`usageMetadata` 为对象且报告有效 prompt 与 output/total 计数时，将省略的 `cachedContentTokenCount` 归一化为零。终态前的部分 usage、缺失 usage、无效计数与显式缓存值保持原样。共享 Gemini codec 不采用该私有规则；`thoughtsTokenCount` 独立保留，累计输出包含思考一次，后续累计修订覆盖已有快照。
 
 ## 6. 本地及真实账号验证与限制
+
+### 2026-11-06：agy 1.5.1 请求头与工具附件
+
+先对官方 agy、OMP 与 Stravia 的附件、多轮和工具循环进行实际对比，确认原生 `functionResponse.parts` 在共享 Gemini 解码时被丢弃，而不是 Antigravity 的出站白名单删除。修复后使用已授权的 agy 登录凭据，以相同 `gemini-3.8-flash-medium` 加载重新构建的真实 Wasm：PDF 工具结果返回 `PDFCHECK 7319`，PNG 工具结果识别为 `Red`，PDF 后续轮正确返回 `7320`，均未再次请求读文件。捕获的 6 次请求（模型发现及 5 次推理）全部 HTTP 200，UA 与 gzip 协商一致，PDF/PNG 附件字节摘要与输入相同；模型目录实际返回 gzip，SSE 未压缩。
+
+上述第一轮真实调用覆盖 native codec → Wasm → Google 上游；隔离捕获桥负责 HTTP 与 gzip 解压，不等同于独立 Server 管理登录、HTTP 入口或 UI 的端到端验证。没有修改原登录文件，保留的证据不包含凭据、项目 ID、签名正文或附件正文。该轮未修改 requestId、labels、工具结果 role 和默认输出上限，不能据此宣称全部请求体或底层传输指纹与官方逐字一致。
+
+### 2026-11-06：原始分帧与原生生图
+
+官方 agy 1.5.1 的推理请求使用 HTTP/1.1 chunked；目录查询及原生 `generate_image` 使用 Content-Length。生图抓到三次 `POST /v1internal:generateContent`：前两次 HTTP 200 但仅有失败 `finishMessage`，第三次返回 gzip JSON、STOP 和 JPEG 图片。参考图编辑另抓到提示文本在前、`inlineData` 在后，默认 `aspectRatio: "1:1"`；该次真实响应为 429 RESOURCE_EXHAUSTED，提示约五小时后恢复，因此未重试。生图没有额外系统提示或 `responseModalities`，不是普通推理的 SSE 分支。
+
+修改后重新构建独立插件与 Server，在全新 SQLite 实例执行管理登录、原生 Gemini HTTP 入口和 MCP。Provider/OAuth 记录使用隔离测试种子；真实 agy 凭据只由 loopback 桥在转发 Google 时读取，不写入 Server 测试库。五次真实上游推理全部成功：PDF 返回 `PDFCHECK 7319`、PNG 返回 `Red`、第三轮返回 `7320`，附件没有引发再次读文件。原始 HTTP 接收器确认每次都是 HTTP/1.1、chunked、无 Content-Length，并验证十六进制块长、CRLF、终止块和重组后的附件摘要。宿主回归还覆盖空正文、压缩后分帧、保留正文的 307 与清空正文的 303，以及歧义 framing 拒绝。
+
+图片配额已耗尽，不能把修复后的真实上游生图成功记为通过。成功路径改用官方成功响应结构与摘要相同的图片字节回放（省略未消费的 thoughtSignature），实际经过 Wasm、宿主 gzip 解压、MCP `generate`、Core 图片校验、Artifact 收存和 HTTP 下载，得到字节一致的 1024×1024、340003 字节 JPEG。参考图顺序、所选模型、策略拒绝、失败诊断、缺失终态和 429 由真实 Wasm／本地 HTTP 合约覆盖；不冒充真实编辑结果。
+
+保留证据位于本次工作区 `target/antigravity-compare-20261106-8rozh0ek/` 的 `framing-image-verification.json`、`native-image-captures/` 和 `server-wire-captures/`；鉴权、项目、签名及媒体正文均脱敏。原始分帧来自 Server→loopback 桥，不是 Server 直连 Google 的 TLS 捕获。未验证桌面壳/UI、HTTP/2 或 TLS 指纹完全一致；生图显式分辨率选项也未获本次官方样本验证。
+
+### 2026-11-06：默认请求头与 OAuth profile 分离
+
+以下是已撤销的默认头抑制补丁的历史验证，不代表当前 `Accept` 行为。当前实现恢复官方 reqwest 并接受额外的 `Accept: */*`，保留 HTTP 协商、OAuth UA、gzip 和请求体修复。
+
+隔离复制 agy 登录文件并只修改副本的 expiry，执行官方 `agy models`，实际刷新返回 HTTP 200：`oauth2.googleapis.com/token` 使用 HTTP/2、`Go-http-client/2.0`、表单 Content-Type、准确的 Content-Length 和 gzip，既没有 Accept，也没有 Authorization；认证参数在表单中。同次 `loadCodeAssist`、`fetchAvailableModels`、`retrieveUserQuotaSummary` 均为 HTTP/1.1、CLI UA、定长 JSON、Bearer 和 gzip，无 Accept。
+
+精确 1.5.1 二进制的 Go 函数／行号映射确认授权码交换与刷新共用 OAuth HTTP 构造路径，但也存在 Basic auth-style 探测分支。没有重新登录进行授权码交换抓包，未向 Google 发送伪造授权码，因此不能把刷新请求的认证形式当成授权码交换的实测结果。本次保留既有表单认证，不引入未经验证的探测或重试。
+
+reqwest 在实际发送前补入默认 `Accept: */*`，仅修改插件 header 列表无法移除。当时为消除差异使用了逐请求补丁和显式宿主选项，保留原 TLS 验证与代理实现。在新建 Server／SQLite 中导入重建的 Wasm，用临时 CA 仅配置该 Server 进程，经本机 TLS 捕获代理转发真实 Google；原始 agy 登录文件未改，凭据副本仅存于随后删除的私有测试目录。
+
+13 次真实 Google 请求全部 HTTP 200：1 次刷新、2 次项目读取、3 次模型清单、1 次额度、6 次推理。检查了完整 header 名称集合及非凭据值，忽略名称大小写和顺序，动态正文长度按实际字节数核对；无额外 Accept。OAuth 实际协商 HTTP/2，其余使用 HTTP/1.1；推理为 chunked、无 Content-Length，普通 JSON 使用准确长度。PDF、PNG 工具结果与第三轮分别得到 `PDFCHECK 7319`、`Red`、`7320`，媒体摘要不变且未重复读文件。
+
+图片仍不作新的真实生成调用。最终的 gzip JSON 回放经过实际 MCP、Wasm、宿主、Artifact 与下载，得到与官方样本字节一致的 1024×1024 JPEG。回放夹具最初重复 gzip 编码，产生的六条 HTTP 200 错误正文均在报告中标记，不计为生成成功；修正的是临时夹具，不是产品错误处理或重试策略。新测试 Key 最初未开启 MCP，按既有管理 API 显式开启后再执行该路径。
+
+本轮通过 Core 网络 35 项、SDK／Runtime／Antigravity 库 89 项、真实 Antigravity Component 合约 4 项及 Runtime Component 9 项，仓库 Rust 格式检查、相关 crate 全 target Clippy 和 Server／插件构建通过。移除 Cargo update 顺带产生的无关传递依赖重选后，锁定模式再次通过上述 137 项、Server 构建与 Clippy；重启最终构建的 Server，真实请求再次返回 `AGY_HEADERS_VERIFIED`，其冷启动模型查询与推理头也已核对。脱敏记录为 `target/antigravity-compare-20261106-8rozh0ek/header-verification.json`、`header-captures/` 与 `official-oauth/`。这不覆盖授权码交换的实际认证头、管理员强制 HTTP/1 下的 OAuth UA 回退、TLS 指纹、头顺序或 UI／桌面壳。
+
+### 2026-11-07：撤销 reqwest 默认头补丁
+
+恢复 registry 发布的 reqwest 0.13.5，删除默认头禁用字段、依赖补丁、准备脚本及 Task／CI／Docker／Nix／开发启动器接线；接受宿主自动添加 `Accept: */*`，不替换 TLS 实现。原有 HTTP/1、gzip、chunked、附件续接和原生生图修复保留。
+
+锁定构建通过 Core 网络 35 项、SDK／Runtime／Antigravity 库 89 项、Runtime Component 9 项和 Antigravity Component 4 项，共 137 项。Server、10 个独立插件与 21 个测试组件重建成功；Rust 格式、相关 crate Clippy、工作流 actionlint、开发启动器语法检查和 Nix 求值通过。重建 Server 在全新 SQLite 中导入当前 Wasm，经 loopback 原始 HTTP 接收器实际完成模型查询和三次推理调用：均带 `Accept: */*` 与 gzip 协商，模型查询定长、推理为真实 chunked；压缩响应可解码，多轮历史与工具 PDF 字节保持完整。脱敏结果在 `target/reqwest-removal-verification.json`。此轮使用本地合成上游，不调用 Google；不覆盖真实 OAuth、图片生成、TLS 指纹或完整 Docker／Nix 构建。
+
+### 早期接入验证
 
 已运行 native 编译、SDK 授权码策略用例及插件解析用例；`task build:vendors:all` 生成含新插件的八个自包含组件。临时可执行入口实际加载发布 Wasm，通过 loopback HTTP 运行授权开始、错误 state 拒绝、手动交换、异步 operation、账号模型、共享额度、刷新、推理文本/工具/签名、字段清理、截断与 429 错误。跨 OpenAI 入口还验证外来控制清除、具名工具选择、schema 引用与可空类型、业务默认值和结构化输出约束；对应 opt-in 回归位于 `tests/contract.rs`，并纳入 `task test:all` 的本地 ignored allowlist。SDK 17 个、插件 11 个、真实 Wasm/HTTP 合约 1 个、Server OAuth callback 8 个用例通过；定向 Clippy 和仓库 Rust 格式检查通过。
 

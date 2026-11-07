@@ -746,6 +746,7 @@ impl StoreState {
         &mut self,
         request: wit_types::HttpRequest,
         compression: Option<wit_types::HttpCompression>,
+        http1_only: bool,
     ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
     {
         if let Err(error) = self.network_active() {
@@ -764,6 +765,7 @@ impl StoreState {
                     .map(convert_http_content_coding)
                     .collect(),
             }),
+            http1_only,
         };
         match self.services.http_start(request) {
             Ok(response) => self
@@ -811,7 +813,7 @@ impl wit_host::Host for StoreState {
         request: wit_types::HttpRequest,
     ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
     {
-        self.start_http(request, None)
+        self.start_http(request, None, false)
     }
 
     async fn http_start_with_compression(
@@ -820,7 +822,19 @@ impl wit_host::Host for StoreState {
         compression: wit_types::HttpCompression,
     ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
     {
-        self.start_http(request, Some(compression))
+        self.start_http(request, Some(compression), false)
+    }
+
+    /// The new WIT entry point requires a host built against this updated
+    /// contract. Existing entries retain their HTTP negotiation behavior;
+    /// only this entry point carries explicit options.
+    async fn http_start_with_options(
+        &mut self,
+        request: wit_types::HttpRequest,
+        options: wit_types::HttpRequestOptions,
+    ) -> Result<Result<Resource<HttpResponseResource>, wit_types::PluginError>, wasmtime::Error>
+    {
+        self.start_http(request, options.compression, options.http1_only)
     }
 
     async fn ws_connect(

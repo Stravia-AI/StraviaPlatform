@@ -24,18 +24,38 @@ impl GuestHost {
     /// resource. Waiting happens only in `status`, `headers`, and `read_body`.
     /// Manual compression headers and pre-encoded request bytes retain their
     /// legacy behavior; use `http_start_with_compression` for host-owned coding.
+    /// A single `Transfer-Encoding: chunked` opts into host-framed HTTP/1.1;
+    /// provide unframed bytes, without Content-Length. Other transfer codings
+    /// and duplicate declarations are rejected before sending.
     pub fn http_start(&self, request: types::HttpRequest) -> Result<HttpResponse, PluginError> {
         host::http_start(&request)
     }
 
     /// Admit an HTTP request with host-owned compression. Bodies are application
     /// bytes; do not provide Accept-Encoding, Content-Encoding, or Content-Length.
+    /// The same explicit chunked option as `http_start` applies after compression.
     pub fn http_start_with_compression(
         &self,
         request: types::HttpRequest,
         compression: types::HttpCompression,
     ) -> Result<HttpResponse, PluginError> {
         host::http_start_with_compression(&request, &compression)
+    }
+
+    /// Admit an HTTP request with explicit transport options. This new entry
+    /// point requires a host built against the updated WIT contract; older
+    /// hosts that do not implement `http-start-with-options` cannot load a
+    /// plugin importing it.
+    /// `http1_only: true` restricts HTTP protocol negotiation to
+    /// HTTP/1.1. TLS, proxy, redirect, network permission, and failure handling
+    /// are unchanged. A `compression` policy uses the same host-owned coding and
+    /// explicit chunked framing as `http_start_with_compression`.
+    pub fn http_start_with_options(
+        &self,
+        request: types::HttpRequest,
+        options: types::HttpRequestOptions,
+    ) -> Result<HttpResponse, PluginError> {
+        host::http_start_with_options(&request, &options)
     }
 
     /// Connect with the plugin's cross-request reuse policy. A missing

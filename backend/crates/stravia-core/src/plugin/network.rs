@@ -234,7 +234,7 @@ impl Drop for VendorWebSocketPool {
 #[derive(Clone)]
 pub(crate) struct VendorNetwork {
     http: Client,
-    websocket: Client,
+    http1: Client,
     origins: NetworkPolicy,
     operation: Arc<VendorOperation>,
     cancellation: CancellationToken,
@@ -258,12 +258,18 @@ struct WireDiagnostic<'a> {
     headers: Option<&'a HeaderMap>,
 }
 
+struct HttpSendOptions {
+    explicit_compression: bool,
+    http1_only: bool,
+}
+
 impl VendorNetwork {
     /// Clients must have automatic redirects disabled. Every redirect hop is
     /// independently authorized here before any bytes leave the process.
+    /// The second client must be HTTP/1-only, with the same proxy and TLS policy.
     pub(crate) fn new(
         http: Client,
-        websocket: Client,
+        http1: Client,
         origins: NetworkPolicy,
         operation: Arc<VendorOperation>,
         cancellation: CancellationToken,
@@ -276,7 +282,7 @@ impl VendorNetwork {
         }
         Self {
             http,
-            websocket,
+            http1,
             origins,
             operation,
             cancellation,
@@ -437,7 +443,7 @@ impl VendorNetwork {
 
     pub(crate) fn http_start(
         &self,
-        request: HttpRequest,
+        mut request: HttpRequest,
     ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let url = self.url(&request.url, false)?;
         let method = Method::from_bytes(request.method.as_bytes())
@@ -445,9 +451,16 @@ impl VendorNetwork {
         if method == Method::CONNECT {
             return Err(invalid("HTTP CONNECT is not a vendor operation"));
         }
+        let chunked = http::take_chunked_header(&mut request.headers)?;
         let mut headers = request_headers(request.headers, &url)?;
         if let Some(compression) = &request.compression {
             http::prepare(&mut headers, compression)?;
+        }
+        if chunked {
+            headers.insert(
+                reqwest::header::TRANSFER_ENCODING,
+                HeaderValue::from_static("chunked"),
+            );
         }
         let legacy_decode = headers.contains_key(reqwest::header::ACCEPT_ENCODING);
         let network = self.clone();
@@ -461,7 +474,10 @@ impl VendorNetwork {
                     body = http::encode(request.body, request.compression.as_ref().and_then(|policy| policy.request)) => body?,
                 };
                 let response = sending
-                    .send_http(method.clone(), url, headers, body, request.compression.is_some())
+                    .send_http(method.clone(), url, headers, body, HttpSendOptions {
+                        explicit_compression: request.compression.is_some(),
+                        http1_only: request.http1_only,
+                    })
                     .await?;
                 match &request.compression {
                     Some(compression) => UpstreamResponse::decoded(response, &method, compression).await,
@@ -484,7 +500,7 @@ impl VendorNetwork {
         mut url: Url,
         mut headers: HeaderMap,
         mut body: Bytes,
-        explicit_compression: bool,
+        options: HttpSendOptions,
     ) -> Result<Response, HostFailure> {
         for redirects in 0..=MAX_REDIRECTS {
             self.ensure_current()?;
@@ -500,13 +516,37 @@ impl VendorNetwork {
                 },
                 || crate::interaction_observation::WirePayload::Bytes(body.clone()),
             );
-            let response = async { tokio::select! {
-                _ = self.cancelled() => Err(cancelled()),
-                result = self.http.request(method.clone(), url.clone())
-                    .headers(headers.clone()).body(body.clone()).send() => result.map_err(transport_failure),
-            }}.instrument(tracing::info_span!(
+            let chunked = headers.contains_key(reqwest::header::TRANSFER_ENCODING);
+            let client = if options.http1_only || chunked {
+                &self.http1
+            } else {
+                &self.http
+            };
+            let request_body = if chunked {
+                // HTTP/2 会移除 Transfer-Encoding；复用同配置的 HTTP/1 客户端。
+                // 未知长度的 body 让 hyper 真正编码分块及终止块，空正文也保持该契约。
+                let stream =
+                    futures::stream::once(std::future::ready(Ok::<_, std::convert::Infallible>(
+                        body.clone(),
+                    )));
+                reqwest::Body::wrap_stream(stream)
+            } else {
+                reqwest::Body::from(body.clone())
+            };
+            let request = client
+                .request(method.clone(), url.clone())
+                .headers(headers.clone())
+                .body(request_body);
+            let response = async {
+                tokio::select! {
+                    _ = self.cancelled() => Err(cancelled()),
+                    result = request.send() => result.map_err(transport_failure),
+                }
+            }
+            .instrument(tracing::info_span!(
                 target: "stravia::perf", "upstream.http.response_headers.wait"
-            )).await?;
+            ))
+            .await?;
             let status = response.status().as_u16();
             self.wire(
                 WireDiagnostic {
@@ -541,6 +581,7 @@ impl VendorNetwork {
                 body = Bytes::new();
                 headers.remove(reqwest::header::CONTENT_TYPE);
                 headers.remove(reqwest::header::CONTENT_ENCODING);
+                headers.remove(reqwest::header::TRANSFER_ENCODING);
             }
             if next.origin() != url.origin() {
                 // Bodies and arbitrary custom headers can carry credentials,
@@ -550,7 +591,8 @@ impl VendorNetwork {
                         "cross-origin redirect cannot forward a request body",
                     ));
                 }
-                let accept_encoding = explicit_compression
+                let accept_encoding = options
+                    .explicit_compression
                     .then(|| headers.get(reqwest::header::ACCEPT_ENCODING).cloned())
                     .flatten();
                 headers.clear();
@@ -663,7 +705,7 @@ impl VendorNetwork {
             );
             let response = tokio::select! {
                 _ = self.cancelled() => return Err(cancelled()),
-                result = handshake.send(&self.websocket) => result.map_err(websocket_transport_failure)?,
+                result = handshake.send(&self.http1) => result.map_err(websocket_transport_failure)?,
             };
             let status = response.status().as_u16();
             self.wire(

@@ -59,6 +59,7 @@ impl GoogleEncoder {
 
         let mut contents: Vec<Value> = Vec::new();
         let mut previous_was_assistant = false;
+        let mut previous_was_tool = false;
         for msg in req.items {
             if matches!(msg.role, Role::System | Role::Developer) {
                 if raw_system.is_none() {
@@ -68,10 +69,23 @@ impl GoogleEncoder {
                     )]));
                 }
                 previous_was_assistant = false;
+                previous_was_tool = false;
                 continue;
             }
             let is_assistant = msg.role == Role::Assistant;
+            let is_tool = msg.role == Role::Tool;
             let mut content = encode_content(msg, &call_names)?;
+            // Canonical 按调用隔离附件；Gemini 同一轮的并行结果仍放在同一个 content。
+            if is_tool
+                && previous_was_tool
+                && let Some(previous) = contents.last_mut()
+                && let Some(parts) = previous["parts"].as_array_mut()
+                && let Some(next_parts) = content["parts"].as_array_mut()
+            {
+                parts.append(next_parts);
+                continue;
+            }
+            previous_was_tool = is_tool;
             if previous_was_assistant
                 && let Some(previous) = contents.last_mut()
                 && previous["role"] == "model"
@@ -442,11 +456,37 @@ fn encode_content(msg: AiItem, call_names: &HashMap<String, String>) -> Result<V
             {
                 // 原生工具结果已携带 JSON 响应，不能再作为媒体嵌套进空文本响应。
                 let mut parts = Vec::new();
+                let mut media_parts = Vec::new();
                 for block in blocks {
-                    if matches!(block, ContentBlock::ToolResult { .. })
-                        || tool_result_block_is_supported(&block)
-                    {
+                    if matches!(
+                        block,
+                        ContentBlock::ToolResult { .. } | ContentBlock::Text { .. }
+                    ) {
                         append_content_parts_for_gemini(&mut parts, block, call_names);
+                    } else if tool_result_block_is_supported(&block) {
+                        append_content_parts_for_gemini(&mut media_parts, block, call_names);
+                    }
+                }
+                if !media_parts.is_empty()
+                    && let Some(response) = parts
+                        .iter_mut()
+                        .find_map(|part| part.get_mut("functionResponse"))
+                {
+                    match response
+                        .as_object_mut()
+                        .expect("encoded function response")
+                        .entry("parts")
+                    {
+                        serde_json::map::Entry::Vacant(entry) => {
+                            entry.insert(Value::Array(media_parts));
+                        }
+                        serde_json::map::Entry::Occupied(mut entry) => {
+                            entry
+                                .get_mut()
+                                .as_array_mut()
+                                .expect("encoded response parts")
+                                .extend(media_parts);
+                        }
                     }
                 }
                 parts

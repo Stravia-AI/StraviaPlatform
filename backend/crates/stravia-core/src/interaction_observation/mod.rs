@@ -1096,6 +1096,27 @@ impl RunObserver {
         for item in input {
             let before = pending.len();
             if let MessageContent::Blocks(blocks) = &item.content {
+                if item.role == Role::Tool
+                    && let Some(tool_id) = &item.tool_call_id
+                    && blocks.iter().any(|block| !block.is_tool_result())
+                {
+                    // 复合工具结果的附件与业务内容共用一次调用，不能只记录其中的 JSON。
+                    pending.push(RunEvent::ClientToolResult {
+                        tool_id: tool_id.to_string(),
+                        content: serde_json::to_value(&item.content)
+                            .expect("canonical tool content"),
+                        is_error: blocks.iter().any(|block| {
+                            matches!(
+                                block,
+                                ContentBlock::ToolResult {
+                                    is_error: Some(true),
+                                    ..
+                                }
+                            )
+                        }),
+                    });
+                    continue;
+                }
                 for block in blocks {
                     if let ContentBlock::ToolResult {
                         tool_use_id,
@@ -7867,6 +7888,43 @@ mod snapshot_tests {
         assert!(events.iter().any(
             |event| event.kind == "request_failed" && event.payload["error"]["message"] == text
         ));
+        pool.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compound_tool_result_records_business_payload_and_attachment() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), true).await;
+        let item: stravia_runtime_contract::protocol::ir::AiItem = serde_json::from_value(
+            serde_json::json!({
+                "role":"tool", "tool_call_id":"read-pdf", "content":[
+                    {"type":"tool_result","tool_use_id":"read-pdf","content":{"receipt":"42"},"content_kind":"json","is_error":true},
+                    {"type":"file","source":{"type":"base64","media_type":"application/pdf","data":"JVBERg=="},"media_type":"application/pdf"}
+                ]
+            }),
+        )?;
+        let expected = serde_json::to_value(&item.content)?;
+        let run = test_run(
+            &observation,
+            "compound-tool-result",
+            facts(vec![item.clone()]),
+        );
+        run.capture_client_tool_results(&[item]);
+        run.publish_user_input();
+        drop(run);
+        observation.flush().await?;
+        let events = replayed(&observation).await?;
+        let results: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "client_tool_result")
+            .flat_map(|event| event.payload["results"].as_array().into_iter().flatten())
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["tool_id"], "read-pdf");
+        assert_eq!(results[0]["content"], expected);
+        assert_eq!(results[0]["is_error"], true);
         pool.close().await;
         Ok(())
     }

@@ -242,19 +242,23 @@ pub(crate) fn infer(
         request_type: "agent",
         request_id: uuid::Uuid::new_v4(),
     };
-    let headers = client::headers(&provider)?;
+    let mut headers = client::headers(&provider)?;
+    headers.push(("transfer-encoding".into(), "chunked".into()));
     let bytes = serde_json::to_vec(&envelope)
         .map_err(|_| invalid("Antigravity request could not be encoded"))?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
-        method: "POST".into(),
-        url: format!(
-            "{}?alt=sse",
-            client::endpoint(&provider, "streamGenerateContent")
-        ),
-        headers,
-        body: bytes,
-    })?;
+    let response = client::http_start(
+        host,
+        stravia_vendor_sdk::wit::types::HttpRequest {
+            method: "POST".into(),
+            url: format!(
+                "{}?alt=sse",
+                client::endpoint(&provider, "streamGenerateContent")
+            ),
+            headers,
+            body: bytes,
+        },
+    )?;
     let status = response.status()?;
     let headers = response.headers()?;
     if !(200..300).contains(&status) {
