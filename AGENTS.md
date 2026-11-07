@@ -56,6 +56,7 @@ Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、�
 
 | 目标 | 命令 |
 |---|---|
+| 准备 Cargo 补丁（直接运行 Cargo 或启动 IDE 前） | `task prepare:crates` |
 | 安装锁定版本的 WebUI 依赖 | `task install:web` |
 | 开发 WebUI / 服务端 / 桌面端 | `task dev:web` / `task dev:server` / `task dev:desktop` |
 | 构建 WebUI / 服务端 / 桌面端 | `task build:web` / `task build:server` / `task build:desktop` |

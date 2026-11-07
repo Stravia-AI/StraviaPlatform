@@ -1,10 +1,10 @@
-// Stravia vendor plugin contract, version 0.6.0.
+// Stravia vendor plugin contract, version 1.0.0.
 //
 // One package = one vendor. The guest orchestrates vendor flows and drives
 // controlled HTTP / WebSocket through host imports; it never gets raw sockets,
 // filesystem, env, or background tasks. Host enforces origin allowlists,
 // backpressure, cancellation, and resource limits.
-package stravia:vendor@0.6.0;
+package stravia:vendor@1.0.0;
 
 /// Types shared between the world exports and the host-side interfaces.
 interface types {
@@ -82,8 +82,8 @@ interface types {
 
     /// Canonical model failure facts retained across the plugin boundary.
     /// This mirrors `AiErrorKind`; `unknown` is explicit rather than inferred
-    /// from guest text or a provider brand.
-    enum model-error-kind {
+    /// from guest text or a provider brand. Future classifications use `other`.
+    variant model-error-kind {
         authentication-error,
         authorization-error,
         not-found-error,
@@ -99,13 +99,7 @@ interface types {
         stream-mid-error,
         unexpected-eof,
         unknown,
-    }
-
-    /// Transport on which an otherwise upstream-scoped failure occurred.
-    /// This is a fact for host retry policy, never an instruction for the guest
-    /// to replay a request itself.
-    enum transport-failure {
-        websocket,
+        other(string),
     }
 
     /// Facts about an upstream failure. Management operations can leave
@@ -117,7 +111,8 @@ interface types {
     record upstream-failure {
         model-error-kind: option<model-error-kind>,
         retry-after-milliseconds: option<u64>,
-        transport-failure: option<transport-failure>,
+        /// `websocket` is recognized; unknown values are not retry evidence.
+        transport-failure: option<string>,
     }
 
     variant error-kind {
@@ -155,77 +150,6 @@ interface types {
         /// runtime catalog no longer owns that identity, not that input was
         /// malformed.
         provider-not-found,
-    }
-
-    enum http-content-coding {
-        gzip,
-        deflate,
-        br,
-        zstd,
-    }
-
-    /// The host encodes application request bytes and decodes response bytes.
-    /// An empty response list requests identity; identity is always accepted.
-    record http-compression {
-        request: option<http-content-coding>,
-        /// Accept-Encoding preserves this order, retaining only the first occurrence
-        /// of each coding. An empty list requests identity.
-        response: list<http-content-coding>,
-    }
-
-    enum compression-negotiation {
-        preferred,
-        required,
-    }
-
-    variant ws-compression {
-        disabled,
-        permessage-deflate(compression-negotiation),
-    }
-
-    /// HTTP request issued by the guest through the controlled transport.
-    record http-request {
-        method: string,
-        url: string,
-        headers: list<tuple<string, string>>,
-        /// Request body, empty for none.
-        body: list<u8>,
-    }
-
-    /// Explicit transport controls for one HTTP request. `http1-only`
-    /// restricts HTTP protocol negotiation to HTTP/1.1;
-    /// TLS, proxy, redirect, and origin checks remain unchanged.
-    record http-request-options {
-        /// None preserves manually supplied compression headers and pre-encoded
-        /// request bytes. Some opts into host-owned compression, including an
-        /// identity-only policy.
-        compression: option<http-compression>,
-        /// True restricts HTTP protocol negotiation to HTTP/1.1.
-        http1-only: bool,
-    }
-
-    /// WebSocket upgrade request issued through the controlled transport.
-    record ws-request {
-        url: string,
-        headers: list<tuple<string, string>>,
-        protocols: list<string>,
-        /// Present only for ephemeral continuation; requires the exact local socket tip.
-        continuation-id: option<string>,
-        /// Maximum reuse age in milliseconds from the original handshake.
-        /// None keeps the host default; zero disables reuse. The host may cap
-        /// this at its own limit. This never shortens an in-flight response;
-        /// idle sockets expire and completed expired sockets cannot be parked.
-        /// A later checkout may shorten, but never extend, this connection's age.
-        reuse-max-age-millis: option<u64>,
-    }
-
-    /// WebSocket message kind for the controlled socket interface.
-    variant ws-message {
-        text(string),
-        binary(list<u8>),
-        ping(list<u8>),
-        pong(list<u8>),
-        close(option<tuple<u16, string>>),
     }
 
     /// Scoped view of the provider connection the host hands to the guest for
@@ -283,57 +207,7 @@ interface types {
 /// Controlled host services imported by the guest. Every call is scoped to the
 /// single operation; no handle survives it.
 interface host {
-    use types.{http-request, http-compression, http-request-options, ws-request, ws-compression, ws-message, canonical-event, plugin-error};
-
-    /// An in-flight HTTP exchange. `http-start` returns the handle as soon as
-    /// the request is admitted, so a single operation can run several
-    /// auxiliary calls concurrently; `status`/`headers`/`read-body` then
-    /// suspend the guest until the corresponding stage is ready. All handles
-    /// are bound to the operation: cancellation drops them, and none may
-    /// outlive the operation.
-    resource http-response {
-        /// Suspend until response headers arrive; returns the status code.
-        status: func() -> result<u16, plugin-error>;
-        /// Response headers (valid after `status` resolves).
-        headers: func() -> result<list<tuple<string, string>>, plugin-error>;
-        /// Next body chunk; `none` on EOF. Host applies bounded backpressure.
-        read-body: func() -> result<option<list<u8>>, plugin-error>;
-    }
-
-    /// Start an HTTP request. The host checks the resolved origin against the
-    /// operation snapshot allowlist before any byte leaves, then returns the
-    /// pending handle immediately.
-    http-start: func(req: http-request) -> result<http-response, plugin-error>;
-
-    /// Start an HTTP request with host-owned request encoding and response decoding.
-    /// Compression headers are exclusive to this policy; the body is application bytes.
-    http-start-with-compression: func(req: http-request, compression: http-compression) -> result<http-response, plugin-error>;
-
-    /// Start an HTTP request with explicit transport options. This entry point
-    /// requires a host built against this version of the contract; older hosts
-    /// do not implement `http-start-with-options` and cannot load a plugin
-    /// importing it. `http1-only: true` restricts HTTP protocol negotiation
-    /// to HTTP/1.1. TLS, proxy, redirect, network permission, and failure
-    /// handling are unchanged.
-    http-start-with-options: func(req: http-request, options: http-request-options) -> result<http-response, plugin-error>;
-
-    /// WebSocket connection controlled by the host.
-    resource ws-connection {
-        send: func(msg: ws-message) -> result<_, plugin-error>;
-        /// Next inbound message; `none` on clean close.
-        next: func() -> result<option<ws-message>, plugin-error>;
-        /// Release after a terminal response. `continuation-id` names the latest
-        /// successfully completed response on this socket; `none` clears its old tip.
-        close: func(continuation-id: option<string>) -> result<_, plugin-error>;
-    }
-
-    /// Open a WebSocket. Same origin enforcement as `http-start` plus
-    /// scheme/port match for `ws`/`wss`. Headers are explicit so authorized
-    /// connection credentials and routing metadata can be sent on upgrade.
-    ws-connect: func(req: ws-request) -> result<ws-connection, plugin-error>;
-
-    /// Open a WebSocket with an explicit handshake compression policy.
-    ws-connect-with-compression: func(req: ws-request, compression: ws-compression) -> result<ws-connection, plugin-error>;
+    use types.{canonical-event, plugin-error};
 
     /// Operation-scoped private state. The host binds the connection or auth
     /// session; the guest never names a provider/session/vendor id.
@@ -371,6 +245,11 @@ interface host {
 /// the host reads before admitting the component; `select-protocol` performs
 /// pure request-dependent protocol choice; `execute` runs one operation and
 /// returns only after all sub-tasks and handles are dropped.
+/// Within 1.x no new world export may be required; new exports belong to
+/// separate optional interfaces which the host probes for presence.
+/// Existing records, variants, enums, and signatures are sealed: extending
+/// them requires a new major version. `operation-kind` and `error-kind` are
+/// closed; provider and operation extensions belong in JSON metadata.
 world vendor {
     // Pull in only the WASI surface a plugin may legitimately use: stdio for
     // panic/log output, clocks for signing/expiry/backoff, and secure random
@@ -383,6 +262,8 @@ world vendor {
     import wasi:clocks/wall-clock@0.2.12;
     import wasi:random/random@0.2.12;
 
+    import stravia:net/http@1.0.0;
+    import stravia:net/websocket@1.0.0;
     import host;
 
     use types.{canonical-payload, operation-kind, operation-input, plugin-error, provider-snapshot};
@@ -419,7 +300,7 @@ world vendor {
     /// replacement Provider Profile set the host should register for this
     /// vendor. `input` is a serialized `CatalogSyncRequest`; the result is a
     /// serialized `CatalogSyncOutcome`. The call is vendor-scoped rather than
-    /// connection-scoped: the host admits `http-start` only for the configured
+    /// connection-scoped: the host admits `stravia:net/http.start` only for the configured
     /// catalog origin and denies connection state, event emission, and other
     /// operation imports. Vendors without a runtime catalog return
     /// `unsupported` (the SDK default does so).
