@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { resolve } from 'node:path'
 import process from 'node:process'
@@ -7,6 +7,12 @@ import { createServer } from 'vite'
 
 const webuiRoot = fileURLToPath(new URL('../', import.meta.url))
 const repositoryRoot = resolve(webuiRoot, '../..')
+const preparation = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['patches/cargo/prepare.py'], {
+  cwd: repositoryRoot,
+  stdio: 'inherit',
+})
+if (preparation.error) throw preparation.error
+if (preparation.status !== 0) throw new Error('Failed to prepare patched Cargo crates')
 const webui = await createServer({ root: webuiRoot, server: { host: true } })
 
 try {
