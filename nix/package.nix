@@ -29,6 +29,11 @@ let
     hash = "sha256-vYMlYwApeXVOYZU3oNWGGx8cjftQW3HDFMzXgbJpcyQ=";
   };
 
+  ramaHttpTypesCrate = fetchurl {
+    url = "https://static.crates.io/crates/rama-http-types/rama-http-types-0.4.0.crate";
+    hash = "sha256-WwnAJ8RYCnNkNXGVOqZiQp2Nq4SKrGxFQl8/grSo6qU=";
+  };
+
   # 用白名单界定源码，避免把开发数据库、凭据和已有产物送入 store。
   cleanSource =
     include:
@@ -188,7 +193,8 @@ stdenv.mkDerivation {
     cp -r ${webui}/. frontend/stravia-webui/dist/
     python3 patches/cargo/prepare.py --offline \
       --crate-file rustls=${rustlsCrate} \
-      --crate-file rama-http-core=${ramaHttpCoreCrate}
+      --crate-file rama-http-core=${ramaHttpCoreCrate} \
+      --crate-file rama-http-types=${ramaHttpTypesCrate}
     cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors
     cargo build --locked --offline --release -p stravia-server --bin stravia-server
     runHook postBuild

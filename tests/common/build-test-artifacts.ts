@@ -137,7 +137,7 @@ const signature = createHash('sha256')
       arch: process.arch,
       cpu: cpus()[0]?.model,
       command: plan.command,
-      patchedCrates: ['rustls-0.23.46-shape2', 'rama-http-core-0.4.0-shape1'].map((crate) => readFileSync(join(repository, '.stravia-patched-crates', crate, '.prepare-stamp.json'), 'utf8')),
+      patchedCrates: ['rustls-0.23.46-shape2', 'rama-http-core-0.4.0-shape1', 'rama-http-types-0.4.0-shape1'].map((crate) => readFileSync(join(repository, '.stravia-patched-crates', crate, '.prepare-stamp.json'), 'utf8')),
       environment: compilerEnvironment,
     }),
   )
