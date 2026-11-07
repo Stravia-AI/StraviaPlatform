@@ -15,7 +15,7 @@ use crate::performance::{ResourceLease, ResourceUsage};
 use super::redaction::{REDACTED, RedactionKind};
 use super::types::{TraceManifest, WirePayload};
 
-pub(crate) const TRACE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const TRACE_SCHEMA_VERSION: u32 = 3;
 const SEGMENT_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const WRITE_BATCH_BYTES: usize = 64 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 1024;
@@ -77,16 +77,28 @@ impl TraceRecord {
 }
 
 pub(super) fn redact_authorization_headers(headers: &mut Value) -> bool {
-    let Value::Object(headers) = headers else {
-        return false;
-    };
     let mut redacted = false;
-    for (name, value) in headers {
-        if !name.eq_ignore_ascii_case("authorization") {
-            continue;
+    match headers {
+        Value::Object(headers) => {
+            for (name, value) in headers {
+                if name.eq_ignore_ascii_case("authorization") {
+                    redact_header_value(value);
+                    redacted = true;
+                }
+            }
         }
-        redact_header_value(value);
-        redacted = true;
+        Value::Array(fields) => {
+            for field in fields {
+                let Value::Object(field) = field else { continue };
+                if field.get("name").and_then(Value::as_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("authorization"))
+                {
+                    field.insert("bytes".into(), serde_json::json!([42, 42, 42]));
+                    redacted = true;
+                }
+            }
+        }
+        _ => {}
     }
     redacted
 }

@@ -256,6 +256,35 @@ async fn debug_redacts_only_authorization_header_values() {
 }
 
 #[tokio::test]
+async fn ordered_wire_headers_preserve_bytes_and_redact_every_authorization() {
+    let directory = tempfile::tempdir().expect("trace directory");
+    let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
+    let handle = manager.create();
+    let mut record = wire_record(1, "request_head", Value::Null);
+    record.headers = serde_json::json!([
+        {"name": "X-Test", "bytes": [255, 0, 65]},
+        {"name": "Authorization", "bytes": [115, 101, 99, 114, 101, 116]},
+        {"name": "Cookie", "bytes": [1, 2]},
+        {"name": "aUtHoRiZaTiOn", "bytes": []},
+        {"name": "X-Test", "bytes": [66]}
+    ]);
+
+    assert_eq!(handle.record(record), TraceWriteOutcome::Queued);
+    assert_eq!(handle.finish().await.status, "complete");
+    let records = persisted_records(&handle).await;
+    assert_eq!(records[0].schema_version, 3);
+    assert_eq!(records[0].headers, serde_json::json!([
+        {"name": "X-Test", "bytes": [255, 0, 65]},
+        {"name": "Authorization", "bytes": [42, 42, 42]},
+        {"name": "Cookie", "bytes": [1, 2]},
+        {"name": "aUtHoRiZaTiOn", "bytes": [42, 42, 42]},
+        {"name": "X-Test", "bytes": [66]}
+    ]));
+    assert_eq!(records[0].redactions, [RedactionKind::CredentialHeader]);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn raw_media_non_utf8_and_websocket_messages_preserve_observed_bytes() {
     let directory = tempfile::tempdir().expect("trace directory");
     let manager = TraceManager::new(directory.path().to_owned()).expect("trace manager");
