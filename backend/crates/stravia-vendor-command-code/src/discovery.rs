@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stravia_vendor_common::connection_check::{self, invalid_response};
-use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     ConnectionCheckResponse, ConnectionCheckVerification, DiscoverResponse, DiscoveredModel,
     ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, PluginError, ProviderSnapshot, read_http_body,
@@ -111,10 +110,11 @@ pub(super) fn connection_check(
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
     let base = base_url(provider);
-    let value = connection_check::json(
-        host,
+    let response = host.http_start(
         commandcode_request(&base, api_key(provider)?, "/alpha/whoami", &[]),
+        &crate::net_options(),
     )?;
+    let value = connection_check::read_json(&response)?;
     validate_account(value)?;
     // 自定义端点可能忽略 API key，响应不能证明凭据被接受。
     let verified = if base.trim_end_matches('/') == crate::DEFAULT_BASE_URL {
@@ -157,9 +157,9 @@ fn validate_account(value: Value) -> Result<(), PluginError> {
 
 fn get<T: serde::de::DeserializeOwned>(
     host: &GuestHost,
-    request: HttpRequest,
+    request: stravia_vendor_sdk::net::Request,
 ) -> Result<T, PluginError> {
-    let response = host.http_start(request)?;
+    let response = host.http_start(request, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(

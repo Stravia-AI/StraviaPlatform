@@ -138,12 +138,12 @@ pub(super) fn execute(
             if state.deadline_ms <= chrono::Utc::now().timestamp_millis() {
                 return Err(fail(ErrorKind::Auth, "Kilo device code expired"));
             }
-            let response = host.http_start(HttpRequest {
+            let response = host.http_start(stravia_vendor_sdk::net::Request {
                 method: "GET".into(),
                 url: format!("{ORIGIN}/api/device-auth/codes/{}", escape(&state.code)),
-                headers: vec![],
+                headers: crate::net_fields(vec![]),
                 body: vec![],
-            })?;
+            }, &crate::net_options())?;
             let status = response.status()?;
             if !poll_status(status)? {
                 return Ok(AuthResponse::Pending {

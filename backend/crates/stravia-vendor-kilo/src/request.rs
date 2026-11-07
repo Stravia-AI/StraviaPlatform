@@ -323,12 +323,12 @@ pub(super) fn infer(
     };
     let body = serde_json::to_vec(&body).map_err(|e| fail(ErrorKind::Invalid, e.to_string()))?;
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: format!("{ORIGIN}{path}"),
-        headers: headers(provider)?,
+        headers: crate::net_fields(headers(provider)?),
         body,
-    })?;
+    }, &crate::net_options())?;
     stream::decode(host, &protocol, response)
         .map(Box::new)
         .map(OperationOutput::Infer)

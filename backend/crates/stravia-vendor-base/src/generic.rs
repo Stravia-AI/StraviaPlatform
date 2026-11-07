@@ -16,10 +16,11 @@ use stravia_runtime_contract::protocol::ids::{
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
-    DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost, HttpRequest,
+    DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
     MODELS_SOURCE_CATALOG, Operation, OperationInput, OperationOutput, PluginError,
-    ProviderSnapshot, TransportPreference, ValidationIssue, WsRequest, read_http_body,
+    ProviderSnapshot, TransportPreference, ValidationIssue, read_http_body,
 };
+use stravia_vendor_sdk::net::{ConnectRequest, Request};
 
 use crate::metadata::ACCOUNT_DISCOVERY_PROVIDER_IDS;
 
@@ -205,13 +206,11 @@ pub(crate) fn execute_inference(
             .map(str::to_owned);
         return crate::openai::execute_responses_websocket(
             host,
-            WsRequest {
+            ConnectRequest {
                 url: url.into(),
-                headers,
-                protocols: Vec::new(),
-                continuation_id,
-                reuse_max_age_millis: None,
+                headers: crate::fields(headers),
             },
+            continuation_id,
             encoded.body,
             preserve_upstream_errors,
             classify_open_responses_error,
@@ -228,12 +227,12 @@ pub(crate) fn execute_inference(
     })?;
     drop(encoded);
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "POST".to_owned(),
         url,
-        headers,
+        headers: crate::fields(headers),
         body,
-    })?;
+    }, &crate::net_options())?;
     if operation == Operation::Compact {
         return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
             .map(OperationOutput::Compact);
@@ -823,7 +822,7 @@ fn model_discovery_request(
     vendor_id: &str,
     provider: &ProviderSnapshot,
     request: &DiscoverRequest,
-) -> Result<HttpRequest, PluginError> {
+) -> Result<Request, PluginError> {
     let mut headers = vec![("accept".to_owned(), "application/json".to_owned())];
     let configured_source = provider
         .operation_metadata
@@ -881,10 +880,10 @@ fn model_discovery_request(
         });
         url.push_str(&urlencoding::encode(cursor));
     }
-    Ok(HttpRequest {
+    Ok(Request {
         method: "GET".to_owned(),
         url,
-        headers,
+        headers: crate::fields(headers),
         body: Vec::new(),
     })
 }
@@ -895,7 +894,7 @@ fn discover(
     provider: &ProviderSnapshot,
     request: DiscoverRequest,
 ) -> Result<DiscoverResponse, PluginError> {
-    let response = host.http_start(model_discovery_request(vendor_id, provider, &request)?)?;
+    let response = host.http_start(model_discovery_request(vendor_id, provider, &request)?, &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_JSON_BODY)?;
@@ -1040,12 +1039,12 @@ fn prepare_ollama_request(
     let body = serde_json::to_vec(&json!({"name": model})).map_err(|error| {
         common::plugin_error(ErrorKind::Trapped, format!("encode Ollama probe: {error}"))
     })?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "POST".to_owned(),
         url: base.to_string(),
-        headers,
+        headers: crate::fields(headers),
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(common::plugin_error(
@@ -1127,7 +1126,8 @@ pub(crate) fn connection_check(
     check_channel(vendor_id, channel, provider)?;
     let protocol = protocol_for(vendor_id, provider)?;
     let request = connection_check_request(vendor_id, provider, &protocol)?;
-    let value = common_check::json(host, request)?;
+    let response = host.http_start(request, &crate::net_options())?;
+    let value = common_check::read_json(&response)?;
     let (keys, id_fields): (&[&str], &[&str]) = if protocol == GEMINI_PROTOCOL {
         (&["models"], &["name", "id"])
     } else {
@@ -1143,7 +1143,7 @@ fn connection_check_request(
     vendor_id: &str,
     provider: &ProviderSnapshot,
     protocol: &str,
-) -> Result<HttpRequest, PluginError> {
+) -> Result<Request, PluginError> {
     let base = effective_base_url(vendor_id, provider)?;
     let mut headers = vec![("accept".to_owned(), "application/json".to_owned())];
     let url = if protocol == GEMINI_PROTOCOL {
@@ -1160,10 +1160,10 @@ fn connection_check_request(
         apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
         models_list_url(vendor_id, &base)?
     };
-    Ok(HttpRequest {
+    Ok(Request {
         method: "GET".to_owned(),
         url,
-        headers,
+        headers: crate::fields(headers),
         body: Vec::new(),
     })
 }
@@ -1206,7 +1206,7 @@ mod tests {
             request
                 .headers
                 .iter()
-                .any(|(name, value)| name == "authorization" && value == "Bearer sk-test")
+                .any(|field| field.name == "authorization" && field.bytes == b"Bearer sk-test")
         );
 
         let snapshot = provider(ANTHROPIC_PROTOCOL, "sk-ant");
@@ -1215,13 +1215,13 @@ mod tests {
             request
                 .headers
                 .iter()
-                .any(|(name, value)| name == "x-api-key" && value == "sk-ant")
+                .any(|field| field.name == "x-api-key" && field.bytes == b"sk-ant")
         );
         assert!(
             request
                 .headers
                 .iter()
-                .any(|(name, value)| name == "anthropic-version" && value == "2023-06-01")
+                .any(|field| field.name == "anthropic-version" && field.bytes == b"2023-06-01")
         );
 
         let mut google = provider(GEMINI_PROTOCOL, "key +&");
@@ -1235,7 +1235,7 @@ mod tests {
             !request
                 .headers
                 .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .any(|field| field.name.eq_ignore_ascii_case("authorization"))
         );
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
             !request
                 .headers
                 .iter()
-                .any(|(name, _)| name == "authorization")
+                .any(|field| field.name == "authorization")
         );
 
         snapshot.operation_metadata.insert(
@@ -1331,7 +1331,7 @@ mod tests {
             request
                 .headers
                 .iter()
-                .any(|(name, value)| name == "authorization" && value == "Bearer key +&")
+                .any(|field| field.name == "authorization" && field.bytes == b"Bearer key +&")
         );
     }
 

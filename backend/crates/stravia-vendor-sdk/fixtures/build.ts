@@ -16,7 +16,8 @@ const fixturePackages = {
   'capability-contract': 'stravia-vendor-capability-contract-fixture',
   'lifecycle-contract': 'stravia-vendor-lifecycle-contract-fixture',
   'management-contract': 'stravia-vendor-management-contract-fixture',
-  'legacy-contract': 'stravia-vendor-legacy-contract-fixture',
+  'manual-contract': 'stravia-vendor-manual-contract-fixture',
+  'net-1.0-compat': 'stravia-vendor-net-1-0-compat-fixture',
 } as const
 const bundled = await Bun.file(resolve(root, 'target/vendor-plugins/manifest.json')).json() as Array<{
   vendor_id: string
@@ -52,7 +53,8 @@ async function buildFixture(directory: keyof typeof fixturePackages, library: st
 }
 
 await mkdir(output, { recursive: true })
-await buildFixture('legacy-contract', 'stravia_vendor_legacy_contract_fixture', 'legacy-entrypoints', {})
+await buildFixture('manual-contract', 'stravia_vendor_manual_contract_fixture', 'manual-entrypoints', {})
+await buildFixture('net-1.0-compat', 'stravia_vendor_net_1_0_compat_fixture', 'net-1.0-compat', {})
 for (const [name, vendor, provider, kind, version, stateFormat, canonicalFormat, author, protocol] of lifecycle) {
   await buildFixture('lifecycle-contract', 'stravia_vendor_lifecycle_contract_fixture', name, {
     STRAVIA_FIXTURE_VENDOR_ID: vendor,
@@ -78,4 +80,4 @@ for (const profile of managementProfiles) {
     STRAVIA_FIXTURE_PROFILE: profile,
   })
 }
-console.log(`Built ${1 + lifecycle.length + capabilityProfiles.length + managementProfiles.length} real test components in ${output}`)
+console.log(`Built ${2 + lifecycle.length + capabilityProfiles.length + managementProfiles.length} real test components in ${output}`)

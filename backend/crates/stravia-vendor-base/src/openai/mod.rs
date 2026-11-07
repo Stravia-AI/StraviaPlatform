@@ -14,7 +14,7 @@ use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
     DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    HttpRequest, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
     OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot,
     TransportPreference, ValidationIssue,
 };
@@ -265,13 +265,13 @@ fn infer(
         headers.push(("authorization".into(), format!("Bearer {api_key}")));
     }
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url,
-        headers,
+        headers: crate::fields(headers),
         body: serde_json::to_vec(&body)
             .map_err(|_| invalid("OpenAI request could not be encoded"))?,
-    })?;
+    }, &crate::net_options())?;
     match operation {
         Operation::Infer => {
             let decoded = if preserve_upstream_errors {
@@ -365,13 +365,11 @@ fn infer_responses_websocket(
         .flatten();
     execute_responses_websocket(
         host,
-        stravia_vendor_sdk::WsRequest {
+        stravia_vendor_sdk::net::ConnectRequest {
             url,
-            headers,
-            protocols: Vec::new(),
-            continuation_id,
-            reuse_max_age_millis: None,
+            headers: crate::fields(headers),
         },
+        continuation_id,
         body,
         preserve_upstream_errors,
         classify_responses_stream_error,
@@ -380,7 +378,8 @@ fn infer_responses_websocket(
 
 pub(crate) fn execute_responses_websocket(
     host: &GuestHost,
-    request: stravia_vendor_sdk::WsRequest,
+    request: stravia_vendor_sdk::net::ConnectRequest,
+    continuation_id: Option<String>,
     mut body: Value,
     preserve_upstream_errors: bool,
     classify_error: fn(&Value, bool) -> Option<PluginError>,
@@ -395,9 +394,13 @@ pub(crate) fn execute_responses_websocket(
     object.remove("stream");
     object.remove("background");
     object.insert("type".into(), Value::String("response.create".into()));
-    let connection = host.ws_connect(request)?;
+    let mut options = crate::net_options();
+    if let Some(id) = continuation_id.as_deref() {
+        options.continuation(id).map_err(|error| invalid(error.to_string()))?;
+    }
+    let connection = host.ws_connect(request, &options)?;
     host.emit_started()?;
-    connection.send(&stravia_vendor_sdk::WsMessage::Text(
+    connection.send(&stravia_vendor_sdk::net::WsMessage::Text(
         serde_json::to_string(&body)
             .map_err(|_| invalid("Responses WebSocket request could not be encoded"))?,
     ))?;
@@ -441,12 +444,12 @@ fn discover(
     if let Some(api_key) = credential(&provider, "apiKey") {
         headers.push(("authorization".into(), format!("Bearer {api_key}")));
     }
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "GET".into(),
         url,
-        headers,
+        headers: crate::fields(headers),
         body: Vec::new(),
-    })?;
+    }, &crate::net_options())?;
     ensure_success(&response, "OpenAI model discovery")?;
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&body)
@@ -529,15 +532,16 @@ pub(crate) fn connection_check(
     if let Some(api_key) = api_key {
         headers.push(("authorization".into(), format!("Bearer {api_key}")));
     }
-    let value = common_check::json(
-        host,
-        HttpRequest {
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
             method: "GET".into(),
             url,
-            headers,
+            headers: crate::fields(headers),
             body: Vec::new(),
         },
+        &crate::net_options(),
     )?;
+    let value = common_check::read_json(&response)?;
     crate::connection_check::validate_models(&value, &["data", "models"], &["id", "slug", "name"])?;
     Ok(ConnectionCheckResponse {
         verified: if api_key.is_some() && official_openai_origin(&provider.base_url) {
@@ -620,7 +624,7 @@ pub(super) fn endpoint(base_url: &str, path: &str) -> String {
 }
 
 pub(super) fn ensure_success(
-    response: &stravia_vendor_sdk::HttpResponse,
+    response: &stravia_vendor_sdk::net::HttpResponse,
     label: &str,
 ) -> Result<u16, PluginError> {
     let status = response.status()?;

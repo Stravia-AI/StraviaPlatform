@@ -195,27 +195,23 @@ fn token_request(host: &GuestHost, params: &[(&str, &str)]) -> Result<Value, Plu
     let form: String = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params.iter().copied())
         .finish();
-    let response = host.http_start_with_options(
-        stravia_vendor_sdk::HttpRequest {
+    let mut headers = stravia_vendor_sdk::net::Fields::new();
+    headers.slot("Host");
+    headers.append("User-Agent", b"Go-http-client/2.0".as_slice());
+    headers.slot("Content-Length");
+    headers.append("Content-Type", b"application/x-www-form-urlencoded".as_slice());
+    headers.append("Accept-Encoding", b"gzip".as_slice());
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("antigravity").expect("valid shape");
+    options.response_decoding(&[stravia_vendor_sdk::net::Coding::Gzip]).expect("valid decoding");
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: TOKEN_URL.into(),
-            headers: vec![
-                (
-                    "content-type".into(),
-                    "application/x-www-form-urlencoded".into(),
-                ),
-                ("user-agent".into(), "Go-http-client/2.0".into()),
-            ],
+            headers,
             body: form.into_bytes(),
         },
-        stravia_vendor_sdk::HttpRequestOptions {
-            compression: Some(stravia_vendor_sdk::HttpCompression {
-                request: None,
-                response: vec![stravia_vendor_sdk::HttpContentCoding::Gzip],
-            }),
-            // 官方 OAuth 使用默认 HTTP 协商，区别于 Cloud Code 的 HTTP/1 客户端。
-            http1_only: false,
-        },
+        &options,
     )?;
     let status = response.status()?;
     let headers = response.headers()?;

@@ -27,7 +27,7 @@ use stravia_vendor_sdk::{
 const VENDOR_ID: &str = "antigravity";
 const CHANNEL: &str = "oauth";
 const BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
-const CLI_USER_AGENT: &str = "antigravity/cli/1.5.1 (aidev_client; os_type=linux; arch=amd64; cl=1014269460; auth_method=consumer)";
+const CLI_USER_AGENT: &str = "antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)";
 
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([

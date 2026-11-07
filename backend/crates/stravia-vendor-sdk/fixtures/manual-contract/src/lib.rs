@@ -10,27 +10,28 @@ wit_bindgen::generate!({
 });
 
 use stravia::vendor::{host, types};
+use stravia::net::{http, types as net_types, websocket};
 
-struct LegacyContract;
+struct ManualContract;
 
-impl Guest for LegacyContract {
+impl Guest for ManualContract {
     fn descriptor() -> String {
         json!({
-            "vendor_id": "fixture.legacy-abi",
+            "vendor_id": "fixture.manual-entrypoints",
             "version": "1.0.0",
-            "display_name": "Legacy ABI Fixture",
+            "display_name": "Manual ABI Fixture",
             "description": null,
             "canonical_format_version": 1,
             "kind": "dedicated",
             "providers": [{
-                "provider_id": "fixture.legacy-abi",
+                "provider_id": "fixture.manual-entrypoints",
                 "catalog_id": null,
-                "display_name": "Legacy ABI Fixture",
+                "display_name": "Manual ABI Fixture",
                 "description": null,
                 "capabilities": ["infer"],
                 "channels": [{
                     "id": "default",
-                    "name": {"en-US": "Legacy ABI", "zh-CN": "旧版 ABI"},
+                    "name": {"en-US": "Manual ABI", "zh-CN": "手动入口"},
                     "description": null,
                     "protocol": "fixture-lifecycle",
                     "capabilities": ["infer"]
@@ -66,85 +67,87 @@ impl Guest for LegacyContract {
         if !matches!(operation, types::OperationKind::Infer) {
             return Err(failure(
                 types::ErrorKind::Unsupported,
-                "unsupported legacy operation",
+                "unsupported manual operation",
             ));
         }
         let options: Value = serde_json::from_slice(&input.provider.options).map_err(invalid)?;
         let secrets: Value = serde_json::from_slice(&input.provider.secrets).map_err(invalid)?;
         let mode = options["mode"].as_str().unwrap_or("manual");
-        let mut headers = vec![(
-            "authorization".into(),
-            format!("Bearer {}", secrets["apiKey"].as_str().unwrap_or_default()),
-        )];
+        let mut headers = vec![net_types::Field {
+            name: "authorization".into(),
+            bytes: format!("Bearer {}", secrets["apiKey"].as_str().unwrap_or_default()).into_bytes(),
+        }];
+        let net_options = net_types::Options::new();
+        net_options.set("shape", "default").map_err(net_error)?;
         host::emit_started()?;
         let body = if mode == "websocket" {
-            headers.push(("connection".into(), "keep-alive".into()));
-            headers.push(("accept-encoding".into(), "gzip".into()));
-            let socket = host::ws_connect(&types::WsRequest {
+            headers.push(field("connection", "keep-alive"));
+            headers.push(field("accept-encoding", "gzip"));
+            headers.push(field("sec-websocket-protocol", "manual-v1"));
+            net_options.set("ws.reuse-max-age-millis", "0").map_err(net_error)?;
+            let socket = websocket::connect(&websocket::ConnectRequest {
                 url: options["auxUrl"]
                     .as_str()
-                    .ok_or_else(|| invalid("missing legacy WebSocket URL"))?
+                    .ok_or_else(|| invalid("missing manual WebSocket URL"))?
                     .into(),
                 headers,
-                protocols: vec!["legacy-v1".into()],
-                continuation_id: None,
-                reuse_max_age_millis: Some(0),
-            })?;
-            socket.send(&types::WsMessage::Text(
+            }, &net_options).map_err(net_error)?;
+            socket.send(&websocket::Message::Text(
                 String::from_utf8(input.input.body).map_err(invalid)?,
-            ))?;
+            )).map_err(net_error)?;
             let body = loop {
-                match socket.next()? {
-                    Some(types::WsMessage::Text(text)) => break text.into_bytes(),
-                    Some(types::WsMessage::Ping(_) | types::WsMessage::Pong(_)) => {}
-                    _ => return Err(invalid("legacy WebSocket ended without a response")),
+                match socket.next().map_err(net_error)? {
+                    Some(websocket::Message::Text(text)) => break text.into_bytes(),
+                    Some(websocket::Message::Ping(_) | websocket::Message::Pong(_)) => {}
+                    _ => return Err(invalid("manual WebSocket ended without a response")),
                 }
             };
-            socket.close(None)?;
+            socket.close(None).map_err(net_error)?;
             body
         } else {
             let mut body = input.input.body;
             if mode == "manual" {
-                headers.push(("accept-encoding".into(), "gzip".into()));
+                headers.push(field("accept-encoding", "gzip"));
+                net_options.set("http.response-decoding", "gzip").map_err(net_error)?;
             } else if mode == "preencoded" {
-                headers.push(("content-encoding".into(), "gzip".into()));
+                headers.push(field("content-encoding", "gzip"));
                 let mut encoder =
                     flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 encoder.write_all(&body).map_err(invalid)?;
                 body = encoder.finish().map_err(invalid)?;
             }
-            let response = host::http_start(&types::HttpRequest {
+            let response = http::start(&http::Request {
                 method: "POST".into(),
                 url: format!("{}/infer", input.provider.base_url.trim_end_matches('/')),
                 headers,
                 body,
-            })?;
-            if response.status()? != 200 {
-                return Err(invalid("legacy HTTP failed"));
+            }, &net_options).map_err(net_error)?;
+            if response.status().map_err(net_error)? != 200 {
+                return Err(invalid("manual HTTP failed"));
             }
-            let response_headers = response.headers()?;
+            let response_headers = response.headers().map_err(net_error)?;
             let mut body = Vec::new();
-            while let Some(chunk) = response.read_body()? {
+            while let Some(chunk) = response.read_body().map_err(net_error)? {
                 if body.len().saturating_add(chunk.len()) > 1024 * 1024 {
                     return Err(failure(
                         types::ErrorKind::ResourceExhausted,
-                        "legacy body limit",
+                        "manual body limit",
                     ));
                 }
                 body.extend_from_slice(&chunk);
             }
             if mode == "raw" {
                 if !body.starts_with(&[0x1f, 0x8b])
-                    || !response_headers.iter().any(|(name, value)| {
-                        name.eq_ignore_ascii_case("content-encoding") && value == "gzip"
+                    || !response_headers.iter().any(|field| {
+                        field.name.eq_ignore_ascii_case("content-encoding") && field.bytes == b"gzip"
                     })
-                    || !response_headers.iter().any(|(name, value)| {
-                        name.eq_ignore_ascii_case("content-length")
-                            && value == &body.len().to_string()
+                    || !response_headers.iter().any(|field| {
+                        field.name.eq_ignore_ascii_case("content-length")
+                            && field.bytes == body.len().to_string().as_bytes()
                     })
                 {
                     return Err(invalid(
-                        "legacy raw response or encoding headers were changed",
+                        "manual raw response or encoding headers were changed",
                     ));
                 }
                 let mut decoded = Vec::new();
@@ -154,13 +157,13 @@ impl Guest for LegacyContract {
                 decoded
             } else {
                 if mode == "manual"
-                    && response_headers.iter().any(|(name, _)| {
-                        name.eq_ignore_ascii_case("content-encoding")
-                            || name.eq_ignore_ascii_case("content-length")
+                    && response_headers.iter().any(|field| {
+                        field.name.eq_ignore_ascii_case("content-encoding")
+                            || field.name.eq_ignore_ascii_case("content-length")
                     })
                 {
                     return Err(invalid(
-                        "legacy negotiated response headers were not decoded",
+                        "manual negotiated response headers were not decoded",
                     ));
                 }
                 body
@@ -179,9 +182,17 @@ impl Guest for LegacyContract {
     ) -> Result<types::CanonicalPayload, types::PluginError> {
         Err(failure(
             types::ErrorKind::Unsupported,
-            "no legacy runtime catalog",
+            "no manual runtime catalog",
         ))
     }
+}
+
+fn field(name: &str, value: &str) -> net_types::Field {
+    net_types::Field { name: name.into(), bytes: value.as_bytes().to_vec() }
+}
+
+fn net_error(error: net_types::NetError) -> types::PluginError {
+    failure(types::ErrorKind::Invalid, error.message)
 }
 
 fn invalid(error: impl std::fmt::Display) -> types::PluginError {
@@ -196,4 +207,4 @@ fn failure(kind: types::ErrorKind, message: impl Into<String>) -> types::PluginE
     }
 }
 
-export!(LegacyContract);
+export!(ManualContract);

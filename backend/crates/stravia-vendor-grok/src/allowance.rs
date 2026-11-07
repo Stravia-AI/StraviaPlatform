@@ -7,7 +7,7 @@ use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod, AllowanceItem,
     AllowanceRequest, AllowanceResponse, ConnectionCheckResponse, ConnectionCheckVerification,
-    ErrorKind, GuestHost, HttpRequest, PluginError, ProviderSnapshot, read_http_body,
+    ErrorKind, GuestHost, PluginError, ProviderSnapshot, read_http_body,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -21,7 +21,7 @@ pub(crate) fn execute(
     _request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
     let credential = access_token(&provider)?;
-    let response = host.http_start(usage_request(credential))?;
+    let response = host.http_start(usage_request(credential), &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(status_error(status));
@@ -53,7 +53,7 @@ pub(crate) fn connection_check(
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
     let credential = access_token(provider)?;
-    let response = host.http_start(usage_request(credential))?;
+    let response = host.http_start(usage_request(credential), &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
@@ -61,11 +61,10 @@ pub(crate) fn connection_check(
         return Err(common::upstream_error(status, &headers, &body));
     }
     let header_status = headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("grpc-status"))
-        .map(|(_, value)| value.parse::<u16>())
-        .transpose()
-        .map_err(|_| invalid_response("Grok response has an invalid grpc-status header"))?;
+        .get("grpc-status")
+        .map(|bytes| std::str::from_utf8(bytes).ok().and_then(|value| value.parse::<u16>().ok())
+            .ok_or_else(|| invalid_response("Grok response has an invalid grpc-status header")))
+        .transpose()?;
     if let Some(code) = header_status.filter(|code| *code != 0) {
         let mut failure = grpc_status_error(code);
         failure.upstream_status = Some(status);
@@ -95,11 +94,11 @@ pub(crate) fn connection_check(
     })
 }
 
-fn usage_request(credential: &str) -> HttpRequest {
-    HttpRequest {
+fn usage_request(credential: &str) -> stravia_vendor_sdk::net::Request {
+    stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: ALLOWANCE_URL.into(),
-        headers: vec![
+        headers: crate::net_fields(vec![
             ("authorization".into(), format!("Bearer {credential}")),
             ("accept".into(), "*/*".into()),
             ("content-type".into(), "application/grpc-web+proto".into()),
@@ -108,7 +107,7 @@ fn usage_request(credential: &str) -> HttpRequest {
             ("x-grpc-web".into(), "1".into()),
             ("x-user-agent".into(), "connect-es/2.1.1".into()),
             ("user-agent".into(), "Stravia".into()),
-        ],
+        ]),
         body: vec![0, 0, 0, 0, 0],
     }
 }
@@ -118,10 +117,10 @@ fn usage_request(credential: &str) -> HttpRequest {
 /// 服务端不返回该字段，因此缺省、空值或请求失败都降级为 None。
 fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
     let response = host
-        .http_start(HttpRequest {
+        .http_start(stravia_vendor_sdk::net::Request {
             method: "GET".into(),
             url: USER_URL.into(),
-            headers: vec![
+            headers: crate::net_fields(vec![
                 ("accept".into(), "application/json".into()),
                 ("authorization".into(), format!("Bearer {access_token}")),
                 ("x-xai-token-auth".into(), "xai-grok-cli".into()),
@@ -129,9 +128,9 @@ fn fetch_plan_label(host: &GuestHost, access_token: &str) -> Option<String> {
                     "x-grok-client-version".into(),
                     crate::XAI_CLIENT_VERSION.into(),
                 ),
-            ],
+            ]),
             body: Vec::new(),
-        })
+        }, &crate::net_options())
         .ok()?;
     if !(200..300).contains(&response.status().ok()?) {
         return None;
@@ -411,11 +410,11 @@ fn read_varint(body: &[u8], index: &mut usize) -> Result<u64, ()> {
     Err(())
 }
 
-fn check_grpc_status(headers: &[(String, String)]) -> Result<(), PluginError> {
+fn check_grpc_status(headers: &stravia_vendor_sdk::net::Fields) -> Result<(), PluginError> {
     let Some(status) = headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("grpc-status"))
-        .and_then(|(_, value)| value.parse::<u16>().ok())
+        .get("grpc-status")
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|value| value.parse::<u16>().ok())
     else {
         return Ok(());
     };

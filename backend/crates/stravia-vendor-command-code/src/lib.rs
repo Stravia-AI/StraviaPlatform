@@ -338,12 +338,12 @@ fn infer(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: format!("{}/alpha/generate", base_url(&provider)),
-        headers: inference_headers(api_key, zdr_enabled(&provider), &session_id),
+        headers: crate::net_fields(inference_headers(api_key, zdr_enabled(&provider), &session_id)),
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(&response, status, "Command Code inference"));
@@ -525,18 +525,18 @@ fn ensure_initialized(
             format!("encode Command Code lifecycle: {err}"),
         )
     })?;
-    let fingerprint_response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let fingerprint_response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: format!("{}/alpha/fingerprint/record", base_url(provider)),
-        headers: headers.clone(),
+        headers: crate::net_fields(headers.clone()),
         body: fingerprint_body,
-    });
-    let lifecycle_response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    }, &crate::net_options());
+    let lifecycle_response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: format!("{}/alpha/lifecycle-events", base_url(provider)),
-        headers,
+        headers: crate::net_fields(headers),
         body: lifecycle_body,
-    });
+    }, &crate::net_options());
     for response in [fingerprint_response, lifecycle_response]
         .into_iter()
         .flatten()
@@ -949,4 +949,22 @@ mod identity_tests {
         );
         assert_eq!(uuid::Uuid::parse_str(&first).unwrap().get_version_num(), 4);
     }
+}
+
+
+fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
+    let mut fields = stravia_vendor_sdk::net::Fields::new();
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
+    if fields.get("accept").is_none() { fields.append("accept", b"*/*".to_vec()); }
+    if fields.get("accept-encoding").is_none() { fields.append("accept-encoding", b"identity".to_vec()); }
+    if fields.get("user-agent").is_none() { fields.append("user-agent", b"Stravia".to_vec()); }
+    fields
+}
+
+fn net_options() -> stravia_vendor_sdk::net::Options {
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("default").expect("default shape is valid");
+    options
 }

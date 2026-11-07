@@ -29,10 +29,34 @@ use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigGroup, DataCompatibility, DiscoverRequest, DiscoverResponse, ErrorKind, GuestHost,
-    HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration,
+    NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration,
     PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind,
     read_http_body,
 };
+use stravia_vendor_sdk::net::{Coding, Fields, Options, Request};
+
+fn net_options() -> Options {
+    let mut options = Options::new();
+    options.shape("claude-code").expect("valid shape");
+    options.response_decoding(&[Coding::Gzip, Coding::Deflate, Coding::Br, Coding::Zstd])
+        .expect("valid response codings");
+    options
+}
+
+fn net_request(method: &str, url: impl Into<String>, headers: Vec<(String, String)>, body: Vec<u8>) -> Request {
+    let mut fields = Fields::new();
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
+    if fields.get("accept").is_none() { fields.append("Accept", b"application/json".to_vec()); }
+    if fields.get("user-agent").is_none() {
+        fields.append("User-Agent", request::cli_user_agent(DEFAULT_CLIENT_VERSION).into_bytes());
+    }
+    if fields.get("accept-encoding").is_none() {
+        fields.append("Accept-Encoding", b"gzip, deflate, br, zstd".to_vec());
+    }
+    Request::new(method, url).fields(fields).body(body)
+}
 
 use request::{AccountIdentity, DEFAULT_CLIENT_VERSION};
 use session::{SessionStore, ThreadMode};
@@ -313,23 +337,7 @@ fn infer(
     );
     // 每次实际模型请求之前都声明一次开始；宿主恢复重放时已经重置开始槽位。
     host.emit_started()?;
-    let response = host.http_start_with_compression(
-        HttpRequest {
-            method: "POST".into(),
-            url,
-            headers,
-            body: shaped.body,
-        },
-        stravia_vendor_sdk::HttpCompression {
-            request: None,
-            response: vec![
-                stravia_vendor_sdk::HttpContentCoding::Gzip,
-                stravia_vendor_sdk::HttpContentCoding::Deflate,
-                stravia_vendor_sdk::HttpContentCoding::Br,
-                stravia_vendor_sdk::HttpContentCoding::Zstd,
-            ],
-        },
-    )?;
+    let response = host.http_start(net_request("POST", url, headers, shaped.body), &net_options())?;
     if compact {
         return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
             .map(OperationOutput::Compact);
@@ -400,10 +408,8 @@ fn infer(
             // 保留它们以及 OAuth 流程写入的非线程字段。
             let latest = host.read_private_state()?;
             let mut latest = SessionStore::from_bytes(latest.as_deref()).map_err(invalid)?;
-            let request_id = response_headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("request-id"))
-                .map(|(_, value)| value.as_str());
+            let request_id = response_headers.get("request-id")
+                .and_then(|bytes| std::str::from_utf8(bytes).ok());
             if continuation_replay {
                 // 本轮未使用 thread，不能保存为续接 tip，也不能永久关闭后续优化。
                 // reusable=false 清除失效 tip，下一轮正常请求重新创建线程。
@@ -548,10 +554,8 @@ fn discover(
         url.push_str("?after_id=");
         url.push_str(cursor);
     }
-    let response = host.http_start(HttpRequest {
-        method: "GET".into(),
-        url,
-        headers: vec![
+    let response = host.http_start(net_request("GET", url, vec![
+            ("Accept".into(), "application/json".into()),
             ("anthropic-version".into(), "2023-06-01".into()),
             (
                 "anthropic-dangerous-direct-browser-access".into(),
@@ -562,9 +566,7 @@ fn discover(
                 "authorization".into(),
                 format!("Bearer {}", access_token(provider)?),
             ),
-        ],
-        body: Vec::new(),
-    })?;
+        ], Vec::new()), &net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_MODELS_BODY)?;

@@ -308,10 +308,10 @@ fn infer(
     let response = codex::start_responses_http(
         host,
         &provider,
-        stravia_vendor_sdk::wit::types::HttpRequest {
+        stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: endpoint(&provider.base_url, &path),
-            headers,
+            headers: codex::http_fields(headers),
             body: serde_json::to_vec(&codex::WireBody(&body))
                 .map_err(|_| invalid("Codex request could not be encoded"))?,
         },
@@ -433,12 +433,12 @@ fn discover(
     let mut headers = vec![("version".into(), CLIENT_VERSION.into())];
     codex::append_identity_headers(&provider, &mut headers)?;
     headers.push(("accept".into(), "*/*".into()));
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "GET".into(),
         url,
-        headers,
+        headers: codex::http_fields(headers),
         body: Vec::new(),
-    })?;
+    }, &codex::http_options()?)?;
     ensure_success(&response, "Codex model discovery")?;
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&body)

@@ -357,23 +357,23 @@ pub(crate) fn inference_headers(
     betas: String,
 ) -> Vec<(String, String)> {
     let mut headers = vec![
-        ("accept".into(), "application/json".into()),
+        ("Accept".into(), "application/json".into()),
         ("authorization".into(), format!("Bearer {access_token}")),
         ("connection".into(), "keep-alive".into()),
-        ("content-type".into(), "application/json".into()),
-        ("user-agent".into(), cli_user_agent(client_version)),
+        ("Content-Type".into(), "application/json".into()),
+        ("User-Agent".into(), cli_user_agent(client_version)),
         (
-            "x-claude-code-session-id".into(),
+            "X-Claude-Code-Session-Id".into(),
             context.session_id.clone(),
         ),
-        ("x-stainless-arch".into(), STAINLESS_ARCH.into()),
-        ("x-stainless-lang".into(), "js".into()),
-        ("x-stainless-os".into(), STAINLESS_OS.into()),
-        ("x-stainless-package-version".into(), SDK_VERSION.into()),
-        ("x-stainless-retry-count".into(), "0".into()),
-        ("x-stainless-runtime".into(), "node".into()),
-        ("x-stainless-runtime-version".into(), RUNTIME_VERSION.into()),
-        ("x-stainless-timeout".into(), "600".into()),
+        ("X-Stainless-Arch".into(), STAINLESS_ARCH.into()),
+        ("X-Stainless-Lang".into(), "js".into()),
+        ("X-Stainless-OS".into(), STAINLESS_OS.into()),
+        ("X-Stainless-Package-Version".into(), SDK_VERSION.into()),
+        ("X-Stainless-Retry-Count".into(), "0".into()),
+        ("X-Stainless-Runtime".into(), "node".into()),
+        ("X-Stainless-Runtime-Version".into(), RUNTIME_VERSION.into()),
+        ("X-Stainless-Timeout".into(), "600".into()),
         ("anthropic-beta".into(), betas),
         (
             "anthropic-dangerous-direct-browser-access".into(),
@@ -390,6 +390,7 @@ pub(crate) fn inference_headers(
         "x-client-request-id".into(),
         uuid::Uuid::new_v4().to_string(),
     ));
+    headers.push(("Accept-Encoding".into(), "gzip, deflate, br, zstd".into()));
     headers
 }
 
@@ -1886,9 +1887,11 @@ mod tests {
         let get = |name: &str| {
             headers
                 .iter()
-                .find(|(key, _)| key == name)
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
                 .map(|(_, value)| value.as_str())
         };
+        assert_eq!(headers[0].0, "Accept");
+        assert_eq!(get("accept-encoding"), Some("gzip, deflate, br, zstd"));
         assert_eq!(get("authorization"), Some("Bearer tok"));
         assert_eq!(get("x-claude-code-session-id"), Some(SESSION));
         assert_eq!(get("x-claude-code-prompt-id"), Some(PROMPT));

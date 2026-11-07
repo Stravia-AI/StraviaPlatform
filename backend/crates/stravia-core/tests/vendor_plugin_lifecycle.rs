@@ -486,18 +486,18 @@ async fn manual_entrypoints_preserve_raw_and_preencoded_http() -> anyhow::Result
 
     let directory = tempfile::tempdir()?;
     let gateway = new_gateway(directory.path().to_owned()).await?;
-    install(&gateway, "legacy-entrypoints.wasm", false).await?;
+    install(&gateway, "manual-entrypoints.wasm", false).await?;
     let mut upstream = TestUpstream::start().await;
     let mut targets = Vec::with_capacity(3);
 
     for mode in ["manual", "raw", "preencoded"] {
         let target = connection(
             &gateway,
-            "fixture.legacy-abi",
-            &format!("legacy {mode} account"),
-            &format!("legacy-{mode}"),
+            "fixture.manual-entrypoints",
+            &format!("manual {mode} account"),
+            &format!("manual-{mode}"),
             &upstream.base_url,
-            "legacy-secret",
+            "manual-secret",
             options(&[("mode", mode)]),
         )
         .await?;
@@ -517,8 +517,10 @@ async fn manual_entrypoints_preserve_raw_and_preencoded_http() -> anyhow::Result
         let request = upstream.next_for(&mut call).await;
         assert_eq!(
             request.header("authorization"),
-            Some("Bearer legacy-secret")
+            Some("Bearer manual-secret")
         );
+        assert_eq!(request.header("accept"), None);
+        assert_eq!(request.header("user-agent"), None);
         assert_eq!(
             request.header("accept-encoding"),
             (mode == "manual").then_some("gzip"),
@@ -539,7 +541,7 @@ async fn manual_entrypoints_preserve_raw_and_preencoded_http() -> anyhow::Result
             assert_eq!(request.header("content-encoding"), None);
         }
 
-        let expected = format!("legacy {mode} response");
+        let expected = format!("manual {mode} response");
         let mut reply = UpstreamReply::model(&expected);
         if mode != "preencoded" {
             let mut encoder = GzipEncoder::new(Vec::new());
@@ -566,11 +568,11 @@ async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow
 
     let directory = tempfile::tempdir()?;
     let gateway = new_gateway(directory.path().to_owned()).await?;
-    install(&gateway, "legacy-entrypoints.wasm", false).await?;
+    install(&gateway, "manual-entrypoints.wasm", false).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let base_url = format!("http://{}", listener.local_addr()?);
     let (observed, mut messages) = mpsc::unbounded_channel();
-    let reply = UpstreamReply::model("legacy WebSocket response");
+    let reply = UpstreamReply::model("manual WebSocket response");
     let reply = String::from_utf8(reply.body)?;
     let upstream = Router::new().route(
         "/socket",
@@ -579,7 +581,7 @@ async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow
             let reply = reply.clone();
             async move {
                 upgrade
-                    .protocols(["legacy-v1"])
+                    .protocols(["manual-v1"])
                     .on_upgrade(move |mut socket| async move {
                         let Message::Text(text) = socket
                             .recv()
@@ -587,7 +589,7 @@ async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow
                             .expect("request frame")
                             .expect("valid request")
                         else {
-                            panic!("legacy request must be text");
+                            panic!("manual request must be text");
                         };
                         observed
                             .send((headers, text))
@@ -609,15 +611,15 @@ async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow
     let server = tokio::spawn(async move {
         axum::serve(listener, upstream)
             .await
-            .expect("serve legacy WS upstream");
+            .expect("serve manual WS upstream");
     });
     let target = connection(
         &gateway,
-        "fixture.legacy-abi",
-        "legacy WebSocket account",
-        "legacy-websocket",
+        "fixture.manual-entrypoints",
+        "manual WebSocket account",
+        "manual-websocket",
         &base_url,
-        "legacy-ws-secret",
+        "manual-ws-secret",
         options(&[
             ("mode", "websocket"),
             (
@@ -635,15 +637,15 @@ async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow
     ));
     let (headers, text) = tokio::select! {
         biased;
-        request = messages.recv() => request.expect("legacy WS request"),
-        response = &mut call => panic!("legacy WS returned before request: {:?}", response?),
+        request = messages.recv() => request.expect("manual WS request"),
+        response = &mut call => panic!("manual WS returned before request: {:?}", response?),
     };
     assert_eq!(
         headers.get("authorization").unwrap(),
-        "Bearer legacy-ws-secret"
+        "Bearer manual-ws-secret"
     );
     assert_eq!(headers.get("accept-encoding").unwrap(), "gzip");
-    assert_eq!(headers.get("sec-websocket-protocol").unwrap(), "legacy-v1");
+    assert_eq!(headers.get("sec-websocket-protocol").unwrap(), "manual-v1");
     assert!(!headers.contains_key("sec-websocket-extensions"));
     let application: serde_json::Value = serde_json::from_str(&text)?;
     assert!(
@@ -651,7 +653,7 @@ async fn manual_entrypoints_exchange_uncompressed_websocket_messages() -> anyhow
             .to_string()
             .contains("exercise the lifecycle fixture")
     );
-    assert_success_with(&call.await?, "legacy WebSocket response");
+    assert_success_with(&call.await?, "manual WebSocket response");
     gateway.shutdown().await;
     server.abort();
     Ok(())

@@ -24,7 +24,7 @@ use stravia_runtime_contract::protocol::{
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::{
@@ -59,7 +59,7 @@ impl HostHttpResponse for HttpResponse {
     async fn status(&self) -> Result<u16, HostFailure> {
         Ok(self.response().await?.lock().await.status().as_u16())
     }
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
+    async fn headers(&self) -> Result<Vec<stravia_vendor_sdk::net::Field>, HostFailure> {
         Ok(self
             .response()
             .await?
@@ -67,7 +67,7 @@ impl HostHttpResponse for HttpResponse {
             .await
             .headers()
             .iter()
-            .map(|(key, value)| (key.to_string(), value.to_str().unwrap().into()))
+            .map(|(key, value)| stravia_vendor_sdk::net::Field { name: key.to_string(), bytes: value.as_bytes().to_vec() })
             .collect())
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -249,7 +249,10 @@ struct Services {
 }
 #[async_trait]
 impl HostServices for Services {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), stravia_vendor_sdk::net::OptionError> {
+        stravia_vendor_sdk::net::validate_host_option(key, value)
+    }
+    fn http_start(&self, request: stravia_vendor_sdk::net::Request, _options: stravia_vendor_sdk::net::Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let url = url::Url::parse(&request.url).unwrap();
         assert!(matches!(
             url.host_str(),
@@ -271,8 +274,11 @@ impl HostServices for Services {
                 local,
             )
             .body(request.body);
-        for (key, value) in request.headers {
-            builder = builder.header(key, value);
+        for field in request.headers.into_vec() {
+            if field.bytes.is_empty() && (field.name.eq_ignore_ascii_case("host") || field.name.eq_ignore_ascii_case("content-length")) {
+                continue;
+            }
+            builder = builder.header(field.name, reqwest::header::HeaderValue::from_bytes(&field.bytes).unwrap());
         }
         Ok(Arc::new(HttpResponse {
             client: self.client.clone(),
@@ -282,7 +288,8 @@ impl HostServices for Services {
     }
     async fn ws_connect(
         &self,
-        _: stravia_vendor_runtime::WsRequest,
+        _: stravia_vendor_sdk::net::ConnectRequest,
+        _: stravia_vendor_sdk::net::Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Unsupported,
@@ -993,6 +1000,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             .unwrap();
         assert!(!headers.contains_key("x-downstream-secret"));
         assert!(!headers.contains_key("x-goog-api-client"));
+        assert_eq!(headers["transfer-encoding"], "chunked");
+        assert_eq!(headers["accept-encoding"], "gzip");
         let body: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(body["project"], "test-project");
         assert_eq!(body["model"], "account-model");

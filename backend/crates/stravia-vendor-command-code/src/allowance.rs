@@ -1,6 +1,5 @@
 use serde_json::{Map, Value};
 use stravia_vendor_common::account::first_account_label;
-use stravia_vendor_sdk::wit::types::HttpRequest;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
     AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ErrorKind, GuestHost, PluginError,
@@ -93,7 +92,7 @@ pub(super) fn commandcode_request(
     credential: &str,
     path: &str,
     params: &[(&str, &str)],
-) -> HttpRequest {
+) -> stravia_vendor_sdk::net::Request {
     let mut url = format!("{}{path}", base_url.trim_end_matches('/'));
     if !params.is_empty() {
         url.push('?');
@@ -106,10 +105,10 @@ pub(super) fn commandcode_request(
             url.push_str(&percent_encode(value));
         }
     }
-    HttpRequest {
+    stravia_vendor_sdk::net::Request {
         method: "GET".into(),
         url,
-        headers: vec![
+        headers: crate::net_fields(vec![
             ("authorization".into(), format!("Bearer {credential}")),
             ("accept".into(), "application/json".into()),
             ("user-agent".into(), "cli".into()),
@@ -118,7 +117,7 @@ pub(super) fn commandcode_request(
                 crate::PROTOCOL_VERSION.into(),
             ),
             ("x-cli-environment".into(), "production".into()),
-        ],
+        ]),
         body: vec![],
     }
 }
@@ -138,8 +137,8 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn execute_request(host: &GuestHost, request: HttpRequest) -> Result<Vec<u8>, PluginError> {
-    let response = host.http_start(request)?;
+fn execute_request(host: &GuestHost, request: stravia_vendor_sdk::net::Request) -> Result<Vec<u8>, PluginError> {
+    let response = host.http_start(request, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(status_error(status));
@@ -147,7 +146,7 @@ fn execute_request(host: &GuestHost, request: HttpRequest) -> Result<Vec<u8>, Pl
     read_http_body(&response, MAX_RESPONSE_BYTES)
 }
 
-fn optional_request(host: &GuestHost, request: HttpRequest) -> Option<Vec<u8>> {
+fn optional_request(host: &GuestHost, request: stravia_vendor_sdk::net::Request) -> Option<Vec<u8>> {
     execute_request(host, request).ok()
 }
 

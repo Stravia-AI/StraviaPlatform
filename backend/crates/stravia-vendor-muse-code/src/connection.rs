@@ -8,15 +8,16 @@ pub(super) fn check(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
-    let value = connection_check::json(
-        host,
-        HttpRequest {
+    let response = host.http_start(
+        net::Request {
             method: "GET".into(),
             url: format!("{}/models", provider.base_url.trim_end_matches('/')),
             headers: headers(key(provider)?),
             body: Vec::new(),
         },
+        &bun_options(),
     )?;
+    let value = connection_check::read_json(&response)?;
     if !value.get("data").is_some_and(Value::is_array) {
         return Err(connection_check::invalid_response(
             "Muse model list has no data array",

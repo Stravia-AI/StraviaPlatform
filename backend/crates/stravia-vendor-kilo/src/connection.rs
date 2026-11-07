@@ -6,15 +6,16 @@ pub(super) fn check(
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
     token(provider)?;
-    let value = connection_check::json(
-        host,
-        HttpRequest {
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
             method: "GET".into(),
             url: format!("{ORIGIN}/api/profile/balance"),
-            headers: headers(provider)?,
+            headers: crate::net_fields(headers(provider)?),
             body: Vec::new(),
         },
+        &crate::net_options(),
     )?;
+    let value = connection_check::read_json(&response)?;
     if value
         .get("balance")
         .is_none_or(|balance| !balance.is_number())

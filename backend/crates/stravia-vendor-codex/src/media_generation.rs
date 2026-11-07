@@ -94,10 +94,10 @@ pub(super) fn generate(
     let response = codex::start_responses_http(
         host,
         provider,
-        stravia_vendor_sdk::wit::types::HttpRequest {
+        stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: endpoint(&provider.base_url, "/responses"),
-            headers,
+            headers: codex::http_fields(headers),
             body: serde_json::to_vec(&codex::WireBody(&body))
                 .map_err(|_| invalid("Codex image request could not be encoded"))?,
         },

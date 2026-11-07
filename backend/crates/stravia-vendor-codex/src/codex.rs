@@ -8,7 +8,7 @@ use stravia_runtime_contract::protocol::{
     ir::{AiResponse, ServerToolUsage, Usage},
 };
 use stravia_vendor_sdk::{
-    GuestHost, ProviderSnapshot, SearchRequest, SearchResponse, SearchSource, WsMessage, WsRequest,
+    GuestHost, ProviderSnapshot, SearchRequest, SearchResponse, SearchSource, WsMessage,
 };
 
 use super::auth::account_id_from_jwt;
@@ -963,24 +963,38 @@ pub(super) fn append_identity_headers(
     Ok(())
 }
 
+pub(super) fn fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
+    let mut fields = stravia_vendor_sdk::net::Fields::new();
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
+    fields
+}
+
+pub(super) fn http_fields(mut headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
+    headers.push(("accept-encoding".into(), "identity".into()));
+    fields(headers)
+}
+
+pub(super) fn http_options() -> Result<stravia_vendor_sdk::net::Options, stravia_vendor_sdk::PluginError> {
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("codex-http").map_err(|e| invalid(&e.to_string()))?;
+    Ok(options)
+}
+
 /// The official client zstd-encodes Responses bodies only for ChatGPT auth on
 /// the built-in OpenAI provider; a custom base URL is a different provider.
 pub(super) fn start_responses_http(
     host: &GuestHost,
     provider: &ProviderSnapshot,
-    request: stravia_vendor_sdk::wit::types::HttpRequest,
+    request: stravia_vendor_sdk::net::Request,
 ) -> Result<stravia_vendor_sdk::HttpResponse, stravia_vendor_sdk::PluginError> {
-    if !official_endpoint(&provider.base_url) {
-        return host.http_start(request);
+    let mut options = http_options()?;
+    if official_endpoint(&provider.base_url) {
+        options.request_encoding(stravia_vendor_sdk::net::Coding::Zstd)
+            .map_err(|e| invalid(&e.to_string()))?;
     }
-    host.http_start_with_compression(
-        request,
-        stravia_vendor_sdk::HttpCompression {
-            request: Some(stravia_vendor_sdk::HttpContentCoding::Zstd),
-            // The official client advertises no response codings.
-            response: Vec::new(),
-        },
-    )
+    host.http_start(request, &options)
 }
 
 fn official_endpoint(base_url: &str) -> bool {
@@ -1056,17 +1070,18 @@ pub(super) fn infer_websocket(
     };
     let continuation_id = request_continuation_id(body).map(str::to_owned);
     let continuation_requested = continuation_id.is_some();
-    let connection = host.ws_connect_with_compression(
-        WsRequest {
-            url,
-            headers,
-            protocols: Vec::new(),
-            continuation_id,
-            reuse_max_age_millis: Some(WEBSOCKET_REUSE_MAX_AGE_MILLIS),
-        },
-        stravia_vendor_sdk::WsCompression::PermessageDeflate(
-            stravia_vendor_sdk::CompressionNegotiation::Preferred,
-        ),
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("codex-ws").map_err(|e| invalid(&e.to_string()))?;
+    options.ws_compression(stravia_vendor_sdk::net::WsCompression::Preferred)
+        .map_err(|e| invalid(&e.to_string()))?;
+    options.reuse_max_age(std::time::Duration::from_millis(WEBSOCKET_REUSE_MAX_AGE_MILLIS))
+        .map_err(|e| invalid(&e.to_string()))?;
+    if let Some(id) = &continuation_id {
+        options.continuation(id).map_err(|e| invalid(&e.to_string()))?;
+    }
+    let connection = host.ws_connect(
+        stravia_vendor_sdk::net::ConnectRequest::new(url).fields(fields(headers)),
+        &options,
     )?;
     let mut frame = body.clone();
     let object = frame
@@ -1164,10 +1179,10 @@ pub(super) fn search(
     let response = start_responses_http(
         host,
         provider,
-        stravia_vendor_sdk::wit::types::HttpRequest {
+        stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: endpoint(&provider.base_url, "/responses"),
-            headers,
+            headers: http_fields(headers),
             body: serde_json::to_vec(&WireBody(&body))
                 .map_err(|_| invalid("Codex Search request could not be encoded"))?,
         },

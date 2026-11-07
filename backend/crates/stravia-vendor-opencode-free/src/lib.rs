@@ -29,7 +29,7 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigGroup, DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    HttpRequest, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
+    net::{self, Fields, Request}, NetworkDeclaration, Operation, OperationInput, OperationOutput, PluginError,
     ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
 
@@ -52,9 +52,16 @@ fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(FREE_MODEL_SUFFIX) || UNSUFFIXED_FREE_MODELS.contains(&model)
 }
 
-fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
-    headers.retain(|(candidate, _)| !candidate.eq_ignore_ascii_case(name));
-    headers.push((name.to_owned(), value));
+fn set_header(headers: &mut Fields, name: &str, value: String) {
+    headers.remove(name);
+    headers.append(name, value.into_bytes());
+}
+
+fn bun_options() -> net::Options {
+    let mut options = net::Options::new();
+    options.shape("bun").expect("valid bun shape");
+    options.response_decoding(&[net::Coding::Gzip, net::Coding::Deflate, net::Coding::Br, net::Coding::Zstd]).expect("valid response codings");
+    options
 }
 
 fn setting<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a str> {
@@ -67,7 +74,7 @@ fn setting<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-fn apply_auth(provider: &ProviderSnapshot, headers: &mut Vec<(String, String)>) {
+fn apply_auth(provider: &ProviderSnapshot, headers: &mut Fields) {
     // Zen 官方客户端无 key 时发送字面量 `Bearer public`，上游对
     // `allowAnonymous` 免费模型放行并改用 IP 限流。
     let token = setting(provider, "apiKey").unwrap_or("public");
@@ -174,10 +181,12 @@ fn execute_inference(
     }
     let mut encoded = common::encode_inference_request(PROTOCOL, request)?;
     project_body(&mut encoded.body);
-    let mut headers = Vec::new();
+    let mut headers = Fields::new();
     native_identity::apply(provider, &mut headers)?;
     set_header(&mut headers, "content-type", "application/json".into());
     apply_auth(provider, &mut headers);
+    headers.append("accept", b"*/*".to_vec());
+    headers.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = serde_json::to_vec(&encoded.body).map_err(|error| {
         common::plugin_error(
@@ -186,26 +195,28 @@ fn execute_inference(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "POST".to_owned(),
         url,
         headers,
         body,
-    })?;
+    }, &bun_options())?;
     common::decode_inference(host, PROTOCOL, response)
 }
 
 fn discover(host: &GuestHost, provider: &ProviderSnapshot) -> Result<OperationOutput, PluginError> {
     let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
-    let mut headers = vec![("accept".to_owned(), "application/json".to_owned())];
+    let mut headers = Fields::new();
+    headers.append("accept", b"application/json".to_vec());
     native_identity::apply(provider, &mut headers)?;
     apply_auth(provider, &mut headers);
-    let response = host.http_start(HttpRequest {
+    headers.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
+    let response = host.http_start(Request {
         method: "GET".to_owned(),
         url,
         headers,
         body: Vec::new(),
-    })?;
+    }, &bun_options())?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let body = read_http_body(&response, MAX_MODELS_BODY)?;

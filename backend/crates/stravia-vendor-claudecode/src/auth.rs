@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use stravia_vendor_sdk::{
-    AuthRequest, AuthResponse, AuthStep, ErrorKind, GuestHost, HttpRequest, PluginError,
+    AuthRequest, AuthResponse, AuthStep, ErrorKind, GuestHost, PluginError,
     ProviderSnapshot, read_http_body,
 };
 
@@ -255,12 +255,7 @@ fn token_request(
         ("content-type".into(), "application/json".into()),
     ];
     headers.extend(extra_headers);
-    let response = host.http_start(HttpRequest {
-        method: "POST".into(),
-        url: TOKEN_URL.into(),
-        headers,
-        body,
-    })?;
+    let response = host.http_start(crate::net_request("POST", TOKEN_URL, headers, body), &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_TOKEN_BODY)?;
@@ -361,10 +356,7 @@ fn complete_identity(host: &GuestHost, values: &mut BTreeMap<String, Value>) {
 
 fn fetch_bootstrap(host: &GuestHost, access_token: &str) -> Option<BootstrapAccount> {
     let response = host
-        .http_start(HttpRequest {
-            method: "GET".into(),
-            url: BOOTSTRAP_URL.into(),
-            headers: vec![
+        .http_start(crate::net_request("GET", BOOTSTRAP_URL, vec![
                 ("accept".into(), "application/json, text/plain, */*".into()),
                 ("authorization".into(), format!("Bearer {access_token}")),
                 ("content-type".into(), "application/json".into()),
@@ -373,9 +365,7 @@ fn fetch_bootstrap(host: &GuestHost, access_token: &str) -> Option<BootstrapAcco
                     format!("claude-code/{DEFAULT_CLIENT_VERSION}"),
                 ),
                 ("anthropic-beta".into(), OAUTH_BETA.into()),
-            ],
-            body: Vec::new(),
-        })
+            ], Vec::new()), &crate::net_options())
         .ok()?;
     if !(200..300).contains(&response.status().ok()?) {
         return None;

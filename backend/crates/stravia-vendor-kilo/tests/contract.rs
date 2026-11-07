@@ -9,12 +9,13 @@ use std::{
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
 use stravia_vendor_sdk::{
     AuthRequest, AuthResponse, AuthStep, ErrorKind, OperationInput, OperationOutput,
     ProviderSnapshot,
+    net::{ConnectRequest, Field, Options, Request as HttpRequest},
 };
 
 struct Response {
@@ -27,8 +28,8 @@ impl HostHttpResponse for Response {
     async fn status(&self) -> Result<u16, HostFailure> {
         Ok(self.status)
     }
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
-        Ok(vec![("content-type".into(), self.mime.clone())])
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
+        Ok(vec![Field { name: "content-type".into(), bytes: self.mime.as_bytes().to_vec() }])
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
         Ok(self.chunks.lock().pop_front())
@@ -52,7 +53,7 @@ impl Services {
 }
 #[async_trait]
 impl HostServices for Services {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.requests.lock().push(request);
         self.responses
             .lock()
@@ -62,7 +63,8 @@ impl HostServices for Services {
     }
     async fn ws_connect(
         &self,
-        _request: stravia_vendor_runtime::WsRequest,
+        _request: ConnectRequest,
+        _options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(HostFailure::new(ErrorKind::Trapped, "Unexpected websocket"))
     }
@@ -218,7 +220,7 @@ async fn device_pending_approval_profile_and_expiry() {
         services.requests.lock()[3]
             .headers
             .iter()
-            .all(|(n, _)| !n.eq_ignore_ascii_case("X-KiloCode-OrganizationId"))
+            .all(|field| !field.name.eq_ignore_ascii_case("X-KiloCode-OrganizationId"))
     );
     *services.state.lock() = Some(br#"{"code":"expired","deadline_ms":0}"#.to_vec());
     let count = services.requests.lock().len();
@@ -338,7 +340,7 @@ async fn signed_in_catalog_and_organization_balance() {
     assert!(
         s.requests.lock()[0]
             .headers
-            .contains(&("authorization".into(), "Bearer key".into()))
+            .get("authorization") == Some(b"Bearer key".as_slice())
     );
     p.credentials
         .insert("organizations".into(), json!([{"id":"org/id"}]));
@@ -366,7 +368,7 @@ async fn signed_in_catalog_and_organization_balance() {
     assert!(
         request
             .headers
-            .contains(&("X-KiloCode-OrganizationId".into(), "org/id".into()))
+            .get("X-KiloCode-OrganizationId") == Some(b"org/id".as_slice())
     );
     let count = s.requests.lock().len();
     assert!(
@@ -434,7 +436,7 @@ async fn route_alias_uses_the_target_model_and_requires_sign_in() {
     assert!(
         requests[0]
             .headers
-            .contains(&("authorization".into(), "Bearer key".into()))
+            .get("authorization") == Some(b"Bearer key".as_slice())
     );
 }
 
@@ -484,7 +486,7 @@ async fn billing_and_midstream_failure_never_complete_successfully() {
             s.requests.lock()[0]
                 .headers
                 .iter()
-                .all(|(n, _)| n != "session_id")
+                .all(|field| field.name != "session_id")
         );
     }
 }
