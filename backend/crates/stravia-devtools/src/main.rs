@@ -11,6 +11,7 @@ mod replay;
 mod scenarios;
 
 mod schema;
+mod wit_compat;
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +31,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Verify released WIT snapshots and backwards compatibility.
+    WitCompat,
     /// Capture a real client's TLS and HTTP fingerprint on loopback only.
     CaptureClient(capture_client::CaptureArgs),
     /// Plan or explicitly apply an offline data-root migration without modifying source data.
@@ -49,6 +52,7 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
+        Command::WitCompat => wit_compat::run(),
         Command::CaptureClient(args) => capture_client::run(args).await,
         Command::MigrateData(args) => migrate_data::run(args).await,
         Command::Record(args) => record::run(args).await,

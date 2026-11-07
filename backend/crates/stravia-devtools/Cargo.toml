@@ -40,3 +40,4 @@ base64 = { workspace = true }
 walkdir = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
+wit-parser = "=0.258.3"

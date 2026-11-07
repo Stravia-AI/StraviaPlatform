@@ -1,0 +1,15 @@
+[package]
+name = "stravia-vendor-net-1-0-compat-fixture"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+wit-bindgen.workspace = true
