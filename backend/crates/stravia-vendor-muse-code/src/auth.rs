@@ -58,27 +58,24 @@ fn post(
     body: Vec<u8>,
 ) -> Result<(u16, Value), PluginError> {
     let mut request_headers = token.map(headers).unwrap_or_else(|| {
-        vec![
-            ("accept".into(), "application/json".into()),
-            ("x-api-version".into(), "1.0.0".into()),
-            ("user-agent".into(), CLIENT_USER_AGENT.into()),
-        ]
+        let mut fields = net::Fields::new();
+        fields.append("accept", b"application/json".to_vec());
+        fields.append("x-api-version", b"1.0.0".to_vec());
+        fields.append("user-agent", CLIENT_USER_AGENT.as_bytes().to_vec());
+        fields.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
+        fields
     });
-    request_headers.push((
-        "content-type".into(),
-        if token.is_some() {
-            "application/json"
-        } else {
-            "application/x-www-form-urlencoded"
-        }
-        .into(),
-    ));
-    let response = host.http_start(HttpRequest {
+    request_headers.append("content-type", if token.is_some() {
+        b"application/json".as_slice()
+    } else {
+        b"application/x-www-form-urlencoded".as_slice()
+    }.to_vec());
+    let response = host.http_start(net::Request {
         method: "POST".into(),
         url: url.into(),
         headers: request_headers,
         body,
-    })?;
+    }, &crate::bun_options())?;
     let status = response.status()?;
     let bytes = read_http_body(&response, 1024 * 1024)?;
     // Never reflect auth response text: it may contain account/device/API tokens.

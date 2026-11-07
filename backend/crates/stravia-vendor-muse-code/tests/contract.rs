@@ -12,9 +12,10 @@ use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, 
 use stravia_runtime_contract::thinking::ThinkingLevel;
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
+use stravia_vendor_sdk::net::{self, ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{
     AuthRequest, AuthResponse, AuthStep, DiscoverRequest, ErrorKind, OperationInput,
     OperationOutput, ProviderSnapshot,
@@ -29,10 +30,10 @@ impl HostHttpResponse for Response {
     async fn status(&self) -> Result<u16, HostFailure> {
         Ok(self.status)
     }
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
         Ok(vec![
-            ("content-type".into(), "text/event-stream".into()),
-            ("retry-after".into(), "7".into()),
+            Field { name: "content-type".into(), bytes: b"text/event-stream".to_vec() },
+            Field { name: "retry-after".into(), bytes: b"7".to_vec() },
         ])
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -63,7 +64,7 @@ impl Services {
 }
 #[async_trait]
 impl HostServices for Services {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.requests.lock().push(request);
         let (status, body) = self
             .replies
@@ -75,9 +76,13 @@ impl HostServices for Services {
             body: Mutex::new(Some(body.into_bytes())),
         }))
     }
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        net::validate_host_option(key, value)
+    }
     async fn ws_connect(
         &self,
-        _request: stravia_vendor_runtime::WsRequest,
+        _request: ConnectRequest,
+        _options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(HostFailure::new(ErrorKind::Trapped, "no websocket"))
     }
@@ -231,11 +236,7 @@ async fn device_flow_mints_once_and_keeps_account_token_out_of_inference() {
     );
     // Meta 把无 UA 的设备登录重定向到浏览器不支持页；每一步认证请求都必须带 UA。
     for request in requests.iter() {
-        assert!(
-            request
-                .headers
-                .contains(&("user-agent".into(), "Bun/1.4.3".into()))
-        );
+        assert_eq!(request.headers.get("user-agent"), Some(b"Bun/1.4.3".as_slice()));
     }
     let form: BTreeMap<_, _> = url::form_urlencoded::parse(&requests[1].body)
         .into_owned()
@@ -464,20 +465,9 @@ async fn responses_stream_preserves_tools_results_and_real_encrypted_reasoning()
     let requests = services.requests.lock();
     let sent = &requests[0];
     assert_eq!(sent.url, "https://api.meta.ai/v1/responses");
-    assert!(
-        sent.headers
-            .contains(&("authorization".into(), "Bearer inference-key".into()))
-    );
-    assert!(
-        !sent
-            .headers
-            .iter()
-            .any(|(_, v)| v.contains("account-token") || v.contains("injected"))
-    );
-    assert!(
-        sent.headers
-            .contains(&("x-api-version".into(), "1.0.0".into()))
-    );
+    assert_eq!(sent.headers.get("authorization"), Some(b"Bearer inference-key".as_slice()));
+    assert!(sent.headers.iter().all(|field| !field.bytes.windows(b"account-token".len()).any(|w| w == b"account-token") && !field.bytes.windows(b"injected".len()).any(|w| w == b"injected")));
+    assert_eq!(sent.headers.get("x-api-version"), Some(b"1.0.0".as_slice()));
     let body: Value = serde_json::from_slice(&sent.body).unwrap();
     assert_eq!(body["stream"], true);
     assert!(body.get("tool_choice").is_none());
@@ -756,10 +746,8 @@ async fn meta_projection_omits_foreign_controls_and_keeps_supported_native_value
         body.get("text")
             .is_none_or(|text| text.get("verbosity").is_none())
     );
-    assert!(sent.headers.iter().all(|(name, _)| matches!(
-        name.as_str(),
-        "authorization" | "x-api-version" | "content-type" | "accept" | "user-agent"
-    )));
+    assert_eq!(sent.headers.iter().map(|field| field.name.as_str()).collect::<Vec<_>>(),
+        vec!["authorization", "x-api-version", "user-agent", "accept-encoding", "content-type", "accept"]);
     let serialized = serde_json::to_string(&body).unwrap();
     for private in [
         "raw-session",
@@ -773,7 +761,7 @@ async fn meta_projection_omits_foreign_controls_and_keeps_supported_native_value
             !sent
                 .headers
                 .iter()
-                .any(|(_, value)| value.contains(private))
+                .any(|field| field.bytes.windows(private.len()).any(|bytes| bytes == private.as_bytes()))
         );
     }
 }

@@ -18,7 +18,7 @@
 use serde_json::Value;
 use stravia_vendor_common::common;
 use stravia_vendor_common::plan::display_name;
-use stravia_vendor_sdk::wit::types::HttpRequest;
+use stravia_vendor_sdk::net::Request;
 use stravia_vendor_sdk::{
     AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
     read_http_body,
@@ -42,15 +42,15 @@ pub(super) fn execute(
 ) -> Result<AllowanceResponse, PluginError> {
     let credential = api_key(provider)?;
     let base = base_url(provider);
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "GET".into(),
         url: format!("{base}{USAGE_LIMITS_PATH}"),
-        headers: vec![
+        headers: crate::fields(vec![
             ("accept".into(), "application/json".into()),
             ("authorization".into(), format!("Bearer {credential}")),
-        ],
+        ]),
         body: Vec::new(),
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
@@ -74,15 +74,15 @@ pub(super) fn execute(
 /// 主机与额度接口相同，插件的网络来源声明已经覆盖。
 fn current_plan_label(host: &GuestHost, base: &str, credential: &str) -> Option<String> {
     let response = host
-        .http_start(HttpRequest {
+        .http_start(Request {
             method: "GET".into(),
             url: format!("{base}{CURRENT_PLAN_PATH}"),
-            headers: vec![
+            headers: crate::fields(vec![
                 ("accept".into(), "application/json".into()),
                 ("authorization".into(), format!("Bearer {credential}")),
-            ],
+            ]),
             body: Vec::new(),
-        })
+        }, &crate::net_options())
         .ok()?;
     let status = response.status().ok()?;
     if !(200..300).contains(&status) {

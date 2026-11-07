@@ -9,7 +9,7 @@ const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop
 
 pub(crate) fn apply(
     provider: &ProviderSnapshot,
-    headers: &mut Vec<(String, String)>,
+    headers: &mut stravia_vendor_sdk::net::Fields,
 ) -> Result<(), PluginError> {
     let mut ids = NativeIds::now()?;
     let session = common::session_affinity(provider)

@@ -2,19 +2,12 @@
 
 use serde_json::Value;
 use stravia_vendor_sdk::{
-    ErrorKind, GuestHost, HttpResponse, PluginError, net::{Options, Request}, read_http_body,
+    ErrorKind, HttpResponse, PluginError, read_http_body,
 };
 
 use crate::common::{plugin_error, upstream_error};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-
-/// 发送插件选定的非生成请求。调用方还须校验响应结构与认证证据，
-/// 不能把任意 JSON 或携带 Authorization 的 2xx 直接解释为检查通过。
-pub fn json(host: &GuestHost, request: Request) -> Result<Value, PluginError> {
-    let response = host.http_start(request, &Options::new())?;
-    read_json(&response)
-}
 
 /// 解码已由插件选择传输策略的连接检查响应，保留 HTTP 与业务错误检查。
 pub fn read_json(response: &HttpResponse) -> Result<Value, PluginError> {

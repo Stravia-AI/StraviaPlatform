@@ -13,9 +13,10 @@ use stravia_runtime_contract::protocol::ir::{
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime, WebSocketMessage,
 };
+use stravia_vendor_sdk::net::{self, ConnectRequest, Field, Options, Request};
 use stravia_vendor_sdk::{ErrorKind, OperationInput, OperationOutput, ProviderSnapshot};
 
 /// 只从全量供应商 manifest 定位组件，避免误用遗留的单独构建产物。
@@ -78,7 +79,7 @@ impl HostHttpResponse for LoopbackResponse {
     async fn status(&self) -> Result<u16, HostFailure> {
         Ok(self.response().await?.lock().await.status().as_u16())
     }
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
         Ok(self
             .response()
             .await?
@@ -86,7 +87,7 @@ impl HostHttpResponse for LoopbackResponse {
             .await
             .headers()
             .iter()
-            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_string()))
+            .map(|(name, value)| Field { name: name.to_string(), bytes: value.as_bytes().to_vec() })
             .collect())
     }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -111,7 +112,9 @@ struct LoopbackServices {
 
 #[async_trait]
 impl HostServices for LoopbackServices {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> { net::validate_host_option(key, value) }
+    fn http_start(&self, request: Request, options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+        assert_eq!(options.iter().find(|(k, _)| *k == net::keys::SHAPE).map(|(_, v)| v), Some("codex-http"));
         let url = url::Url::parse(&request.url).unwrap();
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert_eq!(url.origin().ascii_serialization(), self.address);
@@ -119,8 +122,8 @@ impl HostServices for LoopbackServices {
             .client
             .request(request.method.parse().unwrap(), request.url)
             .body(request.body);
-        for (name, value) in request.headers {
-            builder = builder.header(name, value);
+        for field in request.headers.into_vec() {
+            builder = builder.header(field.name, field.bytes);
         }
         Ok(Arc::new(LoopbackResponse {
             client: self.client.clone(),
@@ -130,7 +133,8 @@ impl HostServices for LoopbackServices {
     }
     async fn ws_connect(
         &self,
-        _: stravia_vendor_runtime::WsRequest,
+        _: ConnectRequest,
+        _: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         panic!("HTTP-only attempt opened WebSocket")
     }
@@ -259,6 +263,7 @@ async fn http_case(case: &'static str) {
                 name.eq_ignore_ascii_case(expected).then(|| value.trim())
             })
         };
+        assert_eq!(header("accept-encoding"), Some("identity"));
         let thread = header("thread-id").expect("thread header");
         assert_eq!(thread, "5d42eca3-00ce-7fd9-879a-2f189010d915");
         assert_eq!(header("session-id"), Some(thread));
@@ -640,7 +645,7 @@ struct ConnectionRecord {
     headers: BTreeMap<String, String>,
     continuation_id: Option<String>,
     reuse_max_age_millis: Option<u64>,
-    compression: Option<stravia_vendor_sdk::WsCompression>,
+    compression: Option<String>,
 }
 
 /// What one `ws_connect` does. The queue is consumed in connection order.
@@ -662,6 +667,8 @@ struct MockSocket {
 
 #[async_trait]
 impl HostWebSocket for MockSocket {
+    fn handshake_status(&self) -> u16 { 101 }
+    fn handshake_headers(&self) -> Vec<Field> { Vec::new() }
     async fn send(&self, message: WebSocketMessage) -> Result<(), HostFailure> {
         if let WebSocketMessage::Text(text) = &message {
             // Field order is wire behavior; only parse after checking the raw text.
@@ -689,20 +696,25 @@ impl HostWebSocket for MockSocket {
 
 #[async_trait]
 impl HostServices for MockServices {
-    fn http_start(&self, _request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> { net::validate_host_option(key, value) }
+    fn http_start(&self, _request: Request, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         Err(HostFailure::new(ErrorKind::Trapped, "unexpected HTTP path"))
     }
 
     async fn ws_connect(
         &self,
-        request: stravia_vendor_runtime::WsRequest,
+        request: ConnectRequest,
+        options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
-        let continuation_requested = request.continuation_id.is_some();
+        let get = |key: &str| options.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_owned());
+        assert_eq!(get(net::keys::SHAPE).as_deref(), Some("codex-ws"));
+        let continuation_id = get(net::keys::CONTINUATION);
+        let continuation_requested = continuation_id.is_some();
         self.recorded.connections.lock().push(ConnectionRecord {
-            headers: request.headers.into_iter().collect(),
-            continuation_id: request.continuation_id,
-            reuse_max_age_millis: request.reuse_max_age_millis,
-            compression: request.compression,
+            headers: request.headers.into_vec().into_iter().map(|f| (f.name, String::from_utf8(f.bytes).unwrap())).collect(),
+            continuation_id,
+            reuse_max_age_millis: get(net::keys::REUSE_MAX_AGE).map(|v| v.parse().unwrap()),
+            compression: get(net::keys::WS_COMPRESSION),
         });
         let connect = self
             .connects
@@ -1114,12 +1126,7 @@ async fn affinity_and_account_headers_follow_actual_codex_frames() {
     assert_eq!(sent.len(), cases.len());
     assert_eq!(closed.len(), cases.len());
     for (index, (_, previous_id, _, response_id)) in cases.iter().enumerate() {
-        assert!(matches!(
-            &connections[index].compression,
-            Some(stravia_vendor_sdk::WsCompression::PermessageDeflate(
-                stravia_vendor_sdk::CompressionNegotiation::Preferred
-            ))
-        ));
+        assert_eq!(connections[index].compression.as_deref(), Some("preferred"));
         assert_eq!(connections[index].continuation_id.as_deref(), *previous_id);
         assert_eq!(connections[index].reuse_max_age_millis, Some(3_300_000));
         assert_eq!(sent[index]["previous_response_id"].as_str(), *previous_id);

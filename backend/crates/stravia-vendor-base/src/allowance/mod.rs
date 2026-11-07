@@ -3,7 +3,7 @@ mod clinepass;
 mod parsers;
 
 use serde_json::Value;
-use stravia_vendor_sdk::wit::types::HttpRequest;
+use stravia_vendor_sdk::net::Request;
 use stravia_vendor_sdk::{
     AllowanceRequest, AllowanceResponse, ErrorKind, GuestHost, PluginError, ProviderSnapshot,
     read_http_body,
@@ -37,7 +37,7 @@ pub(crate) fn execute(
     let requests = requests_for(monitor, credential);
     let count = requests.len();
     for (index, request) in requests.into_iter().enumerate() {
-        let response = host.http_start(request)?;
+        let response = host.http_start(request, &crate::net_options())?;
         let status = response.status()?;
         if !(200..300).contains(&status) {
             if count > 1 && index == 0 && status == 404 {
@@ -92,7 +92,7 @@ fn string_value(value: &Value) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn requests_for(monitor: Monitor, credential: &str) -> Vec<HttpRequest> {
+fn requests_for(monitor: Monitor, credential: &str) -> Vec<Request> {
     let (method, urls, body): (&str, &[&str], Vec<u8>) = match monitor {
         Monitor::GitHubCopilot => (
             "GET",
@@ -149,10 +149,10 @@ fn requests_for(monitor: Monitor, credential: &str) -> Vec<HttpRequest> {
                 Monitor::OpenCodeGo => headers.push(("user-agent".into(), "Stravia".into())),
                 _ => {}
             }
-            HttpRequest {
+            Request {
                 method: method.into(),
                 url: (*url).into(),
-                headers,
+                headers: crate::fields(headers),
                 body: body.clone(),
             }
         })

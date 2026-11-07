@@ -2,8 +2,8 @@ use serde_json::{Value, json};
 use stravia_vendor_common::common::plugin_error;
 use stravia_vendor_common::connection_check;
 use stravia_vendor_sdk::{
-    ConnectionCheckResponse, ConnectionCheckVerification, ErrorKind, GuestHost, HttpRequest,
-    PluginError, ProviderSnapshot,
+    ConnectionCheckResponse, ConnectionCheckVerification, ErrorKind, GuestHost,
+    PluginError, ProviderSnapshot, net::Request,
 };
 
 use crate::client;
@@ -23,7 +23,7 @@ pub(crate) fn execute(
     })?;
     let response = client::http_start(
         host,
-        HttpRequest {
+        Request {
             method: "POST".into(),
             url: client::endpoint(provider, "fetchAvailableModels"),
             headers: client::headers(provider)?,

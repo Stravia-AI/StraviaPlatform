@@ -242,14 +242,20 @@ pub(crate) fn infer(
         request_type: "agent",
         request_id: uuid::Uuid::new_v4(),
     };
-    let mut headers = client::headers(&provider)?;
-    headers.push(("transfer-encoding".into(), "chunked".into()));
+    let mut headers = stravia_vendor_sdk::net::Fields::new();
+    for field in client::headers(&provider)?.into_vec() {
+        if field.name.eq_ignore_ascii_case("content-length") {
+            headers.append("Transfer-Encoding", b"chunked".as_slice());
+        } else {
+            headers.append(field.name, field.bytes);
+        }
+    }
     let bytes = serde_json::to_vec(&envelope)
         .map_err(|_| invalid("Antigravity request could not be encoded"))?;
     host.emit_started()?;
     let response = client::http_start(
         host,
-        stravia_vendor_sdk::wit::types::HttpRequest {
+        stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: format!(
                 "{}?alt=sse",
@@ -265,9 +271,9 @@ pub(crate) fn infer(
         let bytes = read_http_body(&response, MAX_EVENT)?;
         return Err(common::upstream_error(status, &headers, &bytes));
     }
-    let streaming = headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("content-type")
-            && value.to_ascii_lowercase().contains("text/event-stream")
+    let streaming = headers.iter().any(|field| {
+        field.name.eq_ignore_ascii_case("content-type")
+            && String::from_utf8_lossy(&field.bytes).to_ascii_lowercase().contains("text/event-stream")
     });
     if !streaming {
         let bytes = read_http_body(&response, MAX_BODY)?;
@@ -332,7 +338,7 @@ fn decode_event(
     accumulator: &mut StreamResponseAccumulator,
     terminal: &mut bool,
     payload: &[u8],
-    headers: &[(String, String)],
+    headers: &stravia_vendor_sdk::net::Fields,
 ) -> Result<(), PluginError> {
     if payload == b"[DONE]" {
         return Ok(());
@@ -399,7 +405,7 @@ pub(crate) fn normalize_final_usage(response: &mut Value) {
         .or_insert_with(|| json!(0));
 }
 
-pub(crate) fn response_error(value: &Value, headers: &[(String, String)]) -> Option<PluginError> {
+pub(crate) fn response_error(value: &Value, headers: &stravia_vendor_sdk::net::Fields) -> Option<PluginError> {
     let error = value
         .get("error")
         .or_else(|| value.pointer("/response/error"))?;

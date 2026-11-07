@@ -13,9 +13,10 @@ use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
     AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
-    ConnectionCheckVerification, GuestHost, HttpRequest, ModelAllowance, PluginError,
+    ConnectionCheckVerification, GuestHost, ModelAllowance, PluginError,
     ProviderSnapshot, read_http_body,
 };
+use stravia_vendor_sdk::net::Request;
 
 use crate::request::{DEFAULT_CLIENT_VERSION, cli_user_agent};
 use crate::{access_token, retryable};
@@ -33,7 +34,7 @@ pub(crate) fn execute(
     provider: &ProviderSnapshot,
 ) -> Result<AllowanceResponse, PluginError> {
     let access_token = access_token(provider)?;
-    let response = host.http_start(usage_request(access_token))?;
+    let response = host.http_start(usage_request(access_token), &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, MAX_USAGE_BODY)?;
@@ -63,26 +64,22 @@ pub(crate) fn connection_check(
     host: &GuestHost,
     provider: &ProviderSnapshot,
 ) -> Result<ConnectionCheckResponse, PluginError> {
-    let value = connection_check::json(host, usage_request(access_token(provider)?))?;
+    let response = host.http_start(usage_request(access_token(provider)?), &crate::net_options())?;
+    let value = connection_check::read_json(&response)?;
     validate_usage(&value)?;
     Ok(ConnectionCheckResponse {
         verified: ConnectionCheckVerification::Credentials,
     })
 }
 
-fn usage_request(access_token: &str) -> HttpRequest {
-    HttpRequest {
-        method: "GET".into(),
-        url: USAGE_URL.into(),
-        headers: vec![
+fn usage_request(access_token: &str) -> Request {
+    crate::net_request("GET", USAGE_URL, vec![
             ("accept".into(), "application/json, text/plain, */*".into()),
             ("anthropic-beta".into(), USAGE_BETAS.into()),
             ("content-type".into(), "application/json".into()),
             ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
             ("authorization".into(), format!("Bearer {access_token}")),
-        ],
-        body: Vec::new(),
-    }
+        ], Vec::new())
 }
 
 /// 接受 `limits` 的空列表和缺省窗口；只要出现的已知字段类型正确即可通过，
@@ -125,18 +122,13 @@ fn validate_usage(value: &Value) -> Result<(), PluginError> {
 /// 失败或无 `user:profile` 权限时降级为 `None`，不让一次附加请求拖垮额度刷新。
 fn fetch_profile_plan(host: &GuestHost, access_token: &str) -> Option<String> {
     let response = host
-        .http_start(HttpRequest {
-            method: "GET".into(),
-            url: PROFILE_URL.into(),
-            headers: vec![
+        .http_start(crate::net_request("GET", PROFILE_URL, vec![
                 ("accept".into(), "application/json, text/plain, */*".into()),
                 ("anthropic-beta".into(), "oauth-2025-04-20".into()),
                 ("content-type".into(), "application/json".into()),
                 ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
                 ("authorization".into(), format!("Bearer {access_token}")),
-            ],
-            body: Vec::new(),
-        })
+            ], Vec::new()), &crate::net_options())
         .ok()?;
     if !(200..300).contains(&response.status().ok()?) {
         return None;

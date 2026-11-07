@@ -18,7 +18,7 @@ use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     AuthDescriptor, AuthFlow, AuthRequest, AuthResponse, AuthStep, CANONICAL_FORMAT_VERSION,
     Capability, ChannelDescriptor, DataCompatibility, DiscoverRequest, DiscoverResponse,
-    DiscoveredModel, ErrorKind, GuestHost, HttpRequest, MODELS_SOURCE_CATALOG, NetworkDeclaration,
+    DiscoveredModel, ErrorKind, GuestHost, MODELS_SOURCE_CATALOG, NetworkDeclaration,
     Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
     ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
 };
@@ -229,12 +229,12 @@ fn execute_inference(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url,
-        headers,
+        headers: crate::net_fields(headers),
         body,
-    })?;
+    }, &crate::net_options())?;
     common::decode_inference(host, OPEN_RESPONSES_PROTOCOL, response)
 }
 
@@ -434,12 +434,12 @@ fn discover(
         url.push_str("after=");
         url.push_str(&urlencoding::encode(cursor));
     }
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "GET".into(),
         url,
-        headers,
+        headers: crate::net_fields(headers),
         body: Vec::new(),
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let body = read_http_body(&response, MAX_JSON_BODY)?;
@@ -758,18 +758,18 @@ fn token_request(
     body: Vec<u8>,
     fallback_refresh: Option<&str>,
 ) -> Result<TokenResult, PluginError> {
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: endpoint.into(),
-        headers: vec![
+        headers: crate::net_fields(vec![
             (
                 "content-type".into(),
                 "application/x-www-form-urlencoded".into(),
             ),
             ("accept".into(), "application/json".into()),
-        ],
+        ]),
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let bytes = read_http_body(&response, MAX_JSON_BODY)?;
@@ -861,12 +861,12 @@ fn json_request(
     body: Vec<u8>,
 ) -> Result<Value, PluginError> {
     headers.push(("accept".into(), "application/json".into()));
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: method.into(),
         url: url.into(),
-        headers,
+        headers: crate::net_fields(headers),
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let bytes = read_http_body(&response, MAX_JSON_BODY)?;
@@ -1203,4 +1203,22 @@ mod tests {
         );
         assert!(body["text"].get("verbosity").is_none());
     }
+}
+
+
+fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
+    let mut fields = stravia_vendor_sdk::net::Fields::new();
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
+    if fields.get("accept").is_none() { fields.append("accept", b"*/*".to_vec()); }
+    if fields.get("accept-encoding").is_none() { fields.append("accept-encoding", b"identity".to_vec()); }
+    if fields.get("user-agent").is_none() { fields.append("user-agent", b"Stravia".to_vec()); }
+    fields
+}
+
+fn net_options() -> stravia_vendor_sdk::net::Options {
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("default").expect("default shape is valid");
+    options
 }

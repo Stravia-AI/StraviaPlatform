@@ -47,13 +47,21 @@ fn route(channel: &str, provider: &ProviderSnapshot) -> Result<(), PluginError> 
     }
     Ok(())
 }
-fn headers(token: &str) -> Vec<(String, String)> {
-    vec![
-        ("authorization".into(), format!("Bearer {token}")),
-        ("x-api-version".into(), "1.0.0".into()),
-        ("accept".into(), "application/json".into()),
-        ("user-agent".into(), CLIENT_USER_AGENT.into()),
-    ]
+fn headers(token: &str) -> net::Fields {
+    let mut fields = net::Fields::new();
+    fields.append("authorization", format!("Bearer {token}").into_bytes());
+    fields.append("x-api-version", b"1.0.0".to_vec());
+    fields.append("accept", b"application/json".to_vec());
+    fields.append("user-agent", CLIENT_USER_AGENT.as_bytes().to_vec());
+    fields.append("accept-encoding", b"gzip, deflate, br, zstd".to_vec());
+    fields
+}
+
+fn bun_options() -> net::Options {
+    let mut options = net::Options::new();
+    options.shape("bun").expect("valid bun shape");
+    options.response_decoding(&[net::Coding::Gzip, net::Coding::Deflate, net::Coding::Br, net::Coding::Zstd]).expect("valid response codings");
+    options
 }
 
 fn seed(id: &str) -> Option<(&'static str, bool)> {
@@ -71,12 +79,12 @@ fn seed(id: &str) -> Option<(&'static str, bool)> {
     })
 }
 fn discover(host: &GuestHost, provider: &ProviderSnapshot) -> Result<OperationOutput, PluginError> {
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(net::Request {
         method: "GET".into(),
         url: format!("{BASE}/models"),
         headers: headers(key(provider)?),
         body: Vec::new(),
-    })?;
+    }, &bun_options())?;
     let status = response.status()?;
     let response_headers = response.headers()?;
     let bytes = read_http_body(&response, 4 * 1024 * 1024)?;
@@ -314,18 +322,18 @@ fn infer(
         provider.model.as_deref().unwrap_or_default(),
     )?;
     let mut headers = headers(key(provider)?);
-    headers.push(("content-type".into(), "application/json".into()));
-    headers.retain(|(name, _)| name != "accept");
-    headers.push(("accept".into(), "text/event-stream".into()));
+    headers.append("content-type", b"application/json".to_vec());
+    headers.remove("accept");
+    headers.append("accept", b"text/event-stream".to_vec());
     let body = serde_json::to_vec(&encoded.body)
         .map_err(|_| invalid("Responses request could not be encoded"))?;
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(net::Request {
         method: "POST".into(),
         url: format!("{BASE}/responses"),
         headers,
         body,
-    })?;
+    }, &bun_options())?;
     common::decode_inference(host, PROTOCOL, response)
 }
 

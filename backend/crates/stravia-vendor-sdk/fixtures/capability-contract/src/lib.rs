@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use stravia_vendor_sdk::{
     AiError, AiResponse, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
-    ConfigFieldKind, ConfigGroup, DataCompatibility, ErrorKind, GuestHost, HttpRequest,
+    ConfigFieldKind, ConfigGroup, DataCompatibility, ErrorKind, GuestHost,
+    Fields, Options, Request,
     MediaImageResponse, NetworkDeclaration, Operation, OperationInput, OperationOutput,
     PluginError, ProviderDescriptor, SearchResponse, VendorDescriptor, VendorGuest, VendorKind,
     read_http_body,
@@ -270,24 +271,29 @@ where
 {
     let body = serde_json::to_vec(request).map_err(invalid)?;
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let mut headers = Fields::new();
+    headers.append("accept", b"application/json".to_vec());
+    headers.append("accept-encoding", b"identity".to_vec());
+    headers.append("user-agent", b"stravia-capability-fixture".to_vec());
+    headers.append("content-type", b"application/json".to_vec());
+    headers.append("x-state-before", state_before.to_string().into_bytes());
+    let mut options = Options::new();
+    options.shape("default").map_err(invalid)?;
+    let response = host.http_start(Request {
         method: "POST".into(),
         url: format!("{}{path}", base_url.trim_end_matches('/')),
-        headers: vec![
-            ("content-type".into(), "application/json".into()),
-            ("x-state-before".into(), state_before.to_string()),
-        ],
+        headers,
         body,
-    })?;
+    }, &options)?;
     let status = response.status()?;
     let headers = response.headers()?;
     let body = read_http_body(&response, 8 * 1024 * 1024)?;
     if !(200..300).contains(&status) {
         let payload = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
         let retry_after = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-            .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+            .get("retry-after")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
             .map(Duration::from_secs);
         return Err(PluginError {
             kind: ErrorKind::upstream(

@@ -174,9 +174,9 @@ pub(super) fn decode(
         return Err(common::upstream_error(status, &headers, &bytes));
     }
     let endpoint = common::endpoint(protocol)?;
-    if !headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("content-type")
-            && v.to_ascii_lowercase().contains("text/event-stream")
+    if !headers.iter().any(|field| {
+        field.name.eq_ignore_ascii_case("content-type")
+            && String::from_utf8_lossy(&field.bytes).to_ascii_lowercase().contains("text/event-stream")
     }) {
         let bytes = read_http_body(&response, MAX_BODY)?;
         let mut value: Value = serde_json::from_slice(&bytes).map_err(invalid)?;

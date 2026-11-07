@@ -318,12 +318,12 @@ fn infer(
         )
     })?;
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: endpoint(&provider, GET_CHAT_MESSAGE_PATH),
-        headers: connect_headers(token, true),
+        headers: crate::net_fields(connect_headers(token, true)),
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(
@@ -475,12 +475,12 @@ fn resolve_assignment(
     if let Some(assignment) = state.assignments.get(&key) {
         return Ok(Some(assignment.clone()));
     }
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: endpoint(provider, ASSIGN_MODEL_PATH),
-        headers: connect_headers(token, false),
+        headers: crate::net_fields(connect_headers(token, false)),
         body: encode_assign_model_request_with_platform(token, router_uid, cascade_id, platform),
-    });
+    }, &crate::net_options());
     let response = match response {
         Ok(response) => response,
         Err(_) if !required => return Ok(None),
@@ -529,12 +529,12 @@ fn discover(
 ) -> Result<DiscoverResponse, PluginError> {
     let token = session_token(provider)?;
     let platform = client_platform(provider)?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: endpoint(provider, CATALOG_PATH),
-        headers: catalog_headers(token),
+        headers: crate::net_fields(catalog_headers(token)),
         body: encode_client_metadata_request_with_platform(token, true, platform),
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(

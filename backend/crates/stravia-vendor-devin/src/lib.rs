@@ -113,3 +113,21 @@ impl VendorGuest for DevinVendor {
 
 #[cfg(target_arch = "wasm32")]
 stravia_vendor_sdk::export_vendor!(DevinVendor);
+
+
+fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
+    let mut fields = stravia_vendor_sdk::net::Fields::new();
+    for (name, value) in headers {
+        fields.append(name, value.into_bytes());
+    }
+    if fields.get("accept").is_none() { fields.append("accept", b"*/*".to_vec()); }
+    if fields.get("accept-encoding").is_none() { fields.append("accept-encoding", b"identity".to_vec()); }
+    if fields.get("user-agent").is_none() { fields.append("user-agent", b"Stravia".to_vec()); }
+    fields
+}
+
+fn net_options() -> stravia_vendor_sdk::net::Options {
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options.shape("default").expect("default shape is valid");
+    options
+}

@@ -16,9 +16,10 @@ use stravia_runtime_contract::protocol::ir::request::{ToolChoice, ToolSpec};
 use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
+use stravia_vendor_sdk::net::{self, ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{ErrorKind, OperationInput, OperationOutput, ProviderSnapshot};
 
 const UPSTREAM: &str = "https://opencode.ai/inference/v1";
@@ -57,8 +58,8 @@ impl HostHttpResponse for MockResponse {
         Ok(self.status)
     }
 
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
-        Ok(vec![("content-type".into(), "text/event-stream".into())])
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
+        Ok(vec![Field { name: "content-type".into(), bytes: b"text/event-stream".to_vec() }])
     }
 
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -80,7 +81,7 @@ struct MockServices {
 
 #[async_trait]
 impl HostServices for MockServices {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let rejects_tool_choice = request.method == "POST"
             && serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
                 let model = body["model"].as_str().unwrap_or_default();
@@ -101,9 +102,14 @@ impl HostServices for MockServices {
         }))
     }
 
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        net::validate_host_option(key, value)
+    }
+
     async fn ws_connect(
         &self,
-        _request: stravia_vendor_runtime::WsRequest,
+        _request: ConnectRequest,
+        _options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Trapped,
@@ -215,9 +221,8 @@ fn sent_body(recorded: &Recorded) -> Value {
 fn sent_header(recorded: &Recorded, name: &str) -> Option<String> {
     recorded.requests.lock()[0]
         .headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.clone())
+        .get(name)
+        .map(|bytes| String::from_utf8(bytes.to_vec()).expect("UTF-8 header"))
 }
 
 fn sent_tool_names(body: &Value) -> Vec<String> {
@@ -307,9 +312,8 @@ async fn separate_component_stores_derive_session_without_private_state() {
     let header = |index: usize, name: &str| {
         requests[index]
             .headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
+            .get(name)
+            .map(|bytes| std::str::from_utf8(bytes).expect("UTF-8 header"))
             .expect("native identity header")
     };
     assert_eq!(
@@ -451,7 +455,7 @@ struct RealServices {
     private_state: Mutex<Option<Vec<u8>>>,
 }
 
-type RealResponseData = (u16, Vec<(String, String)>, Vec<u8>);
+type RealResponseData = (u16, Vec<Field>, Vec<u8>);
 
 struct RealResponse {
     builder: Mutex<Option<reqwest::RequestBuilder>>,
@@ -475,7 +479,7 @@ impl RealResponse {
                 let headers = response
                     .headers()
                     .iter()
-                    .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
+                    .map(|(n, v)| Field { name: n.as_str().to_owned(), bytes: v.as_bytes().to_vec() })
                     .collect();
                 let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
                 Ok((status, headers, body))
@@ -491,7 +495,7 @@ impl HostHttpResponse for RealResponse {
         Ok(self.fetch().await?.0)
     }
 
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
         Ok(self.fetch().await?.1.clone())
     }
 
@@ -508,15 +512,17 @@ impl HostHttpResponse for RealResponse {
 
 #[async_trait]
 impl HostServices for RealServices {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let client = reqwest::Client::new();
         let method: reqwest::Method = request
             .method
             .parse()
             .map_err(|_| HostFailure::new(ErrorKind::Invalid, "bad method"))?;
         let mut builder = client.request(method, request.url).body(request.body);
-        for (name, value) in request.headers {
-            builder = builder.header(name, value);
+        for field in request.headers.into_vec() {
+            let value = reqwest::header::HeaderValue::from_bytes(&field.bytes)
+                .map_err(|_| HostFailure::new(ErrorKind::Invalid, "bad header value"))?;
+            builder = builder.header(field.name, value);
         }
         Ok(Arc::new(RealResponse {
             builder: Mutex::new(Some(builder)),
@@ -525,9 +531,14 @@ impl HostServices for RealServices {
         }))
     }
 
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        net::validate_host_option(key, value)
+    }
+
     async fn ws_connect(
         &self,
-        _request: stravia_vendor_runtime::WsRequest,
+        _request: ConnectRequest,
+        _options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Trapped,

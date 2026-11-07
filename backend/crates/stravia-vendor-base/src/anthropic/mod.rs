@@ -10,7 +10,7 @@ use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup,
     ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
     DataCompatibility, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind, GuestHost,
-    HttpRequest, MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
+    MODELS_SOURCE_CATALOG, NetworkDeclaration, Operation, OperationInput,
     OperationOutput, PluginError, ProviderDescriptor, ProviderSnapshot, ValidationIssue,
 };
 
@@ -200,13 +200,13 @@ fn infer(
         headers.push(("x-api-key".into(), api_key.into()));
     }
     host.emit_started()?;
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: endpoint(&provider.base_url, &egress_path),
-        headers,
+        headers: crate::fields(headers),
         body: serde_json::to_vec(&body)
             .map_err(|_| invalid("Anthropic request could not be encoded"))?,
-    })?;
+    }, &crate::net_options())?;
     if operation == Operation::Compact {
         return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
             .map(OperationOutput::Compact);
@@ -257,12 +257,12 @@ fn discover(
     if let Some(api_key) = credential(&provider, "apiKey") {
         headers.push(("x-api-key".into(), api_key.into()));
     }
-    let response = host.http_start(stravia_vendor_sdk::wit::types::HttpRequest {
+    let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "GET".into(),
         url,
-        headers,
+        headers: crate::fields(headers),
         body: Vec::new(),
-    })?;
+    }, &crate::net_options())?;
     ensure_success(&response, "Anthropic model discovery", None)?;
     let bytes = stravia_vendor_sdk::read_http_body(&response, MAX_MODELS_BODY)?;
     let value: Value = serde_json::from_slice(&bytes)
@@ -340,15 +340,16 @@ pub(crate) fn connection_check(
     if let Some(api_key) = api_key {
         headers.push(("x-api-key".into(), api_key.into()));
     }
-    let value = common_check::json(
-        host,
-        HttpRequest {
+    let response = host.http_start(
+        stravia_vendor_sdk::net::Request {
             method: "GET".into(),
             url,
-            headers,
+            headers: crate::fields(headers),
             body: Vec::new(),
         },
+        &crate::net_options(),
     )?;
+    let value = common_check::read_json(&response)?;
     crate::connection_check::validate_models(&value, &["data", "models"], &["id", "name"])?;
     Ok(ConnectionCheckResponse {
         verified: if api_key.is_some() && official_anthropic_origin(&provider.base_url) {
@@ -426,7 +427,7 @@ fn credential<'a>(provider: &'a ProviderSnapshot, key: &str) -> Option<&'a str> 
 }
 
 fn ensure_success(
-    response: &stravia_vendor_sdk::HttpResponse,
+    response: &stravia_vendor_sdk::net::HttpResponse,
     label: &str,
     classify: Option<fn(&Value, bool) -> Option<PluginError>>,
 ) -> Result<u16, PluginError> {

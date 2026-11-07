@@ -1,5 +1,5 @@
 [package]
-name = "stravia-vendor-legacy-contract-fixture"
+name = "stravia-vendor-manual-contract-fixture"
 version.workspace = true
 edition.workspace = true
 publish = false

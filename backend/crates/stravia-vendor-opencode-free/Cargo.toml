@@ -32,5 +32,5 @@ async-trait = { workspace = true }
 jsonschema = { workspace = true }
 parking_lot = { workspace = true }
 stravia-vendor-runtime = { workspace = true }
-reqwest = { workspace = true, features = ["rustls", "stream"] }
+reqwest = { workspace = true, features = ["rustls", "stream", "gzip", "deflate", "brotli", "zstd"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }

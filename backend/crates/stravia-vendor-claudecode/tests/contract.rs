@@ -19,9 +19,10 @@ use stravia_runtime_contract::protocol::ir::{
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent, VendorRuntime,
 };
+use stravia_vendor_sdk::net::{ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{
     AuthRequest, AuthResponse, AuthStep, DiscoverRequest, ErrorKind, OperationInput,
     OperationOutput, ProviderSnapshot,
@@ -68,10 +69,10 @@ impl HostHttpResponse for MockResponse {
         Ok(self.status)
     }
 
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
-        let mut headers = vec![("content-type".into(), self.content_type.into())];
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
+        let mut headers = vec![Field { name: "content-type".into(), bytes: self.content_type.as_bytes().to_vec() }];
         if let Some(id) = &self.request_id {
-            headers.push(("request-id".into(), id.clone()));
+            headers.push(Field { name: "request-id".into(), bytes: id.as_bytes().to_vec() });
         }
         Ok(headers)
     }
@@ -98,7 +99,11 @@ struct MockServices {
 
 #[async_trait]
 impl HostServices for MockServices {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), stravia_vendor_sdk::net::OptionError> {
+        stravia_vendor_sdk::net::validate_host_option(key, value)
+    }
+
+    fn http_start(&self, request: HttpRequest, _options: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.wire_log.lock().push("request");
         if self.reject_assistant_prefill {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
@@ -153,7 +158,8 @@ impl HostServices for MockServices {
 
     async fn ws_connect(
         &self,
-        _request: stravia_vendor_runtime::WsRequest,
+        _request: ConnectRequest,
+        _options: Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(HostFailure::new(
             ErrorKind::Trapped,
@@ -449,12 +455,7 @@ async fn native_compaction_stream_keeps_signed_state_and_iteration_usage() {
         assert!(
             betas.contains(&"compact-2026-09-04"),
             "{}",
-            requests[0]
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
-                .map(|(_, value)| value.as_str())
-                .unwrap_or("")
+            wire_header(&requests[0], "anthropic-beta")
         );
         assert!(!betas.contains(&"message-threads-2026-08-12"));
     }
@@ -1140,14 +1141,7 @@ async fn scoped_ids_survive_reload_without_reusing_http_request_ids() {
     assert_eq!(requests.len(), 2);
     let mut http_ids = Vec::new();
     for sent in requests.iter() {
-        let header = |name: &str| {
-            sent.headers
-                .iter()
-                .find(|(candidate, _)| candidate == name)
-                .unwrap()
-                .1
-                .as_str()
-        };
+        let header = |name: &str| wire_header(sent, name);
         assert_eq!(
             header("x-claude-code-session-id"),
             "0a00c8c6-848d-463f-94f9-b8c3e6ce1a14"
@@ -1220,32 +1214,8 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     assert_eq!(requests.len(), 1);
     let sent = &requests[0];
     assert_eq!(sent.url, "https://api.anthropic.com/v1/messages?beta=true");
-    let compression = sent
-        .compression
-        .as_ref()
-        .expect("explicit HTTP compression");
-    assert!(compression.request.is_none());
-    assert!(matches!(
-        compression.response.as_slice(),
-        [
-            stravia_vendor_sdk::HttpContentCoding::Gzip,
-            stravia_vendor_sdk::HttpContentCoding::Deflate,
-            stravia_vendor_sdk::HttpContentCoding::Br,
-            stravia_vendor_sdk::HttpContentCoding::Zstd,
-        ]
-    ));
-    assert!(
-        !sent
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
-    );
-    let header = |name: &str| {
-        sent.headers
-            .iter()
-            .find(|(candidate, _)| candidate == name)
-            .map(|(_, value)| value.as_str())
-    };
+    assert_eq!(wire_header(sent, "accept-encoding"), "gzip, deflate, br, zstd");
+    let header = |name: &str| sent.headers.get(name).and_then(|bytes| std::str::from_utf8(bytes).ok());
     assert_eq!(header("authorization"), Some("Bearer sk-ant-oat01-test"));
     let body: Value = serde_json::from_slice(&sent.body).unwrap();
     assert_eq!(body["system"][2]["text"], "You are a helpful agent.");
@@ -1315,13 +1285,8 @@ fn message_reply(id: &str, content: Value, stop_reason: &str) -> String {
 }
 
 fn wire_header<'a>(request: &'a HttpRequest, name: &str) -> &'a str {
-    request
-        .headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .unwrap_or_else(|| panic!("missing header {name}"))
-        .1
-        .as_str()
+    std::str::from_utf8(request.headers.get(name).unwrap_or_else(|| panic!("missing header {name}")))
+        .expect("header is UTF-8")
 }
 
 fn threaded_request(messages: &[Value]) -> AiRequest {

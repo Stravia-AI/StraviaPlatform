@@ -45,7 +45,7 @@ pub(crate) fn generate(
     host.emit_started()?;
     let response = client::http_start(
         host,
-        stravia_vendor_sdk::wit::types::HttpRequest {
+        stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: client::endpoint(provider, "generateContent"),
             headers,
@@ -94,7 +94,7 @@ fn build_request(request: &MediaImageRequest) -> Result<Value, PluginError> {
 
 fn decode_response(
     mut value: Value,
-    headers: &[(String, String)],
+    headers: &stravia_vendor_sdk::net::Fields,
 ) -> Result<MediaImageResponse, PluginError> {
     if let Some(error) = wire::response_error(&value, headers) {
         return Err(error);
@@ -278,17 +278,17 @@ mod tests {
     #[test]
     fn response_requires_one_valid_image_and_successful_finish() {
         let mut response = json!({"response":{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png", "data":STANDARD.encode(png())}}]}}]}});
-        assert!(decode_response(response.clone(), &[]).is_err());
+        assert!(decode_response(response.clone(), &stravia_vendor_sdk::net::Fields::new()).is_err());
         response["response"]["candidates"][0]["finishReason"] = json!("STOP");
         assert_eq!(
-            decode_response(response.clone(), &[]).unwrap().artifacts[0].bytes,
+            decode_response(response.clone(), &stravia_vendor_sdk::net::Fields::new()).unwrap().artifacts[0].bytes,
             png()
         );
         let parts = response["response"]["candidates"][0]["content"]["parts"]
             .as_array_mut()
             .unwrap();
         parts.push(parts[0].clone());
-        assert!(decode_response(response, &[]).is_err());
+        assert!(decode_response(response, &stravia_vendor_sdk::net::Fields::new()).is_err());
     }
 
     #[test]
@@ -303,7 +303,7 @@ mod tests {
         assert!(
             decode_response(
                 json!({"response":{"candidates":[{"finishReason":"STOP"}]}}),
-                &[]
+                &stravia_vendor_sdk::net::Fields::new()
             )
             .is_err()
         );
@@ -357,7 +357,7 @@ mod tests {
             json!({"error":{"code":429,"message":"rate limited"}}),
             json!({"response":{"error":{"code":503,"message":"unavailable"}}}),
         ] {
-            assert!(decode_response(event, &[]).is_err());
+            assert!(decode_response(event, &stravia_vendor_sdk::net::Fields::new()).is_err());
         }
     }
 }

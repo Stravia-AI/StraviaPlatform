@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use stravia_runtime_contract::protocol::ids::{
     OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1,
 };
-use stravia_vendor_sdk::wit::types::HttpRequest;
+use stravia_vendor_sdk::net::Request;
 use stravia_vendor_sdk::{
     AuthResponse, AuthStep, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
     ConfigGroup, ConfigValidationResponse, ConnectionCheckResponse, ConnectionCheckVerification,
@@ -148,7 +148,7 @@ fn infer_azure(
     url.query_pairs_mut().append_pair("api-version", &version);
     let api_key = required_string(provider, "apiKey", "Azure API key is required")?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "api-key", api_key);
+    headers.set("api-key", api_key);
     send_inference(
         host,
         &protocol,
@@ -169,9 +169,9 @@ fn infer_bedrock(
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = json_body(encoded.body)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "content-type", "application/json");
+    headers.set("content-type", "application/json");
     if let Some(api_key) = string_value(provider, "apiKey") {
-        set_header(&mut headers, "authorization", format!("Bearer {api_key}"));
+        headers.set("authorization", format!("Bearer {api_key}"));
     } else {
         sign_bedrock(provider, &url, &body, &mut headers)?;
     }
@@ -199,7 +199,7 @@ fn infer_vertex(
     };
     let (token, _) = vertex_access_token(host, provider, true)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "authorization", format!("Bearer {token}"));
+    headers.set("authorization", format!("Bearer {token}"));
     send_inference(
         host,
         protocol,
@@ -236,7 +236,7 @@ fn infer_vertex_anthropic(
     );
     let (token, _) = vertex_access_token(host, provider, true)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "authorization", format!("Bearer {token}"));
+    headers.set("authorization", format!("Bearer {token}"));
     send_inference(
         host,
         "anthropic-messages",
@@ -258,9 +258,9 @@ fn infer_sap(
     let url = common::endpoint_url(&provider.base_url, path)?;
     let token = sap_access_token(host, provider, true)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "authorization", format!("Bearer {token}"));
+    headers.set("authorization", format!("Bearer {token}"));
     if let Some(group) = string_value(provider, "resourceGroup") {
-        set_header(&mut headers, "AI-Resource-Group", group);
+        headers.set("AI-Resource-Group", group);
     }
     send_inference(
         host,
@@ -281,16 +281,20 @@ fn infer_gitlab(
     let encoded = crate::parameters::encode(provider, "openai-chat-completions", request)?;
     let url = common::endpoint_url(&provider.base_url, &encoded.path)?;
     let body = json_body(encoded.body)?;
-    let base_headers = common::header_pairs(&encoded.headers)?;
+    let mut headers = common::header_pairs(&encoded.headers)?;
 
     let access = gitlab_direct_access(host, provider, false, true)?;
+    headers.set("authorization", format!("Bearer {}", access.token));
+    for (name, value) in &access.headers {
+        headers.set(name.as_str(), value.as_bytes());
+    }
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "POST".into(),
         url,
-        headers: gitlab_headers(base_headers, &access),
+        headers,
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if status == 401 {
         // A model request may already have executed. Return the typed fact to
@@ -337,7 +341,7 @@ fn infer_watsonx(
     url.query_pairs_mut().append_pair("version", &version);
     let token = ibm_access_token(host, provider)?;
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "authorization", format!("Bearer {token}"));
+    headers.set("authorization", format!("Bearer {token}"));
     send_inference(
         host,
         "watsonx-text-chat",
@@ -353,22 +357,19 @@ fn send_inference(
     protocol: &str,
     method: &str,
     url: &str,
-    mut headers: Vec<(String, String)>,
+    mut headers: stravia_vendor_sdk::net::Fields,
     body: Vec<u8>,
 ) -> Result<OperationOutput, PluginError> {
-    if !headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-    {
-        headers.push(("content-type".into(), "application/json".into()));
+    if headers.get("content-type").is_none() {
+        headers.append("content-type", "application/json");
     }
     host.emit_started()?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: method.into(),
         url: url.into(),
         headers,
         body,
-    })?;
+    }, &crate::net_options())?;
     crate::decode_inference(host, protocol, response)
 }
 
@@ -440,15 +441,16 @@ pub(crate) fn connection_check(
             return Err(common::unsupported("connection_check", vendor_id, channel));
         }
     };
-    let value = common_check::json(
-        host,
-        HttpRequest {
+    let response = host.http_start(
+        Request {
             method: "GET".into(),
             url,
-            headers,
+            headers: crate::fields(headers),
             body: Vec::new(),
         },
+        &crate::net_options(),
     )?;
+    let value = common_check::read_json(&response)?;
     let (keys, id_fields): (&[&str], &[&str]) = if vendor_id == "google-vertex-anthropic" {
         (
             &["models", "publisherModels", "foundationModels"],
@@ -564,12 +566,12 @@ fn discover_json(
     url: &str,
     headers: Vec<(String, String)>,
 ) -> Result<OperationOutput, PluginError> {
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "GET".into(),
         url: url.into(),
-        headers,
+        headers: crate::fields(headers),
         body: Vec::new(),
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
@@ -696,12 +698,12 @@ fn discover_vertex(
     }
     let (token, _) = vertex_access_token(host, provider, true)?;
     let url = vertex_anthropic_models_url(provider, cursor)?;
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "GET".into(),
         url,
-        headers: vec![("authorization".into(), format!("Bearer {token}"))],
+        headers: crate::fields(vec![("authorization".into(), format!("Bearer {token}"))]),
         body: Vec::new(),
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
@@ -1042,12 +1044,12 @@ fn token_post_bytes(
         "content-type",
         "application/x-www-form-urlencoded",
     );
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "POST".into(),
         url: url.into(),
-        headers,
+        headers: crate::fields(headers),
         body,
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
     let bytes = read_http_body(&response, 1024 * 1024)?;
@@ -1127,15 +1129,15 @@ fn gitlab_direct_access(
         }
     }
     let url = format!("{instance}/api/v4/ai/third_party_agents/direct_access");
-    let response = host.http_start(HttpRequest {
+    let response = host.http_start(Request {
         method: "POST".into(),
         url,
-        headers: vec![
+        headers: crate::fields(vec![
             ("authorization".into(), format!("Bearer {api_key}")),
             ("content-type".into(), "application/json".into()),
-        ],
+        ]),
         body: b"{}".to_vec(),
-    })?;
+    }, &crate::net_options())?;
     let status = response.status()?;
     if !(200..300).contains(&status) {
         return Err(http_error(response, status));
@@ -1220,7 +1222,7 @@ fn sign_bedrock(
     provider: &ProviderSnapshot,
     url: &str,
     body: &[u8],
-    headers: &mut Vec<(String, String)>,
+    headers: &mut stravia_vendor_sdk::net::Fields,
 ) -> Result<(), PluginError> {
     let region = required_string(provider, "region", "AWS region is required")?;
     let access_key = required_string(provider, "accessKeyId", "AWS access key ID is required")?;
@@ -1232,8 +1234,12 @@ fn sign_bedrock(
     let session_token = string_value(provider, "sessionToken");
     let signable_headers = headers
         .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+        .map(|field| {
+            std::str::from_utf8(&field.bytes)
+                .map(|value| (field.name.as_str(), value))
+                .map_err(|_| common::plugin_error(ErrorKind::Invalid, "Bedrock signing requires UTF-8 header values"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let signable = SignableRequest::new(
         "POST",
         url,
@@ -1277,7 +1283,7 @@ fn sign_bedrock(
         })?
         .into_parts();
     for (name, value) in instructions.headers() {
-        set_header(headers, name, value);
+        headers.set(name, value);
     }
     Ok(())
 }
