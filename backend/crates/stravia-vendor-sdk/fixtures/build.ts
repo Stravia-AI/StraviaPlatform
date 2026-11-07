@@ -4,6 +4,12 @@ import { fileURLToPath } from 'node:url'
 
 const fixtures = dirname(fileURLToPath(import.meta.url))
 const root = resolve(fixtures, '../../../..')
+const preparation = Bun.spawnSync([process.platform === 'win32' ? 'python' : 'python3', 'patches/cargo/prepare.py'], {
+  cwd: root,
+  stdout: 'inherit',
+  stderr: 'inherit',
+})
+if (preparation.exitCode !== 0) throw new Error('Failed to prepare patched Cargo crates')
 const target = resolve(root, 'target/vendor-fixture-build')
 const output = resolve(root, 'target/vendor-test-fixtures')
 const fixturePackages = {

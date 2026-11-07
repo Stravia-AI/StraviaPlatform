@@ -187,6 +187,8 @@ Rust toolchain: [`rust-toolchain.toml`](rust-toolchain.toml) · Bun `1.4.2` · T
 
 Project JavaScript development, build, and test commands use Bun. Rust and Python tests retain their native runners.
 
+Before invoking Cargo directly or opening the workspace in an IDE, run `task prepare:crates` (requires Python 3 and Git). This downloads and verifies the pinned rustls crate and applies the repository patch; Task's Rust commands prepare it automatically. Offline, run `python3 patches/cargo/prepare.py --offline --crate-file /path/to/rustls-0.23.46.crate`. If Cargo reports a missing patched crate, run `task prepare:crates` again. Prepared crate directories are immutable: when changing the archive, patch, or preparation script, bump `directory` in `patches/cargo/crates.json`, the Cargo patch and workspace exclusion, and the Task stamp path together.
+
 | Command                  | Purpose                                                     |
 | ------------------------ | ----------------------------------------------------------- |
 | `task dev:server`        | Start the Vite WebUI and standalone debug server            |

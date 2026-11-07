@@ -25,6 +25,7 @@ RUN rustup target add wasm32-wasip2
 
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
+COPY patches/cargo patches/cargo
 COPY backend backend
 COPY --from=web-builder /src/frontend/stravia-webui/dist frontend/stravia-webui/dist
 # Vendor plugins and the Gateway embed original SVGs; compiled WebUI assets cannot replace these inputs.
@@ -35,7 +36,8 @@ COPY --from=web-builder /src/frontend/stravia-webui/static/stravia-logo.svg fron
 RUN --mount=type=cache,id=stravia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stravia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=stravia-cargo-target,target=/src/target,sharing=locked \
-    cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors \
+    python3 patches/cargo/prepare.py \
+    && cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors \
     && cargo build --locked --release -p stravia-server \
     && install -Dm755 target/release/stravia-server /out/stravia-server \
     && strip /out/stravia-server \
