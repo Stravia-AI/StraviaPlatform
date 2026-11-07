@@ -20,7 +20,7 @@ index ccecde2..acc5ef3 100644
              alpn_protocols: Vec::new(),
              check_selected_alpn: true,
 diff --git a/src/client/client_conn.rs b/src/client/client_conn.rs
-index 77b2dc5..36410c2 100644
+index 77b2dc5..a3e2c68 100644
 --- a/src/client/client_conn.rs
 +++ b/src/client/client_conn.rs
 @@ -162,6 +162,9 @@ pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
@@ -33,6 +33,22 @@ index 77b2dc5..36410c2 100644
      /// Which ALPN protocols we include in our client hello.
      /// If empty, no ALPN extension is sent.
      pub alpn_protocols: Vec<Vec<u8>>,
+@@ -1075,6 +1078,7 @@ impl std::error::Error for EarlyDataError {}
+ pub struct ClientConnectionData {
+     pub(super) early_data: EarlyData,
+     pub(super) ech_status: EchStatus,
++    pub(super) offered_sct: bool,
+ }
+ 
+ impl ClientConnectionData {
+@@ -1082,6 +1086,7 @@ impl ClientConnectionData {
+         Self {
+             early_data: EarlyData::new(),
+             ech_status: EchStatus::NotOffered,
++            offered_sct: false,
+         }
+     }
+ }
 diff --git a/src/client/common.rs b/src/client/common.rs
 index 1bf0d8c..2aebcdf 100644
 --- a/src/client/common.rs
@@ -52,21 +68,25 @@ index 1bf0d8c..2aebcdf 100644
                  trace!("Unsolicited extension {ext_type:?}");
 diff --git a/src/client/hello_shape.rs b/src/client/hello_shape.rs
 new file mode 100644
-index 0000000..28975f9
+index 0000000..5bad5ef
 --- /dev/null
 +++ b/src/client/hello_shape.rs
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,106 @@
 +use alloc::vec::Vec;
 +
-+use crate::{CipherSuite, ClientConfig, Error};
++use crate::{CipherSuite, ClientConfig, Error, NamedGroup};
 +
 +/// Controls the wire shape of a ClientHello without changing cryptographic implementations.
 +#[derive(Clone, Debug, Default)]
 +pub struct ClientHelloShape {
 +    /// Ordered wire cipher suites. Unimplemented suites may be advertised but cannot be negotiated.
 +    pub cipher_suites: Option<Vec<CipherSuite>>,
++    /// Ordered wire groups; advertised-only groups cannot be negotiated.
++    pub supported_groups: Option<Vec<NamedGroup>>,
 +    /// Preferred extension order. Extensions arising dynamically are appended in their normal order.
 +    pub extension_order: Option<Vec<u16>>,
++    /// Optional nonessential extensions to omit. Currently only status_request (5) is supported.
++    pub omit_extensions: Vec<u16>,
 +    /// Additional safe, non-negotiating extension bodies.
 +    pub raw_extensions: Vec<RawExtension>,
 +    /// Optional ClientHello padding policy.
@@ -123,6 +143,17 @@ index 0000000..28975f9
 +            if (self.renegotiation == Renegotiation::Scsv && !scsv)
 +                || (matches!(self.renegotiation, Renegotiation::Extension | Renegotiation::Omit) && scsv) { return Err(bad()); }
 +        }
++        if let Some(groups) = &self.supported_groups {
++            // The extension has a two-byte vector length inside a two-byte extension length.
++            if groups.is_empty() || groups.len() > 32766
++                || groups.iter().enumerate().any(|(i, v)| groups[..i].contains(v))
++                || config.crypto_provider().kx_groups.iter().any(|g| !groups.contains(&g.name())) {
++                return Err(bad());
++            }
++        }
++        if self.omit_extensions.iter().enumerate().any(|(i, typ)| *typ != 5 || self.omit_extensions[..i].contains(typ)) {
++            return Err(bad());
++        }
 +        if let Some(order) = &self.extension_order {
 +            if order.iter().enumerate().any(|(i, v)| order[..i].contains(v))
 +                || order.iter().position(|v| *v == 41).is_some_and(|i| i + 1 != order.len()) {
@@ -148,7 +179,7 @@ index 0000000..28975f9
 +    }
 +}
 diff --git a/src/client/hs.rs b/src/client/hs.rs
-index 5e90b6a..ddeb4ad 100644
+index 5e90b6a..b0bdb82 100644
 --- a/src/client/hs.rs
 +++ b/src/client/hs.rs
 @@ -26,7 +26,8 @@ use crate::enums::{
@@ -171,7 +202,40 @@ index 5e90b6a..ddeb4ad 100644
          let mut resuming = ClientSessionValue::retrieve(&server_name, &config, cx);
          let session_id = match &mut resuming {
              Some(_resuming) => {
-@@ -393,6 +397,45 @@ fn emit_client_hello_for_retry(
+@@ -215,13 +219,12 @@ fn emit_client_hello_for_retry(
+     let mut exts = Box::new(ClientExtensions {
+         // offer groups which are usable for any offered version
+         named_groups: Some(
+-            config
+-                .provider
+-                .kx_groups
+-                .iter()
+-                .filter(|skxg| supported_versions.any(|v| skxg.usable_for_version(v)))
+-                .map(|skxg| skxg.name())
+-                .collect(),
++            config.client_hello_shape.as_ref().and_then(|shape| shape.supported_groups.clone()).unwrap_or_else(||
++                config.provider.kx_groups.iter()
++                    .filter(|skxg| supported_versions.any(|v| skxg.usable_for_version(v)))
++                    .map(|skxg| skxg.name())
++                    .collect()
++            ),
+         ),
+         supported_versions: Some(supported_versions),
+         signature_schemes: Some(
+@@ -230,7 +233,11 @@ fn emit_client_hello_for_retry(
+                 .supported_verify_schemes(),
+         ),
+         extended_master_secret_request: Some(()),
+-        certificate_status_request: Some(CertificateStatusRequest::build_ocsp()),
++        certificate_status_request: if config.client_hello_shape.as_ref().is_some_and(|shape| shape.omit_extensions.contains(&5)) {
++            None
++        } else {
++            Some(CertificateStatusRequest::build_ocsp())
++        },
+         protocols: extra_exts.protocols.clone(),
+         ..Default::default()
+     });
+@@ -393,6 +400,45 @@ fn emit_client_hello_for_retry(
          cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
      }
  
@@ -217,7 +281,7 @@ index 5e90b6a..ddeb4ad 100644
      let mut chp_payload = ClientHelloPayload {
          client_version: ProtocolVersion::TLSv1_2,
          random: input.random,
-@@ -402,6 +445,17 @@ fn emit_client_hello_for_retry(
+@@ -402,6 +448,17 @@ fn emit_client_hello_for_retry(
          extensions: exts,
      };
  
@@ -235,7 +299,7 @@ index 5e90b6a..ddeb4ad 100644
      let ech_grease_ext = config
          .ech_mode
          .as_ref()
-@@ -443,7 +497,11 @@ fn emit_client_hello_for_retry(
+@@ -443,7 +500,11 @@ fn emit_client_hello_for_retry(
      }
  
      // Note what extensions we sent.
@@ -249,7 +313,7 @@ index 5e90b6a..ddeb4ad 100644
  
      let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
 diff --git a/src/client/test.rs b/src/client/test.rs
-index 2990329..aea634f 100644
+index 2990329..3952c9c 100644
 --- a/src/client/test.rs
 +++ b/src/client/test.rs
 @@ -25,7 +25,7 @@ mod tests {
@@ -261,7 +325,7 @@ index 2990329..aea634f 100644
      use crate::crypto::cipher::MessageEncrypter;
      use crate::crypto::tls13::OkmBlock;
      use crate::enums::CertificateType;
-@@ -45,6 +45,363 @@ mod tests {
+@@ -45,6 +45,434 @@ mod tests {
      use crate::verify::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
      use crate::{DigitallySignedStruct, DistinguishedName, KeyLog, version};
  
@@ -461,6 +525,72 @@ index 2990329..aea634f 100644
 +    }
 +
 +    #[test]
++    fn client_hello_shape_can_omit_status_request() {
++        let default = wire_client_hello(shaped_config(ClientHelloShape::default())).unwrap();
++        assert!(default.extensions.iter().any(|(typ, _)| *typ == 5));
++        let shaped = wire_client_hello(shaped_config(ClientHelloShape {
++            omit_extensions: vec![5],
++            ..ClientHelloShape::default()
++        })).unwrap();
++        assert!(!shaped.extensions.iter().any(|(typ, _)| *typ == 5));
++    }
++
++    #[test]
++    fn shaped_supported_groups_are_ordered_and_advertise_only() {
++        let config = shaped_config(ClientHelloShape::default());
++        let mut groups: Vec<_> = config.crypto_provider().kx_groups.iter().map(|g| g.name()).collect();
++        let advertised = NamedGroup::from(0xfe01);
++        assert!(!groups.contains(&advertised));
++        groups.reverse();
++        groups.insert(0, advertised);
++        let hello = wire_client_hello(shaped_config(ClientHelloShape {
++            supported_groups: Some(groups.clone()),
++            ..ClientHelloShape::default()
++        })).unwrap();
++        let body = &hello.extensions.iter().find(|(typ, _)| *typ == 10).unwrap().1;
++        let expected: Vec<u8> = groups.iter().flat_map(|g| u16::from(*g).to_be_bytes()).collect();
++        assert_eq!(u16::from_be_bytes([body[0], body[1]]) as usize, expected.len());
++        assert_eq!(&body[2..], expected);
++        let shares = &hello.extensions.iter().find(|(typ, _)| *typ == 51).unwrap().1;
++        assert_ne!(u16::from_be_bytes([shares[2], shares[3]]), u16::from(advertised));
++    }
++
++    #[test]
++    fn advertised_only_group_in_hello_retry_request_fails_closed() {
++        let config = shaped_config(ClientHelloShape::default());
++        let mut groups: Vec<_> = config.crypto_provider().kx_groups.iter().map(|g| g.name()).collect();
++        let advertised = NamedGroup::from(0xfe01);
++        groups.push(advertised);
++        let config = shaped_config(ClientHelloShape { supported_groups: Some(groups), ..ClientHelloShape::default() });
++        let mut conn = ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap()).unwrap();
++        let mut first = Vec::new();
++        conn.write_tls(&mut first).unwrap();
++        let record = OutboundOpaqueMessage::read(&mut Reader::init(&first)).unwrap().into_plain_message();
++        let session_id = match Message::try_from(record).unwrap().payload {
++            MessagePayload::Handshake { parsed: HandshakeMessagePayload(HandshakePayload::ClientHello(ch)), .. } => ch.session_id,
++            other => panic!("unexpected message {other:?}"),
++        };
++        let hrr = Message {
++            version: ProtocolVersion::TLSv1_2,
++            payload: MessagePayload::handshake(HandshakeMessagePayload(HandshakePayload::HelloRetryRequest(HelloRetryRequest {
++                cipher_suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
++                legacy_version: ProtocolVersion::TLSv1_2,
++                session_id,
++                extensions: HelloRetryRequestExtensions {
++                    key_share: Some(advertised),
++                    supported_versions: Some(ProtocolVersion::TLSv1_3),
++                    ..HelloRetryRequestExtensions::default()
++                },
++            }))),
++        };
++        conn.read_tls(&mut hrr.into_wire_bytes().as_slice()).unwrap();
++        assert!(conn.process_new_packets().is_err());
++        let mut alert = Vec::new();
++        conn.write_tls(&mut alert).unwrap();
++        assert_eq!(&alert[5..], &[2, 47]); // fatal illegal_parameter
++    }
++
++    #[test]
 +    fn client_hello_shape_rejects_unsafe_or_invalid_input_before_writing() {
 +        let invalid = vec![
 +            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 0, data: vec![] }], ..ClientHelloShape::default() },
@@ -468,7 +598,12 @@ index 2990329..aea634f 100644
 +            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 18, data: vec![] }, RawExtension { typ: 18, data: vec![] }], ..ClientHelloShape::default() },
 +            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 50, data: vec![0, 1, 4] }], ..ClientHelloShape::default() },
 +            ClientHelloShape { extension_order: Some(vec![0, 0]), ..ClientHelloShape::default() },
++            ClientHelloShape { omit_extensions: vec![0], ..ClientHelloShape::default() },
++            ClientHelloShape { omit_extensions: vec![5, 5], ..ClientHelloShape::default() },
 +            ClientHelloShape { cipher_suites: Some(vec![]), ..ClientHelloShape::default() },
++            ClientHelloShape { supported_groups: Some(vec![]), ..ClientHelloShape::default() },
++            ClientHelloShape { supported_groups: Some(vec![NamedGroup::X25519, NamedGroup::X25519]), ..ClientHelloShape::default() },
++            ClientHelloShape { supported_groups: Some(vec![NamedGroup::from(0xfe01)]), ..ClientHelloShape::default() },
 +            ClientHelloShape { ec_point_formats: Some(vec![1]), ..ClientHelloShape::default() },
 +        ];
 +        for shape in invalid {
@@ -625,6 +760,70 @@ index 2990329..aea634f 100644
      /// Tests that session_ticket(35) extension
      /// is not sent if the client does not support TLS 1.2.
      #[test]
+diff --git a/src/client/tls13.rs b/src/client/tls13.rs
+index 8678c1d..467086f 100644
+--- a/src/client/tls13.rs
++++ b/src/client/tls13.rs
+@@ -172,8 +172,12 @@ pub(super) fn handle_server_hello(
+     let shared_secret = our_key_share
+         .complete(&their_key_share.payload.0)
+         .map_err(|err| {
+-            cx.common
+-                .send_fatal_alert(AlertDescription::IllegalParameter, err)
++            let alert = if matches!(err, Error::MlKemDecapsulationFailed) {
++                AlertDescription::InternalError
++            } else {
++                AlertDescription::IllegalParameter
++            };
++            cx.common.send_fatal_alert(alert, err)
+         })?;
+ 
+     let mut key_schedule = key_schedule_pre_handshake.into_handshake(shared_secret);
+@@ -498,6 +502,7 @@ impl State<ClientConnectionData> for ExpectEncryptedExtensions {
+         self.transcript.add_message(&m);
+ 
+         validate_encrypted_extensions(cx.common, &self.hello, exts)?;
++        cx.data.offered_sct = self.hello.sent_extensions.contains(&ExtensionType::SCT);
+         hs::process_alpn_protocol(
+             cx.common,
+             &self.hello.alpn_protocols,
+@@ -1119,6 +1124,13 @@ impl State<ClientConnectionData> for ExpectCertificate {
+             ));
+         }
+ 
++        if !cx.data.offered_sct && cert_chain.entries.iter().any(|entry| entry.extensions.sct.is_some()) {
++            return Err(cx.common.send_fatal_alert(
++                AlertDescription::UnsupportedExtension,
++                PeerMisbehaved::UnsolicitedSctList,
++            ));
++        }
++
+         let end_entity_ocsp = cert_chain.end_entity_ocsp().to_vec();
+         let server_cert = ServerCertDetails::new(
+             cert_chain
+diff --git a/src/error.rs b/src/error.rs
+index dbd043f..5c3218e 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -53,6 +53,10 @@ pub enum Error {
+     /// We couldn't decrypt a message.  This is invariably fatal.
+     DecryptError,
+ 
++    /// ML-KEM decapsulation failed internally after validating the ciphertext length.
++    /// Providers must not use this for malformed peer input.
++    MlKemDecapsulationFailed,
++
+     /// We couldn't encrypt a message because it was larger than the allowed message size.
+     /// This should never happen if the application is using valid record sizes.
+     EncryptError,
+@@ -1001,6 +1005,7 @@ impl fmt::Display for Error {
+             Self::NoApplicationProtocol => write!(f, "peer doesn't support any known protocol"),
+             Self::FailedToGetCurrentTime => write!(f, "failed to get current time"),
+             Self::FailedToGetRandomBytes => write!(f, "failed to get random bytes"),
++            Self::MlKemDecapsulationFailed => write!(f, "ML-KEM decapsulation failed internally"),
+             Self::BadMaxFragmentSize => {
+                 write!(f, "the supplied max_fragment_size was too small or large")
+             }
 diff --git a/src/lib.rs b/src/lib.rs
 index 8652415..86134bf 100644
 --- a/src/lib.rs
@@ -639,7 +838,7 @@ index 8652415..86134bf 100644
      mod test;
      #[cfg(feature = "tls12")]
 diff --git a/src/msgs/handshake.rs b/src/msgs/handshake.rs
-index 63b836a..2f5f4a0 100644
+index 63b836a..f5d8f54 100644
 --- a/src/msgs/handshake.rs
 +++ b/src/msgs/handshake.rs
 @@ -978,6 +978,11 @@ extension_struct! {
@@ -708,3 +907,32 @@ index 63b836a..2f5f4a0 100644
          }
      }
  
+@@ -1729,6 +1759,8 @@ extension_struct! {
+     pub(crate) struct CertificateExtensions<'a> {
+         ExtensionType::StatusRequest =>
+             pub(crate) status: Option<CertificateStatus<'a>>,
++        ExtensionType::SCT =>
++            pub(crate) sct: Option<Payload<'a>>,
+     }
+ }
+ 
+@@ -1736,6 +1768,7 @@ impl CertificateExtensions<'_> {
+     fn into_owned(self) -> CertificateExtensions<'static> {
+         CertificateExtensions {
+             status: self.status.map(|s| s.into_owned()),
++            sct: self.sct.map(|s| s.into_owned()),
+         }
+     }
+ }
+diff --git a/src/msgs/handshake_test.rs b/src/msgs/handshake_test.rs
+index d40d9ef..0d75dd1 100644
+--- a/src/msgs/handshake_test.rs
++++ b/src/msgs/handshake_test.rs
+@@ -962,6 +962,7 @@ fn sample_certificate_payload_tls13() -> CertificatePayloadTls13<'static> {
+                 status: Some(CertificateStatus {
+                     ocsp_response: PayloadU24::from(Payload::new(vec![1, 2, 3])),
+                 }),
++                sct: Some(Payload::new(vec![0, 3, 0, 1, 42])),
+             },
+         }],
+     }
