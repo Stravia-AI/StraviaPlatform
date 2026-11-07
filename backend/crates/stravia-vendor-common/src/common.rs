@@ -114,18 +114,15 @@ pub fn apply_anthropic_output_limit(provider: &ProviderSnapshot, request: &mut A
         .filter(|value| *value > 0);
 }
 
-pub fn header_pairs(headers: &http::HeaderMap) -> Result<Vec<(String, String)>, PluginError> {
-    headers
-        .iter()
-        .map(|(name, value)| {
-            value
-                .to_str()
-                .map(|value| (name.as_str().to_owned(), value.to_owned()))
-                .map_err(|_| {
-                    plugin_error(ErrorKind::Invalid, "codec produced a non-text HTTP header")
-                })
-        })
-        .collect()
+/// Converts HeaderMap iteration order and lowercase names to ordered fields.
+/// Plugins requiring exact spelling and interleaving should construct Fields
+/// themselves after the codec has produced its headers.
+pub fn header_pairs(headers: &http::HeaderMap) -> Result<stravia_vendor_sdk::net::Fields, PluginError> {
+    let mut fields = stravia_vendor_sdk::net::Fields::new();
+    for (name, value) in headers {
+        fields.append(name.as_str(), value.as_bytes());
+    }
+    Ok(fields)
 }
 
 /// 宿主下发的上游会话亲和键（`operation_metadata.session_affinity`），供插件
@@ -319,9 +316,10 @@ pub fn decode_anthropic_compaction(
         let body = read_http_body(&response, MAX_ERROR_BODY)?;
         return Err(upstream_error(status, &headers, &body));
     }
-    let streaming = headers.iter().any(|(name, value)| {
-        name.eq_ignore_ascii_case("content-type")
-            && value.to_ascii_lowercase().contains("text/event-stream")
+    let streaming = headers.iter().any(|field| {
+        field.name.eq_ignore_ascii_case("content-type")
+            && std::str::from_utf8(&field.bytes)
+                .is_ok_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
     });
     let body = read_http_body(&response, MAX_UNARY_BODY)?;
     let message = if streaming {
@@ -489,10 +487,13 @@ fn decode_ai_response_with_error_policy(
 
     let endpoint = endpoint(protocol)?;
     let streaming = matches!(mode, HttpResponseMode::Streaming)
-        || headers.iter().any(|(name, value)| {
-            if !name.eq_ignore_ascii_case("content-type") {
+        || headers.iter().any(|field| {
+            if !field.name.eq_ignore_ascii_case("content-type") {
                 return false;
             }
+            let Ok(value) = std::str::from_utf8(&field.bytes) else {
+                return false;
+            };
             let value = value.to_ascii_lowercase();
             value.contains("text/event-stream")
                 || value.contains("application/x-ndjson")
@@ -573,7 +574,7 @@ fn decode_ai_response_with_error_policy(
 pub fn decode_ai_response_websocket_with_error_classifier(
     host: &GuestHost,
     protocol: &str,
-    connection: stravia_vendor_sdk::WsConnection,
+    connection: stravia_vendor_sdk::net::WebSocket,
     preserve_upstream_errors: bool,
     continuation_requested: bool,
     classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
@@ -591,7 +592,7 @@ pub fn decode_ai_response_websocket_with_error_classifier(
 fn decode_normalized_websocket(
     host: &GuestHost,
     protocol: &str,
-    connection: stravia_vendor_sdk::WsConnection,
+    connection: stravia_vendor_sdk::net::WebSocket,
     preserve_upstream_errors: bool,
     continuation_requested: bool,
     classify_error: impl Fn(&serde_json::Value, bool) -> Option<PluginError>,
@@ -909,7 +910,7 @@ pub fn anthropic_protected_reasoning_message(message: &str) -> bool {
 
 /// Token endpoints only prove revoked authorization with an explicit OAuth
 /// rejection or HTTP 401. Transient statuses always retain their upstream facts.
-pub fn oauth_token_error(status: u16, headers: &[(String, String)], body: &[u8]) -> PluginError {
+pub fn oauth_token_error(status: u16, headers: &stravia_vendor_sdk::net::Fields, body: &[u8]) -> PluginError {
     let mut error = upstream_error(status, headers, body);
     let value = serde_json::from_slice::<serde_json::Value>(body).unwrap_or_default();
     let permanent = (400..500).contains(&status)
@@ -930,7 +931,7 @@ pub fn oauth_token_error(status: u16, headers: &[(String, String)], body: &[u8])
     error
 }
 
-pub fn upstream_error(status: u16, headers: &[(String, String)], body: &[u8]) -> PluginError {
+pub fn upstream_error(status: u16, headers: &stravia_vendor_sdk::net::Fields, body: &[u8]) -> PluginError {
     let value = serde_json::from_slice::<serde_json::Value>(body).unwrap_or_default();
     let message = value
         .pointer("/error/message")
@@ -979,12 +980,13 @@ pub fn upstream_error(status: u16, headers: &[(String, String)], body: &[u8]) ->
 /// Unified subscription headers are distinct from ordinary Anthropic request/token
 /// rate limits. Require the claimed window to be exhausted and extra usage to be
 /// explicitly unavailable; a rejected header or long Retry-After alone is not quota.
-fn anthropic_subscription_exhausted(headers: &[(String, String)]) -> bool {
+fn anthropic_subscription_exhausted(headers: &stravia_vendor_sdk::net::Fields) -> bool {
     let header = |name: &str| {
         headers
             .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.trim())
+            .find(|field| field.name.eq_ignore_ascii_case(name))
+            .and_then(|field| std::str::from_utf8(&field.bytes).ok())
+            .map(str::trim)
     };
     let (status_header, utilization_header) =
         match header("anthropic-ratelimit-unified-representative-claim") {
@@ -1020,11 +1022,12 @@ fn model_error_with_facts(
     }
 }
 
-fn retry_after(headers: &[(String, String)]) -> Option<Duration> {
+fn retry_after(headers: &stravia_vendor_sdk::net::Fields) -> Option<Duration> {
     headers
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, value)| parse_retry_after(value, Utc::now()))
+        .find(|field| field.name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|field| std::str::from_utf8(&field.bytes).ok())
+        .and_then(|value| parse_retry_after(value, Utc::now()))
 }
 
 fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<Duration> {
@@ -1067,6 +1070,32 @@ pub fn map_response_transform_error(error: TransformError) -> PluginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fields(headers: &[(String, String)]) -> stravia_vendor_sdk::net::Fields {
+        let mut fields = stravia_vendor_sdk::net::Fields::new();
+        for (name, value) in headers {
+            fields.append(name.as_str(), value.as_bytes());
+        }
+        fields
+    }
+
+    fn upstream_error(status: u16, headers: &[(String, String)], body: &[u8]) -> PluginError {
+        super::upstream_error(status, &fields(headers), body)
+    }
+
+    fn oauth_token_error(status: u16, headers: &[(String, String)], body: &[u8]) -> PluginError {
+        super::oauth_token_error(status, &fields(headers), body)
+    }
+
+    #[test]
+    fn codec_headers_preserve_duplicates_and_bytes() {
+        let mut headers = http::HeaderMap::new();
+        headers.append("x-test", http::HeaderValue::from_bytes(b"first").unwrap());
+        headers.append("x-test", http::HeaderValue::from_bytes(b"\x80").unwrap());
+        let fields = header_pairs(&headers).unwrap();
+        let values: Vec<_> = fields.iter().map(|field| field.bytes.as_slice()).collect();
+        assert_eq!(values, vec![b"first".as_slice(), b"\x80".as_slice()]);
+    }
 
     #[test]
     fn oauth_rejection_requires_permanent_evidence() {
