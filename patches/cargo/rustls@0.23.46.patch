@@ -1,0 +1,710 @@
+# Opt-in rustls 0.23.46 ClientHello shaping for vendor egress.
+# The default config and ordering stay upstream-compatible. The hook validates
+# wire-only additions; retains dynamic HRR/resumption extensions; encodes padding
+# before PSK binders; tracks sent extensions; and rejects unsupported EtM replies.
+# Public wire/handshake tests cover ordering, retries, padding, and resumption.
+# Upstream plan: propose a reviewed generic ClientHello customization interface;
+# rebase this patch for each rustls security release until that interface exists.
+# Invalid shapes return Error::General before the handshake is sent.
+
+diff --git a/src/client/builder.rs b/src/client/builder.rs
+index ccecde2..acc5ef3 100644
+--- a/src/client/builder.rs
++++ b/src/client/builder.rs
+@@ -166,6 +166,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
+         let require_ems = self.provider.fips();
+ 
+         ClientConfig {
++            client_hello_shape: None,
+             provider: self.provider,
+             alpn_protocols: Vec::new(),
+             check_selected_alpn: true,
+diff --git a/src/client/client_conn.rs b/src/client/client_conn.rs
+index 77b2dc5..36410c2 100644
+--- a/src/client/client_conn.rs
++++ b/src/client/client_conn.rs
+@@ -162,6 +162,9 @@ pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
+ /// [`RootCertStore`]: crate::RootCertStore
+ #[derive(Clone, Debug)]
+ pub struct ClientConfig {
++    /// Optional ClientHello wire shape. The default preserves rustls behavior.
++    pub client_hello_shape: Option<Arc<super::ClientHelloShape>>,
++
+     /// Which ALPN protocols we include in our client hello.
+     /// If empty, no ALPN extension is sent.
+     pub alpn_protocols: Vec<Vec<u8>>,
+diff --git a/src/client/common.rs b/src/client/common.rs
+index 1bf0d8c..2aebcdf 100644
+--- a/src/client/common.rs
++++ b/src/client/common.rs
+@@ -66,6 +66,12 @@ impl ClientHelloDetails {
+                 .map(|ext| ExtensionType::from(*ext)),
+         );
+         for ext_type in extensions {
++            // EtM is not implemented; padding and signature_algorithms_cert
++            // are client-only here and must not be treated as negotiated.
++            if matches!(u16::from(ext_type), 21 | 22 | 50) {
++                trace!("Unsupported or invalid server extension {ext_type:?}");
++                return true;
++            }
+             if !self.sent_extensions.contains(&ext_type) && !allowed_unsolicited.contains(&ext_type)
+             {
+                 trace!("Unsolicited extension {ext_type:?}");
+diff --git a/src/client/hello_shape.rs b/src/client/hello_shape.rs
+new file mode 100644
+index 0000000..28975f9
+--- /dev/null
++++ b/src/client/hello_shape.rs
+@@ -0,0 +1,91 @@
++use alloc::vec::Vec;
++
++use crate::{CipherSuite, ClientConfig, Error};
++
++/// Controls the wire shape of a ClientHello without changing cryptographic implementations.
++#[derive(Clone, Debug, Default)]
++pub struct ClientHelloShape {
++    /// Ordered wire cipher suites. Unimplemented suites may be advertised but cannot be negotiated.
++    pub cipher_suites: Option<Vec<CipherSuite>>,
++    /// Preferred extension order. Extensions arising dynamically are appended in their normal order.
++    pub extension_order: Option<Vec<u16>>,
++    /// Additional safe, non-negotiating extension bodies.
++    pub raw_extensions: Vec<RawExtension>,
++    /// Optional ClientHello padding policy.
++    pub padding: Option<PaddingPolicy>,
++    /// Secure renegotiation indication.
++    pub renegotiation: Renegotiation,
++    /// Wire EC point formats (must contain uncompressed, format 0).
++    pub ec_point_formats: Option<Vec<u8>>,
++}
++
++/// A complete extension body, without its type and length prefix.
++#[derive(Clone, Debug)]
++pub struct RawExtension {
++    /// IANA extension type.
++    pub typ: u16,
++    /// Extension body.
++    pub data: Vec<u8>,
++}
++
++/// ClientHello padding behavior.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum PaddingPolicy {
++    /// Follow the BoringSSL interoperability padding rule.
++    BoringSsl,
++    /// Do not add padding.
++    None,
++}
++
++/// Secure renegotiation signaling behavior.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub enum Renegotiation {
++    /// Preserve rustls's default signaling.
++    #[default]
++    Default,
++    /// Signal using the SCSV cipher suite.
++    Scsv,
++    /// Signal using the renegotiation_info extension.
++    Extension,
++    /// Do not signal secure renegotiation.
++    Omit,
++}
++
++impl ClientHelloShape {
++    /// Reject incompatible and unsafe combinations before sending a ClientHello.
++    pub fn validate(&self, config: &ClientConfig, ech: bool) -> Result<(), Error> {
++        let bad = || Error::General("invalid ClientHello shape".into());
++        if ech || config.ech_mode.is_some() { return Err(bad()); }
++        if let Some(suites) = &self.cipher_suites {
++            if suites.is_empty() || suites.len() > 32767 || suites.iter().enumerate().any(|(i, v)| suites[..i].contains(v))
++                || config.crypto_provider().cipher_suites.iter().any(|s| !suites.contains(&s.suite())) {
++                return Err(bad());
++            }
++            let scsv = suites.contains(&CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
++            if (self.renegotiation == Renegotiation::Scsv && !scsv)
++                || (matches!(self.renegotiation, Renegotiation::Extension | Renegotiation::Omit) && scsv) { return Err(bad()); }
++        }
++        if let Some(order) = &self.extension_order {
++            if order.iter().enumerate().any(|(i, v)| order[..i].contains(v))
++                || order.iter().position(|v| *v == 41).is_some_and(|i| i + 1 != order.len()) {
++                return Err(bad());
++            }
++        }
++        if let Some(formats) = &self.ec_point_formats {
++            if formats.is_empty() || formats.len() > 255 || !formats.contains(&0) { return Err(bad()); }
++        }
++        for (i, ext) in self.raw_extensions.iter().enumerate() {
++            if self.raw_extensions[..i].iter().any(|e| e.typ == ext.typ) || ext.data.len() > u16::MAX as usize { return Err(bad()); }
++            let valid = match ext.typ {
++                // SCT and encrypt-then-MAC requests have empty bodies. A server's
++                // EtM response is rejected: rustls does not implement that mode.
++                18 | 22 => ext.data.is_empty(),
++                // signature_algorithms_cert: a nonempty, even-length u16 vector.
++                50 => ext.data.len() >= 4 && u16::from_be_bytes([ext.data[0], ext.data[1]]) as usize == ext.data.len() - 2 && (ext.data.len() - 2) % 2 == 0,
++                _ => false,
++            };
++            if !valid { return Err(bad()); }
++        }
++        Ok(())
++    }
++}
+diff --git a/src/client/hs.rs b/src/client/hs.rs
+index 5e90b6a..ddeb4ad 100644
+--- a/src/client/hs.rs
++++ b/src/client/hs.rs
+@@ -26,7 +26,8 @@ use crate::enums::{
+ use crate::error::{Error, PeerIncompatible, PeerMisbehaved};
+ use crate::hash_hs::HandshakeHashBuffer;
+ use crate::log::{debug, trace};
+-use crate::msgs::base::Payload;
++use crate::msgs::base::{Payload, PayloadU8};
++use crate::msgs::codec::Codec;
+ use crate::msgs::enums::{Compression, ExtensionType};
+ use crate::msgs::handshake::{
+     CertificateStatusRequest, ClientExtensions, ClientExtensionsInput, ClientHelloPayload,
+@@ -84,6 +85,9 @@ impl ClientHelloInput {
+         cx: &mut ClientContext<'_>,
+         config: Arc<ClientConfig>,
+     ) -> Result<Self, Error> {
++        if let Some(shape) = &config.client_hello_shape {
++            shape.validate(&config, config.ech_mode.is_some())?;
++        }
+         let mut resuming = ClientSessionValue::retrieve(&server_name, &config, cx);
+         let session_id = match &mut resuming {
+             Some(_resuming) => {
+@@ -393,6 +397,45 @@ fn emit_client_hello_for_retry(
+         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+     }
+ 
++    if let Some(shape) = &config.client_hello_shape {
++        use crate::client::Renegotiation;
++        if let Some(suites) = &shape.cipher_suites {
++            cipher_suites = suites.clone();
++        } else {
++            match shape.renegotiation {
++                Renegotiation::Scsv => {
++                    if !cipher_suites.contains(&CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV) {
++                        cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
++                    }
++                }
++                Renegotiation::Extension | Renegotiation::Omit => cipher_suites.retain(|s| *s != CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV),
++                Renegotiation::Default => {}
++            }
++        }
++        if shape.renegotiation == Renegotiation::Extension {
++            exts.renegotiation_info = Some(PayloadU8::empty());
++        }
++        exts.explicit_order = shape.extension_order.as_ref().map(|order| order.iter().copied().map(ExtensionType::from).collect());
++        // Check the encoded extension block size before inserting arbitrary bodies.
++        let base_len = exts.get_encoding().len();
++        let mut extra_len = 0usize;
++        for raw in &shape.raw_extensions {
++            extra_len = extra_len.checked_add(4 + raw.data.len()).ok_or_else(|| Error::General("ClientHello extensions too long".into()))?;
++        }
++        if let Some(formats) = &shape.ec_point_formats {
++            exts.ec_point_formats = None;
++            let mut data = Vec::with_capacity(formats.len() + 1);
++            data.push(formats.len() as u8);
++            data.extend_from_slice(formats);
++            extra_len += 4 + data.len();
++            exts.raw_extensions.push((ExtensionType::ECPointFormats, data));
++        }
++        if base_len + extra_len + 512 > u16::MAX as usize {
++            return Err(Error::General("ClientHello extensions too long".into()));
++        }
++        exts.raw_extensions.extend(shape.raw_extensions.iter().map(|raw| (ExtensionType::from(raw.typ), raw.data.clone())));
++    }
++
+     let mut chp_payload = ClientHelloPayload {
+         client_version: ProtocolVersion::TLSv1_2,
+         random: input.random,
+@@ -402,6 +445,17 @@ fn emit_client_hello_for_retry(
+         extensions: exts,
+     };
+ 
++    if let Some(shape) = &config.client_hello_shape {
++        if shape.padding == Some(crate::client::PaddingPolicy::BoringSsl) {
++            // Count the handshake header, not the enclosing TLS record header.
++            let len = 4 + chp_payload.get_encoding().len();
++            if (256..512).contains(&len) {
++                let padding = (512usize.saturating_sub(len + 4)).max(1);
++                chp_payload.extensions.padding_len = Some(padding as u16);
++            }
++        }
++    }
++
+     let ech_grease_ext = config
+         .ech_mode
+         .as_ref()
+@@ -443,7 +497,11 @@ fn emit_client_hello_for_retry(
+     }
+ 
+     // Note what extensions we sent.
+-    input.hello.sent_extensions = chp_payload.collect_used();
++    input.hello.sent_extensions = if config.client_hello_shape.is_some() {
++        chp_payload.extensions.used_extensions_in_encoding_order()
++    } else {
++        chp_payload.collect_used()
++    };
+     input.hello.offered_cipher_suites = chp_payload.cipher_suites.clone();
+ 
+     let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
+diff --git a/src/client/test.rs b/src/client/test.rs
+index 2990329..aea634f 100644
+--- a/src/client/test.rs
++++ b/src/client/test.rs
+@@ -25,7 +25,7 @@ mod tests {
+     use std::sync::OnceLock;
+ 
+     use super::super::*;
+-    use crate::client::AlwaysResolvesClientRawPublicKeys;
++    use crate::client::{AlwaysResolvesClientRawPublicKeys, ClientHelloShape, PaddingPolicy, RawExtension, Renegotiation};
+     use crate::crypto::cipher::MessageEncrypter;
+     use crate::crypto::tls13::OkmBlock;
+     use crate::enums::CertificateType;
+@@ -45,6 +45,363 @@ mod tests {
+     use crate::verify::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+     use crate::{DigitallySignedStruct, DistinguishedName, KeyLog, version};
+ 
++    // Parse the wire rather than rustls's internal ClientHello representation: extension
++    // ordering, unknown extension bodies, and padding are observable at this boundary.
++    struct WireClientHello {
++        handshake_len: usize,
++        cipher_suites: Vec<u16>,
++        extensions: Vec<(u16, Vec<u8>)>,
++    }
++
++    fn wire_client_hello(config: ClientConfig) -> Result<WireClientHello, Error> {
++        let mut conn = ClientConnection::new(
++            Arc::new(config),
++            ServerName::try_from("localhost").unwrap(),
++        )?;
++        let mut wire = Vec::new();
++        conn.write_tls(&mut wire).unwrap();
++        Ok(parse_wire_client_hello(&wire))
++    }
++
++    fn parse_wire_client_hello(wire: &[u8]) -> WireClientHello {
++        assert_eq!(wire[0], 22); // handshake record
++        let record_len = u16::from_be_bytes([wire[3], wire[4]]) as usize;
++        assert_eq!(record_len + 5, wire.len());
++        assert_eq!(wire[5], 1); // ClientHello
++        let body_len = ((wire[6] as usize) << 16) | ((wire[7] as usize) << 8) | wire[8] as usize;
++        assert_eq!(body_len + 4, record_len);
++        let mut pos = 9 + 2 + 32; // handshake header, legacy_version, random
++        let session_len = wire[pos] as usize;
++        pos += 1 + session_len;
++        let suites_len = u16::from_be_bytes([wire[pos], wire[pos + 1]]) as usize;
++        pos += 2;
++        let cipher_suites = wire[pos..pos + suites_len]
++            .chunks_exact(2)
++            .map(|s| u16::from_be_bytes([s[0], s[1]]))
++            .collect();
++        pos += suites_len;
++        let compression_len = wire[pos] as usize;
++        pos += 1 + compression_len;
++        let extensions_len = u16::from_be_bytes([wire[pos], wire[pos + 1]]) as usize;
++        pos += 2;
++        let end = pos + extensions_len;
++        assert_eq!(end, wire.len());
++        let mut extensions = Vec::new();
++        while pos < end {
++            let typ = u16::from_be_bytes([wire[pos], wire[pos + 1]]);
++            let len = u16::from_be_bytes([wire[pos + 2], wire[pos + 3]]) as usize;
++            pos += 4;
++            extensions.push((typ, wire[pos..pos + len].to_vec()));
++            pos += len;
++        }
++        assert_eq!(pos, end);
++        WireClientHello { handshake_len: body_len + 4, cipher_suites, extensions }
++    }
++
++    fn shaped_config(shape: ClientHelloShape) -> ClientConfig {
++        let mut config = ClientConfig::builder_with_provider(super::provider::default_provider().into())
++            .with_safe_default_protocol_versions()
++            .unwrap()
++            .with_root_certificates(roots())
++            .with_no_client_auth();
++        config.client_hello_shape = Some(Arc::new(shape));
++        config
++    }
++
++    #[test]
++    fn client_hello_shape_orders_suites_and_extensions_and_emits_raw_bodies() {
++        let mut config = shaped_config(ClientHelloShape::default());
++        let mut suites: Vec<_> = config.crypto_provider().cipher_suites.iter().map(|s| s.suite()).collect();
++        suites.reverse();
++        config.client_hello_shape = Some(Arc::new(ClientHelloShape {
++            cipher_suites: Some(suites.clone()),
++            extension_order: Some(vec![22, 18, 50, 0]),
++            raw_extensions: vec![
++                RawExtension { typ: 18, data: vec![] },
++                RawExtension { typ: 22, data: vec![] },
++                RawExtension { typ: 50, data: vec![0, 2, 4, 3] },
++            ],
++            renegotiation: Renegotiation::Omit,
++            ..ClientHelloShape::default()
++        }));
++        let hello = wire_client_hello(config).unwrap();
++        assert_eq!(hello.cipher_suites, suites.into_iter().map(u16::from).collect::<Vec<_>>());
++        assert_eq!(hello.extensions[..3], [(22, vec![]), (18, vec![]), (50, vec![0, 2, 4, 3])]);
++        assert_eq!(hello.extensions[3].0, 0); // server_name
++        assert!(hello.extensions.iter().any(|(typ, _)| *typ == 10)); // supported groups retained
++    }
++
++    #[test]
++    fn client_hello_shape_preserves_order_after_hello_retry_request() {
++        let config = shaped_config(ClientHelloShape {
++            extension_order: Some(vec![22, 18, 0]),
++            raw_extensions: vec![RawExtension { typ: 18, data: vec![] }, RawExtension { typ: 22, data: vec![] }],
++            ..ClientHelloShape::default()
++        });
++        let mut conn = ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap()).unwrap();
++        let mut first = Vec::new();
++        conn.write_tls(&mut first).unwrap();
++        let first_wire = parse_wire_client_hello(&first);
++        let record = OutboundOpaqueMessage::read(&mut Reader::init(&first)).unwrap().into_plain_message();
++        let session_id = match Message::try_from(record).unwrap().payload {
++            MessagePayload::Handshake { parsed: HandshakeMessagePayload(HandshakePayload::ClientHello(ch)), .. } => ch.session_id,
++            other => panic!("unexpected message {other:?}"),
++        };
++        let hrr = Message {
++            version: ProtocolVersion::TLSv1_2,
++            payload: MessagePayload::handshake(HandshakeMessagePayload(
++                HandshakePayload::HelloRetryRequest(HelloRetryRequest {
++                    cipher_suite: CipherSuite::TLS13_AES_128_GCM_SHA256,
++                    legacy_version: ProtocolVersion::TLSv1_2,
++                    session_id,
++                    extensions: HelloRetryRequestExtensions {
++                        cookie: Some(PayloadU16::new(vec![1, 2, 3, 4])),
++                        supported_versions: Some(ProtocolVersion::TLSv1_3),
++                        ..HelloRetryRequestExtensions::default()
++                    },
++                }),
++            )),
++        };
++        conn.read_tls(&mut hrr.into_wire_bytes().as_slice()).unwrap();
++        conn.process_new_packets().unwrap();
++        let mut retry = Vec::new();
++        conn.write_tls(&mut retry).unwrap();
++        let mut pos = 0;
++        while retry[pos] != 22 {
++            pos += 5 + u16::from_be_bytes([retry[pos + 3], retry[pos + 4]]) as usize;
++        }
++        let second_wire = parse_wire_client_hello(&retry[pos..]);
++        let first_types: Vec<_> = first_wire.extensions.iter().map(|(typ, _)| *typ).collect();
++        let second_types: Vec<_> = second_wire.extensions.iter().filter_map(|(typ, _)| (*typ != 44).then_some(*typ)).collect();
++        assert_eq!(second_types, first_types);
++        assert!(second_wire.extensions.iter().any(|(typ, _)| *typ == 44));
++    }
++
++    #[test]
++    fn padded_client_hello_resumption_has_valid_binder() {
++        use crate::server::{ServerConfig, ServerConnection};
++        use crate::HandshakeKind;
++
++        let mut provider = super::provider::default_provider();
++        provider.kx_groups.retain(|group| group.name() == NamedGroup::secp256r1);
++        let provider = Arc::new(provider);
++        let mut client_config = ClientConfig::builder_with_provider(provider.clone())
++            .with_protocol_versions(&[&version::TLS13]).unwrap()
++            .with_root_certificates(roots()).with_no_client_auth();
++        client_config.client_hello_shape = Some(Arc::new(ClientHelloShape {
++            padding: Some(PaddingPolicy::BoringSsl),
++            extension_order: Some(vec![0, 18, 41]),
++            raw_extensions: vec![RawExtension { typ: 18, data: vec![] }],
++            ..ClientHelloShape::default()
++        }));
++        let client_config = Arc::new(client_config);
++        let certificates = vec![
++            CertificateDer::from(&include_bytes!("../../../test-ca/rsa-2048/end.der")[..]),
++            CertificateDer::from(&include_bytes!("../../../test-ca/rsa-2048/inter.der")[..]),
++        ];
++        let key = PrivateKeyDer::from_pem_reader(
++            &mut include_bytes!("../../../test-ca/rsa-2048/end.key").as_slice(),
++        ).unwrap();
++        let server_config = Arc::new(ServerConfig::builder_with_provider(provider)
++            .with_protocol_versions(&[&version::TLS13]).unwrap()
++            .with_no_client_auth().with_single_cert(certificates, key).unwrap());
++
++        for expected in [HandshakeKind::Full, HandshakeKind::Resumed] {
++            let mut client = ClientConnection::new(client_config.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
++            let mut server = ServerConnection::new(server_config.clone()).unwrap();
++            let mut first_flight = Vec::new();
++            client.write_tls(&mut first_flight).unwrap();
++            let hello = parse_wire_client_hello(&first_flight);
++            if expected == HandshakeKind::Resumed {
++                assert_eq!(hello.extensions.last().map(|(typ, _)| *typ), Some(41));
++                assert!(hello.extensions.iter().any(|(typ, _)| *typ == 21));
++            }
++            server.read_tls(&mut first_flight.as_slice()).unwrap();
++            server.process_new_packets().unwrap();
++            for _ in 0..20 {
++                let mut to_client = Vec::new();
++                while server.wants_write() { server.write_tls(&mut to_client).unwrap(); }
++                if !to_client.is_empty() {
++                    client.read_tls(&mut to_client.as_slice()).unwrap();
++                    client.process_new_packets().unwrap();
++                }
++                let mut to_server = Vec::new();
++                while client.wants_write() { client.write_tls(&mut to_server).unwrap(); }
++                if !to_server.is_empty() {
++                    server.read_tls(&mut to_server.as_slice()).unwrap();
++                    server.process_new_packets().unwrap();
++                }
++                if !client.is_handshaking() && !server.is_handshaking() && !server.wants_write() && !client.wants_write() { break; }
++            }
++            assert!(!client.is_handshaking());
++            assert!(!server.is_handshaking());
++            assert_eq!(client.handshake_kind(), Some(expected));
++            assert_eq!(server.handshake_kind(), Some(expected));
++        }
++    }
++
++    #[test]
++    fn client_hello_shape_rejects_unsafe_or_invalid_input_before_writing() {
++        let invalid = vec![
++            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 0, data: vec![] }], ..ClientHelloShape::default() },
++            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 22, data: vec![1] }], ..ClientHelloShape::default() },
++            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 18, data: vec![] }, RawExtension { typ: 18, data: vec![] }], ..ClientHelloShape::default() },
++            ClientHelloShape { raw_extensions: vec![RawExtension { typ: 50, data: vec![0, 1, 4] }], ..ClientHelloShape::default() },
++            ClientHelloShape { extension_order: Some(vec![0, 0]), ..ClientHelloShape::default() },
++            ClientHelloShape { cipher_suites: Some(vec![]), ..ClientHelloShape::default() },
++            ClientHelloShape { ec_point_formats: Some(vec![1]), ..ClientHelloShape::default() },
++        ];
++        for shape in invalid {
++            assert!(wire_client_hello(shaped_config(shape)).is_err());
++        }
++    }
++
++    #[cfg(all(feature = "aws_lc_rs", not(feature = "fips")))]
++    #[test]
++    fn client_hello_shape_rejects_ech_configuration() {
++        use crate::client::{EchGreaseConfig, EchMode};
++        use crate::crypto::hpke::HpkePublicKey;
++        let mut config = shaped_config(ClientHelloShape::default());
++        config.ech_mode = Some(EchMode::Grease(EchGreaseConfig::new(
++            crate::crypto::aws_lc_rs::hpke::DH_KEM_X25519_HKDF_SHA256_AES_128,
++            HpkePublicKey(vec![1; 32]),
++        )));
++        assert!(wire_client_hello(config).is_err());
++    }
++
++    #[test]
++    fn client_hello_shape_controls_renegotiation_signaling() {
++        for (mode, scsv, extension) in [
++            (Renegotiation::Scsv, true, false),
++            (Renegotiation::Extension, false, true),
++            (Renegotiation::Omit, false, false),
++        ] {
++            let hello = wire_client_hello(shaped_config(ClientHelloShape {
++                renegotiation: mode,
++                ..ClientHelloShape::default()
++            })).unwrap();
++            assert_eq!(hello.cipher_suites.contains(&0x00ff), scsv);
++            let renegotiation = hello.extensions.iter().find(|(typ, _)| *typ == 0xff01);
++            assert_eq!(renegotiation.is_some(), extension);
++            if let Some((_, data)) = renegotiation {
++                assert_eq!(data, &[0]);
++            }
++        }
++    }
++
++    #[cfg(feature = "tls12")]
++    #[test]
++    fn client_hello_shape_emits_requested_ec_point_formats() {
++        let hello = wire_client_hello(shaped_config(ClientHelloShape {
++            ec_point_formats: Some(vec![1, 0]),
++            ..ClientHelloShape::default()
++        })).unwrap();
++        let formats = hello.extensions.iter().find(|(typ, _)| *typ == 11).unwrap();
++        assert_eq!(formats.1, vec![2, 1, 0]);
++    }
++
++    #[cfg(feature = "tls12")]
++    #[test]
++    fn client_rejects_encrypt_then_mac_server_response() {
++        fn server_hello_result(response: u16, selected_suite: CipherSuite) -> Result<(), Error> {
++            let mut config = ClientConfig::builder_with_provider(super::provider::default_provider().into())
++                .with_protocol_versions(&[&version::TLS12]).unwrap()
++                .with_root_certificates(roots()).with_no_client_auth();
++            let mut suites: Vec<_> = config.crypto_provider().cipher_suites.iter().map(|suite| suite.suite()).collect();
++            suites.push(CipherSuite::Unknown(0xdead));
++            config.client_hello_shape = Some(Arc::new(ClientHelloShape {
++                cipher_suites: Some(suites),
++                raw_extensions: vec![RawExtension { typ: 22, data: vec![] }, RawExtension { typ: 18, data: vec![] }],
++                ..ClientHelloShape::default()
++            }));
++            let config = Arc::new(config);
++            let mut conn = ClientConnection::new(config.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
++            let mut sent = Vec::new();
++            conn.write_tls(&mut sent).unwrap();
++            let sh = Message {
++                version: ProtocolVersion::TLSv1_2,
++                payload: MessagePayload::handshake(HandshakeMessagePayload(
++                    HandshakePayload::ServerHello(ServerHelloPayload {
++                        random: Random::new(config.provider.secure_random).unwrap(),
++                        compression_method: Compression::Null,
++                        cipher_suite: selected_suite,
++                        legacy_version: ProtocolVersion::TLSv1_2,
++                        session_id: SessionId::empty(),
++                        extensions: Box::new(ServerExtensions {
++                            extended_master_secret_ack: Some(()),
++                            ..ServerExtensions::default()
++                        }),
++                    }),
++                )),
++            };
++            let mut wire = sh.into_wire_bytes();
++            if response != 0 {
++                // The empty-session-id ServerHello has its extensions length here.
++                let ext_len_pos = 9 + 2 + 32 + 1 + 2 + 1;
++                let data: &[u8] = if response == 18 { &[0, 3, 0, 1, 1] } else { &[] };
++                let ext_len = u16::from_be_bytes([wire[ext_len_pos], wire[ext_len_pos + 1]]) + 4 + data.len() as u16;
++                wire[ext_len_pos..ext_len_pos + 2].copy_from_slice(&ext_len.to_be_bytes());
++                wire.extend_from_slice(&response.to_be_bytes());
++                wire.extend_from_slice(&(data.len() as u16).to_be_bytes());
++                wire.extend_from_slice(data);
++                let record_len = (wire.len() - 5) as u16;
++                wire[3..5].copy_from_slice(&record_len.to_be_bytes());
++                let handshake_len = wire.len() - 9;
++                wire[6] = (handshake_len >> 16) as u8;
++                wire[7] = (handshake_len >> 8) as u8;
++                wire[8] = handshake_len as u8;
++            }
++            conn.read_tls(&mut wire.as_slice()).unwrap();
++            conn.process_new_packets().map(|_| ())
++        }
++        let supported = CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
++        assert!(server_hello_result(0, supported).is_ok());
++        assert!(server_hello_result(18, supported).is_ok());
++        assert!(server_hello_result(22, supported).is_err());
++        assert_eq!(server_hello_result(0, CipherSuite::Unknown(0xdead)), Err(PeerMisbehaved::SelectedUnofferedCipherSuite.into()));
++    }
++
++    #[cfg(feature = "tls12")]
++    #[test]
++    fn client_hello_shape_boringssl_padding_is_zero_filled() {
++        fn config(padding: PaddingPolicy, alpn_len: usize) -> ClientConfig {
++            let mut config = ClientConfig::builder_with_provider(super::provider::default_provider().into())
++                .with_protocol_versions(&[&version::TLS12]).unwrap()
++                .with_root_certificates(roots()).with_no_client_auth();
++            config.alpn_protocols = if alpn_len <= 255 {
++                vec![vec![b'a'; alpn_len]]
++            } else {
++                vec![vec![b'a'; 255], vec![b'b'; alpn_len - 255]]
++            };
++            config.client_hello_shape = Some(Arc::new(ClientHelloShape {
++                padding: Some(padding), ..ClientHelloShape::default()
++            }));
++            config
++        }
++        let (alpn_len, unpadded) = (1..=255).find_map(|len| {
++            let hello = wire_client_hello(config(PaddingPolicy::None, len)).unwrap();
++            (256..=508).contains(&hello.handshake_len).then_some((len, hello))
++        }).expect("a TLS 1.2 ClientHello should fit the padding window");
++        assert!(!unpadded.extensions.iter().any(|(typ, _)| *typ == 21));
++        let padded = wire_client_hello(config(PaddingPolicy::BoringSsl, alpn_len)).unwrap();
++        assert_eq!(padded.handshake_len, 512);
++        let padding = padded.extensions.iter().find(|(typ, _)| *typ == 21).unwrap();
++        assert_eq!(padding.1.len(), 512 - unpadded.handshake_len - 4);
++        assert!(padding.1.iter().all(|byte| *byte == 0));
++        for (target, expected) in [(254, 254), (256, 512), (511, 516), (512, 512)] {
++            let alpn_len = (1..=510).find(|len| {
++                wire_client_hello(config(PaddingPolicy::None, *len)).unwrap().handshake_len == target
++            }).expect("TLS 1.2 ClientHello must reach the boundary by varying ALPN length");
++            let hello = wire_client_hello(config(PaddingPolicy::BoringSsl, alpn_len)).unwrap();
++            assert_eq!(hello.handshake_len, expected, "unpadded length {target}");
++            let padding = hello.extensions.iter().find(|(typ, _)| *typ == 21);
++            assert_eq!(padding.is_some(), target == 256 || target == 511);
++            if let Some((_, data)) = padding {
++                assert!(data.iter().all(|byte| *byte == 0));
++            }
++        }
++    }
++
+     /// Tests that session_ticket(35) extension
+     /// is not sent if the client does not support TLS 1.2.
+     #[test]
+diff --git a/src/lib.rs b/src/lib.rs
+index 8652415..86134bf 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -586,6 +586,8 @@ pub mod client {
+     mod ech;
+     pub(super) mod handy;
+     mod hs;
++    mod hello_shape;
++    pub use hello_shape::{ClientHelloShape, PaddingPolicy, RawExtension, Renegotiation};
+     #[cfg(test)]
+     mod test;
+     #[cfg(feature = "tls12")]
+diff --git a/src/msgs/handshake.rs b/src/msgs/handshake.rs
+index 63b836a..2f5f4a0 100644
+--- a/src/msgs/handshake.rs
++++ b/src/msgs/handshake.rs
+@@ -978,6 +978,11 @@ extension_struct! {
+ 
+         /// Extensions that must appear contiguously.
+         pub(crate) contiguous_extensions: Vec<ExtensionType>,
++
++        /// Optional wire order and additional extension bodies.
++        pub(crate) explicit_order: Option<Vec<ExtensionType>>,
++        pub(crate) raw_extensions: Vec<(ExtensionType, Vec<u8>)>,
++        pub(crate) padding_len: Option<u16>,
+     }
+ }
+ 
+@@ -1010,6 +1015,9 @@ impl ClientExtensions<'_> {
+             encrypted_client_hello_outer,
+             order_seed,
+             contiguous_extensions,
++            explicit_order,
++            raw_extensions,
++            padding_len,
+         } = self;
+         ClientExtensions {
+             server_name: server_name.map(|x| x.into_owned()),
+@@ -1038,12 +1046,23 @@ impl ClientExtensions<'_> {
+             encrypted_client_hello_outer,
+             order_seed,
+             contiguous_extensions,
++            explicit_order,
++            raw_extensions,
++            padding_len,
+         }
+     }
+ 
+     pub(crate) fn used_extensions_in_encoding_order(&self) -> Vec<ExtensionType> {
+         let mut exts = self.order_insensitive_extensions_in_random_order();
+         exts.extend(&self.contiguous_extensions);
++        exts.extend(self.raw_extensions.iter().map(|(typ, _)| *typ));
++        if self.padding_len.is_some() {
++            exts.push(ExtensionType::from(21));
++        }
++        if let Some(preferred) = &self.explicit_order {
++            // Only sort extensions actually present; cookies and PSKs appear dynamically.
++            exts.sort_by_key(|typ| preferred.iter().position(|p| p == typ).unwrap_or(preferred.len()));
++        }
+ 
+         if self
+             .encrypted_client_hello_outer
+@@ -1105,7 +1124,18 @@ impl<'a> Codec<'a> for ClientExtensions<'a> {
+ 
+         let body = LengthPrefixedBuffer::new(ListLength::U16, bytes);
+         for item in order {
+-            self.encode_one(item, body.buf);
++            if let Some((_, data)) = self.raw_extensions.iter().find(|(typ, _)| *typ == item) {
++                item.encode(body.buf);
++                (data.len() as u16).encode(body.buf);
++                body.buf.extend_from_slice(data);
++            } else if u16::from(item) == 21 && self.padding_len.is_some() {
++                item.encode(body.buf);
++                let len = self.padding_len.unwrap();
++                len.encode(body.buf);
++                body.buf.resize(body.buf.len() + usize::from(len), 0);
++            } else {
++                self.encode_one(item, body.buf);
++            }
+         }
+     }
+ 
