@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   createWriteStream,
@@ -13,6 +13,12 @@ import { finished } from "node:stream/promises";
 
 const started = performance.now();
 const repository = resolve(import.meta.dir, "../..");
+const preparation = spawnSync(process.platform === "win32" ? "python" : "python3", ["patches/cargo/prepare.py"], {
+  cwd: repository,
+  stdio: "inherit",
+});
+if (preparation.error) throw preparation.error;
+if (preparation.status !== 0) throw new Error("Failed to prepare patched Cargo crates");
 const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 const logDirectory = join(
   repository,

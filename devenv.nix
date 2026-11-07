@@ -169,6 +169,7 @@ in
   enterShell = ''
     STRAVIA_PORT="$(${workspaceInit})" || exit $?
     export STRAVIA_PORT
+    python3 "$DEVENV_ROOT/patches/cargo/prepare.py" || exit $?
   '' + lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
     # 未安装到系统目录的 GTK schema 仍须能被桌面进程找到。
     export XDG_DATA_DIRS="${lib.makeSearchPath "share/gsettings-schemas/${pkgs.gtk3.name}" [ pkgs.gtk3 ]}:${lib.makeSearchPath "share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}" [ pkgs.gsettings-desktop-schemas ]}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"

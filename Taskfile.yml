@@ -3,8 +3,19 @@ version: "3"
 vars:
   DESKTOP_DIR: backend/apps/stravia-desktop
   TAURI_CLI_VERSION: 2.12.3
+  PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
 
 tasks:
+  prepare:crates:
+    desc: Prepare patched Cargo dependencies before resolving the workspace.
+    sources:
+      - patches/cargo/**/*
+    generates:
+      - .stravia-patched-crates/rustls-0.23.46-shape1/.prepare-stamp.json
+    status:
+      - '{{.PYTHON}} patches/cargo/prepare.py --check'
+    cmds:
+      - '{{.PYTHON}} patches/cargo/prepare.py'
   brand:generate:
     desc: Generate SVG brand variants and required native icons from the Cadence master.
     cmds:
@@ -20,10 +31,12 @@ tasks:
 
   build:vendors:
     desc: Build the bundled Stravia Base Providers Wasm component.
+    deps: [prepare:crates]
     sources:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
+      - patches/cargo/**/*
       - backend/crates/stravia-vendor-base/Cargo.toml
       - backend/crates/stravia-vendor-base/build.rs
       - backend/crates/stravia-vendor-base/src/**/*.rs
@@ -53,6 +66,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
+      - patches/cargo/**/*
       - .cargo/config.toml
       - backend/crates/stravia-vendor-*/Cargo.toml
       - backend/crates/stravia-vendor-*/build.rs
@@ -79,6 +93,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
+      - patches/cargo/**/*
       - target/vendor-plugins/manifest.json
       - backend/crates/stravia-vendor-sdk/Cargo.toml
       - backend/crates/stravia-vendor-sdk/fixtures/build.ts
@@ -187,6 +202,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
+      - patches/cargo/**/*
       - .cargo/config.toml
       - backend/**/*.rs
       - backend/**/*.toml
@@ -300,6 +316,7 @@ tasks:
 
   test:all:
     desc: Run every local test surface, including incremental builds and cleanup, with a five-minute budget.
+    deps: [prepare:crates]
     cmds:
       - bun tests/common/run-all.ts
 
@@ -314,6 +331,7 @@ tasks:
 
   test:browser:
     desc: Run the real headless Chrome Web Access regression tests.
+    deps: [prepare:crates]
     cmds:
       - bun tests/common/run-in-tempdir.ts cargo test --locked -p stravia-web-access browser::tests -- --ignored
 
