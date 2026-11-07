@@ -3,7 +3,7 @@
 //! A plugin crate links this SDK, fills a [`VendorDescriptor`], implements
 //! [`VendorGuest`] for the capabilities it claims, and calls
 //! [`export_vendor!`] once. The generated component exposes the versioned
-//! `stravia:vendor@0.6.0` world; all model traffic flows through the canonical
+//! `stravia:vendor@1.0.0` world; all model traffic flows through the canonical
 //! contract in [`stravia_runtime_contract::protocol::ir`].
 //!
 //! The WIT contract lives in `wit/` of this crate and is the single source for
@@ -26,6 +26,7 @@ mod descriptor;
 mod envelope;
 #[doc(hidden)]
 pub mod guest;
+pub mod net;
 mod host_api;
 mod language_tag;
 mod request_compat;
@@ -36,10 +37,7 @@ mod request_compat;
 mod message_build_support;
 
 pub use crate::bindings::stravia::vendor::host::LogLevel;
-pub use crate::bindings::stravia::vendor::types::{
-    CompressionNegotiation, HttpCompression, HttpContentCoding, HttpRequest, HttpRequestOptions,
-    WsCompression, WsRequest,
-};
+pub use net::{Coding, ConnectRequest, Field, Fields, HttpResponse, HttpVersion, OptionError, Options, Request, WebSocket, WsCompression, WsMessage, WsTransport};
 pub use descriptor::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, DataCompatibility,
@@ -63,7 +61,7 @@ pub use guest::{
     SearchSource, TRANSPORT_PREFERENCE_METADATA_KEY, TransportFailure, TransportPreference,
     UpstreamFailure, ValidationIssue, VendorGuest,
 };
-pub use host_api::{GuestHost, HttpResponse, WsConnection, WsMessage, read_http_body};
+pub use host_api::{GuestHost, read_http_body};
 pub use stravia_runtime_contract::protocol::ir::{
     AiError, AiErrorKind, AiRequest, AiResponse, AiStreamDelta, NativeCompactionResponse,
 };

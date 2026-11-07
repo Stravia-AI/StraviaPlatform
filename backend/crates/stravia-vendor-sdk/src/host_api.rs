@@ -4,8 +4,7 @@ use crate::bindings::stravia::vendor::{host, types};
 use crate::envelope::{encode_payload, error};
 use crate::guest::{ErrorKind, PluginError};
 
-pub use host::{HttpResponse, WsConnection};
-pub use types::WsMessage;
+use crate::net::HttpResponse;
 
 /// Operation-scoped access to controlled host services. It is intentionally
 /// not cloneable into a background executor; imported resources are owned and
@@ -20,63 +19,14 @@ impl GuestHost {
         Self { _private: () }
     }
 
-    /// Admit an HTTP request and immediately return its pending response
-    /// resource. Waiting happens only in `status`, `headers`, and `read_body`.
-    /// Manual compression headers and pre-encoded request bytes retain their
-    /// legacy behavior; use `http_start_with_compression` for host-owned coding.
-    /// A single `Transfer-Encoding: chunked` opts into host-framed HTTP/1.1;
-    /// provide unframed bytes, without Content-Length. Other transfer codings
-    /// and duplicate declarations are rejected before sending.
-    pub fn http_start(&self, request: types::HttpRequest) -> Result<HttpResponse, PluginError> {
-        host::http_start(&request)
+    /// Start a host-authorized request using a snapshot of the options.
+    pub fn http_start(&self, request: crate::net::Request, options: &crate::net::Options) -> Result<crate::net::HttpResponse, PluginError> {
+        crate::net::start(request, options)
     }
 
-    /// Admit an HTTP request with host-owned compression. Bodies are application
-    /// bytes; do not provide Accept-Encoding, Content-Encoding, or Content-Length.
-    /// The same explicit chunked option as `http_start` applies after compression.
-    pub fn http_start_with_compression(
-        &self,
-        request: types::HttpRequest,
-        compression: types::HttpCompression,
-    ) -> Result<HttpResponse, PluginError> {
-        host::http_start_with_compression(&request, &compression)
-    }
-
-    /// Admit an HTTP request with explicit transport options. This new entry
-    /// point requires a host built against the updated WIT contract; older
-    /// hosts that do not implement `http-start-with-options` cannot load a
-    /// plugin importing it.
-    /// `http1_only: true` restricts HTTP protocol negotiation to
-    /// HTTP/1.1. TLS, proxy, redirect, network permission, and failure handling
-    /// are unchanged. A `compression` policy uses the same host-owned coding and
-    /// explicit chunked framing as `http_start_with_compression`.
-    pub fn http_start_with_options(
-        &self,
-        request: types::HttpRequest,
-        options: types::HttpRequestOptions,
-    ) -> Result<HttpResponse, PluginError> {
-        host::http_start_with_options(&request, &options)
-    }
-
-    /// Connect with the plugin's cross-request reuse policy. A missing
-    /// `reuse_max_age_millis` uses the host default; zero prevents cross-request
-    /// reuse. The host may cap the requested age, measured from the first
-    /// handshake, and later requests cannot extend it. In-flight I/O keeps its
-    /// independent host deadline.
-    /// This legacy entry point does not negotiate compression.
-    pub fn ws_connect(&self, request: types::WsRequest) -> Result<WsConnection, PluginError> {
-        host::ws_connect(&request)
-    }
-
-    /// Connect with an explicit handshake compression policy. Required
-    /// compression fails before application messages if unavailable.
-    /// Do not provide Sec-WebSocket-Extensions manually.
-    pub fn ws_connect_with_compression(
-        &self,
-        request: types::WsRequest,
-        compression: types::WsCompression,
-    ) -> Result<WsConnection, PluginError> {
-        host::ws_connect_with_compression(&request, compression)
+    /// Connect a host-authorized WebSocket using a snapshot of the options.
+    pub fn ws_connect(&self, request: crate::net::ConnectRequest, options: &crate::net::Options) -> Result<crate::net::WebSocket, PluginError> {
+        crate::net::connect(request, options)
     }
 
     pub fn read_private_state(&self) -> Result<Option<Vec<u8>>, PluginError> {

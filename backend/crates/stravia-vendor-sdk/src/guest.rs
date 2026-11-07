@@ -11,8 +11,30 @@ use crate::envelope::{CANONICAL_FORMAT_VERSION, decode_payload, error};
 use crate::host_api::GuestHost;
 
 pub use crate::bindings::stravia::vendor::types::{
-    ErrorKind, ModelErrorKind, PluginError, TransportFailure, UpstreamFailure,
+    ErrorKind, ModelErrorKind, PluginError, UpstreamFailure,
 };
+
+/// Recognized transport-specific failures. Unknown wire values are not evidence
+/// that replaying a request on another transport is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportFailure {
+    Websocket,
+}
+
+impl TransportFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Websocket => "websocket",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "websocket" => Some(Self::Websocket),
+            _ => None,
+        }
+    }
+}
 
 impl ErrorKind {
     /// Construct an upstream failure while preserving optional canonical model
@@ -40,7 +62,7 @@ impl ErrorKind {
         let Self::Upstream(mut failure) = Self::upstream(model_error_kind, retry_after) else {
             unreachable!("upstream constructor always returns the upstream variant")
         };
-        failure.transport_failure = Some(transport_failure);
+        failure.transport_failure = Some(transport_failure.as_str().to_owned());
         Self::Upstream(failure)
     }
 
@@ -51,7 +73,7 @@ impl ErrorKind {
 
     pub fn model_error_kind(&self) -> Option<stravia_runtime_contract::protocol::ir::AiErrorKind> {
         match self {
-            Self::Upstream(failure) => failure.model_error_kind.map(Into::into),
+            Self::Upstream(failure) => failure.model_error_kind.as_ref().map(Into::into),
             _ => None,
         }
     }
@@ -65,7 +87,10 @@ impl ErrorKind {
 
     pub fn transport_failure(&self) -> Option<TransportFailure> {
         match self {
-            Self::Upstream(failure) => failure.transport_failure,
+            Self::Upstream(failure) => failure
+                .transport_failure
+                .as_deref()
+                .and_then(TransportFailure::from_str),
             _ => None,
         }
     }
@@ -100,6 +125,12 @@ impl From<stravia_runtime_contract::protocol::ir::AiErrorKind> for ModelErrorKin
 
 impl From<ModelErrorKind> for stravia_runtime_contract::protocol::ir::AiErrorKind {
     fn from(value: ModelErrorKind) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&ModelErrorKind> for stravia_runtime_contract::protocol::ir::AiErrorKind {
+    fn from(value: &ModelErrorKind) -> Self {
         match value {
             ModelErrorKind::AuthenticationError => Self::AuthenticationError,
             ModelErrorKind::AuthorizationError => Self::AuthorizationError,
@@ -115,7 +146,53 @@ impl From<ModelErrorKind> for stravia_runtime_contract::protocol::ir::AiErrorKin
             ModelErrorKind::ModelNotAvailable => Self::ModelNotAvailable,
             ModelErrorKind::StreamMidError => Self::StreamMidError,
             ModelErrorKind::UnexpectedEof => Self::UnexpectedEof,
-            ModelErrorKind::Unknown => Self::Unknown,
+            ModelErrorKind::Unknown | ModelErrorKind::Other(_) => Self::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_conversion_tests {
+    use super::*;
+    use stravia_runtime_contract::protocol::ir::AiErrorKind;
+
+    #[test]
+    fn model_classifications_convert_conservatively() {
+        let kind = ModelErrorKind::from(AiErrorKind::RateLimitError);
+        assert_eq!(AiErrorKind::from(kind), AiErrorKind::RateLimitError);
+        let kind = ModelErrorKind::Other("future-kind".into());
+        assert_eq!(AiErrorKind::from(&kind), AiErrorKind::Unknown);
+        assert!(matches!(&kind, ModelErrorKind::Other(name) if name == "future-kind"));
+    }
+
+    #[test]
+    fn transport_hints_are_open_but_only_websocket_is_recognized() {
+        let known = ErrorKind::upstream_transport(
+            Some(AiErrorKind::Timeout),
+            Some(Duration::from_millis(42)),
+            TransportFailure::Websocket,
+        );
+        assert_eq!(known.transport_failure(), Some(TransportFailure::Websocket));
+        assert_eq!(known.model_error_kind(), Some(AiErrorKind::Timeout));
+        assert_eq!(known.retry_after(), Some(Duration::from_millis(42)));
+        let unknown = ErrorKind::Upstream(UpstreamFailure {
+            model_error_kind: Some(ModelErrorKind::Other("future-kind".into())),
+            retry_after_milliseconds: None,
+            transport_failure: Some("future-transport".into()),
+        });
+        assert_eq!(unknown.transport_failure(), None);
+        assert_eq!(unknown.model_error_kind(), Some(AiErrorKind::Unknown));
+        assert!(matches!(&unknown, ErrorKind::Upstream(failure)
+            if failure.transport_failure.as_deref() == Some("future-transport")));
+    }
+
+    #[test]
+    fn lifecycle_errors_have_no_upstream_retry_facts() {
+        for kind in [ErrorKind::Cancelled, ErrorKind::DeadlineExceeded, ErrorKind::Trapped] {
+            assert!(!kind.is_upstream_failure());
+            assert_eq!(kind.model_error_kind(), None);
+            assert_eq!(kind.retry_after(), None);
+            assert_eq!(kind.transport_failure(), None);
         }
     }
 }
