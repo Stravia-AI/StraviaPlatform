@@ -13,13 +13,11 @@ use std::{
 };
 use tokio::time::Instant;
 
-use bytes::Bytes;
 use rama_core::ServiceInput;
 use rama_http_core::client::conn::http1;
-use rama_http_types::body::util::Full;
 use rustls::{client::Resumption, ClientConfig};
 
-use super::{connector::{self, Resolver, Route}, h2::{self, H2PeerSettingsHandle, H2Settings}};
+use super::{body::RequestBody, connector::{self, Resolver, Route}, h2::{self, H2PeerSettingsHandle, H2Settings}};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -52,7 +50,7 @@ pub struct ConnectOptions {
     pub h2_settings: H2Settings,
 }
 
-type H1Sender = http1::SendRequest<Full<Bytes>>;
+type H1Sender = http1::SendRequest<RequestBody>;
 
 /// A sender for the negotiated HTTP version.
 pub enum Sender {
@@ -328,7 +326,7 @@ impl Pool {
             }
             (Sender::Http2(sender), Some(peer_settings))
         } else {
-            let (sender, connection) = http1::handshake::<_, Full<Bytes>>(io).await.map_err(other)?;
+            let (sender, connection) = http1::handshake::<_, RequestBody>(io).await.map_err(other)?;
             tokio::spawn(async move {
                 if let Err(error) = connection.with_upgrades().await {
                     tracing::debug!(%error, "HTTP/1 connection closed with an error");
