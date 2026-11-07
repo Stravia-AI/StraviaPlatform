@@ -68,10 +68,10 @@ index 1bf0d8c..2aebcdf 100644
                  trace!("Unsolicited extension {ext_type:?}");
 diff --git a/src/client/hello_shape.rs b/src/client/hello_shape.rs
 new file mode 100644
-index 0000000..5bad5ef
+index 0000000..1f2f968
 --- /dev/null
 +++ b/src/client/hello_shape.rs
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,107 @@
 +use alloc::vec::Vec;
 +
 +use crate::{CipherSuite, ClientConfig, Error, NamedGroup};
@@ -85,7 +85,8 @@ index 0000000..5bad5ef
 +    pub supported_groups: Option<Vec<NamedGroup>>,
 +    /// Preferred extension order. Extensions arising dynamically are appended in their normal order.
 +    pub extension_order: Option<Vec<u16>>,
-+    /// Optional nonessential extensions to omit. Currently only status_request (5) is supported.
++    /// Optional nonessential extensions to omit: status_request (5) and
++    /// psk_key_exchange_modes (45). Omitting 45 fails if PSK or early data is offered.
 +    pub omit_extensions: Vec<u16>,
 +    /// Additional safe, non-negotiating extension bodies.
 +    pub raw_extensions: Vec<RawExtension>,
@@ -151,7 +152,7 @@ index 0000000..5bad5ef
 +                return Err(bad());
 +            }
 +        }
-+        if self.omit_extensions.iter().enumerate().any(|(i, typ)| *typ != 5 || self.omit_extensions[..i].contains(typ)) {
++        if self.omit_extensions.iter().enumerate().any(|(i, typ)| !matches!(typ, 5 | 45) || self.omit_extensions[..i].contains(typ)) {
 +            return Err(bad());
 +        }
 +        if let Some(order) = &self.extension_order {
@@ -179,7 +180,7 @@ index 0000000..5bad5ef
 +    }
 +}
 diff --git a/src/client/hs.rs b/src/client/hs.rs
-index 5e90b6a..b0bdb82 100644
+index 5e90b6a..473ef8c 100644
 --- a/src/client/hs.rs
 +++ b/src/client/hs.rs
 @@ -26,7 +26,8 @@ use crate::enums::{
@@ -235,7 +236,20 @@ index 5e90b6a..b0bdb82 100644
          protocols: extra_exts.protocols.clone(),
          ..Default::default()
      });
-@@ -393,6 +400,45 @@ fn emit_client_hello_for_retry(
+@@ -373,6 +380,12 @@ fn emit_client_hello_for_retry(
+ 
+     // Do we have a SessionID or ticket cached for this host?
+     let tls13_session = prepare_resumption(&input.resuming, &mut exts, suite, cx, config);
++    if config.client_hello_shape.as_ref().is_some_and(|shape| shape.omit_extensions.contains(&45)) {
++        if exts.preshared_key_offer.is_some() || exts.early_data_request.is_some() {
++            return Err(Error::General("cannot omit psk_key_exchange_modes when offering PSK or early data".into()));
++        }
++        exts.preshared_key_modes = None;
++    }
+ 
+     // Extensions MAY be randomized
+     // but they also need to keep the same order as the previous ClientHello
+@@ -393,6 +406,45 @@ fn emit_client_hello_for_retry(
          cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
      }
  
@@ -281,7 +295,7 @@ index 5e90b6a..b0bdb82 100644
      let mut chp_payload = ClientHelloPayload {
          client_version: ProtocolVersion::TLSv1_2,
          random: input.random,
-@@ -402,6 +448,17 @@ fn emit_client_hello_for_retry(
+@@ -402,6 +454,17 @@ fn emit_client_hello_for_retry(
          extensions: exts,
      };
  
@@ -299,7 +313,7 @@ index 5e90b6a..b0bdb82 100644
      let ech_grease_ext = config
          .ech_mode
          .as_ref()
-@@ -443,7 +500,11 @@ fn emit_client_hello_for_retry(
+@@ -443,7 +506,11 @@ fn emit_client_hello_for_retry(
      }
  
      // Note what extensions we sent.
@@ -313,7 +327,7 @@ index 5e90b6a..b0bdb82 100644
  
      let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
 diff --git a/src/client/test.rs b/src/client/test.rs
-index 2990329..3952c9c 100644
+index 2990329..04cf2ca 100644
 --- a/src/client/test.rs
 +++ b/src/client/test.rs
 @@ -25,7 +25,7 @@ mod tests {
@@ -325,7 +339,7 @@ index 2990329..3952c9c 100644
      use crate::crypto::cipher::MessageEncrypter;
      use crate::crypto::tls13::OkmBlock;
      use crate::enums::CertificateType;
-@@ -45,6 +45,434 @@ mod tests {
+@@ -45,6 +45,491 @@ mod tests {
      use crate::verify::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
      use crate::{DigitallySignedStruct, DistinguishedName, KeyLog, version};
  
@@ -522,6 +536,63 @@ index 2990329..3952c9c 100644
 +            assert_eq!(client.handshake_kind(), Some(expected));
 +            assert_eq!(server.handshake_kind(), Some(expected));
 +        }
++    }
++
++    #[test]
++    fn full_handshake_succeeds_without_psk_modes_and_resumption_fails_closed() {
++        use crate::server::{ServerConfig, ServerConnection};
++        let provider = Arc::new(super::provider::default_provider());
++        let mut config = ClientConfig::builder_with_provider(provider.clone())
++            .with_protocol_versions(&[&version::TLS13]).unwrap()
++            .with_root_certificates(roots()).with_no_client_auth();
++        config.client_hello_shape = Some(Arc::new(ClientHelloShape {
++            omit_extensions: vec![45], ..ClientHelloShape::default()
++        }));
++        let config = Arc::new(config);
++        let certificates = vec![
++            CertificateDer::from(&include_bytes!("../../../test-ca/rsa-2048/end.der")[..]),
++            CertificateDer::from(&include_bytes!("../../../test-ca/rsa-2048/inter.der")[..]),
++        ];
++        let key = PrivateKeyDer::from_pem_reader(
++            &mut include_bytes!("../../../test-ca/rsa-2048/end.key").as_slice(),
++        ).unwrap();
++        let server_config = Arc::new(ServerConfig::builder_with_provider(provider)
++            .with_protocol_versions(&[&version::TLS13]).unwrap()
++            .with_no_client_auth().with_single_cert(certificates, key).unwrap());
++        let mut client = ClientConnection::new(config.clone(), ServerName::try_from("localhost").unwrap()).unwrap();
++        let mut server = ServerConnection::new(server_config.clone()).unwrap();
++        let mut first = Vec::new();
++        client.write_tls(&mut first).unwrap();
++        assert!(!parse_wire_client_hello(&first).extensions.iter().any(|(typ, _)| *typ == 45));
++        server.read_tls(&mut first.as_slice()).unwrap();
++        server.process_new_packets().unwrap();
++        for _ in 0..20 {
++            let mut to_client = Vec::new();
++            while server.wants_write() { server.write_tls(&mut to_client).unwrap(); }
++            if !to_client.is_empty() { client.read_tls(&mut to_client.as_slice()).unwrap(); client.process_new_packets().unwrap(); }
++            let mut to_server = Vec::new();
++            while client.wants_write() { client.write_tls(&mut to_server).unwrap(); }
++            if !to_server.is_empty() { server.read_tls(&mut to_server.as_slice()).unwrap(); server.process_new_packets().unwrap(); }
++            if !client.is_handshaking() && !server.is_handshaking() && !server.wants_write() && !client.wants_write() { break; }
++        }
++        assert!(!client.is_handshaking() && !server.is_handshaking());
++        // A full handshake without psk_key_exchange_modes may not receive a ticket.
++        // Seed a ticket through a separate, ordinary full handshake sharing the store.
++        let mut ordinary = (*config).clone();
++        ordinary.client_hello_shape = None;
++        let mut client = ClientConnection::new(Arc::new(ordinary), ServerName::try_from("localhost").unwrap()).unwrap();
++        let mut server = ServerConnection::new(server_config).unwrap();
++        for _ in 0..20 {
++            let mut to_server = Vec::new();
++            while client.wants_write() { client.write_tls(&mut to_server).unwrap(); }
++            if !to_server.is_empty() { server.read_tls(&mut to_server.as_slice()).unwrap(); server.process_new_packets().unwrap(); }
++            let mut to_client = Vec::new();
++            while server.wants_write() { server.write_tls(&mut to_client).unwrap(); }
++            if !to_client.is_empty() { client.read_tls(&mut to_client.as_slice()).unwrap(); client.process_new_packets().unwrap(); }
++            if !client.is_handshaking() && !server.is_handshaking() && !server.wants_write() && !client.wants_write() { break; }
++        }
++        assert!(!client.is_handshaking() && !server.is_handshaking());
++        assert!(ClientConnection::new(config, ServerName::try_from("localhost").unwrap()).is_err());
 +    }
 +
 +    #[test]
