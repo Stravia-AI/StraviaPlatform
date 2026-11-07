@@ -336,7 +336,7 @@ HTTP / MCP 在业务解析之前捕获实际请求正文、响应头及已读取
 
 Chromium 记录页面及可归属子 frame / dedicated worker 的请求头、可获得的原始 POST 字节、响应头和 `Network.getResponseBody` 返回的实体正文，而非渲染后的 DOM。CDP 不能还原 HTTP 压缩 / 传输分块，也不能完整捕获浏览器流式分片、WebSocket / WebTransport、重定向正文或可靠归属 shared / service worker；这些限制显式使 Trace 标记 `partial`。正文不可得、页面关闭或读取取消同样标记缺口，不把错误文本、CDP 错误事件或重新编码的 POST 文本冒充远程原始字节。此限制不改变既有 Vendor WebSocket 的捕获。
 
-每条 Wire 记录保留必要的关联元数据，包括适用的 Interaction、Run、Model Turn、Target attempt、方向、协议、transport、顺序与 UTC 时间。既有 Target attempt 身份与生命周期、usage、工具事件、失败与取消继续由普通 Observation 持久化并随 Bundle 导出，不把旧 `target_selected` 迁入普通 Observation，也不复制到 Debug Trace。Debug 原始字节不等待 Canonical Item 收口，普通 Observation 的内容收口也不阻塞 wire 捕获或下游转发。
+每条 Wire 记录保留必要的关联元数据，包括适用的 Interaction、Run、Model Turn、Target attempt、方向、协议、transport、顺序与 UTC 时间。Trace schema 3 的 Vendor 网络出站 headers 使用有序 `[{"name": string, "bytes": [u8, ...]}]`，保留重复字段、交错顺序及非 UTF-8 字节；每个大小写不敏感的 Authorization 值替换为 `[42, 42, 42]`。其他捕获源仍可使用原有 header map，历史 schema 2 map 记录继续可读。既有 Target attempt 身份与生命周期、usage、工具事件、失败与取消继续由普通 Observation 持久化并随 Bundle 导出，不把旧 `target_selected` 迁入普通 Observation，也不复制到 Debug Trace。Debug 原始字节不等待 Canonical Item 收口，普通 Observation 的内容收口也不阻塞 wire 捕获或下游转发。
 
 Wire 记录直接写入 Debug Trace 队列，不逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、item 内容与工具结果持久化并驱动 SSE；Trace manifest 仅写本地文件，不产生普通事件。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减；manifest 按既有维护周期或显式生命周期边界持久化。Interaction 导出票据排空目标 Interaction 的 Trace 后固定截止水位；既有 ZIP 截止水位不能包含之后的新捕获。
 

@@ -7,17 +7,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION, RETRY_AFTER};
-use reqwest::{Client, Method, Response, Url};
+use ::http::Method;
+use url::Url;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::protocol::ir::{AiError, AiErrorKind};
-use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostWebSocket, HttpRequest, WebSocketMessage, WsRequest,
-};
-use stravia_vendor_sdk::{CompressionNegotiation, ErrorKind, TransportFailure, WsCompression};
+use stravia_vendor_runtime::{HostFailure, HostHttpResponse, HostWebSocket, WebSocketMessage};
+use stravia_vendor_sdk::{ErrorKind, net::{self, Field}};
 use tokio::sync::{Mutex, MutexGuard, Notify};
 use tokio::task::{AbortHandle, JoinHandle};
 use tracing::Instrument as _;
@@ -26,9 +24,14 @@ use crate::interaction_observation::{RunEvent, RunObserver};
 
 use super::lifecycle::VendorOperation;
 use super::permissions::NetworkPolicy;
+use crate::outbound_proxy::OutboundProxySettings;
 
+pub(crate) mod shape;
+use shape::ShapeRegistry;
+mod fields;
+mod options;
 mod http;
-mod transport;
+pub(crate) mod transport;
 mod websocket;
 use http::UpstreamResponse;
 use websocket::{Handshake, Message, WebSocket};
@@ -57,9 +60,10 @@ struct PooledWebSocket {
     actual_url: String,
     requested_headers: [u8; 32],
     actual_headers: [u8; 32],
-    requested_protocols: Vec<String>,
-    actual_protocols: Vec<String>,
     compression_key: u8,
+    partition: [u8; 32],
+    handshake_status: u16,
+    handshake_headers: Vec<net::Field>,
     socket: WebSocket,
     connected_at: tokio::time::Instant,
     reuse_expires_at: tokio::time::Instant,
@@ -73,9 +77,8 @@ struct WebSocketPoolIdentity {
     actual_url: String,
     requested_headers: [u8; 32],
     actual_headers: [u8; 32],
-    requested_protocols: Vec<String>,
-    actual_protocols: Vec<String>,
     compression_key: u8,
+    partition: [u8; 32],
 }
 
 /// Reuse lookup key; the pool matches every field exactly.
@@ -84,8 +87,8 @@ struct WebSocketPoolRequest<'a> {
     affinity: &'a str,
     requested_url: &'a str,
     requested_headers: &'a [u8; 32],
-    requested_protocols: &'a [String],
     compression_key: u8,
+    partition: [u8; 32],
     continuation_id: Option<&'a str>,
 }
 
@@ -100,8 +103,8 @@ impl VendorWebSocketPool {
             affinity,
             requested_url,
             requested_headers,
-            requested_protocols,
             compression_key,
+            partition,
             continuation_id,
         } = *request;
         let mut idle = self.idle.lock();
@@ -114,9 +117,8 @@ impl VendorWebSocketPool {
                 && entry.actual_url == requested_url
                 && entry.requested_headers == *requested_headers
                 && entry.actual_headers == *requested_headers
-                && entry.requested_protocols == requested_protocols
-                && entry.actual_protocols == requested_protocols
                 && entry.compression_key == compression_key
+                && entry.partition == partition
                 && (compression_key != 2 || entry.socket.compressed())
         };
         let mut expiration_changed = false;
@@ -138,6 +140,8 @@ impl VendorWebSocketPool {
     fn park(
         self: &Arc<Self>,
         identity: WebSocketPoolIdentity,
+        handshake_status: u16,
+        handshake_headers: Vec<net::Field>,
         socket: WebSocket,
         connected_at: tokio::time::Instant,
         reuse_expires_at: tokio::time::Instant,
@@ -167,9 +171,10 @@ impl VendorWebSocketPool {
                 actual_url: identity.actual_url,
                 requested_headers: identity.requested_headers,
                 actual_headers: identity.actual_headers,
-                requested_protocols: identity.requested_protocols,
-                actual_protocols: identity.actual_protocols,
                 compression_key: identity.compression_key,
+                partition: identity.partition,
+                handshake_status,
+                handshake_headers,
                 socket,
                 connected_at,
                 reuse_expires_at,
@@ -234,8 +239,10 @@ impl Drop for VendorWebSocketPool {
 
 #[derive(Clone)]
 pub(crate) struct VendorNetwork {
-    http: Client,
-    http1: Client,
+    transport: Arc<transport::VendorTransport>,
+    shapes: Arc<ShapeRegistry>,
+    proxy: OutboundProxySettings,
+    resolver: Arc<dyn transport::Resolver>,
     origins: NetworkPolicy,
     operation: Arc<VendorOperation>,
     cancellation: CancellationToken,
@@ -256,21 +263,15 @@ struct WireDiagnostic<'a> {
     message_type: &'a str,
     url: &'a Url,
     status_code: Option<u16>,
-    headers: Option<&'a HeaderMap>,
-}
-
-struct HttpSendOptions {
-    explicit_compression: bool,
-    http1_only: bool,
+    headers: Option<&'a [Field]>,
 }
 
 impl VendorNetwork {
-    /// Clients must have automatic redirects disabled. Every redirect hop is
-    /// independently authorized here before any bytes leave the process.
-    /// The second client must be HTTP/1-only, with the same proxy and TLS policy.
+    /// Each redirect is authorized independently before dispatch.
     pub(crate) fn new(
-        http: Client,
-        http1: Client,
+        transport: Arc<transport::VendorTransport>,
+        shapes: Arc<ShapeRegistry>,
+        proxy: OutboundProxySettings,
         origins: NetworkPolicy,
         operation: Arc<VendorOperation>,
         cancellation: CancellationToken,
@@ -282,8 +283,10 @@ impl VendorNetwork {
             let _ = write!(protocol, "{endpoint}");
         }
         Self {
-            http,
-            http1,
+            transport,
+            shapes,
+            proxy,
+            resolver: Arc::new(transport::SystemResolver),
             origins,
             operation,
             cancellation,
@@ -395,25 +398,15 @@ impl VendorNetwork {
         Ok(url)
     }
 
-    fn protect_headers(&self, headers: &HeaderMap) {
-        let Some(observer) = &self.observer else {
-            return;
-        };
-        observer.protect_secrets(headers.iter().filter_map(|(name, value)| {
-            let name = name.as_str();
-            let sensitive = matches!(
-                name,
-                "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
-            ) || name.contains("token")
-                || name.contains("secret")
-                || name.contains("api-key")
-                || name.contains("api_key")
-                || name.ends_with("-key")
-                || name.starts_with("x-auth-");
-            sensitive
-                .then(|| value.to_str().ok())
-                .flatten()
-                .filter(|value| !value.is_empty())
+    fn protect_headers(&self, headers: &[Field]) {
+        let Some(observer) = &self.observer else { return };
+        observer.protect_secrets(headers.iter().filter_map(|field| {
+            let name = field.name.to_ascii_lowercase();
+            let sensitive = matches!(name.as_str(), "authorization" | "proxy-authorization" | "cookie" | "set-cookie")
+                || name.contains("token") || name.contains("secret")
+                || name.contains("api-key") || name.contains("api_key")
+                || name.ends_with("-key") || name.starts_with("x-auth-");
+            sensitive.then(|| std::str::from_utf8(&field.bytes).ok()).flatten().filter(|value| !value.is_empty())
         }));
     }
 
@@ -437,467 +430,325 @@ impl VendorNetwork {
             attempt_id: self.attempt_id.clone(),
             status_code: diagnostic.status_code,
             url: Some(diagnostic.url.as_str().to_owned()),
-            headers: diagnostic.headers.map(headers_value).unwrap_or(Value::Null),
+            headers: diagnostic.headers.map(|headers| {
+                if diagnostic.direction == "upstream_request" { headers_value(headers) }
+                else { response_headers_value(headers) }
+            }).unwrap_or(Value::Null),
             payload: payload().into(),
         });
     }
 
-    pub(crate) fn http_start(
-        &self,
-        mut request: HttpRequest,
-    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
-        let url = self.url(&request.url, false)?;
-        let method = Method::from_bytes(request.method.as_bytes())
-            .map_err(|_| invalid("invalid HTTP method"))?;
-        if method == Method::CONNECT {
-            return Err(invalid("HTTP CONNECT is not a vendor operation"));
+    pub(crate) fn validate_net_option(&self, key: &str, value: &str) -> Result<(), HostFailure> {
+        options::validate_option(&self.shapes, key, value)
+            .map_err(|error| HostFailure::new(ErrorKind::Unsupported, error.to_string()))
+    }
+
+    fn validate_options(&self, options: &net::Options) -> Result<(), HostFailure> {
+        for (key, value) in options.iter() { self.validate_net_option(key, value)?; }
+        Ok(())
+    }
+
+    fn route(&self, options: &net::Options, websocket: bool) -> Result<transport::Route, HostFailure> {
+        self.validate_options(options)?;
+        let name = option(options, net::keys::SHAPE).unwrap_or("default");
+        let shape = self.shapes.get(name).ok_or_else(|| HostFailure::new(ErrorKind::Unsupported, "unknown network shape"))?;
+        let mut proxy = self.proxy.clone();
+        proxy.normalize();
+        proxy.validate().map_err(|error| HostFailure::new(ErrorKind::Invalid, error.to_string()))?;
+        let mut digest = Sha256::new();
+        digest.update(proxy.url.as_bytes());
+        digest.update([0]);
+        digest.update(proxy.bypass.as_bytes());
+        digest.update([proxy.force_http1 as u8]);
+        let proxy_identity = format!("{:x}", digest.finalize());
+        let preference = if websocket { option(options, net::keys::WS_TRANSPORT) } else { option(options, net::keys::HTTP_VERSION) };
+        if proxy.force_http1 && matches!(preference, Some("http2" | "h2")) {
+            return Err(HostFailure::new(ErrorKind::Unsupported, "HTTP/2 conflicts with the proxy HTTP/1 policy"));
         }
-        let chunked = http::take_chunked_header(&mut request.headers)?;
-        let mut headers = request_headers(request.headers, &url)?;
-        if let Some(compression) = &request.compression {
-            http::prepare(&mut headers, compression)?;
+        if websocket && matches!(preference, Some("h2")) && !shape.ws.over_h2 {
+            return Err(HostFailure::new(ErrorKind::Unsupported, "shape does not support WebSocket over HTTP/2"));
         }
-        if chunked {
-            headers.insert(
-                reqwest::header::TRANSFER_ENCODING,
-                HeaderValue::from_static("chunked"),
-            );
-        }
-        let legacy_decode = headers.contains_key(reqwest::header::ACCEPT_ENCODING);
+        let version = match preference {
+            Some("http1") => transport::HttpVersionPref::Http1,
+            Some("http2" | "h2") => transport::HttpVersionPref::Http2,
+            _ if proxy.force_http1 || (websocket && !shape.ws.over_h2) => transport::HttpVersionPref::Http1,
+            _ => transport::HttpVersionPref::Auto,
+        };
+        Ok(transport::Route {
+            shape_name: shape.name.clone(), shape_revision: shape.revision,
+            tls: shape.tls_for(&proxy_identity, websocket), proxy_tls: self.shapes.proxy_tls(),
+            proxy, resolver: self.resolver.clone(), version, h2: shape.http2.clone(),
+            omit_h2_content_length: shape.http2_content_length == "omit",
+        })
+    }
+
+    fn request_observer(&self, url: Url, transport_name: &'static str, message_type: &'static str, body: Bytes) -> Option<Box<dyn FnOnce(transport::RequestHead) + Send>> {
+        if !self.observer.as_ref().is_some_and(RunObserver::debug_enabled) { return None; }
         let network = self.clone();
-        let sending = network.clone();
-        // The task owns the operation lease only while the imported response
-        // resource exists. Resource drop aborts the task before version drain.
-        let task = tokio::spawn(
-            async move {
-                let body = tokio::select! {
-                    _ = sending.cancelled() => return Err(cancelled()),
-                    body = http::encode(request.body, request.compression.as_ref().and_then(|policy| policy.request)) => body?,
-                };
-                let response = sending
-                    .send_http(method.clone(), url, headers, body, HttpSendOptions {
-                        explicit_compression: request.compression.is_some(),
-                        http1_only: request.http1_only,
-                    })
-                    .await?;
-                match &request.compression {
-                    Some(compression) => UpstreamResponse::decoded(response, &method, compression).await,
-                    None => Ok(UpstreamResponse::legacy(response, legacy_decode).await),
-                }
-            }
-            .in_current_span(),
-        );
-        let abort = task.abort_handle();
-        Ok(Arc::new(PendingHttp {
-            network,
-            state: Mutex::new(HttpState::Pending(task)),
-            abort,
+        Some(Box::new(move |head| {
+            network.wire(WireDiagnostic { direction: "upstream_request", transport: transport_name, message_type, url: &url, status_code: None, headers: Some(&head.fields) }, || crate::interaction_observation::WirePayload::Bytes(body));
         }))
     }
 
-    async fn send_http(
-        &self,
-        mut method: Method,
-        mut url: Url,
-        mut headers: HeaderMap,
-        mut body: Bytes,
-        options: HttpSendOptions,
-    ) -> Result<Response, HostFailure> {
-        for redirects in 0..=MAX_REDIRECTS {
-            self.ensure_current()?;
-            self.admit_send().await?;
-            self.wire(
-                WireDiagnostic {
-                    direction: "upstream_request",
-                    transport: "http",
-                    message_type: "request",
-                    url: &url,
-                    status_code: None,
-                    headers: Some(&headers),
-                },
-                || crate::interaction_observation::WirePayload::Bytes(body.clone()),
-            );
-            let chunked = headers.contains_key(reqwest::header::TRANSFER_ENCODING);
-            let client = if options.http1_only || chunked {
-                &self.http1
-            } else {
-                &self.http
-            };
-            let request_body = if chunked {
-                // HTTP/2 会移除 Transfer-Encoding；复用同配置的 HTTP/1 客户端。
-                // 未知长度的 body 让 hyper 真正编码分块及终止块，空正文也保持该契约。
-                let stream =
-                    futures::stream::once(std::future::ready(Ok::<_, std::convert::Infallible>(
-                        body.clone(),
-                    )));
-                reqwest::Body::wrap_stream(stream)
-            } else {
-                reqwest::Body::from(body.clone())
-            };
-            let request = client
-                .request(method.clone(), url.clone())
-                .headers(headers.clone())
-                .body(request_body);
-            let response = async {
-                tokio::select! {
-                    _ = self.cancelled() => Err(cancelled()),
-                    result = request.send() => result.map_err(transport_failure),
-                }
+    pub(crate) fn http_start(
+            &self,
+            request: net::Request,
+            options: net::Options,
+        ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+            let url = self.url(&request.url, false)?;
+            self.validate_options(&options)?;
+            let method = Method::from_bytes(request.method.as_bytes())
+                .map_err(|_| invalid("invalid HTTP method"))?;
+            if method == Method::CONNECT {
+                return Err(invalid("HTTP CONNECT is not a vendor operation"));
             }
-            .instrument(tracing::info_span!(
-                target: "stravia::perf", "upstream.http.response_headers.wait"
-            ))
-            .await?;
-            let status = response.status().as_u16();
-            self.wire(
-                WireDiagnostic {
-                    direction: "upstream_response",
-                    transport: "http",
-                    message_type: "response_headers",
-                    url: &url,
-                    status_code: Some(status),
-                    headers: Some(response.headers()),
-                },
-                || Value::Null,
-            );
-            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
-                return Ok(response);
-            }
-            let Some(location) = response.headers().get(LOCATION) else {
-                return Ok(response);
-            };
-            if redirects == MAX_REDIRECTS {
-                return Err(invalid("upstream redirect limit exceeded"));
-            }
-            let next = url
-                .join(
-                    location
-                        .to_str()
-                        .map_err(|_| invalid("invalid redirect location"))?,
-                )
-                .map_err(|_| invalid("invalid redirect URL"))?;
-            let next = self.url(next.as_str(), false)?;
-            if matches!(status, 301..=303) && method != Method::GET && method != Method::HEAD {
-                method = Method::GET;
-                body = Bytes::new();
-                headers.remove(reqwest::header::CONTENT_TYPE);
-                headers.remove(reqwest::header::CONTENT_ENCODING);
-                headers.remove(reqwest::header::TRANSFER_ENCODING);
-            }
-            if next.origin() != url.origin() {
-                // Bodies and arbitrary custom headers can carry credentials,
-                // not just Authorization and Cookie.
-                if !body.is_empty() {
-                    return Err(invalid(
-                        "cross-origin redirect cannot forward a request body",
-                    ));
-                }
-                let accept_encoding = options
-                    .explicit_compression
-                    .then(|| headers.get(reqwest::header::ACCEPT_ENCODING).cloned())
-                    .flatten();
-                headers.clear();
-                if let Some(accept_encoding) = accept_encoding {
-                    headers.insert(reqwest::header::ACCEPT_ENCODING, accept_encoding);
-                }
-            }
-            url = next;
+            http::prepare(&request.headers, &options)?;
+            let route = self.route(&options, false)?;
+            let network = self.clone();
+            let sending = network.clone();
+            let task = tokio::spawn(async move {
+                let body = tokio::select! {
+                    _ = sending.cancelled() => return Err(cancelled()),
+                    body = http::encode(request.body, &options) => body?,
+                };
+                sending.send_http(method, url, request.headers.into_vec(), body, options, route).await
+            }.in_current_span());
+            let abort = task.abort_handle();
+            Ok(Arc::new(PendingHttp { network, state: Mutex::new(HttpState::Pending(task)), abort }))
         }
-        unreachable!("redirect loop returns at its bound")
-    }
+
+    async fn send_http(
+            &self,
+            mut method: Method,
+            mut url: Url,
+            mut headers: Vec<Field>,
+            mut body: Bytes,
+            options: net::Options,
+            route: transport::Route,
+        ) -> Result<UpstreamResponse, HostFailure> {
+            let shape = self.shapes.get(&route.shape_name)
+                .ok_or_else(|| invalid("unknown network shape"))?;
+            for redirects in 0..=MAX_REDIRECTS {
+                self.ensure_current()?;
+                let fields = fields::plan_http(headers.clone(), &url, method.as_str(), body.len(), shape)
+                    .map_err(|error| HostFailure::new(ErrorKind::Trapped, error))?;
+                self.admit_send().await?;
+                let request = transport::RequestPlan {
+                    method: method.as_str().to_owned(), uri: url.as_str().to_owned(),
+                    fields, body: body.clone(),
+                    observer: self.request_observer(url.clone(), "http", "request", body.clone()),
+                };
+                let response = async {
+                    tokio::select! {
+                        _ = self.cancelled() => Err(cancelled()),
+                        result = self.transport.send(request, route.clone()) => result.map_err(transport_failure),
+                    }
+                }.instrument(tracing::info_span!(
+                    target: "stravia::perf", "upstream.http.response_headers.wait"
+                )).await?;
+                self.ensure_current()?;
+                let status = response.head.status;
+                self.wire(WireDiagnostic {
+                    direction: "upstream_response", transport: "http", message_type: "response_headers",
+                    url: &url, status_code: Some(status), headers: Some(&response.head.fields),
+                }, || Value::Null);
+                if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                    return UpstreamResponse::new(response, url, method.as_str(), &options);
+                }
+                let Some(location) = response.head.fields.iter().find(|f| f.name.eq_ignore_ascii_case("location")) else {
+                    return UpstreamResponse::new(response, url, method.as_str(), &options);
+                };
+                if redirects == MAX_REDIRECTS { return Err(invalid("upstream redirect limit exceeded")); }
+                let location = std::str::from_utf8(&location.bytes).map_err(|_| invalid("invalid redirect location"))?;
+                let next = url.join(location).map_err(|_| invalid("invalid redirect URL"))?;
+                let next = self.url(next.as_str(), false)?;
+                if matches!(status, 301..=303) && method != Method::GET && method != Method::HEAD {
+                    method = Method::GET;
+                    body = Bytes::new();
+                    headers.retain(|f| !f.name.to_ascii_lowercase().starts_with("content-")
+                        && !f.name.eq_ignore_ascii_case("transfer-encoding"));
+                }
+                if next.origin() != url.origin() {
+                    if !body.is_empty() { return Err(invalid("cross-origin redirect cannot forward a request body")); }
+                    if option(&options, net::keys::RESPONSE_DECODING).unwrap_or("none") == "none" {
+                        headers.clear();
+                    } else {
+                        headers.retain(|f| f.name.eq_ignore_ascii_case("accept-encoding"));
+                    }
+                } else {
+                    for field in &mut headers {
+                        if field.name.eq_ignore_ascii_case("host") { field.bytes.clear(); }
+                    }
+                }
+                url = next;
+            }
+            unreachable!("redirect loop returns at its bound")
+        }
 
     pub(crate) async fn ws_connect(
         &self,
-        request: WsRequest,
+        request: net::ConnectRequest,
+        options: net::Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
-        let WsRequest {
-            url,
-            headers,
-            protocols,
-            continuation_id,
-            reuse_max_age_millis,
-            compression,
-        } = request;
-        let compression_key = match &compression {
-            None | Some(WsCompression::Disabled) => 0,
-            Some(WsCompression::PermessageDeflate(CompressionNegotiation::Preferred)) => 1,
-            Some(WsCompression::PermessageDeflate(CompressionNegotiation::Required)) => 2,
+        let route = self.route(&options, true)?;
+        let shape = self.shapes.get(option(&options, net::keys::SHAPE).unwrap_or("default"))
+            .ok_or_else(|| HostFailure::new(ErrorKind::Unsupported, "unknown network shape"))?;
+        let compression = match option(&options, net::keys::WS_COMPRESSION).unwrap_or("disabled") {
+            "preferred" => net::WsCompression::Preferred,
+            "required" => net::WsCompression::Required,
+            _ => net::WsCompression::Disabled,
         };
-        let reuse_age = reuse_max_age_millis
-            .map(Duration::from_millis)
-            .unwrap_or(MAX_WEBSOCKET_AGE)
-            .min(MAX_WEBSOCKET_AGE);
-        let mut url = self.url(&url, true)?;
+        let compression_key = match compression {
+            net::WsCompression::Disabled => 0,
+            net::WsCompression::Preferred => 1,
+            net::WsCompression::Required => 2,
+        };
+        let reuse_age = option(&options, net::keys::REUSE_MAX_AGE)
+            .and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis)
+            .unwrap_or(MAX_WEBSOCKET_AGE).min(MAX_WEBSOCKET_AGE);
+        let continuation_id = option(&options, net::keys::CONTINUATION);
+        let mut proxy = route.proxy.clone();
+        proxy.normalize();
+        let mut partition_hash = Sha256::new();
+        partition_hash.update(b"stravia-websocket-route-v1\0");
+        partition_hash.update(route.shape_name.as_bytes());
+        partition_hash.update(route.shape_revision.to_be_bytes());
+        partition_hash.update(serde_json::to_vec(&proxy).expect("proxy settings serialize"));
+        partition_hash.update(match route.version {
+            transport::HttpVersionPref::Auto => b"auto".as_slice(),
+            transport::HttpVersionPref::Http1 => b"http1".as_slice(),
+            transport::HttpVersionPref::Http2 => b"http2".as_slice(),
+        });
+        let partition: [u8; 32] = partition_hash.finalize().into();
+        let mut url = self.url(&request.url, true)?;
         let requested_url = url.as_str().to_owned();
-        let mut headers = request_headers(headers, &url)?;
-        websocket::validate_headers(&headers, compression.as_ref())?;
+        let mut headers = fields::plan_ws(request.headers.into_vec(), &url, shape)
+            .map_err(|message| HostFailure::new(ErrorKind::Invalid, message))?;
+        // Validate the handshake before checking out a pooled connection.
+        let mut handshake = Some(Handshake::new(&url, headers.clone(), compression)?);
         let requested_headers = canonical_headers(&headers);
-        let requested_protocols = protocols.clone();
-        let mut protocols = protocols;
 
         if let (Some(pool), Some(scope_key), Some(affinity)) = (
-            self.websocket_pool.as_ref(),
-            self.websocket_scope_key.as_deref(),
-            self.websocket_affinity.as_deref(),
+            self.websocket_pool.as_ref(), self.websocket_scope_key.as_deref(), self.websocket_affinity.as_deref(),
         ) {
             let lookup = WebSocketPoolRequest {
-                scope_key,
-                affinity,
-                requested_url: &requested_url,
-                requested_headers: &requested_headers,
-                requested_protocols: &requested_protocols,
-                compression_key,
-                continuation_id: continuation_id.as_deref(),
+                scope_key, affinity, requested_url: &requested_url, requested_headers: &requested_headers,
+                compression_key, partition, continuation_id,
             };
             while let Some(mut entry) = pool.take(&lookup, reuse_age) {
-                if self.url(&entry.actual_url, true).is_err()
-                    || !drain_idle_frames(&mut entry.socket)
-                {
-                    continue;
-                }
-                let wire_url = entry.actual_url.clone();
+                if self.url(&entry.actual_url, true).is_err() || !drain_idle_frames(&mut entry.socket) { continue; }
                 return Ok(Arc::new(ScopedWebSocket {
-                    network: self.clone(),
-                    socket: Mutex::new(Some(entry.socket)),
-                    wire_url,
+                    network: self.clone(), socket: Mutex::new(Some(entry.socket)), wire_url: entry.actual_url.clone(),
+                    handshake_status: entry.handshake_status, handshake_headers: entry.handshake_headers,
                     pool_identity: Some(WebSocketPoolIdentity {
-                        scope_key: entry.scope_key,
-                        affinity: entry.affinity,
-                        requested_url: entry.requested_url,
-                        actual_url: entry.actual_url,
-                        requested_headers: entry.requested_headers,
-                        actual_headers: entry.actual_headers,
-                        requested_protocols: entry.requested_protocols,
-                        actual_protocols: entry.actual_protocols,
-                        compression_key: entry.compression_key,
+                        scope_key: entry.scope_key, affinity: entry.affinity, requested_url: entry.requested_url,
+                        actual_url: entry.actual_url, requested_headers: entry.requested_headers,
+                        actual_headers: entry.actual_headers, compression_key: entry.compression_key, partition: entry.partition,
                     }),
-                    connected_at: entry.connected_at,
-                    reuse_expires_at: entry.reuse_expires_at,
-                    reused: true,
-                    first_send_admitted: AtomicBool::new(false),
-                    application_message_seen: AtomicBool::new(false),
-                    reusable: AtomicBool::new(true),
-                    explicitly_released: AtomicBool::new(false),
+                    connected_at: entry.connected_at, reuse_expires_at: entry.reuse_expires_at, reused: true,
+                    first_send_admitted: AtomicBool::new(false), application_message_seen: AtomicBool::new(false),
+                    reusable: AtomicBool::new(true), explicitly_released: AtomicBool::new(false),
                 }));
             }
         }
         if continuation_id.is_some() {
             self.ensure_current()?;
-            return Err(HostFailure::new(
-                ErrorKind::ContinuationUnavailable,
-                "requested WebSocket continuation is not available locally",
-            ));
+            return Err(HostFailure::new(ErrorKind::ContinuationUnavailable, "requested WebSocket continuation is not available locally"));
         }
-
         for redirects in 0..=MAX_REDIRECTS {
             self.ensure_current()?;
             self.admit_send().await?;
-            let handshake = Handshake::new(&url, &headers, &protocols, compression.as_ref())?;
-            self.wire(
-                WireDiagnostic {
-                    direction: "upstream_request",
-                    transport: "websocket",
-                    message_type: "handshake_request",
-                    url: &url,
-                    status_code: None,
-                    headers: Some(handshake.headers()),
-                },
-                || Value::Null,
-            );
+            let handshake = match handshake.take() {
+                Some(handshake) => handshake,
+                None => Handshake::new(&url, headers.clone(), compression)?,
+            };
+            let observer = self.request_observer(url.clone(), "websocket", "handshake_request", Bytes::new());
             let response = tokio::select! {
                 _ = self.cancelled() => return Err(cancelled()),
-                result = handshake.send(&self.http1) => result.map_err(websocket_transport_failure)?,
+                result = handshake.send(&self.transport, route.clone(), observer) => result.map_err(websocket_transport_failure)?,
             };
-            let status = response.status().as_u16();
-            self.wire(
-                WireDiagnostic {
-                    direction: "upstream_response",
-                    transport: "websocket",
-                    message_type: "handshake_response",
-                    url: &url,
-                    status_code: Some(status),
-                    headers: Some(response.headers()),
-                },
-                || Value::Null,
-            );
-            if matches!(status, 301 | 302 | 303 | 307 | 308) {
-                if redirects == MAX_REDIRECTS {
-                    return Err(invalid("upstream redirect limit exceeded"));
-                }
-                let location = response
-                    .headers()
-                    .get(LOCATION)
-                    .and_then(|value| value.to_str().ok())
+            let (head, upgraded, mut rejected_body) = match response {
+                transport::UpgradeResponse::Upgraded(head, io) => (head, Some(io), None),
+                transport::UpgradeResponse::Rejected(response) => (response.head, None, Some(response.body)),
+            };
+            let status = head.status;
+            self.wire(WireDiagnostic { direction: "upstream_response", transport: "websocket", message_type: "handshake_response", url: &url, status_code: Some(status), headers: Some(&head.fields) }, || Value::Null);
+            if matches!(status, 301 | 302 | 303 | 307 | 308) && upgraded.is_none() {
+                if redirects == MAX_REDIRECTS { return Err(invalid("upstream redirect limit exceeded")); }
+                let location = head.fields.iter().find(|field| field.name.eq_ignore_ascii_case("location"))
+                    .and_then(|field| std::str::from_utf8(&field.bytes).ok())
                     .ok_or_else(|| invalid("WebSocket redirect lacks a valid location"))?;
-                let next = url
-                    .join(location)
-                    .map_err(|_| invalid("invalid redirect URL"))?;
+                let next = url.join(location).map_err(|_| invalid("invalid redirect URL"))?;
                 let next = self.url(next.as_str(), true)?;
                 if next.origin() != url.origin() {
-                    headers.clear();
-                    protocols.clear();
+                    headers = fields::plan_ws(Vec::new(), &next, shape)
+                        .map_err(|message| HostFailure::new(ErrorKind::Invalid, message))?;
                 }
                 url = next;
                 continue;
             }
-            if status != 101 {
-                let retry_after = retry_after(response.headers());
-                let mut response = response;
+            if let Some(mut body_stream) = rejected_body.take() {
+                let retry_after = retry_after(&head.fields);
                 let mut body = Vec::new();
                 loop {
                     let chunk = tokio::select! {
                         _ = self.cancelled() => return Err(cancelled()),
-                        result = response.chunk() => result.map_err(|error| {
-                            let cause = transport_cause(&error);
-                            tracing::debug!(error = %cause, "vendor WebSocket handshake body read failed");
-                            HostFailure::upstream_transport(
-                                Some(kind_without_body(status)),
-                                Some(status),
-                                retry_after,
-                                TransportFailure::Websocket,
-                                format!("WebSocket handshake body read failed: {cause}"),
-                            )
-                        })?,
+                        result = body_stream.next_chunk() => result.map_err(|error| HostFailure::upstream_transport(
+                            Some(kind_without_body(status)), Some(status), retry_after, "websocket".into(),
+                            format!("WebSocket handshake body read failed: {}", transport_cause(&error)),
+                        ))?,
                     };
                     let Some(chunk) = chunk else { break };
+                    if chunk.len() > websocket::MAX_MESSAGE_BYTES - body.len() {
+                        return Err(HostFailure::upstream_transport(Some(kind_without_body(status)), Some(status), retry_after, "websocket".into(), "WebSocket handshake body exceeds size limit"));
+                    }
                     body.extend_from_slice(&chunk);
                 }
                 let body = Bytes::from(body);
-                self.wire(
-                    WireDiagnostic {
-                        direction: "upstream_response",
-                        transport: "websocket",
-                        message_type: "handshake_body",
-                        url: &url,
-                        status_code: Some(status),
-                        headers: None,
-                    },
-                    || crate::interaction_observation::WirePayload::Bytes(body.clone()),
-                );
+                self.wire(WireDiagnostic { direction: "upstream_response", transport: "websocket", message_type: "handshake_body", url: &url, status_code: Some(status), headers: None }, || crate::interaction_observation::WirePayload::Bytes(body.clone()));
                 return Err(match status {
                     401 | 403 | 408 | 429 | 500..=599 => {
                         let value = serde_json::from_slice::<Value>(&body).ok();
-                        HostFailure::upstream(
-                            Some(AiError::kind_from_status(status, value.as_ref())),
-                            Some(status),
-                            retry_after,
-                            "upstream did not accept the WebSocket handshake",
-                        )
+                        HostFailure::upstream(Some(AiError::kind_from_status(status, value.as_ref())), Some(status), retry_after, "upstream did not accept the WebSocket handshake")
                     }
-                    200..=399 | 404 | 405 | 426 => HostFailure::upstream_transport(
-                        Some(AiErrorKind::ServiceUnavailable),
-                        Some(status),
-                        retry_after,
-                        TransportFailure::Websocket,
-                        "upstream did not accept the WebSocket handshake",
-                    ),
-                    _ => HostFailure {
-                        kind: ErrorKind::Invalid,
-                        message: "upstream did not accept the WebSocket handshake".into(),
-                        upstream_status: Some(status),
-                    },
+                    200..=399 | 404 | 405 | 426 => HostFailure::upstream_transport(Some(AiErrorKind::ServiceUnavailable), Some(status), retry_after, "websocket".into(), "upstream did not accept the WebSocket handshake"),
+                    _ => HostFailure { kind: ErrorKind::Invalid, message: "upstream did not accept the WebSocket handshake".into(), upstream_status: Some(status) },
                 });
             }
             let socket = tokio::select! {
                 _ = self.cancelled() => return Err(cancelled()),
-                result = handshake.finish(response) => result?,
+                result = handshake.finish(&head, upgraded.expect("upgrade has IO")) => result?,
             };
+            self.ensure_current()?;
             let connected_at = tokio::time::Instant::now();
             let actual_headers = canonical_headers(&headers);
-            let pool_identity = match (
-                self.websocket_pool.as_ref(),
-                self.websocket_scope_key.as_ref(),
-                self.websocket_affinity.as_ref(),
-            ) {
-                (Some(_), Some(scope_key), Some(affinity))
-                    if url.as_str() == requested_url.as_str()
-                        && actual_headers == requested_headers
-                        && protocols == requested_protocols =>
-                {
-                    Some(WebSocketPoolIdentity {
-                        scope_key: scope_key.clone(),
-                        affinity: affinity.clone(),
-                        requested_url: requested_url.clone(),
-                        actual_url: url.as_str().to_owned(),
-                        requested_headers,
-                        actual_headers,
-                        requested_protocols: requested_protocols.clone(),
-                        actual_protocols: protocols.clone(),
-                        compression_key,
-                    })
-                }
+            let pool_identity = match (self.websocket_pool.as_ref(), self.websocket_scope_key.as_ref(), self.websocket_affinity.as_ref()) {
+                (Some(_), Some(scope_key), Some(affinity)) if url.as_str() == requested_url && actual_headers == requested_headers => Some(WebSocketPoolIdentity {
+                    scope_key: scope_key.clone(), affinity: affinity.clone(), requested_url: requested_url.clone(), actual_url: url.as_str().to_owned(),
+                    requested_headers, actual_headers, compression_key, partition,
+                }),
                 _ => None,
             };
             return Ok(Arc::new(ScopedWebSocket {
-                network: self.clone(),
-                socket: Mutex::new(Some(socket)),
-                wire_url: url.as_str().to_owned(),
-                pool_identity,
-                connected_at,
-                reuse_expires_at: connected_at + reuse_age,
-                reused: false,
-                first_send_admitted: AtomicBool::new(true),
-                application_message_seen: AtomicBool::new(false),
-                reusable: AtomicBool::new(true),
-                explicitly_released: AtomicBool::new(false),
+                network: self.clone(), socket: Mutex::new(Some(socket)), wire_url: url.as_str().to_owned(),
+                handshake_status: head.status, handshake_headers: head.fields, pool_identity, connected_at,
+                reuse_expires_at: connected_at + reuse_age, reused: false,
+                first_send_admitted: AtomicBool::new(true), application_message_seen: AtomicBool::new(false),
+                reusable: AtomicBool::new(true), explicitly_released: AtomicBool::new(false),
             }));
         }
         unreachable!("redirect loop returns at its bound")
     }
 }
 
-fn request_headers(values: Vec<(String, String)>, url: &Url) -> Result<HeaderMap, HostFailure> {
-    let mut headers = HeaderMap::with_capacity(values.len());
-    for (name, value) in values {
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| invalid("invalid upstream header name"))?;
-        // 真实客户端常发 `Connection: keep-alive`；它不改变宿主连接管理，
-        // 其他取值（close、upgrade、逐跳头名）仍由宿主独占。HTTP/2 下由 hyper 移除。
-        let keep_alive =
-            name == reqwest::header::CONNECTION && value.trim().eq_ignore_ascii_case("keep-alive");
-        if !keep_alive
-            && matches!(
-                name.as_str(),
-                "connection"
-                    | "transfer-encoding"
-                    | "content-length"
-                    | "proxy-authorization"
-                    | "proxy-connection"
-                    | "upgrade"
-            )
-        {
-            return Err(invalid(
-                "upstream header is controlled by the host transport",
-            ));
-        }
-        if name == reqwest::header::HOST {
-            let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
-            if !value.eq_ignore_ascii_case(authority) {
-                return Err(invalid(
-                    "Host header cannot override the authorized upstream",
-                ));
-            }
-        }
-        let value =
-            HeaderValue::from_str(&value).map_err(|_| invalid("invalid upstream header value"))?;
-        headers.append(name, value);
-    }
-    Ok(headers)
-}
-
-fn canonical_headers(headers: &HeaderMap) -> [u8; 32] {
-    let mut values = headers
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_bytes()))
-        .collect::<Vec<_>>();
-    values.sort();
+fn canonical_headers(headers: &[Field]) -> [u8; 32] {
     let mut digest = Sha256::new();
-    digest.update(b"stravia-vendor-websocket-headers-v1\0");
-    for (name, value) in values {
-        digest.update((name.len() as u64).to_be_bytes());
-        digest.update(name.as_bytes());
-        digest.update((value.len() as u64).to_be_bytes());
-        digest.update(value);
+    digest.update(b"stravia-vendor-websocket-fields-v2\0");
+    for field in headers {
+        digest.update((field.name.len() as u64).to_be_bytes());
+        digest.update(field.name.as_bytes());
+        digest.update((field.bytes.len() as u64).to_be_bytes());
+        digest.update(&field.bytes);
     }
     digest.finalize().into()
 }
@@ -954,21 +805,12 @@ impl HostHttpResponse for PendingHttp {
         Ok(response.status())
     }
 
-    async fn headers(&self) -> Result<Vec<(String, String)>, HostFailure> {
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
         let state = self.response().await?;
         let HttpState::Ready(response) = &*state else {
             unreachable!("resolved HTTP state")
         };
-        response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                let value = value
-                    .to_str()
-                    .map_err(|_| invalid("upstream header is not text"))?;
-                Ok((name.as_str().to_owned(), value.to_owned()))
-            })
-            .collect()
+        Ok(response.headers().to_vec())
     }
 
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
@@ -1010,6 +852,8 @@ struct ScopedWebSocket {
     network: VendorNetwork,
     socket: Mutex<Option<WebSocket>>,
     wire_url: String,
+    handshake_status: u16,
+    handshake_headers: Vec<net::Field>,
     pool_identity: Option<WebSocketPoolIdentity>,
     connected_at: tokio::time::Instant,
     // Retirement only controls checkout/check-in; in-flight I/O keeps the
@@ -1064,7 +908,7 @@ impl ScopedWebSocket {
                 Some(kind),
                 None,
                 None,
-                TransportFailure::Websocket,
+                "websocket".to_owned(),
                 message,
             )
         } else {
@@ -1086,6 +930,14 @@ impl Drop for ScopedWebSocket {
 
 #[async_trait]
 impl HostWebSocket for ScopedWebSocket {
+    fn handshake_status(&self) -> u16 {
+        self.handshake_status
+    }
+
+    fn handshake_headers(&self) -> Vec<net::Field> {
+        self.handshake_headers.clone()
+    }
+
     async fn send(&self, message: WebSocketMessage) -> Result<(), HostFailure> {
         self.network.ensure_current()?;
         if tokio::time::Instant::now() >= self.expires_at() {
@@ -1254,10 +1106,11 @@ impl HostWebSocket for ScopedWebSocket {
                     actual_url: identity.actual_url.clone(),
                     requested_headers: identity.requested_headers,
                     actual_headers: identity.actual_headers,
-                    requested_protocols: identity.requested_protocols.clone(),
-                    actual_protocols: identity.actual_protocols.clone(),
                     compression_key: identity.compression_key,
+                    partition: identity.partition,
                 },
+                self.handshake_status,
+                self.handshake_headers.clone(),
                 socket,
                 self.connected_at,
                 self.reuse_expires_at,
@@ -1286,24 +1139,28 @@ impl HostWebSocket for ScopedWebSocket {
     }
 }
 
-fn headers_value(headers: &HeaderMap) -> Value {
+fn headers_value(headers: &[Field]) -> Value {
+    Value::Array(headers.iter().map(|field| {
+        let bytes = if field.name.eq_ignore_ascii_case("authorization") || field.name.eq_ignore_ascii_case("proxy-authorization") {
+            b"***".as_slice()
+        } else {
+            field.bytes.as_slice()
+        };
+        serde_json::json!({ "name": field.name, "bytes": bytes })
+    }).collect())
+}
+
+fn response_headers_value(headers: &[Field]) -> Value {
     let mut values = serde_json::Map::new();
-    for (name, value) in headers {
-        let value = value
-            .to_str()
-            .map(|value| Value::String(value.to_owned()))
-            .unwrap_or_else(|_| bytes_value(value.as_bytes()));
-        match values.entry(name.as_str().to_owned()) {
-            serde_json::map::Entry::Vacant(entry) => {
-                entry.insert(value);
-            }
+    for field in headers {
+        let name = field.name.to_ascii_lowercase();
+        let value = if name == "authorization" { Value::String("***".into()) } else { bytes_value(&field.bytes) };
+        match values.entry(name) {
+            serde_json::map::Entry::Vacant(entry) => { entry.insert(value); }
             serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
                 Value::Array(existing) => existing.push(value),
-                existing => {
-                    let first = std::mem::replace(existing, Value::Null);
-                    *existing = Value::Array(vec![first, value]);
-                }
-            },
+                existing => { let first = std::mem::replace(existing, Value::Null); *existing = Value::Array(vec![first, value]); }
+            }
         }
     }
     Value::Object(values)
@@ -1358,6 +1215,10 @@ fn ws_payload(message: &WebSocketMessage) -> Value {
     }
 }
 
+fn option<'a>(options: &'a net::Options, key: &str) -> Option<&'a str> {
+    options.iter().find_map(|(name, value)| (name == key).then_some(value))
+}
+
 fn cancelled() -> HostFailure {
     HostFailure::new(ErrorKind::Cancelled, "vendor operation cancelled")
 }
@@ -1375,8 +1236,9 @@ fn kind_without_body(status: u16) -> AiErrorKind {
     }
 }
 
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+fn retry_after(headers: &[Field]) -> Option<Duration> {
+    let field = headers.iter().find(|field| field.name.eq_ignore_ascii_case("retry-after"))?;
+    let value = std::str::from_utf8(&field.bytes).ok()?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(Duration::from_secs(seconds));
     }
@@ -1420,7 +1282,7 @@ fn websocket_transport_failure(error: impl std::error::Error) -> HostFailure {
         Some(AiErrorKind::ServiceUnavailable),
         None,
         None,
-        TransportFailure::Websocket,
+        "websocket".to_owned(),
         format!("upstream WebSocket transport failed: {cause}"),
     )
 }
