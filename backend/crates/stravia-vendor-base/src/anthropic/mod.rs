@@ -193,17 +193,17 @@ fn infer(
             compaction_control,
         )
         .map_err(|error| invalid(error.to_string()))?;
-        stravia_protocol_codec::codec::compaction::add_anthropic_compaction_beta(&mut headers);
+        crate::add_anthropic_compaction_beta(&mut headers);
     }
-    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-api-key"));
+    headers.remove("x-api-key");
     if let Some(api_key) = credential(&provider, "apiKey") {
-        headers.push(("x-api-key".into(), api_key.into()));
+        headers.append("x-api-key", api_key.as_bytes());
     }
     host.emit_started()?;
     let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url: endpoint(&provider.base_url, &egress_path),
-        headers: crate::fields(headers),
+        headers,
         body: serde_json::to_vec(&body)
             .map_err(|_| invalid("Anthropic request could not be encoded"))?,
     }, &crate::net_options())?;
@@ -383,9 +383,9 @@ fn validate_config(options: &BTreeMap<String, Value>) -> Vec<ValidationIssue> {
     }
 }
 
-fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
-    headers.retain(|(candidate, _)| !candidate.eq_ignore_ascii_case(name));
-    headers.push((name.into(), value));
+fn set_header(headers: &mut stravia_vendor_sdk::net::Fields, name: &str, value: String) {
+    headers.remove(name);
+    headers.append(name, value.into_bytes());
 }
 
 fn endpoint(base_url: &str, path: &str) -> String {

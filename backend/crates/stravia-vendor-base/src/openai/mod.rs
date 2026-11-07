@@ -250,25 +250,20 @@ fn infer(
     }
     let url = endpoint(&provider.base_url, &encoded.path);
     let mut headers = common::header_pairs(&encoded.headers)?;
-    set_header(&mut headers, "content-type", "application/json".into());
-    if !headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("accept"))
-    {
-        headers.push((
-            "accept".into(),
-            "text/event-stream, application/json".into(),
-        ));
+    headers.remove("content-type");
+    headers.append("content-type", "application/json");
+    if headers.get("accept").is_none() {
+        headers.append("accept", "text/event-stream, application/json");
     }
-    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+    headers.remove("authorization");
     if let Some(api_key) = credential(&provider, "apiKey") {
-        headers.push(("authorization".into(), format!("Bearer {api_key}")));
+        headers.append("authorization", format!("Bearer {api_key}"));
     }
     host.emit_started()?;
     let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "POST".into(),
         url,
-        headers: crate::fields(headers),
+        headers,
         body: serde_json::to_vec(&body)
             .map_err(|_| invalid("OpenAI request could not be encoded"))?,
     }, &crate::net_options())?;
@@ -327,11 +322,6 @@ fn prepare_responses_body(
     Ok(())
 }
 
-fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
-    headers.retain(|(candidate, _)| !candidate.eq_ignore_ascii_case(name));
-    headers.push((name.into(), value));
-}
-
 fn infer_responses_websocket(
     host: &GuestHost,
     provider: &ProviderSnapshot,
@@ -341,9 +331,9 @@ fn infer_responses_websocket(
 ) -> Result<stravia_runtime_contract::protocol::ir::AiResponse, PluginError> {
     let mut headers = common::header_pairs(codec_headers)?;
 
-    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+    headers.remove("authorization");
     if let Some(api_key) = credential(provider, "apiKey") {
-        headers.push(("authorization".into(), format!("Bearer {api_key}")));
+        headers.append("authorization", format!("Bearer {api_key}"));
     }
     let url = if let Some(url) = configured_websocket_url(provider) {
         url.to_owned()
@@ -367,7 +357,7 @@ fn infer_responses_websocket(
         host,
         stravia_vendor_sdk::net::ConnectRequest {
             url,
-            headers: crate::fields(headers),
+            headers,
         },
         continuation_id,
         body,
@@ -440,14 +430,15 @@ fn discover(
         .filter(|source| !source.is_empty() && *source != MODELS_SOURCE_CATALOG)
         .map(str::to_owned)
         .map_or_else(|| common::model_discovery_url(&provider.base_url), Ok)?;
-    let mut headers = vec![("accept".into(), "application/json".into())];
+    let mut headers = stravia_vendor_sdk::net::Fields::new();
+    headers.append("accept", "application/json");
     if let Some(api_key) = credential(&provider, "apiKey") {
-        headers.push(("authorization".into(), format!("Bearer {api_key}")));
+        headers.append("authorization", format!("Bearer {api_key}"));
     }
     let response = host.http_start(stravia_vendor_sdk::net::Request {
         method: "GET".into(),
         url,
-        headers: crate::fields(headers),
+        headers,
         body: Vec::new(),
     }, &crate::net_options())?;
     ensure_success(&response, "OpenAI model discovery")?;
@@ -528,15 +519,16 @@ pub(crate) fn connection_check(
 ) -> Result<ConnectionCheckResponse, PluginError> {
     let url = common::model_discovery_url(&provider.base_url)?;
     let api_key = credential(provider, "apiKey");
-    let mut headers = vec![("accept".into(), "application/json".into())];
+    let mut headers = stravia_vendor_sdk::net::Fields::new();
+    headers.append("accept", "application/json");
     if let Some(api_key) = api_key {
-        headers.push(("authorization".into(), format!("Bearer {api_key}")));
+        headers.append("authorization", format!("Bearer {api_key}"));
     }
     let response = host.http_start(
         stravia_vendor_sdk::net::Request {
             method: "GET".into(),
             url,
-            headers: crate::fields(headers),
+            headers,
             body: Vec::new(),
         },
         &crate::net_options(),

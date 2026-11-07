@@ -279,7 +279,7 @@ fn infer(
     };
     let mut session = codex::NativeSession::new(&provider, body_operation);
     session.resolve_identity(host, &provider)?;
-    let attempt = prepare_attempt(&protocol.to_string(), request, websocket, &session)?;
+    let attempt = prepare_attempt(&protocol.to_string(), request, &session)?;
     if websocket {
         return codex::infer_websocket(
             host,
@@ -291,18 +291,12 @@ fn infer(
         .map(Box::new)
         .map(OperationOutput::Infer);
     }
-    let Attempt {
-        body,
-        headers: codec_headers,
-        egress_path,
-    } = attempt;
+    let Attempt { body, egress_path } = attempt;
     let path = strip_v1_prefix(&egress_path).to_owned();
-    let mut headers = codec_headers;
-    headers.retain(|(name, _)| {
-        !name.eq_ignore_ascii_case("content-type") && !name.eq_ignore_ascii_case("accept")
-    });
-    headers.push(("accept".into(), "text/event-stream".into()));
-    headers.push(("content-type".into(), "application/json".into()));
+    let mut headers = vec![
+        ("accept".into(), "text/event-stream".into()),
+        ("content-type".into(), "application/json".into()),
+    ];
     codex::append_runtime_headers(&provider, &body, &session, &mut headers)?;
     host.emit_started()?;
     let response = codex::start_responses_http(
@@ -358,8 +352,6 @@ fn infer(
 /// from the same native session for every dispatch.
 struct Attempt {
     body: Value,
-    /// Codec headers for the HTTP wire; empty for WebSocket.
-    headers: Vec<(String, String)>,
     egress_path: String,
 }
 
@@ -380,7 +372,6 @@ fn requests_previous_response(request: &AiRequest) -> bool {
 fn prepare_attempt(
     protocol: &str,
     mut request: AiRequest,
-    websocket: bool,
     session: &codex::NativeSession,
 ) -> Result<Attempt, PluginError> {
     let native_tools = codex::encode_tools(&request, codex::BodyOperation::Http);
@@ -390,15 +381,9 @@ fn prepare_attempt(
     let encoded = common::encode_inference_request(protocol, request)?;
     let mut body = encoded.body;
     body["tools"] = native_tools.into();
-    let headers = if websocket {
-        Vec::new()
-    } else {
-        common::header_pairs(&encoded.headers)?
-    };
     session.project_body(&mut body)?;
     Ok(Attempt {
         body,
-        headers,
         egress_path: encoded.path,
     })
 }

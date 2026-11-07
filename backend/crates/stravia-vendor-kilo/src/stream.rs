@@ -176,7 +176,8 @@ pub(super) fn decode(
     let endpoint = common::endpoint(protocol)?;
     if !headers.iter().any(|field| {
         field.name.eq_ignore_ascii_case("content-type")
-            && String::from_utf8_lossy(&field.bytes).to_ascii_lowercase().contains("text/event-stream")
+            && field.bytes.windows(b"text/event-stream".len())
+                .any(|window| window.eq_ignore_ascii_case(b"text/event-stream"))
     }) {
         let bytes = read_http_body(&response, MAX_BODY)?;
         let mut value: Value = serde_json::from_slice(&bytes).map_err(invalid)?;

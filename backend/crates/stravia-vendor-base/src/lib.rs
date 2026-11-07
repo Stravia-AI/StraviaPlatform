@@ -34,6 +34,38 @@ fn fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
     fields
 }
 
+fn add_anthropic_compaction_beta(headers: &mut stravia_vendor_sdk::net::Fields) {
+    use stravia_protocol_codec::codec::compaction::ANTHROPIC_COMPACTION_BETA;
+
+    let Some(value) = headers.get("anthropic-beta") else {
+        headers.append("anthropic-beta", ANTHROPIC_COMPACTION_BETA);
+        return;
+    };
+    fn trim(bytes: &[u8]) -> &[u8] {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            text.trim().as_bytes()
+        } else {
+            bytes.trim_ascii()
+        }
+    }
+    if value.split(|byte| *byte == b',').any(|beta| trim(beta) == ANTHROPIC_COMPACTION_BETA.as_bytes()) {
+        return;
+    }
+    let has_value = !trim(value).is_empty();
+    let fields = std::mem::take(headers).into_vec();
+    let mut updated = false;
+    for mut field in fields {
+        if !updated && field.name.eq_ignore_ascii_case("anthropic-beta") {
+            if has_value {
+                field.bytes.push(b',');
+            }
+            field.bytes.extend_from_slice(ANTHROPIC_COMPACTION_BETA.as_bytes());
+            updated = true;
+        }
+        headers.append(field.name, field.bytes);
+    }
+}
+
 fn net_options() -> stravia_vendor_sdk::net::Options {
     let mut options = stravia_vendor_sdk::net::Options::new();
     options.shape("default").expect("default shape is valid");
