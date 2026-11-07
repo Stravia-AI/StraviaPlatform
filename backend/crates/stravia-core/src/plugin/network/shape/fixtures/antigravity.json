@@ -1,0 +1,378 @@
+{
+  "clienthello": {
+    "alpn": [],
+    "cipher_suites": [
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49161,
+      49171,
+      49162,
+      49172,
+      4865,
+      4866,
+      4867
+    ],
+    "ec_point_formats": [
+      0
+    ],
+    "extension_details": [
+      {
+        "body": null,
+        "decoded": {
+          "server_name_present": true
+        },
+        "length": 14,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 0
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "point_formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
+      },
+      {
+        "body": [
+          0
+        ],
+        "decoded": {
+          "renegotiation_info": true
+        },
+        "length": 1,
+        "payload_omitted": null,
+        "type": 65281
+      },
+      {
+        "body": [],
+        "decoded": {
+          "extended_master_secret": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
+        "body": [],
+        "decoded": {
+          "signed_certificate_timestamp": true
+        },
+        "length": 0,
+        "payload_omitted": null,
+        "type": 18
+      },
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": {
+          "status_request": true
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": [
+          0,
+          14,
+          17,
+          236,
+          17,
+          235,
+          17,
+          237,
+          0,
+          29,
+          0,
+          23,
+          0,
+          24,
+          0,
+          25
+        ],
+        "decoded": {
+          "groups": [
+            4588,
+            4587,
+            4589,
+            29,
+            23,
+            24,
+            25
+          ]
+        },
+        "length": 16,
+        "payload_omitted": null,
+        "type": 10
+      },
+      {
+        "body": [
+          0,
+          26,
+          9,
+          4,
+          9,
+          5,
+          9,
+          6,
+          8,
+          4,
+          4,
+          3,
+          8,
+          7,
+          8,
+          5,
+          8,
+          6,
+          4,
+          1,
+          5,
+          1,
+          6,
+          1,
+          5,
+          3,
+          6,
+          3
+        ],
+        "decoded": {
+          "algorithms": [
+            2308,
+            2309,
+            2310,
+            2052,
+            1027,
+            2055,
+            2053,
+            2054,
+            1025,
+            1281,
+            1537,
+            1283,
+            1539
+          ]
+        },
+        "length": 28,
+        "payload_omitted": null,
+        "type": 13
+      },
+      {
+        "body": [
+          0,
+          30,
+          9,
+          4,
+          9,
+          5,
+          9,
+          6,
+          8,
+          4,
+          4,
+          3,
+          8,
+          7,
+          8,
+          5,
+          8,
+          6,
+          4,
+          1,
+          5,
+          1,
+          6,
+          1,
+          5,
+          3,
+          6,
+          3,
+          2,
+          1,
+          2,
+          3
+        ],
+        "decoded": {
+          "algorithms": [
+            2308,
+            2309,
+            2310,
+            2052,
+            1027,
+            2055,
+            2053,
+            2054,
+            1025,
+            1281,
+            1537,
+            1283,
+            1539,
+            513,
+            515
+          ]
+        },
+        "length": 32,
+        "payload_omitted": null,
+        "type": 50
+      },
+      {
+        "body": [
+          4,
+          3,
+          4,
+          3,
+          3
+        ],
+        "decoded": {
+          "versions": [
+            772,
+            771
+          ]
+        },
+        "length": 5,
+        "payload_omitted": null,
+        "type": 43
+      },
+      {
+        "body": null,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ]
+        },
+        "length": 1258,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 51
+      }
+    ],
+    "extensions": [
+      0,
+      11,
+      65281,
+      23,
+      18,
+      5,
+      10,
+      13,
+      50,
+      43,
+      51
+    ],
+    "ja3": "771,49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-4865-4866-4867,0-11-65281-23-18-5-10-13-50-43-51,4588-4587-4589-29-23-24-25,0",
+    "ja3_hash": "9b7dcdf3f997f1fb7b4409c94cb7ef36",
+    "ja4": "t13d131100_f57a46bbacb6_f50d94e863eb",
+    "key_share_groups": [
+      4588,
+      29
+    ],
+    "legacy_version": 771,
+    "padding_length": null,
+    "signature_algorithms": [
+      2308,
+      2309,
+      2310,
+      2052,
+      1027,
+      2055,
+      2053,
+      2054,
+      1025,
+      1281,
+      1537,
+      1283,
+      1539
+    ],
+    "sni_present": true,
+    "supported_groups": [
+      4588,
+      4587,
+      4589,
+      29,
+      23,
+      24,
+      25
+    ],
+    "supported_versions": [
+      772,
+      771
+    ]
+  },
+  "h1": {
+    "headers": [
+      {
+        "name": "Host",
+        "value": "<redacted>"
+      },
+      {
+        "name": "User-Agent",
+        "value": "antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)"
+      },
+      {
+        "name": "Content-Length",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Authorization",
+        "value": "<redacted>"
+      },
+      {
+        "name": "Content-Type",
+        "value": "application/json"
+      },
+      {
+        "name": "Accept-Encoding",
+        "value": "gzip"
+      }
+    ],
+    "method": "POST",
+    "normalizations": [
+      {
+        "header_index": 0,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 2,
+        "reason": "unclassified"
+      },
+      {
+        "header_index": 3,
+        "reason": "credential_or_dynamic"
+      }
+    ],
+    "raw_head": "POST <redacted> HTTP/1.1\r\nHost: <redacted>\r\nUser-Agent: antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)\r\nContent-Length: <redacted>\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n",
+    "target": "<redacted>",
+    "version": "HTTP/1.1"
+  },
+  "provenance": {
+    "arch": "x86_64",
+    "captured_at": "2026-11-07T05:33:11.516133112+00:00",
+    "client": "agy",
+    "os": "linux",
+    "version": "1.5.2",
+    "capture_round": 1,
+    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden, fake D-Bus address and isolated HOME; browser and xdg-open disabled",
+    "target": "https://localhost:<ephemeral-port>",
+    "capture_tool": "stravia-tools capture-client module, standalone harness",
+    "invocation": "agy --log-file <temporary log> --print-timeout 15s --print \"Reply OK\"",
+    "configuration": "CLOUD_CODE_URL=local target; temporary HOME with synthetic consumer token, never real login; SSL_CERT_FILE=temporary capture CA",
+    "trust": "SSL_CERT_FILE",
+    "operation": "consumer Cloud Code POST /v1internal:loadCodeAssist bootstrap, local 401; not an inference request"
+  }
+}
