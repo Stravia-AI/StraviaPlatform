@@ -438,13 +438,15 @@ impl VendorNetwork {
         });
     }
 
-    pub(crate) fn validate_net_option(&self, key: &str, value: &str) -> Result<(), HostFailure> {
+    pub(crate) fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
         options::validate_option(&self.shapes, key, value)
-            .map_err(|error| HostFailure::new(ErrorKind::Unsupported, error.to_string()))
     }
 
     fn validate_options(&self, options: &net::Options) -> Result<(), HostFailure> {
-        for (key, value) in options.iter() { self.validate_net_option(key, value)?; }
+        for (key, value) in options.iter() {
+            self.validate_net_option(key, value)
+                .map_err(|error| HostFailure::new(ErrorKind::Unsupported, error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -460,7 +462,7 @@ impl VendorNetwork {
         digest.update([0]);
         digest.update(proxy.bypass.as_bytes());
         digest.update([proxy.force_http1 as u8]);
-        let proxy_identity = format!("{:x}", digest.finalize());
+        let proxy_identity = stravia_runtime_contract::protocol::ir::canonical::hash_hex(&digest.finalize().into());
         let preference = if websocket { option(options, net::keys::WS_TRANSPORT) } else { option(options, net::keys::HTTP_VERSION) };
         if proxy.force_http1 && matches!(preference, Some("http2" | "h2")) {
             return Err(HostFailure::new(ErrorKind::Unsupported, "HTTP/2 conflicts with the proxy HTTP/1 policy"));

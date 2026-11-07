@@ -286,14 +286,11 @@ impl Gateway {
             .no_proxy()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
-        // 供应商操作的共享可续期 deadline 管理整个操作；reqwest 总超时
-        // 不随流式活动续期，会截断仍持续输出的长响应。
-        let vendor_http_client = vendor_http_client_builder().no_proxy().build()?;
-        let vendor_websocket_client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .http1_only()
-            .build()?;
+        let vendor_shapes = Arc::new(
+            crate::plugin::network::shape::ShapeRegistry::builtin()
+                .context("failed to initialize vendor egress shapes")?,
+        );
+        let vendor_transport = Arc::new(crate::plugin::network::transport::VendorTransport::new());
 
         crate::startup_progress::report(
             "gateway_initialize",
@@ -518,8 +515,8 @@ impl Gateway {
             storage_kind,
             runtime_cache: runtime_cache.clone(),
             http_client,
-            vendor_http_client: vendor_http_client.clone(),
-            vendor_websocket_client: vendor_websocket_client.clone(),
+            vendor_transport: Arc::clone(&vendor_transport),
+            vendor_shapes: Arc::clone(&vendor_shapes),
             vendor_plugins: vendor_plugins.clone(),
             vendor_websocket_pool: Arc::new(crate::plugin::network::VendorWebSocketPool::default()),
             provider_catalog: provider_catalog.clone(),
@@ -527,14 +524,13 @@ impl Gateway {
                 vendor_plugins.clone(),
                 provider_catalog,
                 catalog_base_url,
-                vendor_http_client.clone(),
-                vendor_websocket_client.clone(),
+                vendor_transport,
+                vendor_shapes,
             ),
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::new(
                 runtime_cache.clone(),
             ),
             allowance_samples,
-            vendor_client_cache: Arc::new(tokio::sync::RwLock::new([None, None])),
             model_cache,
             cache_affinity: router::cache_affinity::CacheAffinity::new(runtime_cache.clone()),
             route_policy_state: router::RoutePolicyState::new(runtime_cache),
@@ -984,21 +980,7 @@ impl Gateway {
         self.artifact_store.as_ref()
     }
 
-    pub(crate) async fn vendor_client_snapshot(
-        &self,
-        use_proxy: bool,
-    ) -> anyhow::Result<VendorClientSnapshot> {
-        let proxy = self.effective_vendor_proxy(use_proxy).await?;
-        let http = self.client_for_vendor(&proxy, false).await?;
-        let websocket = self.client_for_vendor(&proxy, true).await?;
-        Ok(VendorClientSnapshot {
-            http,
-            websocket,
-            websocket_reuse_identity: proxy.reuse_identity()?,
-        })
-    }
-
-    async fn effective_vendor_proxy(
+    pub(crate) async fn vendor_proxy_snapshot(
         &self,
         use_proxy: bool,
     ) -> anyhow::Result<EffectiveVendorProxy> {
@@ -1015,78 +997,9 @@ impl Gateway {
             force_http1: config.force_http1,
         })
     }
-
-    async fn client_for_vendor(
-        &self,
-        proxy: &EffectiveVendorProxy,
-        require_http1: bool,
-    ) -> anyhow::Result<reqwest::Client> {
-        let default_client = if require_http1 {
-            &self.vendor_websocket_client
-        } else {
-            &self.vendor_http_client
-        };
-        let EffectiveVendorProxy::Explicit {
-            proxy_url,
-            bypass,
-            force_http1,
-        } = proxy
-        else {
-            return Ok(default_client.clone());
-        };
-        let force_http1 = require_http1 || *force_http1;
-        let cache_key = serde_json::to_string(&(proxy_url, bypass, force_http1))?;
-        let slot = usize::from(force_http1);
-        let mut cache = self.vendor_client_cache.write().await;
-        if let Some(cached) = &cache[slot]
-            && cached.cache_key == cache_key
-        {
-            return Ok(cached.client.clone());
-        }
-
-        let mut builder = vendor_http_client_builder();
-        if force_http1 {
-            builder = builder.http1_only();
-        }
-        let config = crate::outbound_proxy::OutboundProxySettings {
-            url: proxy_url.clone(),
-            bypass: bypass.clone(),
-            force_http1,
-        };
-        let client = builder.no_proxy().proxy(config.reqwest_proxy()?).build()?;
-
-        cache[slot] = Some(VendorClientCache {
-            cache_key,
-            client: client.clone(),
-        });
-        Ok(client)
-    }
 }
 
-/// 供应商 HTTP/2 连接探活间隔与应答超时。
-///
-/// 经 CONNECT 代理时，本机到代理的 TCP 始终存活，代理另一侧的链路静默失效后
-/// 没有任何 TCP 级信号；复用该连接的请求只能等到首 Token 超时，重试与换账号
-/// 又复用同一条连接。HTTP/2 PING 由源站端到端应答，是唯一能识别这种死连接的手段。
-/// 只在有活动流时探活；空闲连接由连接池的空闲超时回收。
-const VENDOR_H2_KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-const VENDOR_H2_KEEP_ALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn vendor_http_client_builder() -> reqwest::ClientBuilder {
-    vendor_http_client_builder_with(VENDOR_H2_KEEP_ALIVE_INTERVAL, VENDOR_H2_KEEP_ALIVE_TIMEOUT)
-}
-
-fn vendor_http_client_builder_with(
-    keep_alive_interval: std::time::Duration,
-    keep_alive_timeout: std::time::Duration,
-) -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .http2_keep_alive_interval(keep_alive_interval)
-        .http2_keep_alive_timeout(keep_alive_timeout)
-}
-
-enum EffectiveVendorProxy {
+pub(crate) enum EffectiveVendorProxy {
     Direct,
     Explicit {
         proxy_url: String,
@@ -1096,7 +1009,20 @@ enum EffectiveVendorProxy {
 }
 
 impl EffectiveVendorProxy {
-    fn reuse_identity(&self) -> anyhow::Result<String> {
+    pub(crate) fn into_settings(self) -> crate::outbound_proxy::OutboundProxySettings {
+        match self {
+            Self::Direct => crate::outbound_proxy::OutboundProxySettings::default(),
+            Self::Explicit { proxy_url, bypass, force_http1 } => {
+                crate::outbound_proxy::OutboundProxySettings {
+                    url: proxy_url,
+                    bypass,
+                    force_http1,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn reuse_identity(&self) -> anyhow::Result<String> {
         let encoded = match self {
             Self::Direct => serde_json::to_vec(&"direct")?,
             Self::Explicit {
@@ -1131,38 +1057,49 @@ fn to_sql_backend_config(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn vendor_http2_request_on_silently_dead_connection_fails_instead_of_hanging()
-    -> anyhow::Result<()> {
-        // 服务端接受连接后既不读也不写，等价于代理另一侧链路静默失效：
-        // 本机 TCP 仍然存活，只有 HTTP/2 PING 无应答能暴露它。
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("http://{}/", listener.local_addr()?);
-        let server = tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((stream, _)) = listener.accept().await {
-                held.push(stream);
-            }
-        });
-        let client = vendor_http_client_builder_with(
-            std::time::Duration::from_millis(100),
-            std::time::Duration::from_millis(100),
-        )
-        .http2_prior_knowledge()
-        .no_proxy()
-        .build()?;
+    fn vendor_request(
+        gateway: &Gateway,
+        proxy: EffectiveVendorProxy,
+        http1: bool,
+        url: &str,
+    ) -> anyhow::Result<Arc<dyn stravia_vendor_runtime::HostHttpResponse>> {
+        use crate::plugin::{
+            lifecycle::VendorOperationTracker,
+            network::VendorNetwork,
+            permissions::{NetworkOrigin, NetworkPolicy},
+        };
+        use stravia_vendor_sdk::net::{HttpVersion, Options, Request};
 
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(5), client.get(&url).send()).await;
-        server.abort();
-
-        let result =
-            outcome.expect("keep-alive must close the dead connection before the test deadline");
-        assert!(
-            result.is_err(),
-            "a dead connection cannot produce a response"
+        let operation = VendorOperationTracker::default().begin("gateway-transport-test")?;
+        let origin = url::Url::parse(url)?.origin().ascii_serialization();
+        let network = VendorNetwork::new(
+            Arc::clone(&gateway.vendor_transport),
+            Arc::clone(&gateway.vendor_shapes),
+            proxy.into_settings(),
+            NetworkPolicy::compile([NetworkOrigin::Exact(origin)])?,
+            operation,
+            stravia_runtime_contract::CancellationToken::new(),
+            "openai".into(),
         );
-        Ok(())
+        let mut options = Options::new();
+        options.http_version(if http1 { HttpVersion::Http1 } else { HttpVersion::Auto })?;
+        network.http_start(Request::new("GET", url), options)
+            .map_err(|failure| anyhow::anyhow!(failure.message))
+    }
+
+    async fn vendor_text(
+        gateway: &Gateway,
+        proxy: EffectiveVendorProxy,
+        http1: bool,
+        url: &str,
+    ) -> anyhow::Result<String> {
+        let response = vendor_request(gateway, proxy, http1, url)?;
+        assert_eq!(response.status().await.map_err(|failure| anyhow::anyhow!(failure.message))?, 200);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.read_body().await.map_err(|failure| anyhow::anyhow!(failure.message))? {
+            body.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8(body)?)
     }
 
     #[tokio::test]
@@ -1240,35 +1177,27 @@ mod tests {
         .await?;
         let result = async {
             for http1 in [false, true] {
-                let direct = gateway
-                    .client_for_vendor(&EffectiveVendorProxy::Direct, http1)
-                    .await?;
                 assert_eq!(
-                    direct.get(&origin).send().await?.text().await?,
+                    vendor_text(&gateway, EffectiveVendorProxy::Direct, http1, &origin).await?,
                     "direct origin"
                 );
-                let selected = gateway
-                    .client_for_vendor(
-                        &EffectiveVendorProxy::Explicit {
+                let selected = EffectiveVendorProxy::Explicit {
                             proxy_url: explicit.clone(),
                             bypass: String::new(),
                             force_http1: http1,
-                        },
-                        http1,
-                    )
-                    .await?;
+                        };
                 assert_eq!(
-                    selected.get(&origin).send().await?.text().await?,
+                    vendor_text(&gateway, selected, http1, &origin).await?,
                     "explicit proxy"
                 );
-                let bypassed = gateway.client_for_vendor(&EffectiveVendorProxy::Explicit {
+                let bypassed = EffectiveVendorProxy::Explicit {
                     proxy_url: explicit.clone(), bypass: " NONMATCH.INVALID 127.0.0.1\tOTHER.INVALID; ".into(), force_http1: http1,
-                }, http1).await?;
-                assert_eq!(bypassed.get(&origin).send().await?.text().await?, "direct origin");
-                let switched = gateway.client_for_vendor(&EffectiveVendorProxy::Explicit {
+                };
+                assert_eq!(vendor_text(&gateway, bypassed, http1, &origin).await?, "direct origin");
+                let switched = EffectiveVendorProxy::Explicit {
                     proxy_url: explicit.clone(), bypass: String::new(), force_http1: http1,
-                }, http1).await?;
-                assert_eq!(switched.get(&origin).send().await?.text().await?, "explicit proxy");
+                };
+                assert_eq!(vendor_text(&gateway, switched, http1, &origin).await?, "explicit proxy");
             }
             let admin = gateway.admin();
             let saved = serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
@@ -1279,10 +1208,10 @@ mod tests {
             let error = admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, &invalid).await.unwrap_err();
             assert!(!error.to_string().contains("secret"));
             assert_eq!(admin.get_setting(crate::outbound_proxy::SETTINGS_KEY).await?, Some(saved));
-            assert_eq!(gateway.vendor_client_snapshot(true).await?.http.get(&origin).send().await?.text().await?, "direct origin");
+            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot(true).await?, false, &origin).await?, "direct origin");
             admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, r#"{"url":"","bypass":"","force_http1":false}"#).await?;
-            assert!(gateway.vendor_client_snapshot(true).await.is_err());
-            assert_eq!(gateway.vendor_client_snapshot(false).await?.http.get(&origin).send().await?.text().await?, "direct origin");
+            assert!(gateway.vendor_proxy_snapshot(true).await.is_err());
+            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot(false).await?, false, &origin).await?, "direct origin");
             anyhow::Ok(())
         }
         .await;
@@ -1337,27 +1266,27 @@ mod tests {
                     } else {
                         EffectiveVendorProxy::Direct
                     };
-                    let client = gateway.client_for_vendor(&proxy, http1).await?;
                     let request_url = if proxied {
                         "http://127.0.0.1:9/stream"
                     } else {
                         &origin
                     };
                     sender.send(Bytes::from_static(b"first")).await?;
-                    let mut response = client.get(request_url).send().await?;
-                    assert_eq!(response.chunk().await?.unwrap(), "first");
+                    let response = vendor_request(&gateway, proxy, http1, request_url)?;
+                    assert_eq!(response.status().await.unwrap(), 200);
+                    assert_eq!(response.read_body().await.unwrap().unwrap(), b"first");
                     let streamed = async {
                         for part in [b"second".as_slice(), b"third", b"after-300s"] {
-                            // 只推进 reqwest 的时钟；读取真实 socket 时恢复时钟，
+                            // 只推进传输层时钟；读取真实 socket 时恢复时钟，
                             // 避免 Tokio 空闲自动跳时把网络调度误判成超时。
                             tokio::time::pause();
                             tokio::time::advance(Duration::from_secs(101)).await;
                             tokio::time::resume();
                             sender.send(Bytes::copy_from_slice(part)).await?;
-                            assert_eq!(response.chunk().await?.unwrap().as_ref(), part);
+                            assert_eq!(response.read_body().await.unwrap().unwrap().as_slice(), part);
                         }
                         drop(sender);
-                        assert!(response.chunk().await?.is_none());
+                        assert!(response.read_body().await.unwrap().is_none());
                         anyhow::Ok(())
                     }
                     .await;
@@ -1450,14 +1379,8 @@ mod tests {
         .await?;
         let result = async {
             for _ in 0..2 {
-                let clients = gateway.vendor_client_snapshot(true).await?;
-                let body = clients
-                    .http
-                    .get("http://127.0.0.1:9/vendor")
-                    .send()
-                    .await?
-                    .text()
-                    .await?;
+                let proxy = gateway.vendor_proxy_snapshot(true).await?;
+                let body = vendor_text(&gateway, proxy, false, "http://127.0.0.1:9/vendor").await?;
                 assert_eq!(body, "proxy response");
             }
             assert_eq!(connections.lock().await.len(), 1);

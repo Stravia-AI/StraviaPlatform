@@ -15,6 +15,45 @@ use tokio::{
 use super::{body::RequestBody, h2::{H2Settings, connect}};
 
 #[tokio::test]
+async fn silent_peer_before_settings_fails_pending_response() -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use super::{HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let uri = format!("http://{}/", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let shapes = crate::plugin::network::shape::ShapeRegistry::builtin()?;
+    let shape = shapes.get("default").expect("default shape");
+    let mut h2 = shape.http2.clone();
+    h2.keep_alive_interval = Some(Duration::from_millis(100));
+    h2.keep_alive_timeout = Duration::from_millis(100);
+    let route = Route {
+        shape_name: shape.name.clone(),
+        shape_revision: shape.revision,
+        tls: shape.tls_for("direct", false),
+        proxy_tls: shapes.proxy_tls(),
+        proxy: Default::default(),
+        resolver: Arc::new(SystemResolver),
+        version: HttpVersionPref::Http2,
+        h2,
+        omit_h2_content_length: false,
+    };
+    let transport = VendorTransport::new();
+    let outcome = timeout(Duration::from_secs(5), transport.send(RequestPlan {
+        method: "GET".into(), uri, fields: Vec::new(), body: Bytes::new(), observer: None,
+    }, route)).await;
+    server.abort();
+    let result = outcome.expect("keepalive must fail before the test deadline");
+    assert!(result.is_err(), "a silent peer cannot produce a response");
+    Ok(())
+}
+
+#[tokio::test]
 async fn unanswered_keepalive_ping_fails_pending_response() {
     timeout(Duration::from_secs(10), async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

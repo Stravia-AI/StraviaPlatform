@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, sync::{Arc, Mutex}};
 
 use rustls::{
-    client::{danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier}, ClientHelloShape, ClientSessionStore, PaddingPolicy, RawExtension, Renegotiation, Resumption},
+    client::{danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier}, ClientHelloShape, PaddingPolicy, RawExtension, Renegotiation, Resumption},
     pki_types::{CertificateDer, ServerName, UnixTime},
     CertificateCompressionAlgorithm, CipherSuite, ClientConfig, DigitallySignedStruct, DistinguishedName, Error, SignatureScheme,
 };

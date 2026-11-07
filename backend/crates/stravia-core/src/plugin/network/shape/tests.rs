@@ -92,7 +92,7 @@ fn clienthello_matches_independently_captured_fingerprints() {
     let registry = ShapeRegistry::builtin().unwrap();
     for (name, fixture, websocket, random_order) in [
         ("claude-code", include_str!("fixtures/claude-code.json"), false, false),
-        ("antigravity", include_str!("fixtures/antigravity.json"), false, false),
+        ("antigravity", include_str!("fixtures/antigravity-inference.json"), false, false),
         ("bun", include_str!("fixtures/bun-1.4.2-http.json"), false, false),
         ("bun", include_str!("fixtures/bun-1.4.2-ws.json"), true, false),
         ("codex-http", include_str!("fixtures/codex-http.json"), false, false),

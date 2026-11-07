@@ -8,13 +8,13 @@ use std::sync::{
 use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest};
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LoadedPlugin,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin,
     LogLevel, OperationScope, RuntimeError, RuntimeEvent,
 };
 use stravia_vendor_sdk::{
     AllowanceRequest, AuthRequest, ConfigValidationRequest, DiscoverRequest, ErrorKind,
     MODELS_SOURCE_CATALOG, MediaImageRequest, ModelMetadata, Operation, OperationInput,
-    OperationOutput, ProviderSnapshot, SearchRequest,
+    OperationOutput, ProviderSnapshot, SearchRequest, net,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -924,7 +924,7 @@ impl Gateway {
             .descriptor()
             .provider(&provider.provider_id)
             .ok_or_else(|| anyhow::anyhow!("vendor operation profile is unavailable"))?;
-        let clients = self.vendor_client_snapshot(use_proxy).await?;
+        let proxy = self.vendor_proxy_snapshot(use_proxy).await?;
         if context.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled.into());
         }
@@ -936,14 +936,15 @@ impl Gateway {
             provider_id.as_deref(),
             plugin.identity(),
             &provider.credentials,
-            &clients.websocket_reuse_identity,
+            &proxy.reuse_identity()?,
         )?;
         let websocket_affinity = provider_id
             .as_ref()
             .and_then(|_| context.websocket_affinity.clone());
         let network = VendorNetwork::new(
-            clients.http,
-            clients.websocket,
+            Arc::clone(&self.vendor_transport),
+            Arc::clone(&self.vendor_shapes),
+            proxy.into_settings(),
             origins,
             operation.clone(),
             context.cancellation.clone(),
@@ -1456,17 +1457,22 @@ impl ScopedHostServices {
 
 #[async_trait]
 impl HostServices for ScopedHostServices {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        self.network.validate_net_option(key, value)
+    }
+
+    fn http_start(&self, request: net::Request, options: net::Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.ensure_current()?;
-        self.network.http_start(request)
+        self.network.http_start(request, options)
     }
 
     async fn ws_connect(
         &self,
-        request: stravia_vendor_runtime::WsRequest,
+        request: net::ConnectRequest,
+        options: net::Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         self.ensure_current()?;
-        self.network.ws_connect(request).await
+        self.network.ws_connect(request, options).await
     }
 
     async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {

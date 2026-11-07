@@ -14,15 +14,15 @@ use anyhow::Context;
 use async_trait::async_trait;
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_runtime::{
-    HostFailure, HostHttpResponse, HostServices, HostWebSocket, HttpRequest, LogLevel,
+    HostFailure, HostHttpResponse, HostServices, HostWebSocket, LogLevel,
     OperationScope, RuntimeError, RuntimeEvent,
 };
-use stravia_vendor_sdk::{CatalogSyncOutcome, CatalogSyncRequest, ErrorKind};
+use stravia_vendor_sdk::{CatalogSyncOutcome, CatalogSyncRequest, ErrorKind, net};
 use tokio::sync::Mutex;
 
 use super::lifecycle::VendorOperation;
 use super::manager::VendorPlugins;
-use super::network::VendorNetwork;
+use super::network::{VendorNetwork, shape::ShapeRegistry, transport::VendorTransport};
 use super::permissions::{NetworkOrigin, NetworkPolicy};
 use crate::provider_catalog::{
     CatalogError, CatalogModelList, CatalogProviderScope, CatalogRefreshSummary, ProviderCatalog,
@@ -42,8 +42,8 @@ pub struct VendorCatalogSync {
     /// `None` fails remote requests closed — a gateway without a configured
     /// catalog origin never reaches the production service.
     catalog_base_url: Option<String>,
-    http: reqwest::Client,
-    websocket: reqwest::Client,
+    transport: Arc<VendorTransport>,
+    shapes: Arc<ShapeRegistry>,
     lock: Arc<Mutex<()>>,
 }
 
@@ -52,15 +52,15 @@ impl VendorCatalogSync {
         plugins: Arc<VendorPlugins>,
         catalog: ProviderCatalog,
         catalog_base_url: Option<String>,
-        http: reqwest::Client,
-        websocket: reqwest::Client,
+        transport: Arc<VendorTransport>,
+        shapes: Arc<ShapeRegistry>,
     ) -> Self {
         Self {
             plugins,
             catalog,
             catalog_base_url,
-            http,
-            websocket,
+            transport,
+            shapes,
             lock: Arc::new(Mutex::new(())),
         }
     }
@@ -218,8 +218,9 @@ impl VendorCatalogSync {
                 .map(NetworkOrigin::Exact),
         )?;
         let network = VendorNetwork::new(
-            self.http.clone(),
-            self.websocket.clone(),
+            Arc::clone(&self.transport),
+            Arc::clone(&self.shapes),
+            crate::outbound_proxy::OutboundProxySettings::default(),
             origins,
             operation.clone(),
             cancellation.clone(),
@@ -294,14 +295,19 @@ impl CatalogSyncServices {
 
 #[async_trait]
 impl HostServices for CatalogSyncServices {
-    fn http_start(&self, request: HttpRequest) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
+        self.network.validate_net_option(key, value)
+    }
+
+    fn http_start(&self, request: net::Request, options: net::Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         self.ensure_current()?;
-        self.network.http_start(request)
+        self.network.http_start(request, options)
     }
 
     async fn ws_connect(
         &self,
-        _request: stravia_vendor_runtime::WsRequest,
+        _request: net::ConnectRequest,
+        _options: net::Options,
     ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         Err(self.unavailable("WebSocket access"))
     }
