@@ -102,7 +102,7 @@ fn decode(bytes: &[u8]) -> Result<Value> {
     let cipher_suites = words(c.vec16()?)?;
     c.vec8()?; // compression methods
     let mut extensions = Vec::new();
-    let mut extension_details = Vec::new();
+    let mut extension_details: Vec<Value> = Vec::new();
     let mut groups = Vec::new();
     let mut point_formats = Vec::new();
     let mut signature_algorithms = Vec::new();
