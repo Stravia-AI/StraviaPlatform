@@ -41,6 +41,10 @@ impl Capture {
     }
 
     fn connect(&self) -> StreamOwned<ClientConnection, TcpStream> {
+        self.connect_with_alpn(b"http/1.1")
+    }
+
+    fn connect_with_alpn(&self, protocol: &[u8]) -> StreamOwned<ClientConnection, TcpStream> {
         let pem = fs::read(self.dir.path().join("ca.pem")).unwrap();
         let mut roots = RootCertStore::empty();
         roots.add(CertificateDer::from_pem_slice(&pem).unwrap()).unwrap();
@@ -51,7 +55,7 @@ impl Capture {
         .unwrap()
         .with_root_certificates(roots)
         .with_no_client_auth();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![protocol.to_vec()];
         let connection = ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap()).unwrap();
         let socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -172,6 +176,32 @@ fn captures_http1_header_order_without_secrets() {
         {"name":"Content-Length", "value":"<redacted>"}
     ]));
     assert_sanitized(&result, &["private-path", "secret-query", "private-first", "private-second", "secret-auth", "secret-cookie"]);
+}
+
+#[test]
+fn captures_http2_settings_windows_and_pseudoheader_order() {
+    let capture = Capture::start();
+    let mut stream = capture.connect_with_alpn(b"h2");
+    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
+    // SETTINGS_INITIAL_WINDOW_SIZE = 65535, followed by a connection window update.
+    stream.write_all(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 255, 255]).unwrap();
+    stream.write_all(&[0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 100]).unwrap();
+    // HPACK static-table indexes :method GET, :scheme https, :path /.
+    stream.write_all(&[0, 0, 3, 1, 5, 0, 0, 0, 1, 0x82, 0x87, 0x84]).unwrap();
+    stream.flush().unwrap();
+    let mut server_settings = [0; 9];
+    stream.read_exact(&mut server_settings).unwrap();
+    assert_eq!(server_settings[3], 4);
+    let result = capture.finish();
+    let frames = result["h2"]["frames"].as_array().unwrap();
+    assert_eq!(frames[0]["settings"], json!([{"id": 4, "value": 65535}]));
+    assert_eq!(frames[1]["increment"], 100);
+    assert_eq!(frames[2]["headers"], json!([
+        {"name": ":method", "value": "GET"},
+        {"name": ":scheme", "value": "https"},
+        {"name": ":path", "value": "<redacted>"}
+    ]));
+    assert_eq!(frames[2]["normalizations"], json!([{"header_index": 2, "reason": "unclassified"}]));
 }
 
 #[test]
