@@ -1,0 +1,325 @@
+# Rama 0.4.0 early HTTP/2 frame fidelity fixes.
+# Preserve configured frames and flow-control credit; encode PRIORITY,
+# including idle streams, without panics or waiting for unrelated input.
+diff --git a/src/h2/codec/framed_write.rs b/src/h2/codec/framed_write.rs
+index 37a14a2..912512f 100644
+--- a/src/h2/codec/framed_write.rs
++++ b/src/h2/codec/framed_write.rs
+@@ -322,18 +322,9 @@ where
+                 tracing::trace!("encoded window_update: rem = {}", self.buf.remaining());
+             }
+ 
+-            Frame::Priority(_) => {
+-                /*
++            Frame::Priority(v) => {
+                 v.encode(self.buf.get_mut());
+                 tracing::trace!("encoded priority; rem = {:?}", self.buf.remaining());
+-                */
+-                #[expect(
+-                    clippy::unimplemented,
+-                    reason = "vendored from upstream `h2`: priority frame encoding intentionally unimplemented; matches upstream behavior"
+-                )]
+-                {
+-                    unimplemented!()
+-                }
+             }
+             Frame::Reset(v) => {
+                 v.encode(self.buf.get_mut());
+diff --git a/src/h2/early_frame_tests.rs b/src/h2/early_frame_tests.rs
+new file mode 100644
+index 0000000..76536b7
+--- /dev/null
++++ b/src/h2/early_frame_tests.rs
+@@ -0,0 +1,151 @@
++use rama_core::{
++    bytes::Bytes,
++    extensions::{Extensions, ExtensionsRef},
++};
++use rama_http_types::{
++    Request,
++    proto::h2::frame::{EarlyFrame, Priority, StreamDependency, StreamId, WindowUpdate},
++};
++use std::{
++    pin::Pin,
++    task::{Context, Poll},
++};
++use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
++
++struct Io(DuplexStream, Extensions);
++impl ExtensionsRef for Io {
++    fn extensions(&self) -> &Extensions {
++        &self.1
++    }
++}
++impl AsyncRead for Io {
++    fn poll_read(
++        mut self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        b: &mut ReadBuf<'_>,
++    ) -> Poll<std::io::Result<()>> {
++        Pin::new(&mut self.0).poll_read(cx, b)
++    }
++}
++impl AsyncWrite for Io {
++    fn poll_write(
++        mut self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        b: &[u8],
++    ) -> Poll<std::io::Result<usize>> {
++        Pin::new(&mut self.0).poll_write(cx, b)
++    }
++    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
++        Pin::new(&mut self.0).poll_flush(cx)
++    }
++    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
++        Pin::new(&mut self.0).poll_shutdown(cx)
++    }
++}
++
++async fn replay(idle: bool) -> Result<(), Box<dyn std::error::Error>> {
++    let (socket, mut peer) = tokio::io::duplex(4096);
++    let mut builder = super::client::Builder::new();
++    let priority_stream = if idle { 3 } else { 1 };
++    builder.set_initial_window_size(100_000);
++    builder.set_early_frames(vec![
++        EarlyFrame::WindowUpdate(WindowUpdate::new(StreamId::zero(), 123)),
++        EarlyFrame::WindowUpdate(WindowUpdate::new(StreamId::zero(), 456)),
++        EarlyFrame::Priority(Priority::new(
++            StreamId::from(priority_stream),
++            StreamDependency::new(StreamId::zero(), 201, true),
++        )),
++    ]);
++    let (mut sender, connection) = builder
++        .handshake::<_, Bytes>(Io(socket, Extensions::new()))
++        .await?;
++    let response = if idle {
++        None
++    } else {
++        Some(
++            sender
++                .send_request(Request::builder().uri("https://localhost/").body(())?, true)?
++                .0,
++        )
++    };
++    let mut driver = tokio::spawn(connection);
++    let observe = async {
++        let mut preface = [0; 24];
++        peer.read_exact(&mut preface).await?;
++        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
++        peer.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await?;
++        let mut windows = Vec::new();
++        loop {
++            let mut frame = [0; 9];
++            peer.read_exact(&mut frame).await?;
++            let length = (usize::from(frame[0]) << 16)
++                | (usize::from(frame[1]) << 8)
++                | usize::from(frame[2]);
++            let mut body = vec![0; length];
++            peer.read_exact(&mut body).await?;
++            match frame[3] {
++                4 if frame[4] & 1 == 0 => peer.write_all(&[0, 0, 0, 4, 1, 0, 0, 0, 0]).await?,
++                8 => windows.push(u32::from_be_bytes(body.as_slice().try_into()?)),
++                2 => {
++                    assert_eq!(windows, [123, 456]);
++                    assert_eq!(frame, [0, 0, 5, 2, 0, 0, 0, 0, priority_stream as u8]);
++                    assert_eq!(body, [128, 0, 0, 0, 201]);
++                    break;
++                }
++                1 => panic!("application headers overtook configured early frames"),
++                _ => {}
++            }
++        }
++        if let Some(response) = response {
++            peer.write_all(&[0, 0, 1, 1, 4, 0, 0, 0, 1, 0x88]).await?;
++            let payload = [0x5a; 16_384];
++            let mut remaining = 66_000usize;
++            while remaining != 0 {
++                let size = remaining.min(payload.len());
++                remaining -= size;
++                peer.write_all(&[
++                    0,
++                    (size >> 8) as u8,
++                    size as u8,
++                    0,
++                    u8::from(remaining == 0),
++                    0,
++                    0,
++                    0,
++                    1,
++                ])
++                .await?;
++                peer.write_all(&payload[..size]).await?;
++            }
++            let mut body = response.await?.into_body();
++            let mut received = 0;
++            while let Some(chunk) = body.data().await {
++                let chunk = chunk?;
++                assert!(chunk.iter().all(|b| *b == 0x5a));
++                received += chunk.len();
++                body.flow_control().release_capacity(chunk.len())?;
++            }
++            assert_eq!(received, 66_000);
++        }
++        Ok::<_, Box<dyn std::error::Error>>(())
++    };
++    tokio::select! {
++        result = tokio::time::timeout(std::time::Duration::from_secs(10), observe) => { result??; },
++        result = &mut driver => { panic!("H2 driver ended before replay completed: {result:?}"); }
++    }
++    driver.abort();
++    // The driver is deliberately cancelled after the wire and flow-control assertions.
++    let _ = driver.await;
++    Ok(())
++}
++
++#[tokio::test]
++async fn early_frames_preserve_order_and_cumulative_receive_credit()
++-> Result<(), Box<dyn std::error::Error>> {
++    replay(false).await
++}
++#[tokio::test]
++async fn priority_on_idle_stream_does_not_wait_for_stream_creation()
++-> Result<(), Box<dyn std::error::Error>> {
++    replay(true).await
++}
+diff --git a/src/h2/mod.rs b/src/h2/mod.rs
+index 72adbd8..f60d673 100644
+--- a/src/h2/mod.rs
++++ b/src/h2/mod.rs
+@@ -93,6 +93,8 @@ macro_rules! ready {
+ #[cfg_attr(feature = "unstable", allow(missing_docs))]
+ mod codec;
+ mod error;
++#[cfg(test)]
++mod early_frame_tests;
+ 
+ pub use codec::UserError;
+ 
+diff --git a/src/h2/proto/streams/recv.rs b/src/h2/proto/streams/recv.rs
+index 86c2ea2..b3848f0 100644
+--- a/src/h2/proto/streams/recv.rs
++++ b/src/h2/proto/streams/recv.rs
+@@ -636,12 +636,10 @@ impl Recv {
+     /// Replay a captured early connection-level (`stream_id = 0`)
+     /// `WINDOW_UPDATE`, emitting `increment` on the wire verbatim.
+     ///
+-    /// The connection window always starts at `DEFAULT_INITIAL_WINDOW_SIZE`
+-    /// (unlike streams, it is not governed by `SETTINGS_INITIAL_WINDOW_SIZE`),
+-    /// so we set the target to `DEFAULT_INITIAL_WINDOW_SIZE + increment`.
+-    /// Setting it absolutely overrides any default target rather than stacking
+-    /// on it, so a single `WINDOW_UPDATE` of `increment` is sent. Fails with
+-    /// `FLOW_CONTROL_ERROR` if that target exceeds `MAX_WINDOW_SIZE`.
++    /// Base the target on the window already advertised to the peer, not an
++    /// unadvertised builder target. Commit this increment immediately so the
++    /// caller can encode each replayed frame without coalescing or thresholds.
++    /// Later increments accumulate and retain normal overflow checks.
+     ///
+     /// The `task` is an optional parked task for the `Connection` that might
+     /// be blocked on needing more window capacity.
+@@ -650,11 +648,18 @@ impl Recv {
+         increment: WindowSize,
+         task: &mut Option<Waker>,
+     ) -> Result<(), Reason> {
+-        let target = DEFAULT_INITIAL_WINDOW_SIZE
+-            .checked_add(increment)
++        if increment == 0 {
++            return Err(Reason::PROTOCOL_ERROR);
++        }
++        let target = self
++            .flow
++            .window_size()
++            .checked_add(self.in_flight_data)
++            .and_then(|window| window.checked_add(increment))
+             .filter(|target| *target <= proto::MAX_WINDOW_SIZE)
+             .ok_or(Reason::FLOW_CONTROL_ERROR)?;
+-        self.set_target_connection_window(target, task)
++        self.set_target_connection_window(target, task)?;
++        self.flow.inc_window(increment)
+     }
+ 
+     pub(super) fn apply_local_settings(
+diff --git a/src/h2/proto/streams/streams.rs b/src/h2/proto/streams/streams.rs
+index 62ed1ff..cf68123 100644
+--- a/src/h2/proto/streams/streams.rs
++++ b/src/h2/proto/streams/streams.rs
+@@ -202,46 +202,43 @@ where
+             }
+         }
+ 
+-        // Ensure an early frame can be buffered before consuming it from the
+-        // replay context. This keeps I/O polling outside the stream lock.
+-        ready!(dst.poll_ready(cx))?;
+-
+-        let mut me = self.inner.lock();
+-        let me = &mut *me;
+-
+-        let next_stream_id = me.actions.send.peek_next_id();
+-        match me.early_frame_ctx.replay_next_frame(next_stream_id) {
+-            Some(early_frame) => {
+-                let frame: Frame<Prioritized<B>> = match early_frame {
+-                    frame::EarlyFrame::Priority(priority) => priority.into(),
+-                    frame::EarlyFrame::Settings(settings) => {
+-                        // NOTE: if ever issues, we might need to do something locally with settings as well
+-                        return Poll::Ready(Ok((!settings.flags.is_ack()).then_some(settings)));
+-                    }
+-                    // NOTE: this can cause issues in case regular logic would also send a windows update soon afterwards
+-                    frame::EarlyFrame::WindowUpdate(window_update) => {
+-                        tracing::trace!(
+-                            "replay: increment h2 window update size w/ {}",
+-                            window_update.size_increment
++        loop {
++            // Drain replay frames while capacity permits; otherwise a final
++            // frame can stall forever waiting for unrelated inbound traffic.
++            // I/O polling stays outside the stream lock.
++            ready!(dst.poll_ready(cx))?;
++            let mut me = self.inner.lock();
++            let me = &mut *me;
++            let next_stream_id = me.actions.send.peek_next_id();
++            let Some(early_frame) = me.early_frame_ctx.replay_next_frame(next_stream_id) else {
++                return Poll::Ready(Ok(None));
++            };
++            let frame: Frame<Prioritized<B>> = match early_frame {
++                frame::EarlyFrame::Priority(priority) => priority.into(),
++                frame::EarlyFrame::Settings(settings) => {
++                    // NOTE: if ever issues, we might need to do something locally with settings as well
++                    return Poll::Ready(Ok((!settings.flags.is_ack()).then_some(settings)));
++                }
++                frame::EarlyFrame::WindowUpdate(window_update) => {
++                    tracing::trace!(
++                        "replay: increment h2 window update size w/ {}",
++                        window_update.size_increment
++                    );
++                    if let Err(reason) = me.actions.recv.replay_connection_window_update(
++                        window_update.size_increment,
++                        &mut me.actions.task,
++                    ) {
++                        tracing::debug!(
++                            "h2 streams: failed to replay window update (replay_connection_window_update): reason = {reason}; go away"
+                         );
+-                        if let Err(reason) = me.actions.recv.replay_connection_window_update(
+-                            window_update.size_increment,
+-                            &mut me.actions.task,
+-                        ) {
+-                            tracing::debug!(
+-                                "h2 streams: failed to replay window update (replay_connection_window_update): reason = {reason}; go away"
+-                            );
+-                            return Poll::Ready(Err(Error::library_go_away(reason)));
+-                        }
+-                        return Poll::Ready(Ok(None));
++                        return Poll::Ready(Err(Error::library_go_away(reason)));
+                     }
+-                };
+-                Poll::Ready(match dst.buffer(frame) {
+-                    Ok(_) => Ok(None),
+-                    Err(err) => Err(err.into()),
+-                })
++                    window_update.into()
++                }
++            };
++            if let Err(error) = dst.buffer(frame) {
++                return Poll::Ready(Err(error.into()));
+             }
+-            None => Poll::Ready(Ok(None)),
+         }
+     }
+ 
