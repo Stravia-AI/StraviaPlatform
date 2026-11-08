@@ -68,10 +68,7 @@ async fn antigravity_two_transport_handshakes_preserve_disabled_resumption() {
                 };
                 hellos.push(hello);
                 let mut stream = acceptor.accept(socket).await.unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    request.push(stream.read_u8().await.unwrap());
-                }
+                super::test_support::read_headers(&mut stream).await;
                 stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
                     .await
@@ -120,7 +117,6 @@ async fn forced_http1_filters_shape_alpn_in_actual_clienthello() {
     use super::{H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
     use crate::outbound_proxy::OutboundProxySettings;
     use bytes::Bytes;
-    use rustls::{ClientConfig, RootCertStore};
 
     timeout(Duration::from_secs(5), async {
         for (offered, expected) in [
@@ -144,13 +140,7 @@ async fn forced_http1_filters_shape_alpn_in_actual_clienthello() {
                 socket.read_exact(&mut body).await.unwrap();
                 body
             });
-            let mut tls = ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(RootCertStore::empty())
-            .with_no_client_auth();
+            let mut tls = super::test_support::untrusted_tls();
             tls.alpn_protocols = offered;
             let tls = Arc::new(tls);
             let route = Route {

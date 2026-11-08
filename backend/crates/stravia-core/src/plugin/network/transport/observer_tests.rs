@@ -7,7 +7,6 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use rama_http_types::proto::h2::{PseudoHeader, PseudoHeaderOrder, hpack::Decoder};
-use rustls::{ClientConfig, RootCertStore};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -21,16 +20,7 @@ use super::{
 use crate::outbound_proxy::OutboundProxySettings;
 
 fn route(version: HttpVersionPref, h2: H2Settings) -> Route {
-    // These tests use plaintext; the unused TLS configuration remains fail-closed.
-    let tls = Arc::new(
-        ClientConfig::builder_with_provider(
-            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-        )
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth(),
-    );
+    let tls = Arc::new(super::test_support::untrusted_tls());
     Route {
         shape_name: "observer-test".into(),
         shape_revision: 1,
@@ -60,13 +50,7 @@ async fn http1_observer_matches_wire_before_response_io_error() {
         let (observed_tx, observed_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut headers = Vec::new();
-            while !headers.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).await.unwrap();
-                headers.push(byte[0]);
-                assert!(headers.len() <= 8192);
-            }
+            let headers = super::test_support::read_headers(&mut socket).await;
             // Do not close the connection until the observer has run. The client
             // then encounters an I/O error instead of receiving a response.
             observed_rx.await.unwrap();

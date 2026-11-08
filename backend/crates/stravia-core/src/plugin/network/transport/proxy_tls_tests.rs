@@ -6,13 +6,16 @@ use rustls::{
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     time::timeout,
 };
 use tokio_rustls::TlsAcceptor;
 
-use super::connector::{self, BoxStream, Proxy, Route, SystemResolver};
+use super::{
+    connector::{self, BoxStream, Proxy, Route, SystemResolver},
+    test_support::read_headers,
+};
 
 fn loopback_tls() -> (Arc<ClientConfig>, TlsAcceptor) {
     let CertifiedKey { cert, signing_key } =
@@ -33,15 +36,6 @@ fn loopback_tls() -> (Arc<ClientConfig>, TlsAcceptor) {
         .with_single_cert(vec![cert.der().clone()], key)
         .unwrap();
     (Arc::new(client), TlsAcceptor::from(Arc::new(server)))
-}
-
-async fn read_headers(stream: &mut (impl AsyncRead + Unpin)) -> Vec<u8> {
-    let mut headers = Vec::new();
-    while !headers.ends_with(b"\r\n\r\n") {
-        assert!(headers.len() < 8192, "HTTP headers exceeded limit");
-        headers.push(stream.read_u8().await.unwrap());
-    }
-    headers
 }
 
 async fn tls_request_through_proxy(https_proxy: bool) {

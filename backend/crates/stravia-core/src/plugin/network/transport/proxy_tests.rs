@@ -94,13 +94,7 @@ async fn http_connect_sends_target_and_proxy_authorization() {
         let proxy_addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).await.unwrap();
-                request.push(byte[0]);
-                assert!(request.len() <= 8192, "CONNECT headers exceeded test limit");
-            }
+            let request = super::test_support::read_headers(&mut socket).await;
             assert_eq!(request, b"CONNECT target.example:8443 HTTP/1.1\r\nHost: target.example:8443\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n");
             socket.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\npong").await.unwrap();
             let mut payload = [0; 4];

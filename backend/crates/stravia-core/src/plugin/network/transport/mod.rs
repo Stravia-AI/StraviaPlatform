@@ -23,6 +23,8 @@ mod proxy_tls_tests;
 #[cfg(test)]
 mod reuse_tests;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod upgrade_tests;
 #[cfg(test)]
 mod wire_tests;

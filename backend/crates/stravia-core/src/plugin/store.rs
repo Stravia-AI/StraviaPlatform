@@ -2247,6 +2247,10 @@ impl PluginStore {
 mod atomic_retention;
 
 #[cfg(test)]
+#[path = "atomic_test_fixtures.rs"]
+mod atomic_test_fixtures;
+
+#[cfg(test)]
 #[path = "atomic_state_tests.rs"]
 mod atomic_state_tests;
 

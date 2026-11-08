@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use rustls::{ClientConfig, RootCertStore};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -87,17 +86,7 @@ async fn http1_reuses_only_matching_shape_revision_and_proxy_identity() {
             }
         });
 
-        // These routes only send plaintext HTTP. An empty root store keeps the
-        // unused TLS configuration fail-closed rather than trusting all peers.
-        let tls = Arc::new(
-            ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(RootCertStore::empty())
-            .with_no_client_auth(),
-        );
+        let tls = Arc::new(super::test_support::untrusted_tls());
         let route = Route {
             shape_name: "reuse-test".into(),
             shape_revision: 1,

@@ -4,7 +4,6 @@ use std::{io::Cursor, ops::ControlFlow, sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use rama_http_types::proto::h2::hpack::Decoder;
-use rustls::{ClientConfig, RootCertStore};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -19,16 +18,7 @@ use super::{
 use crate::outbound_proxy::OutboundProxySettings;
 
 fn route(version: HttpVersionPref) -> Route {
-    // These peers use cleartext; the unused TLS configurations must still fail closed.
-    let tls = Arc::new(
-        ClientConfig::builder_with_provider(
-            Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-        )
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(RootCertStore::empty())
-        .with_no_client_auth(),
-    );
+    let tls = Arc::new(super::test_support::untrusted_tls());
     Route {
         shape_name: "upgrade-test".into(),
         shape_revision: 1,
@@ -73,13 +63,7 @@ async fn http1_upgrade_preserves_bytes_read_with_response_and_supports_writes() 
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).await.unwrap();
-                request.push(byte[0]);
-                assert!(request.len() <= 8192);
-            }
+            let request = super::test_support::read_headers(&mut socket).await;
             assert!(request.starts_with(b"GET /socket HTTP/1.1\r\n"));
             // One write deliberately puts the first upgraded bytes immediately after the head.
             socket.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nserver-first").await.unwrap();
@@ -108,13 +92,7 @@ async fn http1_upgrade_rejection_preserves_status_ordered_headers_and_body() {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte).await.unwrap();
-                request.push(byte[0]);
-                assert!(request.len() <= 8192);
-            }
+            let request = super::test_support::read_headers(&mut socket).await;
             assert!(request.starts_with(b"GET /socket HTTP/1.1\r\n"));
             socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Basic realm=first\r\nx-reason: denied\r\nwww-authenticate: Bearer realm=second\r\ncontent-length: 13\r\n\r\nauth required").await.unwrap();
         });

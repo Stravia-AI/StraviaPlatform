@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Vendor State resource handlers now live in a dedicated private module with shared cancellation-aware storage waits and state-key construction. Network and atomic-state tests reuse common fixtures; ABI, storage schema and runtime behavior are unchanged.
+
 - Cargo dependency patches now use pinned `patch-crate` through `task prepare:crates`, replacing the handwritten downloader, extractor and patch preparer. Patches follow `patches/<crate>+<version>.patch`; generated sources live under `target/patch`. Re-run preparation after `cargo clean`, and finish any forced refresh before starting builds.
 
 - **Breaking - Vendor network ABI 1.x:** Vendor Components use `stravia:vendor@1.0.0`, independently versioned `stravia:net@1.1.0` and `stravia:state@1.1.0`; standalone 0.6 plugins must be rebuilt and re-imported, while released 1.0 Components remain compatible. The host no longer adds `Accept`, `Accept-Encoding` or `User-Agent`. HTTP/1 preserves plugin header spelling and order, including interleaved duplicates; HTTP/2 applies required lowercase and connection-header normalization. Protocol-required slots are filled in place. Canonical format and client protocols are unchanged. SQLite and PostgreSQL migrations add durable prompt provenance, fenced atomic cells and ContentStore-backed native-history journals; process-local Cookie jars remain isolated by vendor and provider and are not serialized into persistent state.

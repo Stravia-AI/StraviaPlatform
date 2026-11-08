@@ -1,5 +1,5 @@
+use super::atomic_test_fixtures::{install, provider};
 use super::*;
-use crate::db::models::CreateProviderRecord;
 use crate::storage::{DynStorage, PostgresStorage, SqliteStorage};
 
 const VENDOR: &str = "journal-test-vendor";
@@ -12,46 +12,12 @@ const CHILD_ADMISSION: &str = "00000000-0000-4000-8000-000000000031";
 const MEMORY_ADMISSION: &str = "00000000-0000-4000-8000-000000000032";
 
 async fn setup(storage: &DynStorage) -> anyhow::Result<String> {
-    storage
-        .vendor_plugins()
-        .install(
-            &InstalledPlugin {
-                vendor_id: VENDOR.into(),
-                version: "test".into(),
-                source: "local".into(),
-                descriptor: "{}".into(),
-                component: Bytes::new(),
-                digest: "test".into(),
-                revision: 1,
-                data_epoch: 1,
-                installed_at: 1,
-            },
-            None,
-            &[],
-        )
-        .await?;
+    install(storage, VENDOR).await?;
     create_provider(storage, "journal provider").await
 }
 
 async fn create_provider(storage: &DynStorage, name: &str) -> anyhow::Result<String> {
-    let provider = storage
-        .providers()
-        .create(CreateProviderRecord {
-            name: name.into(),
-            vendor: Some(VENDOR.into()),
-            protocol: "openai-compatible".into(),
-            base_url: "http://127.0.0.1:9".into(),
-            preset_key: None,
-            channel: Some("default".into()),
-            models_source: None,
-            static_models: None,
-            api_key: String::new(),
-            adapter_credentials: "{}".into(),
-            vendor_options: "{}".into(),
-            auth_mode: "apikey".into(),
-            use_proxy: false,
-        })
-        .await?;
+    let provider = storage.providers().create(provider(name, VENDOR)).await?;
     Ok(provider.id)
 }
 
