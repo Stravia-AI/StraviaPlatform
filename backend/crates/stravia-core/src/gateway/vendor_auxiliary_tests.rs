@@ -37,6 +37,33 @@ mod cli_shape_acceptance_tests;
 #[path = "vendor_codex_shape_acceptance_tests.rs"]
 mod codex_shape_acceptance_tests;
 
+#[tokio::test]
+async fn default_shape_matches_existing_reqwest_client_hello() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let request = tokio::spawn(async move {
+        client
+            .get(format!("https://localhost:{}/", address.port()))
+            .send()
+            .await
+    });
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let mut header = [0u8; 5];
+    stream.read_exact(&mut header).await.unwrap();
+    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+    let mut record = header.to_vec();
+    record.resize(5 + len, 0);
+    stream.read_exact(&mut record[5..]).await.unwrap();
+    drop(stream);
+    request
+        .await
+        .unwrap()
+        .expect_err("capture closes the peer before completing TLS");
+    crate::plugin::network::shape::tests::assert_default_matches_client_hello(&record);
+}
+
 const DEEPSEEK_HOST: &str = "api.deepseek.com";
 const DEVIN_HOST: &str = "server.codeium.com";
 const DEVIN_BASE_URL: &str = "https://server.codeium.com";

@@ -346,7 +346,7 @@ async fn regex_policy_rejects_previously_authorized_pooled_websocket() {
     let original = network(&server.url, pool.clone());
     round_trip_and_park(&original, &server.url, "tip").await;
     assert_eq!(pool.idle.lock().len(), 1);
-    let requested = reqwest::Url::parse(&server.url).unwrap();
+    let requested = url::Url::parse(&server.url).unwrap();
     let mut current = network(&server.url, pool.clone());
     current.origins = crate::plugin::permissions::NetworkPolicy::compile([
         crate::plugin::permissions::NetworkOrigin::HostRegex {
@@ -1392,7 +1392,7 @@ async fn cross_origin_redirect_with_body_is_rejected_before_destination_io() {
     let destination_origin = format!("http://{}", destination.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut network = network(&url, Arc::new(VendorWebSocketPool::default()));
-    let source_origin = reqwest::Url::parse(&url)
+    let source_origin = url::Url::parse(&url)
         .unwrap()
         .origin()
         .ascii_serialization();

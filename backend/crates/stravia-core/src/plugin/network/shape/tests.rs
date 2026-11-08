@@ -544,31 +544,8 @@ fn captured_codex_ws_hello_has_no_alpn_and_random_extension_order() {
     );
 }
 
-#[tokio::test]
-async fn default_shape_matches_existing_reqwest_client_hello() {
-    use tokio::io::AsyncReadExt;
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let address = listener.local_addr().unwrap();
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    let request = tokio::spawn(async move {
-        let _ = client
-            .get(format!("https://localhost:{}/", address.port()))
-            .send()
-            .await;
-    });
-    let (mut stream, _) = listener.accept().await.unwrap();
-    let mut header = [0u8; 5];
-    stream.read_exact(&mut header).await.unwrap();
-    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
-    let mut record = header.to_vec();
-    record.resize(5 + len, 0);
-    stream.read_exact(&mut record[5..]).await.unwrap();
-    drop(stream);
-    let _ = request.await;
-    let old = parse_wire(&record);
+pub(crate) fn assert_default_matches_client_hello(wire: &[u8]) {
+    let old = parse_wire(wire);
     let registry = ShapeRegistry::builtin().unwrap();
     let new = capture(registry.get("default").unwrap().tls_for("direct", false));
     assert_eq!(old.suites, new.suites);
