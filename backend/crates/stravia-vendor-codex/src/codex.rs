@@ -212,9 +212,6 @@ impl NativeSession {
             // Official `PromptCacheKey::SessionDerived`.
             object.insert("prompt_cache_key".into(), self.thread_id.clone().into());
         }
-        if self.user_inference_turn() {
-            object.insert("access_programs".into(), json!({"cyber": "standard"}));
-        }
         self.apply_client_metadata(body)
     }
 
@@ -315,15 +312,6 @@ impl NativeSession {
             .ok_or_else(|| invalid("Codex Responses input must be an item list"))?
             .splice(0..0, prefix);
         Ok(())
-    }
-
-    /// Ordinary inference turns carry the default Cyber access program;
-    /// compaction and auxiliary requests do not (official title generation).
-    fn user_inference_turn(&self) -> bool {
-        matches!(
-            self.operation,
-            BodyOperation::Http | BodyOperation::WebSocket
-        )
     }
 
     /// core/src/responses_metadata.rs `CodexResponsesMetadata::client_metadata`
@@ -778,6 +766,14 @@ pub(super) fn prepare_operation_body(
     // Filter control envelopes, never user input, tool schemas, grammars or
     // image/search business data.
     retain_control_fields(object.get_mut("reasoning"), &["effort", "summary"]);
+    if let Some(reasoning) = object.get_mut("reasoning").and_then(Value::as_object_mut)
+        && reasoning.get("summary").and_then(Value::as_str) == Some("auto")
+    {
+        reasoning.remove("summary");
+        if reasoning.is_empty() {
+            object.remove("reasoning");
+        }
+    }
     if let Some(text) = object.get_mut("text").and_then(Value::as_object_mut) {
         text.retain(|key, _| matches!(key.as_str(), "verbosity" | "format"));
         retain_control_fields(
@@ -1958,7 +1954,7 @@ mod tests {
         );
         assert_eq!(body["text"], json!({"verbosity":"low"}));
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
-        assert_eq!(body["access_programs"], json!({"cyber":"standard"}));
+        assert!(body.get("access_programs").is_none());
         assert_eq!(
             body["prompt_cache_key"],
             body["client_metadata"]["thread_id"]
@@ -2092,7 +2088,6 @@ mod tests {
                 "prompt_cache_key",
                 "text",
                 "client_metadata",
-                "access_programs",
             ]
         );
 
@@ -2125,7 +2120,6 @@ mod tests {
                 "text",
                 "generate",
                 "client_metadata",
-                "access_programs",
             ]
         );
 
@@ -2159,6 +2153,38 @@ mod tests {
             json!({"content_item_kinds": ["model.base_instructions"]})
         );
         assert_eq!(body["input"][1]["role"], "user");
+    }
+
+    #[test]
+    fn default_summary_and_access_program_are_omitted_from_inference() {
+        for operation in [
+            BodyOperation::Http,
+            BodyOperation::WebSocket,
+            BodyOperation::Compaction,
+        ] {
+            let session = NativeSession::new(&provider(), operation);
+            let body = project(
+                &session,
+                json!({"model":"gpt-6-astra", "input":[], "reasoning":{"effort":"high", "summary":"auto"}}),
+            );
+            assert_eq!(body["reasoning"], json!({"effort":"high"}));
+            assert!(body.get("access_programs").is_none());
+
+            let body = project(
+                &session,
+                json!({"model":"gpt-6-astra", "input":[], "reasoning":{"summary":"auto"}}),
+            );
+            assert!(body.get("reasoning").is_none());
+
+            let body = project(
+                &session,
+                json!({"model":"gpt-6-astra", "input":[], "reasoning":{"effort":"medium", "summary":"detailed"}}),
+            );
+            assert_eq!(
+                body["reasoning"],
+                json!({"effort":"medium", "summary":"detailed"})
+            );
+        }
     }
 
     #[test]

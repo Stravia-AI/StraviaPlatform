@@ -116,8 +116,7 @@ async fn capture_request(omit_h2_content_length: bool) -> (Vec<Vec<u8>>, Vec<u8>
         .with_no_client_auth(),
     );
     let route = Route {
-        shape_name: "h2-length-test".into(),
-        shape_revision: 1,
+        shape_identity: "h2-length-test".into(),
         tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,

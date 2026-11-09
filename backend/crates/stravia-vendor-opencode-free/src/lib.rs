@@ -349,6 +349,7 @@ fn string_field(
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([Capability::Infer, Capability::ModelDiscovery]);
     VendorDescriptor {
+        egress_shapes: Vec::new(),
         vendor_id: VENDOR_ID.into(),
         version: Version::parse(env!("CARGO_PKG_VERSION"))
             .expect("package version must be valid semver"),

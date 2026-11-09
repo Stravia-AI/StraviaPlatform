@@ -173,6 +173,7 @@ pub fn descriptor() -> VendorDescriptor {
     );
 
     VendorDescriptor {
+        egress_shapes: Vec::new(),
         vendor_id: "base".into(),
         version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
             .expect("package version must be valid semver"),

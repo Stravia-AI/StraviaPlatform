@@ -80,8 +80,7 @@ pub(crate) enum HttpVersionPref {
 /// redirects and deadlines. TLS configurations must use the platform verifier.
 #[derive(Clone)]
 pub(crate) struct Route {
-    pub shape_name: String,
-    pub shape_revision: u64,
+    pub shape_identity: Arc<str>,
     pub tls: Arc<ClientConfig>,
     pub tls_session_policy: super::shape::SessionPolicy,
     pub proxy_tls: Arc<ClientConfig>,
@@ -164,14 +163,195 @@ impl AsyncWrite for UpgradedIo {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct DiagnosticCapture {
+    state: Arc<parking_lot::Mutex<DiagnosticState>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct DiagnosticState {
+    next_id: u64,
+    failure_count: usize,
+    response: Option<DiagnosticResponse>,
+    observation: Option<DiagnosticObservation>,
+}
+
+#[cfg(test)]
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct DiagnosticObservation {
+    response_count: usize,
+    last_status: u16,
+    subscription_exhausted: bool,
+}
+
+#[cfg(test)]
+fn subscription_exhausted(fields: &[Field]) -> bool {
+    let header = |name: &str| {
+        fields
+            .iter()
+            .find(|field| field.name.eq_ignore_ascii_case(name))
+            .and_then(|field| std::str::from_utf8(&field.bytes).ok())
+            .map(str::trim)
+    };
+    let (status, utilization) = match header("anthropic-ratelimit-unified-representative-claim") {
+        Some("five_hour") => (
+            "anthropic-ratelimit-unified-5h-status",
+            "anthropic-ratelimit-unified-5h-utilization",
+        ),
+        Some("seven_day") => (
+            "anthropic-ratelimit-unified-7d-status",
+            "anthropic-ratelimit-unified-7d-utilization",
+        ),
+        _ => return false,
+    };
+    header(status) == Some("rejected")
+        && header(utilization)
+            .and_then(|value| value.parse::<f64>().ok())
+            .is_some_and(|value| value.is_finite() && value >= 1.0)
+        && header("anthropic-ratelimit-unified-overage-status") == Some("rejected")
+        && header("anthropic-ratelimit-unified-overage-disabled-reason")
+            == Some("org_level_disabled")
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiagnosticContentCoding {
+    Identity,
+    Gzip,
+    Deflate,
+    Br,
+    Zstd,
+    Unknown,
+}
+
+#[cfg(test)]
+impl DiagnosticContentCoding {
+    pub(super) fn from_fields(fields: &[Field]) -> Self {
+        let mut encodings = fields
+            .iter()
+            .filter(|field| field.name.eq_ignore_ascii_case("content-encoding"));
+        let Some(field) = encodings.next() else {
+            return Self::Identity;
+        };
+        if encodings.next().is_some() {
+            return Self::Unknown;
+        }
+        let coding = field.bytes.trim_ascii();
+        if coding.eq_ignore_ascii_case(b"identity") {
+            Self::Identity
+        } else if coding.eq_ignore_ascii_case(b"gzip") {
+            Self::Gzip
+        } else if coding.eq_ignore_ascii_case(b"deflate") {
+            Self::Deflate
+        } else if coding.eq_ignore_ascii_case(b"br") {
+            Self::Br
+        } else if coding.eq_ignore_ascii_case(b"zstd") {
+            Self::Zstd
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+/// The most recently delivered HTTP response, never persisted or logged.
+#[cfg(test)]
+pub(crate) struct DiagnosticResponse {
+    pub(crate) id: u64,
+    pub(crate) failure_count: usize,
+    pub(crate) status: u16,
+    pub(crate) content_coding: DiagnosticContentCoding,
+    pub(crate) body: Vec<u8>,
+    pub(crate) truncated: bool,
+}
+
+#[cfg(test)]
+impl DiagnosticCapture {
+    const LIMIT: usize = 256 * 1024;
+
+    pub(crate) fn clear(&self) {
+        let mut state = self.state.lock();
+        state.response = None;
+        state.failure_count = 0;
+        state.observation = None;
+    }
+
+    pub(crate) fn observation(&self) -> Option<DiagnosticObservation> {
+        self.state.lock().observation.clone()
+    }
+
+    pub(crate) fn observe_head(&self, status: u16, fields: &[Field]) {
+        let mut state = self.state.lock();
+        let response_count = state.observation.as_ref().map_or(1, |observation| {
+            observation.response_count.saturating_add(1)
+        });
+        state.observation = Some(DiagnosticObservation {
+            response_count,
+            last_status: status,
+            subscription_exhausted: status == 429 && subscription_exhausted(fields),
+        });
+    }
+
+    pub(crate) fn take(&self) -> Option<DiagnosticResponse> {
+        self.state.lock().response.take()
+    }
+
+    pub(super) fn begin(&self, status: u16, content_coding: DiagnosticContentCoding) -> u64 {
+        let mut state = self.state.lock();
+        state.next_id = state.next_id.wrapping_add(1);
+        state.failure_count = state.failure_count.saturating_add(1);
+        let id = state.next_id;
+        let failure_count = state.failure_count;
+        state.response = Some(DiagnosticResponse {
+            id,
+            failure_count,
+            status,
+            content_coding,
+            body: Vec::new(),
+            truncated: false,
+        });
+        id
+    }
+
+    pub(super) fn chunk(&self, id: u64, bytes: &[u8]) {
+        let mut state = self.state.lock();
+        let Some(response) = state.response.as_mut().filter(|response| response.id == id) else {
+            return;
+        };
+        if response.status < 400 {
+            return;
+        }
+        let available = Self::LIMIT - response.body.len();
+        response
+            .body
+            .extend_from_slice(&bytes[..bytes.len().min(available)]);
+        response.truncated |= bytes.len() > available;
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct VendorTransport {
     pool: Pool,
+    #[cfg(test)]
+    diagnostic_capture: Arc<parking_lot::Mutex<Option<DiagnosticCapture>>>,
 }
 
 impl VendorTransport {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_diagnostic_capture(&self) -> DiagnosticCapture {
+        let capture = DiagnosticCapture::default();
+        *self.diagnostic_capture.lock() = Some(capture.clone());
+        capture
+    }
+
+    #[cfg(test)]
+    pub(super) fn diagnostic_capture(&self) -> Option<DiagnosticCapture> {
+        self.diagnostic_capture.lock().clone()
     }
 
     pub(crate) async fn send(
@@ -262,8 +442,7 @@ impl VendorTransport {
                 tls_session_policy: route.tls_session_policy,
                 proxy_tls: Some(route.proxy_tls),
                 resolver: route.resolver,
-                shape_name: route.shape_name,
-                shape_revision: route.shape_revision,
+                shape_identity: route.shape_identity,
                 alpn,
                 h2_settings: route.h2,
             })
@@ -346,6 +525,46 @@ impl VendorTransport {
         }
         .map_err(|e| TransportError::Protocol(e.to_string()))
     }
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_head_observation_is_bounded_and_resettable() {
+    let capture = DiagnosticCapture::default();
+    let fields: Vec<Field> = [
+        (
+            "anthropic-ratelimit-unified-representative-claim",
+            "five_hour",
+        ),
+        ("anthropic-ratelimit-unified-5h-status", "rejected"),
+        ("anthropic-ratelimit-unified-5h-utilization", "1.0"),
+        ("anthropic-ratelimit-unified-overage-status", "rejected"),
+        (
+            "anthropic-ratelimit-unified-overage-disabled-reason",
+            "org_level_disabled",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| Field {
+        name: name.into(),
+        bytes: value.as_bytes().to_vec(),
+    })
+    .collect();
+    capture.observe_head(429, &fields);
+    assert_eq!(
+        serde_json::to_value(capture.observation()).unwrap(),
+        serde_json::json!({"response_count": 1, "last_status": 429, "subscription_exhausted": true})
+    );
+    let mut insufficient = fields.clone();
+    insufficient[2].bytes = b"0.9".to_vec();
+    capture.observe_head(200, &insufficient);
+    assert_eq!(
+        serde_json::to_value(capture.observation()).unwrap(),
+        serde_json::json!({"response_count": 2, "last_status": 200, "subscription_exhausted": false})
+    );
+    assert!(capture.take().is_none());
+    capture.clear();
+    assert!(capture.observation().is_none());
 }
 
 fn response_head(response: &Response<Incoming>) -> Head {

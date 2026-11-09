@@ -2066,6 +2066,7 @@ mod profile_admission_tests {
 
     fn descriptor() -> VendorDescriptor {
         VendorDescriptor {
+            egress_shapes: Vec::new(),
             vendor_id: "base".into(),
             version: "1.0.0".parse().expect("valid test version"),
             display_name: "Base".into(),

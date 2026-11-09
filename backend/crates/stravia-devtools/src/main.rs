@@ -11,6 +11,7 @@ mod replay;
 mod scenarios;
 
 mod schema;
+mod verify_egress_shape;
 mod wit_compat;
 
 #[derive(Parser)]
@@ -35,6 +36,8 @@ enum Command {
     WitCompat,
     /// Capture a real client's TLS and HTTP fingerprint on loopback only.
     CaptureClient(capture_client::CaptureArgs),
+    /// Verify a packaged component's egress shape against a capture without networking.
+    VerifyEgressShape(verify_egress_shape::VerifyEgressShapeArgs),
     /// Plan or explicitly apply an offline data-root migration without modifying source data.
     MigrateData(migrate_data::MigrateDataArgs),
     /// Scenario-driven recorder: replays fixed scenarios against a real LLM and writes .jsonl fixtures
@@ -54,6 +57,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::WitCompat => wit_compat::run(),
         Command::CaptureClient(args) => capture_client::run(args).await,
+        Command::VerifyEgressShape(args) => verify_egress_shape::run(args).await,
         Command::MigrateData(args) => migrate_data::run(args).await,
         Command::Record(args) => record::run(args).await,
         Command::Replay(args) => replay::run(args).await,

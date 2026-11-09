@@ -126,6 +126,7 @@ impl VendorGuest for CapabilityContractVendor {
             authors: vec!["Stravia test fixture".into()],
             canonical_format_version: CANONICAL_FORMAT_VERSION,
             kind: profile.kind(),
+            egress_shapes: Vec::new(),
             providers: vec![ProviderDescriptor {
                 provider_id: profile.provider_id().into(),
                 catalog_id: (profile == Profile::DedicatedDeepseek).then(|| "deepseek".into()),

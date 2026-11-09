@@ -36,8 +36,7 @@ async fn silent_peer_before_settings_fails_pending_response() -> anyhow::Result<
     h2.keep_alive_interval = Some(Duration::from_millis(100));
     h2.keep_alive_timeout = Duration::from_millis(100);
     let route = Route {
-        shape_name: shape.name.clone(),
-        shape_revision: shape.revision,
+        shape_identity: Arc::clone(&shape.identity),
         tls: shape.tls_for("direct", false),
         tls_session_policy: shape.session_policy(false),
         proxy_tls: shapes.proxy_tls(),

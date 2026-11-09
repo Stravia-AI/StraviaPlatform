@@ -1022,6 +1022,10 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         let body: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(body["project"], "test-project");
         assert_eq!(body["model"], "account-model");
+        assert_eq!(
+            body["request"]["generationConfig"]["maxOutputTokens"],
+            65536
+        );
         assert_eq!(body["request"]["sessionId"], "-2713670015314466186");
         let request_id = body["requestId"].as_str().unwrap();
         let native_id = uuid::Uuid::parse_str(request_id.strip_prefix("agent/").unwrap()).unwrap();
@@ -1054,6 +1058,29 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
                 .encode(sha2::Sha256::digest(verifier.as_bytes())),
             query["code_challenge"]
         );
+    }
+    {
+        let mut zero_limit = request.clone();
+        zero_limit.generation.max_tokens = Some(0);
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: provider.clone(),
+                request: zero_limit,
+            },
+        )
+        .await
+        .unwrap();
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let body: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(body["request"]["generationConfig"]["maxOutputTokens"], 0);
     }
     let openai = stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
     let openai_request = ProtocolTransform::global()
@@ -1257,9 +1284,9 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             assert_eq!(
                 envelope.pointer("/request/generationConfig/thinkingConfig/thinkingLevel"),
                 Some(&json!(match effort {
-                    Some("low") => 1,
-                    Some("medium") => 2,
-                    Some("high") | None => 3,
+                    Some("low") => "LOW",
+                    Some("medium") => "MEDIUM",
+                    Some("high") | None => "HIGH",
                     _ => unreachable!(),
                 }))
             );
@@ -1289,6 +1316,15 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             true,
         ),
         (Some("HIGH"), None, None, Some(json!("HIGH")), None, false),
+        (
+            Some("XHIGH"),
+            None,
+            None,
+            Some(json!("EXTRA_HIGH")),
+            None,
+            true,
+        ),
+        (Some("MAX"), None, None, Some(json!("MAX")), None, true),
         (None, Some(2048), None, None, Some(json!(2048)), true),
         (
             Some("HIGH"),
@@ -1298,7 +1334,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
                     value: "medium".into(),
                 },
             ),
-            Some(json!(2)),
+            Some(json!("MEDIUM")),
             None,
             true,
         ),
@@ -1373,6 +1409,60 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         assert_eq!(
             envelope.pointer("/request/generationConfig/thinkingConfig/includeThoughts"),
             Some(&json!(summary))
+        );
+    }
+    for (number, name) in [
+        (0, "UNSPECIFIED"),
+        (1, "LOW"),
+        (2, "MEDIUM"),
+        (3, "HIGH"),
+        (4, "MINIMAL"),
+        (5, "EXTRA_HIGH"),
+        (6, "MAX"),
+    ] {
+        let mut selected_provider = provider.clone();
+        selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            extensions: BTreeMap::from([(
+                "antigravity".into(),
+                json!({"default":"flash", "variants":[{
+                    "id":"flash", "effort":"medium", "metadata":{"thinkingLevel":number}
+                }]}),
+            )]),
+            ..Default::default()
+        });
+        let mut selected_request = request.clone();
+        selected_request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "medium".into(),
+            },
+        );
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: selected_provider,
+                request: selected_request,
+            },
+        )
+        .await
+        .unwrap();
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(envelope["model"], "flash");
+        assert_eq!(
+            envelope["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            name
+        );
+        assert!(
+            envelope
+                .pointer("/request/generationConfig/thinkingConfig/thinkingBudget")
+                .is_none()
         );
     }
     for metadata in [

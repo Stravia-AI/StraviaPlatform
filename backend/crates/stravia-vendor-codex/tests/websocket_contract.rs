@@ -1712,10 +1712,7 @@ async fn lite_websocket_frames_follow_the_official_capture() {
         assert_eq!(frame["parallel_tool_calls"], false);
         assert_eq!(frame["reasoning"]["context"], "all_turns");
         assert_eq!(frame["text"]["verbosity"], "low");
-        assert_eq!(
-            frame["access_programs"],
-            serde_json::json!({"cyber":"standard"})
-        );
+        assert!(frame.get("access_programs").is_none());
     }
     let roles = |frame: &serde_json::Value| {
         frame["input"]

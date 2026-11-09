@@ -1478,7 +1478,8 @@ async fn compressed_content_length_is_checked_against_wire_body() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     let network = network(&url, Arc::new(VendorWebSocketPool::default()));
-    let body = b"body to compress".to_vec();
+    let body =
+        br#"{"messages":[{"role":"user","content":"synthetic payload"}],"stream":true}"#.to_vec();
     let mut options = http1();
     options.request_encoding(Coding::Gzip).unwrap();
     let encoded = http::encode(body.clone(), &options).await.unwrap();
@@ -1528,17 +1529,38 @@ async fn compressed_content_length_is_checked_against_wire_body() {
         request
     });
     let mut fields = Fields::new();
+    fields.append("Accept", b"text/event-stream".to_vec());
     fields.append("Content-Encoding", b"gzip".to_vec());
-    fields.append("Content-Length", encoded.len().to_string().into_bytes());
+    fields.slot("Content-Length");
+    fields.append("Accept-Encoding", b"gzip, compress, deflate, br".to_vec());
+    fields.slot("Host");
+    options
+        .response_decoding(&[Coding::Gzip, Coding::Deflate, Coding::Br])
+        .unwrap();
     let response = network
         .http_start(
-            Request::new("POST", &url).fields(fields).body(body),
+            Request::new("POST", &url).fields(fields).body(body.clone()),
             options,
         )
         .unwrap();
     assert_eq!(response.status().await.unwrap(), 204);
-    let (_, wire_body) = server.await.unwrap();
+    let (head, wire_body) = server.await.unwrap();
+    assert_eq!(
+        head,
+        format!(
+            "POST / HTTP/1.1\r\nAccept: text/event-stream\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nAccept-Encoding: gzip, compress, deflate, br\r\nHost: {}\r\n\r\n",
+            wire_body.len(),
+            url::Url::parse(&url).unwrap().authority(),
+        )
+    );
     assert_eq!(wire_body, encoded.as_ref());
+    use tokio::io::AsyncReadExt;
+    let mut decoder =
+        async_compression::tokio::bufread::GzipDecoder::new(std::io::Cursor::new(&wire_body));
+    let mut decoded = Vec::new();
+    decoder.read_to_end(&mut decoded).await.unwrap();
+    assert_eq!(decoded, body);
+    assert_eq!(decoder.into_inner().position() as usize, wire_body.len());
 }
 
 #[tokio::test]

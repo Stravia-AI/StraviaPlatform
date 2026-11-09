@@ -20,8 +20,7 @@ use crate::outbound_proxy::OutboundProxySettings;
 fn route(version: HttpVersionPref) -> Route {
     let tls = Arc::new(super::test_support::untrusted_tls());
     Route {
-        shape_name: "upgrade-test".into(),
-        shape_revision: 1,
+        shape_identity: "upgrade-test".into(),
         tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,

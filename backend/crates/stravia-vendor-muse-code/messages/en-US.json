@@ -1,5 +1,0 @@
-{
-  "subscription": "Muse Code subscription",
-  "subscription_description": "Sign in with a Meta account and an active Muse Code subscription. Payment or plan eligibility is checked during login. No refresh or read-only allowance endpoint is available.",
-  "compatibility": "Responses streaming; function tools and encrypted reasoning are preserved. Only automatic tool selection is supported; other selections and unsupported effort tiers are omitted, losing those constraints."
-}

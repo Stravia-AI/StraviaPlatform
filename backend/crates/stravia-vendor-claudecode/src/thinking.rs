@@ -7,6 +7,8 @@
 //! Fable/Mythos 5.x），并沿用 oh-my-pi 的策略：思考关不掉的型号省略 `thinking`
 //! 并把 effort 固定为 `low`，强制工具调用与思考冲突时优先保住工具调用。
 
+use std::borrow::Cow;
+
 use serde_json::{Map, Value, json};
 
 use crate::capabilities::ModelCapabilities;
@@ -143,6 +145,24 @@ impl<'a> ModelProfile<'a> {
         self.adaptive_only()
     }
 
+    pub(crate) fn per_turn_effort(&self) -> bool {
+        self.caps.per_turn_effort.unwrap_or(matches!(
+            self.known,
+            Some((Family::Opus | Family::Sonnet | Family::Haiku, [5, 5, 0]))
+                | Some((Family::Fable | Family::Mythos, [5, 1, 0]))
+        ))
+    }
+
+    pub(crate) fn mid_conversation_tools(&self) -> bool {
+        self.caps.mid_conversation_system != Some(false)
+            && self.caps.mid_conversation_tools.unwrap_or(matches!(
+                self.known,
+                Some((Family::Opus, [4, 8, 0] | [5, 0, 0] | [5, 5, 0]))
+                    | Some((Family::Sonnet | Family::Haiku, [5, 5, 0]))
+                    | Some((Family::Fable | Family::Mythos, [5, 0, 0] | [5, 1, 0]))
+            ))
+    }
+
     /// 型号接受的 effort 原生值；未知词表不推断顺序。
     fn efforts(&self) -> impl Iterator<Item = &str> {
         let ladder: &[&str] = if self.caps.efforts.is_some() {
@@ -193,7 +213,11 @@ impl<'a> ModelProfile<'a> {
 /// （`claude-3-opus-20240229`、日期后缀）视为只支持手动预算的旧型号；
 /// Fable/Mythos 缺少版本号（如 `claude-mythos-preview`）能力不明，不猜测。
 fn parse_known(model: &str) -> Option<(Family, Revision)> {
-    let model = model.to_ascii_lowercase();
+    let model = if model.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(model.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(model)
+    };
     let (name, family) = FAMILIES
         .into_iter()
         .find(|(name, _)| model.contains(name))?;
@@ -406,14 +430,15 @@ pub(crate) fn normalize(
         && caps.adaptive.is_none()
         && caps.enabled.is_none()
     {
-        // effort 声明不提供思考模式或预算证据；未知型号仅约束授权，其余保持透传。
+        // effort 声明不提供思考模式或预算证据；只归一强度，不推导思考类型。
         if let Some(efforts) = &caps.efforts {
-            let unauthorized = object
+            let requested = object
                 .get("output_config")
                 .and_then(|config| config.get("effort"))
-                .and_then(Value::as_str)
-                .is_some_and(|value| !efforts.iter().any(|effort| effort == value));
-            if unauthorized {
+                .and_then(Value::as_str);
+            if requested.is_none() {
+                set_effort(object, profile.clamp_effort("medium"));
+            } else if requested.is_some_and(|value| !efforts.iter().any(|effort| effort == value)) {
                 set_effort(object, None);
             }
         }
@@ -443,6 +468,8 @@ pub(crate) fn normalize(
         .and_then(|config| config.get("effort"))
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // 插件统一采用 medium；显式强度、预算换算及型号能力始终优先。
+    let default_effort = requested.is_none().then_some("medium");
 
     let mut forced = is_forced_tool_choice(object);
     if forced && !profile.forced_tool_use() {
@@ -464,6 +491,7 @@ pub(crate) fn normalize(
     let on = !off && matches!(kind.as_deref(), Some("adaptive" | "enabled"));
 
     if off {
+        let effort = effort.or(default_effort);
         let effort = if profile.always_on() {
             // 关不掉思考的型号：省略 `thinking`（缺省即自适应），用最低 effort 近似关闭。
             object.remove("thinking");
@@ -493,7 +521,12 @@ pub(crate) fn normalize(
             // Keep summary opt-in independent of the model's native intensity.
             object.insert("thinking".into(), thinking);
         }
-        set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
+        set_effort(
+            object,
+            effort
+                .or(default_effort)
+                .and_then(|value| profile.clamp_effort(value)),
+        );
         return Ok(());
     }
 
@@ -509,7 +542,12 @@ pub(crate) fn normalize(
         // 手动预算与强制工具调用互斥，且该型号没有自适应可换：以工具调用为准。
         object.remove("thinking");
         drop_clear_thinking(object);
-        set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
+        set_effort(
+            object,
+            effort
+                .or(default_effort)
+                .and_then(|value| profile.clamp_effort(value)),
+        );
         return Ok(());
     }
 
@@ -530,7 +568,12 @@ pub(crate) fn normalize(
         if !auto_output_limit {
             raise_max_tokens(object, budget);
         }
-        set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
+        set_effort(
+            object,
+            effort
+                .or(default_effort)
+                .and_then(|value| profile.clamp_effort(value)),
+        );
     } else {
         let mut thinking = json!({ "type": "adaptive" });
         let display = display.or_else(|| {
@@ -542,7 +585,9 @@ pub(crate) fn normalize(
             thinking["display"] = Value::String(display);
         }
         object.insert("thinking".into(), thinking);
-        let effort = effort.or_else(|| budget.map(effort_from_budget));
+        let effort = effort
+            .or_else(|| budget.map(effort_from_budget))
+            .or(default_effort);
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
     }
     Ok(())

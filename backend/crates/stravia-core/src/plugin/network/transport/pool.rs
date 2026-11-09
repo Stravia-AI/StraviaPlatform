@@ -48,9 +48,7 @@ pub struct ConnectOptions {
     pub tls_session_policy: super::super::shape::SessionPolicy,
     pub proxy_tls: Option<Arc<ClientConfig>>,
     pub resolver: Arc<dyn Resolver>,
-    pub shape_name: String,
-    /// Must change whenever the shape's HTTP/2 settings change.
-    pub shape_revision: u64,
+    pub shape_identity: Arc<str>,
     pub alpn: AlpnPreference,
     pub h2_settings: H2Settings,
 }
@@ -151,8 +149,7 @@ struct Key {
     target_tls: ConfigIdentity,
     tls_session_policy: super::super::shape::SessionPolicy,
     proxy_tls: ConfigIdentity,
-    shape_name: String,
-    shape_revision: u64,
+    shape_identity: Arc<str>,
     alpn: AlpnPreference,
 }
 
@@ -289,8 +286,7 @@ impl Pool {
             target_tls: ConfigIdentity(options.target_tls.clone()),
             tls_session_policy: options.tls_session_policy,
             proxy_tls: ConfigIdentity(options.proxy_tls.clone()),
-            shape_name: options.shape_name.clone(),
-            shape_revision: options.shape_revision,
+            shape_identity: options.shape_identity.clone(),
             alpn: options.alpn,
         };
         let (target_tls, proxy_tls, guard) = {

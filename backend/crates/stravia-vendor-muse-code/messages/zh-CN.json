@@ -1,5 +1,0 @@
-{
-  "subscription": "Muse Code 订阅",
-  "subscription_description": "使用 Meta 账号和有效的 Muse Code 订阅登录。登录时检查支付及套餐资格。不提供刷新或只读额度接口。",
-  "compatibility": "使用 Responses 流式协议，保留函数工具和加密推理。仅支持自动工具选择；其它选择和不支持的努力档位会被省略，相应约束丢失。"
-}

@@ -501,7 +501,7 @@ impl AdminService {
         let _configuration = self.gw.vendor_plugins.configuration_guard(vendor_id).await;
         let (loaded, operation, _) = self.gw.vendor_plugins.acquire(vendor_id)?;
         anyhow::ensure!(
-            loaded.descriptor().provider(vendor_id) == Some(&descriptor),
+            loaded.component.descriptor().provider(vendor_id) == Some(&descriptor),
             "vendor plugin changed while validating provider configuration"
         );
         let _permit = operation.write_permit().await?;
@@ -1039,7 +1039,7 @@ impl AdminService {
         let _configuration = self.gw.vendor_plugins.configuration_guard(&vendor).await;
         let (loaded, operation, _) = self.gw.vendor_plugins.acquire(&vendor)?;
         anyhow::ensure!(
-            loaded.descriptor().provider(&vendor) == Some(&descriptor),
+            loaded.component.descriptor().provider(&vendor) == Some(&descriptor),
             "vendor plugin changed while validating provider configuration"
         );
         let _permit = operation.write_permit().await?;

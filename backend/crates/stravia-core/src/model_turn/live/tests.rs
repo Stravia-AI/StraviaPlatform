@@ -15,6 +15,24 @@ use stravia_runtime_contract::protocol::ids::{
 use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest};
 
 #[test]
+fn generation_session_affinity_isolates_principal_target_and_root() {
+    let owner = stravia_runtime_contract::Principal::new("owner");
+    let other = stravia_runtime_contract::Principal::new("other");
+    let affinity = super::generation_session_affinity(&owner, "provider:model", "root-one");
+    for (principal, target, root) in [
+        (&other, "provider:model", "root-one"),
+        (&owner, "provider:other-model", "root-one"),
+        (&owner, "other-provider:model", "root-one"),
+        (&owner, "provider:model", "root-two"),
+    ] {
+        assert_ne!(
+            affinity,
+            super::generation_session_affinity(principal, target, root)
+        );
+    }
+}
+
+#[test]
 fn parent_session_transport_affinity_matches_real_parent_and_is_scoped() {
     let principal = stravia_runtime_contract::Principal::new("owner");
     let other = stravia_runtime_contract::Principal::new("other");

@@ -140,8 +140,7 @@ async fn tls_h2_extended_connect_exchanges_websocket_frames() {
 
         let tls = Arc::new(client_tls);
         let route = Route {
-            shape_name: "websocket-h2-tls-test".into(),
-            shape_revision: 1,
+            shape_identity: "websocket-h2-tls-test".into(),
             tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
             tls: Arc::clone(&tls),
             proxy_tls: tls,

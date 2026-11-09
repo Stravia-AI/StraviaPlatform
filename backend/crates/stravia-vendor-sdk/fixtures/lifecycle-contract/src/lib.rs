@@ -54,6 +54,7 @@ impl VendorGuest for LifecycleContractVendor {
                 "fallback" => VendorKind::Fallback,
                 value => panic!("unknown fixture Vendor kind: {value}"),
             },
+            egress_shapes: Vec::new(),
             providers: vec![ProviderDescriptor {
                 provider_id: build_value("STRAVIA_FIXTURE_PROVIDER_ID", "fixture.lifecycle").into(),
                 catalog_id: None,

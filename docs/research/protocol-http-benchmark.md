@@ -130,7 +130,7 @@ baseline 与 optimized 使用同脚本、seed、case 顺序、token/图片/时�
 |媒体与协议编码|嵌套工具媒体从借用 JSON 反序列化，移走 Responses 的单次使用原生元数据；Data URL 解析和生成复用 owned String，并精确预留前缀空间，避免容量翻倍|删除或插入前缀仍会搬动字节；Base64 与最终协议 JSON 仍是新表示。不能仅把 IR 改为 `Arc<String>`、再在最终 `Value::String` 处复制，冒充消除了复制|
 |Debug Wire|`WirePayload` 共享已有 `Bytes`，直接序列化 UTF-8；无效 UTF-8 的 Base64 通过显示编码器写入最终 JSON，不创建等长中间 String|Trace **仍在入队前同步编码**，队列只保留并计量最终 Vec，不把小 Bytes 切片及其大 backing 长期留在队列。Authorization 掩码、Header UTF-8 表示、捕获上限与 writer 错误保持原边界|
 |普通可见正文观测|ledger/终态保留 `Arc<String>`，通过 `RunObserver::record_visible_delta(&str)` 把借用正文交给现有脱敏器；普通脱敏逐阶段复用未变化的 `Cow<str>`，只在真实替换处建立输出，ASCII scheme 比较不再逐词创建小写 String|脱敏后的内容、未完成秘密片段和持久化独立表示仍需拥有缓冲；引用原子、空白、已掩码字段和分隔符保真保持不变；没有把大正文 clone 延后到 writer 来宣称优化|
-|SSE、Connect 与 WebSocket|四类公共协议共享借用分帧，部分帧只保留尾部并集中压紧；Devin 未压缩帧借用、Kilo 单行 data 借用；客户端 SSE→WebSocket 直接共享 `Bytes` 帧切片|跨 chunk 拼接、gzip 解压和协议 JSON 重建仍需分配。部分上游 WebSocket `Text(String)` 抓取仍需现有 owned 事件接口要求的独立快照，不计作零拷贝收益|
+|SSE、Connect 与 WebSocket|四类公共协议共享借用分帧，部分帧只保留尾部并集中压紧；Devin 未压缩帧借用；客户端 SSE→WebSocket 直接共享 `Bytes` 帧切片|跨 chunk 拼接、gzip 解压和协议 JSON 重建仍需分配。部分上游 WebSocket `Text(String)` 抓取仍需现有 owned 事件接口要求的独立快照，不计作零拷贝收益|
 |历史存储|借用 envelope 字段进行序列化，RAW 解码返回 `Cow` 借用，RAW 编码复用 owned Vec；SQLx 接管 owned payload，最后一个恢复 slot 移走可独占的 Value|重复 slot 或仍被缓存持有的 Value 需要独立副本；zstd 解压需要新输出。唯一内容仍先无分配计长/哈希，避免为了“一次遍历”先物化所有重复内容|
 |Trace 分段存储与读取|借用已编码正文的 `RawValue`，消除 `Vec→Value/String→Vec→最终记录` 的正文重复物化；只有可缓存且首次出现的正文才建立缓存副本，超出缓存总预算的记录不再计算无用的缓存摘要；按既有编码长度预留输出容量；读取时移动已有 JSON 子树|分段格式、引用偏移、8MiB 缓存边界和解码值不变。这里跳过的是不可能进入缓存的 Debug 记录摘要，不是 canonical 或持久化内容指纹|
 

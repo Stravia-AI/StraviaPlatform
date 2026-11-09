@@ -30,6 +30,9 @@ pub(crate) struct ModelCapabilities {
     pub efforts: Option<Vec<String>>,
     /// `context_management.supported`。
     pub context_management: Option<bool>,
+    pub per_turn_effort: Option<bool>,
+    pub mid_conversation_system: Option<bool>,
+    pub mid_conversation_tools: Option<bool>,
     /// 各上下文编辑策略是否受支持，键为编辑类型。
     pub context_edits: BTreeMap<&'static str, bool>,
 }
@@ -68,6 +71,9 @@ impl ModelCapabilities {
             enabled: supported("/thinking/types/enabled"),
             efforts,
             context_management: supported("/context_management"),
+            per_turn_effort: supported("/per_turn_effort"),
+            mid_conversation_system: supported("/mid_conv_system"),
+            mid_conversation_tools: supported("/mid_conv_tool_change"),
             context_edits: CONTEXT_EDIT_KEYS
                 .into_iter()
                 .filter_map(|key| Some((key, supported(&format!("/context_management/{key}"))?)))

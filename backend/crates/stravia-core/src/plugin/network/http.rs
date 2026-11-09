@@ -197,6 +197,10 @@ pub(super) struct UpstreamResponse {
     status: u16,
     headers: Vec<Field>,
     body: Body,
+    #[cfg(test)]
+    prefetched: std::collections::VecDeque<Bytes>,
+    #[cfg(test)]
+    prefetch_error: Option<HostFailure>,
 }
 impl UpstreamResponse {
     pub(super) fn new(
@@ -213,6 +217,10 @@ impl UpstreamResponse {
                 url,
                 status: head.status,
                 headers,
+                #[cfg(test)]
+                prefetched: Default::default(),
+                #[cfg(test)]
+                prefetch_error: None,
                 body: Body::Plain(body),
             });
         }
@@ -228,6 +236,10 @@ impl UpstreamResponse {
                 url,
                 status: head.status,
                 headers,
+                #[cfg(test)]
+                prefetched: Default::default(),
+                #[cfg(test)]
+                prefetch_error: None,
                 body: Body::Empty,
             });
         }
@@ -239,6 +251,10 @@ impl UpstreamResponse {
                 url,
                 status: head.status,
                 headers,
+                #[cfg(test)]
+                prefetched: Default::default(),
+                #[cfg(test)]
+                prefetch_error: None,
                 body: Body::Plain(body),
             });
         };
@@ -280,6 +296,10 @@ impl UpstreamResponse {
             status: head.status,
             headers,
             body,
+            #[cfg(test)]
+            prefetched: Default::default(),
+            #[cfg(test)]
+            prefetch_error: None,
         })
     }
     pub(super) fn url(&self) -> &Url {
@@ -298,7 +318,41 @@ impl UpstreamResponse {
             "body_chunk"
         }
     }
+    #[cfg(test)]
+    pub(super) async fn prefetch_diagnostic(&mut self, capture: &transport::DiagnosticCapture) {
+        let id = capture.begin(
+            self.status,
+            transport::DiagnosticContentCoding::from_fields(&self.headers),
+        );
+        let mut prefetched = std::collections::VecDeque::new();
+        let mut length = 0usize;
+        while length < 256 * 1024 {
+            match self.chunk().await {
+                Ok(Some(chunk)) => {
+                    capture.chunk(id, &chunk);
+                    length = length.saturating_add(chunk.len());
+                    prefetched.push_back(chunk);
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    self.prefetch_error = Some(error);
+                    break;
+                }
+            }
+        }
+        self.prefetched = prefetched;
+    }
+
     pub(super) async fn chunk(&mut self) -> Result<Option<Bytes>, HostFailure> {
+        #[cfg(test)]
+        {
+            if let Some(chunk) = self.prefetched.pop_front() {
+                return Ok(Some(chunk));
+            }
+            if let Some(error) = self.prefetch_error.take() {
+                return Err(error);
+            }
+        }
         match &mut self.body {
             Body::Empty => Ok(None),
             Body::Plain(body) => loop {

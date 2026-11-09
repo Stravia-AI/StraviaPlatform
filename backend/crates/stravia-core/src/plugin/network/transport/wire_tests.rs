@@ -27,8 +27,7 @@ async fn antigravity_two_transport_handshakes_preserve_disabled_resumption() {
         let registry = ShapeRegistry::builtin_with_verifier(verifier).unwrap();
         let shape = registry.get("antigravity").unwrap();
         let route = Route {
-            shape_name: shape.name.clone(),
-            shape_revision: shape.revision,
+            shape_identity: Arc::clone(&shape.identity),
             tls: shape.tls_for("direct", false),
             tls_session_policy: shape.session_policy(false),
             proxy_tls: registry.proxy_tls(),
@@ -144,8 +143,7 @@ async fn forced_http1_filters_shape_alpn_in_actual_clienthello() {
             tls.alpn_protocols = offered;
             let tls = Arc::new(tls);
             let route = Route {
-                shape_name: "wire-alpn".into(),
-                shape_revision: 1,
+                shape_identity: "wire-alpn".into(),
                 tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
                 tls: tls.clone(),
                 proxy_tls: tls,

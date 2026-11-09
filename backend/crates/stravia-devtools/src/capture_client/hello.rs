@@ -12,6 +12,20 @@ const MAX_RECORDS: usize = 256;
 /// Read whole TLS records through the first ClientHello. The returned bytes must
 /// be replayed unchanged, including any subsequent messages in the last record.
 pub(super) async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(Vec<u8>, Value)> {
+    read_checked(stream, None).await
+}
+
+pub(crate) async fn read_for_server_name<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    server_name: &str,
+) -> Result<(Vec<u8>, Value)> {
+    read_checked(stream, Some(server_name)).await
+}
+
+async fn read_checked<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    server_name: Option<&str>,
+) -> Result<(Vec<u8>, Value)> {
     let mut replay = Vec::new();
     let mut handshake = Vec::new();
     for _ in 0..MAX_RECORDS {
@@ -42,7 +56,7 @@ pub(super) async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(Vec<u8
                 | handshake[3] as usize;
             ensure!(length + 4 <= MAX_HELLO, "ClientHello exceeds size limit");
             if handshake.len() >= length + 4 {
-                return Ok((replay, decode(&handshake[4..4 + length])?));
+                return Ok((replay, decode(&handshake[4..4 + length], server_name)?));
             }
         }
     }
@@ -185,7 +199,7 @@ fn safe_extension_body(kind: u16, payload: &[u8]) -> bool {
     }
 }
 
-fn decode(bytes: &[u8]) -> Result<Value> {
+fn decode(bytes: &[u8], expected_server_name: Option<&str>) -> Result<Value> {
     let mut c = Cursor::new(bytes);
     let legacy_version = c.u16()?;
     c.take(32)?; // random: never expose
@@ -199,6 +213,11 @@ fn decode(bytes: &[u8]) -> Result<Value> {
     let mut signature_algorithms = Vec::new();
     let mut supported_versions = Vec::new();
     let mut key_share_groups = Vec::new();
+    let mut key_shares = Vec::new();
+    let mut signature_algorithms_cert = Vec::new();
+    let mut certificate_compression = Vec::new();
+    let mut psk_modes = Vec::new();
+    let mut matched_server_name = false;
     let mut alpn = Vec::new();
     let mut first_alpn = None;
     let mut sni_present = false;
@@ -219,8 +238,14 @@ fn decode(bytes: &[u8]) -> Result<Value> {
                     let mut names = Cursor::new(p.vec16()?);
                     p.finish()?;
                     while !names.done() {
-                        names.u8()?;
-                        names.vec16()?;
+                        let kind = names.u8()?;
+                        let name = names.vec16()?;
+                        if kind == 0
+                            && expected_server_name
+                                .is_some_and(|expected| name == expected.as_bytes())
+                        {
+                            matched_server_name = true;
+                        }
                     }
                     decoded = Some(json!({"server_name_present": true}));
                 }
@@ -252,20 +277,21 @@ fn decode(bytes: &[u8]) -> Result<Value> {
                     decoded = Some(json!({"extended_master_secret": true}));
                 }
                 45 if safe_extension_body(kind, payload) => {
-                    decoded = Some(json!({"psk_key_exchange_modes": &payload[1..]}));
+                    psk_modes = payload[1..].to_vec();
+                    decoded = Some(json!({"psk_key_exchange_modes": psk_modes}));
                 }
                 65281 => {
                     decoded = Some(json!({"renegotiation_info": true}));
                 }
                 27 => {
-                    let algorithms = words(p.vec8()?)?;
+                    certificate_compression = words(p.vec8()?)?;
                     p.finish()?;
-                    decoded = Some(json!({"algorithms": algorithms}));
+                    decoded = Some(json!({"algorithms": certificate_compression}));
                 }
                 50 => {
-                    let algorithms = words(p.vec16()?)?;
+                    signature_algorithms_cert = words(p.vec16()?)?;
                     p.finish()?;
-                    decoded = Some(json!({"algorithms": algorithms}));
+                    decoded = Some(json!({"algorithms": signature_algorithms_cert}));
                 }
                 16 => {
                     let mut protocols = Cursor::new(p.vec16()?);
@@ -295,10 +321,12 @@ fn decode(bytes: &[u8]) -> Result<Value> {
                     let mut shares = Cursor::new(p.vec16()?);
                     p.finish()?;
                     while !shares.done() {
-                        key_share_groups.push(shares.u16()?);
-                        shares.vec16()?; // key exchange bytes are never exposed
+                        let group = shares.u16()?;
+                        let key = shares.vec16()?; // key exchange bytes are never exposed
+                        key_share_groups.push(group);
+                        key_shares.push(json!({"group": group, "length": key.len()}));
                     }
-                    decoded = Some(json!({"groups": key_share_groups}));
+                    decoded = Some(json!({"groups": key_share_groups, "shares": key_shares}));
                 }
                 _ => {} // Unknown extension data can contain secrets.
             }
@@ -312,6 +340,10 @@ fn decode(bytes: &[u8]) -> Result<Value> {
             }));
         }
     }
+    ensure!(
+        expected_server_name.is_none() || matched_server_name,
+        "ClientHello SNI does not match server name"
+    );
     let filtered_ciphers: Vec<_> = cipher_suites
         .iter()
         .copied()
@@ -376,7 +408,10 @@ fn decode(bytes: &[u8]) -> Result<Value> {
         "extensions": extensions, "extension_details": extension_details,
         "supported_groups": groups, "ec_point_formats": point_formats,
         "signature_algorithms": signature_algorithms, "supported_versions": supported_versions,
-        "key_share_groups": key_share_groups, "padding_length": padding_length,
+        "key_share_groups": key_share_groups, "key_shares": key_shares,
+        "signature_algorithms_cert": signature_algorithms_cert,
+        "certificate_compression": certificate_compression, "psk_modes": psk_modes,
+        "padding_length": padding_length,
         "sni_present": sni_present, "alpn": alpn, "ja3": ja3, "ja3_hash": ja3_hash, "ja4": ja4
     }))
 }

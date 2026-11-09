@@ -24,7 +24,6 @@ use super::lifecycle::VendorOperation;
 use super::manager::VendorPlugins;
 use super::network::{
     VendorNetwork,
-    shape::ShapeRegistry,
     transport::{Resolver, VendorTransport},
 };
 use super::permissions::{NetworkOrigin, NetworkPolicy};
@@ -47,7 +46,6 @@ pub struct VendorCatalogSync {
     /// catalog origin never reaches the production service.
     catalog_base_url: Option<String>,
     transport: Arc<VendorTransport>,
-    shapes: Arc<ShapeRegistry>,
     resolver: Arc<dyn Resolver>,
     lock: Arc<Mutex<()>>,
 }
@@ -58,7 +56,6 @@ impl VendorCatalogSync {
         catalog: ProviderCatalog,
         catalog_base_url: Option<String>,
         transport: Arc<VendorTransport>,
-        shapes: Arc<ShapeRegistry>,
         resolver: Arc<dyn Resolver>,
     ) -> Self {
         Self {
@@ -66,7 +63,6 @@ impl VendorCatalogSync {
             catalog,
             catalog_base_url,
             transport,
-            shapes,
             resolver,
             lock: Arc::new(Mutex::new(())),
         }
@@ -227,7 +223,7 @@ impl VendorCatalogSync {
         let network = VendorNetwork::new(
             Arc::clone(&self.transport),
             super::network::VendorNetworkConfig {
-                shapes: Arc::clone(&self.shapes),
+                shapes: Arc::clone(&plugin.shapes),
                 resolver: Arc::clone(&self.resolver),
             },
             crate::outbound_proxy::OutboundProxySettings::default(),
@@ -246,7 +242,7 @@ impl VendorCatalogSync {
         let body = self
             .plugins
             .runtime
-            .sync_catalog(&plugin, input, scope)
+            .sync_catalog(&plugin.component, input, scope)
             .await?;
         serde_json::from_slice(&body).context("decode catalog sync outcome")
     }

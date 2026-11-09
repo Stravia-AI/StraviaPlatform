@@ -1854,12 +1854,11 @@ async fn prepare_attempt(
     if let Some(root_id) = input.generation_root_id.as_deref() {
         metadata.insert(
             "session_affinity".into(),
-            serde_json::Value::String(namespace_fingerprint(&(
-                "session",
-                input.principal.continuation_key(),
+            serde_json::Value::String(generation_session_affinity(
+                &input.principal,
                 target_key.as_str(),
                 root_id,
-            ))),
+            )),
         );
     }
     if !protocol_hint.is_empty() {
@@ -3166,6 +3165,14 @@ fn header_pairs(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect()
+}
+
+pub(crate) fn generation_session_affinity(
+    principal: &stravia_runtime_contract::Principal,
+    target_key: &str,
+    root_id: &str,
+) -> String {
+    namespace_fingerprint(&("session", principal.continuation_key(), target_key, root_id))
 }
 
 fn namespace_fingerprint<T: serde::Serialize>(value: &T) -> String {

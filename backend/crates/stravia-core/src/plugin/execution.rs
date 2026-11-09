@@ -25,11 +25,15 @@ use crate::interaction_observation::ProtectedSecrets;
 use crate::provider_models::ProviderModelRecord;
 
 use super::lifecycle::{VendorOperation, VendorPublicationFence};
+use super::manager::AdmittedPlugin;
 use super::network::VendorNetwork;
 use super::permissions::{NetworkPolicy, resolve_permissions};
 use super::store::{PluginStorageError, PluginStore};
 
 mod state;
+
+#[cfg(test)]
+mod alignment_tests;
 
 #[derive(Debug, Clone)]
 pub(crate) enum VendorRequest {
@@ -163,7 +167,7 @@ impl VendorCallContext {
 #[derive(Clone)]
 pub(crate) struct VendorSessionScope {
     pub(crate) vendor_id: String,
-    pub(crate) plugin: LoadedPlugin,
+    pub(crate) plugin: AdmittedPlugin,
     pub(crate) data_epoch: i64,
     pub(crate) provider: ProviderSnapshot,
     pub(crate) private_state: Arc<Mutex<Option<Vec<u8>>>>,
@@ -172,7 +176,7 @@ pub(crate) struct VendorSessionScope {
 
 #[derive(Clone)]
 pub(crate) struct PreparedVendorExecution {
-    plugin: LoadedPlugin,
+    plugin: AdmittedPlugin,
     operation: Arc<VendorOperation>,
     data_epoch: i64,
     vendor_id: String,
@@ -200,11 +204,12 @@ impl PreparedVendorExecution {
     }
 
     pub(crate) fn pinned_component(&self) -> LoadedPlugin {
-        self.plugin.clone()
+        self.plugin.component.clone()
     }
 
     pub(crate) fn descriptor(&self) -> &stravia_vendor_sdk::ProviderDescriptor {
         self.plugin
+            .component
             .descriptor()
             .provider(&self.provider.provider_id)
             .expect("prepared execution retains its admitted provider profile")
@@ -260,6 +265,7 @@ impl Gateway {
             "vendor session provider identity does not match"
         );
         let descriptor = plugin
+            .component
             .descriptor()
             .provider(vendor_id)
             .ok_or_else(|| anyhow::anyhow!("loaded vendor plugin does not support the provider"))?;
@@ -310,7 +316,7 @@ impl Gateway {
         }
         let protocol = {
             let selection = self.vendor_plugins.runtime.select_protocol(
-                &prepared.plugin,
+                &prepared.plugin.component,
                 prepared.kind,
                 &prepared.provider,
                 request,
@@ -405,7 +411,7 @@ impl Gateway {
     async fn prepare_vendor_execution_with_admission(
         &self,
         vendor_id: &str,
-        plugin: LoadedPlugin,
+        plugin: AdmittedPlugin,
         operation: Arc<VendorOperation>,
         data_epoch: i64,
         provider_id: &str,
@@ -439,9 +445,13 @@ impl Gateway {
             )
             .await?;
 
-            let descriptor = plugin.descriptor().provider(vendor_id).ok_or_else(|| {
-                anyhow::anyhow!("loaded vendor plugin does not support the provider")
-            })?;
+            let descriptor = plugin
+                .component
+                .descriptor()
+                .provider(vendor_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("loaded vendor plugin does not support the provider")
+                })?;
             let effective_models_source = if kind == Operation::Discover {
                 self.provider_catalog
                     .resolve_models_source(
@@ -803,6 +813,7 @@ impl Gateway {
         );
         let descriptor = session
             .plugin
+            .component
             .descriptor()
             .provider(&session.vendor_id)
             .ok_or_else(|| anyhow::anyhow!("vendor session profile is unavailable"))?;
@@ -811,7 +822,7 @@ impl Gateway {
             Operation::ConfigValidation | Operation::ConnectionCheck
         ) {
             anyhow::ensure!(
-                current_plugin.identity() == session.plugin.identity(),
+                current_plugin.component.identity() == session.plugin.component.identity(),
                 "vendor plugin changed while preparing the connection snapshot"
             );
         }
@@ -929,7 +940,7 @@ impl Gateway {
     )]
     async fn execute_vendor_input(
         &self,
-        plugin: LoadedPlugin,
+        plugin: AdmittedPlugin,
         operation: Arc<VendorOperation>,
         data_epoch: i64,
         provider_id: Option<String>,
@@ -949,6 +960,7 @@ impl Gateway {
         operation.ensure_current()?;
 
         let descriptor = plugin
+            .component
             .descriptor()
             .provider(&provider.provider_id)
             .ok_or_else(|| anyhow::anyhow!("vendor operation profile is unavailable"))?;
@@ -962,7 +974,7 @@ impl Gateway {
         operation.ensure_current()?;
         let websocket_scope = websocket_scope_key(
             provider_id.as_deref(),
-            plugin.identity(),
+            plugin.component.identity(),
             &provider.credentials,
             &proxy.reuse_identity()?,
         )?;
@@ -995,7 +1007,7 @@ impl Gateway {
         let network = VendorNetwork::new(
             Arc::clone(&self.vendor_transport),
             super::network::VendorNetworkConfig {
-                shapes: Arc::clone(&self.vendor_shapes),
+                shapes: Arc::clone(&plugin.shapes),
                 resolver: Arc::clone(&self.vendor_resolver),
             },
             proxy.into_settings(),
@@ -1068,10 +1080,13 @@ impl Gateway {
         let (sdk_operation, sdk_input) = request
             .encode_for_host(provider)
             .map_err(|_| RuntimeError::InvalidOutput)?;
-        let execution =
-            self.vendor_plugins
-                .runtime
-                .execute(&plugin, &channel, sdk_operation, sdk_input, scope);
+        let execution = self.vendor_plugins.runtime.execute(
+            &plugin.component,
+            &channel,
+            sdk_operation,
+            sdk_input,
+            scope,
+        );
         let output = tokio::select! {
             biased;
             _ = context.cancellation.cancelled() => {

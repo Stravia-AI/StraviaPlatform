@@ -1312,6 +1312,7 @@ mod profile_admission_tests {
                 authors: Vec::new(),
                 canonical_format_version: CANONICAL_FORMAT_VERSION,
                 kind: VendorKind::Fallback,
+                egress_shapes: Vec::new(),
                 providers: vec![
                     profile("alpha", Capability::Infer),
                     profile("beta", Capability::Search),

@@ -91,6 +91,7 @@ pub(crate) fn descriptor() -> VendorDescriptor {
         Capability::Allowance,
     ]);
     VendorDescriptor {
+        egress_shapes: Vec::new(),
         vendor_id: "devin".into(),
         version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
             .expect("package version must be valid semver"),

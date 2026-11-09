@@ -6,6 +6,8 @@
 mod artifacts;
 pub(crate) mod atomic_lease;
 mod builtin;
+mod egress_verification;
+pub use egress_verification::synthesize_egress_client_hello;
 pub mod catalog_sync;
 #[cfg(debug_assertions)]
 pub(crate) mod development;

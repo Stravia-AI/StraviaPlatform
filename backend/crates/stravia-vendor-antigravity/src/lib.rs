@@ -38,6 +38,7 @@ pub fn descriptor() -> VendorDescriptor {
         Capability::Allowance,
     ]);
     VendorDescriptor {
+        egress_shapes: Vec::new(),
         vendor_id: VENDOR_ID.into(),
         version: semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version"),
         display_name: "Antigravity".into(),

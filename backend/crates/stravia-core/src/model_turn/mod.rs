@@ -59,6 +59,8 @@ pub(crate) fn validate_target_capability(
 }
 
 pub(crate) use live::LiveModelTurnExecutor;
+#[cfg(test)]
+pub(crate) use live::generation_session_affinity;
 
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;

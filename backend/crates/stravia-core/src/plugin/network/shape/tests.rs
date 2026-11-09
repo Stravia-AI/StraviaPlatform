@@ -586,3 +586,67 @@ fn invalid_registry_documents_fail_with_field_context() {
     let error = ShapeRegistry::from_json_sources(&[&json]).err().unwrap();
     assert!(error.to_string().contains("raw_extensions"));
 }
+
+#[test]
+fn plugin_shapes_are_isolated_and_share_builtins() {
+    let base = Arc::new(ShapeRegistry::builtin().unwrap());
+    assert!(Arc::ptr_eq(
+        &base,
+        &base.with_plugin("component-a", &[]).unwrap()
+    ));
+    let mut shape: EgressShape = serde_json::from_str(include_str!("data/default.json")).unwrap();
+    shape.name = "example".into();
+    let a = base.with_plugin("component-a", &[shape.clone()]).unwrap();
+    let b = base.with_plugin("component-b", &[shape.clone()]).unwrap();
+    assert!(base.get("plugin:example").is_none());
+    assert!(a.get("example").is_none());
+    assert!(a.get("plugin:example").is_some());
+    assert!(std::ptr::eq(
+        base.get("default").unwrap(),
+        a.get("default").unwrap()
+    ));
+    assert_ne!(
+        a.get("plugin:example").unwrap().identity,
+        b.get("plugin:example").unwrap().identity
+    );
+    assert_ne!(
+        a.get("plugin:example").unwrap().identity,
+        a.get("default").unwrap().identity
+    );
+    shape.name = "other".into();
+    let c = a.with_plugin("component-c", &[shape]).unwrap();
+    assert!(c.get("plugin:example").is_none());
+    assert!(c.get("plugin:other").is_some());
+    assert!(c.get("default").is_some());
+    let empty = a.with_plugin("component-d", &[]).unwrap();
+    assert!(empty.get("plugin:example").is_none());
+    assert!(empty.get("default").is_some());
+}
+
+#[test]
+fn plugin_shape_compilation_fails_closed() {
+    let base = Arc::new(ShapeRegistry::builtin().unwrap());
+    let mut shape: EgressShape = serde_json::from_str(include_str!("data/default.json")).unwrap();
+    shape.name = "example".into();
+    assert!(
+        base.with_plugin("component", &[shape.clone(), shape.clone()])
+            .is_err()
+    );
+    shape.revision = 0;
+    assert!(base.with_plugin("component", &[shape.clone()]).is_err());
+    shape.revision = 1;
+    shape.name = "bad:name".into();
+    assert!(base.with_plugin("component", &[shape.clone()]).is_err());
+    shape.name = "example".into();
+    shape.source = Some(stravia_vendor_sdk::net::shape::ShapeSource {
+        client: " ".into(),
+        runtime: "runtime".into(),
+        captured: "capture".into(),
+        ja4: "fingerprint".into(),
+    });
+    assert!(base.with_plugin("component", &[shape.clone()]).is_err());
+    shape.source = None;
+    shape.http1.slot_positions.host = Some("middle".into());
+    assert!(base.with_plugin("component", &[shape]).is_err());
+    assert!(base.get("plugin:example").is_none());
+}

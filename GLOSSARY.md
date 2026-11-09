@@ -805,7 +805,7 @@ _避免使用_：Provider 连接、Protocol Codec
 
 ## Egress Shape（出站形态）
 
-Egress Shape 是宿主内置的客户端连接层出站形态数据，涵盖 TLS ClientHello、ALPN、HTTP/1 和 HTTP/2 参数及 WebSocket 传输。它不包含请求头、供应商身份、请求内容、凭据或重试策略。
+Egress Shape 是客户端连接层的出站形态，涵盖 TLS ClientHello、ALPN、HTTP/1 和 HTTP/2 参数及 WebSocket 传输。它不包含请求头、供应商身份、请求内容、凭据或重试策略。
 _避免使用_：Profile、Network Profile、供应商 Profile、指纹伪装配置、User-Agent 设置
 
 ## Slot Header（槽位头）

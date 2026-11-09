@@ -1,3 +1,6 @@
+pub mod shape;
+pub use shape::EgressShape;
+
 use std::time::Duration;
 
 use crate::bindings::stravia::net::{http, types, websocket};

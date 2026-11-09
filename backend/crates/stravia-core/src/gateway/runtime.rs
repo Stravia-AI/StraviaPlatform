@@ -274,6 +274,12 @@ impl Gateway {
         self.lifecycle.cancellation.cancel();
     }
 
+    #[cfg(test)]
+    pub(crate) async fn stop_background_tasks_for_test(&self) {
+        // 实调用验证必须先排空空实例的维护任务，再导入真实凭据；不关闭请求使用的观测与缓存。
+        self.lifecycle.shutdown().await;
+    }
+
     pub async fn shutdown(&self) {
         self.lifecycle.shutdown().await;
         self.observation.shutdown().await;
@@ -604,6 +610,7 @@ impl Gateway {
                 wasmtime: paths.wasmtime_cache(),
                 admissions: paths.plugin_admissions(),
             }),
+            Arc::clone(&vendor_shapes),
         )
         .await?;
         let catalog_base_url = config.catalog_base_url.clone();
@@ -628,7 +635,6 @@ impl Gateway {
                 provider_catalog,
                 catalog_base_url,
                 vendor_transport,
-                vendor_shapes,
                 vendor_resolver,
             ),
             provider_allowance_state: admin::provider_allowance::ProviderAllowanceState::new(

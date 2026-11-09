@@ -950,7 +950,7 @@ async fn responses_auto_truncation_sends_complete_tool_continuation_history() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn always_on_default_summary_preserves_explicit_omission_and_effort() {
+async fn always_on_summary_preserves_explicit_display_intent() {
     let (runtime, plugin) = load_plugin().await;
     for (summary, expected) in [
         (None, "updates"),
@@ -983,7 +983,6 @@ async fn always_on_default_summary_preserves_explicit_omission_and_effort() {
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], expected);
-        assert!(body.get("output_config").is_none());
     }
 }
 
@@ -1263,6 +1262,187 @@ async fn scoped_ids_survive_reload_without_forwarding_injected_request_ids() {
         assert_eq!(identity["device_id"], first_identity["device_id"]);
         assert!(!identity["device_id"].as_str().unwrap().is_empty());
         assert_eq!(identity["account_uuid"], ACCOUNT_UUID);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inference_defaults_follow_model_effort_and_beta_capabilities() {
+    let (runtime, plugin) = load_plugin().await;
+    for (model, effort, per_turn, tool_changes) in [
+        ("claude-haiku-4-5", None, false, false),
+        ("claude-haiku-5-5", Some("medium"), true, true),
+        ("claude-sonnet-4-5", None, false, false),
+        ("claude-sonnet-4-6", Some("medium"), false, false),
+        ("claude-sonnet-5", Some("medium"), false, false),
+        ("claude-sonnet-5-5", Some("medium"), true, true),
+        ("claude-opus-4-5", Some("medium"), false, false),
+        ("claude-opus-4-7", Some("medium"), false, false),
+        ("claude-opus-4-8", Some("medium"), false, true),
+        ("claude-opus-5-5", Some("medium"), true, true),
+        ("claude-fable-5", Some("medium"), false, true),
+        ("claude-mythos-5-1", Some("medium"), true, true),
+    ] {
+        let services = Arc::new(MockServices {
+            routes: vec![(
+                UPSTREAM,
+                200,
+                "text/event-stream",
+                SSE_TOOL_USE.replace("claude-sonnet-4-5", model),
+            )],
+            ..MockServices::default()
+        });
+        let mut provider = signed_in();
+        provider.model = Some(model.into());
+        let request = anthropic_client_request(json!({
+            "model": model,
+            "max_tokens": 128000,
+            "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "Read a."}]
+        }));
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer { provider, request },
+        )
+        .await
+        .expect("inference succeeds");
+
+        let requests = services.requests.lock();
+        let sent = &requests[0];
+        let body: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body["output_config"]["effort"].as_str(), effort, "{model}");
+        assert_eq!(
+            body["context_management"],
+            json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}),
+            "{model}"
+        );
+        let betas: Vec<_> = wire_header(sent, "anthropic-beta").split(',').collect();
+        assert!(betas.contains(&"claude-code-20250219"), "{model}");
+        assert_eq!(
+            betas.contains(&"effort-2025-11-24"),
+            effort.is_some(),
+            "{model}"
+        );
+        assert_eq!(
+            betas.contains(&"per-turn-control-2026-07-01"),
+            per_turn,
+            "{model}"
+        );
+        assert_eq!(
+            betas.contains(&"mid-conversation-tool-changes-2026-07-01"),
+            tool_changes,
+            "{model}"
+        );
+        for absent in [
+            "afk-mode-2026-01-31",
+            "dangerous-tool-use-2026-09-03",
+            "mid-conversation-system-clear-at-2026-08-21",
+        ] {
+            assert!(!betas.contains(&absent), "{model}: {absent}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_inference_controls_override_cli_defaults() {
+    let (runtime, plugin) = load_plugin().await;
+    let compact_context = json!({"edits": [{
+        "type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 100000}
+    }]});
+    for (controls, effort, context) in [
+        (
+            json!({"output_config": {"effort": "high"}, "context_management": compact_context}),
+            "high",
+            compact_context.clone(),
+        ),
+        (
+            json!({"thinking": {"type": "enabled", "budget_tokens": 16000}}),
+            "high",
+            json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}),
+        ),
+    ] {
+        let services = Arc::new(MockServices {
+            routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+            ..MockServices::default()
+        });
+        let mut provider = signed_in();
+        provider.model = Some("claude-haiku-5-5".into());
+        let mut body = json!({
+            "model": "claude-haiku-5-5", "max_tokens": 128000,
+            "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "Read a."}]
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(controls.as_object().unwrap().clone());
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider,
+                request: anthropic_client_request(body),
+            },
+        )
+        .await
+        .expect("inference succeeds");
+
+        let requests = services.requests.lock();
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["output_config"]["effort"], effort, "{controls}");
+        assert_eq!(sent["context_management"], context, "{controls}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn discovered_capabilities_can_disable_cli_defaults() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices {
+        routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+        ..MockServices::default()
+    });
+    let mut provider = signed_in();
+    provider.model = Some("claude-haiku-5-5".into());
+    provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+        extensions: BTreeMap::from([(
+            "anthropic_capabilities".into(),
+            json!({
+                "effort": {"supported": false},
+                "context_management": {"supported": false},
+                "per_turn_effort": {"supported": false},
+                "mid_conv_system": {"supported": false},
+                "mid_conv_tool_change": {"supported": true}
+            }),
+        )]),
+        ..Default::default()
+    });
+    let request = anthropic_client_request(json!({
+        "model": "claude-haiku-5-5", "max_tokens": 128000,
+        "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+        "messages": [{"role": "user", "content": "Read a."}]
+    }));
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer { provider, request },
+    )
+    .await
+    .expect("inference succeeds");
+    let requests = services.requests.lock();
+    let sent = &requests[0];
+    let body: Value = serde_json::from_slice(&sent.body).unwrap();
+    assert!(body.get("output_config").is_none());
+    assert!(body.get("context_management").is_none());
+    let betas: Vec<_> = wire_header(sent, "anthropic-beta").split(',').collect();
+    for absent in [
+        "context-management-2025-06-27",
+        "effort-2025-11-24",
+        "per-turn-control-2026-07-01",
+        "mid-conversation-tool-changes-2026-07-01",
+    ] {
+        assert!(!betas.contains(&absent), "{absent}");
     }
 }
 

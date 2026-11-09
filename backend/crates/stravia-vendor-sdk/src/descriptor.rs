@@ -596,7 +596,13 @@ pub struct VendorDescriptor {
     pub kind: VendorKind,
     /// Provider profiles owned by this package. Profiles never merge at runtime.
     pub providers: Vec<ProviderDescriptor>,
+    /// Transport shapes owned by this component, selected as `plugin:<name>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_shapes: Vec<crate::net::EgressShape>,
 }
+
+/// Maximum number of transport shapes declared by one component.
+pub const MAX_EGRESS_SHAPES: usize = 64;
 
 impl VendorDescriptor {
     /// Validate structural invariants the host enforces on load.
@@ -627,6 +633,23 @@ impl VendorDescriptor {
             VendorKind::Fallback | VendorKind::Dedicated => {}
         }
 
+        if self.egress_shapes.len() > MAX_EGRESS_SHAPES {
+            return Err(DescriptorError::TooManyEgressShapes);
+        }
+        let mut shape_names = BTreeSet::new();
+        for shape in &self.egress_shapes {
+            if shape.name.is_empty()
+                || !shape
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
+                return Err(DescriptorError::InvalidEgressShapeName(shape.name.clone()));
+            }
+            if !shape_names.insert(shape.name.as_str()) {
+                return Err(DescriptorError::DuplicateEgressShape(shape.name.clone()));
+            }
+        }
         let mut provider_ids = BTreeSet::new();
         for provider in &self.providers {
             if provider.provider_id.is_empty() {
@@ -943,6 +966,12 @@ fn default_matches_kind(value: &serde_json::Value, kind: &ConfigFieldKind) -> bo
 /// Structural validation failures for [`VendorDescriptor::validate`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DescriptorError {
+    #[error("descriptor declares more than 64 egress shapes")]
+    TooManyEgressShapes,
+    #[error("egress shape name `{0}` must contain lowercase ASCII letters, digits or hyphens")]
+    InvalidEgressShapeName(String),
+    #[error("duplicate egress shape name `{0}`")]
+    DuplicateEgressShape(String),
     #[error("vendor_id must not be empty")]
     EmptyVendorId,
     #[error("vendor_id must contain only lowercase ASCII letters, digits, '.', '-', or '_'")]
@@ -1298,7 +1327,49 @@ mod tests {
             canonical_format_version: 1,
             kind,
             providers,
+            egress_shapes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn egress_shape_declarations_are_optional_bounded_and_unique() {
+        let mut descriptor = manifest("alpha", VendorKind::Dedicated, vec![provider("alpha")]);
+        let wire = serde_json::to_value(&descriptor).unwrap();
+        assert!(wire.get("egress_shapes").is_none());
+        assert!(
+            serde_json::from_value::<VendorDescriptor>(wire)
+                .unwrap()
+                .egress_shapes
+                .is_empty()
+        );
+
+        let shape: crate::net::EgressShape =
+            serde_json::from_str(r#"{"name":"example-1","revision":1,"tls":{}}"#).unwrap();
+        descriptor.egress_shapes.push(shape.clone());
+        assert_eq!(descriptor.validate(), Ok(()));
+        let wire = serde_json::to_value(&descriptor).unwrap();
+        assert_eq!(
+            serde_json::from_value::<VendorDescriptor>(wire).unwrap(),
+            descriptor
+        );
+        descriptor.egress_shapes.push(shape.clone());
+        assert_eq!(
+            descriptor.validate(),
+            Err(DescriptorError::DuplicateEgressShape("example-1".into()))
+        );
+        descriptor.egress_shapes.pop();
+        for name in ["", "Upper", "plugin:example", "foo_bar", "a.b"] {
+            descriptor.egress_shapes[0].name = name.into();
+            assert_eq!(
+                descriptor.validate(),
+                Err(DescriptorError::InvalidEgressShapeName(name.into()))
+            );
+        }
+        descriptor.egress_shapes = vec![shape; MAX_EGRESS_SHAPES + 1];
+        assert_eq!(
+            descriptor.validate(),
+            Err(DescriptorError::TooManyEgressShapes)
+        );
     }
 
     #[test]

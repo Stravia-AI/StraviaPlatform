@@ -8772,24 +8772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stravia-vendor-kilo"
-version = "0.6.4"
-dependencies = [
- "async-trait",
- "chrono",
- "parking_lot",
- "semver",
- "serde",
- "serde_json",
- "stravia-protocol-codec",
- "stravia-runtime-contract",
- "stravia-vendor-common",
- "stravia-vendor-runtime",
- "stravia-vendor-sdk",
- "tokio",
-]
-
-[[package]]
 name = "stravia-vendor-lifecycle-contract-fixture"
 version = "0.6.4"
 dependencies = [
@@ -8816,24 +8798,6 @@ dependencies = [
  "flate2",
  "serde_json",
  "wit-bindgen 0.63.0",
-]
-
-[[package]]
-name = "stravia-vendor-muse-code"
-version = "0.6.4"
-dependencies = [
- "async-trait",
- "parking_lot",
- "semver",
- "serde",
- "serde_json",
- "stravia-protocol-codec",
- "stravia-runtime-contract",
- "stravia-vendor-common",
- "stravia-vendor-runtime",
- "stravia-vendor-sdk",
- "tokio",
- "url",
 ]
 
 [[package]]

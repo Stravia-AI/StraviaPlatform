@@ -88,8 +88,7 @@ async fn http1_reuses_only_matching_shape_revision_and_proxy_identity() {
 
         let tls = Arc::new(super::test_support::untrusted_tls());
         let route = Route {
-            shape_name: "reuse-test".into(),
-            shape_revision: 1,
+            shape_identity: "plugin:component-a:reuse-test:1".into(),
             tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
             tls: Arc::clone(&tls),
             proxy_tls: tls,
@@ -110,12 +109,21 @@ async fn http1_reuses_only_matching_shape_revision_and_proxy_identity() {
         );
 
         let mut revised = route.clone();
-        revised.shape_revision += 1;
+        revised.shape_identity = "plugin:component-a:reuse-test:2".into();
         let revision_connection = request(&transport, &uri, revised).await;
         assert_ne!(
             revision_connection, original,
             "a new revision must not reuse the old connection"
         );
+
+        let mut another_component = route.clone();
+        another_component.shape_identity = "plugin:component-b:reuse-test:1".into();
+        let other_connection = request(&transport, &uri, another_component).await;
+        assert_ne!(
+            other_connection, original,
+            "equal local names and revisions from different components must not share a connection"
+        );
+        assert_eq!(request(&transport, &uri, route.clone()).await, original);
 
         // Both proxy identities dial the same loopback socket, so a different
         // connection demonstrates credential isolation rather than routing to a

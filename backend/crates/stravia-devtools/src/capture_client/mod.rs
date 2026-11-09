@@ -1,5 +1,5 @@
 mod h2;
-mod hello;
+pub(super) mod hello;
 
 use std::{
     io::Cursor,

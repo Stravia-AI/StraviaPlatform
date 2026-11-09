@@ -685,8 +685,7 @@ impl VendorNetwork {
         Ok(NetworkRoute {
             cookies,
             transport: transport::Route {
-                shape_name: shape.name.clone(),
-                shape_revision: shape.revision,
+                shape_identity: Arc::clone(&shape.identity),
                 tls: shape.tls_for(&proxy_identity, websocket),
                 tls_session_policy: shape.session_policy(websocket),
                 proxy_tls: self.shapes.proxy_tls(),
@@ -748,7 +747,7 @@ impl VendorNetwork {
         let route = self.route(&options, false)?;
         let shape = self
             .shapes
-            .get(&route.transport.shape_name)
+            .get(option(&options, net::keys::SHAPE).unwrap_or("default"))
             .ok_or_else(|| HostFailure::new(ErrorKind::Unsupported, "unknown network shape"))?;
         let encoded =
             option(&options, net::keys::REQUEST_ENCODING).unwrap_or("identity") != "identity";
@@ -768,13 +767,12 @@ impl VendorNetwork {
                     body = http::encode(request.body, &options) => body?,
                 };
                 if encoded {
-                    let shape =
-                        sending
-                            .shapes
-                            .get(&route.transport.shape_name)
-                            .ok_or_else(|| {
-                                HostFailure::new(ErrorKind::Unsupported, "unknown network shape")
-                            })?;
+                    let shape = sending
+                        .shapes
+                        .get(option(&options, net::keys::SHAPE).unwrap_or("default"))
+                        .ok_or_else(|| {
+                            HostFailure::new(ErrorKind::Unsupported, "unknown network shape")
+                        })?;
                     fields::finish_http(&mut headers, body.len(), shape)
                         .map_err(|error| HostFailure::new(ErrorKind::Invalid, error))?;
                 }
@@ -792,6 +790,30 @@ impl VendorNetwork {
         }))
     }
 
+    async fn finish_http_response(
+        &self,
+        response: transport::UpstreamResponse,
+        url: Url,
+        method: &str,
+        options: &net::Options,
+    ) -> Result<UpstreamResponse, HostFailure> {
+        let response = UpstreamResponse::new(response, url, method, options)?;
+        #[cfg(test)]
+        let response = {
+            let mut response = response;
+            if response.status() >= 400
+                && let Some(capture) = self.transport.diagnostic_capture()
+            {
+                tokio::select! {
+                    _ = self.cancelled() => return Err(cancelled()),
+                    _ = response.prefetch_diagnostic(&capture) => {}
+                }
+            }
+            response
+        };
+        Ok(response)
+    }
+
     async fn send_http(
         &self,
         mut method: Method,
@@ -807,7 +829,7 @@ impl VendorNetwork {
         } = route;
         let shape = self
             .shapes
-            .get(&route.shape_name)
+            .get(option(&options, net::keys::SHAPE).unwrap_or("default"))
             .ok_or_else(|| invalid("unknown network shape"))?;
         for redirects in 0..=MAX_REDIRECTS {
             self.ensure_current()?;
@@ -830,6 +852,10 @@ impl VendorNetwork {
                 }.instrument(tracing::info_span!(
                     target: "stravia::perf", "upstream.http.response_headers.wait"
                 )).await?;
+            #[cfg(test)]
+            if let Some(capture) = self.transport.diagnostic_capture() {
+                capture.observe_head(response.head.status, &response.head.fields);
+            }
             self.ensure_current()?;
             self.absorb_cookies(cookies.as_ref(), &url, &response.head.fields)
                 .await?;
@@ -846,7 +872,9 @@ impl VendorNetwork {
                 || Value::Null,
             );
             if !matches!(status, 301 | 302 | 303 | 307 | 308) {
-                return UpstreamResponse::new(response, url, method.as_str(), &options);
+                return self
+                    .finish_http_response(response, url, method.as_str(), &options)
+                    .await;
             }
             let Some(location) = response
                 .head
@@ -854,7 +882,9 @@ impl VendorNetwork {
                 .iter()
                 .find(|f| f.name.eq_ignore_ascii_case("location"))
             else {
-                return UpstreamResponse::new(response, url, method.as_str(), &options);
+                return self
+                    .finish_http_response(response, url, method.as_str(), &options)
+                    .await;
             };
             if redirects == MAX_REDIRECTS {
                 return Err(invalid("upstream redirect limit exceeded"));
@@ -933,9 +963,9 @@ impl VendorNetwork {
         let mut proxy = route.proxy.clone();
         proxy.normalize();
         let mut partition_hash = Sha256::new();
-        partition_hash.update(b"stravia-websocket-route-v1\0");
-        partition_hash.update(route.shape_name.as_bytes());
-        partition_hash.update(route.shape_revision.to_be_bytes());
+        partition_hash.update(b"stravia-websocket-route-v2\0");
+        partition_hash.update(route.shape_identity.as_bytes());
+        partition_hash.update([0]);
         partition_hash.update(serde_json::to_vec(&proxy).expect("proxy settings serialize"));
         partition_hash.update(match route.version {
             transport::HttpVersionPref::Auto => b"auto".as_slice(),
@@ -1039,6 +1069,10 @@ impl VendorNetwork {
                     (response.head, None, Some(response.body))
                 }
             };
+            #[cfg(test)]
+            if let Some(capture) = self.transport.diagnostic_capture() {
+                capture.observe_head(head.status, &head.fields);
+            }
             self.ensure_current()?;
             self.absorb_cookies(cookies.as_ref(), &url, &head.fields)
                 .await?;
@@ -1083,6 +1117,16 @@ impl VendorNetwork {
                 continue;
             }
             if let Some(mut body_stream) = rejected_body.take() {
+                #[cfg(test)]
+                let diagnostic = self.transport.diagnostic_capture().and_then(|capture| {
+                    (status >= 400).then(|| {
+                        let id = capture.begin(
+                            status,
+                            transport::DiagnosticContentCoding::from_fields(&head.fields),
+                        );
+                        (capture, id)
+                    })
+                });
                 let retry_after = retry_after(&head.fields);
                 let mut body = Vec::new();
                 loop {
@@ -1094,6 +1138,10 @@ impl VendorNetwork {
                         ))?,
                     };
                     let Some(chunk) = chunk else { break };
+                    #[cfg(test)]
+                    if let Some((capture, id)) = &diagnostic {
+                        capture.chunk(*id, &chunk);
+                    }
                     if chunk.len() > websocket::MAX_MESSAGE_BYTES - body.len() {
                         return Err(HostFailure::upstream_transport(
                             Some(kind_without_body(status)),

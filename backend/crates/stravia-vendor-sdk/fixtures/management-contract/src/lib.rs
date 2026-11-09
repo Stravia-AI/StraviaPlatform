@@ -122,6 +122,7 @@ impl VendorGuest for ManagementContractVendor {
             authors: vec!["Unverified management fixture author".into()],
             canonical_format_version: CANONICAL_FORMAT_VERSION,
             kind: VendorKind::Dedicated,
+            egress_shapes: Vec::new(),
             providers: vec![ProviderDescriptor {
                 provider_id: profile.vendor_id().into(),
                 catalog_id: None,

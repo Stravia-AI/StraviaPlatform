@@ -1,4 +1,4 @@
-//! Validated, built-in egress shapes. A shape does not contain request fields or credentials.
+//! Validated builtin and component-owned egress shapes, without request fields or credentials.
 
 mod h2;
 mod kx;
@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use serde::{Deserialize, Deserializer};
+use stravia_vendor_sdk::net::shape::{
+    EarlyFrameShape, EgressShape, Http1Shape, Http2Shape, TlsShape, WsShape,
+};
 
 use super::transport::H2Settings;
 
@@ -30,218 +32,9 @@ impl ShapeError {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct EgressShape {
-    pub name: String,
-    pub revision: u64,
-    #[serde(default)]
-    pub source: Option<ShapeSource>,
-    pub tls: TlsShape,
-    #[serde(default)]
-    pub http1: Http1Shape,
-    #[serde(default)]
-    pub http2: Http2Shape,
-    #[serde(default)]
-    pub ws: WsShape,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ShapeSource {
-    pub client: String,
-    pub runtime: String,
-    pub captured: String,
-    pub ja4: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct TlsShape {
-    pub versions: Vec<String>,
-    pub cipher_suites: Vec<String>,
-    pub advertise_only_cipher_suites: Vec<String>,
-    pub groups: Vec<String>,
-    pub key_shares: Vec<String>,
-    pub signature_algorithms: Vec<String>,
-    #[serde(deserialize_with = "deserialize_extension_order")]
-    pub extension_order: Option<Vec<u16>>,
-    pub omit_extensions: Vec<u16>,
-    pub raw_extensions: Vec<RawExtensionShape>,
-    pub padding: Option<String>,
-    pub renegotiation: Option<String>,
-    pub ec_point_formats: Option<Vec<u8>>,
-    pub cert_compression: Vec<String>,
-    #[serde(default = "default_true")]
-    pub session_tickets: bool,
-    pub alpn: AlpnShape,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawExtensionShape {
-    #[serde(rename = "type")]
-    pub typ: u16,
-    #[serde(deserialize_with = "deserialize_bytes")]
-    pub data: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct AlpnShape {
-    pub http: Vec<String>,
-    pub ws: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct Http1Shape {
-    pub slot_positions: SlotPositions,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct SlotPositions {
-    pub host: Option<String>,
-    pub content_length: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct Http2Shape {
-    pub settings: Vec<(String, u32)>,
-    pub early_frames: Vec<EarlyFrameShape>,
-    pub pseudo_order: Vec<String>,
-    pub content_length: String,
-    pub keepalive: KeepaliveShape,
-}
-
-impl Default for Http2Shape {
-    fn default() -> Self {
-        Self {
-            settings: Vec::new(),
-            early_frames: Vec::new(),
-            pseudo_order: Vec::new(),
-            content_length: "auto".into(),
-            keepalive: KeepaliveShape::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum EarlyFrameShape {
-    WindowUpdate {
-        stream_id: u32,
-        increment: u32,
-    },
-    Priority {
-        stream_id: u32,
-        dependency_id: u32,
-        weight: u8,
-        exclusive: bool,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct KeepaliveShape {
-    pub interval_ms: Option<u64>,
-    pub timeout_ms: u64,
-    pub while_idle: bool,
-}
-
-impl Default for KeepaliveShape {
-    fn default() -> Self {
-        Self {
-            interval_ms: Some(15_000),
-            timeout_ms: 10_000,
-            while_idle: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct WsShape {
-    pub over_h2: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ExtensionOrderInput {
-    Random(String),
-    List(Vec<WireU16>),
-}
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum WireU16 {
-    Number(u16),
-    Hex(String),
-}
-
-fn deserialize_extension_order<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Vec<u16>>, D::Error> {
-    use serde::de::Error as _;
-    match Option::<ExtensionOrderInput>::deserialize(deserializer)? {
-        None => Ok(None),
-        Some(ExtensionOrderInput::Random(s)) if s == "random" => Ok(None),
-        Some(ExtensionOrderInput::Random(_)) => Err(D::Error::custom(
-            "expected random or an ordered extension list",
-        )),
-        Some(ExtensionOrderInput::List(values)) => values
-            .into_iter()
-            .map(|v| match v {
-                WireU16::Number(n) => Ok(n),
-                WireU16::Hex(s) => u16::from_str_radix(
-                    s.strip_prefix("0x")
-                        .ok_or_else(|| D::Error::custom("extension type must be 0x-prefixed"))?,
-                    16,
-                )
-                .map_err(D::Error::custom),
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some),
-    }
-}
-
-fn deserialize_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-    use serde::de::Error as _;
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Bytes {
-        Hex(String),
-        Array(Vec<u8>),
-    }
-    match Bytes::deserialize(deserializer)? {
-        Bytes::Array(bytes) => Ok(bytes),
-        Bytes::Hex(s) => {
-            let hex = s.strip_prefix("0x").unwrap_or(&s);
-            if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
-                return Err(D::Error::custom("expected an even-length hex string"));
-            }
-            hex.as_bytes()
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| {
-                    let pair = std::str::from_utf8(pair).map_err(D::Error::custom)?;
-                    u8::from_str_radix(pair, 16).map_err(D::Error::custom)
-                })
-                .collect()
-        }
-    }
-}
-
 /// Fully validated shape with reusable, proxy-isolated TLS session stores.
 pub(crate) struct ResolvedShape {
-    pub name: String,
-    pub revision: u64,
+    pub identity: Arc<str>,
     pub http1: Http1Shape,
     pub http2: H2Settings,
     pub http2_content_length: String,
@@ -271,8 +64,9 @@ impl ResolvedShape {
 }
 
 pub(crate) struct ShapeRegistry {
-    shapes: HashMap<String, ResolvedShape>,
+    shapes: HashMap<String, Arc<ResolvedShape>>,
     proxy_tls: Arc<rustls::ClientConfig>,
+    verifier: Arc<dyn rustls::client::danger::ServerCertVerifier>,
 }
 
 const BUILTIN_SHAPES: &[&str] = &[
@@ -315,72 +109,12 @@ impl ShapeRegistry {
         for source in sources {
             let shape: EgressShape =
                 serde_json::from_str(source).map_err(|e| ShapeError::field("shape", e))?;
-            if shape.name.is_empty()
-                || !shape
-                    .name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            {
-                return Err(ShapeError::field(
-                    "name",
-                    "must contain lowercase ASCII letters, digits or hyphens",
-                ));
+            let name = shape.name.clone();
+            let identity = format!("builtin:{}:{}", name, shape.revision);
+            let resolved = Self::compile(&shape, identity, &verifier)?;
+            if shapes.insert(name.clone(), Arc::new(resolved)).is_some() {
+                return Err(ShapeError::field("name", format!("duplicate shape {name}")));
             }
-            if shape.revision == 0 {
-                return Err(ShapeError::field("revision", "must be positive"));
-            }
-            if shapes.contains_key(&shape.name) {
-                return Err(ShapeError::field(
-                    "name",
-                    format!("duplicate shape {}", shape.name),
-                ));
-            }
-            if let Some(source) = &shape.source {
-                for (field, text) in [
-                    ("source.client", &source.client),
-                    ("source.runtime", &source.runtime),
-                    ("source.captured", &source.captured),
-                    ("source.ja4", &source.ja4),
-                ] {
-                    if text.trim().is_empty() {
-                        return Err(ShapeError::field(
-                            field,
-                            "capture provenance must not be empty",
-                        ));
-                    }
-                }
-            }
-            for (field, position) in [
-                (
-                    "http1.slot_positions.host",
-                    &shape.http1.slot_positions.host,
-                ),
-                (
-                    "http1.slot_positions.content_length",
-                    &shape.http1.slot_positions.content_length,
-                ),
-            ] {
-                if position
-                    .as_ref()
-                    .is_some_and(|p| p != "first" && p != "last")
-                {
-                    return Err(ShapeError::field(field, "expected first or last"));
-                }
-            }
-            let http2 = h2::resolve(&shape.http2)?;
-            let http_tls = Arc::new(tls::ResolvedTls::build(&shape.tls, Arc::clone(&verifier))?);
-            let ws_tls = http_tls.clone();
-            let resolved = ResolvedShape {
-                name: shape.name.clone(),
-                revision: shape.revision,
-                http1: shape.http1,
-                http2,
-                http2_content_length: shape.http2.content_length,
-                ws: shape.ws,
-                http_tls,
-                ws_tls,
-            };
-            shapes.insert(shape.name, resolved);
         }
         let default = shapes
             .get("default")
@@ -392,11 +126,112 @@ impl ShapeRegistry {
         Ok(Self {
             shapes,
             proxy_tls: Arc::new(proxy_tls),
+            verifier,
         })
     }
 
+    fn compile(
+        shape: &EgressShape,
+        identity: String,
+        verifier: &Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    ) -> Result<ResolvedShape, ShapeError> {
+        if shape.name.is_empty()
+            || !shape
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(ShapeError::field(
+                "name",
+                "must contain lowercase ASCII letters, digits or hyphens",
+            ));
+        }
+        if shape.revision == 0 {
+            return Err(ShapeError::field("revision", "must be positive"));
+        }
+        if let Some(source) = &shape.source {
+            for (field, text) in [
+                ("source.client", &source.client),
+                ("source.runtime", &source.runtime),
+                ("source.captured", &source.captured),
+                ("source.ja4", &source.ja4),
+            ] {
+                if text.trim().is_empty() {
+                    return Err(ShapeError::field(
+                        field,
+                        "capture provenance must not be empty",
+                    ));
+                }
+            }
+        }
+        for (field, position) in [
+            (
+                "http1.slot_positions.host",
+                &shape.http1.slot_positions.host,
+            ),
+            (
+                "http1.slot_positions.content_length",
+                &shape.http1.slot_positions.content_length,
+            ),
+        ] {
+            if position
+                .as_ref()
+                .is_some_and(|p| p != "first" && p != "last")
+            {
+                return Err(ShapeError::field(field, "expected first or last"));
+            }
+        }
+        let http2 = h2::resolve(&shape.http2)?;
+        let http_tls = Arc::new(tls::ResolvedTls::build(&shape.tls, Arc::clone(verifier))?);
+        Ok(ResolvedShape {
+            identity: Arc::from(identity),
+            http1: shape.http1.clone(),
+            http2,
+            http2_content_length: shape.http2.content_length.clone(),
+            ws: shape.ws.clone(),
+            ws_tls: Arc::clone(&http_tls),
+            http_tls,
+        })
+    }
+
+    /// Compile a component's definitions while retaining the base verifier and builtins.
+    pub fn with_plugin(
+        self: &Arc<Self>,
+        component_identity: &str,
+        declarations: &[EgressShape],
+    ) -> Result<Arc<Self>, ShapeError> {
+        if declarations.is_empty() && self.shapes.keys().all(|name| !name.starts_with("plugin:")) {
+            return Ok(Arc::clone(self));
+        }
+        let mut shapes: HashMap<_, _> = self
+            .shapes
+            .iter()
+            .filter(|(name, _)| !name.starts_with("plugin:"))
+            .map(|(name, shape)| (name.clone(), Arc::clone(shape)))
+            .collect();
+        for shape in declarations {
+            let name = format!("plugin:{}", shape.name);
+            let identity = format!(
+                "plugin:{}:{}:{}:{}",
+                component_identity.len(),
+                component_identity,
+                shape.name,
+                shape.revision
+            );
+            let resolved = Self::compile(shape, identity, &self.verifier)?;
+            if shapes.insert(name.clone(), Arc::new(resolved)).is_some() {
+                return Err(ShapeError::field("name", format!("duplicate shape {name}")));
+            }
+        }
+        Ok(Arc::new(Self {
+            shapes,
+            proxy_tls: Arc::clone(&self.proxy_tls),
+            verifier: Arc::clone(&self.verifier),
+        }))
+    }
+
     pub fn get(&self, name: &str) -> Option<&ResolvedShape> {
-        self.shapes.get(name)
+        self.shapes.get(name).map(Arc::as_ref)
     }
 
     /// Platform-verified TLS for a proxy, isolated from origin TLS sessions.

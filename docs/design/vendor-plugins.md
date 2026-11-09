@@ -55,8 +55,6 @@ Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再�
 | `stravia-vendor-claudecode` | `claude-code` / `dedicated` | `provider_id = claude-code`、`catalog_id = anthropic`、channel `oauth`。 |
 | `stravia-vendor-antigravity` | `antigravity` / `dedicated` | `provider_id = antigravity`、无目录映射、channel `oauth`；模型与额度来自登录账号。 |
 | `stravia-vendor-opencode-free` | `opencode-free` / `dedicated` | `provider_id = opencode-free`、`catalog_id = opencode`、channel `default`。 |
-| `stravia-vendor-muse-code` | `muse-code` / `dedicated` | `provider_id = muse-code`、`catalog_id = meta`、channel `subscription`。 |
-| `stravia-vendor-kilo` | `kilo` / `dedicated` | `provider_id = kilo`、`catalog_id = kilo`、channel `default`。 |
 
 ### 供应商选择器与来源
 
@@ -106,8 +104,6 @@ Claude Code 当前默认版本为 2.1.319，使用普通交互式身份 `claude-
 | Devin `3000.11.3` | trajectory/cascade 按两个既有不同语义映射为 UUIDv4 位格式，不再以 token 参与派生。每次编码 message 仍新建 UUIDv4；step 推进、AssignModel 的 cascade/JWT 绑定不变。 | [官方 manifest](https://static.devin.ai/cli/3000.11.3/manifest.json)及[固定发行物](https://static.devin.ai/cli/3000.11.3/devin-3000.11.3-x86_64-unknown-linux.tar.gz)摘要匹配，但 stripped 二进制不足恢复精确字段生成／validator。**v4 只是保留既有 codec 形态，官方字段版本尚未证实**；不把第三方 3000.10.x 编码证据重标为官方 3000.11.3 契约。 |
 | Antigravity CLI `1.5.1`；session 算法另核对 `1.3.5` | `sessionId` 为完整 UTF-8 的 FNV-1a64 按 signed int64 输出十进制，无 scope 省略。文本 `requestId` 保留 `agent/UUIDv4` fallback；独立生图使用 `image_gen/<毫秒时间戳>/<UUIDv4>/1`，不模拟 CLI 的共享操作树或步数。 | 官方 agy 1.5.1 生图抓包确认 `image_gen/<时间戳>/<操作 UUID>/<步骤>`；[官方 1.3.5 Linux 发行物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)反汇编确认 `getSessionID` 的 `FormatInt` 及 `computeRequestID` fallback。上层输入结构的字段准确名称／恢复作用域尚未完全恢复，不声称服务端强制此算法。 |
 | OpenCode Zen Free `1.18.25` | 推理 session 为 `ses_` + 12 lowerhex + 14 base62，取宿主持久会话身份；`x-opencode-request` 的 `msg_` 取独立用户输入身份与真实创建时间。工具续接和重试复用用户消息 ID，新用户输入更新；重启保留关联，不从 session 或 HTTP UUID 猜测。发现与连接检查等辅助操作仍按真实时间新建 ID。 | 固定源码 [`cb7d8b2f`](https://github.com/anomalyco/opencode/tree/cb7d8b2f5e44876ef98b661dc10590c915af3a9f)：[默认算法](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/schema/src/identifier.ts)为 time/counter/random，客户端 session/message 类型只检查 `ses`／`msg` 前缀；[请求头](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/opencode/src/session/llm/request.ts#L190-L194)取 `input.sessionID`／`input.user.id`。推理缺少宿主可信身份或时间时明确失败，不新增另一套持久映射。公开 Zen handler 无时间解码证据，不能替代当前私有网关校验。 |
-| Kilo CLI `7.8.15` / Gateway | 不强加 session/root/message/request。没有对应原生上下文时不添加可选 task/parent/project/machine 字段；组织授权字段不变。 | [固定源码 `56aead64`](https://github.com/Kilo-Org/kilocode/tree/56aead6452eb5837b9800b05d1fa7989f50ccbe0) 的 Gateway factory 无 task ID 也可构造请求；不能从 CLI 可选遥测推定所有 Gateway API 必填。 |
-| Muse Code / Model API `1.0.0` | 不添加无证据的客户端 session/request。响应/message ID 与 `previous_response_id` 保留上游值；显式 `prompt_cache_key`、`safety_identifier` 不是会话源。 | 官方 [CreateResponse](https://dev.meta.ai/docs/api-reference/responses/schemas#create-response) 与 [Responses 兼容文档](https://dev.meta.ai/docs/protocols/responses#openai-compatibility)没有强制客户端会话／HTTP ID；未给独立客户端发行版本，不伪造版本号。 |
 
 #### 固定映射契约
 
@@ -150,7 +146,7 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 |Grok|官方 [Grok Build 固定提交](https://github.com/xai-org/grok-build/tree/9684fa3cdbf2995e30ea8b9b637f1db008f144fc)的 Responses、sampler、tool override 实现|按源码重建 body、搜索控制与 `x-grok-*` 会话头；本轮未完成官方 CLI 账号抓包。|
 |Devin|[OMP `v18.12.6` 的 `buildChatMessagePrompts`](https://github.com/can1357/oh-my-pi/blob/v18.12.6/packages/ai/src/providers/devin.ts)、[官方 CLI `3000.11.3` manifest](https://static.devin.ai/cli/3000.11.3/manifest.json) 与授权实调捕获|2026-10-26 使用隔离配置运行官方 CLI，捕获 `deepseek-v4-1-flash-1017-max` 的工具调用、返回与最终正文；无签名思考在续接请求中保留为 `#11`，不降级到 `#3`。修复后的实际 Wasm 经隔离 Stravia HTTP 服务完成同模型的读文件工具循环并返回 `SUM=42`；不据此宣称所有模型或参数均获验证。|
 |OpenCode Zen Free|官方 `1.18.25` 的隔离请求捕获、[原生 ID 算法](https://github.com/anomalyco/opencode/blob/cb7d8b2f5e44876ef98b661dc10590c915af3a9f/packages/schema/src/identifier.ts)与匿名单变量探测|捕获完整 UA、会话头和工具输入 schema；实际 Wasm 在 `/inference/v1` 对 `big-pickle` 返回 200 与准确探测文本。不能外推为所有免费模型、其他协议或未来门控的支持证明。|
-|其他插件|各自既有固定官方协议／工具源码、模型目录与 OMP 实现|通过实际 Wasm 合同验证投影与流式解析，不把离线 fixture 当作账号资格证明。Muse Code 账号授权与 Kilo OAuth 仍需要对应账号。|
+|其他插件|各自既有固定官方协议／工具源码、模型目录与 OMP 实现|通过实际 Wasm 合同验证投影与流式解析，不把离线 fixture 当作账号资格证明。|
 
 除表中明确注明的授权真实调用外，上述 CLI 捕获使用合成凭据、隔离配置与 loopback 接收器，返回受控错误，不执行模型工具，不产生官方服务调用。它们证明工具构造出的参数形态，不证明上游接受任意字段取值；授权的真实调用另行验证成功终态。Devin 的真实调用使用只读生产数据库取得的连接凭据、临时 CLI 配置与临时 Stravia 数据库，不修改生产连接或部署；已安装的独立 Devin 插件须重建并重新导入才能采用无签名思考修复。真实 Codex HTTP 对同一可用模型的 `stream:false` 返回 400／`stream must be set to true`，改为 `stream:true` 后返回 200 并完成。插件因此对推理与独立压缩固定使用官方流式 wire；客户端可继续选择非流式响应，由宿主汇总结果，canonical 的交付选择不被改写。独立压缩是末尾带 `compaction_trigger` 的流式 `/responses`，不调用 `/responses/compact`。
 
@@ -185,32 +181,12 @@ Devin 的 `GetUserStatus` 在 `PlanStatus` 中报告每日、每周剩余百分�
 
 修复位于独立 `devin` 插件，Desktop 与 Server 共用该解析行为。已安装实例需要重新构建并导入 Devin Wasm 包，再刷新额度；单独更新宿主不会替换已安装插件。既有 `daily`、`weekly` guard key、凭据、路由和数据库 schema 不变。
 
-### Muse Code 接入
+### 停止维护的专属插件
 
-Muse Code 由独立 `muse-code` 插件提供，固定接入 `https://api.meta.ai/v1`，不把普通 Meta 目录 Profile 自动迁移为订阅连接。
+Muse Code（`muse-code`）与 Kilo（`kilo`）专属插件已停止维护，源码、独立组件构建与 Release 附件已移除。`base` 中普通 Meta 与 Kilo Gateway 的 API-key 目录接入不受影响；它们不是原专属插件的订阅／设备登录替代实现，也不会接管原插件连接。
 
-1. 在供应商插件管理页本地导入 Release 的 `stravia-vendor-muse-code-v{version}.wasm`；本地构建使用 `task build:vendors:all`，从 `target/vendor-plugins-all/manifest.json` 找到对应组件。更新同样须重新构建并导入独立 Wasm，仅升级宿主不会更新已安装 codec。
-2. 添加 **Muse Code** 供应商。`subscription` 使用 Meta device login：打开界面提供的 `auth.meta.com` 验证页，完成设备授权；插件向设备 token 端点换取账号 token，再向 `/muse-code/key` 提交 onboarding 请求取得推理 API key。订阅 inactive 或需付款/账号操作时明确失败，用户在 Meta 账号完成操作后重新登录；不自动再次 mint key。插件只提供这一种登录方式，不接受手动 Model API key。
-3. 保存后同步模型，并把实际发现的模型绑定到 Route。插件通过订阅换取的 Bearer API key 与 `x-api-version: 1.0.0` 读取 `/v1/models`、调用 `/v1/responses`；账号 OAuth token 不作为推理凭据。未知模型仍登记真实 ID，但不猜测上下文或能力。
+已经手动安装的独立 Wasm 不会因宿主升级自动卸载；既有连接、凭据、Route 和历史数据不自动删除或迁移。需要停用时，管理员先停用或调整关联 Route，再在插件管理页卸载旧包。
 
-插件提供认证、模型发现与推理，没有额度查询能力，不把缺失额度显示为零。Meta 无已实现的 refresh/revoke grant；插件不伪造刷新成功或到期时间，失效后需重新登录。接入边界见 [Meta Muse Code 认证](https://dev.meta.ai/docs/muse-code/auth)、[CreateResponse schema](https://dev.meta.ai/docs/api-reference/responses/schemas#create-response)、[Responses 兼容范围](https://dev.meta.ai/docs/protocols/responses#openai-compatibility)；已知型号能力种子固定依据 [oh-my-pi `v18.10.4`](https://github.com/can1357/oh-my-pi/tree/v18.10.4)，不扩大 `/models` 返回的集合。
-
-推理始终为前台 SSE，复用 Responses codec 后按 Meta 白名单投影：只发送 function 工具，仅 `tool_choice: auto` 可表达；其它工具选择约束省略，不伪装成强制、禁止或具名调用。已核对型号支持 reasoning effort；`max` 只为种子明确支持的型号发送，禁用思考及 token budget 无原生等价，省略后仍由上游执行默认思考。已知型号输出上限约束为 16–131072 tokens（含思考），未知型号只应用最小值；未知型号不发送未核实采样控制。保留工具 schema 的 nullable/null 语义，不转发任意扩展。`truncation` 若存在改为原生 `disabled`，不承诺自动裁剪；`store` 默认 `false`，没有 `previous_response_id` 时请求真实 `reasoning.encrypted_content`，有原生续接 ID 时不同时索取该密文。支持仍取决于上游型号、订阅资格和实际响应，不保证所有账号或请求可用。
-
-### Kilo 接入
-
-Kilo 由独立 `kilo` 插件提供，固定地址 `https://api.kilo.ai/api/gateway`；模型集合来自 Kilo 上游，不消费宿主目录 scope。认证与 Gateway 范围见 [官方 Gateway](https://kilo.ai/docs/gateway)、[认证](https://kilo.ai/docs/gateway/authentication)、[模型与供应商](https://kilo.ai/docs/gateway/models-and-providers)、[用量与计费](https://kilo.ai/docs/gateway/usage-and-billing)。
-
-1. 在插件管理页本地导入 `stravia-vendor-kilo-v{version}.wasm`；本地构建及更新与 Muse Code 一样使用完整构建 manifest，更新须重新导入独立组件。
-2. 添加 **Kilo** 服务。打开上游提供的 device verification URL 并授权，宿主按描述符轮询，登录后读取 `/api/profile` 核对身份。插件只提供这一种登录方式，不接受手动 API key，也不提供未登录的匿名调用；未登录时模型发现、推理与额度查询直接失败，不发起上游请求。
-3. 默认使用个人范围。需要组织范围时配置 `organizationId` 并登录核对该 ID 属于账号 profile 的 `organizations`；只有已验证的选中组织或 membership 才发送 `X-KiloCode-OrganizationId`。组织 ID 不是客户端 header 授权，也不能凭任意填写获得组织权限；账号或组织选择变化后重新认证并同步模型。
-4. 同步模型并绑定 Route：个人范围读取 `/api/gateway/models`，组织读取 `/api/organizations/{id}/models`。图片输出型号不纳入此推理清单。
-
-推理使用 Route 选定的上游模型 ID，而不是客户端填写的平台路由名。上游目录的多行或超长 Markdown 说明保留在 `kilo.description` 来源空间，不使整份模型同步失败，也不截断原文。
-
-模型 catalog 元数据是传输与控制支持的权威来源：仅 `opencode.ai_sdk_provider == "openai"` 选择 Responses（`/api/openrouter/responses`），其它型号选择 Chat Completions（`/api/gateway/chat/completions`）；GPT/o-series 名称本身不授予 Responses 权限。采样、工具选择、结构化输出、reasoning 等须同时符合目标协议白名单与 `supported_parameters`；effort 使用 catalog 的 `opencode.variants` 映射，无映射不编造档位。Chat 可按已声明支持发送 gateway 的 `top_k`、`min_p`、`repetition_penalty` 和 reasoning enabled/budget。仅 canonical function 工具跨越此网关，不承诺外来 hosted 工具、compaction、item reference、受保护思考签名或其它账号原生续接状态可回放；它们不会作为任意扩展透传，原始历史不删除。
-
-认证连接的额度页读取 `/api/profile/balance`（已验证组织时附带组织头，返回组织共享余额），把数字 `balance` 呈现为 `balance` 类额度的剩余 USD；单位依据官方客户端将其直接显示为 `$x.xx`。上游不提供已购总额，因此不生成限额、使用百分比或重置窗口；响应缺少数字 `balance` 时报错，不当作零余额。历史用量接口不再读取：宿主额度模型没有「仅已用、无上限」的类型。device token 记录插件的一年到期边界；没有 refresh grant，刷新操作只用现有有效 token 重新核对 profile，不续期，过期须重新登录。插件接入不改变 API 权限、Route 重试或冷却策略；官方服务可用性和组织实际政策仍由上游决定。
 
 ### Cline Pass 接入
 
@@ -235,6 +211,8 @@ Claude Pro/Max 订阅由专属插件 `claude-code`（crate `stravia-vendor-claud
 - `x-claude-code-sandy-plover` 使用会话工具历史：工具解析成功后同时记录请求名与解析后的名称并去重；找不到工具时不登记解析结果，但调用方随后提交的历史仍可贡献该请求名。因此本地 `_` 隔离下，一次已声明的 `lookup` 交接可记录 `_lookup` 与 `lookup`；只从历史恢复时不虚构解析结果。依据是官方 `@anthropic-ai/claude-code-linux-x64@2.1.319` 内嵌源码：`eFi` 记录两个名称，其调用位于工具不存在分支返回之后；`$H` 从历史提取名称，`D.record` 去重。此映射不代表官方 CLI 自带 `_` 隔离。
 - 计费头的版本指纹使用首条用户文本的 UTF-16 零基索引 4、7、20 处的码元（缺位为 `0`）、固定盐与版本计算 SHA-256，取前三个 hex。`cch` 是最终序列化字节的 XXH64 低 20 位（五个小写 hex，seed `0x4d659218e32a3268`），计算时自身置为 `00000`，按原生字节扫描规则排除 model 值及 max_tokens、fallbacks、fallback_credit_token 字段；不是完整 JSON 的直接哈希，也不是认证签名。仅改写插件自己生成的计费块，不改动用户文本中的同名内容。
 - 普通交互推理发送完整历史和 diagnostics，不启用 Message Threads，也不获取远端 GrowthBook 配置；没有宿主生产的灰度来源，客户端传入的 thread／diagnostics 不可信。`diagnostics.previous_message_id` 使用同作用域上一成功响应的上游消息 ID，无已知值时为 null；`cc_prev_req` 使用上一成功响应的 `request-id`。压缩请求和含原生压缩块的回放不发送 diagnostics；所有请求均不发送 thread 或 thread beta。缓存断点放在身份／最后一个客户端 system 块及消息末尾可缓存块，TTL 为 1h；tools 不加断点。beta 按最终模型、thinking、工具与实际字段条件选择，不伪造未知灰度分配或工具耗时。
+- 第一方主请求的 `claude-code-20250219` beta 不因型号含 Haiku 而移除；per-turn effort 与 mid-conversation beta 按已知型号及显式发现能力选择，不照搬单一型号的整组头。无工具历史时继续发送官方允许的 `x-claude-code-sandy-plover: []`，不把 SDK 日志中的缺省显示当作真实 wire 缺失。
+- 支持 effort 的型号统一以 `medium` 为插件默认值，而非逐型号复刻 CLI 的 high／xhigh 默认；显式有效强度、预算换算、目标控制与型号能力限制仍优先，不支持 effort 的型号不注入该字段。满足 context 编辑条件、思考未关闭且调用者未声明策略时，默认发送 `context_management.edits: [{"type":"clear_thinking_20251015","keep":"all"}]`；原生压缩不混入该默认编辑，显式 capability 禁用仍生效。公共 IR 目前仅承载原生 compact 编辑，不能完整表达 thinking/tool 清理策略及空 edits 覆盖；本次不扩大公共 IR 或 codec 契约。
 - 私有状态按宿主 transport affinity、账号、地址与客户端 profile 隔离，保存 prompt ID、用户轮摘要与计数、上一成功响应的请求及消息 ID 和时间，不保存消息、签名或凭据，并保留同一根对象中的其它字段；最多 64 项、24 小时元数据保留。没有可信 affinity 时不保存作用域状态；压缩操作不使用或更新该状态。调用方仍须保存完整历史。插件不自行重发生成请求，普通错误、认证、限流或服务端故障按既有分类交宿主；通用续接恢复与 Route 重试仍由宿主决定，不为 Claude 原生线程增加重试路径。
 - Responses 历史继承或客户端显式声明的 `truncation: "auto"` 与 `truncation: "disabled"` 按目标是否支持统一处理：支持时保留原值，不支持时省略该控制，不因无法表达拒绝转换。Anthropic 不支持该字段，插件不擅自裁剪输入，超出输入窗口仍按 [Anthropic 的默认输入溢出行为](https://platform.claude.com/docs/en/build-with-claude/context-windows#context-window-overflow-behavior)由上游报错；这不保证 `auto` 的自动截断意图仍获执行，也不保证其它内容或 continuation 历史转换无损。已安装的独立 `claude-code` 插件需重新构建并导入才能获得此修复，单独更新宿主不会替换插件中的 codec。
 - 请求头包括 `Accept-Encoding: gzip, deflate, br, zstd`（宿主解码响应）与 `Connection: keep-alive`；工具 `strict` 按 Anthropic 原生 grammar 编译预算投影：工具总数超过 20，或工具与输出 schema 合计 optional properties 超过 24、`anyOf`/`oneOf` branches 超过 16 时，只移除工具上的 `strict: true` 注释，保留显式 `strict: false`、schema、required 与 nullable/null 语义，不删除约束或把 null 改为字符串。预算内保留原声明；降级不保证严格工具入参约束仍由上游强制执行，见 [官方 structured outputs 限制](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)。显式 `tool_result.is_error` 保留；成功结果不补 `is_error: false`。非 deferred 的自定义工具按实测补 `eager_input_streaming: true`。
@@ -259,7 +237,9 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；未固定的规格字段随同步刷新，固定字段保持不变。生图复用原 OAuth、project 与连接，按官方 agy 1.5.1 抓包走 `generateContent` 定长 JSON，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；本地响应回放不代表所有真实账号都有生图权限或额度。
 
-合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。Effort 通过 envelope 的模型 ID 实现，不同时转换为 Gemini thinking budget；独立的原生 Budget 等控制保持既有行为。
+合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。选择后的 envelope 模型 ID 与 thinking 控制均取对应档位，不另按通用 Effort 推导 Gemini budget；独立的原生 Budget 等控制保持既有行为。
+
+推理未指定输出上限时发送 `generationConfig.maxOutputTokens: 65536`，显式上限保持优先。目录的数值 `thinkingLevel` 在最终 wire 投影为 CLI 枚举名：`0`–`6` 分别为 `UNSPECIFIED`、`LOW`、`MEDIUM`、`HIGH`、`MINIMAL`、`EXTRA_HIGH`、`MAX`；只改变表示，不改变已选档位。显式扩展档位不再被公开 Gemini codec 折叠为 HIGH；预算路径及 `includeThoughts` 语义不变，非法目录档位仍在发送前失败。
 
 升级时重新导入构建后的独立插件，再同步模型。旧逐档模型记录与 Route 绑定不自动删除或改绑；未再发现的记录沿用现有 missing 与可用状态规则，已有配置不会自动迁移到家族模型。需要统一档位选择时，从清单添加家族模型并显式调整原绑定。
 
@@ -276,7 +256,7 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 ### Provider 图标标识
 
 - `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有宿主图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。图像接口属于公开静态资源，不要求管理登录；入口 origin 策略仍生效。
-- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 的全部 Provider Profile 均不声明 `icon_svg`，也不维护品牌 SVG 清单或图标别名；宿主按原生 `catalog_id` / `provider_id` 请求 Models 图标。`base` 插件自身的 Stravia 标志不属于供应商品牌图，继续保留。专属插件直接声明各自适用标志；Kilo 未内嵌 SVG，不以其它品牌图标代替。Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
+- 宿主优先返回插件内嵌 SVG，再尝试目录 logo 和网站 favicon。`base` 的全部 Provider Profile 均不声明 `icon_svg`，也不维护品牌 SVG 清单或图标别名；宿主按原生 `catalog_id` / `provider_id` 请求 Models 图标。`base` 插件自身的 Stravia 标志不属于供应商品牌图，继续保留。专属插件直接声明各自适用标志。Command Code、Devin、Antigravity 的第一方资源来源记录在各自 SVG 内。
 - 更换图标需要重建并重新导入独立插件；仅更新宿主不会改写已安装组件。`base` 随宿主更新。品牌名称和图形归各自权利人所有，公开下载地址不等同于再分发授权。
 - 访问远端 `/logos/{id}.svg` 时，图标 ID 优先使用插件声明的 `catalog_id`，没有该映射时使用 `provider_id`，不得使用已保存连接 UUID。例如 `openai-codex` 的 `catalog_id = openai`，只有未声明内嵌 SVG 时才请求 `/logos/openai.svg`。
 - 按选定 ID 获取目录图标失败后才进入网站图标回退；已经选择 `catalog_id` 时，不再追加一次 `provider_id` 目录图标尝试。网站图标来源优先使用插件明确声明的官网地址；没有官网声明时，使用已保存连接 `base_url` 的 origin。不得把文档地址自动视为官网，也不得猜测域名。官网一旦被选为来源，获取失败后不再请求连接 origin 的 favicon。
@@ -667,7 +647,7 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 - `protected-reasoning-rejected` 仍由宿主恢复，不向客户端暴露未经脱敏的上游错误文本。受保护推理首次不因协议、模型或来源不同提前剥离；被拒后只移除外来与来源不明的载荷并重放一次，本上游载荷始终保留，无可剥离载荷时原样返回错误。该恢复不消耗 Target 恢复预算，也不计入连续失败；重放重新获得完整的 Target 首 token 窗口，总 deadline 不变。重放未再被判为推理拒绝时（包括被首 token 超时等取消，避免后续 Target 重试再次首发同一外来载荷），宿主按“当前签发作用域 × 来源签发作用域”记忆拒绝，来源不明的载荷按摘要记忆；命中进程内记忆时首发剥离，见 [ADR-0080](../adr/0080-try-protected-reasoning-once-and-block-only-foreign-origins.md)。宿主每次派发从实际请求重算 `operation_metadata.protected_reasoning_untrusted`：仅含外来或来源不明受保护载荷时设置 JSON `true`，否则省略。Devin 只在该声明为 `true` 且尚无模型输出时将 Connect `invalid_argument` 分类为推理拒绝；拒绝 trailer 前的模型标识与用量帧不算输出，判定与宿主首个输出提交规则一致；可解包的私有 replay 封装解包，其余非空载荷作为不透明签名先试一次。插件 codec 与内置 codec 一样自行决定可读思考的表示：原生载体能承载无签名明文时原生编码，否则降级为助手正文；宿主不再替插件把思考改写成文本。
 - Codex 从可信 `client_conversation_id` 派生稳定 session/thread，窗口为 `thread:N`，其中 N 取持久 `context_window_index`；逻辑 turn 与创建时间取宿主来源证明，内部重试和工具续接不重新计轮。一个插件本地 `NativeSession` 同时投影 HTTP body 的 `client_metadata`、HTTP headers 与 WebSocket 握手；根线程的 root turn 即本 turn，子线程无可信父 turn 时省略 parent/root turn。Responses 与压缩的 `x-client-request-id` 均取 thread，installation ID 取持久安装身份。turn metadata 仅保留明确支持的官方成员，未知自定义键丢弃；自报身份不能覆盖宿主作用域身份。省略的默认服务级别与上游补全的 `default` 生成相同路由提示。认证、账号、URL、插件与凭据作用域仍参与连接隔离。
 - 私有 Codex endpoint 不等于公共 Responses API：从[官方请求结构](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/common.rs)正向投影，省略不支持的采样、输出上限、`metadata` 与 `prompt_cache_retention`，保留已支持的 `prompt_cache_key` 与 `parallel_tool_calls`；客户端未指定缓存键时按官方取 thread ID。HTTP 不发送 WS-only `previous_response_id`／`generate`：若输入仍是增量续接，插件在发出 Started 或网络请求前返回 `continuation-unavailable`，由宿主恢复完整历史后重新派发，不能删 ID 后仍发增量历史。WS 保留官方允许的续接、generate、stream 与 service tier。这些目标投影不改写 canonical 历史。只有实际发送了续接 ID、尚无模型响应事件，且收到明确的 `previous_response_not_found`，或 HTTP 状态语义为 400、`invalid_request_error`、无 code 的精确 ``Invalid `previous_response_id`.`` 时，插件才报告 `continuation-not-found`；普通 400 与已开始响应后的错误不因此恢复。Infer 中的 inline compaction 同样遵守这些安全边界，独立 Compact 不使用续接恢复。
-- Codex 请求形态按官方 `0.167.0` 投影。模型 metadata 的 `use_responses_lite` 为真时，HTTP 推理、WS 推理与压缩使用 Responses Lite：顶层 `instructions` 与 `tools` 移入 input 前缀（`additional_tools` item 与带 `model.base_instructions` passthrough 的 developer message，函数工具按官方规则包入 `functions` namespace），并发送 `parallel_tool_calls:false` 与 `reasoning.context:"all_turns"`；HTTP 带 `x-openai-internal-codex-responses-lite: true`，WS 帧改用 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`。WS 续接帧只发送新增 item，不重复前缀。非 Lite 模型保留顶层 tools，instructions 同样转为 developer 前缀。推理与压缩请求按模型 metadata 补齐 `tool_choice:"auto"`、默认 reasoning effort 与 verbosity（模型不支持 verbosity 时删除），`include` 固定为 `reasoning.encrypted_content`；HTTP／WS 推理附 `access_programs: {"cyber":"standard"}`，压缩、search、image 不附。
+- Codex 请求形态按官方 `0.167.0` 投影。模型 metadata 的 `use_responses_lite` 为真时，HTTP 推理、WS 推理与压缩使用 Responses Lite：顶层 `instructions` 与 `tools` 移入 input 前缀（`additional_tools` item 与带 `model.base_instructions` passthrough 的 developer message，函数工具按官方规则包入 `functions` namespace），并发送 `parallel_tool_calls:false` 与 `reasoning.context:"all_turns"`；HTTP 带 `x-openai-internal-codex-responses-lite: true`，WS 帧改用 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`。WS 续接帧只发送新增 item，不重复前缀。非 Lite 模型保留顶层 tools，instructions 同样转为 developer 前缀。推理与压缩请求按模型 metadata 补齐 `tool_choice:"auto"`、默认 reasoning effort 与 verbosity（模型不支持 verbosity 时删除），`include` 固定为 `reasoning.encrypted_content`。HTTP、WS 与压缩统一省略默认 `reasoning.summary:"auto"`，保留非 auto summary 及其它 reasoning 字段，移除因此变空的 reasoning 对象；不再生成默认 `access_programs: {"cyber":"standard"}`，effort 的显式值与模型默认逻辑不变。
 - turn metadata 按官方字段顺序生成；环境字段取官方客户端可配置的最小披露：`analytics_enabled` 与 `auto_review_enabled` 为 false，不发送 workspaces 与 tool namespace 信息，`sandbox`／`sandbox_mode` 取 Linux TUI 默认的 `seccomp`／`workspace-write`，node_repl 两项取模型 metadata。`client_metadata` 另带 `root_turn_id`（仅根线程）、`mcp_attribution: {"status":"none"}` 与 `guardian_credits_requested`。推理、模型发现与额度查询统一使用 originator `codex-tui` 与固定 Linux x86_64 User-Agent；额度查询不发送 `x-openai-codex-luna-reserve`，官方仅在能切换 Reserve 模型的客户端声明该头。官方 chatgpt.com 端点的 HTTP 请求体按官方客户端以 zstd 编码，自定义 base URL 不压缩。
 - 顶层 body 字段按官方 `ResponsesApiRequest`／`ResponseCreateWsRequest` 声明顺序序列化（路由字段在 `input` 之前，WS 帧以 `type` 开头），仅输出该契约内字段。前缀 item：Responses Lite 对应官方默认开启的 `incremental_tools` 历史路径，base instructions passthrough 依次为 `turn_id`、小数 Unix 秒 `create_time`、`content_item_kinds`、`content_item_metadata`；非 Lite 模型对应官方请求时前缀，ID 为 thread 命名空间（`NAMESPACE_OID` 下 thread ID 的 UUIDv5）内按正文计算的 UUIDv5，passthrough 只有 `content_item_kinds`。
 - 与官方 wire 的已知差异及各自的对齐前提见下节「Codex 与官方 wire 的已知差异」。
@@ -725,9 +705,15 @@ Jar 按安装、Vendor、Provider、数据 epoch 与 fence 隔离，HTTP 和 WS 
 
 ### Egress Shape
 
-Egress Shape（出站形态）是宿主内置的连接层数据，不是供应商 Provider Profile，也不包含请求头、URL、凭据或重试策略。它描述 TLS ClientHello、ALPN、HTTP/1 槽位、HTTP/2 SETTINGS／早期帧／伪头顺序及 WS 传输；插件通过 `shape` 选项选择，1.0 不支持插件自带 shape。数据在 `backend/crates/stravia-core/src/plugin/network/shape/data/` 编译期内嵌，修改或新增需更新宿主及修订号、校验配置并重新做本地 wire 捕获验证，不能仅凭来源标签宣称实测一致。
+Egress Shape（出站形态）是由宿主校验和执行的连接层数据，不是供应商 Provider Profile，也不包含请求头、URL、凭据或重试策略。它描述 TLS ClientHello、ALPN、HTTP/1 槽位、HTTP/2 SETTINGS／早期帧／伪头顺序及 WS 传输。宿主内置 shape 使用裸名称，数据在 `backend/crates/stravia-core/src/plugin/network/shape/data/`；插件也可在 `VendorDescriptor.egress_shapes` 中打包至多 64 个 `net::EgressShape` 声明，并通过 `shape("plugin:<local-name>")` 选择。local name 仅含小写 ASCII 字母、数字和连字符，同一组件内不得重复，revision 必须为正数；缺省声明为空。插件不能覆盖裸名内置 shape，也不能引用其他组件的声明。
 
-| 名称（revision 均为 1） | 数据来源标签与边界 |
+宿主在预览准入和启动恢复时验证、编译声明，编译失败不能确认安装或执行；有效组件与编译后的 registry 作为同一个快照发布。普通操作、catalog sync 和认证会话固定各自取得的快照，兼容更新不把旧组件与新形态混用。HTTP 与 WebSocket 连接池身份包含组件内容身份、shape 名称及修订，不仅依赖可重复的本地名称。插件 shape 复用宿主配置的证书验证器，不增加信任、不扩大 origin 权限，也不提供裸套接字。
+
+Qoder、WorkBuddy 的专属数据、脱敏 capture、采集维护说明及错误码诊断映射分别由各自插件仓库维护，宿主不再内置其名称或专属分类。更新形态仍须更新修订并验证实际 wire；已有通用参数足够时只需重建、重新导入插件，不必发布宿主或修改 WIT。支持新传输原语仍需更新宿主。旧宿主会在选项验证时拒绝 `plugin:*`，不会误用同名旧内置配置；旧插件对 `qoder-cli`／`workbuddy` 裸名称的引用也不再受支持，必须与宿主配套升级。
+
+通用离线命令 `stravia-tools verify-egress-shape --component PATH --shape plugin:NAME --fixture PATH --server-name HOST` 从实际 Wasm 描述符编译并生成 ClientHello，与脱敏 fixture 比较；`--websocket` 选择 WS TLS 配置。命令不连接上游，失败返回非零；它不证明完整 HTTP 请求、真实账号推理或其他平台行为一致。
+
+| 名称（未注明时 revision 为 1） | 数据来源标签与边界 |
 | --- | --- |
 | `default` | 通用配置；HTTP ALPN 为 h2、http/1.1，WS 为 http/1.1。 |
 | `claude-code` | Claude Code 2.1.319，Linux x86_64；HTTP／WS ALPN 为 http/1.1。 |
@@ -842,3 +828,17 @@ Egress Shape（出站形态）是宿主内置的连接层数据，不是供应�
 - 宿主取消不能保证上游已经停止执行或停止计费；保留已确认用量，不伪造未知用量，也不自动重放被中断的请求。
 - 新版本启用后，具备有效配置与凭据的连接可以恢复接入；必要数据已清除的连接继续保持暂不可用，直到管理员重新配置或登录。
 - 若无法确保旧任务已经停止且不能写回，不得继续丢弃数据或宣称切换成功。该取消例外不改变兼容更新允许在途调用使用旧版本完成的规则。
+
+## 供应商真实对齐辅助工具
+
+推理验证使用真实准入的 Generation Chain 根，并与正式 Model Turn 共用 `session_affinity` 的派生：按 Principal、Target 和链路根隔离，不采用客户端自报的会话标识。缺少此上下文会使依赖会话头的插件产生不完整请求，不能将这种验证器失败归因于产品传输栈。
+
+`tests/common/vendor_alignment.py` 默认只读取来源目录的 SQLite 快照并输出清单，不发送网络请求；SQLite 使用只读模式、显式事务和 WAL，不迁移或复制生产库。使用 `--vendor` 选择组件，可重复；`--component` 指定单个外部 WASM 时必须同时指定一个 Vendor。默认发行组件来自 `target/vendor-plugins-all/manifest.json`，校验组件摘要，需先通过现有构建流程生成。
+
+真实调用必须显式加 `--allow-live`，并通过 `--runner` 或 `STRAVIA_ALIGNMENT_RUNNER` 指定预先构建的 Core 单元测试可执行文件；`--scenario` 可重复选择 `infer`、`media-image`、`discover`、`allowance`，`--model` 固定请求模型，`--channel` 只选择指定渠道，没有匹配连接时明确失败。报告记录模型 ID、metadata 的 ID 是否匹配，以及按来源连接稳定查询顺序生成的本轮序号；序号不包含账号标识，也不能用于追认没有连接标识的历史调用。未指定推理模型时仍取保存目录的排序首项，不代表官方默认模型；需要同模型对照时必须显式指定。来源目录无当前用户读取权限时可加 `--sudo-reader`：只有只读 SQLite 子进程提权，Core 执行进程不提权。`--output` 必须指向源码树和来源数据目录以外的路径。输出不保存凭据或原始响应；隔离的新用户单轮上下文并非来源账户原有会话，请求一致性尚未比较时明确报告 `not_compared`，不把调用成功当作官方客户端一致性证明。
+
+运行器先用迁移后的全新内存 SQLite 和受限临时目录启动并排空后台任务，再装入选定连接，不传递 refresh token，不改真实到期时间；已知过期的 OAuth 不发请求，未知期限保持未知并由上游判定。每次操作只执行一次，不对凭据拒绝自动刷新重试。无源连接时，显式选择 `opencode-free` 可匿名发现；匿名推理还需指定模型，运行器先从真实发现结果验证其免费资格。其他缺少凭据的插件报告缺失，不伪造成功。仅对获授权且已记录摘要的组件运行，沿用 Core 的插件声明网络策略和重定向凭据防护，不由脚本向其他 origin 复制凭据。
+
+未指定生图模型时，运行器先调用同一组件的真实模型发现，只选择明确声明图片输出能力的模型；没有可确认模型则报告 `image_model_unavailable`，不猜测型号。此时报告的请求模型仍为 `null`，不能据此恢复内部发现选中的 ID。错误响应诊断仅在测试构建的内存中保留最多 256 KiB，并对 gzip、deflate、br、zstd 做同样有界的解码；未知、损坏、截断或超限正文保持未知。报告保留已有的 `model_error_kind`、`retry_after_ms`，并以 `http_observation` 单独记录实际收到的 HTTP 响应数量、最后状态及明确的订阅耗尽头判定；它不把 SSE 业务状态冒充 HTTP 状态，也不预读 HTTP 200 的正文。正文报告只含格式、字段存在性及固定错误类别，不输出正文或未知自由错误码。HTTP 400／403／429、模型列表成功和本地合成捕获都不等于真实推理对齐成功。
+
+外部插件 wrapper 可通过 `--response-code-map PATH` 提供测试专用的数字错误码映射：JSON 为 `{"fields":["code"],"codes":{"42":"rate_limit"}}`，文件最多 16 KiB、最多 64 个码；fields 只能选择 `code`、`type`、`status`、`error`，码键必须为规范的 i64 十进制字符串，类别只能来自报告的固定闭集。共享脚本和 Core 运行器分别校验，配置经既有私有输入通道传递；映射不改变生产错误分类、认证或重试，也不增加 WIT 导出。

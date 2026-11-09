@@ -79,8 +79,7 @@ fn route() -> Route {
         .with_no_client_auth(),
     );
     Route {
-        shape_name: "websocket-test".into(),
-        shape_revision: 1,
+        shape_identity: "websocket-test".into(),
         tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,

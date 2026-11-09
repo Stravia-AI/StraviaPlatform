@@ -176,6 +176,32 @@ pub(crate) fn prepare(
     if let Some(compaction) = compaction {
         object.insert("compaction".into(), compaction);
     }
+    // CLI 的自动策略先于 caller extra body；显式策略整体优先，原生压缩不混入编辑。
+    if !object.contains_key("context_management")
+        && caps.context_management != Some(false)
+        && caps.thinking != Some(false)
+        && caps.context_edits.get("clear_thinking_20251015") != Some(&false)
+        && !object
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| model.contains("claude-3-"))
+        && object
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            != Some("disabled")
+        && object
+            .get("output_config")
+            .and_then(|config| config.get("effort"))
+            .and_then(Value::as_str)
+            != Some("none")
+        && !carries_compaction(object)
+    {
+        object.insert(
+            "context_management".into(),
+            json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}),
+        );
+    }
     let explicit_display = has_explicit_display(object);
     let block_binding = object
         .get_mut("thinking")
@@ -824,6 +850,18 @@ fn beta_header(object: &Map<String, Value>, caps: &ModelCapabilities) -> String 
         betas.push("context-management-2025-06-27");
     }
     betas.push("prompt-caching-scope-2026-01-05");
+    // NBn 为主交互补回基础列表排除的 Haiku CLI beta，位置在基础列表末尾。
+    if model.contains("haiku") {
+        betas.push("claude-code-20250219");
+    }
+    if let Some(profile) = ModelProfile::new(model, caps) {
+        if profile.per_turn_effort() {
+            betas.push("per-turn-control-2026-07-01");
+        }
+        if profile.mid_conversation_tools() {
+            betas.push("mid-conversation-tool-changes-2026-07-01");
+        }
+    }
     // The first-party default for the provenance feature is enabled, but remote
     // overrides and its accompanying provenance details are unavailable here.
     betas.push("tool-provenance-2026-10-26");
@@ -1761,7 +1799,6 @@ mod tests {
         let bare = request(json!({"model": "claude-haiku-4-5"}));
         let betas: Vec<_> = bare.split(',').collect();
         for absent in [
-            "claude-code-20250219",
             TOOL_SEARCH_BETA,
             EFFORT_BETA,
             "thinking-binding-controls-2026-08-01",
@@ -1773,6 +1810,7 @@ mod tests {
             assert!(!betas.contains(&absent), "{absent}");
         }
         assert!(!betas.contains(&"message-threads-2026-08-12"));
+        assert!(betas.contains(&"claude-code-20250219"));
         assert!(betas.contains(&"thinking-token-count-2026-05-13"));
         let old = request(json!({"model": "claude-3-opus-20240229"}));
         for absent in [
