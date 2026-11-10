@@ -1355,7 +1355,7 @@ mod tests {
         ] {
             let update = format!("UPDATE api_keys SET {column} = 2 WHERE id = 'key-0'");
             assert!(
-                sqlx::query(sqlx::AssertSqlSafe(&update))
+                sqlx::query(sqlx::AssertSqlSafe(update))
                     .execute(&pool)
                     .await
                     .is_err()
@@ -1364,7 +1364,7 @@ mod tests {
                 "INSERT INTO api_keys (id, token, name, {column}) VALUES ('invalid', 'invalid', 'Key', 2)"
             );
             assert!(
-                sqlx::query(sqlx::AssertSqlSafe(&insert))
+                sqlx::query(sqlx::AssertSqlSafe(insert))
                     .execute(&pool)
                     .await
                     .is_err()
@@ -1468,7 +1468,7 @@ mod tests {
         ] {
             let update = format!("UPDATE api_keys SET {column} = 2 WHERE id = 'key-0'");
             assert!(
-                sqlx::query(sqlx::AssertSqlSafe(&update))
+                sqlx::query(sqlx::AssertSqlSafe(update))
                     .execute(&pool)
                     .await
                     .is_err()
@@ -1477,7 +1477,7 @@ mod tests {
                 "INSERT INTO api_keys (id, token, name, {column}) VALUES ('invalid', 'invalid', 'Key', 2)"
             );
             assert!(
-                sqlx::query(sqlx::AssertSqlSafe(&insert))
+                sqlx::query(sqlx::AssertSqlSafe(insert))
                     .execute(&pool)
                     .await
                     .is_err()
