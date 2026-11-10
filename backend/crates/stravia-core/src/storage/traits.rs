@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use crate::db::models::{
     ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord, CreateWebProvider,
     ModelStats, OAuthCredential, Provider, ProviderCredentialVersion, ProviderStats, PutRoute,
-    RouteConfig, StatsFilter, StatsOverview, StatsSeries, StatsWindow, UpdateApiKey,
-    UpdateProvider, UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings, WebProvider,
+    RouteConfig, StatsFilter, StatsOverview, StatsSeries, StatsWindow, TransparentInjectionSet,
+    UpdateApiKey, UpdateProvider, UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings,
+    WebProvider,
 };
-pub use crate::db::models::{TransparentInjection, TransparentInjectionSet};
 
 use crate::pricing::{Amount, CostBasis, CurrencyKind, CustomCurrency, SubscriptionPeriod};
 use crate::provider_models::{

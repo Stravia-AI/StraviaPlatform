@@ -616,7 +616,7 @@ pub(crate) async fn materialize_request(
         settings: &settings,
         retention: retention(gateway).await?,
         annotate_references: crate::proxy::security::Security::new(gateway.storage.auth())
-            .effective_injections(principal)
+            .authorize_transparent_injections(principal)
             .await
             .map_err(|error| {
                 ArtifactError::Storage(format!(

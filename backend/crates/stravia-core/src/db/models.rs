@@ -10,33 +10,40 @@ use crate::thinking::ThinkingLevelMapping;
 use crate::thinking::mapping_control;
 use stravia_runtime_contract::thinking::ThinkingLevel;
 
-/// An optional platform capability that Transparent Injection can expose for a Key.
-/// Declaration order is the stable canonical order of `TransparentInjectionSet`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TransparentInjection {
-    WebSearch,
-    MediaUnderstanding,
-    MediaGeneration,
+macro_rules! transparent_injections {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// An optional platform capability that Transparent Injection can expose for a Key.
+        /// Declaration order is the stable canonical order of `TransparentInjectionSet`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum TransparentInjection {
+            $($variant),+
+        }
+
+        impl TransparentInjection {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+transparent_injections! {
+    WebSearch => "web_search",
+    MediaUnderstanding => "media_understanding",
+    MediaGeneration => "media_generation",
 }
 
 impl TransparentInjection {
-    pub const ALL: [Self; 3] = [
-        Self::WebSearch,
-        Self::MediaUnderstanding,
-        Self::MediaGeneration,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::WebSearch => "web_search",
-            Self::MediaUnderstanding => "media_understanding",
-            Self::MediaGeneration => "media_generation",
-        }
-    }
-
-    pub const fn allowed_values() -> &'static str {
-        "web_search, media_understanding, media_generation"
+    fn allowed_values() -> String {
+        Self::ALL
+            .iter()
+            .map(|item| item.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -44,21 +51,16 @@ impl FromStr for TransparentInjection {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "web_search" => Ok(Self::WebSearch),
-            "media_understanding" => Ok(Self::MediaUnderstanding),
-            "media_generation" => Ok(Self::MediaGeneration),
-            other => anyhow::bail!(
-                "unknown transparent injection {other}; allowed values: {}",
-                Self::allowed_values()
-            ),
-        }
-    }
-}
-
-impl fmt::Display for TransparentInjection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|item| item.as_str() == s)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown transparent injection {s}; allowed values: {}",
+                    Self::allowed_values()
+                )
+            })
     }
 }
 
@@ -84,59 +86,17 @@ impl TransparentInjectionSet {
         self.0[item as usize]
     }
 
-    pub const fn is_empty(&self) -> bool {
-        let mut index = 0;
-        while index < self.0.len() {
-            if self.0[index] {
-                return false;
-            }
-            index += 1;
-        }
-        true
-    }
-
-    pub fn len(&self) -> usize {
-        self.iter().count()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = TransparentInjection> + '_ {
         TransparentInjection::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|item| self.contains(*item))
-    }
-
-    pub fn as_names(&self) -> Vec<&'static str> {
-        self.iter().map(TransparentInjection::as_str).collect()
-    }
-
-    pub fn to_json(&self) -> anyhow::Result<String> {
-        Ok(serde_json::to_string(self)?)
-    }
-
-    pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        Ok(serde_json::from_str(json)?)
-    }
-
-    pub const fn allowed_values() -> &'static str {
-        TransparentInjection::allowed_values()
-    }
-}
-
-impl FromIterator<TransparentInjection> for TransparentInjectionSet {
-    fn from_iter<I: IntoIterator<Item = TransparentInjection>>(iter: I) -> Self {
-        Self::from_items(iter)
-    }
-}
-
-impl<'a> FromIterator<&'a TransparentInjection> for TransparentInjectionSet {
-    fn from_iter<I: IntoIterator<Item = &'a TransparentInjection>>(iter: I) -> Self {
-        Self::from_items(iter.into_iter().copied())
     }
 }
 
 impl Serialize for TransparentInjectionSet {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut sequence = serializer.serialize_seq(Some(self.len()))?;
+        let mut sequence = serializer.serialize_seq(Some(self.iter().count()))?;
         for item in self.iter() {
             sequence.serialize_element(item.as_str())?;
         }
@@ -901,9 +861,6 @@ mod transparent_injection_tests {
     #[test]
     fn default_injection_set_is_empty() {
         let set = TransparentInjectionSet::default();
-        assert!(set.is_empty());
-        assert_eq!(set.len(), 0);
-        assert_eq!(set.as_names(), Vec::<&str>::new());
         assert_eq!(
             serde_json::to_value(set).expect("empty set JSON"),
             serde_json::json!([])
@@ -912,15 +869,10 @@ mod transparent_injection_tests {
 
     #[test]
     fn arbitrary_input_order_serializes_in_canonical_order() {
-        let set = TransparentInjectionSet::from_json(
+        let set = serde_json::from_str::<TransparentInjectionSet>(
             r#"["media_generation","web_search","media_understanding"]"#,
         )
         .expect("valid injection set");
-        assert_eq!(set.len(), 3);
-        assert_eq!(
-            set.as_names(),
-            ["web_search", "media_understanding", "media_generation"]
-        );
         assert_eq!(
             set.iter().collect::<Vec<_>>(),
             TransparentInjection::ALL.to_vec()
@@ -929,8 +881,9 @@ mod transparent_injection_tests {
             serde_json::to_value(&set).expect("canonical set JSON"),
             serde_json::json!(["web_search", "media_understanding", "media_generation"])
         );
-        let round_trip = TransparentInjectionSet::from_json(&set.to_json().expect("set JSON"))
-            .expect("round trip");
+        let round_trip =
+            serde_json::from_str::<TransparentInjectionSet>(&serde_json::to_string(&set).expect("set JSON"))
+                .expect("round trip");
         assert_eq!(round_trip, set);
     }
 
@@ -952,6 +905,17 @@ mod transparent_injection_tests {
     }
 
     #[test]
+    fn every_declared_injection_can_be_selected_and_round_tripped() {
+        for &item in TransparentInjection::ALL {
+            let set = TransparentInjectionSet::from_items([item]);
+            assert!(set.contains(item));
+            let json = serde_json::to_string(&set).expect("serialize selection");
+            let decoded: TransparentInjectionSet = serde_json::from_str(&json).expect("parse selection");
+            assert_eq!(decoded, set);
+        }
+    }
+
+    #[test]
     fn members_are_queryable_and_update_omission_preserves_the_set() {
         use super::{CreateApiKey, UpdateApiKey};
 
@@ -961,7 +925,6 @@ mod transparent_injection_tests {
         ]);
         assert!(set.contains(TransparentInjection::WebSearch));
         assert!(!set.contains(TransparentInjection::MediaUnderstanding));
-        assert!(!set.is_empty());
 
         let created: CreateApiKey = serde_json::from_value(serde_json::json!({
             "name": "Injection key",

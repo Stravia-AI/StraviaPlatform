@@ -1435,7 +1435,7 @@ impl HookSession for ReadPlanningSession {
         let enabled = self.tool.capabilities(&self.principal).await;
         let explicit = read_scope == ReadExposureScope::FULL;
         let security = crate::proxy::security::Security::new(self.tool.gateway.storage.auth());
-        let injections = security.effective_injections(&self.principal).await.ok();
+        let injections = security.authorize_transparent_injections(&self.principal).await.ok();
         let basic = injections
             .as_ref()
             .is_some_and(|injections| injections.enabled);

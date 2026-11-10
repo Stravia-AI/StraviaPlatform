@@ -157,7 +157,8 @@ impl<'a> Security<'a> {
         })
     }
 
-    pub(crate) async fn effective_injections(
+    /// Authorizes the principal’s Key and returns its effective injection selections.
+    pub(crate) async fn authorize_transparent_injections(
         &self,
         principal: &stravia_runtime_contract::Principal,
     ) -> Result<EffectiveInjections, GatewayError> {
@@ -343,7 +344,7 @@ mod tests {
     async fn web_search_authorization_returns_the_injection_grant() {
         let store = TestStore::valid();
         let grant = Security::new(Some(&store))
-            .effective_injections(&Principal::new("key-id"))
+            .authorize_transparent_injections(&Principal::new("key-id"))
             .await
             .expect("Web Search access");
 
@@ -357,7 +358,7 @@ mod tests {
             super::TransparentInjectionSet::empty();
 
         let grant = Security::new(Some(&store))
-            .effective_injections(&Principal::new("key-id"))
+            .authorize_transparent_injections(&Principal::new("key-id"))
             .await
             .expect("valid principal");
         assert!(!grant.contains(super::TransparentInjection::WebSearch));
@@ -385,7 +386,7 @@ mod tests {
             ]);
         assert!(
             Security::new(Some(&store))
-                .effective_injections(&Principal::new("key-id"))
+                .authorize_transparent_injections(&Principal::new("key-id"))
                 .await
                 .expect("valid principal")
                 .contains(super::TransparentInjection::MediaUnderstanding)
@@ -398,7 +399,7 @@ mod tests {
             .transparent_injection_enabled = false;
         assert!(
             !Security::new(Some(&store))
-                .effective_injections(&Principal::new("key-id"))
+                .authorize_transparent_injections(&Principal::new("key-id"))
                 .await
                 .expect("valid principal")
                 .contains(super::TransparentInjection::MediaUnderstanding)

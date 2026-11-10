@@ -146,7 +146,7 @@ impl MediaHost for GatewayHost {
     }
     async fn transparent_injection_enabled(&self, principal: &Principal) -> bool {
         crate::proxy::security::Security::new(self.0.storage.auth())
-            .effective_injections(principal)
+            .authorize_transparent_injections(principal)
             .await
             .is_ok_and(|injections| {
                 injections.contains(crate::db::models::TransparentInjection::MediaUnderstanding)

@@ -618,7 +618,7 @@ async fn main() -> anyhow::Result<()> {
     ensure!(
         !api_key
             .transparent_injections
-            .contains(stravia_core::storage::TransparentInjection::MediaGeneration),
+            .contains(stravia_core::db::models::TransparentInjection::MediaGeneration),
         "new keys must not auto-inject media generation"
     );
     admin
@@ -633,7 +633,7 @@ async fn main() -> anyhow::Result<()> {
     ensure!(
         reread_key
             .transparent_injections
-            .contains(stravia_core::storage::TransparentInjection::MediaGeneration),
+            .contains(stravia_core::db::models::TransparentInjection::MediaGeneration),
         "media generation injection selection persists independently"
     );
     ensure!(

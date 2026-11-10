@@ -63,5 +63,5 @@ pub use traits::{
     ApiKeyStore, AuthAccessStore, DynStorage, MoneyStore, NewAdminIdentity, NewAdminSession,
     NewProviderCostPlan, PromptAdmission, PromptAdmissionStore, ProviderCostPlan,
     ProviderModelStore, ProviderStore, RouteSchedulingUsage, RouteStore, SettingsStore, Storage,
-    StorageBootstrap, TransparentInjection, TransparentInjectionSet, UsageStatsStore,
+    StorageBootstrap, UsageStatsStore,
 };

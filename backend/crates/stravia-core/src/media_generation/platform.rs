@@ -323,7 +323,7 @@ impl HookSession for GenerateSession {
         self.forced_generate = explicit
             && matches!(&current.tool_choice, Some(ToolChoice::Named { name }) if name == TOOL_NAME);
         let inject = Security::new(self.tool.gateway.storage.auth())
-            .effective_injections(&self.principal)
+            .authorize_transparent_injections(&self.principal)
             .await
             .map_err(|error| error.to_string())?
             .contains(crate::db::models::TransparentInjection::MediaGeneration);

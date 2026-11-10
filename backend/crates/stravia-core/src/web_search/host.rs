@@ -49,7 +49,7 @@ impl SearchSettingsHost for SearchSettings {
 impl PublicSearchHost for SearchHost {
     async fn authorize(&self, principal: &Principal) -> Option<SearchAccess> {
         crate::proxy::security::Security::new(self.0.storage.auth())
-            .effective_injections(principal)
+            .authorize_transparent_injections(principal)
             .await
             .ok()
             .map(|access| SearchAccess {
