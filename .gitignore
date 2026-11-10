@@ -61,7 +61,6 @@ venv/
 .idea/
 .vscode/
 *.sw?
-.agents/
 /.omp/
 /.orca/
 .antigravitycli/
