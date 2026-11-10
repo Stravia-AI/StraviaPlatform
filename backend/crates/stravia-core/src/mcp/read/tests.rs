@@ -68,10 +68,10 @@ async fn document_fixture() -> (
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: true,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::WebSearch,
+            ]),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

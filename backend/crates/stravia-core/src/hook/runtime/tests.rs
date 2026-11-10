@@ -421,10 +421,8 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

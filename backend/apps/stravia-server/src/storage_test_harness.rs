@@ -608,9 +608,7 @@ async fn main() -> anyhow::Result<()> {
             rpm_limit: Some(10),
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_media_understanding: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             expires_at: None,
             model_ids: vec![route.id.clone().into()],
             spend_limit: None,
@@ -618,20 +616,24 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     ensure!(
-        !api_key.inject_media_generation,
+        !api_key
+            .transparent_injections
+            .contains(stravia_core::storage::TransparentInjection::MediaGeneration),
         "new keys must not auto-inject media generation"
     );
     admin
         .update_api_key(
             &api_key.id,
             serde_json::from_value(serde_json::json!({
-                "inject_media_generation": true
+                "transparent_injections": ["media_generation"]
             }))?,
         )
         .await?;
     let reread_key = admin.get_api_key(&api_key.id).await?;
     ensure!(
-        reread_key.inject_media_generation,
+        reread_key
+            .transparent_injections
+            .contains(stravia_core::storage::TransparentInjection::MediaGeneration),
         "media generation injection selection persists independently"
     );
     ensure!(

@@ -88,10 +88,10 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 |---|---|---|
 | 客户端显式 `StraviaRead` 联网分流 | 平台 Gate 开启 | 无 |
 | Hosted/native web search 声明 | 平台 Gate 开启 | 无 |
-| Stravia 自动暴露联网分流 | Key 的 master 与 `inject_web_search` 均开启 | 同时暴露搜索和网页读取 |
+| Stravia 自动暴露联网分流 | Key 的 `transparent_injection_enabled` 开启，且注入选择包含 `web_search` | 同时暴露搜索和网页读取 |
 | MCP 联网调用 | `mcp_access_enabled` 与平台 Gate 均开启 | 无；所属 Artifact 显式下载独立可用 |
 
-关闭平台 Gate 后，Key 上已保存的 `inject_web_search` 不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
+关闭平台 Gate 后，Key 上已保存的 `web_search` 注入选择不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
 
 Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_ids` 与 `fetch_provider_ids`，分别表示搜索与网页读取来源的有序选择；管理 HTTP 与 Desktop 使用同一结构。旧实例的 `web_access_enabled` 设置不再读写，也不再决定运行时可用性。该调整不自动启用 `web_search_config.enabled`，不改变 API Key、MCP 或网络安全校验。
 

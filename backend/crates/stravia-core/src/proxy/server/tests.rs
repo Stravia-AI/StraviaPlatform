@@ -222,10 +222,8 @@ async fn protected_responses_router_with_base_url(
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -241,9 +239,7 @@ async fn protected_responses_router_with_base_url(
                     is_enabled: Some(false),
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
-                    inject_web_search: None,
-                    inject_media_generation: None,
-                    inject_media_understanding: None,
+                    transparent_injections: None,
                     expires_at: None,
                     model_ids: None,
                     spend_limit: None,
@@ -750,10 +746,8 @@ async fn artifact_upload_fixture() -> ArtifactUploadFixture {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -949,10 +943,8 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

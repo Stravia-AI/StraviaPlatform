@@ -11,7 +11,7 @@ pub(super) struct SqliteApiKeyStore {
 impl ApiKeyStore for SqliteApiKeyStore {
     async fn list(&self) -> anyhow::Result<Vec<ApiKeyWithBindings>> {
         let rows = sqlx::query_as::<_, ApiKey>(
-    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
+    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at, created_at, updated_at FROM api_keys ORDER BY created_at DESC",
             )
             .fetch_all(&self.pool)
             .await?;
@@ -32,9 +32,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
                 is_enabled: row.is_enabled,
                 mcp_access_enabled: row.mcp_access_enabled,
                 transparent_injection_enabled: row.transparent_injection_enabled,
-                inject_media_understanding: row.inject_media_understanding,
-                inject_web_search: row.inject_web_search,
-                inject_media_generation: row.inject_media_generation,
+                transparent_injections: row.transparent_injections,
                 expires_at: row.expires_at,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -46,7 +44,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<ApiKeyWithBindings>> {
         let row = sqlx::query_as::<_, ApiKey>(
-    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -67,9 +65,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             is_enabled: row.is_enabled,
             mcp_access_enabled: row.mcp_access_enabled,
             transparent_injection_enabled: row.transparent_injection_enabled,
-            inject_media_understanding: row.inject_media_understanding,
-            inject_web_search: row.inject_web_search,
-            inject_media_generation: row.inject_media_generation,
+            transparent_injections: row.transparent_injections,
             expires_at: row.expires_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -85,7 +81,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
         let spend_limit_nanos = parse_spend_limit(input.spend_limit.as_deref())?;
         let mut connection = self.pool.acquire_write().await?;
         sqlx::query(
-    "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&key)
@@ -94,9 +90,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .bind(spend_limit_nanos)
             .bind(input.mcp_access_enabled)
             .bind(input.transparent_injection_enabled)
-            .bind(input.inject_media_understanding)
-            .bind(input.inject_web_search)
-            .bind(input.inject_media_generation)
+            .bind(sqlx::types::Json(&input.transparent_injections))
             .bind(input.expires_at.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()))
             .execute(&mut *connection)
             .await?;
@@ -108,7 +102,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
         let current = sqlx::query_as::<_, ApiKey>(
-    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
+    "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -125,13 +119,9 @@ impl ApiKeyStore for SqliteApiKeyStore {
         let transparent_injection_enabled = input
             .transparent_injection_enabled
             .unwrap_or(current.transparent_injection_enabled);
-        let inject_media_understanding = input
-            .inject_media_understanding
-            .unwrap_or(current.inject_media_understanding);
-        let inject_web_search = input.inject_web_search.unwrap_or(current.inject_web_search);
-        let inject_media_generation = input
-            .inject_media_generation
-            .unwrap_or(current.inject_media_generation);
+        let transparent_injections = input
+            .transparent_injections
+            .unwrap_or(current.transparent_injections);
         let expires_at = input.expires_at.or(current.expires_at);
         let spend_limit_nanos = match input.spend_limit {
             Some(value) => parse_spend_limit(value.as_deref())?,
@@ -140,7 +130,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
 
         let mut connection = self.pool.acquire_write().await?;
         sqlx::query(
-    "UPDATE api_keys SET token=?, name=?, rpm_limit=?, spend_limit_nanos=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, inject_media_understanding=?, inject_web_search=?, inject_media_generation=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
+    "UPDATE api_keys SET token=?, name=?, rpm_limit=?, spend_limit_nanos=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, transparent_injections=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
             )
             .bind(key)
             .bind(name.trim())
@@ -149,9 +139,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .bind(is_enabled)
             .bind(mcp_access_enabled)
             .bind(transparent_injection_enabled)
-            .bind(inject_media_understanding)
-            .bind(inject_web_search)
-            .bind(inject_media_generation)
+            .bind(sqlx::types::Json(&transparent_injections))
             .bind(expires_at.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()))
             .bind(id)
             .execute(&mut *connection)
@@ -234,11 +222,9 @@ impl AuthAccessStore for SqliteAuthAccessStore {
         Option<i32>,
         Option<i64>,
         bool,
-        bool,
-        bool,
-        bool,
+        sqlx::types::Json<TransparentInjectionSet>,
     ),
-            >("SELECT id, name, is_enabled, expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = ?")
+            >("SELECT id, name, is_enabled, expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, transparent_injections FROM api_keys WHERE token = ?")
             .bind(raw_key)
             .fetch_optional(&self.pool)
             .await?;
@@ -252,9 +238,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections,
             )| ApiKeyAccessRecord {
                 id,
                 name,
@@ -263,9 +247,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections: transparent_injections.into_inner(),
             },
         ))
     }
@@ -281,11 +263,9 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 Option<i32>,
                 Option<i64>,
                 bool,
-                bool,
-                bool,
-                bool,
+                sqlx::types::Json<TransparentInjectionSet>,
             ),
-        >("SELECT id, name, is_enabled, expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = ?")
+        >("SELECT id, name, is_enabled, expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, transparent_injections FROM api_keys WHERE id = ?")
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -298,9 +278,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections,
             )| ApiKeyAccessRecord {
                 id,
                 name,
@@ -309,9 +287,7 @@ impl AuthAccessStore for SqliteAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections: transparent_injections.into_inner(),
             },
         ))
     }

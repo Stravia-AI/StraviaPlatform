@@ -76,10 +76,10 @@ StraviaRead
 |---|---|---|
 | 显式 `StraviaRead` 媒体分流 | Media Gate 开启且 Key 有效 | 无 |
 | MCP 媒体调用 | Media Gate、有效 Key、`mcp_access_enabled` | 无 |
-| non-vision parent 自动 bridge | Media Gate、有效 Key、master 与 `inject_media_understanding` | 决定是否启用 bridge |
+| non-vision parent 自动 bridge | Media Gate、有效 Key、`transparent_injection_enabled` 开启且注入选择包含 `media_understanding` | 决定是否启用 bridge |
 | 原生 vision Target | 逻辑 Model 自身的图片能力 | 无；原生路径优先 |
 
-Gate 关闭时，API Key 已保存的 `inject_media_understanding` 保留但运行时忽略。重新开启 Gate 后，该选择恢复生效。
+Gate 关闭时，API Key 已保存的 `media_understanding` 注入选择保留但运行时忽略。重新开启 Gate 后，该选择恢复生效。
 
 ## 4. 路由策略
 
@@ -174,14 +174,9 @@ WebUI route：
 
 ## 9. Persistence 与升级
 
-Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 26 为 `agent_definition_configs` 增加 nullable `thinking_level`；启用 Media Understanding 时，专用 Admin API 要求该值属于所选逻辑 Model 的支持等级。migration 18 把 API Key 权限改为：
+Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 26 为 `agent_definition_configs` 增加 nullable `thinking_level`；启用 Media Understanding 时，专用 Admin API 要求该值属于所选逻辑 Model 的支持等级。migration 18 将 API Key 权限拆为 MCP 访问、透明注入总开关与各注入项选择；旧 `allow_media_understanding` 只在 migration 中用于恢复既有自动工具行为，然后删除，不再是显式 capability grant。
 
-- `mcp_access_enabled`；
-- `transparent_injection_enabled`；
-- `inject_media_understanding`；
-- `inject_web_search`。
-
-旧 `allow_media_understanding` 只在 migration 中用于恢复既有自动工具行为，然后删除；它不再是显式 capability grant。
+依据 [ADR-0097](../adr/0097-store-api-key-transparent-injections-as-a-set.md)，SQLite 与 PostgreSQL 的后续 migration 将三个旧注入布尔列合并为 `transparent_injections` JSON 数组，保留每个 Key 的选择，再删除旧列；`mcp_access_enabled` 和 `transparent_injection_enabled` 仍独立保存。SQLite 还须重建引用旧列的布尔契约触发器。`api_keys` 通常行数很少，转换工作量随 Key 数量增长，预期耗时可忽略；该迁移在启动期一次性完成，不单独展示进度，已完成的库再次启动不会重复转换。此预期并非实测性能保证。
 
 这是权限扩大的 clean cutover：Media Gate 开启后，所有有效 Key 都能显式使用能力。升级前必须备份数据库和匹配的旧二进制。回滚必须恢复 migration 18 之前的数据库；不能只回退应用文件。
 

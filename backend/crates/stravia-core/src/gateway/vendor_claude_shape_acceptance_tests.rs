@@ -226,9 +226,7 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: vec![route.id.into()],
             spend_limit: None,
         })

@@ -1435,20 +1435,18 @@ impl HookSession for ReadPlanningSession {
         let enabled = self.tool.capabilities(&self.principal).await;
         let explicit = read_scope == ReadExposureScope::FULL;
         let security = crate::proxy::security::Security::new(self.tool.gateway.storage.auth());
-        let basic = security
-            .transparent_injection_enabled(&self.principal)
-            .await
-            .unwrap_or(false);
+        let injections = security.effective_injections(&self.principal).await.ok();
+        let basic = injections
+            .as_ref()
+            .is_some_and(|injections| injections.enabled);
         let networking = enabled.networking()
-            && security
-                .authorize_principal_web_search(&self.principal)
-                .await
-                .is_ok_and(|access| access.transparent_injection_enabled);
+            && injections.as_ref().is_some_and(|injections| {
+                injections.contains(crate::db::models::TransparentInjection::WebSearch)
+            });
         let media = enabled.media()
-            && security
-                .media_transparent_injection_enabled(&self.principal)
-                .await
-                .unwrap_or(false);
+            && injections.as_ref().is_some_and(|injections| {
+                injections.contains(crate::db::models::TransparentInjection::MediaUnderstanding)
+            });
         let scope = if explicit {
             ReadExposureScope::FULL
         } else {

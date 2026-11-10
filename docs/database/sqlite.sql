@@ -65,8 +65,9 @@ CREATE TABLE api_keys (
     expires_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0, inject_media_generation INTEGER NOT NULL DEFAULT 0, rpm_limit INTEGER CHECK (rpm_limit IS NULL OR rpm_limit > 0), spend_limit_nanos INTEGER
-    CHECK (spend_limit_nanos IS NULL OR spend_limit_nanos > 0));
+, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, rpm_limit INTEGER CHECK (rpm_limit IS NULL OR rpm_limit > 0), spend_limit_nanos INTEGER
+    CHECK (spend_limit_nanos IS NULL OR spend_limit_nanos > 0), transparent_injections TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(transparent_injections) AND json_type(transparent_injections) = 'array'));
 
 CREATE TABLE artifact_download_grants (
     token_hash TEXT PRIMARY KEY,
@@ -1702,11 +1703,15 @@ BEGIN
 END;
 
 CREATE TRIGGER api_keys_boolean_insert BEFORE INSERT ON api_keys
-WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
+WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1))
+  OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1))
+  OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 
 CREATE TRIGGER api_keys_boolean_update BEFORE UPDATE ON api_keys
-WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
+WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1))
+  OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1))
+  OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 
 CREATE TRIGGER inference_run_observations_boolean_insert BEFORE INSERT ON inference_run_observations

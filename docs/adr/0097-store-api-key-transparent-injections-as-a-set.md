@@ -4,7 +4,7 @@ status: accepted
 
 # 以集合保存 API Key 的透明注入选择
 
-API Key 的透明注入选择改为一个注入项集合：存储为 `api_keys.transparent_injections` JSON 字符串数组，Core 以注入项枚举的集合表示，管理 API 以同名数组字段收发，取值为 `web_search`、`media_understanding`、`media_generation`。`inject_media_understanding`、`inject_web_search`、`inject_media_generation` 三列及对应的管理 API 字段删除，不保留别名。透明注入总开关 `transparent_injection_enabled` 仍是独立列：总开关关闭时已选择的注入项保留但不生效（[ADR-0016](0016-gate-advanced-capabilities-and-separate-transparent-injection.md)），它不是注入项。`mcp_access_enabled` 不变。
+API Key 的透明注入选择改为一个注入项集合：存储为 `api_keys.transparent_injections` JSON 字符串数组，Core 以注入项枚举的集合表示，管理 API 以同名数组字段收发，取值为 `web_search`、`media_understanding`、`media_generation`。原先分别控制联网搜索、多模态理解、媒体生成的三个列及对应的管理 API 字段删除，不保留别名。透明注入总开关 `transparent_injection_enabled` 仍是独立列：总开关关闭时已选择的注入项保留但不生效（[ADR-0016](0016-gate-advanced-capabilities-and-separate-transparent-injection.md)），它不是注入项。`mcp_access_enabled` 不变。
 
 逐项一列时，每新增一个注入项都要写双后端 migration、重建 SQLite 的布尔契约触发器、重新导出参考 schema，并修改每条 `api_keys` 读写语句、Core 的 Key 结构体、管理 API 与 WebUI 类型，以及大量逐字段列出 Key 的测试数据；而注入项只是同一概念下的一个取值。改为集合后，新增注入项（例如 [ADR-0096](0096-recall-interaction-chains-through-read-paths.md) 的历史回看）只需新增枚举取值、读取规划、管理面文案与测试。
 

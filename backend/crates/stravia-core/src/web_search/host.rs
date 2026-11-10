@@ -49,11 +49,12 @@ impl SearchSettingsHost for SearchSettings {
 impl PublicSearchHost for SearchHost {
     async fn authorize(&self, principal: &Principal) -> Option<SearchAccess> {
         crate::proxy::security::Security::new(self.0.storage.auth())
-            .authorize_principal_web_search(principal)
+            .effective_injections(principal)
             .await
             .ok()
             .map(|access| SearchAccess {
-                transparent_injection_enabled: access.transparent_injection_enabled,
+                transparent_injection_enabled: access
+                    .contains(crate::db::models::TransparentInjection::WebSearch),
             })
     }
     async fn runner_ready(&self) -> bool {

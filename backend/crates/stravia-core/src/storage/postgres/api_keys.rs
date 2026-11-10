@@ -47,7 +47,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
         let spend_limit_nanos = parse_spend_limit(input.spend_limit.as_deref())?;
         sqlx::query(
-    "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, '')::timestamptz)",
+    "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::timestamptz)",
             )
             .bind(&id)
             .bind(&key)
@@ -56,9 +56,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .bind(spend_limit_nanos)
             .bind(input.mcp_access_enabled)
             .bind(input.transparent_injection_enabled)
-            .bind(input.inject_media_understanding)
-            .bind(input.inject_web_search)
-            .bind(input.inject_media_generation)
+            .bind(sqlx::types::Json(&input.transparent_injections))
             .bind(input.expires_at.as_deref().map(str::trim).unwrap_or(""))
             .execute(&self.pool)
             .await?;
@@ -83,13 +81,9 @@ impl ApiKeyStore for PostgresApiKeyStore {
         let transparent_injection_enabled = input
             .transparent_injection_enabled
             .unwrap_or(current.transparent_injection_enabled);
-        let inject_media_understanding = input
-            .inject_media_understanding
-            .unwrap_or(current.inject_media_understanding);
-        let inject_web_search = input.inject_web_search.unwrap_or(current.inject_web_search);
-        let inject_media_generation = input
-            .inject_media_generation
-            .unwrap_or(current.inject_media_generation);
+        let transparent_injections = input
+            .transparent_injections
+            .unwrap_or(current.transparent_injections);
         let expires_at = input.expires_at.or(current.expires_at);
         let spend_limit_nanos = match input.spend_limit {
             Some(value) => parse_spend_limit(value.as_deref())?,
@@ -97,7 +91,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
         };
 
         sqlx::query(
-    "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, spend_limit_nanos=$4, is_enabled=$5, mcp_access_enabled=$6, transparent_injection_enabled=$7, inject_media_understanding=$8, inject_web_search=$9, inject_media_generation=$10, expires_at=NULLIF($11, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$12",
+    "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, spend_limit_nanos=$4, is_enabled=$5, mcp_access_enabled=$6, transparent_injection_enabled=$7, transparent_injections=$8, expires_at=NULLIF($9, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$10",
             )
             .bind(key)
             .bind(name.trim())
@@ -106,9 +100,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .bind(is_enabled)
             .bind(mcp_access_enabled)
             .bind(transparent_injection_enabled)
-            .bind(inject_media_understanding)
-            .bind(inject_web_search)
-            .bind(inject_media_generation)
+            .bind(sqlx::types::Json(&transparent_injections))
             .bind(expires_at.as_deref().map(str::trim).unwrap_or(""))
             .bind(id)
             .execute(&self.pool)
@@ -185,11 +177,9 @@ impl AuthAccessStore for PostgresAuthAccessStore {
         Option<i32>,
         Option<i64>,
         bool,
-        bool,
-        bool,
-        bool,
+        sqlx::types::Json<TransparentInjectionSet>,
             ),
-            >("SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE token = $1")
+            >("SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, transparent_injections FROM api_keys WHERE token = $1")
             .bind(raw_key)
             .fetch_optional(&self.pool)
             .await?;
@@ -203,9 +193,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections,
             )| ApiKeyAccessRecord {
                 id,
                 name,
@@ -214,9 +202,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections: transparent_injections.into_inner(),
             },
         ))
     }
@@ -232,12 +218,10 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 Option<i32>,
                 Option<i64>,
                 bool,
-                bool,
-                bool,
-                bool,
+                sqlx::types::Json<TransparentInjectionSet>,
             ),
         >(
-            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation FROM api_keys WHERE id = $1",
+            "SELECT id, name, is_enabled, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, rpm_limit, spend_limit_nanos, transparent_injection_enabled, transparent_injections FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -251,9 +235,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections,
             )| ApiKeyAccessRecord {
                 id,
                 name,
@@ -262,9 +244,7 @@ impl AuthAccessStore for PostgresAuthAccessStore {
                 rpm_limit,
                 spend_limit_nanos,
                 transparent_injection_enabled,
-                inject_media_understanding,
-                inject_web_search,
-                inject_media_generation,
+                transparent_injections: transparent_injections.into_inner(),
             },
         ))
     }

@@ -230,7 +230,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         default_thinking_level: None, }).await.unwrap();
         let key = admin.create_api_key(CreateApiKey { key: None, name: "local publication client".into(), rpm_limit: None, expires_at: None, mcp_access_enabled: false, transparent_injection_enabled: false,
             spend_limit: None,
-        inject_web_search: false, inject_media_generation: false, inject_media_understanding: false, model_ids: vec![route.id.into()], }).await.unwrap();
+        transparent_injections: Default::default(), model_ids: vec![route.id.into()], }).await.unwrap();
         sqlx::query("CREATE TRIGGER deny_native_publication BEFORE INSERT ON native_compactions BEGIN SELECT RAISE(ABORT, 'injected registration failure'); END")
             .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -438,9 +438,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
         name: "local ingress WebSocket".into(), rpm_limit: None, expires_at: None,
         mcp_access_enabled: false,
         transparent_injection_enabled: false,
-        inject_web_search: false,
-        inject_media_generation: false,
-        inject_media_understanding: false,
+        transparent_injections: Default::default(),
             spend_limit: None,
         model_ids: vec![route.id.into()], }).await.unwrap();
         let principal = Principal::new(key.id.clone());
@@ -851,9 +849,7 @@ impl Harness {
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
                 spend_limit: None,
-                inject_web_search: false,
-                inject_media_generation: false,
-                inject_media_understanding: false,
+                transparent_injections: Default::default(),
                 model_ids: vec![route.id.into()],
             })
             .await

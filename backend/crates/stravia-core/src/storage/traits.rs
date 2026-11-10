@@ -11,6 +11,8 @@ use crate::db::models::{
     RouteConfig, StatsFilter, StatsOverview, StatsSeries, StatsWindow, UpdateApiKey,
     UpdateProvider, UpdateWebProvider, UpsertOAuthCredential, WebAccessSettings, WebProvider,
 };
+pub use crate::db::models::{TransparentInjection, TransparentInjectionSet};
+
 use crate::pricing::{Amount, CostBasis, CurrencyKind, CustomCurrency, SubscriptionPeriod};
 use crate::provider_models::{
     ModelChangePage, ModelChangeQuery, ModelChangeRecord, NewProviderModelRecord,
@@ -46,9 +48,7 @@ pub struct ApiKeyAccessRecord {
     /// Display-currency nanos; `None` means unlimited.
     pub spend_limit_nanos: Option<i64>,
     pub transparent_injection_enabled: bool,
-    pub inject_media_understanding: bool,
-    pub inject_web_search: bool,
-    pub inject_media_generation: bool,
+    pub transparent_injections: TransparentInjectionSet,
 }
 
 #[derive(Debug, Clone)]

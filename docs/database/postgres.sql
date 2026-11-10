@@ -1319,13 +1319,12 @@ CREATE TABLE public.api_keys (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     mcp_access_enabled boolean DEFAULT false NOT NULL,
     transparent_injection_enabled boolean DEFAULT false NOT NULL,
-    inject_media_understanding boolean DEFAULT false NOT NULL,
-    inject_web_search boolean DEFAULT false NOT NULL,
-    inject_media_generation boolean DEFAULT false NOT NULL,
     rpm_limit integer,
     spend_limit_nanos bigint,
+    transparent_injections jsonb DEFAULT '[]'::jsonb NOT NULL,
     CONSTRAINT api_keys_rpm_limit_check CHECK (((rpm_limit IS NULL) OR (rpm_limit > 0))),
-    CONSTRAINT api_keys_spend_limit_nanos_check CHECK (((spend_limit_nanos IS NULL) OR (spend_limit_nanos > 0)))
+    CONSTRAINT api_keys_spend_limit_nanos_check CHECK (((spend_limit_nanos IS NULL) OR (spend_limit_nanos > 0))),
+    CONSTRAINT api_keys_transparent_injections_check CHECK ((jsonb_typeof(transparent_injections) = 'array'::text))
 );
 
 

@@ -8,7 +8,7 @@
 use axum::http::{HeaderMap, header};
 use chrono::{NaiveDateTime, Utc};
 
-use crate::db::models::RouteConfig;
+use crate::db::models::{RouteConfig, TransparentInjection, TransparentInjectionSet};
 use crate::error::{AccessDenial, AuthFailure, GatewayError};
 use crate::storage::traits::{ApiKeyAccessRecord, AuthAccessStore};
 
@@ -59,9 +59,16 @@ pub(crate) struct AuthenticatedPrincipal {
     pub(crate) spend_limit_nanos: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WebSearchAccessGrant {
-    pub(crate) transparent_injection_enabled: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EffectiveInjections {
+    pub(crate) enabled: bool,
+    selections: TransparentInjectionSet,
+}
+
+impl EffectiveInjections {
+    pub(crate) fn contains(&self, injection: TransparentInjection) -> bool {
+        self.enabled && self.selections.contains(injection)
+    }
 }
 
 pub(crate) struct Security<'a> {
@@ -150,43 +157,16 @@ impl<'a> Security<'a> {
         })
     }
 
-    pub(crate) async fn authorize_principal_web_search(
+    pub(crate) async fn effective_injections(
         &self,
         principal: &stravia_runtime_contract::Principal,
-    ) -> Result<WebSearchAccessGrant, GatewayError> {
+    ) -> Result<EffectiveInjections, GatewayError> {
         let key = self.principal_key(principal).await?;
         validate_key_state(&key)?;
-        Ok(WebSearchAccessGrant {
-            transparent_injection_enabled: key.transparent_injection_enabled
-                && key.inject_web_search,
+        Ok(EffectiveInjections {
+            enabled: key.transparent_injection_enabled,
+            selections: key.transparent_injections,
         })
-    }
-
-    pub(crate) async fn transparent_injection_enabled(
-        &self,
-        principal: &stravia_runtime_contract::Principal,
-    ) -> Result<bool, GatewayError> {
-        let key = self.principal_key(principal).await?;
-        validate_key_state(&key)?;
-        Ok(key.transparent_injection_enabled)
-    }
-
-    pub(crate) async fn media_transparent_injection_enabled(
-        &self,
-        principal: &stravia_runtime_contract::Principal,
-    ) -> Result<bool, GatewayError> {
-        let key = self.principal_key(principal).await?;
-        validate_key_state(&key)?;
-        Ok(key.transparent_injection_enabled && key.inject_media_understanding)
-    }
-
-    pub(crate) async fn generation_transparent_injection_enabled(
-        &self,
-        principal: &stravia_runtime_contract::Principal,
-    ) -> Result<bool, GatewayError> {
-        let key = self.principal_key(principal).await?;
-        validate_key_state(&key)?;
-        Ok(key.transparent_injection_enabled && key.inject_media_generation)
     }
 
     async fn principal_key(
@@ -363,23 +343,25 @@ mod tests {
     async fn web_search_authorization_returns_the_injection_grant() {
         let store = TestStore::valid();
         let grant = Security::new(Some(&store))
-            .authorize_principal_web_search(&Principal::new("key-id"))
+            .effective_injections(&Principal::new("key-id"))
             .await
             .expect("Web Search access");
 
-        assert!(grant.transparent_injection_enabled);
+        assert!(grant.contains(super::TransparentInjection::WebSearch));
     }
 
     #[tokio::test]
     async fn web_search_authorization_uses_selection_only_for_injection() {
         let mut store = TestStore::valid();
-        store.key.as_mut().expect("test key").inject_web_search = false;
+        store.key.as_mut().expect("test key").transparent_injections =
+            super::TransparentInjectionSet::empty();
 
         let grant = Security::new(Some(&store))
-            .authorize_principal_web_search(&Principal::new("key-id"))
+            .effective_injections(&Principal::new("key-id"))
             .await
             .expect("valid principal");
-        assert!(!grant.transparent_injection_enabled);
+        assert!(!grant.contains(super::TransparentInjection::WebSearch));
+        assert!(grant.enabled);
     }
     #[tokio::test]
     async fn capability_model_authorization_uses_platform_gate_not_direct_binding() {
@@ -397,16 +379,16 @@ mod tests {
     #[tokio::test]
     async fn media_injection_requires_the_master_and_media_selection() {
         let mut store = TestStore::valid();
-        store
-            .key
-            .as_mut()
-            .expect("test key")
-            .inject_media_understanding = true;
+        store.key.as_mut().expect("test key").transparent_injections =
+            super::TransparentInjectionSet::from_items([
+                super::TransparentInjection::MediaUnderstanding,
+            ]);
         assert!(
             Security::new(Some(&store))
-                .media_transparent_injection_enabled(&Principal::new("key-id"))
+                .effective_injections(&Principal::new("key-id"))
                 .await
                 .expect("valid principal")
+                .contains(super::TransparentInjection::MediaUnderstanding)
         );
 
         store
@@ -416,9 +398,10 @@ mod tests {
             .transparent_injection_enabled = false;
         assert!(
             !Security::new(Some(&store))
-                .media_transparent_injection_enabled(&Principal::new("key-id"))
+                .effective_injections(&Principal::new("key-id"))
                 .await
                 .expect("valid principal")
+                .contains(super::TransparentInjection::MediaUnderstanding)
         );
     }
     struct TestStore {
@@ -439,10 +422,10 @@ mod tests {
                     expires_at: None,
                     rpm_limit: None,
                     spend_limit_nanos: None,
-                    inject_media_understanding: false,
                     transparent_injection_enabled: true,
-                    inject_web_search: true,
-                    inject_media_generation: false,
+                    transparent_injections: super::TransparentInjectionSet::from_items([
+                        super::TransparentInjection::WebSearch,
+                    ]),
                 }),
                 binding: true,
                 visible_model_ids: vec!["protected-model-id".into()],

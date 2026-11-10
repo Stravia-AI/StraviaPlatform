@@ -9,8 +9,9 @@ use crate::db::models::{
     ApiKey, ApiKeyStats, ApiKeyWithBindings, CreateApiKey, CreateProviderRecord,
     DEFAULT_FIRST_TOKEN_TIMEOUT_MS, DEFAULT_TARGET_COOLDOWN_MS, DEFAULT_TARGET_PRIORITY,
     DEFAULT_TARGET_RETRY_BUDGET, ModelStats, OAuthCredential, Provider, ProviderCredentialVersion,
-    ProviderStats, PutRoute, RouteConfig, StatsOverview, StatsSeries, TargetConfig, UpdateApiKey,
-    UpdateProvider, UpsertOAuthCredential, is_valid_provider_auth_mode,
+    ProviderStats, PutRoute, RouteConfig, StatsOverview, StatsSeries, TargetConfig,
+    TransparentInjectionSet, UpdateApiKey, UpdateProvider, UpsertOAuthCredential,
+    is_valid_provider_auth_mode,
 };
 use crate::plugin::PluginStore;
 use crate::storage::traits::{
