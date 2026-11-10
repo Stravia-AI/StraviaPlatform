@@ -881,9 +881,10 @@ mod transparent_injection_tests {
             serde_json::to_value(&set).expect("canonical set JSON"),
             serde_json::json!(["web_search", "media_understanding", "media_generation"])
         );
-        let round_trip =
-            serde_json::from_str::<TransparentInjectionSet>(&serde_json::to_string(&set).expect("set JSON"))
-                .expect("round trip");
+        let round_trip = serde_json::from_str::<TransparentInjectionSet>(
+            &serde_json::to_string(&set).expect("set JSON"),
+        )
+        .expect("round trip");
         assert_eq!(round_trip, set);
     }
 
@@ -910,7 +911,8 @@ mod transparent_injection_tests {
             let set = TransparentInjectionSet::from_items([item]);
             assert!(set.contains(item));
             let json = serde_json::to_string(&set).expect("serialize selection");
-            let decoded: TransparentInjectionSet = serde_json::from_str(&json).expect("parse selection");
+            let decoded: TransparentInjectionSet =
+                serde_json::from_str(&json).expect("parse selection");
             assert_eq!(decoded, set);
         }
     }
