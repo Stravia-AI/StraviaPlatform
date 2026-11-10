@@ -286,9 +286,7 @@ test('real management persists root and destination RPM limits and queue setting
     name: 'RPM browser key',
     mcp_access_enabled: false,
     transparent_injection_enabled: false,
-    inject_web_search: false,
-    inject_media_understanding: false,
-    inject_media_generation: false,
+    transparent_injections: [],
     model_ids: [],
   })
   const editor = page.locator('[data-slot="sheet-content"]')

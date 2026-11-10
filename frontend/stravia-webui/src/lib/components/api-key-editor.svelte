@@ -15,6 +15,7 @@ import type { CapabilityStatus } from '#lib/capability-status.js'
 import { displayCurrency, formatAmount } from '#lib/money.js'
 
 import type { ApiKey, Route } from '#lib/types.js'
+import type { TransparentInjection } from '#lib/types/api-key.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
@@ -40,9 +41,7 @@ interface KeyForm {
   enabled: boolean
   mcpAccessEnabled: boolean
   transparentInjectionEnabled: boolean
-  injectWebSearch: boolean
-  injectMediaUnderstanding: boolean
-  injectMediaGeneration: boolean
+  transparentInjections: TransparentInjection[]
   modelIds: string[]
 }
 
@@ -103,9 +102,7 @@ function keyForm(source: ApiKey | undefined = apiKey): KeyForm {
     enabled: source?.is_enabled ?? true,
     mcpAccessEnabled: source?.mcp_access_enabled ?? false,
     transparentInjectionEnabled: source?.transparent_injection_enabled ?? false,
-    injectWebSearch: source?.inject_web_search ?? false,
-    injectMediaUnderstanding: source?.inject_media_understanding ?? false,
-    injectMediaGeneration: source?.inject_media_generation ?? false,
+    transparentInjections: [...(source?.transparent_injections ?? [])],
     modelIds: source?.model_ids ?? [],
   }
 }
@@ -115,6 +112,14 @@ function toDateTimeLocal(value: string): string {
   if (Number.isNaN(date.valueOf())) return ''
   const offset = date.getTimezoneOffset() * 60_000
   return new Date(date.valueOf() - offset).toISOString().slice(0, 16)
+}
+
+const injectionOrder: TransparentInjection[] = ['web_search', 'media_understanding', 'media_generation']
+
+function setInjectionChecked(injection: TransparentInjection, checked: boolean): void {
+  form.transparentInjections = injectionOrder.filter((item) =>
+    item === injection ? checked : form.transparentInjections.includes(item),
+  )
 }
 
 function setModelChecked(modelId: string, checked: boolean): void {
@@ -195,9 +200,7 @@ async function saveKey(): Promise<void> {
       spend_limit: form.spendLimit.trim() || null,
       mcp_access_enabled: form.mcpAccessEnabled,
       transparent_injection_enabled: form.transparentInjectionEnabled,
-      inject_web_search: form.injectWebSearch,
-      inject_media_understanding: form.injectMediaUnderstanding,
-      inject_media_generation: form.injectMediaGeneration,
+      transparent_injections: injectionOrder.filter((item) => form.transparentInjections.includes(item)),
       expires_at: form.expiresAt ? new Date(form.expiresAt).toISOString() : undefined,
       model_ids: form.modelIds,
     }
@@ -456,7 +459,8 @@ async function saveKey(): Promise<void> {
           <Switch
             id="api-key-inject-media-understanding"
             aria-labelledby={titleId}
-            bind:checked={form.injectMediaUnderstanding}
+            checked={form.transparentInjections.includes('media_understanding')}
+            onCheckedChange={(checked: boolean) => setInjectionChecked('media_understanding', checked)}
             disabled={mediaUnderstandingStatus !== 'enabled'}
             aria-busy={mediaUnderstandingStatus === 'loading'} />
         {/snippet}
@@ -467,7 +471,8 @@ async function saveKey(): Promise<void> {
           <Switch
             id="api-key-inject-media-generation"
             aria-labelledby={titleId}
-            bind:checked={form.injectMediaGeneration}
+            checked={form.transparentInjections.includes('media_generation')}
+            onCheckedChange={(checked: boolean) => setInjectionChecked('media_generation', checked)}
             disabled={mediaGenerationStatus !== 'enabled'}
             aria-busy={mediaGenerationStatus === 'loading'} />
         {/snippet}
@@ -478,7 +483,8 @@ async function saveKey(): Promise<void> {
           <Switch
             id="api-key-inject-web-search"
             aria-labelledby={titleId}
-            bind:checked={form.injectWebSearch}
+            checked={form.transparentInjections.includes('web_search')}
+            onCheckedChange={(checked: boolean) => setInjectionChecked('web_search', checked)}
             disabled={webSearchStatus !== 'enabled'}
             aria-busy={webSearchStatus === 'loading'} />
         {/snippet}
