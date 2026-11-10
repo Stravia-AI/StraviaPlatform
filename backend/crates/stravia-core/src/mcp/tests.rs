@@ -672,6 +672,34 @@ fn registry_rejects_non_object_schemas() {
 }
 
 #[tokio::test]
+async fn mcp_tools_list_does_not_advertise_history_for_history_key() {
+    let app = test_app().await;
+    app.gateway
+        .admin()
+        .update_api_key(
+            &app.key_id,
+            serde_json::from_value(json!({
+                "mcp_access_enabled": true,
+                "transparent_injection_enabled": true,
+                "transparent_injections": ["history_recall"]
+            }))
+            .expect("key update"),
+        )
+        .await
+        .expect("enable MCP and History Recall");
+    let client = connect(&app).await;
+    let listed = client.list_tools(None).await.expect("tools/list");
+    let reader = listed
+        .tools
+        .iter()
+        .find(|tool| tool.name == "StraviaRead")
+        .expect("MCP reader");
+    let advertised = serde_json::to_string(reader).expect("reader description and schema");
+    assert!(!advertised.contains("stravia://history/"), "{advertised}");
+    assert!(!advertised.contains("History Recall"), "{advertised}");
+}
+
+#[tokio::test]
 async fn official_client_discovers_lists_and_calls_tools() {
     let app = test_app().await;
     let http = reqwest::Client::new();

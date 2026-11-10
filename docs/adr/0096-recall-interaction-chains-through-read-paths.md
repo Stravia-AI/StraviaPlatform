@@ -16,7 +16,7 @@ status: accepted
 
 ## 路径与检索
 
-路径分四级：`stravia://history/` 列出链路，`…/history/<root-id>/` 列出链路内的 Interaction，`…/<root-id>/<interaction-id>` 是转录文件，`…/<interaction-id>/tools/<n>` 是第 n 次工具调用的完整参数与结果。身份全部复用既有 28 位 Interaction id。路径沿用 [ADR-0091](0091-read-paths-with-colon-selectors-and-plain-fields.md) 的 `:` 选择器：文件接受行范围与 `cursor`，目录与检索结果只接受 `cursor`。本决定局部扩展 ADR-0091：`cursor` 不再只对 Artifact 有效，`question` 在历史路径上承载检索文本，与 `stravia://search` 中「`question` 是搜索文本」的语义一致。
+路径分四级：`stravia://history/` 列出链路，`…/history/<root-id>/` 列出链路内的 Interaction，`…/<root-id>/<interaction-id>` 是转录文件，`…/<interaction-id>/tools/<n>` 是第 n 次工具调用的完整参数与结果。身份全部复用 Observation 既有 id：Interaction 用其 id，链路用 Observation 的链路根 id（关联 Generation Chain 时为根节点 id，否则为首个 Interaction 的 id）。路径沿用 [ADR-0091](0091-read-paths-with-colon-selectors-and-plain-fields.md) 的 `:` 选择器：文件接受行范围与 `cursor`，目录与检索结果只接受 `cursor`。本决定局部扩展 ADR-0091：`cursor` 不再只对 Artifact 有效，`question` 在历史路径上承载检索文本，与 `stravia://search` 中「`question` 是搜索文本」的语义一致。
 
 转录按 Observation 事件顺序渲染且只追加，可变状态只出现在目录列表中，因此已完成 Interaction 的行号稳定，检索命中可以长期指向同一行范围。默认省略可读思考；工具结果在转录中只给开头部分与完整结果路径。
 

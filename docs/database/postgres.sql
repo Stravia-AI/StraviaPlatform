@@ -4651,6 +4651,13 @@ CREATE INDEX interaction_observations_parent_idx ON public.interaction_observati
 
 
 --
+-- Name: interaction_observations_principal_activity_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX interaction_observations_principal_activity_idx ON public.interaction_observations USING btree (principal, last_active_at DESC, id);
+
+
+--
 -- Name: interaction_observations_window_idx; Type: INDEX; Schema: public; Owner: -
 --
 

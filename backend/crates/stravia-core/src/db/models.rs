@@ -35,6 +35,7 @@ transparent_injections! {
     WebSearch => "web_search",
     MediaUnderstanding => "media_understanding",
     MediaGeneration => "media_generation",
+    HistoryRecall => "history_recall",
 }
 
 impl TransparentInjection {
@@ -870,7 +871,7 @@ mod transparent_injection_tests {
     #[test]
     fn arbitrary_input_order_serializes_in_canonical_order() {
         let set = serde_json::from_str::<TransparentInjectionSet>(
-            r#"["media_generation","web_search","media_understanding"]"#,
+            r#"["history_recall","media_generation","web_search","media_understanding"]"#,
         )
         .expect("valid injection set");
         assert_eq!(
@@ -879,7 +880,12 @@ mod transparent_injection_tests {
         );
         assert_eq!(
             serde_json::to_value(&set).expect("canonical set JSON"),
-            serde_json::json!(["web_search", "media_understanding", "media_generation"])
+            serde_json::json!([
+                "web_search",
+                "media_understanding",
+                "media_generation",
+                "history_recall"
+            ])
         );
         let round_trip = serde_json::from_str::<TransparentInjectionSet>(
             &serde_json::to_string(&set).expect("set JSON"),
@@ -891,7 +897,7 @@ mod transparent_injection_tests {
     #[test]
     fn unknown_duplicate_and_non_array_values_are_rejected_with_allowed_values() {
         for (case, payload) in [
-            ("unknown", r#"["web_search","history_recall"]"#),
+            ("unknown", r#"["web_search","network_access"]"#),
             ("duplicate", r#"["web_search","web_search"]"#),
             ("non-array", r#"{"web_search":true}"#),
         ] {

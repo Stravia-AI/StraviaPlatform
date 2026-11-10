@@ -475,6 +475,21 @@ async function saveKey(): Promise<void> {
             aria-busy={mediaGenerationStatus === 'loading'} />
         {/snippet}
       </SettingRow>
+      <SettingRow
+        title={m.api_key_editor_history_recall()}
+        description={m.api_key_editor_history_recall_risk()}
+        hint={m.api_key_editor_history_recall_help()}
+        layout="inline"
+        nested>
+        {#snippet children({ titleId, descriptionId })}
+          <Switch
+            id="api-key-inject-history-recall"
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
+            checked={form.transparentInjections.includes('history_recall')}
+            onCheckedChange={(checked: boolean) => setInjectionChecked('history_recall', checked)} />
+        {/snippet}
+      </SettingRow>
       <SettingRow title={m.api_key_editor_web_search()} layout="inline" nested>
         {#snippet note()}{@render capabilityNote(webSearchStatus, 'web-search')}{/snippet}
         {#snippet children({ titleId })}

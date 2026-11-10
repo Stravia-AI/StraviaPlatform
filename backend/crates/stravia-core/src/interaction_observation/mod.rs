@@ -13,6 +13,9 @@ mod manifest_index;
 mod query;
 #[cfg(test)]
 mod read_tests;
+mod recall;
+#[cfg(test)]
+mod recall_tests;
 mod redaction;
 mod retention;
 pub(crate) mod scope;
@@ -27,6 +30,7 @@ mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
 pub(crate) use bundle::hex;
+pub(crate) use recall::*;
 pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
 pub(crate) use trace::optimize_trace_directory;
 pub use types::*;

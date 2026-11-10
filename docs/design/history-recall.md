@@ -2,11 +2,11 @@
 
 历史回看（History Recall）让平台对话中的模型通过 Inference Run 内的 StraviaRead，只读地浏览、读取并检索同一 API Key 过去的对话。它只经 API Key 的透明注入提供，需要在 Key 上单独选中「历史回看」，默认不选；显式声明的 StraviaRead、MCP 与内部 Agent 都不提供（第 6 节）。内容取自 Interaction Observation 的交互链路，不读取 Generation Chain，也不引入 Session。产品边界与已否决的方案见 [ADR-0096](../adr/0096-recall-interaction-chains-through-read-paths.md)，术语见 [GLOSSARY.md](../../GLOSSARY.md) 的「交互链路」「历史回看」「交互转录」。
 
-> 状态：设计已确认，尚未实现。浏览与读取（P1）、检索（P2）按第 10 节分期交付。
+> 状态：浏览与读取（P1）已实现；检索（P2）尚未实现，期间历史路径上的 `question` 返回「检索尚不可用」的错误。分期见第 10 节。
 
 ## 1. 来源与范围
 
-- **单位**：交互链路即一段对话，一个 Connect Client Interaction 即其中一轮。路径身份直接使用既有的 28 位小写 Interaction id；链路以根 Interaction 的 id（`root_id`）标识。
+- **单位**：交互链路即一段对话，一个 Connect Client Interaction 即其中一轮。路径身份直接使用 Observation 既有的 id：一轮用其 Interaction id；链路用 Observation 记录的链路根 id（`root_id`），首轮已关联 Generation Chain 时为其根节点 id，否则为首个 Interaction 的 id，与请求记录管理面按同一根分组。新 id 为 28 位小写字母；路径段按 `[A-Za-z0-9_-]{1,64}` 解析，使升级前格式的 id 在保留期内仍可读，不符合的段在解析时报错，符合但不存在的 id 返回统一的不可用错误。
 - **成员**：沿用词汇表的交互链路成员规则：最终失败且从未交付客户端可见输出的 Interaction 不列出。经 MCP `tools/call` 直接调用平台工具而形成的观测记录（Run 的入口协议为 `mcp`）不是对话，同样不列出。
 - **内容**：用户输入、可见回答、工具调用参数与结果、观测缺口和 Run 失败。可读思考默认不出现；system 指令与完整请求本来就不在 Observation 中。
 - **时间范围**：等于历史保留天数（`log_retention_days`）。到期清理和「清除历史记录」删除的内容立即不可见，也不可检索。
@@ -85,7 +85,7 @@ test result: ok. 12 passed……
 
 - 按 Observation 事件序号渲染。`user_input_recorded` 渲染为 `## user`；可见通道上已完成的 `client_visible_content` 渲染为 `## assistant`；`client_tool_handoff` 与 `platform_tool_started` 渲染为 tool call；`client_tool_result` 与 `platform_tool_finished` 渲染为 tool result；`observation_gap` 与 `request_failed` 渲染为引用行。思考、用量、尝试和压缩等其余事件不渲染。
 - 事件所属 Run 与上一条已渲染事件不同时，先写一行 `--- run · <模型展示名> · <开始时间>`。
-- tool call 与 tool result 只内联前 20 行、且不超过 2 KiB，随后总是写 `(full: …/tools/<n>)`。工具结果在其事件出现的位置渲染，不回填到调用处。结果的 call id 找不到对应调用时，写 `### tool result (unmatched call)`。
+- tool call 与 tool result 只内联前 20 行、且不超过 2 KiB，随后总是写 `(full: …/tools/<n>)`。工具结果在其事件出现的位置渲染，不回填到调用处。结果的 call id 找不到对应调用时，写 `### tool result (unmatched call) · <status>`，这类结果没有工具文件，因此不写 `(full: …)`。内联内容超过上限时，在 `(full: …)` 之前写一行 `… (truncated)`；未匹配结果只有这一行说明内容被截断。
 - 图片、音频等非文本部分写成 `[image]`、`[audio]` 这样的占位行。
 - 父 Interaction 被清理后，`parent` 行写 `none`。行数不变。
 
@@ -197,7 +197,7 @@ test result: ok. 12 passed……
 - **执行时校验**：执行范围不含历史时，历史路径一律返回 `History Recall is only available through this API key's transparent injection.`，MCP 与显式声明都适用这一规则。Key 设置变更从下一次请求起生效。
 - **范围**：只读取当前 API Key 对应 Principal 的交互链路，不跨 Key。
 - **描述与 schema**：只有当本次暴露包含历史范围时，工具描述才加入历史路径说明与「先检索、再读行范围」的用法，`question` 的说明才包含历史检索语义。
-- **风险提示**：Key 编辑器在该选项旁说明：共用 Key 的使用者会互相看到对话，回看时限等于历史保留天数，回看内容属于不可信输入。取消该选项只停止历史回看，不影响其他注入工具。
+- **风险提示**：Key 编辑器在该选项旁常驻一句风险：共用 Key 的使用者会互相看到对话。`?` 提示说明回看时限等于历史保留天数，并说明过去的网页和工具输出会一并返回、其中的指令可能影响模型（回看内容属于不可信输入）。取消该选项只停止历史回看，不影响其他注入工具。
 
 ## 7. 凭据
 
@@ -233,3 +233,10 @@ Observation 保存原文。所有历史输出在离开 Core 前，用所属 Prin
 | P2 检索 | 分词器、索引表、索引任务、查询、排序、摘要、局限说明 | 分词器单测；两个后端对同一中、英、代码混合语料返回相同结果；清理后立即无命中；索引滞后可见；30 至 50 条真实查询的 recall@5，并对比 FTS5 trigram 方案 |
 
 性能验收在实现阶段测量，并记录数据规模与构建模式：按 Principal 列链路、渲染长 Interaction、检索延迟，以及索引体积相对 Observation 正文的比例。不预设结论。
+
+P1 实测均为隔离合成数据上的单次测量，只说明量级与增长方式，不代表生产延迟：
+
+- **建索引**：0050 在 200,000 条 Interaction、100 个 Principal 的窄表上构建索引，SQLite 3.53.3（`synchronous=FULL`）用 95.8 ms，PostgreSQL 16.15（`fsync`、`synchronous_commit` 开启）用 252.7 ms。
+- **根目录**：单个 Principal 在保留期内有 20,000 / 200,000 条 Interaction（每链 5 条，另有一条 1,000 成员的链；5% 失败且无输出）。计数加首页，SQLite 为 22 + 88 ms / 244 + 986 ms，PostgreSQL（JIT 关闭）为 24 + 45 ms / 335 + 502 ms；末页与首页相当。链路聚合要扫描该 Principal 全部候选行，耗时随其保留期内的 Interaction 数线性增长。
+- **链路目录**：同一 200,000 条背景下读取 1,000 成员的链，计数加一页，SQLite 为 3.0 + 3.1 ms，PostgreSQL 为 54 + 62 ms。PostgreSQL 的成员判定仍扫描该 Principal 的全部 Run，会随总量增长。
+- **长转录**（Rust test 非优化调试构建，SQLite）：按 `next_path` 顺序翻页，每页 5–8 ms，与转录长度无关。`:-K` 与靠后的行范围要从头渲染到目标位置：2,000 次工具调用、74,008 行时，`:-1` 用 1.4 s，第 37,004 行起的 20 行用 356 ms；读取工具文件用 1.2 ms。

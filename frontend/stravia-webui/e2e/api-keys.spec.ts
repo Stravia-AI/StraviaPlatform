@@ -92,6 +92,10 @@ test('API Key editor preserves disabled transparent injection selections', async
   const mediaSelection = page.locator('#api-key-inject-media-understanding')
   const generationSelection = page.locator('#api-key-inject-media-generation')
   const searchSelection = page.locator('#api-key-inject-web-search')
+  const historySelection = page.locator('#api-key-inject-history-recall')
+  await expect(historySelection).toBeEnabled()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'false')
+  await historySelection.click()
   await expect(mediaSelection).toHaveAttribute('aria-checked', 'true')
   await expect(generationSelection).toHaveAttribute('aria-checked', 'true')
   await expect(searchSelection).toHaveAttribute('aria-checked', 'true')
@@ -102,11 +106,17 @@ test('API Key editor preserves disabled transparent injection selections', async
     page.getByRole('link', { name: 'Turn on this feature in Advanced Features before Stravia can expose it.' }),
   ).toHaveCount(3)
   await page.locator('#api-key-transparent-injection').click()
+  await expect(historySelection).toBeHidden()
   await page.getByRole('button', { name: 'Save API Key' }).click()
 
-  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation'])
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
   expect(persistedKey.transparent_injection_enabled).toBe(false)
-  expect(persistedKey.transparent_injections).toEqual(['web_search', 'media_understanding', 'media_generation'])
+  expect(persistedKey.transparent_injections).toEqual([
+    'web_search',
+    'media_understanding',
+    'media_generation',
+    'history_recall',
+  ])
   await expect(editor).toBeHidden()
   await expect(page).toHaveURL(/\/api-keys$/)
   await page.reload()
@@ -116,6 +126,15 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(page.locator('#api-key-inject-media-understanding')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-inject-media-generation')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-inject-web-search')).toHaveAttribute('aria-checked', 'true')
+  await expect(historySelection).toBeEnabled()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'true')
+  await page.getByRole('button', { name: 'Save API Key' }).click()
+  await expect(editor).toBeHidden()
+  expect(persistedKey.transparent_injection_enabled).toBe(true)
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
+  await page.reload()
+  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'true')
 })
 
 test('API Key editor saves injection selections in canonical order', async ({ page }) => {
@@ -170,24 +189,34 @@ test('API Key editor saves injection selections in canonical order', async ({ pa
   const mediaSelection = editor.locator('#api-key-inject-media-understanding')
   const generationSelection = editor.locator('#api-key-inject-media-generation')
   const searchSelection = editor.locator('#api-key-inject-web-search')
+  const historySelection = editor.locator('#api-key-inject-history-recall')
+  await expect(historySelection).toBeEnabled()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'false')
   await expect(mediaSelection).toBeEnabled()
   await expect(generationSelection).toBeEnabled()
   await expect(searchSelection).toBeEnabled()
   await expect(mediaSelection).toHaveAttribute('aria-checked', 'false')
   await expect(generationSelection).toHaveAttribute('aria-checked', 'false')
   await expect(searchSelection).toHaveAttribute('aria-checked', 'false')
+  await historySelection.click()
   await generationSelection.click()
+  await mediaSelection.click()
   await searchSelection.click()
   await editor.getByRole('button', { name: 'Save API Key' }).click()
   await expect(editor).toBeHidden()
-  expect(submittedInjections).toEqual(['web_search', 'media_generation'])
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
 
   await page.reload()
   await page.getByRole('row').filter({ hasText: 'Selection client' }).getByRole('cell').nth(1).click()
   await expect(editor.locator('#api-key-transparent-injection')).toHaveAttribute('aria-checked', 'true')
-  await expect(mediaSelection).toHaveAttribute('aria-checked', 'false')
+  await expect(mediaSelection).toHaveAttribute('aria-checked', 'true')
   await expect(generationSelection).toHaveAttribute('aria-checked', 'true')
   await expect(searchSelection).toHaveAttribute('aria-checked', 'true')
+  await expect(historySelection).toHaveAttribute('aria-checked', 'true')
+  await historySelection.click()
+  await editor.getByRole('button', { name: 'Save API Key' }).click()
+  await expect(editor).toBeHidden()
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation'])
 })
 
 test('API Key editor keeps optional help in tooltips and required scope visible at every width', async ({ page }) => {
@@ -447,6 +476,65 @@ async function mockLayoutKey(page: Page, update?: (route: Route) => Promise<void
       },
     }),
   )
+}
+
+for (const locale of ['en-US', 'zh-CN'] as const) {
+  test(`history recall remains readable and available when platform capabilities are unavailable (${locale}, 390px)`, async ({
+    page,
+  }) => {
+    await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await mockLayoutKey(page)
+    for (const endpoint of ['web-search/config', 'media-understanding', 'media-generation/config']) {
+      await page.route(`**/api/v1/${endpoint}`, (route) => route.fulfill({ status: 503 }))
+    }
+    await page.goto('/api-keys/key-layout')
+    await expect(page.locator('html')).toHaveAttribute('lang', locale)
+    const history = page.locator('#api-key-inject-history-recall')
+    await history.scrollIntoViewIfNeeded()
+    await expect(history).toBeVisible()
+    await expect(history).toBeEnabled()
+    await expect(history).toHaveAttribute('aria-checked', 'false')
+    if (locale === 'zh-CN') {
+      await expect(page.getByRole('switch', { name: '历史回看', exact: true })).toBeVisible()
+    }
+    const descriptionId = await history.getAttribute('aria-describedby')
+    expect(descriptionId).toBeTruthy()
+    const description = page.locator(`[id="${descriptionId}"]`)
+    await description.scrollIntoViewIfNeeded()
+    await expect(description).toBeVisible()
+    await expect(description).toContainText(locale === 'zh-CN' ? /[\u4e00-\u9fff]/ : /[a-zA-Z]/)
+    expect(
+      await description.evaluate((element) => {
+        const style = getComputedStyle(element)
+        const range = document.createRange()
+        range.selectNodeContents(element)
+        const bounds = element.getBoundingClientRect()
+        let horizontallyVisible = bounds.left >= 0 && bounds.right <= window.innerWidth
+        for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+          const parentStyle = getComputedStyle(parent)
+          if (parentStyle.overflowX !== 'visible') {
+            const parentBounds = parent.getBoundingClientRect()
+            horizontallyVisible &&= bounds.left >= parentBounds.left - 1 && bounds.right <= parentBounds.right + 1
+          }
+        }
+        const textFits = [...range.getClientRects()].every(
+          (rect) => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.bottom <= bounds.bottom + 1,
+        )
+        return (
+          horizontallyVisible &&
+          textFits &&
+          element.scrollWidth <= element.clientWidth &&
+          element.scrollHeight <= element.clientHeight &&
+          style.textOverflow !== 'ellipsis' &&
+          style.getPropertyValue('-webkit-line-clamp') === 'none'
+        )
+      }),
+    ).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await history.click()
+    await expect(history).toHaveAttribute('aria-checked', 'true')
+  })
 }
 
 const editorControlIds = (scope: Locator) =>

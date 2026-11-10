@@ -59,6 +59,11 @@ impl HookRuntime {
                     && !should_skip_for_partial(&session.descriptor, &completeness)
             })
             .then(|| Arc::new(ContextSnapshot::from_request(request, completeness.clone())));
+        let read_declared = request
+            .tools
+            .iter()
+            .flatten()
+            .any(|tool| tool.name == "StraviaRead");
         Ok(InferenceRun {
             cancellation: context.cancellation.clone(),
             context,
@@ -72,16 +77,12 @@ impl HookRuntime {
             tools: self.tools.clone(),
             exposed_tools: HashMap::new(),
             exposed_tool_specs: HashMap::new(),
-            read_scope: if request
-                .tools
-                .iter()
-                .flatten()
-                .any(|tool| tool.name == "StraviaRead")
-            {
+            read_scope: if read_declared {
                 ReadExposureScope::FULL
             } else {
                 ReadExposureScope::NONE
             },
+            read_declared,
             skips: Vec::new(),
             stream_leg_open: false,
         })
@@ -108,6 +109,7 @@ pub(crate) struct InferenceRun {
     exposed_tools: HashMap<String, ToolId>,
     exposed_tool_specs: HashMap<String, ToolSpec>,
     read_scope: ReadExposureScope,
+    read_declared: bool,
     skips: Vec<HookSkip>,
     stream_leg_open: bool,
 }
@@ -223,6 +225,7 @@ impl InferenceRun {
                     .as_deref()
                     .expect("Request consumer has a snapshot"),
                 read_scope: self.read_scope,
+                read_declared: self.read_declared,
                 current: &hook_view,
                 input_start: self.processed_input_items,
                 context: self

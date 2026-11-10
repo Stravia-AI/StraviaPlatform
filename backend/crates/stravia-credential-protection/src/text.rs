@@ -1,12 +1,18 @@
 //! The readable canonical surface. Protocol identities and opaque payloads never enter it.
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
 };
 
 use serde_json::Value;
 
-use super::{RedactionError, marker, store::Mapping, strength};
+use super::{
+    RedactionError, marker,
+    store::{Mapping, MappingStore},
+    strength,
+};
+use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::{
     AiItem, AiRequest, AiResponse, ContentBlock, CustomTool, DocumentSource, EmbeddingInput,
     MessageContent, NamespaceMember, NativeTool, ResponseFormat, TOOL_RESULT_CONTENT_KIND_META,
@@ -112,6 +118,63 @@ pub(super) fn active(mapping: &Mapping) -> bool {
     marker::valid_reference(&mapping.reference)
 }
 
+/// 当前主体的有效凭据映射快照，用于在历史文本离开 Core 前替换已知秘密。
+/// 只保存已有映射，不检测或登记新秘密，也不发布映射或记录追踪。
+/// 读边界可能一次处理数千段文本，候选顺序只在这里准备一次。
+pub struct KnownSecrets {
+    entries: Vec<(Mapping, bool)>,
+}
+
+impl KnownSecrets {
+    /// 输入是映射存储与要回看历史的 Principal；只读取 `store.active(principal)`。
+    /// 回看是读边界，替换更多已知秘密更安全：不读取可逆脱敏总开关或禁用规则，
+    /// 只跳过标记无效或秘密为空的映射；不检测、不登记、不发布，也不写追踪。
+    pub async fn load(
+        store: &dyn MappingStore,
+        principal: &Principal,
+    ) -> Result<Self, RedactionError> {
+        let mut entries: Vec<_> = store
+            .active(principal)
+            .await?
+            .into_iter()
+            .filter(|mapping| active(mapping) && !mapping.secret.is_empty())
+            .map(|mapping| {
+                let weak = strength::is_weak(&mapping.secret);
+                (mapping, weak)
+            })
+            .collect();
+        entries.sort_by(|(a, _), (b, _)| candidate_order((&a.secret, a), (&b.secret, b)));
+        Ok(Self { entries })
+    }
+
+    /// 输入是任意历史纯文本，输出把已知秘密换成该映射的凭据标记。
+    /// 重合时优先最长秘密，弱秘密只在词边界命中；已有标记是协议原子，不嵌套或改写。
+    /// 被替换的秘密含 k 个 LF 时，标记后追加 k 个 LF，使输出的 LF 数与输入相同。
+    /// 无命中时返回 `Cow::Borrowed`，不排序也不分配。
+    pub fn replace<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if self.entries.is_empty() {
+            return Cow::Borrowed(text);
+        }
+        replace_with(
+            text,
+            false,
+            true,
+            |text, position| {
+                self.entries
+                    .iter()
+                    .find(|(mapping, weak)| matches_at(text, position, &mapping.secret, *weak))
+                    .map(|(mapping, _)| mapping)
+            },
+            |_| {},
+        )
+    }
+
+    /// 快照是否没有可替换的有效秘密；此时 `replace` 直接借用输入。
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 struct Candidate<'a> {
     mapping: &'a Mapping,
     /// 被查找的字面值：出站是秘密，还原是占位符。
@@ -155,27 +218,30 @@ impl<'a> Candidates<'a> {
                 weak: !restore && strength::is_weak(&mapping.secret),
             })
             .collect();
-        entries.sort_by(|a, b| {
-            b.needle
-                .len()
-                .cmp(&a.needle.len())
-                .then_with(|| a.needle.cmp(b.needle))
-                .then_with(|| a.mapping.reference.cmp(&b.mapping.reference))
-        });
+        entries.sort_by(|a, b| candidate_order((a.needle, a.mapping), (b.needle, b.mapping)));
         Self { restore, entries }
     }
 
     fn find(&self, text: &str, position: usize) -> Option<&Candidate<'a>> {
-        self.entries.iter().find(|candidate| {
-            text[position..].starts_with(candidate.needle)
-                && (!candidate.weak
-                    || strength::at_word_boundary(
-                        text,
-                        position,
-                        position + candidate.needle.len(),
-                    ))
-        })
+        self.entries
+            .iter()
+            .find(|candidate| matches_at(text, position, candidate.needle, candidate.weak))
     }
+}
+
+/// 候选字面值的查找顺序：重合时最长者优先，其余按字面值与标记排序，使替换结果确定。
+/// 出站、还原与回看替换共用这一顺序。
+fn candidate_order((a, a_mapping): (&str, &Mapping), (b, b_mapping): (&str, &Mapping)) -> Ordering {
+    b.len()
+        .cmp(&a.len())
+        .then_with(|| a.cmp(b))
+        .then_with(|| a_mapping.reference.cmp(&b_mapping.reference))
+}
+
+/// 字面值在 `position` 处命中；弱秘密还须落在词边界，见 [`strength`]。
+fn matches_at(text: &str, position: usize, needle: &str, weak: bool) -> bool {
+    text[position..].starts_with(needle)
+        && (!weak || strength::at_word_boundary(text, position, position + needle.len()))
 }
 
 /// Single pass over original bytes: inserted secrets/references are never scanned again.
@@ -184,10 +250,34 @@ pub(super) fn replace<'a>(
     candidates: &Candidates<'_>,
     used: &mut BTreeSet<String>,
 ) -> Cow<'a, str> {
-    if text.is_empty() || candidates.entries.is_empty() {
+    if candidates.entries.is_empty() {
         return Cow::Borrowed(text);
     }
-    let restore = candidates.restore;
+    replace_with(
+        text,
+        candidates.restore,
+        false,
+        |text, position| {
+            candidates
+                .find(text, position)
+                .map(|candidate| candidate.mapping)
+        },
+        |mapping| {
+            used.insert(mapping.reference.clone());
+        },
+    )
+}
+
+fn replace_with<'a, 'm>(
+    text: &'a str,
+    restore: bool,
+    preserve_lines: bool,
+    find: impl Fn(&str, usize) -> Option<&'m Mapping>,
+    mut on_match: impl FnMut(&Mapping),
+) -> Cow<'a, str> {
+    if text.is_empty() {
+        return Cow::Borrowed(text);
+    }
     let mut result = String::new();
     let mut copied = 0;
     let mut position = 0;
@@ -198,7 +288,7 @@ pub(super) fn replace<'a>(
             position += reference.len();
             continue;
         }
-        if let Some(Candidate { mapping, .. }) = candidates.find(text, position) {
+        if let Some(mapping) = find(text, position) {
             let (from, to) = if restore {
                 (&mapping.reference, &mapping.secret)
             } else {
@@ -206,9 +296,14 @@ pub(super) fn replace<'a>(
             };
             result.push_str(&text[copied..position]);
             result.push_str(to);
+            if preserve_lines {
+                for _ in from.bytes().filter(|&byte| byte == b'\n') {
+                    result.push('\n');
+                }
+            }
             position += from.len();
             copied = position;
-            used.insert(mapping.reference.clone());
+            on_match(mapping);
         } else {
             let ch = text[position..].chars().next().expect("character boundary");
             position += ch.len_utf8();
@@ -1210,6 +1305,8 @@ pub(super) fn restore_response(
 mod tests {
     use super::*;
     use crate::marker::{IDENTIFIER_LEN, PREFIX, SUFFIX};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use stravia_runtime_contract::Principal;
     use stravia_runtime_contract::hook::{ContextCompleteness, ContextSnapshot};
 
     fn redact_all(value: &mut AiRequest, mappings: &[Mapping]) -> Result<Redacted, RedactionError> {
@@ -1807,6 +1904,149 @@ mod tests {
         );
         let calls = response.items[1].tool_calls.as_ref().unwrap();
         assert!(calls[0].arguments.contains(&mapping.secret));
+    }
+
+    #[tokio::test]
+    async fn known_secrets_replace_active_mappings_for_only_its_principal() {
+        let store = test_store(vec![
+            mapping_of("first\nsecret", 'a'),
+            mapping_of("secret", 'b'),
+        ]);
+        let owner = KnownSecrets::load(&store, &store.owner).await.unwrap();
+        let other = KnownSecrets::load(&store, &Principal::new("key-2"))
+            .await
+            .unwrap();
+        assert!(!owner.is_empty());
+        assert!(matches!(owner.replace("ordinary text"), Cow::Borrowed(_)));
+        assert!(other.is_empty());
+        assert!(matches!(other.replace("first\nsecret"), Cow::Borrowed(_)));
+        assert_eq!(
+            owner.replace("first\nsecret tail secret").as_ref(),
+            format!(
+                "{}\n tail {}",
+                mapping_of("", 'a').reference,
+                mapping_of("", 'b').reference
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn known_secrets_prefer_longest_match_and_preserve_existing_markers() {
+        let store = test_store(vec![
+            mapping_of("secret", 'a'),
+            mapping_of("secret-long", 'b'),
+            mapping_of("pass", 'c'),
+        ]);
+        let secrets = KnownSecrets::load(&store, &store.owner).await.unwrap();
+        assert_eq!(
+            secrets
+                .replace("secret-long / pass / notpass / secret")
+                .as_ref(),
+            format!(
+                "{} / {} / notpass / {}",
+                mapping_of("", 'b').reference,
+                mapping_of("", 'c').reference,
+                mapping_of("", 'a').reference
+            )
+        );
+        let marker = mapping_of("", 'a').reference;
+        let unchanged = secrets.replace(&marker);
+        assert!(matches!(unchanged, Cow::Borrowed(_)));
+        assert_eq!(unchanged.as_ref(), marker);
+    }
+
+    #[tokio::test]
+    async fn known_secrets_replace_mappings_with_only_disabled_rules() {
+        let mut mapping = mapping_of("secret-token", 'a');
+        let built_in_rule = "built-in";
+        let custom_rule = format!("{}disabled", crate::custom::ID_PREFIX);
+        mapping.rule_ids = vec![built_in_rule.to_owned(), custom_rule.clone()].into();
+        let disabled = std::collections::BTreeSet::from([built_in_rule.to_owned()]);
+        let custom = crate::detection::CompiledCustomRules::compile([]).unwrap();
+        let scope = crate::policy::RuleScope::new(
+            std::sync::Arc::new(disabled),
+            custom.ids().map(str::to_owned),
+        );
+        let store = test_store(vec![mapping.clone()]);
+        let secrets = KnownSecrets::load(&store, &store.owner).await.unwrap();
+        assert!(!scope.allows(&mapping));
+        assert_eq!(secrets.replace(&mapping.secret).as_ref(), mapping.reference);
+        assert_eq!(store.active_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(store.side_effects.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn known_secrets_skip_empty_and_inactive_mappings() {
+        let mut inactive = mapping_of("inactive-value", 'a');
+        inactive.reference = "stale-reference".to_owned();
+        let store = test_store(vec![mapping_of("", 'b'), inactive.clone()]);
+        let secrets = KnownSecrets::load(&store, &store.owner).await.unwrap();
+        assert!(secrets.is_empty());
+        assert!(matches!(
+            secrets.replace("inactive-value"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn known_secrets_keep_the_input_line_count() {
+        let store = test_store(vec![mapping_of("a\nb\nc", 'a')]);
+        let secrets = KnownSecrets::load(&store, &store.owner).await.unwrap();
+        let input = "head\na\nb\nc\ntail";
+        let output = secrets.replace(input);
+        assert_eq!(output.matches('\n').count(), input.matches('\n').count());
+        assert_eq!(
+            output.as_ref(),
+            format!("head\n{}\n\n\ntail", mapping_of("", 'a').reference)
+        );
+    }
+
+    struct TestStore {
+        owner: Principal,
+        mappings: Vec<Mapping>,
+        active_calls: AtomicUsize,
+        side_effects: AtomicUsize,
+    }
+
+    fn test_store(mappings: Vec<Mapping>) -> TestStore {
+        TestStore {
+            owner: Principal::new("key-1"),
+            mappings,
+            active_calls: AtomicUsize::new(0),
+            side_effects: AtomicUsize::new(0),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::store::MappingStore for TestStore {
+        async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError> {
+            self.active_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(if principal == &self.owner {
+                self.mappings.clone()
+            } else {
+                Vec::new()
+            })
+        }
+        async fn intern(
+            &self,
+            _: &Principal,
+            _: &[crate::store::DetectedSecret],
+        ) -> Result<crate::store::InternedMappings, RedactionError> {
+            self.side_effects.fetch_add(1, Ordering::Relaxed);
+            unreachable!()
+        }
+        async fn publish(&self, _: &Principal, _: &[String]) -> Result<(), RedactionError> {
+            self.side_effects.fetch_add(1, Ordering::Relaxed);
+            unreachable!()
+        }
+        async fn sweep(&self, _: i64, _: std::time::Duration) -> Result<u64, RedactionError> {
+            self.side_effects.fetch_add(1, Ordering::Relaxed);
+            unreachable!()
+        }
+        async fn plaintext(&self, _: &str) -> Result<Option<String>, RedactionError> {
+            self.side_effects.fetch_add(1, Ordering::Relaxed);
+            unreachable!()
+        }
     }
 
     /// 映射不再有过期时间，快照条目失效的唯一形态是占位符不再合法（例如被篡改或截断）。

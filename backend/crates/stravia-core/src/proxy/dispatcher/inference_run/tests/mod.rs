@@ -4224,6 +4224,8 @@ mod continuation;
 #[cfg(test)]
 mod history_boundary;
 #[cfg(test)]
+mod history_recall;
+#[cfg(test)]
 mod lifecycle;
 #[cfg(test)]
 mod media;

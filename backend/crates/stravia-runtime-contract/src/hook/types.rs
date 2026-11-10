@@ -110,6 +110,9 @@ pub enum HookEvent<'a> {
         session: &'a SessionContext,
         original: &'a ContextSnapshot,
         read_scope: super::tool::ReadExposureScope,
+        /// 客户端原始请求自行声明了 StraviaRead。其他 Hook 的平台暴露合并后也可能
+        /// 等于 `ReadExposureScope::FULL`，因此不能从 `read_scope` 反推声明来源。
+        read_declared: bool,
         current: &'a AiRequest,
         /// 已处理前缀只读；内容变换只处理 `current.items[input_start..]`。
         /// 上轮模型输出可能尚未经过 Request Hook，因此不等同于客户端 delta。

@@ -974,6 +974,9 @@ CREATE INDEX interaction_observations_filter_idx ON interaction_observations(sta
 
 CREATE INDEX interaction_observations_parent_idx ON interaction_observations(parent_interaction_id);
 
+CREATE INDEX interaction_observations_principal_activity_idx
+    ON interaction_observations(principal, last_active_at DESC, id);
+
 CREATE INDEX interaction_observations_window_idx ON interaction_observations(root_id, last_active_at DESC, id);
 
 CREATE INDEX model_change_items_record ON model_change_items(record_id, change_type);
