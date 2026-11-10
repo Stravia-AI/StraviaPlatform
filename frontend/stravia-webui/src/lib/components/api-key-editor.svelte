@@ -15,7 +15,7 @@ import type { CapabilityStatus } from '#lib/capability-status.js'
 import { displayCurrency, formatAmount } from '#lib/money.js'
 
 import type { ApiKey, Route } from '#lib/types.js'
-import type { TransparentInjection } from '#lib/types/api-key.js'
+import { TRANSPARENT_INJECTIONS, type TransparentInjection } from '#lib/types/api-key.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
@@ -114,10 +114,8 @@ function toDateTimeLocal(value: string): string {
   return new Date(date.valueOf() - offset).toISOString().slice(0, 16)
 }
 
-const injectionOrder: TransparentInjection[] = ['web_search', 'media_understanding', 'media_generation']
-
 function setInjectionChecked(injection: TransparentInjection, checked: boolean): void {
-  form.transparentInjections = injectionOrder.filter((item) =>
+  form.transparentInjections = TRANSPARENT_INJECTIONS.filter((item) =>
     item === injection ? checked : form.transparentInjections.includes(item),
   )
 }
@@ -200,7 +198,7 @@ async function saveKey(): Promise<void> {
       spend_limit: form.spendLimit.trim() || null,
       mcp_access_enabled: form.mcpAccessEnabled,
       transparent_injection_enabled: form.transparentInjectionEnabled,
-      transparent_injections: injectionOrder.filter((item) => form.transparentInjections.includes(item)),
+      transparent_injections: form.transparentInjections,
       expires_at: form.expiresAt ? new Date(form.expiresAt).toISOString() : undefined,
       model_ids: form.modelIds,
     }

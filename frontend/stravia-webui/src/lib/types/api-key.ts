@@ -1,6 +1,8 @@
 import type { ApiKeySpend } from './money'
 
-export type TransparentInjection = 'web_search' | 'media_understanding' | 'media_generation'
+export const TRANSPARENT_INJECTIONS = ['web_search', 'media_understanding', 'media_generation'] as const
+
+export type TransparentInjection = (typeof TRANSPARENT_INJECTIONS)[number]
 
 export interface ApiKey {
   id: string
