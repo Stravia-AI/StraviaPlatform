@@ -241,6 +241,8 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 推理未指定输出上限时发送 `generationConfig.maxOutputTokens: 65536`，显式上限保持优先。目录的数值 `thinkingLevel` 在最终 wire 投影为 CLI 枚举名：`0`–`6` 分别为 `UNSPECIFIED`、`LOW`、`MEDIUM`、`HIGH`、`MINIMAL`、`EXTRA_HIGH`、`MAX`；只改变表示，不改变已选档位。显式扩展档位不再被公开 Gemini codec 折叠为 HIGH；预算路径及 `includeThoughts` 语义不变，非法目录档位仍在发送前失败。
 
+插件在最终出站 `systemInstruction.parts[].text` 中删除完整匹配的 `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`，包括同一段或多段中的重复出现。真实调用确认该片段与 `requestType: agent` 的组合可触发上游 `429 RESOURCE_EXHAUSTED`；此兼容处理保留 `requestType`，不改写其余 system 文本、普通消息、工具业务数据或权威历史，也不匹配大小写、空白或措辞不同的声明。仅因删除该片段而变为空白的 text 字段会被移除；不再含任何字段的 part 和因此清空的 systemInstruction 一并省略。该行为属于独立插件，须重建并重新导入后生效。
+
 升级时重新导入构建后的独立插件，再同步模型。旧逐档模型记录与 Route 绑定不自动删除或改绑；未再发现的记录沿用现有 missing 与可用状态规则，已有配置不会自动迁移到家族模型。需要统一档位选择时，从清单添加家族模型并显式调整原绑定。
 
 客户端标识使用 `antigravity/cli/<version>`，不能省略 `/cli/`：实际同账号差分验证中，省略会使上游不返回 Gemini 3.7／3.8 Flash 的 Agent 档位，而不是本地合并规则删除了这些模型。同步结果取决于真实账号响应，不固定承诺家族数量；此次修复不改账号、project、端点或权限。
