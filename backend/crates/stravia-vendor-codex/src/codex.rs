@@ -58,6 +58,10 @@ pub(super) struct NativeSession {
     turn_started_at_unix_ms: i64,
     model: ModelProfile,
     pub(super) history_boundaries: Option<super::lite_history::BoundaryOffsets>,
+    /// 调用方显式请求了 `reasoning.summary: "auto"`。共享 Responses 编码器在调用方未指定时
+    /// 也会补上 `auto`，两者在 body 里无法区分，因此由请求层声明；官方客户端同样只在
+    /// 用户配置时才发送摘要。
+    pub(super) summary_auto_requested: bool,
 }
 
 /// Request-shaping facts from the official `/models` catalog row, which
@@ -153,6 +157,7 @@ impl NativeSession {
             turn_started_at_unix_ms: chrono::Utc::now().timestamp_millis(),
             model: ModelProfile::new(provider, operation),
             history_boundaries: None,
+            summary_auto_requested: false,
             thread_id,
         }
     }
@@ -172,6 +177,11 @@ impl NativeSession {
         let object = body
             .as_object_mut()
             .expect("projected Codex body is an object");
+        // 官方客户端的摘要默认值随模型目录为 none，只有用户配置才会发出；未显式请求的
+        // `auto` 是共享编码器或固定请求体补的默认值，不能带到上游。
+        if !self.summary_auto_requested {
+            drop_default_summary(object);
+        }
         // The official request input is always an item list.
         if let Some(Value::String(text)) = object.get_mut("input") {
             let text = std::mem::take(text);
@@ -743,6 +753,17 @@ impl Serialize for WireBody<'_> {
     }
 }
 
+fn drop_default_summary(object: &mut serde_json::Map<String, Value>) {
+    if let Some(reasoning) = object.get_mut("reasoning").and_then(Value::as_object_mut)
+        && reasoning.get("summary").and_then(Value::as_str) == Some("auto")
+    {
+        reasoning.remove("summary");
+        if reasoning.is_empty() {
+            object.remove("reasoning");
+        }
+    }
+}
+
 /// Closed-field projection only; NativeSession::project_body owns the rest of
 /// the official request shape.
 pub(super) fn prepare_operation_body(
@@ -766,14 +787,6 @@ pub(super) fn prepare_operation_body(
     // Filter control envelopes, never user input, tool schemas, grammars or
     // image/search business data.
     retain_control_fields(object.get_mut("reasoning"), &["effort", "summary"]);
-    if let Some(reasoning) = object.get_mut("reasoning").and_then(Value::as_object_mut)
-        && reasoning.get("summary").and_then(Value::as_str) == Some("auto")
-    {
-        reasoning.remove("summary");
-        if reasoning.is_empty() {
-            object.remove("reasoning");
-        }
-    }
     if let Some(text) = object.get_mut("text").and_then(Value::as_object_mut) {
         text.retain(|key, _| matches!(key.as_str(), "verbosity" | "format"));
         retain_control_fields(
@@ -2277,6 +2290,49 @@ mod tests {
                 json!({"effort":"medium", "summary":"detailed"})
             );
         }
+    }
+
+    #[test]
+    fn only_explicit_summary_requests_reach_upstream() {
+        use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+        use stravia_runtime_contract::protocol::ir::{
+            AiItem, AiRequest, MessageContent, ReasoningSummary, Role,
+        };
+
+        let provider = provider();
+        let summary_sent = |summary: Option<ReasoningSummary>| {
+            let mut request = AiRequest::new(
+                "gpt-6-astra",
+                vec![AiItem {
+                    role: Role::User,
+                    content: MessageContent::Text("hello".to_owned().into()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    meta: None,
+                }],
+            );
+            request.reasoning.summary = summary;
+            let mut session = NativeSession::new(&provider, BodyOperation::Http);
+            let attempt = crate::prepare_attempt(
+                &OPEN_RESPONSES_2026_04_24.to_string(),
+                request,
+                &mut session,
+                &provider,
+            )
+            .unwrap();
+            attempt.body["reasoning"].get("summary").cloned()
+        };
+        // 共享编码器在未指定时补 auto，官方默认不发摘要。
+        assert_eq!(summary_sent(None), None);
+        assert_eq!(summary_sent(Some(ReasoningSummary::None)), None);
+        assert_eq!(
+            summary_sent(Some(ReasoningSummary::Auto)),
+            Some(json!("auto"))
+        );
+        assert_eq!(
+            summary_sent(Some(ReasoningSummary::Detailed)),
+            Some(json!("detailed"))
+        );
     }
 
     #[test]

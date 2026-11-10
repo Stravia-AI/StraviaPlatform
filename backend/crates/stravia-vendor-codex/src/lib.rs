@@ -380,6 +380,8 @@ fn prepare_attempt(
     session: &mut codex::NativeSession,
     provider: &ProviderSnapshot,
 ) -> Result<Attempt, PluginError> {
+    session.summary_auto_requested = request.reasoning.summary
+        == Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::Auto);
     let native_tools = codex::encode_tools(&request, codex::BodyOperation::Http);
     // 原生工具只编码一次；通用 codec 仍负责历史与统一控制的协议投影。
     request.tools = None;

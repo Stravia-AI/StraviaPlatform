@@ -222,7 +222,9 @@ Linux 开发先安装 [Nix 与 devenv](https://devenv.sh/getting-started/)，在
 
 工具链及服务配置集中在 `devenv.nix`。Rust/Bun 由 language 模块提供，版本分别以 `rust-toolchain.toml`、`package.json` 为准；原生 C/C++ 和 Rust 统一使用 Clang，Linux 链接使用 mold，不修改宿主机或 `.cargo/config.toml`。更新输入使用 `devenv update`，并一并保留 `devenv.lock`。
 
-进入 linked worktree 时，从主 worktree 通过 reflink 补齐缺失的 `.stravia-dev` 和 `target`，不合并或覆盖现有目录。初始化按 worktree 加锁，每个目录暂存后原子发布；不支持 reflink 或跨文件系统时阻止进入 shell，不退回完整复制。
+固定版本的 `patch-crate` 由 `nix/patch-crate.nix` 提供，开发环境与发行包构建复用同一份定义。Nix store 在工作区之间共享工具产物，避免每个 worktree 都执行 `cargo install`；无可用二进制缓存时仍需首次构建。非 Nix 环境沿用 `task prepare:crates` 的按需安装流程。
+
+进入 linked worktree 时，从主 worktree 通过 reflink 补齐缺失的 `.stravia-dev`，并选择性预热缺失的 `target`：仅复制 `patch`、debug/release 各自的 `deps`、`.fingerprint`、`build`，以及 `vendor-plugins`、`vendor-plugins-all`。不复制 incremental、profile 根目录可执行文件或测试临时产物，以减少逐文件创建元数据的成本；需要时由构建重新生成。现有目录不合并或覆盖，初始化按 worktree 加锁，每个目录暂存后原子发布；不支持 reflink 或跨文件系统时阻止进入 shell，不退回完整复制。
 
 初始化前应停止主 worktree 的应用与构建：逐文件复制不是原子快照，也不是 SQLite/WAL 在线备份。复制包含配置凭据，外部 PostgreSQL、Redis 连接不会自动隔离，启动新实例前须确认连接目标。`target` 只用于预热，Cargo 仍可能重新编译。
 

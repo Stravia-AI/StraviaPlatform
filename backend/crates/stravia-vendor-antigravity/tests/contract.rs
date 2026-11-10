@@ -818,6 +818,100 @@ async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
+async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
+    let fixture = Arc::new(Fixture::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new()
+        .fallback(upstream)
+        .with_state(Arc::clone(&fixture));
+    let services = Arc::new(Services {
+        root: format!("http://{}", listener.local_addr().unwrap()),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        state: Mutex::new(None),
+        deltas: Mutex::new(Vec::new()),
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime
+        .load(&std::fs::read(artifact()).unwrap())
+        .await
+        .unwrap();
+    let mut provider = provider();
+    provider.credentials = BTreeMap::from([
+        ("access_token".into(), json!("test-token")),
+        ("project_id".into(), json!("test-project")),
+    ]);
+    let fragment = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
+    for (system, expected) in [
+        (
+            json!({"parts": [
+                {"text": format!("保留前文。\n{fragment}{fragment}\n保留后文。")},
+                {"text": fragment},
+                {"text": "RFC 2119 keywords: MUST, SHOULD."}
+            ]}),
+            Some(json!({"parts": [
+                {"text": "保留前文。\n\n保留后文。"},
+                {"text": "RFC 2119 keywords: MUST, SHOULD."}
+            ]})),
+        ),
+        (
+            json!({"parts": [{"text": format!(" \n{fragment}\n ")}]}),
+            None,
+        ),
+    ] {
+        let request = ProtocolTransform::global()
+            .bind(
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            )
+            .unwrap()
+            .decode_request(json!({
+                "systemInstruction": system,
+                "contents": [{"role": "user", "parts": [{"text": fragment}]}],
+                "tools": [{"functionDeclarations": [{
+                    "name": "inspect",
+                    "description": fragment,
+                    "parameters": {"type": "OBJECT"}
+                }]}]
+            }))
+            .unwrap();
+        let OperationOutput::Infer(output) = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: provider.clone(),
+                request,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("inference output")
+        };
+        assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(envelope["requestType"], "agent");
+        let request = &envelope["request"];
+        assert_eq!(request.get("systemInstruction"), expected.as_ref());
+        assert_eq!(request["contents"][0]["parts"][0]["text"], fragment);
+        assert_eq!(
+            request["tools"][0]["functionDeclarations"][0]["description"],
+            fragment
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
 async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     let fixture = Arc::new(Fixture::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

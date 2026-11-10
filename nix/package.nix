@@ -7,15 +7,13 @@
   rustToolchain,
   source,
   autoPatchelfHook,
+  callPackage,
   clang,
   cmake,
-  fetchurl,
   gitMinimal,
   ninja,
   pkg-config,
   python3,
-  openssl,
-  zlib,
   symlinkJoin,
 }:
 let
@@ -24,22 +22,7 @@ let
   toolchain = builtins.fromTOML (builtins.readFile (source + "/rust-toolchain.toml"));
   version = workspace.workspace.package.version;
 
-  patchCrate = rustPlatform.buildRustPackage {
-    pname = "patch-crate";
-    version = "0.1.13";
-    src = fetchurl {
-      name = "patch-crate-0.1.13.tar.gz";
-      url = "https://static.crates.io/crates/patch-crate/patch-crate-0.1.13.crate";
-      sha256 = "e203d4af5d6fa604bc379356bd8d6ff6bbd5b0a97d59293cc1009020cd900c6b";
-    };
-    cargoHash = "sha256-H6c+MfXd2RfRmkYIVBmYJDT4RvBlNLT9twEkMhHjA3U=";
-    nativeBuildInputs = [ pkg-config ];
-    buildInputs = [
-      openssl
-      zlib
-    ];
-    doCheck = false;
-  };
+  patchCrate = callPackage ./patch-crate.nix { };
   # path patch 的锁文件条目不含 registry checksum；按发布校验和补入原始 crate，
   # 让 Cargo 目录源解析未打补丁的依赖时也无需访问 registry。
   patchSources = rustPlatform.importCargoLock {
