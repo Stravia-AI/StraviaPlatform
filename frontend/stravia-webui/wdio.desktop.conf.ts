@@ -2,6 +2,7 @@
 // Bun 1.4.x 对 expect@30 的 CJS/ESM 封装解析有误，AsymmetricMatcher 为
 // undefined，expect-webdriverio 类继承会在加载期崩溃。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -60,6 +61,23 @@ process.env.STRAVIA_DESKTOP_E2E_OWNS_RUN_ROOT = ownsRunRoot ? '1' : '0'
 process.env.CODEX_HOME = codexHome
 // 原生夹具的 manifest 属于此来源；不继承生产源，否则 Core 会按来源校验禁用下载。
 process.env.STRAVIA_UPDATER_URL = 'https://updates.example.com'
+// The Desktop process starts before the smoke test's local signed-release server.
+// Preserve the selected origin across WDIO's launcher and worker processes.
+if (!startupFailure && !process.env.STRAVIA_TEST_PLUGIN_MARKETPLACE_URL) {
+  const { promise, resolve: resolvePort, reject } = Promise.withResolvers<number>()
+  const listener = createServer()
+  listener.once('error', reject)
+  listener.listen(0, '127.0.0.1', () => {
+    const address = listener.address()
+    if (!address || typeof address === 'string') {
+      listener.close()
+      reject(new Error('Could not allocate marketplace fixture port'))
+      return
+    }
+    listener.close((error) => (error ? reject(error) : resolvePort(address.port)))
+  })
+  process.env.STRAVIA_TEST_PLUGIN_MARKETPLACE_URL = `http://127.0.0.1:${await promise}`
+}
 // 恢复窗口不依赖业务数据根；测试仍将 WebView2 配置隔离到可清理的临时目录。
 process.env.WEBVIEW2_USER_DATA_FOLDER = join(runRoot, 'webview')
 

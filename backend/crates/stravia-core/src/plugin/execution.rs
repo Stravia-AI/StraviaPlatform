@@ -1679,6 +1679,9 @@ fn storage_failure() -> HostFailure {
 fn plugin_storage_failure(error: PluginStorageError) -> HostFailure {
     match error {
         PluginStorageError::StaleOperation | PluginStorageError::Changed => cancelled_failure(),
+        PluginStorageError::KeyChanged | PluginStorageError::VersionConflict => {
+            HostFailure::new(ErrorKind::Trapped, error.to_string())
+        }
         PluginStorageError::Storage => storage_failure(),
     }
 }

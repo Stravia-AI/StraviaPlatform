@@ -482,6 +482,11 @@ async fn initialize_desktop(
                         stravia_core::provider_catalog::CATALOG_BASE_URL.to_owned()
                     }),
                     catalog_background_refresh: !cfg!(feature = "desktop-e2e"),
+                    #[cfg(feature = "desktop-e2e")]
+                    test_plugin_marketplace_url: std::env::var(
+                        "STRAVIA_TEST_PLUGIN_MARKETPLACE_URL",
+                    )
+                    .ok(),
                     ..Default::default()
                 }),
             )

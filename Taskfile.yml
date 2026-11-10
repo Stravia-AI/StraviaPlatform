@@ -82,6 +82,7 @@ tasks:
       - target/vendor-plugins/manifest.json
       - backend/crates/stravia-vendor-sdk/Cargo.toml
       - backend/crates/stravia-vendor-sdk/fixtures/build.ts
+      - tests/common/build-plugin-marketplace-fixtures.ts
       - backend/crates/stravia-vendor-sdk/fixtures/*/Cargo.toml
       - backend/crates/stravia-vendor-sdk/fixtures/*/build.rs
       - backend/crates/stravia-vendor-sdk/fixtures/*/messages/*.json
@@ -94,8 +95,10 @@ tasks:
       - backend/crates/stravia-runtime-contract/src/**/*.rs
     generates:
       - target/vendor-test-fixtures/*.wasm
+      - target/vendor-test-fixtures/marketplace/stravia-plugin-catalog.json
     cmds:
       - bun backend/crates/stravia-vendor-sdk/fixtures/build.ts
+      - bun tests/common/build-plugin-marketplace-fixtures.ts
 
   dev:web:
     desc: Start the Stravia WebUI development server.

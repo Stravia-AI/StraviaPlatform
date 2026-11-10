@@ -126,6 +126,25 @@ export function catalogSelectionStale(error: unknown): boolean {
   )
 }
 
+export function localizeMarketplaceError(error: unknown, locale: Locale = getLocale()): string {
+  const options = { locale }
+  switch (resolveErrorPayload(error).payload?.code) {
+    case 'not_cataloged': return m.plugin_sources_error_not_cataloged({}, options)
+    case 'key_changed': return m.plugin_sources_error_key_changed({}, options)
+    case 'rate_limited': return m.plugin_sources_error_rate_limited({}, options)
+    case 'network': return m.plugin_sources_error_network({}, options)
+    case 'signature_invalid': return m.plugin_sources_error_signature_invalid({}, options)
+    case 'source_identity_changed': return m.plugin_sources_error_identity({}, options)
+    case 'version_conflict': return m.market_error_version_conflict({}, options)
+    case 'incompatible': return m.market_error_incompatible({}, options)
+    case 'artifact_corrupt': return m.market_error_artifact_corrupt({}, options)
+    case 'preview_expired': return m.market_error_preview_expired({}, options)
+    case 'source_disabled': return m.market_error_source_disabled({}, options)
+    case 'resource_limit': return m.market_error_resource_limit({}, options)
+    default: return localizeBackendErrorMessage(error, locale)
+  }
+}
+
 export function localizeBackendErrorMessage(error: unknown, locale: Locale = getLocale()): string {
   const { raw, payload } = resolveErrorPayload(error)
   const options = { locale }

@@ -5,6 +5,21 @@ use serde::{Deserialize, Serialize};
 pub enum PluginSource {
     Builtin,
     Local,
+    Marketplace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInstallOrigin {
+    pub source_id: String,
+    pub repository_id: u64,
+    pub repository: String,
+    pub public_key_fingerprint: String,
+    pub trust_revision: i64,
+    pub release_id: u64,
+    pub release_tag: String,
+    pub release_url: String,
+    pub catalog_sha256: String,
+    pub artifact_sha256: String,
 }
 
 impl PluginSource {
@@ -12,6 +27,7 @@ impl PluginSource {
         match self {
             Self::Builtin => "builtin",
             Self::Local => "local",
+            Self::Marketplace => "marketplace",
         }
     }
 }
@@ -73,6 +89,8 @@ pub struct PluginPreview {
     pub previous_version: Option<String>,
     pub new_version: String,
     pub target_source: PluginSource,
+    pub origin: Option<PluginInstallOrigin>,
+    pub previous_origin: Option<PluginInstallOrigin>,
     pub is_downgrade: bool,
     pub inherits_credentials: bool,
     pub affected_providers: Vec<PluginProvider>,
@@ -93,6 +111,9 @@ pub struct PluginSummary {
     pub name: String,
     pub version: String,
     pub source: PluginSource,
+    pub origin: Option<PluginInstallOrigin>,
+    pub digest: String,
+    pub installed_at: i64,
     pub status: String,
     pub error: Option<String>,
     pub builtin_version: Option<String>,

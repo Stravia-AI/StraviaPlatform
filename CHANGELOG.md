@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- Vendor plugin marketplace with signed release catalogs, explicit third-party source trust, source-bound update checks, bounded Zstd downloads and local `.wasm.zst` import. Installation still requires a credential and data-impact preview; changed keys and conflicting versions cannot silently replace installed code.
+- Unified Vendor Plugins workbench with source management, version selection, download progress and cancellation, plus a shared catalog publishing CLI. Official publishing requires a separately provisioned plugin signing key; updater routes and third-party release migration remain external deployment prerequisites.
+
 ## [0.6.4] - 2026-11-06
 
 ### Verification

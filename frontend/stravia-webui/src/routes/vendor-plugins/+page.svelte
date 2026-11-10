@@ -1,15 +1,23 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import type { ComponentProps } from 'svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import CircleAlertIcon from '@lucide/svelte/icons/circle-alert'
-import PackageOpenIcon from '@lucide/svelte/icons/package-open'
+import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import PuzzleIcon from '@lucide/svelte/icons/puzzle'
 import UploadIcon from '@lucide/svelte/icons/upload'
 import { toast } from 'svelte-sonner'
 
 import { admin } from '#lib/admin-client.js'
-import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { marketplaceStatus } from '#lib/marketplace-status.js'
+import { openExternalUrl } from '#lib/open-external.js'
+import type { MarketplaceEntry, MarketplaceRelease, MarketplaceProgress, PluginSourceSummary } from '#lib/types.js'
+import PluginSources from './PluginSources.svelte'
+import SearchCombobox from '#lib/components/search-combobox.svelte'
+import { Input } from '#lib/components/ui/input/index.js'
+import { localizeBackendErrorMessage, localizeMarketplaceError } from '#lib/backend-error.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
 import type {
   PluginBindingImpact,
@@ -32,14 +40,12 @@ import {
   DataTable,
   createDataTableColumnHelper,
   type DataTableCellContext,
-  type DataTableRowPointerEvent,
 } from '#lib/components/ui/data-table/index.js'
 import * as Dialog from '#lib/components/ui/dialog/index.js'
-import * as Empty from '#lib/components/ui/empty/index.js'
-import * as Field from '#lib/components/ui/field/index.js'
+import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js'
 import { Label } from '#lib/components/ui/label/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
-import { Skeleton } from '#lib/components/ui/skeleton/index.js'
+import * as Tabs from '#lib/components/ui/tabs/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { cn } from '#lib/utils.js'
 
@@ -56,6 +62,7 @@ let importing = $state(false)
 let restoringVendorId = $state<string>()
 let restoreError = $state<{ vendorId: string; message: string }>()
 let preview = $state<PluginPreview>()
+let previewPreviousSource = $state<PluginSource>()
 let previewOpen = $state(false)
 let confirmError = $state<string>()
 let confirming = $state(false)
@@ -64,27 +71,241 @@ let uninstallTarget = $state<PluginSummary>()
 let uninstallOpen = $state(false)
 let uninstalling = $state(false)
 let uninstallError = $state<string>()
-let detailVendorId = $state<string>()
 let detailOpen = $state(false)
+let detailContent = $state<HTMLElement | null>(null)
+let previewCancel = $state<HTMLButtonElement | null>(null)
 
+// 默认初始焦点会落在首个 TechnicalValue 的 Tooltip 触发器上：脚本聚焦会弹出气泡遮住内容，并让第一次 Escape 只关气泡。
+function focusDetailClose(event: Event): void {
+  event.preventDefault()
+  requestAnimationFrame(() => detailContent?.querySelector<HTMLElement>('[data-slot="sheet-close"]')?.focus())
+}
+
+function focusPreviewCancel(event: Event): void {
+  event.preventDefault()
+  requestAnimationFrame(() => previewCancel?.focus())
+}
+
+type MarketRow = {
+  key: string
+  vendorId: string
+  entry?: MarketplaceEntry
+  source?: PluginSourceSummary
+  installed?: PluginSummary
+}
+const marketQuery = createQuery(() => ({ queryKey: ['plugin-marketplace'], queryFn: admin.pluginMarketplace.get }))
+let sourceOpen = $state(false)
+let search = $state('')
+let sourceFilter = $state('')
+let tab = $state<'all' | 'installed' | 'updates'>('all')
+let detailKey = $state<string>()
+let preparing = $state(false)
+let progress = $state<MarketplaceProgress>()
+let prepareError = $state<string>()
+let refreshError = $state<string>()
+let refreshing = $state(false)
+let abort: AbortController | undefined
 const plugins = $derived(pluginsQuery.data ?? [])
-const listEmpty = $derived(!pluginsQuery.isPending && !pluginsQuery.error && plugins.length === 0)
+const sources = $derived(marketQuery.data?.sources ?? [])
+const rows = $derived.by(() => {
+  const entries = marketQuery.data?.entries ?? []
+  const result: MarketRow[] = entries.map((entry) => ({
+    key: `${entry.source_id}:${entry.vendor_id}`,
+    vendorId: entry.vendor_id,
+    entry,
+    source: sources.find((source) => source.id === entry.source_id),
+    installed: plugins.find((plugin) => plugin.vendor_id === entry.vendor_id),
+  }))
+  for (const installed of plugins) {
+    if (
+      !result.some(
+        (row) => row.vendorId === installed.vendor_id && row.entry?.source_id === installed.origin?.source_id,
+      )
+    ) {
+      result.push({
+        key: `installed:${installed.vendor_id}`,
+        vendorId: installed.vendor_id,
+        installed,
+        source: sources.find((source) => source.id === installed.origin?.source_id),
+      })
+    }
+  }
+  return result
+})
+const filteredRows = $derived(
+  rows.filter((row) => {
+    const name =
+      row.entry?.latest?.display_name ?? row.entry?.releases[0]?.display_name ?? row.installed?.name ?? row.vendorId
+    const attached = attachedVersion(row) !== undefined
+    return (
+      (!search || `${name} ${row.vendorId}`.toLowerCase().includes(search.toLowerCase())) &&
+      (!sourceFilter || row.entry?.source_id === sourceFilter) &&
+      (tab === 'all' || (tab === 'installed' && attached) || (tab === 'updates' && row.entry?.update && attached))
+    )
+  }),
+)
+const detailRow = $derived(rows.find((row) => row.key === detailKey))
+function rowName(row: MarketRow): string {
+  return row.entry?.latest?.display_name ?? row.entry?.releases[0]?.display_name ?? row.installed?.name ?? row.vendorId
+}
+function rowRelease(row: MarketRow): MarketplaceRelease | undefined {
+  return row.entry?.update ?? row.entry?.latest ?? row.entry?.releases[0] ?? undefined
+}
+/** 只有来自本行来源（或无来源条目）的安装才算本行已安装版本。 */
+function attachedVersion(row: MarketRow): string | undefined {
+  return row.installed && (!row.entry || row.installed.origin?.source_id === row.entry.source_id)
+    ? row.installed.version
+    : undefined
+}
+type StatusTone = NonNullable<ComponentProps<typeof StatusIndicator>['tone']>
+type RowStatus = { label: string; tone: StatusTone; primary: boolean }
+function rowStatus(row: MarketRow): RowStatus {
+  switch (marketplaceStatus(row.entry, row.source, row.installed)) {
+    case 'conflict':
+      return { label: m.market_conflict(), tone: 'error', primary: false }
+    case 'source-error':
+      return { label: m.market_source_error(), tone: 'warning', primary: false }
+    case 'source-disabled':
+      return { label: m.market_source_disabled(), tone: 'neutral', primary: false }
+    case 'source-removed':
+      return { label: m.market_source_removed(), tone: 'warning', primary: false }
+    case 'update':
+      return { label: m.market_update_available(), tone: 'warning', primary: true }
+    case 'host-upgrade':
+      return { label: m.market_host_upgrade(), tone: 'warning', primary: false }
+    case 'latest':
+      return { label: m.market_latest(), tone: 'healthy', primary: false }
+    case 'installed':
+      return { label: m.market_installed(), tone: 'healthy', primary: false }
+    default:
+      // 只有新安装与更新是行内主任务；重装、替换来源等低频动作降为次级按钮。
+      return { label: m.market_available(), tone: 'neutral', primary: true }
+  }
+}
+function actionLabel(row: MarketRow): string {
+  if (!row.installed) return m.market_install()
+  if (!row.installed.origin) return m.market_reinstall()
+  if (row.installed.origin.source_id === row.entry?.source_id)
+    return row.entry?.update ? m.market_update() : m.market_reinstall()
+  return m.market_replace_source()
+}
+async function refreshMarket(): Promise<void> {
+  refreshing = true
+  refreshError = undefined
+  try {
+    await admin.pluginMarketplace.refresh({})
+    await queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] })
+  } catch (error) {
+    refreshError = localizeMarketplaceError(error)
+  } finally {
+    refreshing = false
+  }
+}
+async function prepare(row: MarketRow, release: MarketplaceRelease): Promise<void> {
+  if (!row.entry || preparing) return
+  const controller = new AbortController()
+  detailOpen = false
+  preparing = true
+  prepareError = undefined
+  progress = undefined
+  abort = controller
+  try {
+    const result = await admin.pluginMarketplace.prepareInstall(
+      {
+        source_id: row.entry.source_id,
+        release_id: release.release_id,
+        vendor_id: row.vendorId,
+        version: release.version,
+        catalog_sha256: release.catalog_sha256,
+      },
+      (value) => {
+        progress = value
+      },
+      controller.signal,
+    )
+    showPreview(result)
+  } catch (error) {
+    if (!controller.signal.aborted) prepareError = localizeMarketplaceError(error)
+  } finally {
+    preparing = false
+    abort = undefined
+  }
+}
+function progressLabel(): string {
+  switch (progress?.stage) {
+    case 'download':
+      return progress.total
+        ? m.market_downloading_percent({ percent: Math.round(((progress.received ?? 0) * 100) / progress.total) })
+        : m.market_downloading()
+    case 'verify':
+      return m.market_verifying()
+    case 'decompress':
+      return m.market_decompressing()
+    case 'admission':
+      return m.market_admission()
+    default:
+      return m.market_preparing()
+  }
+}
+
+function formatSize(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MiB` : `${Math.ceil(bytes / 1024)} KiB`
+}
+const marketColumnHelper = createDataTableColumnHelper<MarketRow>()
+const marketColumns = marketColumnHelper.columns([
+  marketColumnHelper.display({
+    id: 'name',
+    header: () => m.common_name(),
+    cell: (context) => renderSnippet(marketIdentity, context),
+    meta: { label: () => m.common_name(), width: 'fill' },
+    size: 220,
+  }),
+  marketColumnHelper.display({
+    id: 'source',
+    header: () => m.vendor_plugins_source_label(),
+    cell: (context) => renderSnippet(marketSource, context),
+    meta: { label: () => m.vendor_plugins_source_label(), width: 'compact' },
+    size: 160,
+  }),
+  marketColumnHelper.display({
+    id: 'installed',
+    header: () => m.market_installed(),
+    cell: (context) => renderSnippet(marketInstalled, context),
+    meta: { label: () => m.market_installed(), width: 'compact' },
+    size: 88,
+  }),
+  marketColumnHelper.display({
+    id: 'available',
+    header: () => m.market_available(),
+    cell: (context) => renderSnippet(marketAvailable, context),
+    meta: { label: () => m.market_available(), width: 'compact' },
+    size: 128,
+  }),
+  marketColumnHelper.display({
+    id: 'status',
+    header: () => m.common_status(),
+    cell: (context) => renderSnippet(marketStatus, context),
+    meta: { label: () => m.common_status(), width: 'compact' },
+    size: 150,
+  }),
+  marketColumnHelper.display({
+    id: 'actions',
+    header: () => m.common_actions(),
+    cell: (context) => renderSnippet(marketActions, context),
+    meta: { label: () => m.common_actions(), width: 'compact', align: 'end' },
+    size: 200,
+  }),
+])
 const fileDragActive = $derived(fileDragDepth > 0)
 const importBusy = $derived(importing || previewOpen || importQueue.length > 0)
-const detailPlugin = $derived(plugins.find((plugin) => plugin.vendor_id === detailVendorId))
-const pendingCount = $derived(plugins.filter((plugin) => plugin.pending_update).length)
-const failedCount = $derived(plugins.filter((plugin) => plugin.error || /error|fail/i.test(plugin.status)).length)
-const attentionNotes = $derived(
-  [
-    pendingCount > 0 ? m.vendor_plugins_attention_pending({ count: pendingCount }) : undefined,
-    failedCount > 0 ? m.vendor_plugins_attention_errors({ count: failedCount }) : undefined,
-  ].filter((note) => note !== undefined),
-)
-const attentionVendorId = $derived(
-  plugins.find((plugin) => plugin.pending_update || plugin.error || /error|fail/i.test(plugin.status))?.vendor_id,
-)
 const tableLabels = $derived(getDataTableLabels())
 const dataDiscardRequired = $derived((preview?.discarded_data.length ?? 0) > 0)
+// 同源更新不重复显示「原来源」；只有跨来源替换或从随附/本地迁出时才需要提示。
+const previewSourceChanged = $derived(
+  preview?.previous_origin
+    ? preview.previous_origin.source_id !== preview.origin?.source_id
+    : previewPreviousSource !== undefined && previewPreviousSource !== preview?.target_source,
+)
 const addedPermissions = $derived(preview?.network_permissions.filter((item) => item.added) ?? [])
 const retainedPermissions = $derived(preview?.network_permissions.filter((item) => !item.added) ?? [])
 const removedPermissions = $derived(preview?.removed_network_permissions ?? [])
@@ -135,28 +356,11 @@ const safeNotes = $derived.by(() => {
 })
 
 function sourceLabel(source: PluginSource): string {
-  return source === 'builtin' ? m.vendor_plugins_source_builtin() : m.vendor_plugins_source_local()
-}
-
-// 按用户关心程度排序；未知标识排在最后并原样显示。
-const CAPABILITY_ORDER = [
-  'infer',
-  'search',
-  'media_image',
-  'compact',
-  'model_discovery',
-  'auth_oauth',
-  'allowance',
-] as const
-// 插件端配置校验是宿主内部握手，对用户没有独立含义。
-const HIDDEN_CAPABILITIES = new Set(['config_validation'])
-
-function listedCapabilities(capabilities: string[]): string[] {
-  const rank = (capability: string) => {
-    const index = CAPABILITY_ORDER.indexOf(capability as (typeof CAPABILITY_ORDER)[number])
-    return index === -1 ? CAPABILITY_ORDER.length : index
-  }
-  return capabilities.filter((capability) => !HIDDEN_CAPABILITIES.has(capability)).sort((a, b) => rank(a) - rank(b))
+  return source === 'builtin'
+    ? m.vendor_plugins_source_builtin()
+    : source === 'marketplace'
+      ? m.plugin_sources_title()
+      : m.vendor_plugins_source_local()
 }
 
 function capabilityLabel(capability: string): string {
@@ -180,54 +384,6 @@ function capabilityLabel(capability: string): string {
   }
 }
 
-function capabilityDescription(capability: string): string | undefined {
-  switch (capability) {
-    case 'infer':
-      return m.vendor_plugins_capability_infer_description()
-    case 'search':
-      return m.vendor_plugins_capability_search_description()
-    case 'media_image':
-      return m.vendor_plugins_capability_media_image_description()
-    case 'compact':
-      return m.vendor_plugins_capability_compact_description()
-    case 'model_discovery':
-      return m.vendor_plugins_capability_model_discovery_description()
-    case 'auth_oauth':
-      return m.vendor_plugins_capability_auth_oauth_description()
-    case 'allowance':
-      return m.vendor_plugins_capability_allowance_description()
-    default:
-      return undefined
-  }
-}
-
-function statusLabel(status: string): string {
-  switch (status.toLowerCase()) {
-    case 'active':
-    case 'loaded':
-    case 'ready':
-      return m.vendor_plugins_status_ready()
-    case 'error':
-    case 'failed':
-      return m.vendor_plugins_status_error()
-    case 'pending':
-    case 'pending_confirmation':
-    case 'pending_update':
-      return m.vendor_plugins_status_pending()
-    case 'unavailable':
-      return m.vendor_plugins_status_unavailable()
-    default:
-      return status || '—'
-  }
-}
-
-function statusTone(status: string, error: string | null): 'healthy' | 'warning' | 'error' | 'neutral' {
-  if (error || /error|fail/i.test(status)) return 'error'
-  if (/pending|unavailable|degraded/i.test(status)) return 'warning'
-  if (/active|loaded|ready/i.test(status)) return 'healthy'
-  return 'neutral'
-}
-
 function bindingLabel(binding: PluginBindingImpact): string {
   return m.vendor_plugins_binding_model_value({
     route: binding.route_id,
@@ -240,91 +396,12 @@ function canRestoreBuiltin(plugin: PluginSummary): boolean {
   return Boolean(
     plugin.builtin_version &&
     !plugin.pending_update &&
-    (plugin.source === 'local' || plugin.status !== 'ready' || plugin.version !== plugin.builtin_version),
+    (plugin.source !== 'builtin' || plugin.status !== 'ready' || plugin.version !== plugin.builtin_version),
   )
 }
 
 function canUninstall(plugin: PluginSummary): boolean {
   return plugin.vendor_id !== 'base'
-}
-
-const pluginColumnHelper = createDataTableColumnHelper<PluginSummary>()
-const pluginColumns = pluginColumnHelper.columns([
-  pluginColumnHelper.accessor((plugin) => plugin.name, {
-    id: 'name',
-    header: () => m.common_name(),
-    cell: (context) => renderSnippet(pluginIdentityCell, context),
-    enableSorting: false,
-    meta: { label: () => m.common_name(), width: 'fill' },
-    size: 260,
-  }),
-  pluginColumnHelper.accessor((plugin) => plugin.version, {
-    id: 'version',
-    header: () => m.vendor_plugins_actual_version(),
-    cell: (context) => renderSnippet(pluginVersionCell, context),
-    enableSorting: false,
-    meta: { label: () => m.vendor_plugins_actual_version(), width: 'compact' },
-    size: 112,
-  }),
-  pluginColumnHelper.accessor((plugin) => sourceLabel(plugin.source), {
-    id: 'source',
-    header: () => m.vendor_plugins_source_label(),
-    cell: (context) => renderSnippet(pluginSourceCell, context),
-    enableSorting: false,
-    meta: { label: () => m.vendor_plugins_source_label(), width: 'compact' },
-    size: 96,
-  }),
-  pluginColumnHelper.accessor((plugin) => listedCapabilities(plugin.capabilities).map(capabilityLabel).join(' · '), {
-    id: 'capabilities',
-    header: () => m.vendor_plugins_features(),
-    cell: (context) => renderSnippet(pluginCapabilitiesCell, context),
-    enableSorting: false,
-    meta: { label: () => m.vendor_plugins_features(), width: 'fill', cellClass: 'whitespace-normal' },
-    size: 160,
-  }),
-  pluginColumnHelper.accessor((plugin) => statusLabel(plugin.status), {
-    id: 'status',
-    header: () => m.common_status(),
-    cell: (context) => renderSnippet(pluginStatusCell, context),
-    enableSorting: false,
-    meta: { label: () => m.common_status(), width: 'compact' },
-    size: 104,
-  }),
-  pluginColumnHelper.display({
-    id: 'actions',
-    header: () => m.common_actions(),
-    cell: (context) => renderSnippet(pluginActionsCell, context),
-    enableSorting: false,
-    enableHiding: false,
-    meta: { label: () => m.common_actions(), width: 'compact', align: 'end' },
-    size: 160,
-  }),
-])
-
-function hasBundledDifference(plugin: PluginSummary): boolean {
-  return Boolean(plugin.builtin_version && plugin.builtin_version !== plugin.version)
-}
-
-function pluginVersionChange(update: PluginPreview): string {
-  return update.previous_version
-    ? m.vendor_plugins_preview_version_change({ previous: update.previous_version, next: update.new_version })
-    : m.vendor_plugins_preview_new_install({ version: update.new_version })
-}
-
-// 紧凑注意计数只负责定位；原因与恢复动作始终在所属行。
-function locateAttentionPlugin(): void {
-  const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-plugin-row]')).filter(
-    (row) => row.dataset.pluginRow === attentionVendorId,
-  )
-  const target = rows.find((row) => row.getClientRects().length > 0) ?? rows[0]
-  if (!target) return
-  target.scrollIntoView({ block: 'center' })
-  target.focus({ preventScroll: true })
-}
-
-function handlePluginRowClick({ event, original }: DataTableRowPointerEvent<PluginSummary>): void {
-  if (event.target instanceof Element && event.target.closest('a, button, [role="button"]')) return
-  openDetails(original)
 }
 
 function pickPluginFile(): void {
@@ -364,13 +441,11 @@ function handleFileDrop(event: DragEvent): void {
   importPluginFiles(Array.from(event.dataTransfer?.files ?? []))
 }
 
-function openDetails(plugin: PluginSummary): void {
-  detailVendorId = plugin.vendor_id
-  detailOpen = true
-}
-
 function showPreview(value: PluginPreview): void {
   preview = value
+  previewPreviousSource = value.previous_version
+    ? plugins.find((plugin) => plugin.vendor_id === value.vendor_id)?.source
+    : undefined
   allowDataDiscard = false
   confirmError = undefined
   previewOpen = true
@@ -457,6 +532,7 @@ function setUninstallOpen(open: boolean): void {
 async function refreshPluginRuntimeQueries(): Promise<void> {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ['vendor-plugins'] }),
+    queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] }),
     queryClient.invalidateQueries({ queryKey: ['gateway-status'] }),
     queryClient.invalidateQueries({ queryKey: ['provider-descriptors'] }),
     queryClient.invalidateQueries({ queryKey: ['providers'] }),
@@ -508,7 +584,10 @@ async function confirmPreview(): Promise<void> {
       preview_id: current.id,
       allow_data_discard: dataDiscardRequired ? allowDataDiscard : false,
     })
-    await queryClient.invalidateQueries({ queryKey: ['vendor-plugins'] })
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['vendor-plugins'] }),
+      queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] }),
+    ])
     previewOpen = false
     preview = undefined
     toast.success(m.vendor_plugins_update_applied())
@@ -532,125 +611,96 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 }
 </script>
 
-{#snippet pageActions()}
-  <Button variant="outline" disabled={pluginsQuery.isFetching} onclick={() => pluginsQuery.refetch()}>
-    {#if pluginsQuery.isFetching}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
-        data-icon="inline-start" />{/if}
-    {m.vendor_plugins_refresh()}
-  </Button>
-  <Button onclick={pickPluginFile} disabled={importing} aria-busy={importing}>
-    {#if importing}<Spinner data-icon="inline-start" />{:else}<UploadIcon data-icon="inline-start" />{/if}
-    {importing ? m.vendor_plugins_importing() : m.vendor_plugins_import_title()}
-  </Button>
-{/snippet}
-
-{#snippet pluginIssueNotes(plugin: PluginSummary)}
-  {#if plugin.pending_update}
-    <p class="mt-1 flex items-start gap-1.5 text-xs whitespace-normal text-warning">
-      <CircleAlertIcon class="mt-0.5 size-3.5 shrink-0" />
-      <span class="min-w-0 break-words">
-        {m.vendor_plugins_pending_builtin_update()} · {pluginVersionChange(plugin.pending_update)}
-      </span>
-    </p>
-  {/if}
-  {#if plugin.error}
-    <p class="mt-1 flex items-start gap-1.5 text-xs whitespace-normal text-destructive">
-      <CircleAlertIcon class="mt-0.5 size-3.5 shrink-0" />
-      <span class="min-w-0 break-words">{plugin.error}</span>
-    </p>
-  {/if}
-  {#if restoreError?.vendorId === plugin.vendor_id}
-    <p class="mt-1 flex items-start gap-1.5 text-xs whitespace-normal text-destructive" role="alert">
-      <CircleAlertIcon class="mt-0.5 size-3.5 shrink-0" />
-      <span class="min-w-0 break-words">{m.vendor_plugins_restore_failed()} {restoreError.message}</span>
-    </p>
-  {/if}
-  {#if plugin.affected_bindings.length > 0}
-    <p class="mt-1 text-xs text-muted-foreground">
-      {m.vendor_plugins_card_binding_count({ count: plugin.affected_bindings.length })}
-    </p>
-  {/if}
-{/snippet}
-
-{#snippet pluginActions(plugin: PluginSummary)}
-  {@const restoring = restoringVendorId === plugin.vendor_id}
-  {#if plugin.pending_update}
-    {@const pendingUpdate = plugin.pending_update}
-    <Button size="sm" onclick={() => showPreview(pendingUpdate)}>
-      {m.vendor_plugins_review_update()}
-    </Button>
-  {/if}
-  {#if canRestoreBuiltin(plugin)}
-    <Button
-      variant="outline"
-      size="sm"
-      disabled={restoring}
-      aria-busy={restoring}
-      onclick={() => restoreBuiltin(plugin.vendor_id)}>
-      {#if restoring}<Spinner data-icon="inline-start" />{/if}
-      {restoring ? m.vendor_plugins_restoring() : m.vendor_plugins_restore_builtin()}
-    </Button>
-  {/if}
-  {#if canUninstall(plugin)}
-    <Button variant="outline" size="sm" onclick={() => openUninstall(plugin)}>
-      {m.vendor_plugins_uninstall_action()}
-    </Button>
-  {/if}
-  <Button variant="ghost" size="sm" onclick={() => openDetails(plugin)}>
-    {m.vendor_plugins_details()}
-  </Button>
-{/snippet}
-
-{#snippet pluginIdentityCell(context: DataTableCellContext<PluginSummary>)}
-  {@const plugin = context.row.original}
-  <div class="flex min-w-0 items-start gap-3" data-plugin-row={plugin.vendor_id} tabindex="-1">
+{#snippet marketIdentity(context: DataTableCellContext<MarketRow>)}
+  {@const row = context.row.original}
+  <div class="flex min-w-0 items-center gap-3">
     <ProviderMark
-      class="size-10 shrink-0 rounded-lg text-base"
-      name={plugin.name}
-      svg={plugin.icon_svg}
-      logo={plugin.vendor_id} />
-    <div class="min-w-0 flex-1">
-      <p class="truncate font-medium">{plugin.name}</p>
-      {@render pluginIssueNotes(plugin)}
-    </div>
+      class="market-icon size-9 shrink-0"
+      name={rowName(row)}
+      svg={row.entry?.latest?.icon_svg ?? row.installed?.icon_svg}
+      logo={row.vendorId} />
+    <span class="truncate font-medium">{rowName(row)}</span>{#if row.source && !row.source.official}<PuzzleIcon
+        class="size-4 shrink-0 text-muted-foreground"
+        aria-label={m.market_external()} />{/if}
   </div>
 {/snippet}
-
-{#snippet pluginVersionCell(context: DataTableCellContext<PluginSummary>)}
-  {@const plugin = context.row.original}
-  <p class="font-technical tabular-nums">{plugin.version}</p>
-  {#if hasBundledDifference(plugin)}
-    <p class="mt-0.5 text-xs text-muted-foreground">
-      {m.vendor_plugins_bundled_version()}
-      <span class="font-technical tabular-nums">{plugin.builtin_version}</span>
-    </p>
-  {/if}
+{#snippet marketSource(context: DataTableCellContext<MarketRow>)}
+  {@const row = context.row.original}
+  <span class="flex min-w-0 items-center gap-2">
+    {#if row.source}<span class="truncate">{row.source.repository}</span>
+      {#if row.source.official}<Badge variant="outline" class="shrink-0">{m.plugin_sources_official()}</Badge>{/if}
+    {:else if row.installed?.origin}<span class="truncate text-muted-foreground"
+        >{row.installed.origin.repository}</span>
+    {:else if row.installed}<span class="text-muted-foreground">{sourceLabel(row.installed.source)}</span>{/if}
+  </span>
 {/snippet}
-
-{#snippet pluginSourceCell(context: DataTableCellContext<PluginSummary>)}
-  <Badge variant="outline">{sourceLabel(context.row.original.source)}</Badge>
+{#snippet marketInstalled(context: DataTableCellContext<MarketRow>)}
+  {@const version = attachedVersion(context.row.original)}
+  {#if version}<span class="font-technical tabular-nums">{version}</span>{:else}<span class="text-muted-foreground"
+      >—</span
+    >{/if}
 {/snippet}
-
-{#snippet pluginCapabilitiesCell(context: DataTableCellContext<PluginSummary>)}
-  {@const features = listedCapabilities(context.row.original.capabilities)}
-  <p class="text-xs leading-5 text-muted-foreground">
-    {features.length > 0 ? features.map(capabilityLabel).join(' · ') : m.vendor_plugins_no_capabilities()}
-  </p>
+{#snippet marketAvailable(context: DataTableCellContext<MarketRow>)}
+  {@const release = rowRelease(context.row.original)}
+  {#if release}<span class="font-technical tabular-nums">{release.version}</span>
+    <span class="ms-1.5 text-xs text-muted-foreground tabular-nums">{formatSize(release.artifact.size)}</span>
+  {:else}<span class="text-muted-foreground">—</span>{/if}
 {/snippet}
-
-{#snippet pluginStatusCell(context: DataTableCellContext<PluginSummary>)}
-  {@const plugin = context.row.original}
-  <StatusIndicator compact label={statusLabel(plugin.status)} tone={statusTone(plugin.status, plugin.error)} />
+{#snippet marketStatus(context: DataTableCellContext<MarketRow>)}
+  {@render statusCell(context.row.original)}
 {/snippet}
-
-{#snippet pluginActionsCell(context: DataTableCellContext<PluginSummary>)}
-  <div class="flex flex-wrap items-center justify-end gap-2">{@render pluginActions(context.row.original)}</div>
+{#snippet statusCell(row: MarketRow)}
+  {@const status = rowStatus(row)}
+  {@const release = rowRelease(row)}
+  <div class="min-w-0">
+    <StatusIndicator compact label={status.label} tone={status.tone} />
+    {#if release && !release.compatible}<p class="mt-0.5 text-xs break-words text-muted-foreground">
+        {release.incompatibility ?? release.compatibility.host_version_req}
+      </p>{/if}
+  </div>
 {/snippet}
-
+{#snippet marketActions(context: DataTableCellContext<MarketRow>)}
+  {@render rowActions(context.row.original, 'justify-end')}
+{/snippet}
+{#snippet rowActions(row: MarketRow, className: string)}
+  {@const release = rowRelease(row)}
+  <div class={cn('flex items-center gap-2 whitespace-nowrap', className)}>
+    {#if row.entry && release && row.vendorId !== 'base'}
+      <Button
+        size="sm"
+        variant={rowStatus(row).primary ? 'default' : 'outline'}
+        disabled={preparing || !row.source?.enabled || release.conflict || !release.compatible || !!row.source?.error}
+        onclick={() => prepare(row, release)}>{actionLabel(row)}</Button>
+    {/if}
+    <Button
+      size="sm"
+      variant="ghost"
+      onclick={() => {
+        detailKey = row.key
+        detailOpen = true
+      }}>{m.vendor_plugins_details()}</Button>
+  </div>
+{/snippet}
+{#snippet pageActions()}
+  <Button variant="outline" disabled={refreshing} onclick={refreshMarket}
+    >{#if refreshing}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
+        data-icon="inline-start" />{/if}{m.market_check_updates()}</Button>
+  <Button variant="outline" onclick={() => (sourceOpen = true)}>{m.plugin_sources_title()}</Button>
+  <DropdownMenu.Root>
+    <DropdownMenu.Trigger>
+      {#snippet child({ props })}
+        <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}
+          ><MoreHorizontalIcon /></Button>
+      {/snippet}
+    </DropdownMenu.Trigger>
+    <DropdownMenu.Content class="w-48" align="end">
+      <DropdownMenu.Item disabled={importBusy} onSelect={pickPluginFile}
+        ><UploadIcon />{m.vendor_plugins_import_title()}</DropdownMenu.Item>
+    </DropdownMenu.Content>
+  </DropdownMenu.Root>
+{/snippet}
 <svelte:head><title>{m.vendor_plugins_title()} · Stravia</title></svelte:head>
-
 <svelte:window ondragover={guardFileDragDefault} ondrop={guardFileDragDefault} />
-
 <div
   class="route-page vendor-plugins-page relative"
   role="group"
@@ -659,294 +709,248 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
   ondragover={handleFileDragOver}
   ondragleave={handleFileDragLeave}
   ondrop={handleFileDrop}>
-  <PageHeader title={m.vendor_plugins_title()} actions={listEmpty ? undefined : pageActions} />
-
+  <PageHeader title={m.vendor_plugins_title()} actions={pageActions} />
   <input
     bind:this={fileInput}
     bind:files={selectedFiles}
     id="vendor-plugin-file"
     type="file"
-    accept=".wasm,application/wasm"
+    accept=".wasm,.wasm.zst,application/wasm,application/zstd"
     multiple
     class="hidden"
     onchange={() => importPluginFiles(Array.from(selectedFiles ?? []))} />
-
-  {#if pluginsQuery.error}
-    <RequestFailure
+  {#if pluginsQuery.error}<RequestFailure
       title={m.vendor_plugins_load_failed()}
       message={localizeBackendErrorMessage(pluginsQuery.error)}
-      retry={() => pluginsQuery.refetch()}
-      retrying={pluginsQuery.isFetching} />
-  {/if}
-
-  {#if importError}
-    <Alert.Root variant="destructive">
-      <CircleAlertIcon />
-      <Alert.Description>{importError}</Alert.Description>
-    </Alert.Root>
-  {/if}
-
+      retry={() => pluginsQuery.refetch()} />{/if}
+  {#if marketQuery.error}<RequestFailure
+      message={localizeBackendErrorMessage(marketQuery.error)}
+      retry={() => marketQuery.refetch()} />{/if}
+  {#if refreshError || importError || prepareError}<Alert.Root variant="destructive"
+      ><CircleAlertIcon /><Alert.Description>{refreshError ?? importError ?? prepareError}</Alert.Description
+      ></Alert.Root
+    >{/if}
+  {#if preparing}<div class="flex items-center gap-3" role="status">
+      <Spinner />{progressLabel()}<Button size="sm" variant="outline" onclick={() => abort?.abort()}
+        >{m.common_cancel()}</Button>
+    </div>{/if}
   <section class="route-section vendor-plugins-workspace">
-    {#if attentionNotes.length > 0}
-      <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-warning" data-slot="plugin-attention">
-        <span class="flex items-center gap-1.5">
-          <CircleAlertIcon class="size-3.5 shrink-0" />
-          <span class="font-medium">{m.vendor_plugins_attention_title()}</span>
-          <span>{attentionNotes.join(' · ')}</span>
-        </span>
-        <Button variant="link" size="xs" class="h-auto p-0" onclick={locateAttentionPlugin}>
-          {m.vendor_plugins_attention_locate()}
-        </Button>
+    <Tabs.Root bind:value={tab}>
+      <Tabs.List aria-label={m.vendor_plugins_title()}>
+        <Tabs.Trigger value="all">{m.market_all()}</Tabs.Trigger>
+        <Tabs.Trigger value="installed">{m.market_installed()}</Tabs.Trigger>
+        <Tabs.Trigger value="updates"
+          >{m.market_updates()} <Badge variant="outline">{marketQuery.data?.update_count ?? 0}</Badge></Tabs.Trigger>
+      </Tabs.List>
+    </Tabs.Root>
+    <div class="flex flex-wrap gap-2">
+      <Input
+        class="min-w-0 flex-[999_1_16rem]"
+        aria-label={m.market_search()}
+        placeholder={m.market_search()}
+        bind:value={search} /><SearchCombobox
+        id="marketplace-source-filter"
+        class="max-w-80 min-w-0 flex-[1_1_14rem]"
+        value={sourceFilter}
+        options={sources.map((source) => ({ value: source.id, label: source.repository }))}
+        placeholder={m.market_all_sources()}
+        emptyText={m.market_no_results()}
+        clearLabel={m.common_table_clear_filter()}
+        onValueChange={(value: string) => (sourceFilter = value)} />
+    </div>
+    {#each sources.filter((source) => source.error || !source.succeeded_at) as source (source.id)}
+      <p class="flex items-center gap-1.5 text-sm text-warning">
+        <CircleAlertIcon class="size-4 shrink-0" aria-hidden="true" />{source.repository}: {source.error
+          ? m.market_cached_error()
+          : m.market_not_checked()}{#if source.succeeded_at}
+          — {m.plugin_sources_last_success({ date: new Date(source.succeeded_at * 1000).toLocaleString() })}{/if}
       </p>
-    {/if}
-
-    {#if listEmpty}
-      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10">
-        <Empty.Header>
-          <Empty.Media variant="icon"><PackageOpenIcon /></Empty.Media>
-          <Empty.Title class="flex items-center justify-center gap-1.5">
-            {m.vendor_plugins_empty_title()}
-            <Field.FieldHelp hint={m.vendor_plugins_empty_description()} />
-          </Empty.Title>
-        </Empty.Header>
-        <Empty.Content>
-          <Button onclick={pickPluginFile} disabled={importing}>
-            <UploadIcon data-icon="inline-start" />
-            {m.vendor_plugins_import_title()}
-          </Button>
-        </Empty.Content>
-      </Empty.Root>
-    {:else if pluginsQuery.isPending}
-      <div class="route-desktop-table" aria-busy="true">
-        <DataTable
-          data={plugins}
-          columns={pluginColumns}
-          labels={tableLabels}
-          ariaLabel={m.vendor_plugins_title()}
-          loading
-          loadingRows={3} />
+    {/each}
+    {#if !marketQuery.isPending && !pluginsQuery.isPending && filteredRows.length === 0}
+      <div class="py-10 text-center text-muted-foreground">
+        {search || sourceFilter || tab !== 'all'
+          ? m.market_no_results()
+          : sources.length > 0 && sources.every((source) => source.error)
+            ? m.market_all_failed()
+            : m.market_empty()}
+        <Button variant="link" onclick={refreshMarket}>{m.market_check_updates()}</Button>
       </div>
-      <div class="route-mobile-list border-y" aria-busy="true">
-        {#each Array(3) as _, index (index)}
-          <div class="flex items-start gap-3 border-b py-4 last:border-b-0">
-            <Skeleton class="size-10 shrink-0 rounded-lg" />
-            <div class="flex flex-1 flex-col gap-2">
-              <Skeleton class="h-5 w-40 max-w-full" />
-              <Skeleton class="h-4 w-56 max-w-full" />
-            </div>
-          </div>
-        {/each}
-      </div>
-    {:else if plugins.length > 0}
+    {:else}
       <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
           workbench
-          data={plugins}
-          columns={pluginColumns}
+          data={filteredRows}
+          columns={marketColumns}
           labels={tableLabels}
-          getRowId={(plugin: PluginSummary) => plugin.vendor_id}
+          getRowId={(row: MarketRow) => row.key}
           ariaLabel={m.vendor_plugins_title()}
-          onRowClick={handlePluginRowClick} />
+          loading={marketQuery.isPending || pluginsQuery.isPending} />
       </div>
       <ul class="route-mobile-list border-t">
-        {#each plugins as plugin (plugin.vendor_id)}
-          {@const features = listedCapabilities(plugin.capabilities)}
-          <li class="flex flex-col gap-3 border-b py-4">
-            <div class="flex min-w-0 items-start gap-3" data-plugin-row={plugin.vendor_id} tabindex="-1">
-              <ProviderMark
-                class="size-10 shrink-0 rounded-lg text-base"
-                name={plugin.name}
-                svg={plugin.icon_svg}
-                logo={plugin.vendor_id} />
-              <div class="min-w-0 flex-1">
-                <p class="font-medium break-words">{plugin.name}</p>
-                <p class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                  <span class="font-technical tabular-nums" title={m.vendor_plugins_actual_version()}
-                    >{plugin.version}</span>
-                  <span>{sourceLabel(plugin.source)}</span>
-                  {#if hasBundledDifference(plugin)}
-                    <span>
-                      {m.vendor_plugins_bundled_version()}
-                      <span class="font-technical tabular-nums">{plugin.builtin_version}</span>
-                    </span>
-                  {/if}
+        {#each filteredRows as row (row.key)}{@const release = rowRelease(row)}
+          <li class="flex gap-3 border-b py-3">
+            <ProviderMark
+              class="market-icon size-9 shrink-0"
+              name={rowName(row)}
+              svg={row.entry?.latest?.icon_svg ?? row.installed?.icon_svg}
+              logo={row.vendorId} />
+            <div class="flex min-w-0 flex-1 flex-col gap-2">
+              <div class="min-w-0">
+                <p class="flex min-w-0 items-center gap-1.5 font-medium">
+                  <span class="truncate">{rowName(row)}</span>{#if row.source && !row.source.official}<PuzzleIcon
+                      class="size-4 shrink-0 text-muted-foreground"
+                      aria-label={m.market_external()} />{/if}
                 </p>
-                {#if features.length > 0}
-                  <p class="mt-1 text-xs text-muted-foreground">{features.map(capabilityLabel).join(' · ')}</p>
-                {/if}
-                {@render pluginIssueNotes(plugin)}
+                <p class="truncate text-xs text-muted-foreground">
+                  {row.source?.repository ??
+                    row.installed?.origin?.repository ??
+                    (row.installed ? sourceLabel(row.installed.source) : '')}
+                </p>
               </div>
+              {@render statusCell(row)}
+              <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
+                <dt class="text-muted-foreground">{m.market_installed()}</dt>
+                <dd class="font-technical tabular-nums">{attachedVersion(row) ?? '—'}</dd>
+                <dt class="text-muted-foreground">{m.market_available()}</dt>
+                <dd class="tabular-nums">
+                  {#if release}<span class="font-technical">{release.version}</span>
+                    <span class="text-muted-foreground"> · {formatSize(release.artifact.size)}</span>{:else}—{/if}
+                </dd>
+              </dl>
+              {@render rowActions(row, 'flex-wrap')}
             </div>
-            <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-              <StatusIndicator
-                compact
-                label={statusLabel(plugin.status)}
-                tone={statusTone(plugin.status, plugin.error)} />
-              <div class="flex flex-wrap justify-end gap-2">{@render pluginActions(plugin)}</div>
-            </div>
-          </li>
-        {/each}
+          </li>{/each}
       </ul>
     {/if}
   </section>
-
-  {#if fileDragActive}
-    <div class="pointer-events-none absolute inset-0 z-40 bg-background/80">
-      <div class="sticky top-0 flex h-[calc(100svh-6rem)] items-center justify-center p-4">
-        <div
-          class="flex size-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary text-center">
-          <span class="flex size-9 items-center justify-center rounded-lg border border-border bg-background">
-            <UploadIcon class="size-4" />
-          </span>
-          <span class="font-medium">{m.vendor_plugins_import_title()}</span>
-          <span class="max-w-64 text-xs text-balance text-muted-foreground">
-            {m.vendor_plugins_drop_hint()}
-          </span>
-        </div>
-      </div>
-    </div>
-  {/if}
+  {#if fileDragActive}<div
+      class="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-primary bg-background/90">
+      {m.vendor_plugins_drop_hint()}
+    </div>{/if}
 </div>
-
-<Sheet.Root bind:open={detailOpen}>
-  <Sheet.Content side="right" class="w-full! gap-0 sm:max-w-md!" closeLabel={m.common_close()}>
-    {#if detailPlugin}
-      {@const plugin = detailPlugin}
-      <Sheet.Header class="pr-12">
-        <Sheet.Title class="flex items-center gap-2.5">
-          <ProviderMark
-            class="size-8 rounded-lg text-xs"
-            name={plugin.name}
-            svg={plugin.icon_svg}
-            logo={plugin.vendor_id} />
-          <span class="truncate">{plugin.name}</span>
-        </Sheet.Title>
-      </Sheet.Header>
-      <div class="route-overlay-body">
-        <div class="flex flex-col gap-5">
-          <dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-            <div class="min-w-0">
-              <dt class="text-xs text-muted-foreground">{m.vendor_plugins_id_label()}</dt>
-              <dd class="mt-1"><TechnicalValue value={plugin.vendor_id} copyable /></dd>
-            </div>
-            <div class="min-w-0">
-              <dt class="text-xs text-muted-foreground">{m.common_status()}</dt>
-              <dd class="mt-1">
-                <StatusIndicator label={statusLabel(plugin.status)} tone={statusTone(plugin.status, plugin.error)} />
-              </dd>
-            </div>
-            <div class="min-w-0">
-              <dt class="text-xs text-muted-foreground">{m.vendor_plugins_actual_version()}</dt>
-              <dd class="font-technical mt-1 truncate tabular-nums">{plugin.version}</dd>
-            </div>
-            <div class="min-w-0">
-              <dt class="text-xs text-muted-foreground">{m.vendor_plugins_source_label()}</dt>
-              <dd class="mt-1"><Badge variant="outline">{sourceLabel(plugin.source)}</Badge></dd>
-            </div>
-            {#if plugin.builtin_version}
-              <div class="min-w-0">
-                <dt class="text-xs text-muted-foreground">{m.vendor_plugins_bundled_version()}</dt>
-                <dd class="font-technical mt-1 truncate tabular-nums">{plugin.builtin_version}</dd>
-              </div>
-            {/if}
-          </dl>
-
-          {#if plugin.pending_update}
-            <Alert.Root variant="warning">
-              <CircleAlertIcon />
-              <Alert.Title>{m.vendor_plugins_pending_builtin_update()}</Alert.Title>
-              <Alert.Description>
-                {plugin.pending_update.previous_version
-                  ? m.vendor_plugins_preview_version_change({
-                      previous: plugin.pending_update.previous_version,
-                      next: plugin.pending_update.new_version,
-                    })
-                  : m.vendor_plugins_preview_new_install({ version: plugin.pending_update.new_version })}
-              </Alert.Description>
-            </Alert.Root>
-          {/if}
-
-          {#if plugin.error}
-            <Alert.Root variant="destructive">
-              <CircleAlertIcon />
-              <Alert.Title>{m.vendor_plugins_reported_error()}</Alert.Title>
-              <Alert.Description><p class="break-words">{plugin.error}</p></Alert.Description>
-            </Alert.Root>
-          {/if}
-
-          {#if restoreError?.vendorId === plugin.vendor_id}
-            <RequestFailure message={restoreError.message} />
-          {/if}
-
-          <section aria-labelledby="detail-capabilities">
-            <h3 id="detail-capabilities" class="text-xs font-medium text-muted-foreground">
-              {m.vendor_plugins_capabilities()}
-            </h3>
-            {#if listedCapabilities(plugin.capabilities).length > 0}
-              <ul class="mt-2 flex flex-col gap-2">
-                {#each listedCapabilities(plugin.capabilities) as capability (capability)}
-                  {@const description = capabilityDescription(capability)}
-                  <li class="min-w-0 text-sm">
-                    <span class="font-medium">{capabilityLabel(capability)}</span>
-                    {#if description}<span class="block text-xs text-muted-foreground">{description}</span>{/if}
-                  </li>
-                {/each}
-              </ul>
-            {:else}
-              <p class="mt-1 text-sm text-muted-foreground">{m.vendor_plugins_no_capabilities()}</p>
-            {/if}
-          </section>
-
-          <section aria-labelledby="detail-bindings">
-            <h3 id="detail-bindings" class="text-xs font-medium text-muted-foreground">
-              {m.vendor_plugins_bindings()}
-            </h3>
-            {#if plugin.affected_bindings.length > 0}
-              <ul class="mt-2 flex flex-col gap-2">
-                {#each plugin.affected_bindings as binding (`${binding.route_id}:${binding.provider_id}:${binding.capability}:${binding.upstream_model}`)}
-                  <li class="min-w-0 rounded-lg border bg-card px-3 py-2 text-sm">
-                    <span class="font-technical block truncate text-xs">{bindingLabel(binding)}</span>
-                    <span class="mt-1 block text-muted-foreground">{capabilityLabel(binding.capability)}</span>
-                  </li>
-                {/each}
-              </ul>
-            {:else}
-              <p class="mt-1 text-sm text-muted-foreground">{m.vendor_plugins_no_bindings()}</p>
-            {/if}
-          </section>
+<PluginSources
+  bind:open={sourceOpen}
+  onchanged={() => queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] })} />
+<Sheet.Root bind:open={detailOpen}
+  ><Sheet.Content
+    bind:ref={detailContent}
+    side="right"
+    class="w-full! gap-0 sm:max-w-2xl!"
+    closeLabel={m.common_close()}
+    onOpenAutoFocus={focusDetailClose}>
+    {#if detailRow}{@const row = detailRow}{@const release = rowRelease(row)}
+      <Sheet.Header><Sheet.Title>{rowName(row)}</Sheet.Title></Sheet.Header>
+      <div class="route-overlay-body @container flex flex-col gap-6">
+        <div class="flex flex-col gap-3">
+          <div class="flex flex-wrap items-start gap-x-4 gap-y-2">
+            <TechnicalValue class="text-xs text-muted-foreground" value={row.vendorId} copyable />
+            {@render statusCell(row)}
+          </div>
+          {#if release?.description}<p class="text-pretty">{release.description}</p>{/if}
         </div>
+        {#if row.source || release?.authors?.length}<dl class="market-detail-list">
+            {#if row.source}
+              <dt>{m.plugin_sources_repository()}</dt>
+              <dd class="flex min-w-0 flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  class="min-w-0 truncate text-primary underline-offset-4 hover:underline"
+                  onclick={() => void openExternalUrl(row.source!.url)}>{row.source.repository}</button>
+                {#if row.source.official}<Badge variant="outline">{m.plugin_sources_official()}</Badge>{/if}
+              </dd>
+              <dt>{m.plugin_sources_fingerprint()}</dt>
+              <dd class="min-w-0"><TechnicalValue value={row.source.fingerprint} copyable /></dd>
+            {/if}
+            {#if release?.authors?.length}
+              <dt>{m.market_authors()}</dt>
+              <dd>{release.authors.join(', ')}</dd>
+            {/if}
+          </dl>{/if}
+        {#if row.installed}<section class="flex flex-col gap-3" aria-labelledby="market-detail-installed">
+            <h3 id="market-detail-installed" class="text-sm font-semibold">{m.market_installed()}</h3>
+            <dl class="market-detail-list">
+              <dt>{m.vendor_plugins_actual_version()}</dt>
+              <dd class="font-technical tabular-nums">{row.installed.version}</dd>
+              <dt>{m.vendor_plugins_source_label()}</dt>
+              <dd class="min-w-0">
+                {#if row.installed.origin}<span class="break-words">{row.installed.origin.repository}</span> ·
+                  <button
+                    type="button"
+                    class="font-technical text-primary underline-offset-4 hover:underline"
+                    onclick={() => void openExternalUrl(row.installed!.origin!.release_url)}
+                    >{row.installed.origin.release_tag}</button
+                  >{:else}{sourceLabel(row.installed.source)}{/if}
+                {#if row.installed.source === 'local'}<p class="text-xs text-muted-foreground">
+                    {m.market_local_unverified()}
+                  </p>{/if}
+              </dd>
+              {#if row.installed.origin}
+                <dt>{m.plugin_sources_fingerprint()}</dt>
+                <dd class="min-w-0">
+                  <TechnicalValue value={row.installed.origin.public_key_fingerprint} copyable />
+                </dd>
+              {/if}
+              {#if row.installed.digest}
+                <dt>{m.market_component_digest()}</dt>
+                <dd class="min-w-0"><TechnicalValue value={row.installed.digest} copyable /></dd>
+              {/if}
+              {#if row.installed.installed_at}
+                <dt>{m.market_installed_at()}</dt>
+                <dd class="font-technical tabular-nums">
+                  {new Date(row.installed.installed_at * 1000).toLocaleString()}
+                </dd>
+              {/if}
+            </dl>
+          </section>{/if}
+        {#if row.entry}<section class="flex flex-col gap-3" aria-labelledby="market-detail-versions">
+            <h3 id="market-detail-versions" class="text-sm font-semibold">{m.market_versions()}</h3>
+            {#if row.entry.incomplete}<p class="text-sm text-warning">{m.market_incomplete()}</p>{/if}
+            {#if row.entry.conflict}<p class="text-sm text-warning">{m.market_conflict()}</p>{/if}
+            <ul class="divide-y border-y">
+              {#each row.entry.releases as version (`${version.release_id}:${version.version}`)}<li
+                  class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-2.5">
+                  <div class="min-w-0">
+                    <button
+                      type="button"
+                      class="font-technical text-primary tabular-nums underline-offset-4 hover:underline"
+                      onclick={() => void openExternalUrl(version.release_url)}>{version.version}</button>
+                    <span class="text-xs text-muted-foreground tabular-nums">
+                      · {new Date(version.published_at).toLocaleDateString()} · {formatSize(version.artifact.size)}
+                    </span>
+                    {#if version.conflict}<p class="text-xs text-warning">{m.market_conflict()}</p>{/if}
+                    {#if !version.compatible}<p class="text-xs text-warning">
+                        {m.market_host_upgrade()}: {version.incompatibility ?? version.compatibility.host_version_req}
+                      </p>{/if}
+                  </div>
+                  {#if row.vendorId !== 'base'}<Button
+                      size="sm"
+                      variant="outline"
+                      disabled={preparing ||
+                        !row.source?.enabled ||
+                        !!row.source?.error ||
+                        version.conflict ||
+                        !version.compatible}
+                      onclick={() => prepare(row, version)}>{m.market_install_version()}</Button
+                    >{/if}
+                </li>{/each}
+            </ul>
+          </section>{/if}
+        {#if row.installed?.error}<RequestFailure message={row.installed.error} />{/if}
+        {#if restoreError?.vendorId === row.vendorId}<RequestFailure message={restoreError.message} />{/if}
       </div>
-      {#if plugin.pending_update || canRestoreBuiltin(plugin) || canUninstall(plugin)}
-        <Sheet.Footer class="border-t">
-          {#if canRestoreBuiltin(plugin)}
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={restoringVendorId === plugin.vendor_id}
-              aria-busy={restoringVendorId === plugin.vendor_id}
-              onclick={() => restoreBuiltin(plugin.vendor_id)}>
-              {#if restoringVendorId === plugin.vendor_id}<Spinner data-icon="inline-start" />{/if}
-              {restoringVendorId === plugin.vendor_id
-                ? m.vendor_plugins_restoring()
-                : m.vendor_plugins_restore_builtin()}
-            </Button>
-          {/if}
-          {#if canUninstall(plugin)}
-            <Button variant="outline" size="sm" onclick={() => openUninstall(plugin)}>
-              {m.vendor_plugins_uninstall_action()}
-            </Button>
-          {/if}
-          {#if plugin.pending_update}
-            {@const pendingUpdate = plugin.pending_update}
-            <Button size="sm" onclick={() => showPreview(pendingUpdate)}>
-              {m.vendor_plugins_review_update()}
-            </Button>
-          {/if}
-        </Sheet.Footer>
-      {/if}
+      <Sheet.Footer class="border-t"
+        >{#if row.installed?.pending_update}<Button onclick={() => showPreview(row.installed!.pending_update!)}
+            >{m.vendor_plugins_review_update()}</Button
+          >{/if}{#if row.installed && canRestoreBuiltin(row.installed)}<Button
+            variant="outline"
+            disabled={restoringVendorId === row.vendorId}
+            onclick={() => restoreBuiltin(row.vendorId)}>{m.vendor_plugins_restore_builtin()}</Button
+          >{/if}{#if row.installed && canUninstall(row.installed)}<Button
+            variant="outline"
+            onclick={() => openUninstall(row.installed!)}>{m.vendor_plugins_uninstall_action()}</Button
+          >{/if}</Sheet.Footer>
     {/if}
-  </Sheet.Content>
-</Sheet.Root>
+  </Sheet.Content></Sheet.Root>
 
 <AlertDialog.Root bind:open={() => uninstallOpen, setUninstallOpen}>
   {#if uninstallTarget}
@@ -993,22 +997,25 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 
 <Dialog.Root bind:open={() => previewOpen, setPreviewOpen}>
   {#if preview}
-    <Dialog.Layout class="sm:max-w-xl" showCloseButton={!confirming}>
+    <Dialog.Layout class="sm:max-w-xl" showCloseButton={!confirming} onOpenAutoFocus={focusPreviewCancel}>
       {#snippet header()}
         <Dialog.Title>{m.vendor_plugins_preview_title()}</Dialog.Title>
       {/snippet}
 
-      <div class="flex flex-col gap-4">
-        <div class="min-w-0">
+      <div class="@container flex flex-col gap-4">
+        <div class="flex min-w-0 flex-col gap-3">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
             <ProviderMark
               class="size-7 rounded-md text-xs"
               name={preview.name}
               svg={preview.icon_svg}
               logo={preview.vendor_id} />
-            <h2 class="truncate font-medium">{preview.name}</h2>
-            <span class="font-technical text-xs text-muted-foreground">{preview.vendor_id}</span>
-            <span class="font-technical ms-auto text-sm tabular-nums">
+            <div class="min-w-0">
+              <h2 class="truncate font-medium">{preview.name}</h2>
+              <p class="font-technical truncate text-xs text-muted-foreground">{preview.vendor_id}</p>
+            </div>
+            <span class="ms-auto flex items-center gap-2 text-sm tabular-nums">
+              {#if preview.is_downgrade}<Badge variant="destructive">{m.vendor_plugins_preview_downgrade()}</Badge>{/if}
               {preview.previous_version
                 ? m.vendor_plugins_preview_version_change({
                     previous: preview.previous_version,
@@ -1017,16 +1024,36 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                 : m.vendor_plugins_preview_new_install({ version: preview.new_version })}
             </span>
           </div>
-          <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
-            <Badge variant="outline">{sourceLabel(preview.target_source)}</Badge>
-            {#if preview.is_downgrade}
-              <Badge variant="destructive">{m.vendor_plugins_preview_downgrade()}</Badge>
+          <dl class="market-detail-list">
+            <dt>{m.vendor_plugins_source_label()}</dt>
+            <dd class="min-w-0">
+              {#if preview.origin}<span class="break-words">{preview.origin.repository}</span> ·
+                <button
+                  type="button"
+                  class="font-technical text-primary underline-offset-4 hover:underline"
+                  onclick={() => void openExternalUrl(preview!.origin!.release_url)}
+                  >{preview.origin.release_tag}</button
+                >{:else}{sourceLabel(preview.target_source)}{/if}
+            </dd>
+            {#if preview.origin}
+              <dt>{m.plugin_sources_fingerprint()}</dt>
+              <dd class="min-w-0">
+                <TechnicalValue value={preview.origin.public_key_fingerprint} copyable />
+              </dd>
             {/if}
-            <span class="text-xs text-muted-foreground">
-              {m.vendor_plugins_preview_author()}: {preview.author ?? m.vendor_plugins_preview_author_unknown()}
-            </span>
-          </div>
-          <p class="mt-1.5 text-xs text-muted-foreground">{m.vendor_plugins_preview_author_unverified()}</p>
+            {#if previewSourceChanged}
+              <dt>{m.market_previous_source()}</dt>
+              <dd class="min-w-0 break-words">
+                {preview.previous_origin?.repository ??
+                  (previewPreviousSource ? sourceLabel(previewPreviousSource) : '')}
+              </dd>
+            {/if}
+            <dt>{m.vendor_plugins_preview_author()}</dt>
+            <dd>
+              {preview.author ?? m.vendor_plugins_preview_author_unknown()}
+              <p class="text-xs text-muted-foreground">{m.vendor_plugins_preview_author_unverified()}</p>
+            </dd>
+          </dl>
         </div>
 
         <div class="grid grid-cols-3 gap-2">
@@ -1198,14 +1225,18 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       </div>
 
       {#snippet footer()}
-        <Button variant="outline" disabled={confirming} onclick={() => setPreviewOpen(false)}
+        <Button bind:ref={previewCancel} variant="outline" disabled={confirming} onclick={() => setPreviewOpen(false)}
           >{m.common_cancel()}</Button>
         <Button
           disabled={confirming || (dataDiscardRequired && !allowDataDiscard)}
           aria-busy={confirming}
           onclick={confirmPreview}>
           {#if confirming}<Spinner data-icon="inline-start" />{/if}
-          {confirming ? m.vendor_plugins_preview_confirming() : m.vendor_plugins_preview_confirm()}
+          {confirming
+            ? m.vendor_plugins_preview_confirming()
+            : preview?.origin
+              ? m.market_confirm_install({ name: preview.name, version: preview.new_version })
+              : m.vendor_plugins_preview_confirm()}
         </Button>
       {/snippet}
     </Dialog.Layout>
@@ -1213,6 +1244,30 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 </Dialog.Root>
 
 <style>
+:global(.market-icon img) {
+  filter: grayscale(1);
+}
+/* 详情里的标签与值成对排列；窄 Sheet 时改为上下堆叠，避免长指纹挤压标签列。 */
+.market-detail-list {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  font-size: 0.8125rem;
+}
+.market-detail-list :global(dt) {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+@container (max-width: 26rem) {
+  .market-detail-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.125rem;
+  }
+  .market-detail-list :global(dd) {
+    margin-bottom: 0.5rem;
+  }
+}
 .vendor-plugins-page {
   /* 与壳层一致，页头与提示按内容占位，其余高度留给资源列表。 */
   height: calc(100svh - 5rem);

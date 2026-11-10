@@ -440,6 +440,49 @@ impl VendorPlugins {
         expected_vendor: Option<&str>,
     ) -> anyhow::Result<PluginPreview> {
         anyhow::ensure!(
+            source != PluginSource::Marketplace,
+            "marketplace installs require a verified origin"
+        );
+        self.preview_inner(gw, bytes, source, expected_vendor, None, None, None)
+            .await
+    }
+
+    pub(crate) async fn preview_marketplace(
+        &self,
+        gw: &Gateway,
+        bytes: Bytes,
+        origin: PluginInstallOrigin,
+        expected_vendor: &str,
+        expected_version: &str,
+        expected_canonical_format_version: u32,
+    ) -> anyhow::Result<PluginPreview> {
+        anyhow::ensure!(
+            expected_vendor != "base",
+            "the base plugin cannot be installed from the marketplace"
+        );
+        self.preview_inner(
+            gw,
+            bytes,
+            PluginSource::Marketplace,
+            Some(expected_vendor),
+            Some(expected_version),
+            Some(expected_canonical_format_version),
+            Some(origin),
+        )
+        .await
+    }
+
+    async fn preview_inner(
+        &self,
+        gw: &Gateway,
+        bytes: Bytes,
+        source: PluginSource,
+        expected_vendor: Option<&str>,
+        expected_version: Option<&str>,
+        expected_canonical_format_version: Option<u32>,
+        origin: Option<PluginInstallOrigin>,
+    ) -> anyhow::Result<PluginPreview> {
+        anyhow::ensure!(
             !bytes.is_empty() && bytes.len() <= MAX_COMPONENT_BYTES,
             "plugin component must contain between 1 byte and 64 MiB"
         );
@@ -462,6 +505,18 @@ impl VendorPlugins {
             anyhow::ensure!(
                 descriptor.vendor_id == expected,
                 "bundled plugin identity does not match"
+            );
+        }
+        if let Some(expected) = expected_version {
+            anyhow::ensure!(
+                descriptor.version.to_string() == expected,
+                "marketplace plugin version does not match"
+            );
+        }
+        if let Some(expected) = expected_canonical_format_version {
+            anyhow::ensure!(
+                descriptor.canonical_format_version == expected,
+                "marketplace plugin canonical format does not match"
             );
         }
         let _update = self.updates.lock().await;
@@ -693,6 +748,12 @@ impl VendorPlugins {
             previous_version: old.as_ref().map(|record| record.version.clone()),
             new_version: descriptor.version.to_string(),
             target_source: source,
+            origin: origin.clone(),
+            previous_origin: old
+                .as_ref()
+                .and_then(|record| record.origin.as_deref())
+                .map(serde_json::from_str)
+                .transpose()?,
             is_downgrade: old_version.is_some_and(|version| descriptor.version < version),
             inherits_credentials: states.iter().any(|state| {
                 state.oauth.is_some()
@@ -741,6 +802,7 @@ impl VendorPlugins {
             vendor_id: descriptor.vendor_id.clone(),
             version: descriptor.version.to_string(),
             source: source.as_str().to_owned(),
+            origin: origin.as_ref().map(serde_json::to_string).transpose()?,
             descriptor: serde_json::to_string(descriptor)?,
             digest: stravia_runtime_contract::protocol::ir::canonical::hash_hex(
                 &Sha256::digest(&bytes).into(),
@@ -769,7 +831,7 @@ impl VendorPlugins {
             source == PluginSource::Builtin
                 || pending
                     .values()
-                    .filter(|pending| pending.preview.target_source == PluginSource::Local)
+                    .filter(|pending| pending.preview.target_source != PluginSource::Builtin)
                     .count()
                     < MAX_PREVIEWS,
             "too many pending plugin updates; complete or let an existing preview expire"
@@ -835,7 +897,7 @@ impl VendorPlugins {
                 == pending.provider_fingerprint,
             "provider configuration or plugin data changed; review the update again"
         );
-        if pending.preview.target_source == PluginSource::Local
+        if pending.preview.target_source != PluginSource::Builtin
             && let Some(artifacts) = &self.artifacts
         {
             artifacts
@@ -881,7 +943,7 @@ impl VendorPlugins {
         // 本地插件已落盘；预览期编译的产物沿用，空闲后释放并按摘要恢复。
         // 内置版本沿用内嵌来源的句柄。
         let loaded = match &self.artifacts {
-            Some(artifacts) if pending.preview.target_source == PluginSource::Local => pending
+            Some(artifacts) if pending.preview.target_source != PluginSource::Builtin => pending
                 .loaded
                 .with_source(artifacts.source(&pending.record.digest)),
             _ => pending.loaded,
@@ -1075,10 +1137,18 @@ impl VendorPlugins {
                 || vendor_id.to_owned(),
                 |descriptor| descriptor.display_name.clone(),
             ),
+            origin: record
+                .origin
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+            digest: record.digest,
+            installed_at: record.installed_at,
             version: record.version,
             source: match record.source.as_str() {
                 "builtin" => PluginSource::Builtin,
                 "local" => PluginSource::Local,
+                "marketplace" => PluginSource::Marketplace,
                 _ => anyhow::bail!("invalid recorded plugin source"),
             },
             status: if loaded.is_none() {

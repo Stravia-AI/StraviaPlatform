@@ -135,9 +135,9 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 
 
 ### 供应商插件
 
-所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 默认内嵌基础 Vendor；Codex、Claude Code、Grok、Command Code 和 Devin 通过独立 Release 附件分发专属插件。添加连接前，先在**供应商插件**中导入对应的本地 `.wasm` 文件。专属插件完整拥有对应供应商身份，任何情况下都不会回退到基础包。
+所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 默认内嵌基础 Vendor；添加连接前，先在**供应商插件**中安装 Codex、Claude Code、Grok、Command Code 或 Devin 等专属插件。页面统一展示已安装插件、可用版本与更新检查。专属插件完整拥有对应供应商身份，任何情况下都不会回退到基础包。
 
-**供应商插件**也支持导入本地包更新，不依赖插件市场。插件会获得所选连接的上游凭据和已批准网络目标，因此使用前应核对来源与请求的 origin。接入步骤、支持能力、隔离、更新与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
+可使用官方源，或添加已发布签名插件目录的公开 GitHub 仓库；信任前应核对其公钥指纹。离线导入支持 `.wasm` 和 `.wasm.zst`。下载经过验证，安装与更新仍需确认：插件会获得所选连接的上游凭据和已批准网络目标，签名有效不等于代码安全。来源要求见[插件市场指南](docs/design/plugin-marketplace.md)，支持能力、隔离与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
 
 ### 密钥、用量与请求记录
 

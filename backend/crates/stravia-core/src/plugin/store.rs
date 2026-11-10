@@ -1,3 +1,5 @@
+mod marketplace;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -37,6 +39,7 @@ struct MemoryPluginData {
     installed: BTreeMap<String, InstalledPlugin>,
     private_state: HashMap<String, MemoryPrivateState>,
     recovery: BTreeSet<(String, String)>,
+    marketplace: marketplace::MemoryMarketplace,
 }
 
 #[derive(Clone)]
@@ -59,6 +62,7 @@ pub(crate) struct InstalledPlugin {
     pub revision: i64,
     pub data_epoch: i64,
     pub installed_at: i64,
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -82,10 +86,23 @@ pub(crate) struct ProviderReset {
 pub(crate) enum PluginStorageError {
     #[error("plugin or provider changed; review the update again")]
     Changed,
+    #[error("plugin source signing key has changed")]
+    KeyChanged,
+    #[error("plugin version was observed with different content")]
+    VersionConflict,
     #[error("plugin operation is no longer current")]
     StaleOperation,
     #[error("plugin storage operation failed")]
     Storage,
+}
+
+fn parse_install_origin(
+    next: &InstalledPlugin,
+) -> Result<Option<crate::plugin::types::PluginInstallOrigin>, PluginStorageError> {
+    next.origin
+        .as_deref()
+        .map(|json| serde_json::from_str(json).map_err(|_| PluginStorageError::Storage))
+        .transpose()
 }
 
 fn storage_error(_: sqlx::Error) -> PluginStorageError {
@@ -135,6 +152,40 @@ async fn install_memory(
     let mut provider_models = store.provider_models.write().await;
     let mut oauth_credentials = store.oauth_credentials.credentials.write().await;
     let mut data = store.data.write().await;
+
+    if let Some(origin) = parse_install_origin(next)? {
+        let source = data
+            .marketplace
+            .sources
+            .get(&origin.source_id)
+            .ok_or(PluginStorageError::Changed)?;
+        if !source.enabled
+            || source.trust_revision != origin.trust_revision
+            || source.repository_id != origin.repository_id
+            || source.fingerprint != origin.public_key_fingerprint
+        {
+            return Err(PluginStorageError::Changed);
+        }
+        if source
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "key_changed")
+        {
+            return Err(PluginStorageError::KeyChanged);
+        }
+        if !data
+            .marketplace
+            .seen
+            .get(&(
+                origin.source_id.clone(),
+                next.vendor_id.clone(),
+                next.version.clone(),
+            ))
+            .is_some_and(|(digest, conflict)| !conflict && digest == &next.digest)
+        {
+            return Err(PluginStorageError::VersionConflict);
+        }
+    }
 
     let revision_matches = match expected_revision {
         Some(expected) => data
@@ -261,7 +312,7 @@ impl PluginStore {
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<InstalledPlugin>, PluginStorageError> {
-        const SQL: &str = "SELECT vendor_id, version, source, descriptor, digest, revision, data_epoch, installed_at FROM vendor_plugins ORDER BY vendor_id";
+        const SQL: &str = "SELECT vendor_id, version, source, descriptor, digest, revision, data_epoch, installed_at, origin FROM vendor_plugins ORDER BY vendor_id";
         match &self.backend {
             PluginStoreBackend::Memory(store) => Ok(store
                 .data
@@ -359,12 +410,33 @@ impl PluginStore {
         resets: &[ProviderReset],
     ) -> Result<(), PluginStorageError> {
         macro_rules! install {
-    ($pool:expr, $begin:literal) => {{
+    ($pool:expr, $begin:literal, $lock:literal) => {{
         let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
         let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+        if let Some(origin) = parse_install_origin(next)? {
+            let source: Option<(String, String, String, i64, bool)> = sqlx::query_as($lock)
+                .bind(&origin.source_id).fetch_optional(&mut *tx).await.map_err(storage_error)?;
+            let Some((repository_id, fingerprint, json, revision, enabled)) = source else {
+                return Err(PluginStorageError::Changed);
+            };
+            let source: crate::plugin::marketplace::PluginSourceSummary = serde_json::from_str(&json).map_err(|_| PluginStorageError::Storage)?;
+            if !enabled || revision != origin.trust_revision || repository_id != origin.repository_id.to_string()
+                || fingerprint != origin.public_key_fingerprint {
+                return Err(PluginStorageError::Changed);
+            }
+            if source.error.as_ref().is_some_and(|error| error.code == "key_changed") {
+                return Err(PluginStorageError::KeyChanged);
+            }
+            let seen: Option<(String, bool)> = sqlx::query_as("SELECT digest, conflict FROM vendor_plugin_seen_digests WHERE source_id=$1 AND vendor_id=$2 AND version=$3")
+                .bind(&origin.source_id).bind(&next.vendor_id).bind(&next.version)
+                .fetch_optional(&mut *tx).await.map_err(storage_error)?;
+            if !seen.is_some_and(|(digest, conflict)| !conflict && digest == next.digest) {
+                return Err(PluginStorageError::VersionConflict);
+            }
+        }
         let changed = if let Some(expected) = expected_revision {
             sqlx::query(
-                "UPDATE vendor_plugins SET version=$2, source=$3, digest=$4, revision=$5, data_epoch=$6, installed_at=$7, descriptor=$9 WHERE vendor_id=$1 AND revision=$8",
+                "UPDATE vendor_plugins SET version=$2, source=$3, digest=$4, revision=$5, data_epoch=$6, installed_at=$7, descriptor=$9, origin=$10 WHERE vendor_id=$1 AND revision=$8",
             )
             .bind(&next.vendor_id)
             .bind(&next.version)
@@ -375,13 +447,14 @@ impl PluginStore {
             .bind(next.installed_at)
             .bind(expected)
             .bind(&next.descriptor)
+            .bind(&next.origin)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?
             .rows_affected()
         } else {
             sqlx::query(
-                "INSERT INTO vendor_plugins (vendor_id,version,source,digest,revision,data_epoch,installed_at,descriptor) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(vendor_id) DO NOTHING",
+                "INSERT INTO vendor_plugins (vendor_id,version,source,digest,revision,data_epoch,installed_at,descriptor,origin) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(vendor_id) DO NOTHING",
             )
             .bind(&next.vendor_id)
             .bind(&next.version)
@@ -391,6 +464,7 @@ impl PluginStore {
             .bind(next.data_epoch)
             .bind(next.installed_at)
             .bind(&next.descriptor)
+            .bind(&next.origin)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?
@@ -505,8 +579,16 @@ impl PluginStore {
             PluginStoreBackend::Memory(store) => {
                 install_memory(store, next, expected_revision, resets).await
             }
-            PluginStoreBackend::Sqlite(pool) => install!(pool, "BEGIN IMMEDIATE"),
-            PluginStoreBackend::Postgres(pool) => install!(pool, "BEGIN"),
+            PluginStoreBackend::Sqlite(pool) => install!(
+                pool,
+                "BEGIN IMMEDIATE",
+                "SELECT repository_id, fingerprint, source_json, trust_revision, enabled FROM vendor_plugin_sources WHERE id=$1"
+            ),
+            PluginStoreBackend::Postgres(pool) => install!(
+                pool,
+                "BEGIN",
+                "SELECT repository_id, fingerprint, source_json, trust_revision, enabled FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
+            ),
         }
     }
 
@@ -785,6 +867,7 @@ mod tests {
                     revision: 1,
                     data_epoch: 1,
                     installed_at: 1,
+                    origin: None,
                 },
                 None,
                 &[ProviderReset {

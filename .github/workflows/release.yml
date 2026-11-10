@@ -24,6 +24,7 @@ env:
   BUN_VERSION: "1.4.2"
   TASK_VERSION: "3.52.0"
   IMAGE_NAME: ghcr.io/stravia-ai/straviaplatform
+  STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY: ${{ vars.STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY }}
 
 jobs:
   checks:
@@ -48,6 +49,13 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Require official plugin identity
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          [[ -n "${STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY}" ]] || { echo 'Missing STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY' >&2; exit 1; }
+          [[ "${GITHUB_REPOSITORY_ID}" == '1350654373' ]] || { echo 'Unexpected official repository ID' >&2; exit 1; }
 
       - name: Fetch main branch
         if: github.event_name == 'push'
@@ -154,10 +162,16 @@ jobs:
         with:
           version: ${{ env.TASK_VERSION }}
 
+      - name: Install native build dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev python3 pkg-config minisign
+
       - name: Build standalone plugins
         run: task build:vendors:all
 
-      - name: Package dedicated plugins
+      - name: Prepare plugin declarations
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
@@ -165,32 +179,57 @@ jobs:
           import hashlib
           import json
           import os
-          import shutil
           from pathlib import Path
 
           directory = Path("target/vendor-plugins-all")
           records = json.loads((directory / "manifest.json").read_text())
+          names = {"openai-codex": "OpenAI Codex", "xai-grok": "xAI Grok", "command-code": "Command Code", "devin": "Devin", "opencode-free": "OpenCode Zen Free", "claude-code": "Claude Code", "antigravity": "Antigravity", "muse-code": "Muse Code", "kilo": "Kilo"}
           dedicated = [record for record in records if record["vendor_id"] != "base"]
-          expected = {"openai-codex", "xai-grok", "command-code", "devin", "opencode-free", "claude-code", "antigravity", "muse-code", "kilo"}
-          if len(dedicated) != len(expected) or {record["vendor_id"] for record in dedicated} != expected:
+          if len(dedicated) != len(names) or {record["vendor_id"] for record in dedicated} != set(names):
               raise SystemExit("Dedicated plugin release inventory is incomplete")
-          output = Path("dist")
-          output.mkdir(exist_ok=True)
+          declarations = []
           for record in dedicated:
               if record["version"] != os.environ["RELEASE_VERSION"]:
                   raise SystemExit("Plugin version does not match the release")
               source = directory / record["file"]
               if hashlib.sha256(source.read_bytes()).hexdigest() != record["sha256"]:
                   raise SystemExit(f"Plugin digest mismatch: {record['vendor_id']}")
-              name = f"stravia-vendor-{record['vendor_id']}-v{record['version']}.wasm"
-              shutil.copyfile(source, output / name)
+              declarations.append({"file": str(source), "vendor_id": record["vendor_id"], "version": record["version"], "display_name": names[record["vendor_id"]]})
+          Path("plugin-input.json").write_text(json.dumps(declarations))
           PY
+
+      - name: Generate catalog and compressed assets
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          PUBLISHED_AT: ${{ needs.prepare.outputs.published_at }}
+        run: |
+          cargo run --release -p stravia-devtools --bin stravia-tools -- plugin-catalog \
+            --repository-id 1350654373 --release-tag "${RELEASE_TAG}" \
+            --host-version-req ">=${RELEASE_VERSION}" --published-at "${PUBLISHED_AT}" \
+            --input plugin-input.json --output dist
+
+      - name: Sign and verify catalog against pinned identity
+        env:
+          SIGNING_KEY: ${{ secrets.STRAVIA_PLUGIN_CATALOG_SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.STRAVIA_PLUGIN_CATALOG_SIGNING_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY}" && -n "${SIGNING_KEY}" && -n "${SIGNING_PASSWORD}" ]] || { echo 'Missing plugin catalog signing configuration' >&2; exit 1; }
+          key_file=$(mktemp)
+          trap 'rm -f "${key_file}"' EXIT
+          chmod 600 "${key_file}"
+          printf '%s\n' "${SIGNING_KEY}" > "${key_file}"
+          printf '%s\n' "${STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY}" > dist/stravia-plugin-catalog.pub
+          printf '%s\n' "${SIGNING_PASSWORD}" | minisign -S -s "${key_file}" -m dist/stravia-plugin-catalog.json -x dist/stravia-plugin-catalog.json.minisig
+          minisign -V -p dist/stravia-plugin-catalog.pub -m dist/stravia-plugin-catalog.json -x dist/stravia-plugin-catalog.json.minisig
 
       - name: Upload dedicated plugin assets
         uses: actions/upload-artifact@v7
         with:
           name: vendor-plugins
-          path: dist/*.wasm
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -583,6 +622,8 @@ jobs:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
+          build-args: |
+            "STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY=${{ env.STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY }}"
           platforms: ${{ matrix.platform }}
           push: false
           provenance: false
@@ -742,6 +783,17 @@ jobs:
             gh release create "${args[@]}"
           fi
           gh release upload "${TAG_NAME}" release-assets/* --clobber
+          gh release view "${TAG_NAME}" --json assets > "${RUNNER_TEMP}/draft-assets.json"
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          local = {p.name: p.stat().st_size for p in Path("release-assets").iterdir() if p.is_file()}
+          assets = json.loads(Path(os.environ["RUNNER_TEMP"], "draft-assets.json").read_text())["assets"]
+          remote = {asset["name"]: asset["size"] for asset in assets}
+          if len(remote) != len(assets) or remote != local:
+              raise SystemExit(f"Draft release assets do not match prepared inventory: expected {local}, got {remote}")
+          PY
 
   publish-image:
     name: Publish image digest (${{ matrix.platform }})
@@ -786,6 +838,8 @@ jobs:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
+          build-args: |
+            "STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY=${{ env.STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY }}"
           platforms: ${{ matrix.platform }}
           provenance: false
           sbom: false

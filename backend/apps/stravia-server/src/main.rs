@@ -122,6 +122,10 @@ struct Args {
     test_catalog_base_url: Option<String>,
 
     #[cfg(feature = "test-harness")]
+    #[arg(long, hide = true)]
+    test_plugin_marketplace_url: Option<String>,
+
+    #[cfg(feature = "test-harness")]
     #[arg(long, env = "STRAVIA_TEST_REDIS_URL", hide = true)]
     test_redis_url: Option<String>,
 }
@@ -245,6 +249,8 @@ fn base_gateway_config(args: &Args, data_dir: PathBuf) -> GatewayConfig {
         data_dir,
         cache,
         update_source_url: args.updater_url.clone(),
+        #[cfg(feature = "test-harness")]
+        test_plugin_marketplace_url: args.test_plugin_marketplace_url.clone(),
         config_poll_interval: Duration::from_secs(args.config_poll_interval),
         catalog_background_refresh: catalog_base_url.is_some(),
         catalog_base_url,

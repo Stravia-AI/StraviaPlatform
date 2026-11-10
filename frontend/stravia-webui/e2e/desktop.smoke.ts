@@ -819,13 +819,13 @@ describe('Stravia desktop smoke', () => {
     await browser.tauri.switchWindow('main')
     await $('a[href="/vendor-plugins"]').click()
     const component = fileURLToPath(new URL('../../../target/vendor-test-fixtures/lifecycle-v1.wasm', import.meta.url))
-    await $('#vendor-plugin-file').waitForExist()
+    await $('input[type="file"][accept*="application/wasm"]').waitForExist()
     const contents = await readFile(component)
     // 嵌入式驱动不支持文件路径发送；分块传递真实文件，避免超过其 JSON 请求体上限。
     for (let offset = 0; offset < contents.length; offset += 256 * 1024) {
       await browser.execute(
         (encoded, name) => {
-          const input = document.querySelector<HTMLInputElement>('#vendor-plugin-file')
+          const input = document.querySelector<HTMLInputElement>('input[type="file"][accept*="application/wasm"]')
           if (!input) throw new Error('Plugin file input is missing')
           const previous = input.files?.item(0)
           const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0))
@@ -838,7 +838,7 @@ describe('Stravia desktop smoke', () => {
       )
     }
     await browser.execute(() => {
-      const input = document.querySelector<HTMLInputElement>('#vendor-plugin-file')
+      const input = document.querySelector<HTMLInputElement>('input[type="file"][accept*="application/wasm"]')
       if (!input) throw new Error('Plugin file input is missing')
       input.dispatchEvent(new Event('change', { bubbles: true }))
     })
@@ -861,6 +861,111 @@ describe('Stravia desktop smoke', () => {
       version: '1.0.0',
       source: 'local',
     })
+  })
+
+  it('installs a signed marketplace component through the native desktop management UI', async () => {
+    const origin = process.env.STRAVIA_TEST_PLUGIN_MARKETPLACE_URL
+    if (!origin) throw new Error('Desktop marketplace fixture origin is not configured')
+    const url = new URL(origin)
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port) {
+      throw new Error('Desktop marketplace fixture requires a loopback HTTP origin with a port')
+    }
+    const fixtureDir = fileURLToPath(new URL('../../../target/vendor-test-fixtures/marketplace/', import.meta.url))
+    const catalogName = 'stravia-plugin-catalog.json'
+    const catalogBytes = await readFile(join(fixtureDir, catalogName))
+    const catalog = JSON.parse(catalogBytes.toString('utf8')) as {
+      repository_id: number
+      release_tag: string
+      releases: Array<{ vendor_id: string; version: string; artifact: { filename: string } }>
+    }
+    expect(catalog.repository_id).toBe(424242)
+    expect(catalog.release_tag).toBe('v2.0.0')
+    const component = catalog.releases.find(
+      (release) => release.vendor_id === 'fixture.lifecycle' && release.version === '2.0.0',
+    )
+    if (!component) throw new Error('Signed marketplace catalog does not contain lifecycle v2')
+    const assets = new Map<string, Buffer>([
+      [catalogName, catalogBytes],
+      [`${catalogName}.minisig`, await readFile(join(fixtureDir, `${catalogName}.minisig`))],
+      ['stravia-plugin-catalog.pub', await readFile(join(fixtureDir, 'stravia-plugin-catalog.pub'))],
+      [component.artifact.filename, await readFile(join(fixtureDir, component.artifact.filename))],
+    ])
+    const requests: string[] = []
+    const repository = { id: 424242, full_name: 'fixture/desktop-market', private: false, mirrored: true }
+    const release = {
+      id: 1001,
+      tag_name: catalog.release_tag,
+      html_url: 'https://github.com/fixture/desktop-market/releases/tag/v2.0.0',
+      draft: false,
+      prerelease: false,
+      assets: Array.from(assets, ([name, bytes], index) => ({ id: index + 1, name, size: bytes.length })),
+    }
+    const upstream = createProvider((request, response) => {
+      const path = new URL(request.url ?? '/', origin).pathname
+      requests.push(path)
+      const json = (value: unknown) => {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify(value))
+      }
+      if (path === '/api/v1/plugin-repositories/fixture/desktop-market' || path === '/repositories/424242') {
+        json(repository)
+      } else if (path === '/api/v1/plugin-repositories/fixture/desktop-market/releases') {
+        json([release])
+      } else {
+        const prefix = `/api/v1/plugin-repositories/fixture/desktop-market/releases/${catalog.release_tag}/assets/`
+        const bytes = path.startsWith(prefix) ? assets.get(decodeURIComponent(path.slice(prefix.length))) : undefined
+        if (bytes) response.end(bytes)
+        else {
+          response.statusCode = 404
+          response.end()
+        }
+      }
+    })
+    const listening = Promise.withResolvers<void>()
+    upstream.once('error', listening.reject)
+    upstream.listen(Number(url.port), url.hostname, listening.resolve)
+    await listening.promise
+    try {
+      await $('button=Plugin sources').click()
+      const sources = await $('[role="dialog"]')
+      await sources.$('button=Add source').click()
+      await sources.$('#plugin-source-url').setValue('https://github.com/fixture/desktop-market')
+      await sources.$('button=Preview source').click()
+      await expect(sources).toHaveText(expect.stringContaining('fixture.lifecycle'))
+      await sources.$('button=Trust and add').click()
+      await sources.$('a=fixture/desktop-market').waitForExist()
+      await sources.$('button=Close').click()
+      await sources.waitForExist({ reverse: true })
+      await $('button=Check updates').click()
+      const row = await $('//tr[.//*[normalize-space()="fixture/desktop-market"]]')
+      await row.waitForExist()
+      await row.$('button=Replace source').click()
+      const preview = await $('[role="dialog"]')
+      await preview.waitForExist({ timeout: 60_000 })
+      await expect(preview).toHaveText(expect.stringContaining('fixture/desktop-market'))
+      await expect(preview).toHaveText(expect.stringContaining('2.0.0'))
+      await preview.$('button=Install Lifecycle Contract Fixture 2.0.0').click()
+      await preview.waitForExist({ reverse: true })
+      const serverPort = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
+      const installed = (await adminRequest(serverPort, '/vendor-plugins')) as Array<{
+        vendor_id: string
+        version: string
+        source: string
+        origin?: { repository_id: number; repository: string; release_tag: string }
+      }>
+      expect(installed.find((plugin) => plugin.vendor_id === 'fixture.lifecycle')).toMatchObject({
+        version: '2.0.0',
+        source: 'marketplace',
+        origin: { repository_id: 424242, repository: 'fixture/desktop-market', release_tag: 'v2.0.0' },
+      })
+      expect(requests).toContain(
+        `/api/v1/plugin-repositories/fixture/desktop-market/releases/${catalog.release_tag}/assets/${component.artifact.filename}`,
+      )
+    } finally {
+      const closed = Promise.withResolvers<void>()
+      upstream.close((error) => (error ? closed.reject(error) : closed.resolve()))
+      await closed.promise
+    }
   })
 
   it('persists the complete client address through native authenticated settings without weakening access checks', async () => {

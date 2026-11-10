@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod fixture;
 mod migrate_data;
+mod plugin_catalog;
 mod protocol;
 mod record;
 mod replay;
@@ -29,6 +30,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Generate and validate a signed-catalog-ready set of plugin assets (sign separately).
+    PluginCatalog(plugin_catalog::Args),
     /// Plan or explicitly apply an offline data-root migration without modifying source data.
     MigrateData(migrate_data::MigrateDataArgs),
     /// Scenario-driven recorder: replays fixed scenarios against a real LLM and writes .jsonl fixtures
@@ -46,6 +49,7 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
+        Command::PluginCatalog(args) => plugin_catalog::run(args).await,
         Command::MigrateData(args) => migrate_data::run(args).await,
         Command::Record(args) => record::run(args).await,
         Command::Replay(args) => replay::run(args).await,

@@ -68,6 +68,14 @@ const statusQuery = createQuery(() => ({
   refetchInterval: 10_000,
 }))
 
+const marketplaceQuery = createQuery(() => ({
+  queryKey: ['plugin-marketplace'],
+  queryFn: admin.pluginMarketplace.get,
+  enabled: hasNavigation,
+  refetchInterval: 60_000,
+}))
+const marketplaceUpdateCount = $derived(marketplaceQuery.data?.update_count ?? 0)
+
 const gatewayRunning = $derived(statusQuery.data?.status === 'running')
 
 const gatewayTone = $derived(
@@ -398,7 +406,11 @@ onMount(() => {
                       <a
                         {...props}
                         href={resolve(item.href)}
-                        aria-label={'beta' in item ? `${label} ${m.common_beta()}` : label}
+                        aria-label={item.href === '/vendor-plugins' && marketplaceUpdateCount > 0
+                          ? `${label} — ${m.settings_update_status_available()} (${marketplaceUpdateCount})`
+                          : 'beta' in item
+                            ? `${label} ${m.common_beta()}`
+                            : label}
                         data-sveltekit-reset={!isDesktopNavigation ? false : undefined}
                         aria-current={current ? 'page' : undefined}
                         onclick={() => {
@@ -411,6 +423,9 @@ onMount(() => {
                   </Sidebar.MenuButton>
                   {#if 'beta' in item}
                     <Sidebar.MenuBadge><Badge variant="secondary">{m.common_beta()}</Badge></Sidebar.MenuBadge>
+                  {:else if item.href === '/vendor-plugins' && marketplaceUpdateCount > 0}
+                    <Sidebar.MenuBadge aria-hidden="true"
+                      ><Badge variant="secondary">{marketplaceUpdateCount}</Badge></Sidebar.MenuBadge>
                   {/if}
                 </Sidebar.MenuItem>
               {/each}
