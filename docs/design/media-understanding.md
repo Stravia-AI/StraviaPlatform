@@ -176,9 +176,11 @@ WebUI route：
 
 Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 26 为 `agent_definition_configs` 增加 nullable `thinking_level`；启用 Media Understanding 时，专用 Admin API 要求该值属于所选逻辑 Model 的支持等级。migration 18 将 API Key 权限拆为 MCP 访问、透明注入总开关与各注入项选择；旧 `allow_media_understanding` 只在 migration 中用于恢复既有自动工具行为，然后删除，不再是显式 capability grant。
 
-依据 [ADR-0097](../adr/0097-store-api-key-transparent-injections-as-a-set.md)，SQLite 与 PostgreSQL 的后续 migration 将三个旧注入布尔列合并为 `transparent_injections` JSON 数组，保留每个 Key 的选择，再删除旧列；`mcp_access_enabled` 和 `transparent_injection_enabled` 仍独立保存。SQLite 还须重建引用旧列的布尔契约触发器。`api_keys` 通常行数很少，转换工作量随 Key 数量增长，预期耗时可忽略；该迁移在启动期一次性完成，不单独展示进度，已完成的库再次启动不会重复转换。隔离 PostgreSQL 16 临时表的 100 行合成样本中，创建表、插入、执行 migration 及计数的 `psql` 总 wall time 为 0.028 秒（客户端 user 0.008 秒、sys 0.004 秒）；这不是完整服务升级或生产负载测量；SQLite 内存数据库上同样的 100 行合成工作负载（建表、插入、迁移及计数）wall time 为 0.006 秒（user 0.003 秒、sys 0.002 秒）。服务端资源用量未测。
+这是权限扩大的 clean cutover：Media Gate 开启后，所有有效 Key 都能显式使用能力。升级前必须备份数据库和匹配的旧二进制。回滚到 migration 18 之前的版本必须恢复兼容该旧二进制的升级前数据库；不能只回退应用文件。
 
-这是权限扩大的 clean cutover：Media Gate 开启后，所有有效 Key 都能显式使用能力。升级前必须备份数据库和匹配的旧二进制。回滚必须恢复 migration 18 之前的数据库；不能只回退应用文件。
+依据 [ADR-0097](../adr/0097-store-api-key-transparent-injections-as-a-set.md)，SQLite 与 PostgreSQL 的 migration 0049 将三个旧注入布尔列合并为 `transparent_injections` JSON 数组，保留每个 Key 的选择，再删除旧列；`mcp_access_enabled` 和 `transparent_injection_enabled` 仍独立保存。SQLite 还须重建引用旧列的布尔契约触发器。`api_keys` 通常行数很少，转换工作量随 Key 数量增长，预期耗时可忽略；该迁移在启动期一次性完成，不单独展示进度，已完成的库再次启动不会重复转换。隔离 PostgreSQL 16 临时表的 100 行合成样本中，创建表、插入、执行 migration 及计数的 `psql` 总 wall time 为 0.028 秒（客户端 user 0.008 秒、sys 0.004 秒）；这不是完整服务升级或生产负载测量；SQLite 内存数据库上同样的 100 行合成工作负载（建表、插入、迁移及计数）wall time 为 0.006 秒（user 0.003 秒、sys 0.002 秒）。服务端资源用量未测。
+
+0049 完成后，不含该 migration 的旧二进制不能直接使用升级后的数据库：旧迁移器会拒绝不在其内嵌迁移列表中的已应用历史，且旧列已删除。回滚必须恢复与旧二进制匹配、未应用其不支持迁移的数据库备份；不要仅删除 `_sqlx_migrations` 记录或只恢复旧列来绕过历史校验。恢复备份会丢失备份之后的写入。
 
 ## 10. 验证边界
 
