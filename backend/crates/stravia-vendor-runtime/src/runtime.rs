@@ -28,6 +28,7 @@ use crate::host::{
     WebSocketResource,
 };
 use stravia_vendor_sdk::net::{ConnectRequest, Request};
+use stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES;
 
 mod admission;
 mod compilation_cache;
@@ -1192,11 +1193,11 @@ impl wit_journal::Host for StoreState {
         }
         if payload
             .as_ref()
-            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+            .is_some_and(|bytes| bytes.len() > MAX_PAYLOAD_BYTES)
         {
             return Ok(Err(to_state_error(StateError::new(
                 "resource-exhausted",
-                "state payload exceeds 64 KiB",
+                "state payload exceeds 1 MiB",
             ))));
         }
         let cell = self.table.get(&cell)?.0.clone();
@@ -1269,11 +1270,11 @@ impl wit_state::HostCell for StoreState {
         }
         if payload
             .as_ref()
-            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+            .is_some_and(|bytes| bytes.len() > MAX_PAYLOAD_BYTES)
         {
             return Ok(Err(to_state_error(StateError::new(
                 "resource-exhausted",
-                "state payload exceeds 64 KiB",
+                "state payload exceeds 1 MiB",
             ))));
         }
         let cell = self.table.get(&cell)?.0.clone();

@@ -424,12 +424,16 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 `stravia:state` 独立于 Vendor 和 Net 版本化。1.0 的 `store` 提供操作范围内的 cell；1.1 只新增 `journal` 与 `volatile` 接口，不修改旧 `scope`、snapshot 或错误结构。冻结快照与摘要位于 SDK 的 `wit/released/`；修改当前契约后必须运行兼容检查并实际加载旧 Component，不能重新生成旧快照来消除不兼容报告。
 
 - `provider` cell 归属于获准的 Vendor／Provider；`conversation` cell 还归属于 Principal 与本次获准的会话 lineage。guest 只提交 key，不选择连接、主体或分支 ID。纯协议选择、目录同步和没有对应会话准入的调用不能借此访问会话状态。
-- key 最多 128 UTF-8 字节，每个 scope 最多 16 个 key，单个 payload 最多 64 KiB。`load` 同时返回 revision 与可选 payload；从未存在的 key 为 revision 0，删除生成非零 revision 的 tombstone，不能用删除重置 revision 绕过 ABA 防护。CAS 只有版本冲突返回 false；取消、存储错误和配额耗尽均显式返回错误。冲突后只能重新读取并计算，不能重发外部请求。
+- key 最多 128 UTF-8 字节，每个 scope 最多 16 个 key，单个 payload 最多 1 MiB（1,048,576 字节），包含 provider、conversation、volatile 与 journal 的 cell payload；journal 正文的 64 MiB 配额不变。SDK、宿主和各存储实现共用 `state::MAX_PAYLOAD_BYTES`，超限不改变原值、revision 或 journal head。`load` 同时返回 revision 与可选 payload；从未存在的 key 为 revision 0，删除生成非零 revision 的 tombstone，不能用删除重置 revision 绕过 ABA 防护。CAS 只有版本冲突返回 false；取消、存储错误和配额耗尽均显式返回错误。冲突后只能重新读取并计算，不能重发外部请求。放宽容量不改变 WIT 布局；冻结的发布快照仍保留当时的容量说明。
 - State 错误码是开放字符串：非法 key 或跨操作 journal handle 为 `invalid`，没有获准作用域为 `unsupported`。SDK 将存储及其它未识别的本地状态失败映射为 `Trapped`，不伪装为上游响应解析错误；未处理的 CAS 冲突同样保留独立错误信息，不授权请求重放。
 - `journal` 仅供已准入的 conversation cell 使用。正文沿用 ContentStore，cell 原子关联 payload、revision 与不可变 journal head；checkpoint／fork 共享已存在的正文引用，不复制累计大正文。单条链、同一会话作用域发布的累计正文与单个操作暂存正文受 64 MiB 配额约束，超限失败而非截断历史。append 不表示发布；只有成功 CAS 使新 head 成为状态，失败分支的未引用内容由现有租约与 GC 回收。
 - 成功改变 journal head 的 CAS，在同一事务中关联宿主提供的 History Boundary Candidate。`owner_admission` 是当前发布者，canonical 来源可以是获准祖先；重复内部尝试不会把 head 回退到旧位置。该关联只证明投影位置，不证明请求已经发出或上游已接纳。重复文本、工具循环与同一 gap 的多个有序变更不以内容 hash 猜位置；codec 在一次编码中把 canonical gap 映射为实际 native input offset。
 - checkpoint、fork、原生压缩与失败 admission 继承确定的状态快照。历史清理通过持久 epoch 使旧操作失效，GC 保留仍被活跃租约、Generation、compaction 或 checkpoint 引用的内容；不会因为清理一次查询记录便删除仍可恢复的历史。SQLite、PostgreSQL 与内存适配器遵守同一行为契约。已有 Provider fence 的读取不获取写事务；首次创建时才串行重检。
 - `volatile.open` 使用相同 key／payload／CAS 契约，但仅存在于进程内，并按持久安装身份、Vendor、Provider、数据 epoch 与 fence 隔离。进程重启后为空；同一进程内重建 Gateway 不重置仍有效的值。本进程的 reset／删除／卸载使旧 handle 失效；跨进程更新在下一次 fence 校验被观察到，不承诺立即擦除另一进程已持有的内存。网络 I/O 不持有数据库事务。
+
+Devin 的 native step 与 cascade assignment 是有效上游会话绑定，不按固定项数清空或猜测过期。它们保存在 Provider CAS cell；仅从未发布过的 cell 首次导入旧 private state，初始化冲突后读取已发布值，之后不再读取或写入旧业务来源。旧 private blob 与 OAuth 共用且不支持 CAS，因此不为清理业务字段覆盖它。没有稳定 affinity 的请求使用一次性身份，不持久化无法复用的绑定；有 affinity 的并发更新合并，达到 cell 容量时显式失败并保留既有绑定，不重放外部请求。
+
+基础插件的云凭据指纹缓存最多保留 64 项，移除已过期或进入现有五分钟续期窗口的 token；满时优先淘汰最早失效的其他项，保留本次取得的 token。这类可重新获取的凭据缓存与不可随意淘汰的会话绑定区别处理。
 
 宿主的 `operation_metadata` 提供已证明的原生请求事实，而不是信任客户端自报的 CLI 标头：
 
@@ -666,7 +670,9 @@ Provider 描述符通过 `config_groups` 声明分组，每项包含稳定的 `i
 |`generate:false` 预热帧|会话启动且尚无连接时于后台发送一次并等待完成，真实请求以其 response ID 续接增量|不发送|不计划对齐：网关收到首个请求时用户已在等待，模拟预热只会多一次往返、一次上游请求与一次 RPM 发送准入，且插件无法区分会话首轮与历史恢复重放|
 |压缩触发源|区分 `auto`／`manual`、`context_limit` 等原因及 `pre_turn`／`mid_turn`／`standalone_turn` 阶段|宿主没有这些客户端内部事实时省略 compaction trigger metadata，不再伪造 manual 默认值；窗口序号由已持久化的宿主窗口证明提供|需要可信操作来源，不能信任客户端自报的 CLI metadata|
 
-WS 新握手携带本次 turn metadata，并在 volatile state 保留与续接响应关联的建连快照；复用连接保持原握手快照，消息的 `client_metadata` 仍描述当前逻辑轮。Cookie 由下述宿主 jar 在真正建连时填充，不把可变 cookie 字节作为连接池身份。Responses Lite 通过 conversation journal 保存首次记录的 `at_`／`msg_` ID、turn、时间及后续工具／指令变更；宿主提供 canonical History Boundary，codec 投影为 native offset，不根据重复文本猜位置。压缩安装新窗口后，`window_number` 与 `thread:N` 随证明推进，不固定为 0。
+WS 新握手携带本次 turn metadata。Codex 在 conversation cell 保存当前 lineage 的有效 tip 与建连快照，随宿主 checkpoint／fork 继承；Provider 共享 volatile 缓存只作查找加速，按序列化 JSON 字节数限制在 1 MiB。成功续接后移除已被替代的旧 tip，写入时先清理超过 55 分钟的快照，容量不足再淘汰最近成功使用时间最早的其他项，优先保留当前响应。没有访问时间的热更新前快照按冷项处理，但仍保留其握手身份。共享缓存被淘汰不删除会话快照，因此会话仍能以原始 metadata 申请同一 socket 的原生续接；宿主仍独立校验精确 tip、身份和连接寿命，不延长连接年龄、不将旧 ID 发到新 socket。消息的 `client_metadata` 继续描述当前逻辑轮。使用此修复需更新宿主，并重建、重新导入独立 Codex 插件。
+
+Cookie 由下述宿主 jar 在真正建连时填充，不把可变 cookie 字节作为连接池身份。Responses Lite 通过 conversation journal 保存首次记录的 `at_`／`msg_` ID、turn、时间及后续工具／指令变更；宿主提供 canonical History Boundary，codec 投影为 native offset，不根据重复文本猜位置。压缩安装新窗口后，`window_number` 与 `thread:N` 随证明推进，不固定为 0。
 
 验证边界：真实上游冒烟覆盖了 Responses Lite 模型的 WS 推理、工具续接、压缩与额度查询；该账号的模型目录均为 Lite 模型，非 Lite 前缀（UUIDv5 ID）只有单元测试与独立计算的参考向量，没有经过真实上游。
 

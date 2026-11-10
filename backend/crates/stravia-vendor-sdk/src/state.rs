@@ -16,6 +16,10 @@ mod bindings {
 
 use bindings::stravia::state::{store, volatile};
 
+/// Maximum cell payload size in bytes, shared by durable, conversation,
+/// process-volatile and journal snapshots.
+pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+
 /// Host-selected scope; no provider or conversation identifier is supplied by
 /// the guest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +123,7 @@ impl Cell {
     }
 
     /// Set or delete a payload if the current revision matches. Payloads are
-    /// limited to 64 KiB. A conflict does not change the cell.
+    /// limited to 1 MiB (1,048,576 bytes). A conflict does not change the cell.
     pub fn compare_exchange(
         &self,
         expected_revision: u64,
@@ -194,6 +198,7 @@ pub mod journal {
     }
 
     /// Atomically replace the payload and head if the revision matches.
+    /// Payloads use the same 1 MiB limit as ordinary cells.
     pub fn compare_exchange(
         cell: &Cell,
         expected_revision: u64,

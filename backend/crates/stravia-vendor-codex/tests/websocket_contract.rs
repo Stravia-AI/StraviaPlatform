@@ -184,7 +184,7 @@ impl HostStateCell for TestCell {
     ) -> Result<bool, StateError> {
         if payload
             .as_ref()
-            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+            .is_some_and(|bytes| bytes.len() > stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES)
         {
             return Err(StateError::new(
                 "resource-exhausted",
@@ -1592,7 +1592,7 @@ async fn websocket_metadata_observer_failure_does_not_complete_or_reuse() {
     let (runtime, plugin) = load_codex().await;
     let recorded = Arc::new(Recording::default());
     let mut frames = codex_frames(0, "resp_unreachable");
-    frames.insert(1, serde_json::json!({"type":"response.metadata", "headers":{"x-codex-turn-state":"x".repeat(65 * 1024)}}).to_string());
+    frames.insert(1, serde_json::json!({"type":"response.metadata", "headers":{"x-codex-turn-state":"x".repeat(stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES + 1)}}).to_string());
     assert!(
         execute_once(
             &runtime,
@@ -2256,4 +2256,257 @@ async fn http_only_continuation_delta_is_rejected_before_started_or_send() {
     assert!(recorded.events.lock().is_empty());
     assert!(recorded.connections.lock().is_empty());
     assert!(recorded.sent.lock().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_lineage_tip_survives_shared_cache_eviction() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "eviction-window".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        request(),
+        codex_frames(0, "resp_before_eviction"),
+        &recorded,
+    )
+    .await
+    .expect("initial response");
+    // 模拟共享缓存被容量淘汰；会话 checkpoint 仍由宿主保留。
+    recorded.state.lock().remove("volatile:codex-ws-handshakes");
+    provider.operation_metadata.insert(
+        "logical_turn_id".into(),
+        uuid::Uuid::now_v7().to_string().into(),
+    );
+    let mut next = request();
+    next.parameters.continuation = Some(Continuation::PreviousResponse(
+        "resp_before_eviction".into(),
+    ));
+    let response = execute_once(
+        &runtime,
+        &plugin,
+        provider,
+        next,
+        codex_frames(0, "resp_after_eviction"),
+        &recorded,
+    )
+    .await
+    .expect("eviction must not prevent native continuation");
+    let OperationOutput::Infer(response) = response else {
+        panic!("expected inference response");
+    };
+    assert_eq!(response.id, "resp_after_eviction");
+    let connections = recorded.connections.lock();
+    assert_eq!(
+        connections[1].continuation_id.as_deref(),
+        Some("resp_before_eviction")
+    );
+    assert_eq!(
+        connections[0].headers["x-codex-turn-metadata"],
+        connections[1].headers["x-codex-turn-metadata"]
+    );
+    assert_eq!(
+        recorded.sent.lock()[1]["previous_response_id"],
+        "resp_before_eviction"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_hot_update_keeps_existing_handshake_identity() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "hot-update-window".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        request(),
+        codex_frames(0, "resp_before_update"),
+        &recorded,
+    )
+    .await
+    .expect("initial response");
+    {
+        let mut state = recorded.state.lock();
+        state.remove("conversation:codex-ws-handshake-tip");
+        let cache = state.get_mut("volatile:codex-ws-handshakes").unwrap();
+        let mut previous: BTreeMap<String, Value> =
+            serde_json::from_slice(cache.snapshot.payload.as_ref().unwrap()).unwrap();
+        for value in previous.values_mut() {
+            value.as_object_mut().unwrap().remove("last_used_at_ms");
+        }
+        cache.snapshot.payload = Some(serde_json::to_vec(&previous).unwrap());
+    }
+    let mut next = request();
+    next.parameters.continuation =
+        Some(Continuation::PreviousResponse("resp_before_update".into()));
+    execute_once(
+        &runtime,
+        &plugin,
+        provider,
+        next,
+        codex_frames(0, "resp_after_update"),
+        &recorded,
+    )
+    .await
+    .expect("hot update must preserve a live connection's original handshake");
+    let connections = recorded.connections.lock();
+    assert_eq!(
+        connections[1].continuation_id.as_deref(),
+        Some("resp_before_update")
+    );
+    assert_eq!(
+        connections[0].headers["x-codex-turn-metadata"],
+        connections[1].headers["x-codex-turn-metadata"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_full_cache_evicts_cold_entries_without_losing_continuation() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "full-cache-window".into());
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        request(),
+        codex_frames(0, "resp_cold"),
+        &recorded,
+    )
+    .await
+    .expect("initial response");
+    let (pin, cold_key) = {
+        let mut state = recorded.state.lock();
+        let pin = state["conversation:codex-ws-handshake-tip"]
+            .snapshot
+            .clone();
+        let cached = state.get_mut("volatile:codex-ws-handshakes").unwrap();
+        let original: BTreeMap<String, Value> =
+            serde_json::from_slice(cached.snapshot.payload.as_ref().unwrap()).unwrap();
+        let (cold_key, mut template) = original.into_iter().next().unwrap();
+        template["last_used_at_ms"] = 1.into();
+        // UUID key 的 JSON 引号、冒号和分隔逗号合计 4 字节。
+        let entry_bytes = 36 + 4 + serde_json::to_vec(&template).unwrap().len();
+        let count = (stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES - 2) / entry_bytes;
+        let mut full = BTreeMap::new();
+        for i in 0..count - 1 {
+            full.insert(format!("00000000-0000-4000-8000-{i:012}"), template.clone());
+        }
+        template["last_used_at_ms"] = 0.into();
+        full.insert(cold_key.clone(), template);
+        let payload = serde_json::to_vec(&full).unwrap();
+        assert!(payload.len() <= stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES);
+        cached.snapshot.payload = Some(payload);
+        (pin, cold_key)
+    };
+    execute_once(
+        &runtime,
+        &plugin,
+        provider.clone(),
+        request(),
+        codex_frames(0, "resp_new_window"),
+        &recorded,
+    )
+    .await
+    .expect("a full shared cache must not fail a completed response");
+    {
+        let mut state = recorded.state.lock();
+        let cached = state["volatile:codex-ws-handshakes"]
+            .snapshot
+            .payload
+            .as_ref()
+            .unwrap();
+        assert!(cached.len() <= stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES);
+        let remaining: BTreeMap<String, Value> = serde_json::from_slice(cached).unwrap();
+        assert!(
+            !remaining.contains_key(&cold_key),
+            "least recently used entry"
+        );
+        // 恢复原会话的 checkpoint，而非让其他会话覆盖其 native state。
+        state
+            .get_mut("conversation:codex-ws-handshake-tip")
+            .unwrap()
+            .snapshot = pin;
+    }
+    let mut next = request();
+    next.parameters.continuation = Some(Continuation::PreviousResponse("resp_cold".into()));
+    execute_once(
+        &runtime,
+        &plugin,
+        provider,
+        next,
+        codex_frames(0, "resp_cold_resumed"),
+        &recorded,
+    )
+    .await
+    .expect("the evicted session still resumes its original socket");
+    let connections = recorded.connections.lock();
+    assert_eq!(connections[2].continuation_id.as_deref(), Some("resp_cold"));
+    assert_eq!(
+        connections[0].headers["x-codex-turn-metadata"],
+        connections[2].headers["x-codex-turn-metadata"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_continuation_retires_previous_tips_without_renewing_handshake() {
+    let (runtime, plugin) = load_codex().await;
+    let recorded = Arc::new(Recording::default());
+    let mut provider = codex_provider();
+    provider
+        .operation_metadata
+        .insert("transport_affinity".into(), "long-chain-window".into());
+    let mut previous = None;
+    for i in 0..128 {
+        let id = format!("resp_chain_{i}");
+        let mut next = request();
+        next.parameters.continuation = previous.map(Continuation::PreviousResponse);
+        execute_once(
+            &runtime,
+            &plugin,
+            provider.clone(),
+            next,
+            codex_frames(0, &id),
+            &recorded,
+        )
+        .await
+        .expect("long native continuation chain");
+        previous = Some(id);
+        let state = recorded.state.lock();
+        let cache: BTreeMap<String, Value> = serde_json::from_slice(
+            state["volatile:codex-ws-handshakes"]
+                .snapshot
+                .payload
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cache.len(), 1, "consumed response tips must not accumulate");
+    }
+    let connections = recorded.connections.lock();
+    assert_eq!(
+        connections.last().unwrap().continuation_id.as_deref(),
+        Some("resp_chain_126")
+    );
+    assert!(
+        connections
+            .iter()
+            .all(|connection| connection.headers["x-codex-turn-metadata"]
+                == connections[0].headers["x-codex-turn-metadata"])
+    );
 }

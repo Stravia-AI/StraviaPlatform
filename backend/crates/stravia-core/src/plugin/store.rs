@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES;
 
 use tokio::sync::RwLock;
 
@@ -1816,7 +1817,8 @@ impl PluginStore {
             key,
         } = *identity;
         if key.len() > 128
-            || update.is_some_and(|(_, payload)| payload.is_some_and(|p| p.len() > 65536))
+            || update
+                .is_some_and(|(_, payload)| payload.is_some_and(|p| p.len() > MAX_PAYLOAD_BYTES))
         {
             return Err(PluginStorageError::Limit);
         }

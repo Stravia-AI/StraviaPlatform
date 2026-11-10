@@ -53,6 +53,34 @@ fn candidate(id: u128, admission: &str) -> crate::generation_chain::HistoryBound
     }
 }
 
+async fn payload_capacity_scenario(
+    store: &PluginStore,
+    mut cell: atomic_journal::JournalScope,
+) -> anyhow::Result<()> {
+    cell.key = "capacity".into();
+    let head = store.journal_append(&cell, "capacity".into(), None).await?;
+    let payload = vec![7; 1_048_576];
+    assert!(
+        store
+            .journal_compare_exchange(&cell, 0, Some(&payload), Some(&head))
+            .await?
+    );
+    let saved = store.journal_load(&cell).await?;
+    assert_eq!(saved.payload.as_deref(), Some(payload.as_slice()));
+    assert_eq!(saved.journal_head.as_deref(), Some(head.as_str()));
+    assert!(matches!(
+        store
+            .journal_compare_exchange(&cell, saved.revision, Some(&vec![0; 1_048_577]), None)
+            .await,
+        Err(PluginStorageError::Limit)
+    ));
+    let unchanged = store.journal_load(&cell).await?;
+    assert_eq!(unchanged.revision, saved.revision);
+    assert_eq!(unchanged.payload, saved.payload);
+    assert_eq!(unchanged.journal_head, saved.journal_head);
+    Ok(())
+}
+
 async fn scenario(db: Database) -> anyhow::Result<()> {
     let storage = db.storage();
     let provider = setup(&storage).await?;
@@ -65,6 +93,7 @@ async fn scenario(db: Database) -> anyhow::Result<()> {
         .fork_atomic_state("alice", ROOT_ADMISSION, None, ROOT_LEASE)
         .await?;
     let root = scope(&provider, fence, ROOT_ADMISSION, ROOT_LEASE, "journal");
+    payload_capacity_scenario(store, root.clone()).await?;
     let initial = store.journal_load(&root).await?;
     assert_eq!(initial.revision, 0);
     assert_eq!(initial.journal_head, None);
@@ -818,6 +847,7 @@ async fn memory_boundary_candidates_follow_checkpoint_lineage() -> anyhow::Resul
         .fork_atomic_state("alice", MEMORY_ADMISSION, None, ROOT_LEASE)
         .await?;
     let mut cell = scope(&provider, fence, MEMORY_ADMISSION, ROOT_LEASE, "journal");
+    payload_capacity_scenario(store, cell.clone()).await?;
     let a = candidate(11, MEMORY_ADMISSION);
     let b = candidate(12, MEMORY_ADMISSION);
     cell.candidate = Some(a.clone());

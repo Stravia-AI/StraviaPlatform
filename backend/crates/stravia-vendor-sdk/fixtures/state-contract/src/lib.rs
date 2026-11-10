@@ -193,9 +193,13 @@ impl wit::Guest for Fixture {
                     matches!(state::open_volatile(&"x".repeat(129)), Err(Error::Host { code, .. }) if code == "invalid")
                 );
                 let cell = state::open_volatile("limit").map_err(invalid)?;
+                let payload = vec![7; state::MAX_PAYLOAD_BYTES];
+                cell.compare_exchange(0, Some(&payload)).map_err(invalid)?;
+                let saved = cell.load().map_err(invalid)?;
                 assert!(
-                    matches!(cell.compare_exchange(0, Some(&vec![0; 65537])), Err(Error::Host { code, .. }) if code == "resource-exhausted")
+                    matches!(cell.compare_exchange(saved.revision, Some(&vec![0; state::MAX_PAYLOAD_BYTES + 1])), Err(Error::Host { code, .. }) if code == "resource-exhausted")
                 );
+                assert_eq!(cell.load().map_err(invalid)?, saved);
             }
             "volatile-open-error" => {
                 assert_host_error(state::open_volatile("open-error").err(), "open-failed")

@@ -770,6 +770,39 @@ struct PrivateState {
     gitlab: Option<CachedGitLabAccess>,
 }
 
+impl PrivateState {
+    fn prune(&mut self, now: u64) {
+        let usable_after = now.saturating_add(300);
+        self.tokens
+            .retain(|_, token| token.expires_at_unix > usable_after);
+        if self
+            .gitlab
+            .as_ref()
+            .is_some_and(|access| access.expires_at_unix <= usable_after)
+        {
+            self.gitlab = None;
+        }
+    }
+
+    fn cache_token(&mut self, key: &str, token: CachedToken, now: u64) {
+        self.prune(now);
+        self.tokens.insert(key.into(), token);
+        // Tokens are replaceable credentials, not conversation provenance.
+        // Credential rotation must not retain every historical fingerprint.
+        while self.tokens.len() > 64 {
+            let oldest = self
+                .tokens
+                .iter()
+                .filter(|(candidate, _)| candidate.as_str() != key)
+                .min_by_key(|(candidate, token)| (token.expires_at_unix, *candidate))
+                .map(|(candidate, _)| candidate.clone());
+            if let Some(oldest) = oldest {
+                self.tokens.remove(&oldest);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedToken {
     value: String,
@@ -788,8 +821,10 @@ fn read_state(host: &GuestHost) -> Result<PrivateState, PluginError> {
     let Some(bytes) = host.read_private_state()? else {
         return Ok(PrivateState::default());
     };
-    serde_json::from_slice(&bytes)
-        .map_err(|_| common::plugin_error(ErrorKind::Invalid, "vendor private state is invalid"))
+    let mut state: PrivateState = serde_json::from_slice(&bytes)
+        .map_err(|_| common::plugin_error(ErrorKind::Invalid, "vendor private state is invalid"))?;
+    state.prune(unix_now());
+    Ok(state)
 }
 
 fn write_state(host: &GuestHost, state: &PrivateState) -> Result<(), PluginError> {
@@ -815,12 +850,14 @@ fn cache_token(
     expires_in: u64,
 ) -> Result<String, PluginError> {
     let mut state = read_state(host)?;
-    state.tokens.insert(
-        key.into(),
+    let now = unix_now();
+    state.cache_token(
+        key,
         CachedToken {
             value: value.clone(),
-            expires_at_unix: unix_now().saturating_add(expires_in),
+            expires_at_unix: now.saturating_add(expires_in),
         },
+        now,
     );
     write_state(host, &state)?;
     Ok(value)
@@ -2092,6 +2129,51 @@ fn input_mismatch() -> PluginError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_rotation_drops_expired_credentials_and_bounds_live_fingerprints() {
+        let now = 1_000;
+        let mut state = PrivateState::default();
+        for index in 0..64 {
+            state.cache_token(
+                &format!("old-{index:02}"),
+                CachedToken {
+                    value: format!("token-{index}"),
+                    expires_at_unix: now + 300 + index,
+                },
+                0,
+            );
+        }
+        state.gitlab = Some(CachedGitLabAccess {
+            config_fingerprint: "old".into(),
+            token: "expired".into(),
+            headers: Vec::new(),
+            expires_at_unix: now + 300,
+        });
+        state.cache_token(
+            "current",
+            CachedToken {
+                value: "current-token".into(),
+                expires_at_unix: now + 3_600,
+            },
+            now,
+        );
+        assert!(!state.tokens.contains_key("old-00"));
+        assert!(state.gitlab.is_none());
+        assert_eq!(state.tokens.len(), 64);
+        state.cache_token(
+            "new",
+            CachedToken {
+                value: "new-token".into(),
+                expires_at_unix: now + 3_600,
+            },
+            now,
+        );
+        assert_eq!(state.tokens.len(), 64);
+        assert!(!state.tokens.contains_key("old-01"));
+        assert_eq!(state.tokens["current"].value, "current-token");
+        assert_eq!(state.tokens["new"].value, "new-token");
+    }
 
     fn provider(base_url: &str, channel: &str) -> ProviderSnapshot {
         ProviderSnapshot {

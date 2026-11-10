@@ -237,7 +237,9 @@ impl PluginStore {
             JournalOperation::Append(text, _) if text.len() as u64 > JOURNAL_LIMIT => {
                 return Err(PluginStorageError::Limit);
             }
-            JournalOperation::Exchange(_, Some(payload), _) if payload.len() > 65536 => {
+            JournalOperation::Exchange(_, Some(payload), _)
+                if payload.len() > MAX_PAYLOAD_BYTES =>
+            {
                 return Err(PluginStorageError::Limit);
             }
             _ => {}

@@ -4,6 +4,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use stravia_vendor_runtime::host::{StateError, StateSnapshot};
+use stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES;
 
 type ScopeKey = (String, String, i64, i64);
 type ScopeMap = HashMap<ScopeKey, Arc<Mutex<Scope>>>;
@@ -221,7 +222,7 @@ impl VolatileCell {
     ) -> Result<bool, StateError> {
         if payload
             .as_ref()
-            .is_some_and(|bytes| bytes.len() > 64 * 1024)
+            .is_some_and(|bytes| bytes.len() > MAX_PAYLOAD_BYTES)
         {
             return Err(StateError::new(
                 "resource-exhausted",

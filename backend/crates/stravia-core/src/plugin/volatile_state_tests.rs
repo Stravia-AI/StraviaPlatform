@@ -193,7 +193,7 @@ async fn quota_counts_tombstones_and_limits_payload_size_per_scope() {
     let first = open(&store, "vendor", "provider", 1, "0").await;
     assert_eq!(
         first
-            .compare_exchange(0, Some(vec![0; 65_537]))
+            .compare_exchange(0, Some(vec![0; 1_048_577]))
             .await
             .unwrap_err()
             .code,
@@ -202,11 +202,27 @@ async fn quota_counts_tombstones_and_limits_payload_size_per_scope() {
     assert_empty(&first).await;
     assert!(
         first
-            .compare_exchange(0, Some(vec![0; 65_536]))
+            .compare_exchange(0, Some(vec![7; 1_048_576]))
             .await
             .unwrap()
     );
-    let revision = first.load().await.unwrap().revision;
+    let saved = first.load().await.unwrap();
+    assert_eq!(
+        saved.payload.as_deref(),
+        Some(vec![7; 1_048_576].as_slice())
+    );
+    assert_eq!(
+        first
+            .compare_exchange(saved.revision, Some(vec![0; 1_048_577]))
+            .await
+            .unwrap_err()
+            .code,
+        "resource-exhausted"
+    );
+    let unchanged = first.load().await.unwrap();
+    assert_eq!(unchanged.revision, saved.revision);
+    assert_eq!(unchanged.payload, saved.payload);
+    let revision = saved.revision;
     assert!(first.compare_exchange(revision, None).await.unwrap());
     for index in 1..16 {
         let cell = open(&store, "vendor", "provider", 1, &index.to_string()).await;

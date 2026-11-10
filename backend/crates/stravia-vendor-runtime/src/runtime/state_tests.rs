@@ -32,6 +32,16 @@ impl HostStateCell for TestCell {
         snapshot.payload = payload;
         Ok(true)
     }
+
+    async fn journal_compare_exchange(
+        &self,
+        expected: u64,
+        payload: Option<Vec<u8>>,
+        head: Option<Arc<dyn crate::host::HostJournalEntry>>,
+    ) -> Result<bool, StateError> {
+        assert!(head.is_none());
+        self.compare_exchange(expected, payload).await
+    }
 }
 
 #[tokio::test]
@@ -132,12 +142,55 @@ async fn state_cell_preserves_conflict_tombstone_cancellation_and_cleanup() {
         .unwrap();
     assert_eq!(deleted.revision, 2);
     assert!(deleted.payload.is_none());
+    let payload = vec![7; 1_048_576];
+    assert!(
+        wit_state::HostCell::compare_exchange(&mut state, borrow(), 2, Some(payload.clone()))
+            .await
+            .unwrap()
+            .unwrap()
+    );
     let too_large =
-        wit_state::HostCell::compare_exchange(&mut state, borrow(), 2, Some(vec![0; 65537]))
+        wit_state::HostCell::compare_exchange(&mut state, borrow(), 3, Some(vec![0; 1_048_577]))
             .await
             .unwrap()
             .unwrap_err();
     assert_eq!(too_large.code, "resource-exhausted");
+    let saved = wit_state::HostCell::load(&mut state, borrow())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.revision, 3);
+    assert_eq!(saved.payload, Some(payload));
+    let journal_payload = vec![8; 1_048_576];
+    assert!(
+        wit_journal::Host::compare_exchange(
+            &mut state,
+            borrow(),
+            3,
+            Some(journal_payload.clone()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    );
+    let too_large = wit_journal::Host::compare_exchange(
+        &mut state,
+        borrow(),
+        4,
+        Some(vec![0; 1_048_577]),
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(too_large.code, "resource-exhausted");
+    let saved = wit_state::HostCell::load(&mut state, borrow())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.revision, 4);
+    assert_eq!(saved.payload, Some(journal_payload));
     state.cancellation.cancel();
     let cancelled = wit_state::HostCell::load(&mut state, borrow())
         .await

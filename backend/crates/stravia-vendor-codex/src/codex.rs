@@ -1123,9 +1123,18 @@ pub(super) fn websocket_available(provider: &ProviderSnapshot) -> bool {
 struct WebSocketHandshakeSnapshot {
     turn_metadata: String,
     created_at_ms: i64,
+    // 热更新前的进程内记录没有访问时间，视为冷项，但不丢弃其有效握手身份。
+    #[serde(default)]
+    last_used_at_ms: i64,
 }
 
 type WebSocketHandshakeSnapshots = std::collections::BTreeMap<String, WebSocketHandshakeSnapshot>;
+
+#[derive(Serialize, Deserialize)]
+struct WebSocketHandshakeTip<K = String, S = WebSocketHandshakeSnapshot> {
+    key: K,
+    snapshot: S,
+}
 
 fn websocket_snapshot_key(
     provider: &ProviderSnapshot,
@@ -1140,26 +1149,80 @@ fn websocket_snapshot_key(
     ]))
 }
 
-fn read_websocket_snapshots() -> Result<WebSocketHandshakeSnapshots, stravia_vendor_sdk::PluginError>
-{
+fn read_websocket_snapshot(
+    key: &str,
+) -> Result<Option<WebSocketHandshakeSnapshot>, stravia_vendor_sdk::PluginError> {
+    // 共享缓存的淘汰不能使仍有有效 socket 的会话失去原始握手身份。
+    // 会话 cell 随宿主 checkpoint/fork 继承，只保存该 lineage 的当前 tip。
+    let tip = stravia_vendor_sdk::state::open(
+        stravia_vendor_sdk::state::Scope::Conversation,
+        "codex-ws-handshake-tip",
+    )?;
+    if let Some(payload) = tip.load()?.payload {
+        let tip: WebSocketHandshakeTip = serde_json::from_slice(&payload)
+            .map_err(|_| invalid("Codex WebSocket handshake tip is invalid"))?;
+        if tip.key == key {
+            return Ok(Some(tip.snapshot));
+        }
+    }
     let cell = stravia_vendor_sdk::state::open_volatile("codex-ws-handshakes")?;
     let snapshot = cell.load()?;
-    snapshot
+    let mut snapshots: WebSocketHandshakeSnapshots = snapshot
         .payload
         .map(|payload| {
             serde_json::from_slice(&payload)
                 .map_err(|_| invalid("Codex WebSocket handshake state is invalid"))
         })
         .transpose()
-        .map(Option::unwrap_or_default)
+        .map(Option::unwrap_or_default)?;
+    Ok(snapshots.remove(key))
+}
+
+struct JsonSize(usize);
+
+impl std::io::Write for JsonSize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_size(value: &impl Serialize) -> Result<usize, stravia_vendor_sdk::PluginError> {
+    let mut size = JsonSize(0);
+    serde_json::to_writer(&mut size, value)
+        .map_err(|_| invalid("Codex WebSocket handshake state could not be encoded"))?;
+    Ok(size.0)
 }
 
 fn save_websocket_snapshot(
     key: String,
-    snapshot: WebSocketHandshakeSnapshot,
+    mut snapshot: WebSocketHandshakeSnapshot,
+    previous_key: Option<&str>,
 ) -> Result<(), stravia_vendor_sdk::PluginError> {
-    let cell = stravia_vendor_sdk::state::open_volatile("codex-ws-handshakes")?;
     let now = chrono::Utc::now().timestamp_millis();
+    snapshot.last_used_at_ms = now;
+    let tip = stravia_vendor_sdk::state::open(
+        stravia_vendor_sdk::state::Scope::Conversation,
+        "codex-ws-handshake-tip",
+    )?;
+    let payload = serde_json::to_vec(&WebSocketHandshakeTip {
+        key: &key,
+        snapshot: &snapshot,
+    })
+    .map_err(|_| invalid("Codex WebSocket handshake tip could not be encoded"))?;
+    loop {
+        let current = tip.load()?;
+        match tip.compare_exchange(current.revision, Some(&payload)) {
+            Ok(()) => break,
+            Err(stravia_vendor_sdk::state::Error::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let cell = stravia_vendor_sdk::state::open_volatile("codex-ws-handshakes")?;
     loop {
         let current = cell.load()?;
         let mut snapshots: WebSocketHandshakeSnapshots = current
@@ -1172,9 +1235,35 @@ fn save_websocket_snapshot(
         snapshots.retain(|_, snapshot| {
             now.saturating_sub(snapshot.created_at_ms) < WEBSOCKET_REUSE_MAX_AGE_MILLIS as i64
         });
+        // 宿主只允许续接同一 socket 的最新 tip，成功推进后旧 ID 不再有复用价值。
+        if let Some(previous_key) = previous_key {
+            snapshots.remove(previous_key);
+        }
         snapshots.insert(key.clone(), snapshot.clone());
-        let payload = serde_json::to_vec(&snapshots)
+        let mut payload = serde_json::to_vec(&snapshots)
             .map_err(|_| invalid("Codex WebSocket handshake state could not be encoded"))?;
+        if payload.len() > stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES {
+            let mut size = payload.len();
+            while size > stravia_vendor_sdk::state::MAX_PAYLOAD_BYTES {
+                let oldest = snapshots
+                    .iter()
+                    .filter(|(candidate, _)| *candidate != &key)
+                    .min_by_key(|(_, snapshot)| snapshot.last_used_at_ms)
+                    .map(|(key, _)| key.clone());
+                let Some(oldest) = oldest else {
+                    // 当前 tip 已由会话 cell 保留；共享缓存不必容纳超大单项。
+                    snapshots.clear();
+                    break;
+                };
+                let (removed_key, removed) =
+                    snapshots.remove_entry(&oldest).expect("existing snapshot");
+                // 移除非末项会同时移除 key/value 间的冒号与项间的逗号。
+                size -= json_size(&removed_key)? + json_size(&removed)? + 2;
+            }
+            payload.clear();
+            serde_json::to_writer(&mut payload, &snapshots)
+                .map_err(|_| invalid("Codex WebSocket handshake state could not be encoded"))?;
+        }
         match cell.compare_exchange(current.revision, Some(&payload)) {
             Ok(()) => return Ok(()),
             Err(stravia_vendor_sdk::state::Error::Conflict) => continue,
@@ -1209,6 +1298,10 @@ pub(super) fn infer_websocket(
     let mut runtime = Vec::new();
     append_runtime_headers(provider, body, session, &mut runtime)?;
     let continuation_id = request_continuation_id(body).map(str::to_owned);
+    let continuation_key = continuation_id
+        .as_deref()
+        .map(|id| websocket_snapshot_key(provider, session, id))
+        .transpose()?;
     let now = chrono::Utc::now().timestamp_millis();
     let mut snapshot = WebSocketHandshakeSnapshot {
         turn_metadata: runtime
@@ -1217,14 +1310,13 @@ pub(super) fn infer_websocket(
             .map(|(_, value)| value.clone())
             .ok_or_else(|| invalid("Codex native turn metadata is missing"))?,
         created_at_ms: now,
+        last_used_at_ms: now,
     };
-    if let Some(id) = &continuation_id {
-        let snapshots = read_websocket_snapshots()?;
-        let key = websocket_snapshot_key(provider, session, id)?;
-        if let Some(previous) = snapshots.get(&key).filter(|previous| {
+    if let Some(key) = &continuation_key {
+        if let Some(previous) = read_websocket_snapshot(key)?.filter(|previous| {
             now.saturating_sub(previous.created_at_ms) < WEBSOCKET_REUSE_MAX_AGE_MILLIS as i64
         }) {
-            snapshot = previous.clone();
+            snapshot = previous;
             set_header(
                 &mut runtime,
                 TURN_METADATA_KEY,
@@ -1386,7 +1478,7 @@ pub(super) fn infer_websocket(
         )?;
     if !response.id.is_empty() {
         let key = websocket_snapshot_key(provider, session, &response.id)?;
-        save_websocket_snapshot(key, snapshot)?;
+        save_websocket_snapshot(key, snapshot, continuation_key.as_deref())?;
     }
     Ok(response)
 }

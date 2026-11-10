@@ -8,6 +8,42 @@ const A_LEASE: &str = "00000000-0000-4000-8000-000000000003";
 const B_LEASE: &str = "00000000-0000-4000-8000-000000000004";
 const REOPEN_LEASE: &str = "00000000-0000-4000-8000-000000000005";
 
+async fn payload_capacity_scenario(storage: &DynStorage, provider_id: &str) -> anyhow::Result<()> {
+    let store = storage.vendor_plugins();
+    store
+        .fork_atomic_state("capacity", "capacity", None, ROOT_LEASE)
+        .await?;
+    for conversation in [false, true] {
+        let key = crate::plugin::store::AtomicStateKey {
+            vendor_id: "test-vendor",
+            provider_id,
+            data_epoch: 1,
+            principal: conversation.then_some("capacity"),
+            admission: conversation.then_some("capacity"),
+            lease: conversation.then_some(ROOT_LEASE),
+            key: "capacity",
+        };
+        let payload = vec![7; 1_048_576];
+        assert!(
+            store
+                .compare_exchange_atomic_state(&key, 0, Some(&payload))
+                .await?
+        );
+        let saved = store.load_atomic_state(&key).await?;
+        assert_eq!(saved.payload.as_deref(), Some(payload.as_slice()));
+        assert!(matches!(
+            store
+                .compare_exchange_atomic_state(&key, saved.revision, Some(&vec![0; 1_048_577]))
+                .await,
+            Err(PluginStorageError::Limit)
+        ));
+        let unchanged = store.load_atomic_state(&key).await?;
+        assert_eq!(unchanged.revision, saved.revision);
+        assert_eq!(unchanged.payload, saved.payload);
+    }
+    Ok(())
+}
+
 async fn scenario(storage: DynStorage) -> anyhow::Result<()> {
     install(&storage, "test-vendor").await?;
     install(&storage, "other-vendor").await?;
@@ -24,6 +60,7 @@ async fn scenario(storage: DynStorage) -> anyhow::Result<()> {
         .create(provider("other", "other-vendor"))
         .await?;
     let store = storage.vendor_plugins();
+    payload_capacity_scenario(&storage, &a.id).await?;
 
     let empty = store
         .load_atomic_state(&crate::plugin::store::AtomicStateKey {
@@ -145,7 +182,7 @@ async fn scenario(storage: DynStorage) -> anyhow::Result<()> {
                     key: "oversized",
                 },
                 0,
-                Some(&vec![0; 65_537]),
+                Some(&vec![0; 1_048_577]),
             )
             .await,
         Err(PluginStorageError::Limit)
@@ -1734,6 +1771,7 @@ async fn postgres_atomic_operations_do_not_serialize_on_unrelated_provider() -> 
             .create(provider("unrelated", "test-vendor"))
             .await?;
         let store = storage.vendor_plugins();
+        payload_capacity_scenario(&storage, &a.id).await?;
         assert!(
             store
                 .compare_exchange_atomic_state(

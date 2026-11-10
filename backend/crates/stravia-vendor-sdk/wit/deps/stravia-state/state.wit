@@ -26,7 +26,7 @@ interface store {
     }
 
     /// Keys are stable UTF-8 names of at most 128 bytes. Each scope supports
-    /// at most 16 keys; each payload is limited to 64 KiB.
+    /// at most 16 keys; each payload is limited to 1 MiB (1048576 bytes).
     open: func(scope: scope, key: string) -> result<cell, error>;
 }
 
@@ -53,6 +53,7 @@ interface journal {
     load: func(cell: borrow<cell>) -> result<snapshot, error>;
     /// Creates an immutable entry in the active conversation operation.
     append: func(cell: borrow<cell>, text: string, previous: option<borrow<entry>>) -> result<entry, error>;
+    /// Uses the store payload limit of 1 MiB (1048576 bytes).
     /// Returns false only when the expected revision conflicts.
     compare-exchange: func(cell: borrow<cell>, expected-revision: u64, payload: option<list<u8>>, head: option<borrow<entry>>) -> result<bool, error>;
 }
