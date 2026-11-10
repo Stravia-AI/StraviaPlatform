@@ -33,6 +33,7 @@ let
     librsvg
     gsettings-desktop-schemas
   ];
+  patchCrate = pkgs.callPackage ./nix/patch-crate.nix { };
   workspaceInit = pkgs.writeScript "stravia-workspace-init" ''
     #!${lib.getExe pkgs.python3}
     import errno
@@ -108,10 +109,25 @@ let
             # 临时副本与目标同文件系统；失败不发布半成品，也不覆盖并发创建的目标。
             with tempfile.TemporaryDirectory(prefix=".devenv-worktree-init-", dir=root) as temporary:
                 staged = Path(temporary) / name
-                subprocess.run([
-                    "${pkgs.coreutils}/bin/cp", "--archive", "--reflink=always",
-                    "--", str(source.resolve()), str(staged),
-                ], check=True)
+                if name == "target":
+                    # reflink 仍逐文件创建元数据；只预热构建依赖与 Wasm 成品。
+                    caches = (
+                        "patch",
+                        "debug/deps", "debug/.fingerprint", "debug/build",
+                        "release/deps", "release/.fingerprint", "release/build",
+                        "vendor-plugins", "vendor-plugins-all",
+                    )
+                    staged.mkdir()
+                    copies = [(source / cache, staged / cache) for cache in caches
+                              if (source / cache).is_dir()]
+                else:
+                    copies = [(source.resolve(), staged)]
+                for original, copied in copies:
+                    copied.parent.mkdir(parents=True, exist_ok=True)
+                    subprocess.run([
+                        "${pkgs.coreutils}/bin/cp", "--archive", "--reflink=always",
+                        "--", str(original), str(copied),
+                    ], check=True)
                 subprocess.run([
                     "${pkgs.coreutils}/bin/mv", "--no-clobber", "--no-target-directory",
                     "--", str(staged), str(destination),
@@ -137,7 +153,7 @@ in
     cmake
     openssl
     docker-client
-  ] ++ cDevelopmentPackages
+  ] ++ [ patchCrate ] ++ cDevelopmentPackages
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux ([ pkgs.mold pkgs.perf ] ++ desktopPackages);
 
   services.postgres = {
