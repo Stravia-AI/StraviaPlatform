@@ -392,7 +392,8 @@ jobs:
     if: ${{ needs.reuse-ci.outputs.run_checks == 'true' && (github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none') }}
     name: PostgreSQL E2E
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # 冷构建 vendor fixtures 与服务可超过 35 分钟，须为完整存储套件保留时间。
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16
