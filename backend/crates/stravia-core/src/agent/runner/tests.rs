@@ -580,7 +580,8 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
             generation_root_id: None,
         });
     }
-    // 父请求已结束；后台消费不能把后续远程字节丢掉或转到新的 Trace。
+    // 先持久化父请求终态，再驱动后台；后续远程字节仍必须归属原 Trace。
+    observation.flush().await?;
     let drivers = drivers
         .into_iter()
         .map(|events| tokio::spawn(async move { events.collect::<Vec<_>>().await }))
@@ -640,9 +641,12 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
             assert!(records.iter().any(|record| {
                 record["direction"] == "upstream_request" && record["payload"] == request
             }));
-            assert!(records.iter().any(|record| {
-                record["direction"] == "upstream_response" && record["payload"] == response
-            }));
+            assert!(
+                records.iter().any(|record| {
+                    record["direction"] == "upstream_response" && record["payload"] == response
+                }),
+                "missing {response:?}: {records:#?}"
+            );
         }
         let other = if owner == "agent-a" {
             "agent-b"

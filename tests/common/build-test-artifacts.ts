@@ -116,6 +116,7 @@ const compilerKeys = [
   'AR',
   'CFLAGS',
   'CXXFLAGS',
+  'LIBSQLITE3_FLAGS',
 ]
 const compilerEnvironment = Object.fromEntries(
   Object.entries({

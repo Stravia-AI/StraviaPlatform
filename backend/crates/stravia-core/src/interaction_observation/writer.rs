@@ -1792,7 +1792,12 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     let trace = active_traces.lock().get(&run_id).cloned();
                     if let Some(trace) = trace {
-                        let manifest = trace.finish().await;
+                        // 客户端终态不代表后台执行结束；最后一个 Observer 的 Finalize 才关闭抓包。
+                        if let Err(error) = trace.flush().await {
+                            trace.mark_observation_gap();
+                            tracing::warn!(%run_id, %error, "run trace flush failed");
+                        }
+                        let manifest = trace.manifest();
                         let at = finished_at;
                         match debug_trace_index
                             .save_manifest(
