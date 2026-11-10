@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.6.5] - 2026-11-10
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Changed
 
 - The Nix development environment now provides pinned `patch-crate` 0.1.13 from a shared Nix package instead of compiling it separately for each worktree. Linked worktrees prewarm only patched sources, debug/release build dependencies and Wasm plugin outputs, excluding incremental caches, profile-root executables and temporary test artifacts.
