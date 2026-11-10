@@ -302,7 +302,8 @@ jobs:
     if: ${{ needs.reuse-ci.outputs.run_checks == 'true' && (github.event_name != 'workflow_dispatch' || inputs.cache_warm == '' || inputs.cache_warm == 'none' || inputs.cache_warm == 'linux-e2e') }}
     name: Backend E2E (${{ matrix.suite }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # 管理 E2E 冷构建两个隔离 profile 约需 45 分钟，随后还须构建 Wasm 夹具并运行完整套件。
+    timeout-minutes: ${{ matrix.suite == 'admin' && 90 || 60 }}
     strategy:
       fail-fast: false
       matrix:
