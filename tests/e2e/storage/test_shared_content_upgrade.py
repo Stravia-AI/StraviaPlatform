@@ -392,6 +392,28 @@ def assert_native_compaction_survives(env: dict[str, Any], fixture: dict[str, An
     assert COMPACTION_REMOVED_HISTORY not in upstream_input
 
 
+def assert_api_key_injections_converted(env: dict[str, Any]) -> None:
+    """Legacy booleans survive as canonical arrays, independently of the master switch."""
+    expected = {
+        "none": (True, []),
+        "web": (True, ["web_search"]),
+        "understanding": (True, ["media_understanding"]),
+        "generation": (True, ["media_generation"]),
+        "web-understanding": (True, ["web_search", "media_understanding"]),
+        "web-generation": (True, ["web_search", "media_generation"]),
+        "understanding-generation": (True, ["media_understanding", "media_generation"]),
+        "all-disabled": (False, ["web_search", "media_understanding", "media_generation"]),
+        "all-enabled": (True, ["web_search", "media_understanding", "media_generation"]),
+    }
+    status, body = http_request("GET", f"{env['admin']}/api/v1/api-keys", headers=env["auth"])
+    assert status == 200, body
+    keys = {item["name"]: item for item in body["data"]}
+    for suffix, (enabled, injections) in expected.items():
+        key = keys[f"upgrade-injection-{suffix}"]
+        assert key["transparent_injection_enabled"] is enabled, key
+        assert key["transparent_injections"] == injections, key
+
+
 @BACKENDS
 def test_upgrade_keeps_turn_content_markers_mappings_and_compactions(
     stravia_binary: Path, storage_runtime: dict[str, Any], tmp_path: Path, backend: str,
@@ -400,6 +422,7 @@ def test_upgrade_keeps_turn_content_markers_mappings_and_compactions(
     with upgraded_server(stravia_binary, storage_runtime, tmp_path, backend, fixture) as env:
         status, body = http_request("GET", f"{env['admin']}/api/v1/settings/log_retention_days", headers=env["auth"])
         assert status == 200 and str(body["data"]) == fixture["settings"]["log_retention_days"], body
+        assert_api_key_injections_converted(env)
         # 先读升级后的原始时间线：随后的续接请求会给同一 Interaction 追加新 Run。
         assert_observation_converted(env, fixture)
         assert_error_details_survive(env, fixture)

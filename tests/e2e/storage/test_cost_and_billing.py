@@ -561,7 +561,7 @@ def test_mcp_internal_model_uses_called_route_billing_and_root_key(usage_env):
         "enabled": True, "model_id": route["id"], "thinking_level": "medium",
     })
     admin(env, "PUT", f"api-keys/{key['id']}", {
-        "transparent_injection_enabled": True, "inject_media_understanding": True,
+        "transparent_injection_enabled": True, "transparent_injections": ["media_understanding"],
     })
     auth = {"Authorization": f"Bearer {key['key']}"}
     image = base64.b64decode(PNG)
