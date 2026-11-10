@@ -2,7 +2,7 @@ mod runtime;
 pub mod tool;
 
 pub use runtime::HookRuntime;
-pub(crate) use runtime::InferenceRun;
+pub(crate) use runtime::{InferenceRun, RequestHookOutcome};
 pub use tool::PlatformToolRegistry;
 
 pub(crate) fn is_secret_key(key: &str) -> bool {

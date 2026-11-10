@@ -189,9 +189,9 @@ pub(super) async fn acquire_followup_model_turn(
         .on_request_with_provenance(std::sync::Arc::make_mut(request))
         .await;
     let hook_outcome = hook_outcome.map(|outcome| {
-        if outcome.canonical_structure_changed {
-            history_boundary = None;
-        }
+        history_boundary = history_boundary
+            .take()
+            .and_then(|boundary| boundary.after_hook(request, &outcome));
         outcome.control
     });
     match hook_outcome {

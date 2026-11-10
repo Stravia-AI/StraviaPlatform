@@ -1405,6 +1405,7 @@ struct ActiveGenerationChain {
     parent_expires_at: Option<std::time::Instant>,
     pub media_turn_messages: Vec<(usize, Vec<String>)>,
     parent_effective_items: Vec<FrozenItem>,
+    processed_input_items: usize,
     parent_client_items: Vec<FrozenItem>,
     replace_effective_history: bool,
     replacement_client_items: Option<Vec<FrozenItem>>,

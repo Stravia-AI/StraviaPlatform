@@ -280,13 +280,73 @@ pub(super) fn apply_request_actions(
     hook_id: &HookId,
     request: &mut AiRequest,
     current: &mut Arc<ContextSnapshot>,
+    input_start: usize,
     exposure: &mut ToolExposure<'_>,
     registry: &PlatformToolRegistry,
     batch: ActionBatch,
-) -> Result<HookControl, HookError> {
+) -> Result<RequestHookOutcome, HookError> {
     if batch.actions.is_empty() {
-        return Ok(HookControl::Continue);
+        return Ok(RequestHookOutcome {
+            control: HookControl::Continue,
+            history_edits: Vec::new(),
+            refresh_context: false,
+        });
     }
+    let rewrites_history = batch.actions.iter().any(|action| {
+        matches!(action, HookAction::PatchRequest(patch) if matches!(patch.as_ref(), RequestPatch::ReplaceContextSpans(_)))
+    });
+    let rewrites_input = batch.actions.iter().any(|action| {
+        matches!(action, HookAction::PatchRequest(patch) if matches!(patch.as_ref(), RequestPatch::SpliceInput { .. }))
+    });
+    let prefix_len = if rewrites_history {
+        0
+    } else if rewrites_input {
+        input_start
+    } else {
+        request.items.len()
+    };
+    // 事务只复制尚未处理的输入。已提交历史在提交/失败两条路径都原样移回，
+    // 路由和工具参数变更不会为了暂存而克隆旧图片、思考或工具结果。
+    let mut prefix = std::mem::take(&mut request.items);
+    request.items = prefix.split_off(prefix_len);
+    let result = apply_request_actions_staged(
+        hook_id,
+        request,
+        current,
+        InputScope {
+            start: input_start.saturating_sub(prefix_len),
+            offset: prefix_len,
+        },
+        exposure,
+        registry,
+        batch,
+    );
+    prefix.append(&mut request.items);
+    request.items = prefix;
+    if result.as_ref().is_ok_and(|outcome| outcome.refresh_context) {
+        let completeness = ContextCompleteness::from_request(request);
+        Arc::make_mut(current).update_from_request(request, completeness);
+    }
+    result
+}
+
+#[derive(Clone, Copy)]
+struct InputScope {
+    /// 暂存请求内未处理输入的起点。
+    start: usize,
+    /// 暂存 items 在完整执行历史中的偏移。
+    offset: usize,
+}
+
+fn apply_request_actions_staged(
+    hook_id: &HookId,
+    request: &mut AiRequest,
+    current: &mut Arc<ContextSnapshot>,
+    input: InputScope,
+    exposure: &mut ToolExposure<'_>,
+    registry: &PlatformToolRegistry,
+    batch: ActionBatch,
+) -> Result<RequestHookOutcome, HookError> {
     let mut staged_request = Cow::Borrowed(&*request);
     let mut staged_context = current.clone();
     let mut staged_tools = exposure.tools.clone();
@@ -300,16 +360,28 @@ pub(super) fn apply_request_actions(
         .collect();
     protected_specs.extend(staged_tool_specs.clone());
     let mut control = None;
+    let mut history_edits = Vec::new();
+    let mut refresh_context = false;
 
     for action in batch.actions {
         match action {
             HookAction::PatchRequest(patch) => {
-                apply_request_patch(
+                if refresh_context && matches!(patch.as_ref(), RequestPatch::ReplaceContextSpans(_))
+                {
+                    Arc::make_mut(&mut staged_context).update_from_request(
+                        &staged_request,
+                        ContextCompleteness::from_request(&staged_request),
+                    );
+                }
+                let (edit, refresh) = apply_request_patch(
                     staged_request.to_mut(),
-                    Arc::make_mut(&mut staged_context),
+                    &mut staged_context,
+                    input,
                     *patch,
                 )
                 .map_err(|message| invalid_action(hook_id, EventKind::Request, message))?;
+                history_edits.extend(edit);
+                refresh_context |= refresh;
             }
             HookAction::ExposeRead { scope, description } => {
                 let tool_id = ToolId::new("stravia-read");
@@ -425,33 +497,43 @@ pub(super) fn apply_request_actions(
     *exposure.tools = staged_tools;
     *exposure.specs = staged_tool_specs;
     *exposure.read_scope = staged_read_scope;
-    Ok(control.unwrap_or(HookControl::Continue))
+    Ok(RequestHookOutcome {
+        control: control.unwrap_or(HookControl::Continue),
+        history_edits,
+        refresh_context,
+    })
 }
 
-pub(super) fn apply_request_patch(
+fn apply_request_patch(
     request: &mut AiRequest,
-    current: &mut ContextSnapshot,
+    current: &mut Arc<ContextSnapshot>,
+    input: InputScope,
     patch: RequestPatch,
-) -> Result<(), String> {
+) -> Result<(Option<RequestHistoryEdit>, bool), String> {
+    let mut refresh_context = false;
     match patch {
-        RequestPatch::ReplaceCanonical(next) => {
-            if next.stream.enabled != request.stream.enabled
-                || next.stream.include_usage != request.stream.include_usage
-            {
-                return Err("a hook cannot change the negotiated StreamConfig".into());
+        RequestPatch::SpliceInput { range, items } => {
+            let input_len = request
+                .items
+                .len()
+                .checked_sub(input.start)
+                .ok_or("processed input boundary is outside the request")?;
+            if range.start > range.end || range.end > input_len {
+                return Err("input rewrite is outside the unprocessed input".into());
             }
-            if !request_metadata_patch_allowed(&request.meta, &next.meta) {
-                return Err("request metadata is read-only".into());
-            }
-            let protected_metadata = request.meta.clone();
-            let media_routing = next.meta.media_routing.clone();
-            *request = *next;
-            request.meta = protected_metadata;
-            request.meta.media_routing = media_routing;
-            request.normalize_parameters();
-            let completeness = ContextCompleteness::from_request(request);
-            current.update_from_request(request, completeness);
+            let inserted = items.len();
+            let start = input.start + range.start;
+            let end = input.start + range.end;
+            request.items.splice(start..end, items);
+            return Ok((
+                Some(RequestHistoryEdit::Splice {
+                    range: input.offset + start..input.offset + end,
+                    inserted,
+                }),
+                true,
+            ));
         }
+        RequestPatch::SetMediaRouting(plan) => request.meta.media_routing = plan,
         RequestPatch::SetModel(model) => {
             if model.trim().is_empty() {
                 return Err("model cannot be empty".into());
@@ -459,11 +541,11 @@ pub(super) fn apply_request_patch(
             request.model = model;
         }
         RequestPatch::SetSystem(system) => {
-            request.instructions = system.clone();
+            request.instructions = system;
             request
                 .parameters
                 .reset(stravia_runtime_contract::protocol::ir::ParameterReset::Instructions);
-            current.system = system;
+            refresh_context = true;
         }
         RequestPatch::SetGeneration(generation) => request.generation = generation,
         RequestPatch::ReplaceTools(tools) => request.tools = tools,
@@ -476,99 +558,19 @@ pub(super) fn apply_request_patch(
         }
         RequestPatch::SetParameters(parameters) => {
             request.parameters = *parameters;
-            current.completeness = ContextCompleteness::from_request(request);
+            refresh_context = true;
         }
         RequestPatch::ReplaceContextSpans(rewrites) => {
+            let current = Arc::make_mut(current);
             current
                 .apply_rewrites(&rewrites)
                 .map_err(|error| error.to_string())?;
             current.write_to_request(request);
+            return Ok((Some(RequestHistoryEdit::ReplaceContext), false));
         }
     }
-    Ok(())
+    Ok((None, refresh_context))
 }
-pub(super) fn request_metadata_patch_allowed(
-    left: &stravia_runtime_contract::protocol::ir::RequestMetadata,
-    right: &stravia_runtime_contract::protocol::ir::RequestMetadata,
-) -> bool {
-    left.source_protocol == right.source_protocol
-        && (right.raw.is_none() || request_metadata_raw_equal(left, right))
-        && sanitized_vendor_map_allowed(&left.vendor.ingress, &right.vendor.ingress)
-        && sanitized_vendor_map_allowed(
-            &left.vendor.passthrough_safe,
-            &right.vendor.passthrough_safe,
-        )
-        && (right.vendor.egress.is_empty() || left.vendor.egress == right.vendor.egress)
-}
-
-pub(super) fn sanitized_vendor_map_allowed(
-    original: &std::collections::HashMap<String, serde_json::Value>,
-    candidate: &std::collections::HashMap<String, serde_json::Value>,
-) -> bool {
-    for (key, value) in candidate {
-        if crate::hook::is_secret_key(key) {
-            return false;
-        }
-        let Some(original_value) = original.get(key) else {
-            return false;
-        };
-        if !sanitized_vendor_value_allowed(original_value, value) {
-            return false;
-        }
-    }
-    original
-        .keys()
-        .all(|key| crate::hook::is_secret_key(key) || candidate.contains_key(key))
-}
-
-pub(super) fn sanitized_vendor_value_allowed(
-    original: &serde_json::Value,
-    candidate: &serde_json::Value,
-) -> bool {
-    match (original, candidate) {
-        (serde_json::Value::Object(original), serde_json::Value::Object(candidate)) => {
-            for (key, value) in candidate {
-                if crate::hook::is_secret_key(key) {
-                    return false;
-                }
-                let Some(original_value) = original.get(key) else {
-                    return false;
-                };
-                if !sanitized_vendor_value_allowed(original_value, value) {
-                    return false;
-                }
-            }
-            original
-                .keys()
-                .all(|key| crate::hook::is_secret_key(key) || candidate.contains_key(key))
-        }
-        (serde_json::Value::Array(original), serde_json::Value::Array(candidate)) => {
-            original.len() == candidate.len()
-                && original
-                    .iter()
-                    .zip(candidate)
-                    .all(|(left, right)| sanitized_vendor_value_allowed(left, right))
-        }
-        _ => original == candidate,
-    }
-}
-
-pub(super) fn request_metadata_raw_equal(
-    left: &stravia_runtime_contract::protocol::ir::RequestMetadata,
-    right: &stravia_runtime_contract::protocol::ir::RequestMetadata,
-) -> bool {
-    match (&left.raw, &right.raw) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            left.body == right.body
-                && left.headers == right.headers
-                && left.method == right.method
-                && left.path == right.path
-        }
-        _ => false,
-    }
-}
-
 pub(super) fn redact_vendor_map(
     values: &std::collections::HashMap<String, serde_json::Value>,
 ) -> std::collections::HashMap<String, serde_json::Value> {

@@ -619,7 +619,8 @@ Agent Turn 保存完整 semantic transcript：
 - user/assistant messages；
 - tool call 与 tool result；
 - public reasoning summary 与协议续接必需 signature/encrypted state；
-- Artifact 的内部 opaque FileId marker；
+- 主体约束的 Artifact 引用（canonical FileId/URL，不保存展开的媒体字节）；
+- Request Hook 已处理前缀的位置；
 - usage、stop/completion metadata。
 
 不保存：
@@ -797,6 +798,8 @@ Chat/Anthropic/Gemini 不增加 metadata extension；只有父模型通过 canon
 - transform public-safe stream。
 
 Hook 不获得 provider credential、Artifact backend key、原始 API key 或任意 storage handle。
+
+Request Hook 读取完整上下文，但内容变换使用宿主提供的 `input_start`，通过 `SpliceInput` 仅处理未处理输入。Runner 保存实际处理后的 canonical transcript；Artifact 引用仅在模型发送前展开，不把展开的媒体字节写回历史。Agent Turn payload 的 `processed_input_items` 标量记录最后模型输出之前的位置，后续 parent Turn 恢复时复用已处理前缀，并首次处理最后模型输出与新增输入。旧 payload 缺少该标量时从零处理，因为旧 transcript 不能证明已经保留 Hook 结果；无启动数据转换或 SQL schema 迁移。模型与工具 allowlist 限制、每步授权不因历史复用而跳过。
 
 ### 13.2 工具暴露
 

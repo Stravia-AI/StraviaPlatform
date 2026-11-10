@@ -38,6 +38,14 @@ impl GenerationChainWrite {
         &self.request_delta
     }
 
+    pub(crate) fn processed_input_items(&self) -> usize {
+        if self.parent.replace_effective_history {
+            0
+        } else {
+            self.parent.processed_input_items
+        }
+    }
+
     /// Observation evidence only; never changes history, execution lineage or input.
     pub(crate) fn has_matching_pending_tool_result(&self) -> bool {
         // 历史编辑可使父节点退回早期工具调用；后续 Assistant 之前的结果是历史，

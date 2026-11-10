@@ -191,6 +191,7 @@ impl AgentRunner {
         };
         let ParentAgentContext {
             mut transcript,
+            processed_input_items,
             snapshot: parent_snapshot,
             root_turn_id,
             state_checkpoint_id: parent_checkpoint_id,
@@ -469,11 +470,11 @@ impl AgentRunner {
             tool_call_id: None,
             meta: None,
         });
-        let mut model_transcript = self
+        transcript = self
             .hydrate_transcript(&input.principal, &transcript)
             .await?;
         let model_instructions = model_instructions(&record.spec);
-        let mut initial_request = AiRequest::new(&model_id, model_transcript.clone());
+        let mut initial_request = AiRequest::new(&model_id, transcript.clone());
         initial_request.instructions = Some(model_instructions.clone());
         initial_request.reasoning.level = thinking_level;
         initial_request.tools = (!allowed_tools.is_empty()).then_some(allowed_tools.clone());
@@ -501,6 +502,7 @@ impl AgentRunner {
                     },
                     &initial_request,
                     ContextCompleteness::Full,
+                    processed_input_items,
                 )
             })
             .transpose()
@@ -549,7 +551,7 @@ impl AgentRunner {
                     current_input_gap = transcript.len();
                     pending_input = true;
                 }
-                append_finalization_instruction(&mut transcript, &mut model_transcript);
+                append_finalization_instruction(&mut transcript);
                 user_turn_index = advance_user_turn(user_turn_index)?;
             }
             model_turns += 1;
@@ -561,7 +563,7 @@ impl AgentRunner {
             )
             .await?;
 
-            let mut request = AiRequest::new(&model_id, model_transcript.clone());
+            let mut request = AiRequest::new(&model_id, std::mem::take(&mut transcript));
             request.instructions = Some(model_instructions.clone());
             request.reasoning.level = thinking_level;
             crate::generation_chain::set_generation_session_id(
@@ -582,7 +584,7 @@ impl AgentRunner {
             };
             request.tools = (!turn_tools.is_empty()).then_some(turn_tools);
             let fixed_model = request.model.clone();
-            let mut hook_structure_changed = false;
+            let mut projected_input_gap = Some(current_input_gap);
             let fixed_tools = request.tools.clone();
             let hook_response = if let Some(hooks) = &hooks {
                 let mut hooks = hooks.lock().await;
@@ -590,7 +592,7 @@ impl AgentRunner {
                     .on_request_with_provenance(&mut request)
                     .await
                     .map_err(|error| AgentRunError::new("hook_policy_error", error.to_string()))?;
-                hook_structure_changed = outcome.canonical_structure_changed;
+                outcome.project_history_gaps(std::slice::from_mut(&mut projected_input_gap));
                 let control = outcome.control;
                 if hooks.has_exposed_tools()
                     || request.model != fixed_model
@@ -614,6 +616,12 @@ impl AgentRunner {
             } else {
                 None
             };
+            // 持久化实际处理结果，而不是下次重新执行 Hook；Artifact 仍是
+            // 受主体约束的引用，不把模型发送时展开的媒体字节写回历史。
+            transcript.clone_from(&request.items);
+            if let Some(gap) = projected_input_gap {
+                current_input_gap = gap;
+            }
             let turn_deadline = if finalizing {
                 deadline
             } else {
@@ -627,7 +635,7 @@ impl AgentRunner {
             } else {
                 let mut source_request = Arc::new(request.clone());
                 Arc::make_mut(&mut source_request).normalize_parameters();
-                let candidate = if !hook_structure_changed {
+                let candidate = if projected_input_gap.is_some() {
                     context_window_id.zip(context_window_index).and_then(|(id, index)| {
                         crate::generation_chain::history_boundary_candidate(
                             admission_id,
@@ -700,7 +708,7 @@ impl AgentRunner {
                         current_input_gap = transcript.len();
                         pending_input = true;
                     }
-                    append_finalization_instruction(&mut transcript, &mut model_transcript);
+                    append_finalization_instruction(&mut transcript);
                     user_turn_index = advance_user_turn(user_turn_index)?;
                     continue;
                 }
@@ -755,7 +763,6 @@ impl AgentRunner {
                 &format!("{turn_id}:{model_turns}"),
                 crate::model_turn::support::explicit_chat_reasoning_field(&response),
             );
-            model_transcript.extend_from_slice(&transcript[output_start..]);
 
             let response_tool_calls = response.tool_calls().cloned().collect::<Vec<_>>();
             if !response_tool_calls.is_empty() {
@@ -791,7 +798,7 @@ impl AgentRunner {
                         current_input_gap = transcript.len();
                         pending_input = true;
                     }
-                    append_finalization_instruction(&mut transcript, &mut model_transcript);
+                    append_finalization_instruction(&mut transcript);
                     user_turn_index = advance_user_turn(user_turn_index)?;
                     continue;
                 }
@@ -816,8 +823,7 @@ impl AgentRunner {
                     current_input_gap = transcript.len();
                     pending_input = true;
                 }
-                transcript.extend(results.clone());
-                model_transcript.extend(results);
+                transcript.extend(results);
                 continue;
             }
 
@@ -931,6 +937,7 @@ impl AgentRunner {
                             client_conversation_id: client_conversation_id.as_deref(),
                             client_conversation_created_at_ms,
                             transcript: &transcript,
+                            processed_input_items: output_start,
                             result: &result,
                         })
                         .await?;
@@ -955,8 +962,7 @@ impl AgentRunner {
                         current_input_gap = transcript.len();
                         pending_input = true;
                     }
-                    transcript.push(instruction.clone());
-                    model_transcript.push(instruction);
+                    transcript.push(instruction);
                     user_turn_index = advance_user_turn(user_turn_index)?;
                 }
                 Err(error) => return Err(error),
@@ -1078,6 +1084,7 @@ impl AgentRunner {
                     "client_conversation_id": commit.client_conversation_id,
                     "client_conversation_created_at_ms": commit.client_conversation_created_at_ms,
                     "transcript": commit.transcript,
+                    "processed_input_items": commit.processed_input_items,
                     "completion": commit.result.completion,
                     "output": commit.result.output,
                     "usage": commit.result.usage,
@@ -1123,6 +1130,7 @@ struct TurnCommitContext<'a> {
     client_conversation_id: Option<&'a str>,
     client_conversation_created_at_ms: Option<i64>,
     transcript: &'a [AiItem],
+    processed_input_items: usize,
     result: &'a AgentResult,
 }
 
@@ -1146,15 +1154,11 @@ fn advance_user_turn(index: Option<u64>) -> Result<Option<u64>, AgentRunError> {
         .transpose()
 }
 
-fn append_finalization_instruction(
-    transcript: &mut Vec<AiItem>,
-    model_transcript: &mut Vec<AiItem>,
-) {
+fn append_finalization_instruction(transcript: &mut Vec<AiItem>) {
     let instruction = user_instruction(
         "The working budget is exhausted. Return the best possible final answer now without calling tools.",
     );
-    transcript.push(instruction.clone());
-    model_transcript.push(instruction);
+    transcript.push(instruction);
 }
 
 fn user_instruction(text: impl Into<String>) -> AiItem {

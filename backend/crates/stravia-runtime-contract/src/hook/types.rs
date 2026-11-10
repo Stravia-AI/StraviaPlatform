@@ -111,6 +111,9 @@ pub enum HookEvent<'a> {
         original: &'a ContextSnapshot,
         read_scope: super::tool::ReadExposureScope,
         current: &'a AiRequest,
+        /// 已处理前缀只读；内容变换只处理 `current.items[input_start..]`。
+        /// 上轮模型输出可能尚未经过 Request Hook，因此不等同于客户端 delta。
+        input_start: usize,
         context: &'a ContextSnapshot,
         route: Option<&'a RouteContext>,
         round: u32,
@@ -150,7 +153,12 @@ impl HookEvent<'_> {
 
 #[derive(Debug, Clone)]
 pub enum RequestPatch {
-    ReplaceCanonical(Box<AiRequest>),
+    /// 范围相对于本轮未处理输入；宿主同时投影历史 gap，不从内容猜测来源。
+    SpliceInput {
+        range: std::ops::Range<usize>,
+        items: Vec<AiItem>,
+    },
+    SetMediaRouting(Option<crate::protocol::ir::request::MediaRoutingPlan>),
     SetModel(String),
     SetSystem(Option<String>),
     SetGeneration(GenerationConfig),

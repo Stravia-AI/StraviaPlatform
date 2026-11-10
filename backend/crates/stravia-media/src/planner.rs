@@ -6,8 +6,9 @@ use stravia_runtime_contract::Principal;
 use crate::host::MediaRoute as Route;
 use crate::types::MediaKind;
 use stravia_runtime_contract::hook::{
-    ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
-    HookSession, ReadExposureScope, RequestKind, RequestPatch, ResponsePatch, SessionContext,
+    ActionBatch, ContextCompleteness, ContextSnapshot, EventKind, Hook, HookAction, HookDescriptor,
+    HookEvent, HookId, HookRejection, HookSession, ReadExposureScope, ReplaceContextSpan,
+    RequestKind, RequestPatch, ResponsePatch, SessionContext,
 };
 use stravia_runtime_contract::protocol::ir::request::{MediaRoutingMode, MediaRoutingPlan};
 
@@ -91,6 +92,8 @@ impl HookSession for MediaPlanningSession {
         }
         let HookEvent::Request {
             current,
+            input_start,
+            context,
             read_scope,
             session,
             ..
@@ -101,8 +104,8 @@ impl HookSession for MediaPlanningSession {
         if self.internal_agent || self.planned {
             return Ok(ActionBatch::default());
         }
-        let mut request = current.clone();
-        let previous_turn_ids = materialize_media_turns(&mut request, &self.inherited_media_turns);
+        let request = current;
+        let previous_turn_ids = materialize_media_turns(request, &self.inherited_media_turns);
         for turn_id in &previous_turn_ids {
             self.gateway.media_run_snapshots.allow_turn(
                 &self.run_id,
@@ -111,7 +114,7 @@ impl HookSession for MediaPlanningSession {
                 self.media_deadline,
             );
         }
-        if !super::contains_images(&request) {
+        if !super::contains_images(request) {
             if previous_turn_ids.is_empty() {
                 return Ok(ActionBatch::default());
             }
@@ -128,9 +131,7 @@ impl HookSession for MediaPlanningSession {
                 }
             };
             let Some(route) = route else {
-                return Ok(ActionBatch::one(HookAction::PatchRequest(Box::new(
-                    RequestPatch::ReplaceCanonical(Box::new(request)),
-                ))));
+                return Ok(ActionBatch::default());
             };
             let (_, _, tool_targets) = classify_targets(&route);
             if tool_targets.is_empty() {
@@ -148,17 +149,21 @@ impl HookSession for MediaPlanningSession {
                     "Media Understanding is unavailable",
                 ));
             }
-            super::ingest::apply_bridge_instructions(&mut request);
-            request.meta.media_routing = Some(MediaRoutingPlan {
+            let mut controls = stravia_runtime_contract::protocol::ir::AiRequest::new(
+                request.model.clone(),
+                Vec::new(),
+            );
+            controls.instructions = request.instructions.clone();
+            super::ingest::apply_bridge_instructions(&mut controls);
+            let plan = MediaRoutingPlan {
                 mode: MediaRoutingMode::Bridge,
                 target_keys: tool_targets,
                 source_artifact_ids: Vec::new(),
-            });
+            };
             return Ok(ActionBatch {
                 actions: vec![
-                    HookAction::PatchRequest(Box::new(RequestPatch::ReplaceCanonical(Box::new(
-                        request,
-                    )))),
+                    HookAction::PatchRequest(Box::new(RequestPatch::SetSystem(controls.instructions))),
+                    HookAction::PatchRequest(Box::new(RequestPatch::SetMediaRouting(Some(plan)))),
                     HookAction::ExposeRead {
                         scope: ReadExposureScope::new(false, true),
                         description: "Read an image Artifact path; put a specific media question in question.".into(),
@@ -183,14 +188,14 @@ impl HookSession for MediaPlanningSession {
         };
         let (native_targets, bridge_targets, _) = classify_targets(&route);
         if !native_targets.is_empty() {
-            request.meta.media_routing = Some(MediaRoutingPlan {
+            let plan = MediaRoutingPlan {
                 mode: MediaRoutingMode::Native,
                 target_keys: native_targets,
                 source_artifact_ids: Vec::new(),
-            });
+            };
             return Ok(ActionBatch {
                 actions: vec![HookAction::PatchRequest(Box::new(
-                    RequestPatch::ReplaceCanonical(Box::new(request)),
+                    RequestPatch::SetMediaRouting(Some(plan)),
                 ))],
             });
         }
@@ -209,15 +214,24 @@ impl HookSession for MediaPlanningSession {
                 "No eligible Target can preserve image semantics for this request",
             ));
         }
+        // 已处理的 bridge 结果直接复用。只有路由改变、旧 native 图片必须转为
+        // bridge 时，才显式重写历史；不能将这种适配伪装成新增输入。
+        let rewrites_history = super::ingest::contains_images_in(&request.items[..input_start]);
+        let rewrite_start = if rewrites_history { 0 } else { input_start };
+        let mut pending = stravia_runtime_contract::protocol::ir::AiRequest::new(
+            request.model.clone(),
+            request.items[rewrite_start..].to_vec(),
+        );
+        pending.instructions = request.instructions.clone();
         let snapshot = super::snapshot_and_rewrite(
             &self.gateway,
             &self.principal,
             &self.run_id,
-            &request,
+            &pending,
             &session.cancellation,
             self.media_deadline,
         );
-        let (mut request, source_ids) = tokio::select! {
+        let (rewritten, source_ids) = tokio::select! {
             biased;
             _ = session.cancellation.cancelled() => {
                 return Ok(reject(499, "cancelled", "Media Understanding cancelled"));
@@ -240,27 +254,62 @@ impl HookSession for MediaPlanningSession {
                 }
             },
         };
-        request.meta.media_routing = Some(MediaRoutingPlan {
+        let plan = MediaRoutingPlan {
             mode: MediaRoutingMode::Bridge,
             target_keys: bridge_targets,
             source_artifact_ids: source_ids
                 .iter()
                 .map(|source_id| source_id.as_str().to_owned())
                 .collect(),
-        });
-        Ok(ActionBatch {
-            actions: vec![
-                HookAction::PatchRequest(Box::new(RequestPatch::ReplaceCanonical(Box::new(
-                    request,
-                )))),
-                HookAction::ExposeRead {
+        };
+        let mut actions = Vec::new();
+        if rewrites_history {
+            let replacement = ContextSnapshot::from_request(
+                &rewritten,
+                ContextCompleteness::from_request(&rewritten),
+            );
+            actions.push(HookAction::PatchRequest(Box::new(
+                RequestPatch::ReplaceContextSpans(vec![ReplaceContextSpan {
+                    start: context
+                        .items
+                        .first()
+                        .expect("image context is nonempty")
+                        .id()
+                        .clone(),
+                    end: context
+                        .items
+                        .last()
+                        .expect("image context is nonempty")
+                        .id()
+                        .clone(),
+                    replacement: replacement.items,
+                }]),
+            )));
+        } else {
+            for (index, item) in rewritten.items.into_iter().enumerate() {
+                if super::ingest::contains_images_in(
+                    &request.items[input_start + index..input_start + index + 1],
+                ) {
+                    actions.push(HookAction::PatchRequest(Box::new(
+                        RequestPatch::SpliceInput {
+                            range: index..index + 1,
+                            items: vec![item],
+                        },
+                    )));
+                }
+            }
+        }
+        actions.extend([
+            HookAction::PatchRequest(Box::new(RequestPatch::SetSystem(rewritten.instructions))),
+            HookAction::PatchRequest(Box::new(RequestPatch::SetMediaRouting(Some(plan)))),
+            HookAction::ExposeRead {
                     scope: ReadExposureScope::new(false, true),
                     description:
                         "Read an image Artifact path; put a specific media question in question."
                             .into(),
-                },
-            ],
-        })
+            },
+        ]);
+        Ok(ActionBatch { actions })
     }
 
     fn requires_terminal_buffering(&self) -> bool {
@@ -283,7 +332,7 @@ async fn transparent_bridge_available(
 }
 
 fn materialize_media_turns(
-    request: &mut stravia_runtime_contract::protocol::ir::AiRequest,
+    request: &stravia_runtime_contract::protocol::ir::AiRequest,
     inherited_media_turns: &[(usize, Vec<String>)],
 ) -> Vec<stravia_runtime_contract::agent::AgentTurnId> {
     let read_call_ids = request
@@ -557,7 +606,7 @@ mod tests {
             stravia_runtime_contract::protocol::ir::AiRequest::new("model", vec![call, result]);
 
         let allowed = [(0, vec!["bcdefghijklmnopqrstuvwxyzabc".into()])];
-        let turns = materialize_media_turns(&mut request, &allowed);
+        let turns = materialize_media_turns(&request, &allowed);
 
         assert_eq!(
             turns,
@@ -567,6 +616,6 @@ mod tests {
         );
 
         request.items[0].tool_calls.as_mut().unwrap()[0].name = "ThirdParty".into();
-        assert!(materialize_media_turns(&mut request, &allowed).is_empty());
+        assert!(materialize_media_turns(&request, &allowed).is_empty());
     }
 }

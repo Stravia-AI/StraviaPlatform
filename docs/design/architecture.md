@@ -542,7 +542,7 @@ Gateway::builder(config)
 
 `build()` 校验 HookId 非空且不重复，校验 PlatformTool 的稳定 `ToolId`，然后以 builder 顺序构造一个不可变的 `HookRuntime`。运行时不使用 hook 的进程级隐式发现；Hook 与 PlatformTool 是受信的、进程内 Rust 实现，依赖在构造时注入。
 
-每个客户端推理 turn 只把 `RunInput` 交给 `inference_run::execute`；该一次性 `interface` 独占完整生命周期，并调用 `HookRuntime::begin(SessionContext, &AiRequest, ContextCompleteness)` 创建 crate-private run state 与每个 Hook 的 `HookSession`。一次 Inference Run 覆盖初始 provider round、纯 PlatformTool 隐藏续跑，以及混合工具等待客户端结果后的恢复；普通 provider Target 重试复用本 round 已校验的 canonical 请求。`SessionContext` 只含 request/run ID、RequestKind、ingress、HTTP/WebSocket transport 和脱敏主体；路由确定后事件才收到 model/provider/target/egress。
+每个客户端推理 turn 只把 `RunInput` 交给 `inference_run::execute`；该一次性 `interface` 独占完整生命周期，并调用 `HookRuntime::begin(SessionContext, &AiRequest, ContextCompleteness, processed_input_items)` 创建 crate-private run state 与每个 Hook 的 `HookSession`。已处理位置由宿主从可信执行历史恢复，不接受客户端或 Hook 自报。一次 Inference Run 覆盖初始 provider round、纯 PlatformTool 隐藏续跑，以及混合工具等待客户端结果后的恢复；普通 provider Target 重试复用本 round 已校验的 canonical 请求。`SessionContext` 只含 request/run ID、RequestKind、ingress、HTTP/WebSocket transport 和脱敏主体；路由确定后事件才收到 model/provider/target/egress。
 
 交付准备与收口集中在 `engine/settlement.rs`。`CompletionSettlement` 的私有状态一起持有待提交的 Generation Chain Write 与 Vendor 围栏，完整响应收口按值消费该对象；调用方不再自行配对围栏、交付时间和可选收口字段。buffered 形态还持有 staged Marker 与其执行工作；stream 形态只持有最终响应工作，先前未通过 Marker 交付门的执行不会在最终收口中补启动。`MarkerExecutions` 仅在确有工作时接管所属 Hook run，空执行保留调用方的清理所有权；Marker 发布仍不等于工具执行交接。
 
@@ -587,6 +587,8 @@ Hook 是并发安全的共享工厂；Session 是每次 `InferenceRun` 的可变
 
 `HookEvent` 携带最小稳定 `SessionContext`、`round` 和必要的 canonical 只读 view；`UpstreamResponse`、`ToolResult`、`ClientOutput` 还需要已设置的 `RouteContext`。Embedding 使用 `RequestKind::Embeddings`，可由 descriptor 自然隔离。
 
+`Request.current` 仍可读取完整上下文；内容变换只处理 `current.items[input_start..]`。`input_start` 区分已经处理的执行前缀与尚未处理的输入，不等于客户端 delta：上一轮模型输出首次成为下一轮输入时也必须处理。请求决策仍会执行，历史复用不缓存路由、能力或权限判定。
+
 ### 4.4 动作批次与失败语义
 
 ```rust
@@ -610,13 +612,15 @@ pub enum HookControl {
 
 一个 `ActionBatch` 先整体验证，再原子应用；任一 Patch 非法、hook 返回错误、hook session 创建 panic 或 runtime 状态非法都会 fail-closed。`Respond` 只允许 `Request`；`Reject` 只允许首字节发出前的 Request/UpstreamResponse；首字节后只能 `StreamAbort`，不能改变已经发送的 HTTP 状态。Hook 调用不设默认超时，但必须响应请求取消。
 
-Request Patch 可改写 canonical model、system/instructions、ContextItems、generation、tools/tool choice、embedding input 和 protocol extension，但不得改变主体、认证、provider target 或凭据。Response/ToolResult Patch 不能修改 usage、stop/lifecycle、tool ownership/ID 或结构性 stream 事件；平台工具所有权在核心分类后保持不可变，arguments 可被安全语义 patch 后重新校验。
+Request Patch 可改写 canonical model、system/instructions、ContextItems、generation、tools/tool choice、embedding input 和 protocol extension，但不得改变主体、认证、provider target 或凭据。请求不再提供 `ReplaceCanonical`：新增内容用 `SpliceInput { range, items }`，范围相对于当前未处理输入，越界使整批动作回滚；路由计划用 `SetMediaRouting`，不改写历史。确需修改已有历史时显式使用 `ReplaceContextSpans`。宿主按成功应用的 splice 投影历史 gap，无法证明替换区间内部的来源时不保留该 gap；显式 context rewrite 使原边界证明失效，不能凭内容相等恢复。Response/ToolResult Patch 不能修改 usage、stop/lifecycle、tool ownership/ID 或结构性 stream 事件；平台工具所有权在核心分类后保持不可变，arguments 可被安全语义 patch 后重新校验。
 
 ### 4.5 ContextSnapshot 与状态
 
 `InferenceRun` 仅在存在当前完整性允许执行的 Request 事件订阅者时，在 `begin()` 为原始请求建立 `ContextSnapshot`：有序 `ContextItem`（Message、Reasoning、ToolCall、ToolResult）、稳定请求内 `ContextItemId`、版本化 checkpoint/fingerprint 与 `ReplaceContextSpan`。无此订阅者时不物化大正文 JSON 快照；其他事件只读取独立的完整性状态，PlatformTool 仍通过既有 read scope、主体与取消上下文执行。每次请求独立从客户端提交的上下文匹配，不维护压缩 rollback 状态机；重叠 span、反向 span、未知/重复 item ID 均拒绝。
 
 原始与当前 Snapshot 在未修改时共享同一 `Arc`，流式只读回调不复制完整上下文。Request 动作在暂存状态中原子应用：空批次不复制请求，实际修改才分离请求或上下文；后续动作失败时仍丢弃整批暂存修改。Canonical 普通文本与 Text block 使用 `Arc<String>` 共享底层缓冲区，文本写入采用写时复制；序列化仍为原有字符串，不能因此改变 checkpoint、历史指纹或 Hook 的只读元数据规则。
+
+普通输入 splice 的请求事务暂存只复制未处理部分；纯控制或路由动作的请求暂存不复制历史 items。Generation Chain 从既有 `effective_history_mutation` 与 `effective_output` 恢复处理结果和最后输出前的位置，不另建历史正文缓存。完整客户端历史经严格父发现、显式父 ID 续接和冷启动物化遵守同一规则；客户端编辑不能命中旧前缀时按新的分支输入处理。原生图片只更新路由计划，保留 canonical 历史边界；bridge 只转换新增图片，若路由变化要求转换旧 native 图片则显式改写历史。
 
 Canonical 语义投影将已拥有的 JSON 子树直接移入父对象或数组，不通过 `json!` 再次序列化并复制正文；历史逐项投影与比较不预先物化整段历史。普通 Text 的指纹与比较借用正文，复杂内容和原生字段仍经过既有受控投影；JSON Map 键序、长度前缀、语义单元顺序及缺省/null 等价关系保持不变。Context item 的身份匹配移交已计算的 canonical bytes，span fingerprint 每项只计算一次，仍保留重复项的独立 occurrence 身份。
 

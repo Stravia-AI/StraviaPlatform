@@ -316,6 +316,26 @@ struct HistoryBoundaryInput {
     candidate: crate::generation_chain::HistoryBoundaryCandidate,
 }
 
+impl HistoryBoundaryInput {
+    fn after_hook(
+        self,
+        request: &Arc<AiRequest>,
+        outcome: &crate::hook::RequestHookOutcome,
+    ) -> Option<Self> {
+        if outcome.preserves_history() {
+            return Some(self);
+        }
+        let gap = *self
+            .gaps
+            .get(usize::try_from(self.candidate.source_item_gap).ok()?)?;
+        Some(Self {
+            candidate: outcome.project_boundary(&self.candidate, request, gap)?,
+            source: Arc::clone(request),
+            gaps: (0..=request.items.len()).collect(),
+        })
+    }
+}
+
 struct SharedModelTurnInput<'a> {
     executor: Arc<dyn ModelTurnExecutor>,
     gateway: &'a Gateway,
@@ -1005,6 +1025,13 @@ pub(super) async fn orchestrate(
         phase.finish();
         return response;
     }
+    let processed_source_items = generation_chain_write.as_ref().map_or(
+        0,
+        crate::generation_chain::GenerationChainWrite::processed_input_items,
+    );
+    let Some(&processed_input_items) = history_boundary_gaps.get(processed_source_items) else {
+        return hook_failure_response("processed history cannot be projected into the request");
+    };
     let initial_history_boundary = generation_chain_write.as_ref().and_then(|write| {
         Some(HistoryBoundaryInput {
             source: write.request_snapshot(),
@@ -1039,6 +1066,7 @@ pub(super) async fn orchestrate(
             session_context,
             &request,
             stravia_runtime_contract::hook::ContextCompleteness::from_request(&request),
+            processed_input_items,
         ) {
             Ok(run) => run,
             Err(error) => return hook_failure_response(error),
@@ -1165,7 +1193,7 @@ async fn dispatch_round(
     if ctx.cancellation.is_cancelled() {
         return error_response(499, "request cancelled");
     }
-    let mut history_boundary_items_preserved = true;
+    let mut history_boundary = generation_chain.initial_history_boundary.take();
     if request_hook_pending {
         let request_hook_result = inference_run
             .as_mut()
@@ -1173,7 +1201,9 @@ async fn dispatch_round(
             .on_request_with_provenance(Arc::make_mut(request))
             .await;
         let request_hook_result = request_hook_result.map(|outcome| {
-            history_boundary_items_preserved = !outcome.canonical_structure_changed;
+            history_boundary = history_boundary
+                .take()
+                .and_then(|boundary| boundary.after_hook(request, &outcome));
             outcome.control
         });
         match request_hook_result {
@@ -1289,10 +1319,6 @@ async fn dispatch_round(
         return *response;
     }
 
-    let history_boundary = generation_chain
-        .initial_history_boundary
-        .take()
-        .filter(|_| history_boundary_items_preserved);
     let outcome = execute_shared_model_turn(SharedModelTurnInput {
         executor: Arc::clone(&executor),
         gateway: &gw,

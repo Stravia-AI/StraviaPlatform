@@ -3,6 +3,7 @@ use super::*;
 #[derive(Default)]
 pub(super) struct ParentAgentContext {
     pub(super) transcript: Vec<AiItem>,
+    pub(super) processed_input_items: usize,
     pub(super) snapshot: Option<ParentAgentSnapshot>,
     pub(super) root_turn_id: Option<AgentTurnId>,
     pub(super) state_checkpoint_id: Option<uuid::Uuid>,
@@ -269,7 +270,7 @@ impl AgentRunner {
             .payload
             .get("user_turn_index")
             .and_then(Value::as_u64);
-        let transcript = serde_json::from_value(
+        let transcript: Vec<AiItem> = serde_json::from_value(
             payload.payload.get("transcript").cloned().ok_or_else(|| {
                 AgentRunError::new(
                     "parent_turn_invalid",
@@ -278,6 +279,20 @@ impl AgentRunner {
             })?,
         )
         .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))?;
+        // 旧 Turn 没有保存 Request Hook 的执行视图，不能从响应归属推断已处理。
+        let processed_input_items = payload
+            .payload
+            .get("processed_input_items")
+            .map(|value| serde_json::from_value::<usize>(value.clone()))
+            .transpose()
+            .map_err(|error| AgentRunError::new("parent_turn_invalid", error.to_string()))?
+            .unwrap_or(0);
+        if processed_input_items > transcript.len() {
+            return Err(AgentRunError::new(
+                "parent_turn_invalid",
+                "Processed input boundary is outside the Agent transcript",
+            ));
+        }
         let definition_id = payload
             .payload
             .get("definition_id")
@@ -318,6 +333,7 @@ impl AgentRunner {
             .flatten();
         Ok(ParentAgentContext {
             transcript,
+            processed_input_items,
             snapshot: Some(ParentAgentSnapshot {
                 definition_id,
                 definition_revision: revision,

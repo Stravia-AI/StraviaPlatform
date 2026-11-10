@@ -41,6 +41,97 @@ impl HookSession for AppendModelSession {
 
 struct InvalidBatchSession;
 
+struct InputEditSession {
+    invalid: bool,
+}
+
+#[async_trait]
+impl HookSession for InputEditSession {
+    async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
+        let HookEvent::Request {
+            current,
+            input_start,
+            ..
+        } = event
+        else {
+            return Ok(ActionBatch::default());
+        };
+        let items = current.items[input_start..]
+            .iter()
+            .map(|item| AiItem::output_text(format!("{} [processed]", item.content.to_text())))
+            .collect::<Vec<_>>();
+        let mut actions = vec![HookAction::PatchRequest(Box::new(
+            RequestPatch::SpliceInput {
+                range: 0..items.len(),
+                items,
+            },
+        ))];
+        if self.invalid {
+            actions.push(HookAction::PatchRequest(Box::new(
+                RequestPatch::SpliceInput {
+                    range: 0..current.items.len(),
+                    items: Vec::new(),
+                },
+            )));
+        }
+        Ok(ActionBatch { actions })
+    }
+}
+
+#[tokio::test]
+async fn incremental_input_edits_preserve_history_and_roll_back_invalid_batches() {
+    for invalid in [false, true] {
+        let runtime = HookRuntime::new(vec![Arc::new(TestHook {
+            descriptor: HookDescriptor::all("incremental-input"),
+            make: Arc::new(move || Box::new(InputEditSession { invalid })),
+        })]);
+        let mut request = AiRequest::new(
+            "model",
+            vec![
+                AiItem::output_text("saved [processed]"),
+                AiItem::output_text("new"),
+            ],
+        );
+        let mut run = runtime
+            .begin(
+                session_context(RequestKind::Generation),
+                &request,
+                ContextCompleteness::Full,
+                1,
+            )
+            .unwrap();
+        let result = run.on_request_with_provenance(&mut request).await;
+        if invalid {
+            assert!(matches!(result, Err(HookError::InvalidAction { .. })));
+            assert_eq!(
+                request
+                    .items
+                    .iter()
+                    .map(|item| item.content.to_text())
+                    .collect::<Vec<_>>(),
+                ["saved [processed]", "new"]
+            );
+        } else {
+            result.unwrap();
+            request.items.push(AiItem::output_text("model output"));
+            run.next_round();
+            run.on_request_with_provenance(&mut request).await.unwrap();
+            assert_eq!(
+                request
+                    .items
+                    .iter()
+                    .map(|item| item.content.to_text())
+                    .collect::<Vec<_>>(),
+                [
+                    "saved [processed]",
+                    "new [processed]",
+                    "model output [processed]"
+                ]
+            );
+        }
+    }
+}
+
 #[async_trait]
 impl HookSession for InvalidBatchSession {
     async fn handle(&mut self, _event: HookEvent<'_>) -> Result<ActionBatch, String> {
@@ -141,6 +232,7 @@ async fn assert_abandoned_inference_delivery(cancel: bool) {
             context,
             &AiRequest::new("model", Vec::new()),
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     let execution = run.detached_platform_execution(
@@ -248,6 +340,7 @@ async fn marker_delivery_persistence_failure_returns_to_owning_inference_run() {
             context,
             &AiRequest::new("model", Vec::new()),
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.set_route(route_context());
@@ -344,6 +437,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
             context,
             &AiRequest::new("model", Vec::new()),
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.set_route(route_context());
@@ -401,6 +495,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
             query_context,
             &AiRequest::new("model", Vec::new()),
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     let query = query_run.detached_platform_execution(
@@ -503,6 +598,7 @@ async fn request_hooks_run_in_order_and_observe_prior_changes() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
 
@@ -520,7 +616,6 @@ async fn request_hooks_run_in_order_and_observe_prior_changes() {
 #[derive(Clone, Copy)]
 enum ProvenancePatch {
     ModelAndTools,
-    SameCanonical,
     SameSpan,
     Reject,
 }
@@ -530,10 +625,7 @@ struct ProvenanceSession(ProvenancePatch);
 #[async_trait]
 impl HookSession for ProvenanceSession {
     async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
-        let HookEvent::Request {
-            current, context, ..
-        } = event
-        else {
+        let HookEvent::Request { context, .. } = event else {
             return Ok(ActionBatch::default());
         };
         let actions = match self.0 {
@@ -541,9 +633,6 @@ impl HookSession for ProvenanceSession {
                 HookAction::PatchRequest(Box::new(RequestPatch::SetModel("other".into()))),
                 HookAction::PatchRequest(Box::new(RequestPatch::ReplaceTools(None))),
             ],
-            ProvenancePatch::SameCanonical => vec![HookAction::PatchRequest(Box::new(
-                RequestPatch::ReplaceCanonical(Box::new(current.clone())),
-            ))],
             ProvenancePatch::SameSpan => {
                 let item = &context.items[0];
                 vec![HookAction::PatchRequest(Box::new(
@@ -584,13 +673,9 @@ async fn request_provenance_distinguishes_controls_from_structural_replacements(
     for (patches, expected) in [
         (vec![], false),
         (vec![ProvenancePatch::ModelAndTools], false),
-        (vec![ProvenancePatch::SameCanonical], true),
         (vec![ProvenancePatch::SameSpan], true),
         (
-            vec![
-                ProvenancePatch::SameCanonical,
-                ProvenancePatch::ModelAndTools,
-            ],
+            vec![ProvenancePatch::SameSpan, ProvenancePatch::ModelAndTools],
             true,
         ),
     ] {
@@ -601,11 +686,21 @@ async fn request_provenance_distinguishes_controls_from_structural_replacements(
                 session_context(RequestKind::Generation),
                 &request,
                 ContextCompleteness::Full,
+                0,
             )
             .unwrap();
         let outcome = run.on_request_with_provenance(&mut request).await.unwrap();
         assert!(matches!(outcome.control, HookControl::Continue));
-        assert_eq!(outcome.canonical_structure_changed, expected);
+        let mut gaps = [Some(0), Some(1)];
+        outcome.project_history_gaps(&mut gaps);
+        assert_eq!(
+            gaps,
+            if expected {
+                [None, None]
+            } else {
+                [Some(0), Some(1)]
+            }
+        );
         assert_eq!(
             serde_json::to_value(&request.items).unwrap(),
             serde_json::to_value(vec![AiItem::output_text("visible")]).unwrap()
@@ -616,7 +711,7 @@ async fn request_provenance_distinguishes_controls_from_structural_replacements(
 #[tokio::test]
 async fn request_provenance_survives_early_hook_control() {
     let runtime = provenance_runtime(&[
-        ProvenancePatch::SameCanonical,
+        ProvenancePatch::SameSpan,
         ProvenancePatch::Reject,
         ProvenancePatch::ModelAndTools,
     ]);
@@ -626,11 +721,14 @@ async fn request_provenance_survives_early_hook_control() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     let outcome = run.on_request_with_provenance(&mut request).await.unwrap();
     assert!(matches!(outcome.control, HookControl::Reject(_)));
-    assert!(outcome.canonical_structure_changed);
+    let mut gaps = [Some(0), Some(1)];
+    outcome.project_history_gaps(&mut gaps);
+    assert_eq!(gaps, [None, None]);
     assert_eq!(request.model, "model");
 }
 
@@ -646,6 +744,7 @@ async fn invalid_action_batch_leaves_request_unchanged() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
 
@@ -682,6 +781,7 @@ async fn hook_requiring_full_context_is_skipped_for_partial_request() {
             ContextCompleteness::Partial {
                 opaque_refs: vec![],
             },
+            0,
         )
         .unwrap();
 
@@ -771,6 +871,7 @@ async fn completing_partial_context_enables_later_full_context_consumers() {
             ContextCompleteness::Partial {
                 opaque_refs: vec![],
             },
+            0,
         )
         .unwrap();
 
@@ -820,6 +921,7 @@ async fn failed_context_completion_does_not_enable_full_context_response_hooks()
             ContextCompleteness::Partial {
                 opaque_refs: vec![],
             },
+            0,
         )
         .unwrap();
     assert!(matches!(
@@ -853,6 +955,7 @@ async fn no_hooks_preserve_route_errors_and_client_tool_ownership() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     assert!(matches!(
@@ -963,6 +1066,7 @@ async fn response_and_tool_result_stages_are_distinct_and_ordered() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.set_route(route_context());
@@ -999,6 +1103,7 @@ async fn protected_response_fields_make_the_whole_batch_fail() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.set_route(route_context());
@@ -1146,6 +1251,7 @@ fn stream_transformer_panics_are_fail_closed() {
                 session_context(RequestKind::Generation),
                 &request,
                 ContextCompleteness::Full,
+                0,
             )
             .unwrap();
         let first = run.transform_stream(
@@ -1186,6 +1292,7 @@ async fn stream_transformer_holds_across_deltas_and_flushes_semantic_content() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
 
@@ -1274,6 +1381,7 @@ async fn stream_transformer_cannot_drop_structural_events() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
 
@@ -1309,6 +1417,7 @@ async fn stream_transformer_is_rejected_when_its_buffer_exceeds_descriptor_limit
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
 
@@ -1395,6 +1504,7 @@ async fn exposed_platform_tool_is_classified_without_claiming_client_tool() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.on_request_with_provenance(&mut request).await.unwrap();
@@ -1443,6 +1553,7 @@ fn session_creation_panic_is_fail_closed() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .err()
         .expect("session creation should fail");
@@ -1523,6 +1634,7 @@ async fn client_tool_arguments_pass_through_verbatim_even_when_not_json() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.set_route(route_context());
@@ -1562,6 +1674,7 @@ async fn valid_platform_call_does_not_block_malformed_client_arguments() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.on_request_with_provenance(&mut request).await.unwrap();
@@ -1614,6 +1727,7 @@ async fn platform_tool_malformed_arguments_are_refused_at_execution() {
             session_context(RequestKind::Generation),
             &request,
             ContextCompleteness::Full,
+            0,
         )
         .unwrap();
     run.on_request_with_provenance(&mut request).await.unwrap();

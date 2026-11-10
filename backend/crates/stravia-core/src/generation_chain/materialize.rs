@@ -153,6 +153,7 @@ fn materialize_generation_replay<'a>(
     let mut root_id = None;
     let mut compaction_record_ids = Vec::new();
     let mut effective_items = Vec::new();
+    let mut processed_input_items = 0;
     let mut client_items = Vec::new();
     let mut media_turn_messages = Vec::new();
     let mut last = None;
@@ -194,6 +195,8 @@ fn materialize_generation_replay<'a>(
         }
         fold_client_history_view(&mut client_items, &mut persisted);
         let output_start = effective_items.len();
+        // 已执行的输入可直接复用；最后一个模型响应尚未经过下一轮 Request Hook。
+        processed_input_items = output_start;
         match &mut persisted {
             Cow::Owned(node) => effective_items.extend(node.effective_output.take_items()),
             Cow::Borrowed(node) => {
@@ -254,6 +257,7 @@ fn materialize_generation_replay<'a>(
         root_id,
         compaction_record_ids,
         effective_items,
+        processed_input_items,
         client_items,
         client_item_units,
         effective_request,

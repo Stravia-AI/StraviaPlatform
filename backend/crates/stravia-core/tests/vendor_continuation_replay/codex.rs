@@ -115,7 +115,11 @@ fn response_frames(turn: usize) -> Vec<Value> {
     events
 }
 
-async fn configure(gateway: &Gateway, upstream: &SocketUpstream) -> anyhow::Result<String> {
+async fn configure(
+    gateway: &Gateway,
+    upstream: &SocketUpstream,
+    responses_lite: bool,
+) -> anyhow::Result<String> {
     install_distributed_vendor_plugin(gateway, "openai-codex").await?;
     let provider = gateway.storage.providers().create(CreateProviderRecord {
         name: "Codex media replay fixture".into(),
@@ -148,7 +152,7 @@ async fn configure(gateway: &Gateway, upstream: &SocketUpstream) -> anyhow::Resu
         )
         .await?;
     gateway.admin().create_manual_provider_model(&provider.id, CODEX_MODEL, CreateManualProviderModel {
-        metadata: json!({"id": CODEX_MODEL, "name": CODEX_MODEL, "modalities": {"input": ["text", "image"], "output": ["text"]}}),
+        metadata: json!({"id": CODEX_MODEL, "name": CODEX_MODEL, "use_responses_lite": responses_lite, "modalities": {"input": ["text", "image"], "output": ["text"]}}),
         template_id: None,
     }).await?;
     let route = gateway.admin().create_model(serde_json::from_value(json!({
@@ -223,6 +227,124 @@ fn image_urls(request: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn static_image_url() -> String {
+    format!(
+        "data:image/webp;base64,{}",
+        base64::engine::general_purpose::STANDARD
+            .encode(include_bytes!("../fixtures/media/static.webp"))
+    )
+}
+
+async fn lite_image_continuations(tool_result: bool) -> anyhow::Result<()> {
+    let upstream = SocketUpstream::start().await?;
+    let directory = tempfile::tempdir()?;
+    let config = GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..Default::default()
+    };
+    let gateway = Gateway::new(config.clone()).await?;
+    let token = configure(&gateway, &upstream, true).await?;
+    let image = static_image_url();
+    let image_content = json!([
+        {"type": "input_text", "text": "Describe this image."},
+        {"type": "input_image", "image_url": image, "detail": "auto"}
+    ]);
+    let mut history = if tool_result {
+        vec![
+            json!({"type": "function_call", "call_id": "read-image", "name": "read_image", "arguments": "{}"}),
+            json!({"type": "function_call_output", "call_id": "read-image", "output": image_content}),
+        ]
+    } else {
+        vec![json!({"role": "user", "content": image_content})]
+    };
+    // Native image routing must not invalidate the canonical boundaries required
+    // by the real Codex Lite encoder, even on the first request.
+    let first = send(&gateway, &token, json!(history), None).await?;
+    assert_eq!(first["output"][0]["content"][0]["text"], "READY");
+    {
+        let sent = upstream.bodies.lock();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(image_urls(&sent[0]), [image.as_str()]);
+    }
+
+    history.extend(
+        first["output"]
+            .as_array()
+            .expect("first response output")
+            .iter()
+            .cloned(),
+    );
+    history.push(json!({"role": "user", "content": [
+        {"type": "input_text", "text": "Describe it again from the complete history."}
+    ]}));
+    let second = send(&gateway, &token, json!(history), None).await?;
+    assert_eq!(second["output"][0]["content"][0]["text"], "READY");
+    {
+        let sent = upstream.bodies.lock();
+        assert_eq!(sent.len(), 2);
+        let full_history = &sent[1];
+        if full_history.get("previous_response_id").is_none() {
+            assert_eq!(image_urls(full_history), [image.as_str()]);
+        } else {
+            assert_eq!(full_history["previous_response_id"], "resp_1");
+            assert!(
+                image_urls(full_history).is_empty(),
+                "a Lite continuation must not resend the already accepted image"
+            );
+        }
+    }
+
+    let parent = second["id"]
+        .as_str()
+        .expect("second response ID")
+        .to_owned();
+    // Lose the socket and in-memory history: previous_response_id must restore
+    // the persisted image and send a valid complete Lite request to a new socket.
+    gateway.shutdown().await;
+    drop(gateway);
+    let gateway = Gateway::new(config).await?;
+    let third = send(
+        &gateway,
+        &token,
+        json!([{"role": "user", "content": [
+            {"type": "input_text", "text": "Describe the saved image once more."}
+        ]}]),
+        Some(&parent),
+    )
+    .await?;
+    assert_eq!(third["output"][0]["content"][0]["text"], "READY");
+    {
+        let sent = upstream.bodies.lock();
+        assert_eq!(
+            sent.len(),
+            3,
+            "each successful turn must reach the local WS"
+        );
+        assert!(sent[2].get("previous_response_id").is_none());
+        assert_eq!(image_urls(&sent[2]), [image.as_str()]);
+        for request in sent.iter() {
+            assert_eq!(
+                request["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
+                "true",
+                "the fixture must exercise the real Lite encoder"
+            );
+        }
+    }
+    gateway.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lite_native_image_preserves_full_history_and_cold_continuation() -> anyhow::Result<()> {
+    lite_image_continuations(false).await
+}
+
+#[tokio::test]
+async fn lite_tool_result_image_preserves_full_history_and_cold_continuation() -> anyhow::Result<()>
+{
+    lite_image_continuations(true).await
+}
+
 #[tokio::test]
 async fn socket_miss_replays_history_and_new_images_as_inline_bytes() -> anyhow::Result<()> {
     let upstream = SocketUpstream::start().await?;
@@ -232,12 +354,8 @@ async fn socket_miss_replays_history_and_new_images_as_inline_bytes() -> anyhow:
         ..Default::default()
     };
     let gateway = Gateway::new(config.clone()).await?;
-    let token = configure(&gateway, &upstream).await?;
-    let history_image = format!(
-        "data:image/webp;base64,{}",
-        base64::engine::general_purpose::STANDARD
-            .encode(include_bytes!("../fixtures/media/static.webp"))
-    );
+    let token = configure(&gateway, &upstream, false).await?;
+    let history_image = static_image_url();
     let new_image = format!(
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD

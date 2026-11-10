@@ -2688,6 +2688,7 @@ async fn materialization_cache_does_not_outlive_the_retention_window() {
         root_id: materialized.root_id.clone(),
         compaction_record_ids: materialized.compaction_record_ids.clone(),
         effective_items: materialized.effective_items.clone(),
+        processed_input_items: materialized.processed_input_items,
         client_items: materialized.client_items.clone(),
         effective_request: materialized.effective_request.clone(),
         effective_system: materialized.effective_system.clone(),

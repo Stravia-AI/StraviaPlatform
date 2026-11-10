@@ -22,7 +22,13 @@ impl HookRuntime {
         context: SessionContext,
         request: &AiRequest,
         completeness: ContextCompleteness,
+        processed_input_items: usize,
     ) -> Result<InferenceRun, HookError> {
+        if processed_input_items > request.items.len() {
+            return Err(HookError::Runtime {
+                message: "processed input boundary is outside the request".into(),
+            });
+        }
         let sessions = self
             .hooks
             .iter()
@@ -62,6 +68,7 @@ impl HookRuntime {
             sessions,
             route: None,
             round: 0,
+            processed_input_items,
             tools: self.tools.clone(),
             exposed_tools: HashMap::new(),
             exposed_tool_specs: HashMap::new(),
@@ -87,12 +94,6 @@ struct RuntimeSession {
     delayed_events: usize,
     held_variants: Vec<SemanticVariant>,
 }
-pub(crate) struct RequestHookOutcome {
-    pub control: HookControl,
-    /// Structural replacement invalidates item provenance even when content is unchanged.
-    pub canonical_structure_changed: bool,
-}
-
 pub(crate) struct InferenceRun {
     cancellation: stravia_runtime_contract::CancellationToken,
     context: SessionContext,
@@ -102,6 +103,7 @@ pub(crate) struct InferenceRun {
     sessions: Vec<RuntimeSession>,
     route: Option<RouteContext>,
     pub(super) round: u32,
+    processed_input_items: usize,
     tools: PlatformToolRegistry,
     exposed_tools: HashMap<String, ToolId>,
     exposed_tool_specs: HashMap<String, ToolSpec>,
@@ -185,7 +187,18 @@ impl InferenceRun {
         &mut self,
         request: &mut AiRequest,
     ) -> Result<RequestHookOutcome, HookError> {
-        let mut canonical_structure_changed = false;
+        if self.processed_input_items > request.items.len() {
+            return Err(HookError::Runtime {
+                message: "processed input prefix was removed without a history rewrite".into(),
+            });
+        }
+        if self.round > 0
+            && let Some(current) = &mut self.current
+        {
+            Arc::make_mut(current)
+                .update_from_request(request, ContextCompleteness::from_request(request));
+        }
+        let mut history_edits = Vec::new();
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
                 .descriptor
@@ -211,6 +224,7 @@ impl InferenceRun {
                     .expect("Request consumer has a snapshot"),
                 read_scope: self.read_scope,
                 current: &hook_view,
+                input_start: self.processed_input_items,
                 context: self
                     .current
                     .as_deref()
@@ -227,19 +241,13 @@ impl InferenceRun {
                 self.cancellation.clone(),
             )
             .await?;
-            let structural_patch = batch.actions.iter().any(|action| {
-                matches!(
-                    action,
-                    HookAction::PatchRequest(patch)
-                        if matches!(patch.as_ref(), RequestPatch::ReplaceCanonical(_) | RequestPatch::ReplaceContextSpans(_))
-                )
-            });
-            let control = apply_request_actions(
+            let outcome = apply_request_actions(
                 &runtime_session.descriptor.id,
                 request,
                 self.current
                     .as_mut()
                     .expect("Request consumer has a snapshot"),
+                self.processed_input_items,
                 &mut ToolExposure {
                     tools: &mut self.exposed_tools,
                     specs: &mut self.exposed_tool_specs,
@@ -248,23 +256,34 @@ impl InferenceRun {
                 &self.tools,
                 batch,
             )?;
-            canonical_structure_changed |= structural_patch;
+            if outcome
+                .history_edits
+                .iter()
+                .any(|edit| matches!(edit, RequestHistoryEdit::ReplaceContext))
+            {
+                self.processed_input_items = 0;
+            }
+            history_edits.extend(outcome.history_edits);
             self.completeness = self
                 .current
                 .as_ref()
                 .expect("Request consumer has a snapshot")
                 .completeness
                 .clone();
-            if !matches!(control, HookControl::Continue) {
+            if !matches!(outcome.control, HookControl::Continue) {
+                self.processed_input_items = request.items.len();
                 return Ok(RequestHookOutcome {
-                    control,
-                    canonical_structure_changed,
+                    control: outcome.control,
+                    history_edits,
+                    refresh_context: false,
                 });
             }
         }
+        self.processed_input_items = request.items.len();
         Ok(RequestHookOutcome {
             control: HookControl::Continue,
-            canonical_structure_changed,
+            history_edits,
+            refresh_context: false,
         })
     }
 

@@ -405,61 +405,6 @@ impl stravia_runtime_contract::hook::HookSession for RewriteModelSession {
     }
 }
 
-struct PrependContextHook {
-    observed: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
-}
-
-struct PrependContextSession {
-    observed: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
-}
-
-impl stravia_runtime_contract::hook::Hook for PrependContextHook {
-    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
-        stravia_runtime_contract::hook::HookDescriptor {
-            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
-            ..stravia_runtime_contract::hook::HookDescriptor::all("prepend-context")
-        }
-    }
-
-    fn create_session(
-        &self,
-        _context: &stravia_runtime_contract::hook::SessionContext,
-    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
-        Box::new(PrependContextSession {
-            observed: self.observed.clone(),
-        })
-    }
-}
-
-#[async_trait]
-impl stravia_runtime_contract::hook::HookSession for PrependContextSession {
-    async fn handle(
-        &mut self,
-        event: stravia_runtime_contract::hook::HookEvent<'_>,
-    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
-        let stravia_runtime_contract::hook::HookEvent::Request { current, .. } = event else {
-            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
-        };
-        self.observed.lock().push(
-            current
-                .items
-                .iter()
-                .map(|item| item.content.to_text())
-                .collect(),
-        );
-        let mut rewritten = current.clone();
-        let mut marker =
-            stravia_runtime_contract::protocol::ir::AiItem::output_text("hook context");
-        marker.role = stravia_runtime_contract::protocol::ir::Role::User;
-        rewritten.items.insert(0, marker);
-        Ok(stravia_runtime_contract::hook::ActionBatch::one(
-            stravia_runtime_contract::hook::HookAction::PatchRequest(Box::new(
-                stravia_runtime_contract::hook::RequestPatch::ReplaceCanonical(Box::new(rewritten)),
-            )),
-        ))
-    }
-}
-
 async fn hidden_round_request_hook_response_is_delivered_impl() {
     let platform_round = serde_json::json!({
         "id": "chatcmpl-hook-followup", "object": "chat.completion",

@@ -1094,6 +1094,7 @@ mod tests {
                 },
                 &request,
                 stravia_runtime_contract::hook::ContextCompleteness::Full,
+                0,
             )
             .expect("Inference Run");
         let projection = ClientProjectionSession::new(

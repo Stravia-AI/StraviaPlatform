@@ -759,6 +759,174 @@ async fn runner_executes_tool_loop_commits_turn_and_emits_one_terminal_event() {
 }
 
 #[tokio::test]
+async fn request_content_hook_processes_tool_loop_inputs_once_and_reuses_parent_turn_history() {
+    use stravia_runtime_contract::hook::{
+        ActionBatch, Hook, HookAction, HookDescriptor, HookEvent, HookSession, RequestPatch,
+    };
+
+    struct MarkInput;
+
+    impl Hook for MarkInput {
+        fn descriptor(&self) -> HookDescriptor {
+            HookDescriptor::all("mark-agent-input")
+        }
+
+        fn create_session(&self, _context: &SessionContext) -> Box<dyn HookSession> {
+            Box::new(MarkInput)
+        }
+    }
+
+    #[async_trait]
+    impl HookSession for MarkInput {
+        async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
+            let HookEvent::Request {
+                current,
+                input_start,
+                ..
+            } = event
+            else {
+                return Ok(ActionBatch::default());
+            };
+            let mut items = current.items[input_start..].to_vec();
+            for item in &mut items {
+                match &mut item.content {
+                    MessageContent::Text(text) => Arc::make_mut(text).push_str(" [processed]"),
+                    MessageContent::Blocks(blocks) => {
+                        for block in blocks {
+                            match block {
+                                ContentBlock::Text { text, .. } => {
+                                    Arc::make_mut(text).push_str(" [processed]");
+                                }
+                                ContentBlock::ToolResult { content, .. } => {
+                                    if let Some(Value::String(text)) = content.get_mut("value") {
+                                        text.push_str(" [processed]");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(ActionBatch::one(HookAction::PatchRequest(Box::new(
+                RequestPatch::SpliceInput {
+                    range: 0..items.len(),
+                    items,
+                },
+            ))))
+        }
+    }
+
+    let mut tool_response = AiResponse::new("response-1", "model-1");
+    tool_response.push_output_text("private scratch");
+    tool_response.extend_tool_calls(vec![ToolCall {
+        id: "call-1".into(),
+        name: "echo".into(),
+        arguments: r#"{"value":"observed"}"#.into(),
+    }]);
+    tool_response.stop_reason = Some("tool_calls".into());
+    let mut first_response = AiResponse::new("response-2", "model-1");
+    first_response.push_output_text(r#"{"answer":"first"}"#);
+    let mut child_response = AiResponse::new("response-3", "model-1");
+    child_response.push_output_text(r#"{"answer":"child"}"#);
+    let model = Arc::new(crate::agent::InMemoryModelTurnExecutor::scripted([
+        tool_response,
+        first_response,
+        child_response,
+    ]));
+    let turns: Arc<dyn TurnChainStore> = Arc::new(crate::turn_chain::test_store().await);
+    let runner = AgentRunner::new(
+        enabled_registry().await,
+        model.clone(),
+        vec![Arc::new(EchoTool)],
+        turns,
+    )
+    .expect("Agent Runner")
+    .with_hook_runtime(HookRuntime::new(vec![Arc::new(MarkInput)]));
+    let first_events = runner
+        .run(AgentInput {
+            principal: Principal::new("owner"),
+            definition_id: AgentDefinitionId::new("research"),
+            parent_turn_id: None,
+            prompt: "question".into(),
+            artifacts: Vec::new(),
+            cancellation: CancellationToken::new(),
+        })
+        .collect::<Vec<_>>()
+        .await;
+    let first = match first_events.last().expect("first terminal event") {
+        AgentEvent::Completed(result) => result,
+        other => panic!("unexpected first terminal event: {other:?}"),
+    };
+    assert_eq!(first.output, serde_json::json!({"answer": "first"}));
+    assert!(first_events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolFinished {
+            is_error: false,
+            ..
+        }
+    )));
+
+    let child_events = runner
+        .run(AgentInput {
+            principal: Principal::new("owner"),
+            definition_id: AgentDefinitionId::new("research"),
+            parent_turn_id: Some(first.turn_id.clone()),
+            prompt: "follow-up".into(),
+            artifacts: Vec::new(),
+            cancellation: CancellationToken::new(),
+        })
+        .collect::<Vec<_>>()
+        .await;
+    let child = match child_events.last().expect("child terminal event") {
+        AgentEvent::Completed(result) => result,
+        other => panic!("unexpected child terminal event: {other:?}"),
+    };
+    assert_eq!(child.output, serde_json::json!({"answer": "child"}));
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].items.len(), 1);
+    assert_eq!(
+        requests[0].items[0].content.to_text(),
+        "question [processed]"
+    );
+    assert_eq!(
+        requests[1].items[0].content.to_text(),
+        "question [processed]"
+    );
+    let scratch = requests[1]
+        .items
+        .iter()
+        .find(|item| item.content.to_text().contains("private scratch"))
+        .expect("previous model output becomes input");
+    assert_eq!(scratch.content.to_text(), "private scratch [processed]");
+    assert_eq!(
+        agent_tool_payload(&requests[1]),
+        (
+            &serde_json::json!({"value": "observed [processed]"}),
+            Some(false)
+        )
+    );
+    assert_eq!(
+        serde_json::to_value(&requests[2].items[..requests[1].items.len()]).unwrap(),
+        serde_json::to_value(&requests[1].items).unwrap(),
+        "a child Turn must reuse the exact processed tool-loop history"
+    );
+    let newly_processed = &requests[2].items[requests[1].items.len()..];
+    assert_eq!(newly_processed.len(), 2);
+    assert_eq!(
+        newly_processed[0].content.to_text(),
+        r#"{"answer":"first"} [processed]"#,
+        "the parent's final model output first becomes Request Hook input on resume"
+    );
+    assert_eq!(
+        newly_processed[1].content.to_text(),
+        "follow-up [processed]"
+    );
+}
+
+#[tokio::test]
 async fn model_turn_budget_reserves_a_no_tool_finalization_turn() {
     let mut tool_response = AiResponse::new("response-1", "model-1");
     tool_response.extend_tool_calls(vec![ToolCall {

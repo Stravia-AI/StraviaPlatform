@@ -292,106 +292,263 @@ async fn hidden_round_rechecks_key_binding_after_platform_tool_execution() {
 }
 
 #[tokio::test]
-async fn automatic_parent_materializes_rewritten_history_before_the_current_hook() {
-    let (base_url, _connections, requests) =
-        serve_responses_websocket_sequence(vec!["first answer", "second answer", "third answer"])
-            .await;
-    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+async fn content_hook_processes_each_input_once_across_history_reuse_restart_and_edit() {
+    use stravia_runtime_contract::protocol::ir::{AiItem, Continuation, Role, ToolCall};
+
+    let reply = |text: &str| {
+        serde_json::json!({
+            "id": format!("chatcmpl-{text}"),
+            "object": "chat.completion",
+            "created": 1,
+            "model": "provider-model",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": text },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        })
+    };
+    let mut first_reply = reply("first answer");
+    first_reply["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+        "id": "lookup-once",
+        "type": "function",
+        "function": { "name": "lookup", "arguments": "{}" }
+    }]);
+    first_reply["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
+    let (base_url, _, requests) = serve_openai_sequence_with_requests(vec![
+        first_reply,
+        reply("second answer"),
+        reply("third answer"),
+        reply("branch answer"),
+    ])
+    .await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let gateway = Gateway::builder(crate::config::GatewayConfig {
+    let gateway = gateway_with_once_content_hook(&data_dir).await;
+    let model = "incremental-content-hook";
+    configure_route(&gateway, model, &[base_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let user = |text: &str| {
+        let mut item = AiItem::output_text(text);
+        item.role = Role::User;
+        item
+    };
+    let first_user = user("first");
+    send_content_hook_request(
+        &gateway,
+        &headers,
+        AiRequest::new(model, vec![first_user.clone()]),
+    )
+    .await;
+    assert_content_hook_upstream_text(&requests, 0, &["first [processed]"]);
+
+    // The assistant text and tool result have not previously been input.
+    // Replay the client's original, unmodified history, not Hook output.
+    let mut first_assistant = AiItem::output_text("first answer");
+    first_assistant.tool_calls = Some(vec![ToolCall {
+        id: "lookup-once".into(),
+        name: "lookup".into(),
+        arguments: "{}".into(),
+    }]);
+    let tool_result = AiItem::function_call_output("lookup-once", serde_json::json!("tool result"));
+    let second_user = user("second");
+    let second_id = send_content_hook_request(
+        &gateway,
+        &headers,
+        AiRequest::new(
+            model,
+            vec![
+                first_user.clone(),
+                first_assistant.clone(),
+                tool_result.clone(),
+                second_user,
+            ],
+        ),
+    )
+    .await;
+    assert_content_hook_upstream_text(
+        &requests,
+        1,
+        &[
+            "first [processed]",
+            "first answer [processed]",
+            "tool result [processed]",
+            "second [processed]",
+        ],
+    );
+
+    // Rebuild with the same isolated database and a fresh Hook/session.
+    // Explicit continuation must restore processed history without rerunning it.
+    shutdown_test_gateway(gateway).await;
+    let gateway = gateway_with_once_content_hook(&data_dir).await;
+    let third_user = user("third");
+    let mut third_request = AiRequest::new(model, vec![third_user.clone()]);
+    third_request.parameters.continuation = Some(Continuation::PreviousResponse(second_id));
+    send_content_hook_request(&gateway, &headers, third_request).await;
+    assert_content_hook_upstream_text(
+        &requests,
+        2,
+        &[
+            "first [processed]",
+            "first answer [processed]",
+            "tool result [processed]",
+            "second [processed]",
+            "second answer [processed]",
+            "third [processed]",
+        ],
+    );
+
+    // A client edit forks the history: no stale text may leak from the
+    // previously processed second input, and every branch input is marked once.
+    send_content_hook_request(
+        &gateway,
+        &headers,
+        AiRequest::new(
+            model,
+            vec![
+                first_user,
+                first_assistant,
+                tool_result,
+                user("edited second"),
+                AiItem::output_text("second answer"),
+                third_user,
+                AiItem::output_text("third answer"),
+                user("branch"),
+            ],
+        ),
+    )
+    .await;
+    assert_content_hook_upstream_text(
+        &requests,
+        3,
+        &[
+            "first [processed]",
+            "first answer [processed]",
+            "tool result [processed]",
+            "edited second [processed]",
+            "second answer [processed]",
+            "third [processed]",
+            "third answer [processed]",
+            "branch [processed]",
+        ],
+    );
+    close_test_gateway(gateway, data_dir).await;
+}
+
+struct OnceContentHook;
+
+struct OnceContentSession;
+
+impl stravia_runtime_contract::hook::Hook for OnceContentHook {
+    fn descriptor(&self) -> stravia_runtime_contract::hook::HookDescriptor {
+        stravia_runtime_contract::hook::HookDescriptor {
+            event_kinds: vec![stravia_runtime_contract::hook::EventKind::Request],
+            ..stravia_runtime_contract::hook::HookDescriptor::all("once-content")
+        }
+    }
+
+    fn create_session(
+        &self,
+        _context: &stravia_runtime_contract::hook::SessionContext,
+    ) -> Box<dyn stravia_runtime_contract::hook::HookSession> {
+        Box::new(OnceContentSession)
+    }
+}
+
+#[async_trait]
+impl stravia_runtime_contract::hook::HookSession for OnceContentSession {
+    async fn handle(
+        &mut self,
+        event: stravia_runtime_contract::hook::HookEvent<'_>,
+    ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
+        let stravia_runtime_contract::hook::HookEvent::Request {
+            current,
+            input_start,
+            ..
+        } = event
+        else {
+            return Ok(stravia_runtime_contract::hook::ActionBatch::default());
+        };
+        let mut items = current.items[input_start..].to_vec();
+        for item in &mut items {
+            let text = item.content.to_text();
+            if !text.is_empty() {
+                item.content = stravia_runtime_contract::protocol::ir::MessageContent::Text(
+                    format!("{text} [processed]").into(),
+                );
+            }
+        }
+        Ok(stravia_runtime_contract::hook::ActionBatch::one(
+            stravia_runtime_contract::hook::HookAction::PatchRequest(Box::new(
+                stravia_runtime_contract::hook::RequestPatch::SpliceInput {
+                    range: 0..items.len(),
+                    items,
+                },
+            )),
+        ))
+    }
+}
+
+async fn gateway_with_once_content_hook(data_dir: &tempfile::TempDir) -> Gateway {
+    Gateway::builder(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
-    .hook(Arc::new(PrependContextHook {
-        observed: observed.clone(),
-    }))
+    .hook(Arc::new(OnceContentHook))
     .build()
     .await
-    .expect("Gateway");
-    let model = "hook-prefix-response-chain";
-    configure_route_with_protocol(&gateway, model, &[base_url], "openai", "openai-compatible")
-        .await;
-    let headers = authorized_headers(&gateway).await;
+    .expect("Gateway with content Hook")
+}
 
-    let mut first_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("first");
-    first_user.role = stravia_runtime_contract::protocol::ir::Role::User;
-    let mut first_request = AiRequest::new(model, vec![first_user.clone()]);
-    first_request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
-    first_request.parameters.store = Some(true);
-    let first_response = execute_request_with_headers(
+async fn send_content_hook_request(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    mut request: AiRequest,
+) -> String {
+    request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
+    request.parameters.store = Some(true);
+    let response = execute_request_with_headers(
         gateway.clone(),
         headers.clone(),
-        first_request,
+        request,
         OPEN_RESPONSES_2026_04_24,
         "/v1/responses",
     )
     .await;
-    assert_eq!(first_response.status(), StatusCode::OK);
-    let _ = to_bytes(first_response.into_body(), usize::MAX)
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
         .await
-        .expect("first response body");
+        .expect("content Hook response body");
+    let body: serde_json::Value =
+        serde_json::from_slice(&body).expect("content Hook response JSON");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body["id"].as_str().expect("Gateway response ID").to_owned()
+}
 
-    let mut second_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("second");
-    second_user.role = stravia_runtime_contract::protocol::ir::Role::User;
-    let mut second_request = AiRequest::new(
-        model,
-        vec![
-            first_user,
-            stravia_runtime_contract::protocol::ir::AiItem::output_text("first answer"),
-            second_user,
-        ],
-    );
-    second_request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
-    second_request.parameters.store = Some(true);
-    let second_response = execute_request_with_headers(
-        gateway.clone(),
-        headers.clone(),
-        second_request,
-        OPEN_RESPONSES_2026_04_24,
-        "/v1/responses",
-    )
-    .await;
-    assert_eq!(second_response.status(), StatusCode::OK);
-    let second_body = to_bytes(second_response.into_body(), usize::MAX)
-        .await
-        .expect("second response body");
-    let second_body: serde_json::Value =
-        serde_json::from_slice(&second_body).expect("second response JSON");
-    let second_response_id = second_body["id"]
-        .as_str()
-        .expect("Gateway response ID")
-        .to_owned();
-
-    let mut third_user = stravia_runtime_contract::protocol::ir::AiItem::output_text("third");
-    third_user.role = stravia_runtime_contract::protocol::ir::Role::User;
-    let mut third_request = AiRequest::new(model, vec![third_user]);
-    third_request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
-    third_request.parameters.continuation = Some(
-        stravia_runtime_contract::protocol::ir::Continuation::PreviousResponse(second_response_id),
-    );
-    third_request.parameters.store = Some(true);
-    let third_response = execute_request_with_headers(
-        gateway.clone(),
-        headers,
-        third_request,
-        OPEN_RESPONSES_2026_04_24,
-        "/v1/responses",
-    )
-    .await;
-    assert_eq!(third_response.status(), StatusCode::OK);
-
-    {
-        let observed = observed.lock();
-        assert_eq!(observed.len(), 3);
-        assert!(
-            observed[2].iter().any(|item| item == "second"),
-            "explicit continuation lost the client item after automatic prefix reuse: {:?}",
-            observed[2]
-        );
-        let requests = requests.lock();
-        assert!(requests[1].get("previous_response_id").is_none());
-        assert_eq!(requests[1]["input"].as_array().map(Vec::len), Some(5));
-    }
-    drop(third_response);
-    close_test_gateway(gateway, data_dir).await;
+fn assert_content_hook_upstream_text(
+    requests: &Arc<parking_lot::Mutex<Vec<String>>>,
+    ordinal: usize,
+    expected: &[&str],
+) {
+    let requests = requests.lock();
+    let request = requests.get(ordinal).expect("captured upstream request");
+    let (_, body) = request.split_once("\r\n\r\n").expect("HTTP request body");
+    let body: serde_json::Value = serde_json::from_str(body).expect("upstream JSON");
+    let actual: Vec<String> = body["messages"]
+        .as_array()
+        .expect("upstream messages")
+        .iter()
+        .filter_map(|message| match &message["content"] {
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Array(blocks) => Some(
+                blocks
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    assert_eq!(actual, expected, "upstream request {ordinal}: {body}");
 }

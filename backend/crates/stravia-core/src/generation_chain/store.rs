@@ -272,6 +272,7 @@ pub(super) struct MaterializedGeneration {
     pub(super) root_id: String,
     pub(super) compaction_record_ids: Vec<String>,
     pub(super) effective_items: Vec<FrozenItem>,
+    pub(super) processed_input_items: usize,
     pub(super) client_items: Vec<FrozenItem>,
     pub(super) effective_request: Option<EffectiveRequestConfig>,
     pub(super) effective_system: Option<String>,
@@ -299,6 +300,7 @@ impl MaterializedGeneration {
             root_id,
             compaction_record_ids,
             effective_items,
+            processed_input_items: _,
             client_items,
             effective_request,
             effective_system,
@@ -403,8 +405,14 @@ pub(super) fn generation_cache_key(
     // JSON tuples avoid delimiter collisions in Principal or node IDs.
     let ingress =
         ingress.map(|endpoint| (endpoint.protocol.as_str(), endpoint.name, endpoint.version));
-    serde_json::to_string(&(principal, id.as_str(), RESPONSE_PAYLOAD_VERSION, ingress))
-        .expect("generation cache key contains only JSON-serializable identifiers")
+    serde_json::to_string(&(
+        "hook-input-v1",
+        principal,
+        id.as_str(),
+        RESPONSE_PAYLOAD_VERSION,
+        ingress,
+    ))
+    .expect("generation cache key contains only JSON-serializable identifiers")
 }
 
 pub(crate) fn request_has_item_references(request: &AiRequest) -> bool {
@@ -1086,6 +1094,7 @@ impl GenerationChainStore {
                 .then_some(materialized.expires_at),
             media_turn_messages: materialized.media_turn_messages.clone(),
             parent_effective_items: materialized.effective_items.clone(),
+            processed_input_items: materialized.processed_input_items,
             parent_client_items: materialized.client_items.clone(),
             replace_effective_history: false,
             replacement_client_items: None,

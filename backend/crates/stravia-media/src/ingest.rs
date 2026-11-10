@@ -122,7 +122,11 @@ impl MediaBridgeError {
 }
 
 pub fn contains_images(request: &AiRequest) -> bool {
-    request.items.iter().any(|message| {
+    contains_images_in(&request.items)
+}
+
+pub(crate) fn contains_images_in(items: &[stravia_runtime_contract::protocol::ir::AiItem]) -> bool {
+    items.iter().any(|message| {
         matches!(
             &message.content,
             MessageContent::Blocks(blocks)

@@ -88,6 +88,26 @@ pub(crate) fn history_boundary_candidate(
     })
 }
 
+impl super::HistoryBoundaryCandidate {
+    /// 保留宿主分配的准入身份，只把已证明的位置投影到实际执行视图。
+    /// 保存执行后的前缀证明，后续恢复不会依赖重新执行旧 Hook。
+    pub(crate) fn at_projected_gap(
+        &self,
+        request: &stravia_runtime_contract::protocol::ir::AiRequest,
+        item_gap: usize,
+    ) -> Option<Self> {
+        let prefix = request.items.get(..item_gap)?;
+        let (source_prefix_hash, units) = canonical::history_context_hash_with_count(prefix);
+        Some(Self {
+            source_item_gap: u64::try_from(item_gap).ok()?,
+            source_unit_gap: u64::try_from(units).ok()?,
+            source_prefix_hash,
+            source_controls_hash: canonical::history_request_controls_hash(request),
+            ..self.clone()
+        })
+    }
+}
+
 /// Project trusted, checkpoint-inherited source gaps onto an exact canonical
 /// request. Unit offsets select a prefix, not a search for equal message text;
 /// the immutable prefix proof validates that the source ancestry survived.

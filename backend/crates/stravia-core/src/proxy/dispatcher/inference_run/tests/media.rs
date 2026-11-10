@@ -592,20 +592,15 @@ impl stravia_runtime_contract::hook::HookSession for ClearHiddenMediaPlanSession
         &mut self,
         event: stravia_runtime_contract::hook::HookEvent<'_>,
     ) -> Result<stravia_runtime_contract::hook::ActionBatch, String> {
-        let stravia_runtime_contract::hook::HookEvent::Request { current, round, .. } = event
-        else {
+        let stravia_runtime_contract::hook::HookEvent::Request { round, .. } = event else {
             return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         };
         if round == 0 {
             return Ok(stravia_runtime_contract::hook::ActionBatch::default());
         }
-        let mut replacement = current.clone();
-        replacement.meta.media_routing = None;
         Ok(stravia_runtime_contract::hook::ActionBatch::one(
             stravia_runtime_contract::hook::HookAction::PatchRequest(Box::new(
-                stravia_runtime_contract::hook::RequestPatch::ReplaceCanonical(Box::new(
-                    replacement,
-                )),
+                stravia_runtime_contract::hook::RequestPatch::SetMediaRouting(None),
             )),
         ))
     }
