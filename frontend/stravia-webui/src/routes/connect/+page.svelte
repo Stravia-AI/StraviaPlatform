@@ -112,7 +112,8 @@ const connectClientInput = $derived.by((): ConnectClientApplyRequest | undefined
     apiKey: selectedCliKey.key,
     models: clientConfigModels,
     transparentImageInputEnabled:
-      selectedCliKey.transparent_injection_enabled && selectedCliKey.transparent_injections.includes('media_understanding'),
+      selectedCliKey.transparent_injection_enabled &&
+      selectedCliKey.transparent_injections.includes('media_understanding'),
   }
 })
 const connectPlanQuery = createQuery(() => ({

@@ -64,10 +64,9 @@ test('Connect plans image input only for enabled media understanding selection',
   ] as const) {
     await page.locator('#cli-key').click()
     await page.getByRole('option', { name: new RegExp(name) }).click()
-    await expect.poll(() => planned.at(-1)).toMatchObject({
-      apiKey: `sk-isolated-${name}`,
-      transparentImageInputEnabled: expected,
-    })
+    await expect
+      .poll(() => planned.at(-1))
+      .toMatchObject({ apiKey: `sk-isolated-${name}`, transparentImageInputEnabled: expected })
   }
 })
 
