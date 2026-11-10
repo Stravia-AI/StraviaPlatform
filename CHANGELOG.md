@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Antigravity inference removes the exact RFC 2119 keyword declaration from outbound system text to avoid a reproducible upstream 429. Other system content, user messages, tool data, stored history and `requestType: agent` remain unchanged. Rebuild and re-import the standalone Antigravity plugin.
+
 ## [0.6.5] - 2026-11-10
 
 ### Verification

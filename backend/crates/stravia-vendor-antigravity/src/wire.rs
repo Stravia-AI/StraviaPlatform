@@ -268,6 +268,7 @@ pub(crate) fn infer(
         }
     }
     sanitize_request(&mut body)?;
+    remove_rejected_system_fragment(&mut body);
     if imported_tool_history {
         gemini::prepare_imported_tool_history(&mut body);
     }
@@ -476,6 +477,45 @@ fn invalid(message: &str) -> PluginError {
 }
 fn invalid_upstream(message: &str) -> PluginError {
     common::model_error(AiErrorKind::ServerError, message)
+}
+
+fn remove_rejected_system_fragment(request: &mut Value) {
+    // 该片段与 requestType=agent 的组合会触发上游 429；仅清理出站副本，不改历史或用户消息。
+    const FRAGMENT: &str = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
+    let Some(parts) = request
+        .get_mut("systemInstruction")
+        .and_then(|system| system.get_mut("parts"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    if parts.is_empty() {
+        return;
+    }
+    parts.retain_mut(|part| {
+        let Some(Value::String(text)) = part.get_mut("text") else {
+            return true;
+        };
+        let mut offset = 0;
+        let mut removed = false;
+        while let Some(index) = text[offset..].find(FRAGMENT) {
+            offset += index;
+            text.replace_range(offset..offset + FRAGMENT.len(), "");
+            removed = true;
+        }
+        if removed && text.trim().is_empty() {
+            let object = part.as_object_mut().expect("system part was validated");
+            object.remove("text");
+            return !object.is_empty();
+        }
+        true
+    });
+    if parts.is_empty() {
+        request
+            .as_object_mut()
+            .expect("request was validated")
+            .remove("systemInstruction");
+    }
 }
 
 // 字段来自 CLI 1.2.16 的 protobuf 序列化边界；不允许未知 raw 扩展穿过。
