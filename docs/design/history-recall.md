@@ -36,7 +36,7 @@
 
 目录输出 Markdown 列表，时间一律使用带 `Z` 的 UTC 秒精度。所有文本先经过第 7 节的凭据替换，再截取预览。
 
-根目录每页 50 条链路，按「链路最近活动时间、根 id」键集分页：
+根目录每页 50 条链路。每条链路由它最近活动的成员代表（同一毫秒取 id 较小者），按代表成员的「最近活动时间、id」键集分页：
 
 ```text
 # stravia://history/ · 23 chains · newest activity first · retention 7 days
@@ -237,6 +237,6 @@ Observation 保存原文。所有历史输出在离开 Core 前，用所属 Prin
 P1 实测均为隔离合成数据上的单次测量，只说明量级与增长方式，不代表生产延迟：
 
 - **建索引**：0050 在 200,000 条 Interaction、100 个 Principal 的窄表上构建索引，SQLite 3.53.3（`synchronous=FULL`）用 95.8 ms，PostgreSQL 16.15（`fsync`、`synchronous_commit` 开启）用 252.7 ms。
-- **根目录**：单个 Principal 在保留期内有 20,000 / 200,000 条 Interaction（每链 5 条，另有一条 1,000 成员的链；5% 失败且无输出）。计数加首页，SQLite 为 22 + 88 ms / 244 + 986 ms，PostgreSQL（JIT 关闭）为 24 + 45 ms / 335 + 502 ms；末页与首页相当。链路聚合要扫描该 Principal 全部候选行，耗时随其保留期内的 Interaction 数线性增长。
-- **链路目录**：同一 200,000 条背景下读取 1,000 成员的链，计数加一页，SQLite 为 3.0 + 3.1 ms，PostgreSQL 为 54 + 62 ms。PostgreSQL 的成员判定仍扫描该 Principal 的全部 Run，会随总量增长。
+- **根目录**：单个 Principal 在保留期内有 200,000 条 Interaction（每链 5 条，另有一条 1,000 成员的链；5% 失败且无输出，10% 等待客户端），另一 Principal 有 20,000 条。经 sqlx 执行（依赖 `opt-level=3` 的测试构建；SQLite 为 sqlx 内置的 3.51.3，未 ANALYZE；PostgreSQL 16.15，JIT 关闭、`work_mem` 4 MB、已 ANALYZE），7 次取中位数：一页 51 行在首页、中间页、末页分别为 SQLite 10.6 / 6.8 / 5.2 ms、PostgreSQL 18.9 / 9.1 / 1.7 ms，不随翻页位置变慢：代表行沿索引扫描并在 LIMIT 处停止。总数计数 SQLite 153 ms、PostgreSQL 337 ms，仍随该 Principal 保留期内的 Interaction 数线性增长。早先按「出现失败请求」写成 `EXISTS (… AND status='failed')` 时，没有统计信息的 SQLite 会选用 `inference_runs_status_idx`，同一数据上计数约 24 s、首页约 26 s；现在 Run 子查询只按 `interaction_id` 关联，SQLite 查询计划由测试锁定为只走键值查找。
+- **链路目录**：同一背景下读取 1,000 成员的链，计数加一页（101 行），SQLite 为 1.1 + 5.9 ms，PostgreSQL 为 7.4 + 9.6 ms；成员判定只查该 Interaction 自己的 Run，不再扫描 Principal 的全部 Run。
 - **长转录**（Rust test 非优化调试构建，SQLite）：按 `next_path` 顺序翻页，每页 5–8 ms，与转录长度无关。`:-K` 与靠后的行范围要从头渲染到目标位置：2,000 次工具调用、74,008 行时，`:-1` 用 1.4 s，第 37,004 行起的 20 行用 356 ms；读取工具文件用 1.2 ms。

@@ -181,7 +181,7 @@ impl Recall<'_> {
                 .chains
                 .last()
                 .filter(|_| listing.has_more)
-                .map(|chain| (chain.last_active_at, chain.root_id.as_str())),
+                .map(|chain| (chain.last_active_at, chain.latest_id.as_str())),
         )?;
         Ok(page::output(address, content, None, next))
     }

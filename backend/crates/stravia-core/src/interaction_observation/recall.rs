@@ -6,6 +6,8 @@ use super::{InteractionObservation, ObservationEvent, hydrate, query, store::Obs
 pub(crate) struct RecallChain {
     pub root_id: String,
     pub head_id: String,
+    /// 代表链路的最近活动成员，也是链路列表的游标键。
+    pub latest_id: String,
     pub last_active_at: i64,
     pub interactions: u64,
     pub status: String,
@@ -56,10 +58,20 @@ pub(crate) struct RecallTool {
 // Interaction 的 `status` 由 Run 汇总而来，永远不是 `failed`：最终失败的交互停在 `interrupted`
 // 等非完成终态，失败事实只在 Run 上。成员规则与展示状态因此和管理面
 // (`observation-chain-visibility.ts`) 一样，按「出现过失败的请求」判定。
+//
+// Run 子查询的 WHERE 只按 `interaction_id` 关联，条件放进 CASE 聚合：没有统计信息的 SQLite
+// 会为 `status='failed'` 选用 `inference_runs_status_idx`，每行都扫描全库的失败 Run。
+fn failed_run() -> String {
+    format!(
+        "r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ({}))",
+        query::CANCELLED_TERMINAL_REASONS
+    )
+}
+
 fn failed_request(interaction: &str) -> String {
     format!(
-        "EXISTS (SELECT 1 FROM inference_run_observations r WHERE r.interaction_id={interaction} AND r.status='failed' AND r.finished_at IS NOT NULL AND (r.failure_json IS NOT NULL OR COALESCE(r.terminal_reason,'') NOT IN ({})))",
-        query::CANCELLED_TERMINAL_REASONS
+        "(SELECT MAX(CASE WHEN {} THEN 1 ELSE 0 END) FROM inference_run_observations r WHERE r.interaction_id={interaction})=1",
+        failed_run()
     )
 }
 
@@ -71,24 +83,76 @@ fn display_status(interaction: &str, status: &str) -> String {
     )
 }
 
-// 所有授权列表与查询共享同一成员定义。
-// 清理删除截止时间及以前的记录，因此回看使用严格大于的边界。
-// 清理保留运行中的记录，回看则仍会过滤已过期的运行中记录。
+// 根 Run 不是 MCP，且 Interaction 仍在进行、有已提交的输出或没有失败请求。
+// 一次扫描该 Interaction 的 Run：2 表示有已提交输出，1 表示只有失败请求。
 fn eligible(alias: &str) -> String {
     format!(
-        "EXISTS (SELECT 1 FROM inference_run_observations root_run WHERE root_run.id={alias}.root_run_id AND root_run.ingress_protocol <> 'mcp') AND ({alias}.status IN ('running','waiting_client') OR EXISTS (SELECT 1 FROM inference_run_observations r WHERE r.interaction_id={alias}.id AND r.client_output_committed) OR NOT {})",
-        failed_request(&format!("{alias}.id"))
+        "EXISTS (SELECT 1 FROM inference_run_observations root_run WHERE root_run.id={alias}.root_run_id AND root_run.ingress_protocol <> 'mcp') AND ({alias}.status IN ('running','waiting_client') OR COALESCE((SELECT MAX(CASE WHEN r.client_output_committed THEN 2 WHEN {} THEN 1 ELSE 0 END) FROM inference_run_observations r WHERE r.interaction_id={alias}.id),0)<>1)",
+        failed_run()
     )
 }
 
-fn membership(root_scoped: bool) -> String {
-    let root_filter = if root_scoped { " AND root_id=$3" } else { "" };
-    let materialized = if root_scoped { "MATERIALIZED " } else { "" };
+// 所有授权列表与查询共享同一成员定义：`$1` 是 Principal，`$2` 是保留期截止时间。
+// 清理删除截止时间及以前的记录，因此回看使用严格大于的边界。
+// 清理保留运行中的记录，回看则仍会过滤已过期的运行中记录。
+fn listed(alias: &str, root: Option<&str>) -> String {
+    let root = root
+        .map(|root| format!(" AND {alias}.root_id={root}"))
+        .unwrap_or_default();
     format!(
-        "WITH candidates AS {materialized}(SELECT * FROM interaction_observations WHERE principal=$1 AND last_active_at > $2{root_filter}), listed AS (SELECT i.* FROM candidates i WHERE {}) ",
-        eligible("i")
+        "{alias}.principal=$1 AND {alias}.last_active_at>$2{root} AND {}",
+        eligible(alias)
     )
 }
+
+/// 链路总数仍随保留期内的成员数线性增长：逐个链路找到一个可列成员即计入。
+pub(super) fn chain_count_sql() -> String {
+    format!(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT root_id FROM interaction_observations WHERE principal=$1 AND last_active_at>$2) d WHERE EXISTS (SELECT 1 FROM interaction_observations m WHERE {})",
+        listed("m", Some("d.root_id"))
+    )
+}
+
+/// 每条链路由它最近活动的可列成员代表（同一时刻取 id 最小者）。代表行沿
+/// (principal, last_active_at DESC, id) 索引顺序扫描并在 LIMIT 处停止，首成员与成员数只为本页链路
+/// 计算，因此翻页耗时取决于页大小，不随保留期内的总量增长。游标是代表成员的 (last_active_at, id)；
+/// `<= COALESCE($3, ..)` 让索引直接定位到游标位置。
+pub(super) fn chain_page_sql() -> String {
+    format!(
+        "WITH page AS MATERIALIZED (SELECT i.id,i.root_id,i.last_active_at,i.status FROM interaction_observations i WHERE {} AND i.last_active_at<=COALESCE($3,9223372036854775807) AND ($3 IS NULL OR i.last_active_at<$3 OR (i.last_active_at=$3 AND i.id>$4)) AND NOT EXISTS (SELECT 1 FROM interaction_observations n WHERE {} AND (n.last_active_at>i.last_active_at OR (n.last_active_at=i.last_active_at AND n.id<i.id))) ORDER BY i.last_active_at DESC,i.id LIMIT $5), chains AS MATERIALIZED (SELECT page.*,(SELECT h.id FROM interaction_observations h WHERE {} ORDER BY h.started_at,h.id LIMIT 1) AS head_id,(SELECT COUNT(*) FROM interaction_observations c WHERE {}) AS interactions FROM page) SELECT chains.root_id,chains.head_id,chains.last_active_at,chains.interactions,{},h.first_model_display_name,chains.id FROM chains JOIN interaction_observations h ON h.id=chains.head_id ORDER BY chains.last_active_at DESC,chains.id",
+        listed("i", None),
+        listed("n", Some("i.root_id")),
+        listed("h", Some("page.root_id")),
+        listed("c", Some("page.root_id")),
+        display_status("chains.id", "chains.status")
+    )
+}
+
+pub(super) fn member_count_sql() -> String {
+    format!(
+        "SELECT COUNT(*),MIN(i.started_at) FROM interaction_observations i WHERE {}",
+        listed("i", Some("$3"))
+    )
+}
+
+pub(super) fn member_page_sql() -> String {
+    format!(
+        "WITH page AS MATERIALIZED (SELECT i.id,i.parent_interaction_id,i.started_at,i.status,i.first_model_display_name FROM interaction_observations i WHERE {} AND ($4 IS NULL OR i.started_at>$4 OR (i.started_at=$4 AND i.id>$5)) ORDER BY i.started_at,i.id LIMIT $6) SELECT page.id,page.parent_interaction_id,p.id IS NOT NULL,page.started_at,{},page.first_model_display_name FROM page LEFT JOIN interaction_observations p ON p.id=page.parent_interaction_id AND {} ORDER BY page.started_at,page.id",
+        listed("i", Some("$3")),
+        display_status("page.id", "page.status"),
+        listed("p", Some("$3"))
+    )
+}
+
+pub(super) fn interaction_sql() -> String {
+    format!(
+        "SELECT i.id,i.root_id,i.parent_interaction_id,i.started_at,r.ingress_protocol FROM interaction_observations i JOIN inference_run_observations r ON r.id=i.root_run_id WHERE i.id=$4 AND {}",
+        listed("i", Some("$3"))
+    )
+}
+
+/// 链路页的一行：根 id、首个成员、最近活动时间、成员数、展示状态、首个模型、最近活动的成员。
+type ChainRow = (String, String, i64, i64, String, Option<String>, String);
 
 /// 成员页的一行：id、父 id、父是否在列、开始时间、展示状态、首个模型。
 type MemberRow = (String, Option<String>, bool, i64, String, Option<String>);
@@ -119,16 +183,12 @@ impl InteractionObservation {
         limit: usize,
     ) -> anyhow::Result<RecallChainPage> {
         let store = &self.inner.store;
-        let base = membership(false);
-        let count_sql = format!("{base} SELECT COUNT(DISTINCT root_id) FROM listed");
+        let count_sql = chain_count_sql();
         let counts: Option<(i64,)> = fetch_optional!(store, count_sql, principal, active_since);
         let (total,) =
             counts.ok_or_else(|| anyhow::anyhow!("recall chain count returned no row"))?;
-        let sql = format!(
-            "{base}, ranked AS (SELECT listed.*, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY last_active_at DESC,id DESC) AS active_rank, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY started_at,id) AS head_rank FROM listed), chains AS (SELECT root_id,MAX(CASE WHEN head_rank=1 THEN id END) AS head_id,MAX(last_active_at) AS last_active_at,COUNT(*) AS interactions,MAX(CASE WHEN active_rank=1 THEN id END) AS latest_id,MAX(CASE WHEN active_rank=1 THEN status END) AS status,MAX(CASE WHEN head_rank=1 THEN first_model_display_name END) AS model FROM ranked GROUP BY root_id), page AS MATERIALIZED (SELECT * FROM chains WHERE ($3 IS NULL OR last_active_at<$3 OR (last_active_at=$3 AND root_id<$4)) ORDER BY last_active_at DESC,root_id DESC LIMIT $5) SELECT root_id,head_id,last_active_at,interactions,{},model FROM page ORDER BY last_active_at DESC,root_id DESC",
-            display_status("page.latest_id", "page.status")
-        );
-        let rows: Vec<(String, String, i64, i64, String, Option<String>)> = fetch_all!(
+        let sql = chain_page_sql();
+        let rows: Vec<ChainRow> = fetch_all!(
             store,
             sql,
             principal,
@@ -142,13 +202,16 @@ impl InteractionObservation {
             .into_iter()
             .take(limit)
             .map(
-                |(root_id, head_id, last_active_at, interactions, status, model)| RecallChain {
-                    root_id,
-                    head_id,
-                    last_active_at,
-                    interactions: interactions as u64,
-                    status,
-                    model,
+                |(root_id, head_id, last_active_at, interactions, status, model, latest_id)| {
+                    RecallChain {
+                        root_id,
+                        head_id,
+                        latest_id,
+                        last_active_at,
+                        interactions: interactions as u64,
+                        status,
+                        model,
+                    }
                 },
             )
             .collect();
@@ -168,8 +231,7 @@ impl InteractionObservation {
         limit: usize,
     ) -> anyhow::Result<Option<RecallMemberPage>> {
         let store = &self.inner.store;
-        let base = membership(true);
-        let sql = format!("{base} SELECT COUNT(*),MIN(started_at) FROM listed");
+        let sql = member_count_sql();
         let counts: Option<(i64, Option<i64>)> =
             fetch_optional!(store, sql, principal, active_since, root_id);
         let (total, started_at) =
@@ -177,11 +239,7 @@ impl InteractionObservation {
         let Some(started_at) = started_at else {
             return Ok(None);
         };
-        let sql = format!(
-            "{base}, page AS MATERIALIZED (SELECT i.id,i.parent_interaction_id,i.started_at,i.status,i.first_model_display_name FROM listed i WHERE ($4 IS NULL OR i.started_at>$4 OR (i.started_at=$4 AND i.id>$5)) ORDER BY i.started_at,i.id LIMIT $6) SELECT page.id,page.parent_interaction_id,p.id IS NOT NULL,page.started_at,{},page.first_model_display_name FROM page LEFT JOIN interaction_observations p ON p.id=page.parent_interaction_id AND p.principal=$1 AND p.root_id=$3 AND p.last_active_at>$2 AND {} ORDER BY page.started_at,page.id",
-            display_status("page.id", "page.status"),
-            eligible("p")
-        );
+        let sql = member_page_sql();
         let rows: Vec<MemberRow> = fetch_all!(
             store,
             sql,
@@ -223,10 +281,7 @@ impl InteractionObservation {
         active_since: i64,
     ) -> anyhow::Result<Option<RecallInteraction>> {
         let store = &self.inner.store;
-        let sql = format!(
-            "{} SELECT i.id,i.root_id,i.parent_interaction_id,i.started_at,r.ingress_protocol FROM listed i JOIN inference_run_observations r ON r.id=i.root_run_id WHERE i.id=$4",
-            membership(true)
-        );
+        let sql = interaction_sql();
         let row: Option<(String, String, Option<String>, i64, String)> =
             fetch_optional!(store, sql, principal, active_since, root_id, interaction_id);
         let Some((id, root_id, parent_id, started_at, protocol)) = row else {

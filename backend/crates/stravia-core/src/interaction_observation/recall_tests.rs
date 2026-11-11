@@ -156,30 +156,38 @@ async fn listing_contract(fixture: &Fixture) -> anyhow::Result<()> {
     fixture
         .execute("UPDATE interaction_observations SET status='interrupted' WHERE id='bad'")
         .await?;
+    // chain-a (b, c) and chain-other all last ran at 200: chains page by their
+    // representative member's (last_active_at, id), and b represents chain-a.
     let page = o.recall_chains("owner", 100, None, 1).await?;
     assert_eq!(page.total, 2);
     assert!(page.has_more);
-    assert_eq!(page.chains[0].root_id, "chain-other");
-    assert_eq!(page.chains[0].status, "interrupted"); // a cancellation is not a failed request.
-    let cursor = (
-        page.chains[0].last_active_at,
-        page.chains[0].root_id.clone(),
-    );
-    let page2 = o.recall_chains("owner", 100, Some(&cursor), 1).await?;
-    assert_eq!(page2.total, 2);
-    assert!(!page2.has_more);
-    let chain = &page2.chains[0];
+    let chain = &page.chains[0];
     assert_eq!(
         (
             &*chain.root_id,
             &*chain.head_id,
+            &*chain.latest_id,
             chain.interactions,
             chain.last_active_at
         ),
-        ("chain-a", "a", 4, 200)
+        ("chain-a", "a", "b", 4, 200)
     );
-    assert_eq!(chain.status, "failed"); // c wins the (last_active_at, id) tie and displays its failed request.
+    assert_eq!(chain.status, "completed");
     assert_eq!(chain.model.as_deref(), Some("head-model"));
+    let cursor = (chain.last_active_at, chain.latest_id.clone());
+    // c sorts after the cursor but must not list chain-a a second time.
+    let page2 = o.recall_chains("owner", 100, Some(&cursor), 1).await?;
+    assert_eq!(page2.total, 2);
+    assert!(!page2.has_more);
+    assert_eq!(
+        page2
+            .chains
+            .iter()
+            .map(|chain| chain.root_id.as_str())
+            .collect::<Vec<_>>(),
+        ["chain-other"]
+    );
+    assert_eq!(page2.chains[0].status, "interrupted"); // a cancellation is not a failed request.
 
     let members = o
         .recall_members("owner", "chain-a", 100, None, 2)
@@ -510,6 +518,36 @@ async fn events_contract(fixture: &Fixture) -> anyhow::Result<()> {
 async fn contract(fixture: &Fixture) -> anyhow::Result<()> {
     listing_contract(fixture).await?;
     events_contract(fixture).await
+}
+
+#[tokio::test]
+async fn sqlite_recall_queries_only_use_keyed_lookups() -> anyhow::Result<()> {
+    // Without ANALYZE statistics SQLite once answered `status='failed'` through
+    // inference_runs_status_idx, scanning every failed run once per listed interaction.
+    let pool = crate::test_support::migrated_sqlite_pool().await?;
+    for sql in [
+        super::recall::chain_count_sql(),
+        super::recall::chain_page_sql(),
+        super::recall::member_count_sql(),
+        super::recall::member_page_sql(),
+        super::recall::interaction_sql(),
+    ] {
+        let plan: Vec<(i64, i64, i64, String)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+                .fetch_all(&pool)
+                .await?;
+        for (_, _, _, detail) in &plan {
+            let table_scan = detail
+                .strip_prefix("SCAN ")
+                .is_some_and(|name| !["page", "chains", "d"].contains(&name));
+            assert!(
+                !table_scan && !detail.contains("inference_runs_status_idx"),
+                "recall query must reach rows through keyed lookups: {plan:?}\n{sql}"
+            );
+        }
+    }
+    pool.close().await;
+    Ok(())
 }
 
 #[tokio::test]
