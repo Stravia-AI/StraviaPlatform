@@ -85,7 +85,7 @@ fn display_status(interaction: &str, status: &str) -> String {
 
 // 根 Run 不是 MCP，且 Interaction 仍在进行、有已提交的输出或没有失败请求。
 // 一次扫描该 Interaction 的 Run：2 表示有已提交输出，1 表示只有失败请求。
-fn eligible(alias: &str) -> String {
+pub(crate) fn eligible(alias: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM inference_run_observations root_run WHERE root_run.id={alias}.root_run_id AND root_run.ingress_protocol <> 'mcp') AND ({alias}.status IN ('running','waiting_client') OR COALESCE((SELECT MAX(CASE WHEN r.client_output_committed THEN 2 WHEN {} THEN 1 ELSE 0 END) FROM inference_run_observations r WHERE r.interaction_id={alias}.id),0)<>1)",
         failed_run()

@@ -145,6 +145,7 @@ test result: ok. 12 passed……
 两个后端存储相同的词元序列，都不另存明文：
 
 - 一个事件的词元按每段 256 个切分，相邻两段重叠 15 个词元，以保证不超过 16 个词元的短语不会跨段漏检。每段对应 `history_search_segments` 中的一行，记录事件序号、段序号、Interaction、Principal、`root_id`、角色权重、发生时间，以及该段在事件文本中的字节区间。
+- 工具调用索引完整名称与工具文件中美化后的完整参数；转录保留紧凑参数预览。参数命中映射到工具文件，工具名命中可映射到转录中的调用行。段的字节区间以共享的未脱敏事件文本为基准，而非脱敏后的显示文本。
 - **SQLite**：使用 FTS5 contentless 表（`content=''`、`contentless_delete=1`、`tokenize='ascii'`），rowid 等于段 id。写入的是用空格连接的词元。`ascii` 分词器把非 ASCII 字符都当作词元字符、只在 ASCII 分隔符处切分，因此 FTS5 得到的词元与 Rust 输出完全一致；`unicode61` 使用 Unicode 6.1 字符表，会与 Rust 的分类分歧，所以不用。打包的 SQLite 为 3.51.3，满足 `contentless_delete` 对 3.43 的要求。
 - **PostgreSQL**：段行内的 `tsvector` 列由 `'<词元>':<位置>` 字面量直接转换而来，并建 GIN 索引。查询使用 `::tsquery` 字面量（`<->` 表示相邻、`:*` 表示前缀），不调用 `to_tsvector`/`to_tsquery`，因此不受文本搜索配置和 locale 影响。每段 256 个词元，正好避开 tsvector 单个词元最多 256 个位置的上限。
 - 段行与所属 Interaction 一起删除。到期清理与「清除历史记录」在同一事务中显式删除段行，外键 `ON DELETE CASCADE` 只是兜底；SQLite 的 FTS 行由段行的 `AFTER DELETE` 触发器同步删除。
@@ -222,7 +223,7 @@ Observation 保存原文。所有历史输出在离开 Core 前，用所属 Prin
 
 - **P1**：`interaction_observations` 新增（`principal`, `last_active_at DESC`, `id`）索引，供按 Principal 列出链路。`api_keys` 不变：「历史回看」只是注入集合的新取值，前提是注入集合已按 ADR-0097 落地。
 - **P2**：新增 `history_search_segments`、`history_search_progress`；SQLite 另加 FTS5 表与触发器，PostgreSQL 另加 `tsvector` 列与 GIN 索引。
-- 两期都只有 DDL。工作量随 `interaction_observations` 行数增长，启动期使用不定进度；按 [migration-startup](../../.agents/skills/migration-startup/SKILL.md) 的要求测量建索引耗时。检索回填在启动之后由索引任务完成，不阻塞启动。
+- 两期都只有 DDL。工作量随 `interaction_observations` 行数增长，启动期使用不定进度；按 [migration-startup](../../.agents/skills/migration-startup/SKILL.md) 的要求测量建索引耗时。检索回填在启动之后由索引任务完成，不阻塞启动。0051 导出参考 schema 时，隔离空库的完整迁移耗时 SQLite 2.101 秒、PostgreSQL 0.651 秒；这不是单独的 0051 耗时，也不能代表有历史数据的升级性能。
 - 每次迁移都同步两个后端，并重新生成 `docs/database/*.sql`。
 
 ## 10. 分期与验证

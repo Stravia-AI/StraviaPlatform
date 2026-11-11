@@ -19,6 +19,8 @@ mod recall_tests;
 mod redaction;
 mod retention;
 pub(crate) mod scope;
+#[cfg(test)]
+mod search_index_tests;
 mod store;
 mod tail;
 mod trace;
@@ -30,6 +32,7 @@ mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
 pub(crate) use bundle::hex;
+pub(crate) use hydrate::{index_events_postgres, index_events_sqlite};
 pub(crate) use recall::*;
 pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
 pub(crate) use trace::optimize_trace_directory;

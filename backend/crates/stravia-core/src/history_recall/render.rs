@@ -308,6 +308,69 @@ fn str_field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
 }
 
+/// 用于建索引的未脱敏文本；字节区间相对于 `text`。
+pub(crate) struct IndexableEventText {
+    pub text: String,
+    pub weight: i32,
+}
+
+fn visible_answer(payload: &Value) -> String {
+    let text = str_field(payload, "text").unwrap_or_default();
+    let placeholders: Vec<String> = payload
+        .get("parts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| {
+            !matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("text" | "input_text" | "output_text")
+            )
+        })
+        .filter_map(part_text)
+        .collect();
+    let mut result = if text.is_empty() && !placeholders.is_empty() {
+        Vec::new()
+    } else {
+        lines(text)
+    };
+    result.extend(placeholders);
+    result.join("\n")
+}
+
+/// 提取转录或工具文件渲染使用的未脱敏内容。
+/// 工具名与完整参数之间以换行分隔，字节区间相对于拼接后的事件文本。
+pub(crate) fn indexable_event_text(event: &ObservationEvent) -> Option<IndexableEventText> {
+    let payload = &event.payload;
+    let (text, weight) = match event.kind.as_str() {
+        "user_input_recorded" => (
+            lines(str_field(payload, "text").unwrap_or_default()).join("\n"),
+            3,
+        ),
+        "client_visible_content"
+            if payload.get("complete").and_then(Value::as_bool) == Some(true)
+                && str_field(payload, "channel") == Some("visible") =>
+        {
+            (visible_answer(payload), 2)
+        }
+        "client_tool_handoff" | "platform_tool_started" => {
+            let input = payload.get("input");
+            let arguments = match parse_arguments(input) {
+                Arguments::Missing => NO_ARGUMENTS.to_owned(),
+                Arguments::Plain(text) => text.to_owned(),
+                Arguments::Json(value) => format!("{value:#}"),
+            };
+            if arguments.contains("stravia://history/") {
+                return None;
+            }
+            let name = single_line(str_field(payload, "name").unwrap_or("unknown tool"));
+            (format!("{name}\n{}", lines(&arguments).join("\n")), 1)
+        }
+        _ => return None,
+    };
+    Some(IndexableEventText { text, weight })
+}
+
 /// 转录跨事件的已确定计数；游标续读时从持久化的工具编号与上一个 Run 恢复。
 #[derive(Debug, Default, Clone)]
 pub(super) struct TranscriptState {
@@ -404,34 +467,7 @@ impl<'a> Transcript<'a> {
                     return Vec::new();
                 }
                 body.push("## assistant".to_owned());
-                let text = str_field(payload, "text").unwrap_or_default();
-                let placeholders: Vec<String> = payload
-                    .get("parts")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter(|part| {
-                        !matches!(
-                            part.get("type").and_then(Value::as_str),
-                            Some("text" | "input_text" | "output_text")
-                        )
-                    })
-                    .filter_map(part_text)
-                    .collect();
-                if text.is_empty() && !placeholders.is_empty() {
-                    body.extend(
-                        placeholders
-                            .iter()
-                            .map(|line| self.secrets.replace(line).into_owned()),
-                    );
-                } else {
-                    body.extend(lines(&self.secrets.replace(text)));
-                    body.extend(
-                        placeholders
-                            .iter()
-                            .map(|line| self.secrets.replace(line).into_owned()),
-                    );
-                }
+                body.extend(redacted_lines(payload, self.secrets, visible_answer));
             }
             "client_tool_handoff" | "platform_tool_started" => {
                 state.allocated = state.allocated.saturating_add(1);
@@ -630,4 +666,91 @@ pub(super) fn tool_file(
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod indexable_tests {
+    use super::indexable_event_text;
+    use crate::interaction_observation::ObservationEvent;
+    use serde_json::{Value, json};
+
+    fn event(kind: &str, payload: Value) -> ObservationEvent {
+        ObservationEvent {
+            sequence: 1,
+            occurred_at: 0,
+            interaction_id: None,
+            run_id: None,
+            rejection_id: None,
+            kind: kind.to_owned(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn indexes_only_visible_content_and_tool_calls() {
+        let user = indexable_event_text(&event(
+            "user_input_recorded",
+            json!({"text": "first\r\nsecond\n"}),
+        ))
+        .unwrap();
+        assert_eq!((user.text.as_str(), user.weight), ("first\nsecond", 3));
+        let answer = indexable_event_text(&event(
+            "client_visible_content",
+            json!({
+                "complete": true, "channel": "visible", "text": "answer", "parts": [
+                    {"type": "thinking", "text": "private"}, {"type": "image"}
+                ]
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            (answer.text.as_str(), answer.weight),
+            ("answer\n[image]", 2)
+        );
+        assert!(
+            indexable_event_text(&event(
+                "client_visible_content",
+                json!({"complete": false, "text": "partial"})
+            ))
+            .is_none()
+        );
+        assert!(
+            indexable_event_text(&event(
+                "client_visible_content",
+                json!({"complete": true, "channel": "thinking", "text": "private"})
+            ))
+            .is_none()
+        );
+        assert!(
+            indexable_event_text(&event(
+                "platform_tool_finished",
+                json!({"content": "result"})
+            ))
+            .is_none()
+        );
+        let tool = indexable_event_text(&event(
+            "client_tool_handoff",
+            json!({"name": "lookup", "input": "{\"query\":\"alpha\"}"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            (tool.text.as_str(), tool.weight),
+            ("lookup\n{\n  \"query\": \"alpha\"\n}", 1)
+        );
+    }
+
+    #[test]
+    fn excludes_history_calls_in_either_tool_kind() {
+        for kind in ["client_tool_handoff", "platform_tool_started"] {
+            for input in [
+                json!({"path": "stravia://history/chain"}),
+                json!("stravia://history/"),
+            ] {
+                assert!(
+                    indexable_event_text(&event(kind, json!({"name": "read", "input": input})))
+                        .is_none()
+                );
+            }
+        }
+    }
 }

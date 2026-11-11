@@ -9,7 +9,9 @@ const SQLITE_NEXT_EXPIRED: &str = "SELECT id FROM interaction_observations WHERE
 const SQLITE_EXPIRED_CONTENT_IDS: &str = "SELECT content_id FROM observation_event_contents WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=?1) UNION SELECT content_id FROM observation_tool_results WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=?1)";
 /// 删除交互 `?1` 时改写的表，以及选出被删行的谓词；新增被删表时与删除语句一起更新。
 /// observation_blocks 不在删除语句里：它随 observation_events 的外键级联删除。
-const SQLITE_PURGED_ROWS: [(&str, &str); 11] = [
+const SQLITE_PURGED_ROWS: [(&str, &str); 13] = [
+    ("history_search_segments", "interaction_id=?1"),
+    ("history_search_progress", "interaction_id=?1"),
     (
         "observation_event_contents",
         "sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=?1)",
@@ -83,6 +85,8 @@ impl ObservationStore {
                     // 先集合删除叶子，避免父级逐 Run 重复触发多层外键查找。
                     // 仍在同一事务中收口，不能向续接或详情读取暴露半个交互。
                     for sql in [
+                        "DELETE FROM history_search_segments WHERE interaction_id=?",
+                        "DELETE FROM history_search_progress WHERE interaction_id=?",
                         "DELETE FROM observation_event_contents WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=?)",
                         "DELETE FROM observation_tool_results WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=?)",
                         "DELETE FROM observation_events WHERE interaction_id=?",
@@ -130,6 +134,8 @@ impl ObservationStore {
                     .fetch_all(&mut *tx)
                     .await?;
                     for sql in [
+                        "DELETE FROM history_search_progress WHERE interaction_id=$1",
+                        "DELETE FROM history_search_segments WHERE interaction_id=$1",
                         "DELETE FROM observation_event_contents WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=$1)",
                         "DELETE FROM observation_tool_results WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id=$1)",
                         "DELETE FROM observation_events WHERE interaction_id=$1",
@@ -294,6 +300,12 @@ impl ObservationStore {
                         .fetch_all(&mut *tx)
                         .await?;
                     // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
+                    sqlx::query("DELETE FROM history_search_segments WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
+                        .execute(&mut *tx)
+                        .await?;
+                    sqlx::query("DELETE FROM history_search_progress WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
+                        .execute(&mut *tx)
+                        .await?;
                     sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
                         .execute(&mut *tx)
                         .await?;
@@ -313,15 +325,34 @@ impl ObservationStore {
                 sqlx::query("DELETE FROM rejected_request_observations")
                     .execute(&mut *tx)
                     .await?;
+                // Match the indexer's interaction-before-progress lock order.
+                let interaction_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client') ORDER BY id FOR UPDATE")
+                    .fetch_all(&mut *tx)
+                    .await?;
                 // 引用行随交互级联删除；先记下将失去引用的正文，删除后在同一事务入 GC 队列。
-                let content_ids: Vec<i64> = sqlx::query_scalar(CLEARED_CONTENT_IDS)
+                let content_ids: Vec<i64> = sqlx::query_scalar("SELECT content_id FROM observation_event_contents WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id = ANY($1)) UNION SELECT content_id FROM observation_tool_results WHERE sequence IN (SELECT sequence FROM observation_events WHERE interaction_id = ANY($1))")
+                    .bind(&interaction_ids)
                     .fetch_all(&mut *tx)
                     .await?;
                 // 叶子显式清理；外键级联只是兜底，不能让登记行先于父行留下孤儿。
-                sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id IN (SELECT id FROM interaction_observations WHERE status NOT IN ('running','waiting_client'))")
+                sqlx::query("DELETE FROM history_search_progress WHERE interaction_id = ANY($1)")
+                    .bind(&interaction_ids)
                     .execute(&mut *tx)
                     .await?;
-                let deleted = sqlx::query_scalar("DELETE FROM interaction_observations WHERE status NOT IN ('running','waiting_client') RETURNING id").fetch_all(&mut *tx).await?;
+                sqlx::query("DELETE FROM history_search_segments WHERE interaction_id = ANY($1)")
+                    .bind(&interaction_ids)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM credential_mapping_reuses WHERE interaction_id = ANY($1)")
+                    .bind(&interaction_ids)
+                    .execute(&mut *tx)
+                    .await?;
+                let deleted = sqlx::query_scalar(
+                    "DELETE FROM interaction_observations WHERE id = ANY($1) RETURNING id",
+                )
+                .bind(&interaction_ids)
+                .fetch_all(&mut *tx)
+                .await?;
                 crate::content_store::postgres::enqueue_unreferenced(&mut tx, &content_ids).await?;
                 tx.commit().await?;
 

@@ -57,13 +57,33 @@ pub(super) async fn hydrate(
     let (blocks, refs, tool_results) = load_rows(store, &sequences).await?;
     let contents = read_bodies(store, events, &sequences, &refs, &tool_results).await?;
 
+    apply_body_payloads(events, &blocks, &refs, &tool_results, &contents, false)?;
+    fill_run_payloads(store, events).await
+}
+
+fn apply_body_payloads(
+    events: &mut [ObservationEvent],
+    blocks: &HashMap<i64, BlockRow>,
+    refs: &HashMap<i64, Vec<(i64, i64)>>,
+    tool_results: &HashMap<i64, Vec<ToolResultRow>>,
+    contents: &BodySet,
+    index_only: bool,
+) -> anyhow::Result<()> {
     for event in events.iter_mut() {
+        if index_only
+            && !matches!(
+                event.kind.as_str(),
+                "user_input_recorded" | "client_visible_content"
+            )
+        {
+            continue;
+        }
         match event.kind.as_str() {
             "model_thinking" | "client_visible_content" => {
                 let block = blocks.get(&event.sequence).with_context(|| {
                     format!("observation block row missing for event {}", event.sequence)
                 })?;
-                let bodies = bodies_for(event.sequence, refs.get(&event.sequence), &contents)?;
+                let bodies = bodies_for(event.sequence, refs.get(&event.sequence), contents)?;
                 let channel = if block.channel == "thinking" {
                     BlockChannel::Thinking
                 } else {
@@ -99,7 +119,7 @@ pub(super) async fn hydrate(
                 event.payload = payload;
             }
             "user_input_recorded" => {
-                let bodies = bodies_for(event.sequence, refs.get(&event.sequence), &contents)?;
+                let bodies = bodies_for(event.sequence, refs.get(&event.sequence), contents)?;
                 let text = bodies
                     .iter()
                     .map(|body| body.text())
@@ -131,7 +151,7 @@ pub(super) async fn hydrate(
             _ => {}
         }
     }
-    fill_run_payloads(store, events).await
+    Ok(())
 }
 
 /// 无载荷 kind 的字段来自投影列：读取时按事件所属 Run 批量回填。
@@ -186,6 +206,13 @@ async fn fill_run_payloads(
             }
         }
     }
+    apply_run_payloads(events, &rows)
+}
+
+fn apply_run_payloads(
+    events: &mut [ObservationEvent],
+    rows: &HashMap<i64, RunPayloadRow>,
+) -> anyhow::Result<()> {
     for event in events {
         let Some(row) = rows.get(&event.sequence) else {
             continue;
@@ -337,6 +364,119 @@ async fn read_bodies(
     }
     Ok(BodySet(contents))
 }
+
+macro_rules! index_events {
+    ($name:ident, $connection:ty, $map:path, $hydrate:ident) => {
+        pub(crate) async fn $name(
+            connection: &mut $connection,
+            id: &str,
+            after: i64,
+            limit: i64,
+        ) -> anyhow::Result<Vec<ObservationEvent>> {
+            let rows = sqlx::query("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM observation_events WHERE interaction_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3")
+                .bind(id).bind(after).bind(limit).fetch_all(&mut *connection).await?;
+            let mut events = $map(rows)?;
+            if !events.is_empty() {
+                let principal: String = sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=$1")
+                    .bind(id).fetch_one(&mut *connection).await?;
+                $hydrate(connection, &mut events, &principal).await?;
+            }
+            Ok(events)
+        }
+    };
+}
+
+index_events!(
+    index_events_sqlite,
+    sqlx::SqliteConnection<'_>,
+    super::query::map_sqlite_events,
+    hydrate_sqlite_transaction
+);
+index_events!(
+    index_events_postgres,
+    sqlx::PgConnection<'_>,
+    super::query::map_postgres_events,
+    hydrate_postgres_transaction
+);
+
+/// 在建索引事务内回填可检索事件的载荷。
+macro_rules! transaction_hydrator {
+    ($name:ident, $connection:ty, $db:ty, $store:ident) => {
+        pub(super) async fn $name(
+            connection: &mut $connection,
+            events: &mut [ObservationEvent],
+            principal: &str,
+        ) -> anyhow::Result<()> {
+            let sequences: Vec<i64> = events.iter().filter(|event| matches!(event.kind.as_str(),
+                "client_visible_content" | "user_input_recorded"))
+                .map(|event| event.sequence).collect();
+            let mut blocks = HashMap::new();
+            let mut refs: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+            let tool_results: HashMap<i64, Vec<ToolResultRow>> = HashMap::new();
+            for chunk in sequences.chunks(SEQUENCE_BATCH) {
+                let mut query = sqlx::QueryBuilder::<$db>::new("SELECT sequence,interaction_id,run_id,model_turn_id,attempt_id,item_ordinal,channel,complete,envelope FROM observation_blocks WHERE sequence IN (");
+                let mut separated = query.separated(",");
+                for sequence in chunk { separated.push_bind(*sequence); }
+                separated.push_unseparated(")");
+                for row in query.build().fetch_all(&mut *connection).await? {
+                    let sequence: i64 = row.try_get("sequence")?;
+                    let envelope: Option<Vec<u8>> = row.try_get("envelope")?;
+                    blocks.insert(sequence, BlockRow {
+                        interaction_id: row.try_get("interaction_id")?,
+                        run_id: row.try_get("run_id")?,
+                        model_turn_id: row.try_get("model_turn_id")?,
+                        attempt_id: row.try_get("attempt_id")?,
+                        item_ordinal: row.try_get("item_ordinal")?,
+                        channel: row.try_get("channel")?,
+                        complete: row.try_get("complete")?,
+                        envelope: envelope.map(|bytes: Vec<u8>| -> anyhow::Result<Value> {
+                            Ok(serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?)
+                        }).transpose()?,
+                    });
+                }
+                let mut query = sqlx::QueryBuilder::<$db>::new("SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (");
+                let mut separated = query.separated(",");
+                for sequence in chunk { separated.push_bind(*sequence); }
+                separated.push_unseparated(") ORDER BY sequence,ordinal");
+                for row in query.build().fetch_all(&mut *connection).await? {
+                    refs.entry(row.try_get("sequence")?).or_default().push((row.try_get("ordinal")?, row.try_get("content_id")?));
+                }
+            }
+            let ids: Vec<i64> = refs.values().flatten().map(|(_, id)| *id)
+                .chain(tool_results.values().flatten().map(|row| row.content_id)).collect();
+            let contents = if ids.is_empty() {
+                BodySet(Vec::new())
+            } else {
+                let scope = crate::content_store::$store::scope_id(connection, &super::content_refs::scope_key(principal)).await?;
+                let bodies = match scope {
+                    Some(scope) => crate::content_store::$store::read(connection, scope, &ids).await?,
+                    None => Vec::new(),
+                };
+                BodySet(vec![crate::content_store::Bodies::from_rows(bodies)])
+            };
+            apply_body_payloads(events, &blocks, &refs, &tool_results, &contents, true)?;
+            for event in events.iter_mut().filter(|event| event.kind == "client_visible_content") {
+                if let Some(block) = blocks.get(&event.sequence) {
+                    event.payload["channel"] = json!(block.channel);
+                }
+            }
+            Ok(())
+        }
+    };
+}
+
+transaction_hydrator!(
+    hydrate_sqlite_transaction,
+    sqlx::SqliteConnection<'_>,
+    sqlx::Sqlite,
+    sqlite
+);
+transaction_hydrator!(
+    hydrate_postgres_transaction,
+    sqlx::PgConnection<'_>,
+    sqlx::Postgres,
+    postgres
+);
 
 #[derive(Debug)]
 struct ToolResultRow {
