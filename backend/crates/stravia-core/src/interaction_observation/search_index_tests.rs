@@ -82,7 +82,7 @@ impl Fixture {
         Ok(())
     }
 
-    async fn index(&self) -> anyhow::Result<()> {
+    async fn index(&self) -> anyhow::Result<bool> {
         match &self.db {
             Db::Sqlite(pool) => index_sqlite(pool, "i").await,
             Db::Postgres(pool) => index_postgres(pool, "i").await,
@@ -186,14 +186,16 @@ impl Fixture {
 }
 
 async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {
-    f.execute("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('i','owner','i','run','route','running',0,0); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES ('run','i','responses','route','running',false,0,0)").await?;
-    // 单个事务最多推进 500 个已提交事件。
+    f.execute("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,last_event_sequence) VALUES ('i','owner','i','run','route','running',0,0,0); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at) VALUES ('run','i','responses','route','running',false,0,0)").await?;
+    // 单个事务最多推进 500 个已提交事件；返回值告诉调度器是否还需下一批。
     for sequence in 1..=501 {
         f.user_event(sequence, "alpha beta").await?;
     }
-    f.index().await?;
+    f.execute("UPDATE interaction_observations SET last_event_sequence=501 WHERE id='i'")
+        .await?;
+    assert!(f.index().await?);
     assert_eq!(f.segments().await?.len(), 500);
-    f.index().await?;
+    assert!(!f.index().await?);
     let incremental = f.segments().await?;
     assert_eq!(incremental.len(), 501);
     assert!(
@@ -202,7 +204,7 @@ async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {
             .enumerate()
             .all(|(i, row)| *row == ((i + 1) as i64, 0, 3, 0, 10))
     );
-    f.index().await?;
+    assert!(!f.index().await?);
     assert_eq!(f.segments().await?, incremental);
     f.counts().await?;
 
@@ -221,10 +223,10 @@ async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {
     .await?;
     f.tool_event(504, "client_tool_handoff", json!({"query":"needle"}))
         .await?;
-    f.execute("UPDATE interaction_observations SET status='completed' WHERE id='i'; UPDATE inference_run_observations SET status='completed', client_output_committed=true WHERE id='run'").await?;
+    f.execute("UPDATE interaction_observations SET status='completed',last_event_sequence=504 WHERE id='i'; UPDATE inference_run_observations SET status='completed', client_output_committed=true WHERE id='run'").await?;
     let (left, right) = tokio::join!(f.index(), f.index());
-    left?;
-    right?;
+    assert!(!left?);
+    assert!(!right?);
     let terminal = f.segments().await?;
     assert_eq!(&terminal[..501], incremental.as_slice());
     assert!(terminal.iter().all(|row| row.0 != 502 && row.0 != 503));
@@ -240,14 +242,16 @@ async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {
     // 终结后续写并重建的结果，应与从空索引重建全部已提交事件一致。
     f.user_event(505, "later input").await?;
     f.user_event(506, &"word ".repeat(260)).await?;
-    f.index().await?;
+    f.execute("UPDATE interaction_observations SET last_event_sequence=506 WHERE id='i'")
+        .await?;
+    assert!(!f.index().await?);
     let extended = f.segments().await?;
     assert!(extended.contains(&(505, 0, 3, 0, 11)));
     assert!(extended.contains(&(506, 0, 3, 0, 1279)));
     assert!(extended.contains(&(506, 1, 3, 1205, 1299)));
     f.execute("DELETE FROM history_search_segments; DELETE FROM history_search_progress;")
         .await?;
-    f.index().await?;
+    assert!(!f.index().await?);
     assert_eq!(f.segments().await?, extended);
     f.counts().await?;
 
@@ -255,9 +259,9 @@ async fn lifecycle(f: &Fixture) -> anyhow::Result<()> {
         .sweep_history(200_000_000, Duration::from_secs(86_400))
         .await?;
     assert_eq!(f.counts().await?, (0, 0));
-    f.execute("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('i','owner','i','run','route','completed',0,0); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,client_output_committed) VALUES ('run','i','responses','route','completed',false,0,0,true)").await?;
+    f.execute("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,last_event_sequence) VALUES ('i','owner','i','run','route','completed',0,0,1); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,client_output_committed) VALUES ('run','i','responses','route','completed',false,0,0,true)").await?;
     f.user_event(1, "clear this").await?;
-    f.index().await?;
+    assert!(!f.index().await?);
     assert_eq!(f.counts().await?, (1, 1));
     f.observation.clear_history().await?;
     assert_eq!(f.counts().await?, (0, 0));
