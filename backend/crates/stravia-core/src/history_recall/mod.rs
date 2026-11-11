@@ -4,7 +4,6 @@
 //! Observation 存储里，目录、转录、工具文件的渲染与分页、凭据替换都在本模块内部。
 //! 调用方负责执行范围校验（只有透明注入的历史范围能到达这里）。
 
-
 pub(crate) mod index;
 mod page;
 pub(crate) mod render;
