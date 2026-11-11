@@ -98,69 +98,87 @@ async fn insert_postgres(
 
 // SQLite 用 BEGIN IMMEDIATE 串行化写入；PostgreSQL 先锁 Interaction 再锁进度行，
 // 与删除操作的锁顺序一致，并在修改段之前锁住进度。
+// 返回值表示本批之后是否还需再调用一次。进度统一记录 Interaction 的末事件序号，
+// 避免状态重算写入的无事件序号让对账永不收敛。
 macro_rules! index_backend {
     ($name:ident, $pool:ty, $begin:literal, $interaction_lock:literal, $progress_lock:literal, $fetch:ident, $insert:ident) => {
-        pub(crate) async fn $name(pool: &$pool, interaction: &str) -> anyhow::Result<()> {
+        pub(crate) async fn $name(
+            pool: &$pool,
+            interaction: &str,
+        ) -> anyhow::Result<bool> {
             let mut connection = pool.acquire_write().await?;
-            let mut tx = connection.begin_with($begin).await?;
-            let sql = format!("SELECT i.principal,i.root_id,i.status,({}) FROM interaction_observations i WHERE i.id=$1{}", eligible("i"), $interaction_lock);
-            let row: Option<(String, String, String, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
-                .bind(interaction).fetch_optional(&mut *tx).await?;
-            let Some((principal, root, status, is_member)) = row else {
-                tx.commit().await?;
-                return Ok(());
-            };
-            if !is_member {
-                sqlx::query("DELETE FROM history_search_segments WHERE interaction_id=$1")
+            let result: anyhow::Result<bool> = async {
+                let mut tx = connection.begin_with($begin).await?;
+                let sql = format!("SELECT i.principal,i.root_id,i.status,i.last_event_sequence,({}) FROM interaction_observations i WHERE i.id=$1{}", eligible("i"), $interaction_lock);
+                let row: Option<(String, String, String, i64, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+                    .bind(interaction).fetch_optional(&mut *tx).await?;
+                let Some((principal, root, status, last_event_sequence, is_member)) = row else {
+                    tx.commit().await?;
+                    return Ok(false);
+                };
+                if !is_member {
+                    sqlx::query("DELETE FROM history_search_segments WHERE interaction_id=$1")
+                        .bind(interaction).execute(&mut *tx).await?;
+                    sqlx::query("DELETE FROM history_search_progress WHERE interaction_id=$1")
+                        .bind(interaction).execute(&mut *tx).await?;
+                    tx.commit().await?;
+                    return Ok(false);
+                }
+                sqlx::query("INSERT INTO history_search_progress (interaction_id) VALUES ($1) ON CONFLICT (interaction_id) DO NOTHING")
                     .bind(interaction).execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM history_search_progress WHERE interaction_id=$1")
-                    .bind(interaction).execute(&mut *tx).await?;
-                tx.commit().await?;
-                return Ok(());
-            }
-            sqlx::query("INSERT INTO history_search_progress (interaction_id) VALUES ($1) ON CONFLICT (interaction_id) DO NOTHING")
-                .bind(interaction).execute(&mut *tx).await?;
-            let progress_sql = concat!("SELECT last_event_sequence,indexed_terminal FROM history_search_progress WHERE interaction_id=$1", $progress_lock);
-            let (last, indexed_terminal): (i64, bool) = sqlx::query_as(progress_sql)
-                .bind(interaction).fetch_one(&mut *tx).await?;
-            let terminal = status != "running" && status != "waiting_client";
-            let latest: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM observation_events WHERE interaction_id=$1")
-                .bind(interaction).fetch_one(&mut *tx).await?;
-            let rebuild = terminal && (!indexed_terminal || latest > last);
-            if terminal && !rebuild {
-                tx.commit().await?;
-                return Ok(());
-            }
-            if rebuild {
-                sqlx::query("DELETE FROM history_search_segments WHERE interaction_id=$1")
-                    .bind(interaction).execute(&mut *tx).await?;
-            }
-            let after = if rebuild { 0 } else { last };
-            let limit = if rebuild { i64::MAX } else { EVENT_BATCH };
-            let events = $fetch(&mut *tx, interaction, after, limit).await?;
-            let mut through = after;
-            for event in events {
-                through = event.sequence;
-                if let Some(text) = indexable_event_text(&event) {
-                    let tokens = tokenize(&text.text);
-                    let metadata = EventMetadata {
-                        interaction,
-                        principal: &principal,
-                        root: &root,
-                        sequence: event.sequence,
-                        occurred_at: event.occurred_at,
-                        weight: text.weight,
-                    };
-                    for segment in segments(&tokens) {
-                        $insert(&mut *tx, &metadata, &segment).await?;
+                let progress_sql = concat!("SELECT last_event_sequence,indexed_terminal FROM history_search_progress WHERE interaction_id=$1", $progress_lock);
+                let (last, indexed_terminal): (i64, bool) = sqlx::query_as(progress_sql)
+                    .bind(interaction).fetch_one(&mut *tx).await?;
+                let terminal = status != "running" && status != "waiting_client";
+                let latest: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM observation_events WHERE interaction_id=$1")
+                    .bind(interaction).fetch_one(&mut *tx).await?;
+                // 若进度越过了当前末事件，重建以恢复一致性；终结态也需重建完整文本。
+                let rebuild = (last > last_event_sequence && latest <= last_event_sequence)
+                    || (terminal && (!indexed_terminal || latest > last || last_event_sequence > last));
+                if terminal && !rebuild {
+                    tx.commit().await?;
+                    return Ok(false);
+                }
+                if rebuild {
+                    sqlx::query("DELETE FROM history_search_segments WHERE interaction_id=$1")
+                        .bind(interaction).execute(&mut *tx).await?;
+                }
+                let after = if rebuild { 0 } else { last };
+                let limit = if rebuild { i64::MAX } else { EVENT_BATCH };
+                let events = $fetch(&mut *tx, interaction, after, limit).await?;
+                let more = !rebuild && events.len() as i64 == EVENT_BATCH;
+                for event in events.iter() {
+                    if let Some(text) = indexable_event_text(event) {
+                        let tokens = tokenize(&text.text);
+                        let metadata = EventMetadata {
+                            interaction,
+                            principal: &principal,
+                            root: &root,
+                            sequence: event.sequence,
+                            occurred_at: event.occurred_at,
+                            weight: text.weight,
+                        };
+                        for segment in segments(&tokens) {
+                            $insert(&mut *tx, &metadata, &segment).await?;
+                        }
                     }
                 }
-            }
-            sqlx::query("UPDATE history_search_progress SET last_event_sequence=$2,indexed_terminal=$3 WHERE interaction_id=$1")
-                .bind(interaction).bind(through).bind(terminal)
-                .execute(&mut *tx).await?;
-            tx.commit().await?;
-            Ok(())
+                // 还有下一批时保留事件游标；否则统一记为末事件序号，即使该序号
+                // 属于其它 Interaction 也不会造成重复读取。
+                let through = if more {
+                    events.last().expect("full batch has events").sequence
+                } else {
+                    last_event_sequence.max(events.last().map_or(after, |event| event.sequence))
+                };
+                sqlx::query("UPDATE history_search_progress SET last_event_sequence=$2,indexed_terminal=$3 WHERE interaction_id=$1")
+                    .bind(interaction).bind(through).bind(terminal)
+                    .execute(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(more)
+            }.await;
+            let more = result?;
+            connection.finish().await?;
+            Ok(more)
         }
     };
 }

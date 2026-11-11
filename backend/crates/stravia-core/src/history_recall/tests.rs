@@ -347,7 +347,7 @@ async fn index_all_sqlite(fixture: &Fixture) -> anyhow::Result<()> {
                 .await?
                 .unwrap();
             for member in members.members {
-                index::index_sqlite(&fixture.pool, &member.id).await?;
+                while index::index_sqlite(&fixture.pool, &member.id).await? {}
             }
         }
     }
@@ -610,10 +610,10 @@ async fn shared_search_corpus(
         .head_id
         .clone();
     for id in ids.iter().chain(std::iter::once(&foreign)) {
-        match db {
+        while match db {
             SearchDatabase::Sqlite(pool) => index::index_sqlite(pool, id).await?,
             SearchDatabase::Postgres(pool) => index::index_postgres(pool, id).await?,
-        }
+        } {}
     }
     let secrets = KnownSecrets::load(&OwnerMappings, &Principal::new(OWNER))
         .await
@@ -838,8 +838,8 @@ async fn history_search_foreign_segments_cannot_starve_owner() -> anyhow::Result
         .chains[0]
         .head_id
         .clone();
-    index::index_sqlite(&fixture.pool, &foreign_id).await?;
-    index::index_sqlite(&fixture.pool, &owner_id).await?;
+    while index::index_sqlite(&fixture.pool, &foreign_id).await? {}
+    while index::index_sqlite(&fixture.pool, &owner_id).await? {}
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM history_search_segments WHERE principal = ?")
             .bind(OTHER)

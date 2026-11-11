@@ -19,6 +19,9 @@ mod recall_tests;
 mod redaction;
 mod retention;
 pub(crate) mod scope;
+mod search_index_task;
+#[cfg(test)]
+mod search_index_task_tests;
 #[cfg(test)]
 mod search_index_tests;
 mod store;
@@ -447,6 +450,21 @@ impl InteractionObservation {
             .store(partial, Ordering::Release);
         Ok(removed)
     }
+
+    /// 索引任务复用 Observation 的存储连接，通知不经过推理写入路径。
+    pub(crate) fn search_index_task(
+        &self,
+        sweeps: mpsc::Receiver<()>,
+        cancellation: stravia_runtime_contract::CancellationToken,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        search_index_task::run(
+            self.inner.store.clone(),
+            self.inner.updates.subscribe(),
+            sweeps,
+            cancellation,
+        )
+    }
+
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();
         let mut live = self.inner.updates.subscribe();
