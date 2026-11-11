@@ -4,13 +4,13 @@
 //! Observation 存储里，目录、转录、工具文件的渲染与分页、凭据替换都在本模块内部。
 //! 调用方负责执行范围校验（只有透明注入的历史范围能到达这里）。
 
-// 索引调度与检索调用分别在后续票据接入；本票先交付可直接调用的实现。
+// 索引调度由独立的后台任务接入。
 #[allow(dead_code)]
 pub(crate) mod index;
 mod page;
 pub(crate) mod render;
-// 查询解析器将在后续检索票据接入。
-#[allow(dead_code)]
+mod search_render;
+mod search_store;
 mod search_text;
 #[cfg(test)]
 mod tests;
@@ -75,6 +75,19 @@ struct DirectoryCursor {
     id: String,
 }
 
+/// 检索游标绑定路径、原查询和上一页的排序键。
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchPageCursor {
+    v: u8,
+    kind: String,
+    path: String,
+    query: String,
+    score: i32,
+    at: i64,
+    id: String,
+}
+
 struct Recall<'a> {
     observation: &'a InteractionObservation,
     secrets: KnownSecrets,
@@ -86,6 +99,24 @@ struct Recall<'a> {
 impl Recall<'_> {
     async fn read(&self, principal: &str, path: &HistoryPath) -> Result<Value, PlatformToolError> {
         let address = path.node.address();
+        let search_cursor = match &path.cursor {
+            Some(encoded) => {
+                let value: Value = page::decode(encoded)?;
+                if value.get("kind").and_then(Value::as_str) == Some("search") {
+                    let cursor: SearchPageCursor = page::decode(encoded)?;
+                    if cursor.v != 1 || cursor.path != address || path.question.is_some() {
+                        return Err(invalid_cursor());
+                    }
+                    Some(cursor)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        if path.question.is_some() || search_cursor.is_some() {
+            return self.search(principal, &address, path, search_cursor).await;
+        }
         match &path.node {
             HistoryNode::Root => self.root(principal, &address, path).await,
             HistoryNode::Chain { root_id } => self.chain(principal, &address, path, root_id).await,
@@ -105,6 +136,89 @@ impl Recall<'_> {
                 self.tool(&address, path, &interaction, *index).await
             }
         }
+    }
+
+    async fn search(
+        &self,
+        principal: &str,
+        address: &str,
+        path: &HistoryPath,
+        cursor: Option<SearchPageCursor>,
+    ) -> Result<Value, PlatformToolError> {
+        use search_store::SearchScope;
+        let scope = match &path.node {
+            HistoryNode::Root => SearchScope::Root,
+            HistoryNode::Chain { root_id } => {
+                self.observation
+                    .recall_members(principal, root_id, self.active_since, None, 1)
+                    .await
+                    .map_err(storage)?
+                    .ok_or_else(unavailable)?;
+                SearchScope::Chain(root_id)
+            }
+            HistoryNode::Transcript {
+                root_id,
+                interaction_id,
+            } => {
+                self.interaction(principal, root_id, interaction_id).await?;
+                SearchScope::Interaction(root_id, interaction_id)
+            }
+            HistoryNode::Tool { .. } => return Err(invalid_cursor()),
+        };
+        let question = cursor
+            .as_ref()
+            .map(|c| c.query.as_str())
+            .or(path.question.as_deref())
+            .ok_or_else(invalid_cursor)?;
+        let query = search_text::parse_query(question).map_err(PlatformToolError::new)?;
+        let after = cursor.as_ref().map(|c| (c.score, c.at, c.id.clone()));
+        let results = search_store::search(
+            self.observation,
+            principal,
+            self.active_since,
+            scope,
+            &query,
+            after,
+        )
+        .await
+        .map_err(storage)?;
+        let mut content = format!(
+            "# Search results for {:?}\n",
+            self.secrets.replace(question)
+        );
+        for hit in &results.interactions {
+            let interaction = self.interaction(principal, &hit.root_id, &hit.id).await?;
+            content.push_str(&format!("\n## {}\n", hit.id));
+            for segment in &hit.segments {
+                let start = usize::try_from(segment.byte_start).map_err(|_| stale_cursor())?;
+                let end = usize::try_from(segment.byte_end).map_err(|_| stale_cursor())?;
+                let (location, snippet, _after_first_page) = search_render::render_hit(
+                    self,
+                    &interaction,
+                    segment.event_sequence,
+                    start,
+                    end,
+                    &query,
+                )
+                .await?;
+                content.push_str(&format!("- {location} — {snippet}\n"));
+            }
+        }
+        let next = if results.has_more {
+            let last = results.interactions.last().ok_or_else(invalid_cursor)?;
+            Some(page::encode(&SearchPageCursor {
+                v: 1,
+                kind: "search".to_owned(),
+                path: address.to_owned(),
+                query: question.to_owned(),
+                score: last.score,
+                at: last.latest_hit_at,
+                id: last.id.clone(),
+            })?)
+        } else {
+            None
+        };
+        Ok(page::output(address, content, None, next))
     }
 
     async fn interaction(

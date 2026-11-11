@@ -324,6 +324,14 @@ fn read_schema_fields_follow_exposure_scope() {
     );
     assert_eq!(keys(ReadExposureScope::NONE, false), ["path", "wait"]);
     assert_eq!(
+        keys(ReadExposureScope::NONE.with_history(), false),
+        ["path", "question", "wait"]
+    );
+    assert_eq!(
+        keys(ReadExposureScope::FULL.with_history(), false),
+        ["allowed_domains", "attachments", "path", "question", "wait"]
+    );
+    assert_eq!(
         keys(ReadExposureScope::FULL, true),
         ["allowed_domains", "attachments", "path", "question"]
     );

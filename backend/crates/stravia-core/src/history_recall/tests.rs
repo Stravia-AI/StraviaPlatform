@@ -307,6 +307,611 @@ async fn read(
     recall.read(principal, &history).await
 }
 
+async fn search(recall: &Recall<'_>, principal: &str, path: &str, question: &str) -> Value {
+    let input = ReadInput {
+        path: path.to_owned(),
+        question: Some(question.to_owned()),
+        attachments: None,
+        allowed_domains: None,
+        wait: None,
+    };
+    let ReadTarget::History(history) = parse_read_input(&input).expect("search path") else {
+        panic!("not a history path");
+    };
+    recall.read(principal, &history).await.expect("search")
+}
+
+fn search_hits(page: &Value) -> Vec<(&str, Vec<&str>)> {
+    let mut hits: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in content(page).lines() {
+        if let Some(id) = line.strip_prefix("## ") {
+            hits.push((id, Vec::new()));
+        } else if let Some(line) = line.strip_prefix("- stravia://history/") {
+            let path = line.split_whitespace().next().expect("hit path");
+            hits.last_mut().expect("hit interaction").1.push(path);
+        }
+    }
+    hits
+}
+
+async fn index_all_sqlite(fixture: &Fixture) -> anyhow::Result<()> {
+    for principal in [OWNER, OTHER] {
+        let chains = fixture
+            .observation
+            .recall_chains(principal, 0, None, 100)
+            .await?;
+        for chain in chains.chains {
+            let members = fixture
+                .observation
+                .recall_members(principal, &chain.root_id, 0, None, 100)
+                .await?
+                .unwrap();
+            for member in members.members {
+                index::index_sqlite(&fixture.pool, &member.id).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_orders_scopes_and_reads_hits() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    seed(&fixture).await?;
+    index_all_sqlite(&fixture).await?;
+    let recall = fixture.recall(OWNER).await;
+    let page = search(&recall, OWNER, "stravia://history/", "question answered").await;
+    assert_eq!(page["representation"], "markdown");
+    let hits = search_hits(&page);
+    assert_eq!(hits.len(), 2, "cross-message AND: {}", content(&page));
+    for (id, paths) in &hits {
+        assert!(!paths.is_empty());
+        assert!(paths.len() <= 3);
+        for path in paths {
+            let full_path = format!("stravia://history/{path}");
+            assert!(full_path.contains(id));
+            let excerpt = read(&recall, OWNER, &full_path)
+                .await
+                .expect("returned hit must be readable");
+            let text = content(&excerpt).to_lowercase();
+            assert!(
+                text.contains("question") || text.contains("answered"),
+                "{text}"
+            );
+        }
+    }
+    let chains = fixture
+        .observation
+        .recall_chains(OWNER, 0, None, 10)
+        .await?;
+    let root = &chains.chains[0].root_id;
+    let members = fixture
+        .observation
+        .recall_members(OWNER, root, 0, None, 10)
+        .await?
+        .unwrap();
+    let child = &members.members[1].id;
+    let scoped = search(
+        &recall,
+        OWNER,
+        &format!("stravia://history/{root}/{child}"),
+        "question answered",
+    )
+    .await;
+    assert_eq!(
+        search_hits(&scoped)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![child.as_str()]
+    );
+    let foreign = search(&recall, OTHER, "stravia://history/", "question answered").await;
+    assert!(search_hits(&foreign).is_empty());
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_ranks_roles_and_intersects_distinct_messages() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let mut ids = Vec::new();
+    for (run, input, output) in [
+        ("rank-user", "zircon", "ordinary response"),
+        ("rank-answer", "ordinary input", "zircon"),
+        ("rank-cross", "zircon", "cobalt"),
+    ] {
+        let observer = admit(&fixture.observation, run, OWNER, vec![user(input)], None);
+        observer.record(visible(run, output, true));
+        finish(&observer, "completed", now(), None);
+        fixture.observation.flush().await?;
+        let chains = fixture
+            .observation
+            .recall_chains(OWNER, 0, None, 20)
+            .await?;
+        let chain = chains
+            .chains
+            .iter()
+            .find(|chain| {
+                !ids.iter()
+                    .any(|(id, _): &(String, String)| id == &chain.head_id)
+            })
+            .unwrap();
+        ids.push((chain.head_id.clone(), chain.root_id.clone()));
+    }
+    index_all_sqlite(&fixture).await?;
+    let recall = fixture.recall(OWNER).await;
+    let page = search(&recall, OWNER, "stravia://history/", "zircon").await;
+    let found: Vec<_> = search_hits(&page).iter().map(|(id, _)| *id).collect();
+    assert_eq!(found.len(), 3);
+    assert_eq!(found[2], ids[1].0, "user matches precede assistant matches");
+    let cross = search(&recall, OWNER, "stravia://history/", "zircon cobalt").await;
+    assert_eq!(
+        search_hits(&cross)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![ids[2].0.as_str()]
+    );
+    let scoped = search(
+        &recall,
+        OWNER,
+        &format!("stravia://history/{}/", ids[0].1),
+        "zircon",
+    )
+    .await;
+    assert_eq!(
+        search_hits(&scoped)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![ids[0].0.as_str()]
+    );
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_finds_overlap_tool_arguments_and_redacts_snippets() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let mut words = vec!["filler"; 255];
+    words.extend(["overlapalpha", "overlapbeta"]);
+    let observer = admit(
+        &fixture.observation,
+        "segments",
+        OWNER,
+        vec![user(&words.join(" "))],
+        None,
+    );
+    observer.record(RunEvent::PlatformToolStarted {
+        model_turn_id: "turn".into(),
+        tool_id: "tool".into(),
+        name: "executor".into(),
+        input: Some(json!({"command": "needletool --deploy"})),
+    });
+    observer.record(visible("answer", &format!("publicmarker {SECRET}"), true));
+    finish(&observer, "completed", now(), None);
+    fixture.observation.flush().await?;
+    index_all_sqlite(&fixture).await?;
+    let recall = fixture.recall(OWNER).await;
+    let phrase = search(
+        &recall,
+        OWNER,
+        "stravia://history/",
+        "\"overlapalpha overlapbeta\"",
+    )
+    .await;
+    let hits = search_hits(&phrase);
+    assert_eq!(hits.len(), 1, "{}", content(&phrase));
+    assert!(!hits[0].1.is_empty());
+    for path in &hits[0].1 {
+        let page = read(&recall, OWNER, &format!("stravia://history/{path}")).await?;
+        assert!(content(&page).contains("overlapalpha overlapbeta"));
+    }
+    let tool = search(&recall, OWNER, "stravia://history/", "needletool").await;
+    let hits = search_hits(&tool);
+    assert_eq!(hits.len(), 1);
+    assert!(!hits[0].1.is_empty());
+    for path in &hits[0].1 {
+        assert!(
+            path.contains("/tools/"),
+            "argument hits point to tool files: {path}"
+        );
+        let page = read(&recall, OWNER, &format!("stravia://history/{path}")).await?;
+        assert!(content(&page).contains("needletool"));
+    }
+    let redacted = search(&recall, OWNER, "stravia://history/", "publicmarker").await;
+    assert_eq!(search_hits(&redacted).len(), 1);
+    assert!(content(&redacted).contains("«publicmarker»"));
+    assert!(content(&redacted).contains(&reference()));
+    assert!(!content(&redacted).contains(SECRET));
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_hit_line_ranges_survive_appended_events() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let observer = admit(
+        &fixture.observation,
+        "ongoing",
+        OWNER,
+        vec![user("stableanchor")],
+        None,
+    );
+    observer.record(visible("first", "first response", true));
+    fixture.observation.flush().await?;
+    index_all_sqlite(&fixture).await?;
+    let recall = fixture.recall(OWNER).await;
+    let page = search(&recall, OWNER, "stravia://history/", "stableanchor").await;
+    let hits = search_hits(&page);
+    assert_eq!(hits.len(), 1);
+    let path = format!("stravia://history/{}", hits[0].1.first().expect("hit path"));
+    let before = read(&recall, OWNER, &path).await?;
+    assert!(content(&before).contains("stableanchor"));
+    observer.record(visible("second", "later appended text", true));
+    fixture.observation.flush().await?;
+    index_all_sqlite(&fixture).await?;
+    let after = read(&recall, OWNER, &path).await?;
+    assert_eq!(content(&before), content(&after));
+    finish(&observer, "completed", now(), None);
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+enum SearchDatabase<'a> {
+    Sqlite(&'a sqlx::SqlitePool),
+    Postgres(&'a sqlx::PgPool),
+}
+
+async fn shared_search_corpus(
+    observation: &InteractionObservation,
+    db: SearchDatabase<'_>,
+) -> anyhow::Result<Vec<Vec<(usize, Vec<String>)>>> {
+    let mut ids = Vec::new();
+    let mut roots = Vec::new();
+    let mut overlap = vec!["filler"; 10];
+    overlap.extend(["middlealpha", "middlebeta"]);
+    overlap.extend(vec!["filler"; 243]);
+    overlap.extend(["overlapalpha", "overlapbeta"]);
+    let overlap = overlap.join(" ");
+    for (run, input, output) in [
+        ("corpus-a", "迁移失败 retention.rs", "resolved cobalt"),
+        ("corpus-b", "ordinary input", "迁移失败 retention.rs cobalt"),
+        ("corpus-c", overlap.as_str(), "ordinary"),
+    ] {
+        let observer = admit(observation, run, OWNER, vec![user(input)], None);
+        observer.record(visible(run, output, true));
+        finish(&observer, "completed", now(), None);
+        observation.flush().await?;
+        let chains = observation.recall_chains(OWNER, 0, None, 10).await?;
+        let chain = chains
+            .chains
+            .iter()
+            .find(|chain| !ids.contains(&chain.head_id))
+            .unwrap();
+        ids.push(chain.head_id.clone());
+        roots.push(chain.root_id.clone());
+    }
+    let other = admit(
+        observation,
+        "corpus-other",
+        OTHER,
+        vec![user("迁移失败 retention.rs cobalt")],
+        None,
+    );
+    other.record(visible("foreign", "foreign", true));
+    finish(&other, "completed", now(), None);
+    observation.flush().await?;
+    let foreign = observation.recall_chains(OTHER, 0, None, 10).await?.chains[0]
+        .head_id
+        .clone();
+    for id in ids.iter().chain(std::iter::once(&foreign)) {
+        match db {
+            SearchDatabase::Sqlite(pool) => index::index_sqlite(pool, id).await?,
+            SearchDatabase::Postgres(pool) => index::index_postgres(pool, id).await?,
+        }
+    }
+    let secrets = KnownSecrets::load(&OwnerMappings, &Principal::new(OWNER))
+        .await
+        .expect("mappings");
+    let recall = Recall {
+        observation,
+        secrets,
+        retention_days: 7,
+        active_since: 0,
+    };
+    let mut results = Vec::new();
+    let root_path = "stravia://history/".to_owned();
+    let chain_path = format!("stravia://history/{}/", roots[0]);
+    let transcript_path = format!("stravia://history/{}/{}", roots[0], ids[0]);
+    let cases: [(&str, &str, &[usize]); 8] = [
+        (&root_path, "迁移失败", &[0, 1]),
+        (&root_path, "retention.rs", &[0, 1]),
+        // corpus-a 的两个词项位于不同消息中。
+        (&root_path, "迁移失败 cobalt", &[0, 1]),
+        (&root_path, "\"retention rs\"", &[0, 1]),
+        (&root_path, "\"middlealpha middlebeta\"", &[2]),
+        (&root_path, "\"overlapalpha overlapbeta\"", &[2]),
+        (&chain_path, "迁移失败", &[0]),
+        (&transcript_path, "迁移失败 cobalt", &[0]),
+    ];
+    for (path, query, expected) in cases {
+        let page = search(&recall, OWNER, path, query).await;
+        let hits = search_hits(&page);
+        assert_eq!(hits.len(), expected.len(), "{query}: {}", content(&page));
+        for ((id, paths), expected_index) in hits.iter().zip(expected) {
+            assert_eq!(*id, ids[*expected_index]);
+            assert!(!paths.is_empty());
+        }
+        let snippets: Vec<String> = content(&page)
+            .lines()
+            .filter_map(|line| line.strip_prefix("- stravia://history/"))
+            .map(|line| {
+                let (_, snippet) = line.split_once(" — ").expect("hit snippet");
+                assert!(
+                    snippet.chars().count() <= 160,
+                    "snippet exceeds 160 characters"
+                );
+                snippet.to_owned()
+            })
+            .collect();
+        let mut rows = Vec::new();
+        for (id, paths) in hits {
+            let mut excerpts = Vec::new();
+            for path in paths {
+                let result = read(&recall, OWNER, &format!("stravia://history/{path}")).await?;
+                if query == "\"middlealpha middlebeta\"" {
+                    assert!(content(&result).contains("middlealpha middlebeta"));
+                }
+                if query == "\"overlapalpha overlapbeta\"" {
+                    assert!(content(&result).contains("overlapalpha overlapbeta"));
+                }
+                excerpts.push(content(&result).to_owned());
+            }
+            rows.push((ids.iter().position(|known| known == id).unwrap(), excerpts));
+        }
+        rows.push((usize::MAX, snippets));
+        results.push(rows);
+    }
+    let other_secrets = KnownSecrets::load(&OwnerMappings, &Principal::new(OTHER))
+        .await
+        .expect("mappings");
+    let other_recall = Recall {
+        observation,
+        secrets: other_secrets,
+        retention_days: 7,
+        active_since: 0,
+    };
+    let other_page = search(&other_recall, OTHER, &root_path, "迁移失败 cobalt").await;
+    let other_hits = search_hits(&other_page);
+    assert_eq!(other_hits.len(), 1);
+    assert_eq!(other_hits[0].0, foreign);
+    let absent = search(
+        &other_recall,
+        OTHER,
+        &root_path,
+        "\"overlapalpha overlapbeta\"",
+    )
+    .await;
+    assert!(search_hits(&absent).is_empty());
+    Ok(results)
+}
+
+#[tokio::test]
+async fn history_search_sqlite_shared_corpus() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    shared_search_corpus(&fixture.observation, SearchDatabase::Sqlite(&fixture.pool)).await?;
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_paginates_without_duplicate_interactions() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    for n in 0..12 {
+        let run = format!("page-{n}");
+        let observer = admit(
+            &fixture.observation,
+            &run,
+            OWNER,
+            vec![user("paginationneedle")],
+            None,
+        );
+        observer.record(visible(&run, "response", true));
+        finish(&observer, "completed", now(), None);
+        fixture.observation.flush().await?;
+    }
+    index_all_sqlite(&fixture).await?;
+    // 所有命中的角色权重与时间相同，只以 Interaction id 排序并翻页。
+    sqlx::query("UPDATE history_search_segments SET occurred_at = ?")
+        .bind(now())
+        .execute(&fixture.pool)
+        .await?;
+    let mut expected: Vec<_> = fixture
+        .observation
+        .recall_chains(OWNER, 0, None, 100)
+        .await?
+        .chains
+        .into_iter()
+        .map(|chain| chain.head_id)
+        .collect();
+    expected.sort();
+    assert_eq!(expected.len(), 12);
+    let recall = fixture.recall(OWNER).await;
+    let first = search(&recall, OWNER, "stravia://history/", "paginationneedle").await;
+    let first_hits = search_hits(&first);
+    assert_eq!(first_hits.len(), 10);
+    let next = first["next_path"].as_str().expect("search cursor");
+    let second = read(&recall, OWNER, next).await?;
+    let second_hits = search_hits(&second);
+    assert_eq!(second_hits.len(), 2);
+    let ids: Vec<_> = first_hits
+        .iter()
+        .chain(&second_hits)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(ids, expected.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(second["next_path"].is_null());
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_hit_beyond_long_line_page_cut_remains_readable() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let text = format!("{}distantneedle end", "padding ".repeat(5000));
+    let observer = admit(
+        &fixture.observation,
+        "long-hit",
+        OWNER,
+        vec![user(&text)],
+        None,
+    );
+    observer.record(visible("long-hit-answer", "response", true));
+    finish(&observer, "completed", now(), None);
+    fixture.observation.flush().await?;
+    index_all_sqlite(&fixture).await?;
+
+    let recall = fixture.recall(OWNER).await;
+    let page = search(&recall, OWNER, "stravia://history/", "distantneedle").await;
+    assert!(
+        content(&page).contains("«distantneedle»"),
+        "{}",
+        content(&page)
+    );
+    let hits = search_hits(&page);
+    assert_eq!(hits.len(), 1);
+    assert!(!hits[0].1.is_empty());
+    let hit_path = format!("stravia://history/{}", hits[0].1[0]);
+    let first = read(&recall, OWNER, &hit_path).await?;
+    assert!(!content(&first).contains("distantneedle"));
+    let next = first["next_path"].as_str().expect("long line continuation");
+    let continuation = read(&recall, OWNER, next).await?;
+    assert!(content(&continuation).contains("distantneedle"));
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_foreign_segments_cannot_starve_owner() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let owner = admit(
+        &fixture.observation,
+        "flood-owner",
+        OWNER,
+        vec![user("x")],
+        None,
+    );
+    owner.record(visible("owner-response", "owner response", true));
+    finish(&owner, "completed", now(), None);
+    fixture.observation.flush().await?;
+    let owner_id = fixture
+        .observation
+        .recall_chains(OWNER, 0, None, 10)
+        .await?
+        .chains[0]
+        .head_id
+        .clone();
+
+    // 先索引超过候选上限的其他 Principal 命中，确保它们无法挤掉当前 Principal。
+    let foreign_text = "x ".repeat(241 * 2002 + 15);
+    let foreign = admit(
+        &fixture.observation,
+        "flood-foreign",
+        OTHER,
+        vec![user(&foreign_text)],
+        None,
+    );
+    foreign.record(visible("foreign-response", "foreign response", true));
+    finish(&foreign, "completed", now(), None);
+    fixture.observation.flush().await?;
+    let foreign_id = fixture
+        .observation
+        .recall_chains(OTHER, 0, None, 10)
+        .await?
+        .chains[0]
+        .head_id
+        .clone();
+    index::index_sqlite(&fixture.pool, &foreign_id).await?;
+    index::index_sqlite(&fixture.pool, &owner_id).await?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM history_search_segments WHERE principal = ?")
+            .bind(OTHER)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert!(
+        count > 2000,
+        "fixture must exceed the candidate cap: {count}"
+    );
+    let recall = fixture.recall(OWNER).await;
+    let page = search(&recall, OWNER, "stravia://history/", "x").await;
+    let hits = search_hits(&page);
+    assert_eq!(hits.len(), 1, "{}", content(&page));
+    assert_eq!(hits[0].0, owner_id);
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn history_search_matches_postgres_shared_corpus() -> anyhow::Result<()> {
+    let sqlite = Fixture::new().await?;
+    let expected =
+        shared_search_corpus(&sqlite.observation, SearchDatabase::Sqlite(&sqlite.pool)).await?;
+    sqlite.close().await;
+    let url = std::env::var("STRAVIA_TEST_POSTGRES_URL")
+        .or_else(|_| std::env::var("DB_URL"))
+        .or_else(|_| std::env::var("DATABASE_URL"))?;
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await?;
+    let schema = format!("history_search_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&admin)
+        .await?;
+    let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with(options.options([("search_path", schema.as_str())]))
+        .await?;
+    let scenario_pool = pool.clone();
+    let result = tokio::spawn(async move {
+        crate::migrations::migrate_postgres(&scenario_pool, None).await?;
+        let directory = tempfile::tempdir()?;
+        let observation = InteractionObservation::new(
+            None,
+            Some(scenario_pool.clone()),
+            directory.path().to_path_buf(),
+            crate::history_retention::HistoryRetention::new(1),
+            true,
+            crate::generation_chain::test_chain().await,
+        )
+        .await;
+        let actual =
+            shared_search_corpus(&observation, SearchDatabase::Postgres(&scenario_pool)).await;
+        observation.shutdown().await;
+        let actual = actual?;
+        assert_eq!(actual, expected);
+        anyhow::Ok(())
+    })
+    .await;
+    pool.close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&admin)
+        .await?;
+    admin.close().await;
+    result??;
+    Ok(())
+}
+
 fn content(page: &Value) -> &str {
     page["content"].as_str().expect("page content")
 }

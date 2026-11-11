@@ -12,7 +12,8 @@
 //! - `stravia://artifacts/<55 lowercase>[选择器]`：Artifact 资源。
 //! - `http(s)://…[选择器]`：公网资源。
 //! - `stravia://history/…[选择器]`：历史回看的目录、交互转录与工具文件（[`HistoryNode`]）；
-//!   不接受任何字段，选择器只有行范围（仅文件）与 `cursor=`。是否可用由 core 按执行范围判定。
+//!   根目录、链路目录和转录接受 `question` 在该范围内检索，工具文件不接受；选择器只有行范围（仅文件）与 `cursor=`，
+//!   `question` 与两者互斥。是否可用由 core 按执行范围判定。
 //!
 //! 资源路径与历史路径接受选择器，从 path 末尾按 `:` 自右向左剥离：
 //! `raw`、`download`、`cursor=<base64url>`，以及行范围 `N`、`N-M`、`N+K`、`-K`
@@ -86,6 +87,7 @@ pub enum ReadTarget {
 
 /// 一次历史回看读取；是否允许由 core 按执行范围判定，解析器只校验语法。
 ///
+/// 根目录、链路目录和转录可用 `question` 在该范围内检索；工具文件不接受检索。
 /// 目录只可能带 `cursor`；文件带行范围或 `cursor`，两者互斥。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryPath {
@@ -94,6 +96,8 @@ pub struct HistoryPath {
     pub lines: Option<Vec<LineSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
 }
 
 /// 历史路径节点：段数决定类型，目录以 `/` 结尾，文件不以 `/` 结尾。
@@ -324,6 +328,7 @@ pub struct ReadSchemaScope {
     pub networking: bool,
     pub media: bool,
     pub internal: bool,
+    pub history: bool,
 }
 
 impl ReadSchemaScope {
@@ -332,6 +337,7 @@ impl ReadSchemaScope {
         networking: true,
         media: true,
         internal: false,
+        history: false,
     };
 }
 
@@ -366,8 +372,8 @@ fn schema_properties(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut properties = serde_json::Map::new();
     properties.insert("path".into(), path_property());
-    if scope.networking || scope.media {
-        properties.insert("question".into(), question_property(strict));
+    if scope.networking || scope.media || scope.history {
+        properties.insert("question".into(), question_property(strict, scope.history));
     }
     if scope.media {
         properties.insert("attachments".into(), attachments_property(strict));
@@ -389,15 +395,21 @@ fn path_property() -> serde_json::Value {
     })
 }
 
-fn question_property(strict: bool) -> serde_json::Value {
+fn question_property(strict: bool, history: bool) -> serde_json::Value {
     let kind = if strict {
         serde_json::json!(["string", "null"])
     } else {
         serde_json::json!("string")
     };
+    let mut description = "Plain-text question or search text; no encoding.".to_owned();
+    if history {
+        description.push_str(
+            " On `stravia://history/`, a chain directory, or a transcript, question searches that history scope by whitespace-separated terms (double quotes make an adjacent phrase); it cannot be combined with a line range or a search cursor.",
+        );
+    }
     serde_json::json!({
         "type": kind,
-        "description": "Plain-text question or search text; no encoding."
+        "description": description
     })
 }
 
@@ -712,12 +724,33 @@ fn parse_history(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathEr
             reason: "cursor cannot be combined with other options",
         });
     }
-    reject_field(
-        input.question.as_ref(),
-        "question",
-        HISTORY_TARGET,
-        "history search is not available yet; browse `stravia://history/` and read transcripts instead",
-    )?;
+    let question = match input.question.as_deref() {
+        None => None,
+        Some(text) if text.trim().is_empty() => return Err(ReadPathError::BlankQuestion),
+        Some(text) if text.len() > MAX_SEARCH_TEXT_BYTES => {
+            return Err(ReadPathError::QuestionTooLarge);
+        }
+        Some(text) => Some(text.to_owned()),
+    };
+    if question.is_some() {
+        if matches!(node, HistoryNode::Tool { .. }) {
+            return Err(ReadPathError::FieldNotAllowed {
+                field: "question",
+                target: "a history tool file",
+                hint: "tool results are not indexed; search a root, chain directory or transcript, then read the linked `tools/<n>` file",
+            });
+        }
+        if selectors.lines.is_some() {
+            return Err(ReadPathError::ConflictingOptions {
+                reason: "question cannot be combined with line ranges; first search without a line range, then read the returned `path:L-M`",
+            });
+        }
+        if selectors.cursor.is_some() {
+            return Err(ReadPathError::ConflictingOptions {
+                reason: "a search cursor already carries its question; to continue, omit question, or start a new search without a cursor",
+            });
+        }
+    }
     reject_field(
         non_empty(input.attachments.as_ref()),
         "attachments",
@@ -740,6 +773,7 @@ fn parse_history(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathEr
         node,
         lines: selectors.lines,
         cursor: selectors.cursor,
+        question,
     }))
 }
 
@@ -1946,11 +1980,19 @@ mod tests {
             networking,
             media,
             internal,
+            history: false,
         };
         assert_eq!(ReadSchemaScope::FULL, scope(true, true, false));
         let cases = [
             (
                 scope(true, true, false),
+                vec!["allowed_domains", "attachments", "path", "question", "wait"],
+            ),
+            (
+                ReadSchemaScope {
+                    history: true,
+                    ..scope(true, true, false)
+                },
                 vec!["allowed_domains", "attachments", "path", "question", "wait"],
             ),
             (
@@ -1964,6 +2006,13 @@ mod tests {
             (
                 scope(false, true, false),
                 vec!["attachments", "path", "question", "wait"],
+            ),
+            (
+                ReadSchemaScope {
+                    history: true,
+                    ..scope(false, false, false)
+                },
+                vec!["path", "question", "wait"],
             ),
             (scope(false, false, false), vec!["path", "wait"]),
             (scope(false, false, true), vec!["path"]),
@@ -2053,11 +2102,13 @@ mod tests {
         node: HistoryNode,
         lines: Option<Vec<LineSelection>>,
         cursor: Option<&str>,
+        question: Option<&str>,
     ) -> ReadTarget {
         ReadTarget::History(HistoryPath {
             node,
             lines,
             cursor: cursor.map(str::to_owned),
+            question: question.map(str::to_owned),
         })
     }
 
@@ -2065,6 +2116,172 @@ mod tests {
         match parse(path).unwrap_err() {
             error @ ReadPathError::InvalidHistoryPath { .. } => error.to_string(),
             other => panic!("{path}: unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_root_chain_and_transcript_accept_search_question() {
+        let nodes = [
+            ("stravia://history/", HistoryNode::Root),
+            (
+                "stravia://history/root-1/",
+                HistoryNode::Chain {
+                    root_id: "root-1".into(),
+                },
+            ),
+            (
+                "stravia://history/root-1/Child_2",
+                HistoryNode::Transcript {
+                    root_id: "root-1".into(),
+                    interaction_id: "Child_2".into(),
+                },
+            ),
+        ];
+        for (path, node) in nodes {
+            assert_eq!(
+                parse_read_input(&with_question(path, "PG 迁移")).unwrap(),
+                ReadTarget::History(HistoryPath {
+                    node,
+                    lines: None,
+                    cursor: None,
+                    question: Some("PG 迁移".into()),
+                }),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_search_rejects_tool_paths_and_conflicting_selectors() {
+        let tool = "stravia://history/root/child/tools/1";
+        let error = parse_read_input(&with_question(tool, "PG 迁移")).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ReadPathError::FieldNotAllowed {
+                    field: "question",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("tool result"), "{error}");
+        assert!(error.to_string().contains("tools/<n>"), "{error}");
+
+        for path in [
+            "stravia://history/root/child:1-5",
+            "stravia://history/:cursor=Ab_9-",
+            "stravia://history/root/:cursor=Ab_9-",
+            "stravia://history/root/child:cursor=Ab_9-",
+        ] {
+            let error = parse_read_input(&with_question(path, "PG 迁移")).unwrap_err();
+            assert!(
+                matches!(error, ReadPathError::ConflictingOptions { .. }),
+                "{path}: {error:?}"
+            );
+            assert!(error.to_string().contains("question"), "{path}: {error}");
+        }
+    }
+
+    #[test]
+    fn history_question_schema_requires_nonblank_plain_text() {
+        assert_eq!(
+            parse_read_input(&with_question("stravia://history/", " \t ")).unwrap_err(),
+            ReadPathError::BlankQuestion
+        );
+        assert_eq!(
+            parse_read_input(&with_question(
+                "stravia://history/",
+                &"a".repeat(MAX_SEARCH_TEXT_BYTES + 1),
+            ))
+            .unwrap_err(),
+            ReadPathError::QuestionTooLarge
+        );
+    }
+
+    #[test]
+    fn history_schema_exposes_search_only_when_history_is_visible() {
+        let keys = |scope: ReadSchemaScope| {
+            let schema = model_input_schema(scope);
+            let mut names: Vec<&str> = schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            names.sort_unstable();
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let history_only = ReadSchemaScope {
+            networking: false,
+            media: false,
+            internal: false,
+            history: true,
+        };
+        assert_eq!(keys(history_only).as_slice(), ["path", "question", "wait"]);
+        assert_eq!(
+            keys(ReadSchemaScope::FULL).as_slice(),
+            ["allowed_domains", "attachments", "path", "question", "wait"]
+        );
+        assert_eq!(
+            keys(ReadSchemaScope {
+                history: true,
+                ..ReadSchemaScope::FULL
+            })
+            .as_slice(),
+            ["allowed_domains", "attachments", "path", "question", "wait"]
+        );
+        let plain = question_property(false, false);
+        let description = model_input_schema(history_only)["properties"]["question"]["description"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(description.contains("history"), "{description}");
+        assert!(description.contains("stravia://history/"), "{description}");
+        assert_ne!(
+            plain["description"].as_str(),
+            Some(description.as_str()),
+            "history-only semantics must differ"
+        );
+        assert!(
+            model_input_schema(ReadSchemaScope::FULL)["properties"]["question"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Plain-text question or search text")
+        );
+        let mixed = model_input_schema(ReadSchemaScope {
+            history: true,
+            ..ReadSchemaScope::FULL
+        });
+        let mixed_description = mixed["properties"]["question"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            mixed_description.contains("Plain-text question or search text"),
+            "{mixed_description}"
+        );
+        assert!(mixed_description.contains("history"), "{mixed_description}");
+    }
+
+    #[test]
+    fn history_schema_leaves_mcp_and_explicit_full_descriptions_unchanged() {
+        for scope in [
+            ReadSchemaScope::FULL,
+            ReadSchemaScope {
+                internal: true,
+                ..ReadSchemaScope::FULL
+            },
+        ] {
+            let loose = input_schema(scope)["properties"]["question"]["description"].clone();
+            let strict = model_input_schema(scope)["properties"]["question"]["description"].clone();
+            assert_eq!(loose, strict);
+            assert_eq!(
+                loose.as_str(),
+                Some("Plain-text question or search text; no encoding.")
+            );
         }
     }
 
@@ -2083,27 +2300,33 @@ mod tests {
             index: 12,
         };
         let cases = [
-            ("stravia://history/", history(HistoryNode::Root, None, None)),
+            (
+                "stravia://history/",
+                history(HistoryNode::Root, None, None, None),
+            ),
             (
                 "stravia://history/:cursor=Ab_9-",
-                history(HistoryNode::Root, None, Some("Ab_9-")),
+                history(HistoryNode::Root, None, Some("Ab_9-"), None),
             ),
-            ("stravia://history/root-1/", history(chain(), None, None)),
+            (
+                "stravia://history/root-1/",
+                history(chain(), None, None, None),
+            ),
             (
                 "stravia://history/root-1/:cursor=c",
-                history(chain(), None, Some("c")),
+                history(chain(), None, Some("c"), None),
             ),
             (
                 "stravia://history/root-1/Child_2",
-                history(transcript(), None, None),
+                history(transcript(), None, None, None),
             ),
             (
                 "stravia://history/root-1/Child_2/tools/12:cursor=x",
-                history(tool(), None, Some("x")),
+                history(tool(), None, Some("x"), None),
             ),
             (
                 "stravia://history/root-1/Child_2/tools/12:-20",
-                history(tool(), Some(vec![LineSelection::Last(20)]), None),
+                history(tool(), Some(vec![LineSelection::Last(20)]), None, None),
             ),
         ];
         for (path, expected) in cases {
@@ -2127,6 +2350,7 @@ mod tests {
                     LineSelection::Inclusive { start: 1, end: 3 },
                     LineSelection::Inclusive { start: 41, end: 58 },
                 ]),
+                None,
                 None,
             )
         );
@@ -2200,11 +2424,9 @@ mod tests {
     }
 
     #[test]
-    fn history_paths_reject_every_field_including_question() {
+    fn history_paths_reject_unrelated_fields() {
         type Setter = fn(&mut ReadInput);
-        let setters: [(Setter, &str); 5] = [
-            (|input| input.question = Some("PG 迁移".into()), "question"),
-            (|input| input.question = Some(" ".into()), "question"),
+        let setters: [(Setter, &str); 3] = [
             (|input| input.wait = Some(0), "wait"),
             (
                 |input| input.allowed_domains = Some(vec!["docs.rs".into()]),
@@ -2232,11 +2454,6 @@ mod tests {
                     ),
                     "{path} {field}: {error:?}"
                 );
-                if field == "question" {
-                    assert!(error
-                        .to_string()
-                        .contains("history search is not available"));
-                }
             }
             let input = ReadInput {
                 attachments: Some(Vec::new()),

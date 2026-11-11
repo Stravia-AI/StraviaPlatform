@@ -271,6 +271,13 @@ impl InteractionObservation {
             websocket,
         }
     }
+    pub(crate) fn search_pools(&self) -> (Option<&SqlitePool>, Option<&PgPool>) {
+        match &self.inner.store {
+            store::ObservationStore::Sqlite(pool, _) => (Some(pool), None),
+            store::ObservationStore::Postgres(pool, _) => (None, Some(pool)),
+        }
+    }
+
     pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
         self.inner.store.query_forest(q).await
     }
