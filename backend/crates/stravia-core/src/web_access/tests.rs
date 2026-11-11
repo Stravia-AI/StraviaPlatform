@@ -292,10 +292,10 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: true,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::WebSearch,
+            ]),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -650,10 +650,10 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: true,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::WebSearch,
+            ]),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -733,10 +733,10 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: true,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::WebSearch,
+            ]),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -911,10 +911,10 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: true,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::WebSearch,
+            ]),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

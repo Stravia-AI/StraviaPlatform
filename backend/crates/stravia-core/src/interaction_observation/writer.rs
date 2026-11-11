@@ -30,6 +30,7 @@ pub(super) struct AdmitPayload {
     pub debug_enabled: bool,
     pub trace: Option<super::trace::TraceHandle>,
     pub discarded_trace: Option<super::trace::TraceHandle>,
+    pub interaction_id: tokio::sync::watch::Sender<Option<String>>,
 }
 
 pub(super) const QUEUE_CAPACITY: usize = 2048;
@@ -1436,6 +1437,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         debug_enabled,
                         trace,
                         discarded_trace,
+                        interaction_id,
                     } = *payload;
                     let now = occurred_at;
                     // 新请求可能续接上一个 Run 的尾源与待回传工具：先让缓冲的交付结算落盘。
@@ -1452,6 +1454,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let mut decision = attribution
                         .admit(&start, &mut facts, received_at, now)
                         .await;
+                    drop(interaction_id.send_replace(Some(decision.interaction_id.clone())));
                     if decision.fingerprint_gap
                         && let Some(trace) = &trace
                     {

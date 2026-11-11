@@ -38,7 +38,7 @@ _避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
 
 ## Interaction Observation
 
-Interaction Observation 是管理面用于查看 Connect Client Interaction 及其 Inference Run、Model Turn、工具调用、Target attempt、交付状态和 Confirmed Upstream Usage 的可持久化诊断投影。它可以实时变化并保留失败、取消或断线记录，但不是推理执行、Generation Chain 或模型历史的事实源；观察记录失败或丢失只影响相关诊断任务，不改变推理结果，也不终止实例。它与 Debug Trace 均仅遮盖实际 HTTP Authorization header 值，实时、持久化与导出内容可能包含下载授权及其他凭据；相同过滤标准不表示相同捕获范围，普通 Observation 不是完整 wire 抓包。
+Interaction Observation 是管理面用于查看 Connect Client Interaction 及其 Inference Run、Model Turn、工具调用、Target attempt、交付状态和 Confirmed Upstream Usage 的可持久化诊断投影，也是历史回看的唯一只读来源。它可以实时变化并保留失败、取消或断线记录，但不是推理执行、Generation Chain 或模型历史的事实源；观察记录失败或丢失只影响相关诊断任务，不改变推理结果，也不终止实例。它与 Debug Trace 均仅遮盖实际 HTTP Authorization header 值，实时、持久化与导出内容可能包含下载授权及其他凭据；相同过滤标准不表示相同捕获范围，普通 Observation 不是完整 wire 抓包。
 _避免使用_：Generation Chain、Request Log、Execution State Store
 
 ## 失败的请求（Failed Request）
@@ -83,8 +83,18 @@ _避免使用_：上游可用率、路由可用率、供应商故障率
 
 ## 交互链路（Interaction Chains）
 
-交互链路是请求记录管理面按诊断父边组织 Connect Client Interaction 因果关系的展示视图，节点代表对话实质；交付过任何客户端可见输出（文本、公开工具调用或 Thinking 预览）即算有实质。从未交付任何客户端可见输出且最终失败的交互不是链路成员，其失败事实归宿于客户端错误视图并可从那里回看；用户取消、断线或观察丢失造成的零输出交互仍是链路成员。
-_避免使用_：全量请求清单、失败列表（当指客户端错误视图）
+交互链路是按诊断父边组织 Connect Client Interaction 因果关系的视图，供请求记录管理面与历史回看共用，节点代表对话实质；交付过任何客户端可见输出（文本、公开工具调用或 Thinking 预览）即算有实质。从未交付任何客户端可见输出且最终失败的交互不是链路成员，其失败事实归宿于客户端错误视图并可从那里回看；用户取消、断线或观察丢失造成的零输出交互仍是链路成员。
+_避免使用_：全量请求清单、失败列表（当指客户端错误视图）、Session、会话
+
+## 历史回看（History Recall）
+
+历史回看是平台对话中的模型经 Inference Run 内 StraviaRead 的 `stravia://history/` 路径，只读浏览、读取并检索当前 API Key 所对应 Principal 的交互链路的能力。它只经透明注入提供：Key 开启透明注入并选中「历史回看」时才随 StraviaRead 注入，默认不选；显式声明的 StraviaRead、MCP 与内部 Agent 都不提供。内容取自 Interaction Observation，可能因观测缺口、到期清理或清除历史而不完整；它只作为工具结果提供，不用于重建模型输入、续接或授权。
+_避免使用_：Session、会话存储、记忆（Memory）、对话历史（当指控制台对话的本地历史）
+
+## 交互转录（Interaction Transcript）
+
+交互转录是一个 Connect Client Interaction 在历史回看中按 Observation 事件顺序渲染的只追加文本文件。已完成 Interaction 的转录行号稳定，检索命中以「路径 + 行范围」指向它；状态、用量等可变信息只出现在目录列表中，不写入转录。
+_避免使用_：Debug Trace、Interaction Debug Bundle、模型历史
 
 ## Rejected Request Observation
 
@@ -1053,4 +1063,4 @@ Platform Capability Gate 是控制高级能力可用性的平台级总开关；W
 
 ## Transparent Injection
 
-Transparent Injection 是平台在客户端未显式声明工具时自动提供工具的偏好，不是 API Key 能力授权；开启总开关即提供所属 Artifact 下载与工具执行查询的基础 Read，联网搜索、多模态理解和媒体生成则按 Key 的选择及平台可用性额外暴露。它不扩大基础 Read 的资源归属或联网、媒体理解范围，不限制显式调用与 MCP；总开关关闭期间，已选择的注入项保留但不生效，重新打开后恢复。
+Transparent Injection 是平台在客户端未显式声明工具时自动提供工具的偏好，不是 API Key 能力授权；开启总开关即提供所属 Artifact 下载与工具执行查询的基础 Read，联网搜索、多模态理解和媒体生成按 Key 的选择及平台可用性额外暴露，历史回看按 Key 的选择额外暴露。它不扩大基础 Read 的资源归属或联网、媒体理解范围，不限制显式调用与 MCP；历史回看例外，它只经透明注入提供，Key 的选择即决定其可用性。总开关关闭期间，已选择的注入项保留但不生效，重新打开后恢复。

@@ -129,9 +129,7 @@ async fn antigravity_real_wasm_inference_matches_inference_capture() -> anyhow::
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: vec![route.id.into()],
             spend_limit: None,
         })

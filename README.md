@@ -126,6 +126,7 @@ When an upstream service is temporarily unavailable, Stravia retries or switches
 - **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
 - **Media Generation** — generate or edit an image through a saved Route backed by a capable Vendor plugin, then reuse its Artifact Reference in later tools.
 - Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
+- **History Recall** — optionally let a Key's automatically added `StraviaRead` browse and read that Key's earlier conversations as read-only files within the history retention period. Off by default and never offered over MCP; everyone sharing the Key can see each other's conversations.
 
 #### Image generation
 

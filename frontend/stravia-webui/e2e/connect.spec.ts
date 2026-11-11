@@ -26,8 +26,7 @@ function key(id: string, overrides: Partial<ApiKey> = {}): ApiKey {
     is_enabled: true,
     mcp_access_enabled: false,
     transparent_injection_enabled: false,
-    inject_web_search: false,
-    inject_media_understanding: false,
+    transparent_injections: [],
     expires_at: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -45,6 +44,31 @@ async function setup(page: Page, keys: ApiKey[]): Promise<void> {
     }),
   )
 }
+
+test('Connect plans image input only for enabled media understanding selection', async ({ page }) => {
+  await setup(page, [
+    key('Media', { transparent_injection_enabled: true, transparent_injections: ['media_understanding'] }),
+    key('Other', { transparent_injection_enabled: true, transparent_injections: ['web_search'] }),
+    key('Disabled', { transparent_injection_enabled: false, transparent_injections: ['media_understanding'] }),
+  ])
+  const planned: { apiKey: string; transparentImageInputEnabled: boolean }[] = []
+  await page.route('**/api/v1/connect-clients/preview', (route) => {
+    planned.push(route.request().postDataJSON())
+    return route.fulfill({ json: { data: { paths: [], preview: 'configuration' } } })
+  })
+  await page.goto('/connect')
+  for (const [name, expected] of [
+    ['Media', true],
+    ['Other', false],
+    ['Disabled', false],
+  ] as const) {
+    await page.locator('#cli-key').click()
+    await page.getByRole('option', { name: new RegExp(name) }).click()
+    await expect
+      .poll(() => planned.at(-1))
+      .toMatchObject({ apiKey: `sk-isolated-${name}`, transparentImageInputEnabled: expected })
+  }
+})
 
 test('Connect selects the sole eligible key, excluding disabled, expired and inaccessible credentials', async ({
   page,

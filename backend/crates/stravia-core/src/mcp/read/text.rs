@@ -17,8 +17,8 @@ use stravia_web_access_contract::read_path::{LineSelection, ReadOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub(super) const SNAPSHOT_MIME: &str = "application/vnd.stravia.read-snapshot";
-pub(super) const PAGE_BYTES: usize = 32 * 1024;
-pub(super) const PAGE_LINES: usize = 200;
+pub(crate) const PAGE_BYTES: usize = 32 * 1024;
+pub(crate) const PAGE_LINES: usize = 200;
 const HEADER_LIMIT: usize = 16 * 1024;
 const CURSOR_LIMIT: usize = 8192;
 const RANGE_LIMIT: usize = 16;

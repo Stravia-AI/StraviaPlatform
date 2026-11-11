@@ -795,9 +795,7 @@ async fn antigravity_independent_image_recovery_case(
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: Vec::new(),
             spend_limit: None,
         })

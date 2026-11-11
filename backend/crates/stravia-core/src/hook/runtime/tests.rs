@@ -4,6 +4,7 @@ use stravia_runtime_contract::Principal;
 use tokio::sync::Mutex;
 
 use super::*;
+use crate::hook::tool::PlatformToolRegistry;
 use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock};
 
 struct TestHook {
@@ -155,6 +156,7 @@ fn session_context(kind: RequestKind) -> SessionContext {
         tools_fixed: false,
         request_id: "req-1".into(),
         run_id: "run-1".into(),
+        interaction_id: None,
         request_kind: kind,
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,
@@ -423,10 +425,8 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -1780,4 +1780,86 @@ async fn platform_tool_malformed_arguments_are_refused_at_execution() {
         "refusal must explain the argument error: {}",
         result.content
     );
+}
+
+struct ReadToolSpec;
+
+#[async_trait]
+impl PlatformTool for ReadToolSpec {
+    fn id(&self) -> ToolId {
+        ToolId::new("stravia-read")
+    }
+    fn external_name(&self) -> &str {
+        "StraviaRead"
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Base read tool.")
+    }
+    fn parameters(&self) -> Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _arguments: Value,
+        _context: ToolExecutionContext,
+    ) -> Result<Value, PlatformToolError> {
+        unreachable!("exposure-only test")
+    }
+}
+
+#[test]
+fn read_exposure_history_scope_updates_tool_schema() {
+    fn exposed(scope: ReadExposureScope) -> String {
+        let registry = PlatformToolRegistry::new(vec![Arc::new(ReadToolSpec)]).unwrap();
+        let mut request = AiRequest::new("model", vec![]);
+        let mut current = Arc::new(ContextSnapshot::from_request(
+            &request,
+            ContextCompleteness::Full,
+        ));
+        let mut tools = HashMap::new();
+        let mut specs = HashMap::new();
+        let mut read_scope = ReadExposureScope::NONE;
+        let mut exposure = ToolExposure {
+            tools: &mut tools,
+            specs: &mut specs,
+            read_scope: &mut read_scope,
+        };
+        let batch = ActionBatch::one(HookAction::ExposeRead {
+            scope,
+            description: "History search is available.".into(),
+        });
+        apply_request_actions(
+            &HookId::new("read-exposure"),
+            &mut request,
+            &mut current,
+            0,
+            &mut exposure,
+            &registry,
+            batch,
+        )
+        .unwrap();
+        let spec = request
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.name == "StraviaRead")
+            .unwrap();
+        serde_json::to_string(&spec.parameters).unwrap()
+    }
+    let plain = exposed(ReadExposureScope::NONE);
+    let full = exposed(ReadExposureScope::FULL);
+    let history = exposed(ReadExposureScope::NONE.with_history());
+    let mixed = exposed(ReadExposureScope::FULL.with_history());
+    assert!(!plain.contains("\"question\""), "{plain}");
+    assert!(!plain.contains("stravia://history/"), "{plain}");
+    assert!(full.contains("\"question\""), "{full}");
+    assert!(
+        !full.contains("stravia://history/"),
+        "explicit/MCP schema is unchanged: {full}"
+    );
+    assert!(history.contains("\"question\""), "{history}");
+    assert!(history.contains("stravia://history/"), "{history}");
+    assert!(mixed.contains("\"question\""), "{mixed}");
+    assert!(mixed.contains("stravia://history/"), "{mixed}");
 }

@@ -29,6 +29,7 @@ use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream, ModelTurnError};
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::redaction::{RedactionError, RedactionTrace};
+pub use text::KnownSecrets;
 
 pub const SETTING_KEY: &str = "reversible_redaction_enabled";
 const MARKER_INSTRUCTION: &str =

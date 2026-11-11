@@ -44,6 +44,7 @@ tungstenite-deflate = { workspace = true }
 tokio-tungstenite-deflate = { workspace = true }
 async-compression = { workspace = true }
 url = { workspace = true }
+unicode-normalization = { workspace = true }
 cookie_store = { workspace = true }
 # 插件以强类型策略声明响应编码；解码始终由宿主执行。
 tower-http = { workspace = true, features = ["decompression-br", "decompression-deflate", "decompression-gzip", "decompression-zstd"] }

@@ -184,7 +184,7 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
         binding: &stravia_web_search::ResolvedWebSearchBackend,
     ) -> Result<(), stravia_web_search::WebSearchError> {
         proxy::security::Security::new(self.gateway.storage.auth())
-            .authorize_principal_web_search(principal)
+            .authorize_principal_capability(principal)
             .await
             .map_err(|_| web_search_authorization_error())?;
         let route_id = match binding {

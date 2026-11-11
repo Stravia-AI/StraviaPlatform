@@ -1,5 +1,14 @@
 import type { ApiKeySpend } from './money'
 
+export const TRANSPARENT_INJECTIONS = [
+  'web_search',
+  'media_understanding',
+  'media_generation',
+  'history_recall',
+] as const
+
+export type TransparentInjection = (typeof TRANSPARENT_INJECTIONS)[number]
+
 export interface ApiKey {
   id: string
   key: string
@@ -13,9 +22,7 @@ export interface ApiKey {
   is_enabled: boolean
   mcp_access_enabled: boolean
   transparent_injection_enabled: boolean
-  inject_web_search: boolean
-  inject_media_understanding: boolean
-  inject_media_generation: boolean
+  transparent_injections: TransparentInjection[]
   expires_at?: string | null
   created_at: string
   updated_at: string
@@ -29,9 +36,7 @@ export interface CreateApiKey {
   spend_limit?: string | null
   mcp_access_enabled: boolean
   transparent_injection_enabled: boolean
-  inject_web_search: boolean
-  inject_media_understanding: boolean
-  inject_media_generation: boolean
+  transparent_injections: TransparentInjection[]
   expires_at?: string
   model_ids: string[]
 }
@@ -44,9 +49,7 @@ export interface UpdateApiKey {
   is_enabled?: boolean
   mcp_access_enabled?: boolean
   transparent_injection_enabled?: boolean
-  inject_web_search?: boolean
-  inject_media_understanding?: boolean
-  inject_media_generation?: boolean
+  transparent_injections?: TransparentInjection[]
   expires_at?: string
   model_ids?: string[]
 }

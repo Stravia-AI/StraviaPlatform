@@ -2052,7 +2052,7 @@ def test_upstream_errors_include_capability_attempts(admin_env: dict[str, Any]) 
                 "model_ids": [vision_route],
                 "mcp_access_enabled": True,
                 "transparent_injection_enabled": True,
-                "inject_media_understanding": True,
+                "transparent_injections": ["media_understanding"],
             },
             headers=admin_env["auth"],
         )

@@ -402,11 +402,7 @@ fn apply_request_actions_staged(
                 // 工具声明的字段按合并后的暴露范围裁剪；已暂存的 spec 同样重算。
                 staged_read_scope = staged_read_scope.union(scope);
                 spec.parameters = stravia_web_access_contract::read_path::model_input_schema(
-                    stravia_web_access_contract::read_path::ReadSchemaScope {
-                        networking: staged_read_scope.networking(),
-                        media: staged_read_scope.media(),
-                        internal: false,
-                    },
+                    crate::mcp::read::schema_scope(staged_read_scope, false),
                 );
                 if !description.is_empty() {
                     match spec.description.as_mut() {

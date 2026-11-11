@@ -26,9 +26,7 @@ async fn master_only_injection_can_download_owned_artifacts_without_media_or_net
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: enabled,
-                inject_web_search: false,
-                inject_media_generation: false,
-                inject_media_understanding: false,
+                transparent_injections: Default::default(),
                 model_ids: vec![],
                 spend_limit: None,
             })
@@ -220,9 +218,9 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: true,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::MediaUnderstanding,
+            ]),
             model_ids: vec![parent.id.into()],
             spend_limit: None,
         })
@@ -399,10 +397,10 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: true,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::MediaUnderstanding,
+            ]),
             model_ids: vec![parent_model.id.into()],
-            inject_media_understanding: true,
             spend_limit: None,
         })
         .await
@@ -774,10 +772,10 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::MediaUnderstanding,
+            ]),
             model_ids: vec![mixed_model.id.into(), unsupported_model.id.into()],
-            inject_media_understanding: true,
             spend_limit: None,
         })
         .await

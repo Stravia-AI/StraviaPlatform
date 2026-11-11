@@ -417,9 +417,7 @@ async fn api_key(gateway: &Gateway, route_id: &str) -> anyhow::Result<String> {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: vec![route_id.into()],
             spend_limit: None,
         })

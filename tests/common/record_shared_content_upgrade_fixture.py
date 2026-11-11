@@ -306,6 +306,31 @@ def insert_row(connection: sqlite3.Connection, table: str, row: dict[str, Any]) 
     connection.execute(f"INSERT INTO {table}({names}) VALUES ({marks})", list(row.values()))
 
 
+def add_injection_keys(connection: sqlite3.Connection) -> None:
+    """Preserve the legacy injection flag combinations covered by the upgrade fixture."""
+    combinations = (
+        ("none", 1, 0, 0, 0),
+        ("web", 1, 0, 1, 0),
+        ("understanding", 1, 1, 0, 0),
+        ("generation", 1, 0, 0, 1),
+        ("web-understanding", 1, 1, 1, 0),
+        ("web-generation", 1, 0, 1, 1),
+        ("understanding-generation", 1, 1, 0, 1),
+        ("all-disabled", 0, 1, 1, 1),
+        ("all-enabled", 1, 1, 1, 1),
+    )
+    for suffix, enabled, understanding, web, generation in combinations:
+        key = f"upgrade-injection-{suffix}"
+        insert_row(connection, "api_keys", {
+            "id": key, "token": f"sk-{key}", "name": key, "is_enabled": 1,
+            "expires_at": None, "created_at": "2026-11-03 15:26:32",
+            "updated_at": "2026-11-03 15:26:32", "mcp_access_enabled": 0,
+            "transparent_injection_enabled": enabled,
+            "inject_media_understanding": understanding, "inject_web_search": web,
+            "inject_media_generation": generation, "rpm_limit": None, "spend_limit_nanos": None,
+        })
+
+
 def principal_of(connection: sqlite3.Connection, token: str) -> str:
     return "api-key:" + connection.execute("SELECT id FROM api_keys WHERE token = ?", (token,)).fetchone()[0]
 
@@ -388,6 +413,7 @@ def export_fixture(database: Path, expectations: dict[str, Any]) -> dict[str, An
     with closing(sqlite3.connect(database)) as connection:
         recorded_at = connection.execute("SELECT MAX(occurred_at) FROM observation_events").fetchone()[0]
         add_synthetic_dependencies(connection, recorded_at, expectations)
+        add_injection_keys(connection)
         connection.commit()
         connection.row_factory = None
         expectations["observation"] = observation_expectations(connection)

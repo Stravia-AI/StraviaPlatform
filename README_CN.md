@@ -126,6 +126,7 @@ OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 
 - **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
 - **媒体生成** —— 通过由具备能力的 Vendor 插件支持的已保存 Route 生成或编辑图片，再用 Artifact Reference 在后续工具中复用。
 - 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
+- **历史回看** —— 可选让某个 Key 自动加入的 `StraviaRead` 以只读文件的形式浏览、读取该 Key 在历史保留期内的过往对话；默认关闭，不经 MCP 提供；共用同一 Key 的人会互相看到对话。
 
 #### 图片生成
 

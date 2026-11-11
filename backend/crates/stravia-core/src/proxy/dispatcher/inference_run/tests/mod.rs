@@ -679,9 +679,7 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
-                    inject_web_search: None,
-                    inject_media_generation: None,
-                    inject_media_understanding: None,
+                    transparent_injections: None,
                     expires_at: None,
                     model_ids: Some(model_ids),
                     spend_limit: None,
@@ -697,10 +695,8 @@ async fn authorized_headers(gateway: &Gateway) -> HeaderMap {
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
-                inject_web_search: false,
-                inject_media_generation: false,
+                transparent_injections: Default::default(),
                 model_ids,
-                inject_media_understanding: false,
                 spend_limit: None,
             })
             .await
@@ -729,9 +725,7 @@ async fn set_rpm_limit(gateway: &Gateway, limit: i32) {
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
-                inject_web_search: None,
-                inject_media_generation: None,
-                inject_media_understanding: None,
+                transparent_injections: None,
                 expires_at: None,
                 model_ids: None,
                 spend_limit: None,
@@ -1844,11 +1838,9 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
                     is_enabled,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
-                    inject_web_search: None,
-                    inject_media_generation: None,
+                    transparent_injections: None,
                     expires_at: None,
                     model_ids,
-                    inject_media_understanding: None,
                     spend_limit: None,
                 },
             )
@@ -2018,10 +2010,8 @@ async fn assert_hidden_round_rechecks_access(
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model_id],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -4233,6 +4223,8 @@ mod auth_hook;
 mod continuation;
 #[cfg(test)]
 mod history_boundary;
+#[cfg(test)]
+mod history_recall;
 #[cfg(test)]
 mod lifecycle;
 #[cfg(test)]

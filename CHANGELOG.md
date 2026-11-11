@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- **History Recall:** API Keys can select the new `history_recall` transparent injection (off by default). The injected `StraviaRead` then browses that Key's earlier conversations as read-only files: `stravia://history/` lists conversation chains by newest activity, `stravia://history/<root-id>/` lists a chain's interactions, `stravia://history/<root-id>/<interaction-id>` reads one interaction's transcript, and `.../tools/<n>` reads the full arguments and results of its n-th tool call; files accept line ranges, and a page with more content returns a `next_path` cursor. Content comes from Interaction Observation within the history retention days and may have gaps; the Key's known credentials appear as redaction markers. Interactions that failed without client-visible output and direct MCP tool calls are not listed. Explicitly declared `StraviaRead`, MCP and internal Agents cannot read history. Everyone sharing a Key can read each other's conversations. Search with `question` at the history root, chain, or transcript scope returns ranked hits with readable paths and index-lag limitations. SQLite and PostgreSQL migrations add the listing and search indexes; existing conversations are indexed in the background.
+
+### Changed
+
+- **Breaking — API Key transparent injections:** The Admin API replaces `inject_web_search`, `inject_media_understanding` and `inject_media_generation` with the `transparent_injections` array; old fields are rejected. Allowed values are `web_search`, `media_understanding`, `media_generation` and `history_recall`, returned in that order. Omission on create selects none; omission on partial update preserves the selection, while a supplied array replaces it. Unknown or duplicate values are rejected. SQLite and PostgreSQL upgrades preserve each Key's existing selections and behavior; the independent transparent-injection master switch and MCP access setting are unchanged.
+
 ### Fixed
 
 - SQLite requests no longer fail intermittently with HTTP 500 `... database is locked` errors, such as `history marker storage failed`, when another request starts while reasoning or platform tool results are being saved. Every Gateway write to the SQLite database, including prompt admission, usage statistics, settings and background cleanup, now waits in one shared write queue. Writes that bypass the queue are rejected instead of holding the database lock while other writers wait.

@@ -944,10 +944,8 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
                         expires_at: None,
                         mcp_access_enabled: false,
                         transparent_injection_enabled: false,
-                        inject_web_search: false,
-                        inject_media_generation: false,
+                        transparent_injections: Default::default(),
                         model_ids: Vec::new(),
-                        inject_media_understanding: false,
                         spend_limit: None,
                     })
                     .await?;

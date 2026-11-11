@@ -21,9 +21,7 @@ async fn create_key(gateway: &Gateway) -> crate::db::models::ApiKeyWithBindings 
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
             spend_limit: None,
         })

@@ -3139,7 +3139,9 @@ fn content_body(content: Option<&Value>) -> CredentialDiscoveryBody {
     }
 }
 
-fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<ObservationEvent>> {
+pub(super) fn map_sqlite_events(
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
             super::store::observation_event_from_row(
@@ -3155,7 +3157,9 @@ fn map_sqlite_events(rows: Vec<sqlx::sqlite::SqliteRow>) -> anyhow::Result<Vec<O
         .collect()
 }
 
-fn map_postgres_events(rows: Vec<sqlx::postgres::PgRow>) -> anyhow::Result<Vec<ObservationEvent>> {
+pub(super) fn map_postgres_events(
+    rows: Vec<sqlx::postgres::PgRow>,
+) -> anyhow::Result<Vec<ObservationEvent>> {
     rows.into_iter()
         .map(|r| {
             super::store::observation_event_from_row(

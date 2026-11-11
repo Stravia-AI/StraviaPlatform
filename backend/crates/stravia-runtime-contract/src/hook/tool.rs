@@ -40,14 +40,29 @@ impl fmt::Display for ToolId {
 pub struct ReadExposureScope {
     networking: bool,
     media: bool,
+    history: bool,
 }
 
 impl ReadExposureScope {
     pub const NONE: Self = Self::new(false, false);
+    /// Explicit declarations and MCP; never includes History Recall.
     pub const FULL: Self = Self::new(true, true);
 
     pub const fn new(networking: bool, media: bool) -> Self {
-        Self { networking, media }
+        Self {
+            networking,
+            media,
+            history: false,
+        }
+    }
+
+    /// History Recall is granted only by transparent-injection read planning for
+    /// a Key that selects it; no constructor or constant includes it implicitly.
+    pub const fn with_history(self) -> Self {
+        Self {
+            history: true,
+            ..self
+        }
     }
 
     pub const fn networking(self) -> bool {
@@ -58,11 +73,16 @@ impl ReadExposureScope {
         self.media
     }
 
+    pub const fn history(self) -> bool {
+        self.history
+    }
+
     pub const fn union(self, other: Self) -> Self {
-        Self::new(
-            self.networking || other.networking,
-            self.media || other.media,
-        )
+        Self {
+            networking: self.networking || other.networking,
+            media: self.media || other.media,
+            history: self.history || other.history,
+        }
     }
 }
 
@@ -77,6 +97,8 @@ pub enum StraviaReadDomain {
 pub struct ToolExecutionContext {
     pub request_id: String,
     pub run_id: String,
+    /// In-memory Run admission attribution, resolved by the observation writer.
+    pub interaction_id: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub principal: Principal,
     pub read_scope: ReadExposureScope,
     pub cancellation: CancellationToken,

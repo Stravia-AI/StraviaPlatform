@@ -4,6 +4,8 @@ status: accepted
 
 # Gate advanced capabilities at platform level and separate transparent injection
 
+> **有意例外。** [ADR-0096](0096-recall-interaction-chains-through-read-paths.md) 的历史回看只经透明注入提供，没有显式调用或 MCP 入口，因此 Key 上的「历史回看」选择同时决定它是否可用；本 ADR 对 Advanced Capability、Platform Capability Gate 与其他注入项的决定不变。
+
 Stravia 将用户可见的“多模态理解”和“联网搜索”定义为两个独立的 platform-gated Advanced Capability。每个总开关打开后，所有有效 API Key 都可以显式使用对应能力；关闭后任何 Key 都不可用。API Key 不再持有 `allow_web_research` 或 `allow_media_understanding` 能力授权，只保留独立的 MCP 访问开关，以及“透明注入”总开关和多模态理解/联网搜索的功能选择。透明注入只控制客户端未显式声明时的自动工具暴露，不影响显式工具调用或 MCP；平台能力关闭时，既有 Key 的注入选择保留并置灰，重新开启后恢复。
 
 ## Considered options

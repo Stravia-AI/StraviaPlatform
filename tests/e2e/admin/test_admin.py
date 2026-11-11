@@ -554,6 +554,22 @@ def _create_api_key(env: dict[str, str], model_id: str, name: str) -> dict[str, 
 
 @pytest.mark.e2e
 @pytest.mark.admin
+@pytest.mark.parametrize("legacy_field", [
+    "inject_web_search", "inject_media_understanding", "inject_media_generation",
+])
+def test_api_key_rejects_legacy_injection_fields(admin_env: dict[str, Any], legacy_field: str) -> None:
+    url = f"{admin_env['admin']}/api/v1/api-keys"
+    status, body = http_request("POST", url, {"name": "legacy", legacy_field: True}, admin_env["auth"])
+    assert status == 422 and legacy_field in body, body
+
+    status, body = http_request("POST", url, {"name": f"legacy-update-{legacy_field}"}, admin_env["auth"])
+    assert status == 200, body
+    status, body = http_request("PUT", f"{url}/{body['data']['id']}", {legacy_field: True}, admin_env["auth"])
+    assert status == 422 and legacy_field in body, body
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_rpm_burst_rejection_and_shared_destination_limit(admin_env: dict[str, Any]) -> None:
     with _model_probe_endpoint() as (origin, received):
         provider = _create_probe_provider(

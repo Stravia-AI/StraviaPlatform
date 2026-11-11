@@ -1052,6 +1052,7 @@ pub(super) async fn orchestrate(
         tools_fixed: false,
         request_id: ctx.request_id.clone(),
         run_id: stravia_runtime_contract::identifier::new_id(),
+        interaction_id: Some(observer.interaction_id()),
         request_kind,
         ingress,
         transport: stravia_runtime_contract::hook::TransportKind::Http,

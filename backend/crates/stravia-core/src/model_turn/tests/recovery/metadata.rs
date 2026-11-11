@@ -154,10 +154,8 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

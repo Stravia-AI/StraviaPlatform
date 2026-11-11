@@ -923,10 +923,8 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![route.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -1217,10 +1215,8 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
                 expires_at: None,
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,
-                inject_web_search: false,
-                inject_media_generation: false,
+                transparent_injections: Default::default(),
                 model_ids: vec![route.id.clone().into()],
-                inject_media_understanding: false,
                 spend_limit: None,
             })
             .await
