@@ -54,30 +54,30 @@ pub(super) async fn hydrate(
     if sequences.is_empty() {
         return fill_run_payloads(store, events).await;
     }
-    let (blocks, refs, tool_results) = load_rows(store, &sequences).await?;
-    let contents = read_bodies(store, events, &sequences, &refs, &tool_results).await?;
+    let rows = load_rows(store, &sequences).await?;
+    let contents = read_bodies(store, events, &sequences, &rows).await?;
 
-    apply_body_payloads(events, &blocks, &refs, &tool_results, &contents, false)?;
+    apply_body_payloads(events, &rows, &contents, &sequences)?;
     fill_run_payloads(store, events).await
 }
 
+/// 只回填 `sequences` 中的事件；建索引只请求可检索的 kind，其余事件保持原样。
 fn apply_body_payloads(
     events: &mut [ObservationEvent],
-    blocks: &HashMap<i64, BlockRow>,
-    refs: &HashMap<i64, Vec<(i64, i64)>>,
-    tool_results: &HashMap<i64, Vec<ToolResultRow>>,
+    rows: &BodyRows,
     contents: &BodySet,
-    index_only: bool,
+    sequences: &[i64],
 ) -> anyhow::Result<()> {
-    for event in events.iter_mut() {
-        if index_only
-            && !matches!(
-                event.kind.as_str(),
-                "user_input_recorded" | "client_visible_content"
-            )
-        {
-            continue;
-        }
+    let wanted: std::collections::HashSet<i64> = sequences.iter().copied().collect();
+    let BodyRows {
+        blocks,
+        refs,
+        tool_results,
+    } = rows;
+    for event in events
+        .iter_mut()
+        .filter(|event| wanted.contains(&event.sequence))
+    {
         match event.kind.as_str() {
             "model_thinking" | "client_visible_content" => {
                 let block = blocks.get(&event.sequence).with_context(|| {
@@ -103,6 +103,7 @@ fn apply_body_payloads(
                     "block_id": block_id,
                     "item": filled.item,
                     "complete": block.complete,
+                    "channel": block.channel,
                 });
                 if channel == BlockChannel::Thinking {
                     payload["model_turn_id"] = json!(block.model_turn_id);
@@ -310,9 +311,11 @@ async fn read_bodies(
     store: &ObservationStore,
     events: &[ObservationEvent],
     sequences: &[i64],
-    refs: &HashMap<i64, Vec<(i64, i64)>>,
-    tool_results: &HashMap<i64, Vec<ToolResultRow>>,
+    rows: &BodyRows,
 ) -> anyhow::Result<BodySet> {
+    let BodyRows {
+        refs, tool_results, ..
+    } = rows;
     let wanted: std::collections::HashSet<i64> = sequences.iter().copied().collect();
     let interactions: Vec<String> = events
         .iter()
@@ -399,68 +402,54 @@ index_events!(
     hydrate_postgres_transaction
 );
 
-/// 在建索引事务内回填可检索事件的载荷。
+/// 在建索引事务内回填可检索事件的载荷；行与池读取共用同一份查询。
 macro_rules! transaction_hydrator {
-    ($name:ident, $connection:ty, $db:ty, $store:ident) => {
+    ($name:ident, $connection:ty, $load:ident, $store:ident) => {
         pub(super) async fn $name(
             connection: &mut $connection,
             events: &mut [ObservationEvent],
             principal: &str,
         ) -> anyhow::Result<()> {
-            let sequences: Vec<i64> = events.iter().filter(|event| matches!(event.kind.as_str(),
-                "client_visible_content" | "user_input_recorded"))
-                .map(|event| event.sequence).collect();
-            let mut blocks = HashMap::new();
-            let mut refs: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
-            let tool_results: HashMap<i64, Vec<ToolResultRow>> = HashMap::new();
-            for chunk in sequences.chunks(SEQUENCE_BATCH) {
-                let mut query = sqlx::QueryBuilder::<$db>::new("SELECT sequence,interaction_id,run_id,model_turn_id,attempt_id,item_ordinal,channel,complete,envelope FROM observation_blocks WHERE sequence IN (");
-                let mut separated = query.separated(",");
-                for sequence in chunk { separated.push_bind(*sequence); }
-                separated.push_unseparated(")");
-                for row in query.build().fetch_all(&mut *connection).await? {
-                    let sequence: i64 = row.try_get("sequence")?;
-                    let envelope: Option<Vec<u8>> = row.try_get("envelope")?;
-                    blocks.insert(sequence, BlockRow {
-                        interaction_id: row.try_get("interaction_id")?,
-                        run_id: row.try_get("run_id")?,
-                        model_turn_id: row.try_get("model_turn_id")?,
-                        attempt_id: row.try_get("attempt_id")?,
-                        item_ordinal: row.try_get("item_ordinal")?,
-                        channel: row.try_get("channel")?,
-                        complete: row.try_get("complete")?,
-                        envelope: envelope.map(|bytes: Vec<u8>| -> anyhow::Result<Value> {
-                            Ok(serde_json::from_slice(&crate::storage_codec::decode(&bytes)?)?)
-                        }).transpose()?,
-                    });
-                }
-                let mut query = sqlx::QueryBuilder::<$db>::new("SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (");
-                let mut separated = query.separated(",");
-                for sequence in chunk { separated.push_bind(*sequence); }
-                separated.push_unseparated(") ORDER BY sequence,ordinal");
-                for row in query.build().fetch_all(&mut *connection).await? {
-                    refs.entry(row.try_get("sequence")?).or_default().push((row.try_get("ordinal")?, row.try_get("content_id")?));
-                }
-            }
-            let ids: Vec<i64> = refs.values().flatten().map(|(_, id)| *id)
-                .chain(tool_results.values().flatten().map(|row| row.content_id)).collect();
+            let sequences: Vec<i64> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind.as_str(),
+                        "client_visible_content" | "user_input_recorded"
+                    )
+                })
+                .map(|event| event.sequence)
+                .collect();
+            let rows = $load(connection, &sequences).await?;
+            let ids: Vec<i64> = rows
+                .refs
+                .values()
+                .flatten()
+                .map(|(_, id)| *id)
+                .chain(
+                    rows.tool_results
+                        .values()
+                        .flatten()
+                        .map(|row| row.content_id),
+                )
+                .collect();
             let contents = if ids.is_empty() {
                 BodySet(Vec::new())
             } else {
-                let scope = crate::content_store::$store::scope_id(connection, &super::content_refs::scope_key(principal)).await?;
+                let scope = crate::content_store::$store::scope_id(
+                    connection,
+                    &super::content_refs::scope_key(principal),
+                )
+                .await?;
                 let bodies = match scope {
-                    Some(scope) => crate::content_store::$store::read(connection, scope, &ids).await?,
+                    Some(scope) => {
+                        crate::content_store::$store::read(connection, scope, &ids).await?
+                    }
                     None => Vec::new(),
                 };
                 BodySet(vec![crate::content_store::Bodies::from_rows(bodies)])
             };
-            apply_body_payloads(events, &blocks, &refs, &tool_results, &contents, true)?;
-            for event in events.iter_mut().filter(|event| event.kind == "client_visible_content") {
-                if let Some(block) = blocks.get(&event.sequence) {
-                    event.payload["channel"] = json!(block.channel);
-                }
-            }
-            Ok(())
+            apply_body_payloads(events, &rows, &contents, &sequences)
         }
     };
 }
@@ -468,13 +457,13 @@ macro_rules! transaction_hydrator {
 transaction_hydrator!(
     hydrate_sqlite_transaction,
     sqlx::SqliteConnection<'_>,
-    sqlx::Sqlite,
+    load_rows_sqlite,
     sqlite
 );
 transaction_hydrator!(
     hydrate_postgres_transaction,
     sqlx::PgConnection<'_>,
-    sqlx::Postgres,
+    load_rows_postgres,
     postgres
 );
 
@@ -485,177 +474,106 @@ struct ToolResultRow {
     content_id: i64,
 }
 
-#[allow(clippy::type_complexity)]
-async fn load_rows(
-    store: &ObservationStore,
-    sequences: &[i64],
-) -> anyhow::Result<(
-    HashMap<i64, BlockRow>,
-    HashMap<i64, Vec<(i64, i64)>>,
-    HashMap<i64, Vec<ToolResultRow>>,
-)> {
-    let mut blocks = HashMap::new();
-    let mut refs: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
-    let mut tool_results: HashMap<i64, Vec<ToolResultRow>> = HashMap::new();
-    for chunk in sequences.chunks(SEQUENCE_BATCH) {
-        match store {
-            ObservationStore::Sqlite(pool, _) => {
-                let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                    "SELECT sequence,interaction_id,run_id,model_turn_id,attempt_id,item_ordinal,channel,complete,envelope FROM observation_blocks WHERE sequence IN (",
-                );
-                let mut separated = query.separated(",");
-                for sequence in chunk {
-                    separated.push_bind(*sequence);
-                }
-                separated.push_unseparated(")");
-                for row in query.build().fetch_all(pool).await? {
-                    let sequence: i64 = row.try_get("sequence")?;
-                    let envelope: Option<Vec<u8>> = row.try_get("envelope")?;
-                    blocks.insert(
-                        sequence,
-                        BlockRow {
-                            interaction_id: row.try_get("interaction_id")?,
-                            run_id: row.try_get("run_id")?,
-                            model_turn_id: row.try_get("model_turn_id")?,
-                            attempt_id: row.try_get("attempt_id")?,
-                            item_ordinal: row.try_get("item_ordinal")?,
-                            channel: row.try_get("channel")?,
-                            complete: row.try_get("complete")?,
-                            envelope: envelope
-                                .map(|bytes| -> anyhow::Result<Value> {
-                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
-                                        &bytes,
-                                    )?)?)
-                                })
-                                .transpose()?,
-                        },
-                    );
-                }
-                read_refs_sqlite(pool, chunk, &mut refs, &mut tool_results).await?;
-            }
-            ObservationStore::Postgres(pool, _) => {
-                let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                    "SELECT sequence,interaction_id,run_id,model_turn_id,attempt_id,item_ordinal,channel,complete,envelope FROM observation_blocks WHERE sequence IN (",
-                );
-                let mut separated = query.separated(",");
-                for sequence in chunk {
-                    separated.push_bind(*sequence);
-                }
-                separated.push_unseparated(")");
-                for row in query.build().fetch_all(pool).await? {
-                    let sequence: i64 = row.try_get("sequence")?;
-                    let envelope: Option<Vec<u8>> = row.try_get("envelope")?;
-                    blocks.insert(
-                        sequence,
-                        BlockRow {
-                            interaction_id: row.try_get("interaction_id")?,
-                            run_id: row.try_get("run_id")?,
-                            model_turn_id: row.try_get("model_turn_id")?,
-                            attempt_id: row.try_get("attempt_id")?,
-                            item_ordinal: row.try_get("item_ordinal")?,
-                            channel: row.try_get("channel")?,
-                            complete: row.try_get("complete")?,
-                            envelope: envelope
-                                .map(|bytes| -> anyhow::Result<Value> {
-                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
-                                        &bytes,
-                                    )?)?)
-                                })
-                                .transpose()?,
-                        },
-                    );
-                }
-                read_refs_postgres(pool, chunk, &mut refs, &mut tool_results).await?;
-            }
+/// 事件的块元数据、正文引用与工具结果，按事件序号索引。
+struct BodyRows {
+    blocks: HashMap<i64, BlockRow>,
+    refs: HashMap<i64, Vec<(i64, i64)>>,
+    tool_results: HashMap<i64, Vec<ToolResultRow>>,
+}
+
+async fn load_rows(store: &ObservationStore, sequences: &[i64]) -> anyhow::Result<BodyRows> {
+    match store {
+        ObservationStore::Sqlite(pool, _) => {
+            let mut connection = pool.acquire().await?;
+            load_rows_sqlite(&mut connection, sequences).await
+        }
+        ObservationStore::Postgres(pool, _) => {
+            let mut connection = pool.acquire().await?;
+            load_rows_postgres(&mut connection, sequences).await
         }
     }
-    Ok((blocks, refs, tool_results))
 }
 
-async fn read_refs_sqlite(
-    pool: &sqlx::SqlitePool,
-    chunk: &[i64],
-    refs: &mut HashMap<i64, Vec<(i64, i64)>>,
-    tool_results: &mut HashMap<i64, Vec<ToolResultRow>>,
-) -> anyhow::Result<()> {
-    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (",
-    );
-    let mut separated = query.separated(",");
-    for sequence in chunk {
-        separated.push_bind(*sequence);
-    }
-    separated.push_unseparated(") ORDER BY sequence,ordinal");
-    for row in query.build().fetch_all(pool).await? {
-        let sequence: i64 = row.try_get("sequence")?;
-        let ordinal: i64 = row.try_get("ordinal")?;
-        let content_id: i64 = row.try_get("content_id")?;
-        refs.entry(sequence)
-            .or_default()
-            .push((ordinal, content_id));
-    }
-    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
-    );
-    let mut separated = query.separated(",");
-    for sequence in chunk {
-        separated.push_bind(*sequence);
-    }
-    separated.push_unseparated(") ORDER BY sequence,ordinal");
-    for row in query.build().fetch_all(pool).await? {
-        let sequence: i64 = row.try_get("sequence")?;
-        tool_results
-            .entry(sequence)
-            .or_default()
-            .push(ToolResultRow {
-                tool_id: row.try_get("tool_id")?,
-                is_error: row.try_get("is_error")?,
-                content_id: row.try_get("content_id")?,
-            });
-    }
-    Ok(())
+/// 池读取与建索引事务读取同一组行；按连接实现，事务内读取才能看到未提交的写入。
+macro_rules! row_loader {
+    ($name:ident, $connection:ty, $db:ty) => {
+        async fn $name(
+            connection: &mut $connection,
+            sequences: &[i64],
+        ) -> anyhow::Result<BodyRows> {
+            let mut rows = BodyRows {
+                blocks: HashMap::new(),
+                refs: HashMap::new(),
+                tool_results: HashMap::new(),
+            };
+            for chunk in sequences.chunks(SEQUENCE_BATCH) {
+                let mut query = sqlx::QueryBuilder::<$db>::new(
+                    "SELECT sequence,interaction_id,run_id,model_turn_id,attempt_id,item_ordinal,channel,complete,envelope FROM observation_blocks WHERE sequence IN (",
+                );
+                let mut separated = query.separated(",");
+                for sequence in chunk {
+                    separated.push_bind(*sequence);
+                }
+                separated.push_unseparated(")");
+                for row in query.build().fetch_all(&mut *connection).await? {
+                    let envelope: Option<Vec<u8>> = row.try_get("envelope")?;
+                    rows.blocks.insert(
+                        row.try_get("sequence")?,
+                        BlockRow {
+                            interaction_id: row.try_get("interaction_id")?,
+                            run_id: row.try_get("run_id")?,
+                            model_turn_id: row.try_get("model_turn_id")?,
+                            attempt_id: row.try_get("attempt_id")?,
+                            item_ordinal: row.try_get("item_ordinal")?,
+                            channel: row.try_get("channel")?,
+                            complete: row.try_get("complete")?,
+                            envelope: envelope
+                                .map(|bytes| -> anyhow::Result<Value> {
+                                    Ok(serde_json::from_slice(&crate::storage_codec::decode(
+                                        &bytes,
+                                    )?)?)
+                                })
+                                .transpose()?,
+                        },
+                    );
+                }
+                let mut query = sqlx::QueryBuilder::<$db>::new(
+                    "SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (",
+                );
+                let mut separated = query.separated(",");
+                for sequence in chunk {
+                    separated.push_bind(*sequence);
+                }
+                separated.push_unseparated(") ORDER BY sequence,ordinal");
+                for row in query.build().fetch_all(&mut *connection).await? {
+                    rows.refs
+                        .entry(row.try_get("sequence")?)
+                        .or_default()
+                        .push((row.try_get("ordinal")?, row.try_get("content_id")?));
+                }
+                let mut query = sqlx::QueryBuilder::<$db>::new(
+                    "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
+                );
+                let mut separated = query.separated(",");
+                for sequence in chunk {
+                    separated.push_bind(*sequence);
+                }
+                separated.push_unseparated(") ORDER BY sequence,ordinal");
+                for row in query.build().fetch_all(&mut *connection).await? {
+                    rows.tool_results
+                        .entry(row.try_get("sequence")?)
+                        .or_default()
+                        .push(ToolResultRow {
+                            tool_id: row.try_get("tool_id")?,
+                            is_error: row.try_get("is_error")?,
+                            content_id: row.try_get("content_id")?,
+                        });
+                }
+            }
+            Ok(rows)
+        }
+    };
 }
 
-async fn read_refs_postgres(
-    pool: &sqlx::PgPool,
-    chunk: &[i64],
-    refs: &mut HashMap<i64, Vec<(i64, i64)>>,
-    tool_results: &mut HashMap<i64, Vec<ToolResultRow>>,
-) -> anyhow::Result<()> {
-    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT sequence,ordinal,content_id FROM observation_event_contents WHERE sequence IN (",
-    );
-    let mut separated = query.separated(",");
-    for sequence in chunk {
-        separated.push_bind(*sequence);
-    }
-    separated.push_unseparated(") ORDER BY sequence,ordinal");
-    for row in query.build().fetch_all(pool).await? {
-        let sequence: i64 = row.try_get("sequence")?;
-        let ordinal: i64 = row.try_get("ordinal")?;
-        let content_id: i64 = row.try_get("content_id")?;
-        refs.entry(sequence)
-            .or_default()
-            .push((ordinal, content_id));
-    }
-    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT sequence,ordinal,tool_id,is_error,content_id FROM observation_tool_results WHERE sequence IN (",
-    );
-    let mut separated = query.separated(",");
-    for sequence in chunk {
-        separated.push_bind(*sequence);
-    }
-    separated.push_unseparated(") ORDER BY sequence,ordinal");
-    for row in query.build().fetch_all(pool).await? {
-        let sequence: i64 = row.try_get("sequence")?;
-        tool_results
-            .entry(sequence)
-            .or_default()
-            .push(ToolResultRow {
-                tool_id: row.try_get("tool_id")?,
-                is_error: row.try_get("is_error")?,
-                content_id: row.try_get("content_id")?,
-            });
-    }
-    Ok(())
-}
+row_loader!(load_rows_sqlite, sqlx::SqliteConnection<'_>, sqlx::Sqlite);
+row_loader!(load_rows_postgres, sqlx::PgConnection<'_>, sqlx::Postgres);
