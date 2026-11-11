@@ -257,8 +257,7 @@ async fn write_queued_behind_lease<T: Send + 'static>(
     pool: &sqlx::SqlitePool,
     write: impl Future<Output = anyhow::Result<T>> + Send + 'static,
 ) -> anyhow::Result<T> {
-    let mut lease = pool.acquire_write().await?;
-    let mut transaction = lease.begin().await?;
+    let mut transaction = pool.begin_write().await?;
     sqlx::query("SELECT epoch FROM prompt_admission_epoch WHERE id = 1")
         .fetch_one(&mut *transaction)
         .await?;
@@ -271,7 +270,6 @@ async fn write_queued_behind_lease<T: Send + 'static>(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
-    lease.finish().await?;
     match finished_early {
         Some(result) => result?,
         None => write.await?,

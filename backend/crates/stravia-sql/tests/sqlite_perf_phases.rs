@@ -38,19 +38,17 @@ async fn wait_started(started: &AtomicBool) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn explicit_finish_completes_hold_and_finish_without_cleanup() {
+async fn committed_write_completes_hold_and_finish_without_cleanup() {
     let captured = Captured::default();
     let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::perf"]));
     let pool = isolated_pool(3).await;
 
-    let mut connection = pool.acquire_write().await.unwrap();
-    let mut transaction = connection.begin().await.unwrap();
+    let mut transaction = pool.begin_write().await.unwrap();
     stravia_sql::query("CREATE TABLE sample(id INTEGER NOT NULL)")
         .execute(&mut *transaction)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    connection.finish().await.unwrap();
 
     let spans = captured.take();
     assert_eq!(
@@ -87,7 +85,7 @@ async fn connection_acquisition_failure_marks_hold_error_without_cleanup() {
     let pool = isolated_pool(1).await;
     pool.close().await;
 
-    let error = pool.acquire_write().await.unwrap_err();
+    let error = pool.begin_write().await.unwrap_err();
     assert!(matches!(error, stravia_sql::Error::PoolClosed));
 
     let spans = captured.take();
@@ -114,7 +112,7 @@ async fn cancelled_connection_acquisition_releases_hold_without_cleanup() {
     let task_started = Arc::clone(&started);
     let task = tokio::spawn(async move {
         task_started.store(true, Ordering::Release);
-        let _ = writer.acquire_write().await;
+        let _ = writer.begin_write().await;
     });
     wait_started(&started).await;
     task.abort();
@@ -134,23 +132,21 @@ async fn cancelled_connection_acquisition_releases_hold_without_cleanup() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn dropped_write_connection_cleanup_finishes_before_hold_closes() {
+async fn dropped_write_transaction_cleanup_finishes_before_hold_closes() {
     let captured = Captured::default();
     let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::perf"]));
     let pool = isolated_pool(1).await;
 
     {
-        let mut connection = pool.acquire_write().await.unwrap();
-        let mut transaction = connection.begin().await.unwrap();
+        let mut transaction = pool.begin_write().await.unwrap();
         stravia_sql::query("CREATE TABLE sample(id INTEGER NOT NULL)")
             .execute(&mut *transaction)
             .await
             .unwrap();
-        // Drop the transaction and then the write connection without finish.
+        // Drop the write transaction without commit or rollback.
     }
     // The next lease can only acquire after cleanup released the gate.
-    let next = pool.acquire_write().await.unwrap();
-    next.finish().await.unwrap();
+    pool.begin_write().await.unwrap().commit().await.unwrap();
 
     let spans = captured.take();
     let holds = named_spans(&spans, "sqlite.write_gate.hold");
@@ -177,6 +173,10 @@ async fn dropped_write_connection_cleanup_finishes_before_hold_closes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finish 的防御检查只在迁移使用的连接级写租约上可达"
+)]
 async fn finish_with_active_transaction_reports_error_and_cleans_up() {
     let captured = Captured::default();
     let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::perf"]));
@@ -191,8 +191,7 @@ async fn finish_with_active_transaction_reports_error_and_cleans_up() {
     assert!(matches!(error, stravia_sql::Error::Protocol(_)));
 
     // The failed finish hands the gate to the close-on-drop cleanup.
-    let next = pool.acquire_write().await.unwrap();
-    next.finish().await.unwrap();
+    pool.begin_write().await.unwrap().commit().await.unwrap();
 
     let spans = captured.take();
     assert_eq!(

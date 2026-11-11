@@ -168,11 +168,9 @@ async fn intern_unreferenced(
     let mut contents = [Content::text(text)];
     let ids = match &observation.inner.store {
         store::ObservationStore::Sqlite(pool, _) => {
-            let mut connection = pool.acquire_write().await?;
-            let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = pool.begin_write().await?;
             let ids = content_refs::intern_sqlite(&mut tx, principal, &mut contents).await?;
             tx.commit().await?;
-            connection.finish().await?;
             ids
         }
         store::ObservationStore::Postgres(pool, _) => {
@@ -360,7 +358,7 @@ async fn contents_are_visible_only_through_observation_refs(
         VALUES ($1, 'api-key:reader-a', 'vendor', 'provider', 0, $2, 1, 1)";
     match &observation.inner.store {
         store::ObservationStore::Sqlite(pool, _) => {
-            let mut connection = pool.acquire_write().await?;
+            let mut connection = pool.begin_write().await?;
             sqlx::query(insert)
                 .bind("private-test-node")
                 .bind(private)
@@ -371,7 +369,7 @@ async fn contents_are_visible_only_through_observation_refs(
                 .bind(output_id)
                 .execute(&mut *connection)
                 .await?;
-            connection.finish().await?;
+            connection.commit().await?;
         }
         store::ObservationStore::Postgres(pool, _) => {
             sqlx::query(insert)

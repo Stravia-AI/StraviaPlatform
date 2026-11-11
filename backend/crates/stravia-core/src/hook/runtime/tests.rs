@@ -364,7 +364,7 @@ async fn marker_delivery_persistence_failure_returns_to_owning_inference_run() {
         .publish(&principal, std::slice::from_ref(&marker.reference))
         .await
         .unwrap();
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query(
         "CREATE TRIGGER fail_delivery_result BEFORE UPDATE OF segment_payload ON history_markers \
          WHEN NOT EXISTS (SELECT 1 FROM public_tool_executions WHERE marker_reference = OLD.reference) \
@@ -373,7 +373,7 @@ async fn marker_delivery_persistence_failure_returns_to_owning_inference_run() {
     .execute(&mut *connection)
     .await
     .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let delivery = gateway.start_history_marker_executions(principal, vec![execution]);
     entered.notified().await;
     release.notify_one();

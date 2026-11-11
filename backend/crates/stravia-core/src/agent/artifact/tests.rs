@@ -38,8 +38,7 @@ async fn artifact_ingest_reuse_and_thinking_wait_for_same_pool_write_lease() {
         .await
         .unwrap();
 
-    let mut connection = pool.acquire_write().await.unwrap();
-    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let mut transaction = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE artifacts SET expires_at=expires_at WHERE id=?")
         .bind(existing.id.as_str())
         .execute(&mut *transaction)
@@ -92,7 +91,6 @@ async fn artifact_ingest_reuse_and_thinking_wait_for_same_pool_write_lease() {
     // 首笔真实写入故意超过 fixture 的 BUSY 时限，消费者应排队而不是失败。
     let early = tokio::time::timeout(busy_timeout * 6, &mut consumers).await;
     transaction.commit().await.unwrap();
-    connection.finish().await.unwrap();
 
     let (fresh, reused, marker) = match early {
         Ok(values) => values,
@@ -171,13 +169,13 @@ async fn generated_download_relay_preserves_client_prefix_and_owner_with_live_se
         file_public_base_url: Some("https://files.example/public".into()),
         ..Default::default()
     };
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("INSERT INTO settings(name,value) VALUES('artifact_settings',?)")
         .bind(serde_json::to_string(&settings).unwrap())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let ordinary = store
         .download(&owner, &artifact.id, Duration::from_secs(60), &settings)
         .await
@@ -490,13 +488,13 @@ async fn cancelled_s3_read_removes_partial_cache_without_blocking_configuration(
         ..Default::default()
     };
     // A store constructed before the persisted update must use the shared S3 config.
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("INSERT INTO settings(name,value) VALUES('artifact_settings',?)")
         .bind(serde_json::to_string(&settings).unwrap())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let owner = Principal::new("cancel-reader");
     let artifact = store
         .ingest(
@@ -609,13 +607,13 @@ async fn delayed_s3_sweep_allows_unrelated_sqlite_writes_and_safe_reuse() {
         }),
         ..Default::default()
     };
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("INSERT INTO settings(name,value) VALUES('artifact_settings',?)")
         .bind(serde_json::to_string(&settings).unwrap())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let owner = Principal::new("reuse-owner");
     let payload = Bytes::from_static(b"reusable");
     let artifact = store
@@ -634,13 +632,13 @@ async fn delayed_s3_sweep_allows_unrelated_sqlite_writes_and_safe_reuse() {
         .await
         .unwrap();
     let object_path = root.join(backend_key);
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
         .bind(artifact.id.as_str())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
 
     let sweeping_store = store.clone();
     let sweeping = tokio::spawn(async move { sweeping_store.sweep_expired().await });
@@ -762,15 +760,17 @@ async fn delayed_s3_sweep_allows_unrelated_sqlite_writes_and_safe_reuse() {
     assert_eq!(bytes, payload);
 
     // 真正失败的 metadata DELETE 必须保留过期状态；再次上传修复对象后才可复活。
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
         .bind(reused.id.as_str())
         .execute(&mut *connection)
         .await
         .unwrap();
+    connection.commit().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("CREATE TRIGGER fail_ready_delete BEFORE DELETE ON artifacts WHEN OLD.state='ready' BEGIN SELECT RAISE(ABORT, 'isolated metadata delete failure'); END")
         .execute(&mut *connection).await.unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     assert!(matches!(
         store.sweep_expired().await,
         Err(ArtifactError::Storage(_))
@@ -780,12 +780,12 @@ async fn delayed_s3_sweep_allows_unrelated_sqlite_writes_and_safe_reuse() {
         store.open(&owner, &reused.id).await,
         Err(ArtifactError::NotFound)
     ));
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("DROP TRIGGER fail_ready_delete")
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let repaired = store
         .ingest(
             &owner,
@@ -1072,13 +1072,13 @@ async fn s3_multipart_native_download_and_platform_relay_preserve_bytes() {
         s3: Some(s3),
         ..Default::default()
     };
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("INSERT INTO settings(name,value) VALUES('artifact_settings',?)")
         .bind(serde_json::to_string(&settings).unwrap())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let owner = Principal::new("s3-owner");
     let artifact = rebuilt
         .ingest(
@@ -1110,13 +1110,13 @@ async fn s3_multipart_native_download_and_platform_relay_preserve_bytes() {
     drop(reader);
     settings.external_signed_downloads = true;
     settings.file_public_base_url = Some(endpoint.clone());
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE settings SET value=? WHERE name='artifact_settings'")
         .bind(serde_json::to_string(&settings).unwrap())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let native = rebuilt
         .download(&owner, &artifact.id, Duration::from_secs(60), &settings)
         .await
@@ -1148,34 +1148,34 @@ async fn s3_multipart_native_download_and_platform_relay_preserve_bytes() {
     );
     settings.s3.as_mut().unwrap().credentials_expires_at =
         Some(chrono::Utc::now().timestamp_millis() + 299_000);
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE settings SET value=? WHERE name='artifact_settings'")
         .bind(serde_json::to_string(&settings).unwrap())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     assert!(matches!(
         rebuilt
             .download(&owner, &artifact.id, Duration::from_secs(60), &settings)
             .await,
         Err(ArtifactError::Invalid(_))
     ));
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
         .bind(artifact.id.as_str())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     assert_eq!(rebuilt.sweep_expired().await.unwrap(), 0);
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE artifact_download_grants SET expires_at=0 WHERE artifact_id=?")
         .bind(artifact.id.as_str())
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     assert_eq!(rebuilt.sweep_expired().await.unwrap(), 1);
     assert_eq!(
         reqwest::get(&native.url).await.unwrap().status(),
@@ -1332,16 +1332,16 @@ async fn failed_ready_artifact_file_cleanup_keeps_its_database_record() {
         .await
         .expect("Artifact row count");
     assert_eq!(record_count, 1);
-    let mut connection = pool.acquire_write().await.expect("SQLite write lease");
+    let mut connection = pool.begin_write().await.expect("SQLite write lease");
     sqlx::query("UPDATE artifacts SET expires_at = 0 WHERE id = ?")
         .bind(artifact.id.as_str())
         .execute(&mut *connection)
         .await
         .expect("expire Artifact");
     connection
-        .finish()
+        .commit()
         .await
-        .expect("finish SQLite write lease");
+        .expect("commit SQLite write transaction");
     assert!(matches!(
         store.sweep_expired().await,
         Err(ArtifactError::Storage(_))
@@ -1375,16 +1375,16 @@ async fn batch_retention_extension_cannot_revive_expired_artifacts() {
         )
         .await
         .expect("ready Artifact");
-    let mut connection = pool.acquire_write().await.expect("SQLite write lease");
+    let mut connection = pool.begin_write().await.expect("SQLite write lease");
     sqlx::query("UPDATE artifacts SET expires_at = 0 WHERE id = ?")
         .bind(artifact.id.as_str())
         .execute(&mut *connection)
         .await
         .expect("expire Artifact");
     connection
-        .finish()
+        .commit()
         .await
-        .expect("finish SQLite write lease");
+        .expect("commit SQLite write transaction");
 
     assert!(matches!(
         store
@@ -1438,16 +1438,16 @@ async fn sweep_expired_upload_removes_staging_before_upload_metadata() {
     tokio::fs::write(staging.join("partial.tmp"), b"abc")
         .await
         .expect("write partial upload");
-    let mut connection = pool.acquire_write().await.expect("SQLite write lease");
+    let mut connection = pool.begin_write().await.expect("SQLite write lease");
     sqlx::query("UPDATE artifact_uploads SET expires_at = 0 WHERE id = ?")
         .bind(&upload.upload_id)
         .execute(&mut *connection)
         .await
         .expect("expire upload");
     connection
-        .finish()
+        .commit()
         .await
-        .expect("finish SQLite write lease");
+        .expect("commit SQLite write transaction");
 
     assert_eq!(store.sweep_expired().await.expect("sweep upload"), 0);
     assert!(matches!(
@@ -1465,16 +1465,16 @@ async fn sweep_expired_upload_removes_staging_before_upload_metadata() {
     assert_eq!(upload_count, 0);
     assert_eq!(artifact_count, 1);
 
-    let mut connection = pool.acquire_write().await.expect("SQLite write lease");
+    let mut connection = pool.begin_write().await.expect("SQLite write lease");
     sqlx::query("UPDATE artifacts SET expires_at = 0 WHERE id = ?")
         .bind(&staging_artifact_id)
         .execute(&mut *connection)
         .await
         .expect("expire staging artifact");
     connection
-        .finish()
+        .commit()
         .await
-        .expect("finish SQLite write lease");
+        .expect("commit SQLite write transaction");
     assert_eq!(store.sweep_expired().await.expect("sweep artifact"), 1);
     let (artifact_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM artifacts")
         .fetch_one(&pool)

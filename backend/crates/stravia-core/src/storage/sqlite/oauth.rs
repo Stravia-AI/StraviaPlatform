@@ -27,7 +27,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         input: UpsertOAuthCredential,
     ) -> anyhow::Result<OAuthCredential> {
         let connection_id = stravia_runtime_contract::identifier::new_id();
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
     r#"INSERT INTO provider_oauth_credentials
            (provider_id, connection_id, driver_key, scheme, access_token, refresh_token,
@@ -64,19 +64,19 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
             .bind(input.meta.as_deref().unwrap_or("{}"))
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         self.get(provider_id)
             .await?
             .context("credential not found after upsert")
     }
 
     async fn delete(&self, provider_id: &str) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query("DELETE FROM provider_oauth_credentials WHERE provider_id = ?")
             .bind(provider_id)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(())
     }
 
@@ -85,7 +85,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         provider_id: &str,
         expected_version: i32,
     ) -> anyhow::Result<Option<OAuthCredential>> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             r#"UPDATE provider_oauth_credentials
        SET status = 'refreshing', status_version = status_version + 1,
@@ -96,7 +96,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         .bind(expected_version)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         if result.rows_affected() > 0 {
             Ok(self.get(provider_id).await?)
         } else {
@@ -109,7 +109,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         provider_id: &str,
         expected_version: i32,
     ) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             r#"UPDATE provider_oauth_credentials
        SET status = 'connected', status_version = status_version + 1,
@@ -120,7 +120,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         .bind(expected_version)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -130,7 +130,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         expected_version: i32,
         input: UpsertOAuthCredential,
     ) -> anyhow::Result<OAuthCredential> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             r#"UPDATE provider_oauth_credentials SET
            driver_key = ?, scheme = ?,
@@ -155,7 +155,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         .bind(expected_version)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         anyhow::ensure!(
             result.rows_affected() == 1,
             "credential refresh lease is no longer current"
@@ -171,7 +171,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         expected_version: i32,
         error_message: &str,
     ) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             r#"UPDATE provider_oauth_credentials SET
            status = 'error', last_error = ?,
@@ -184,7 +184,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         .bind(expected_version)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -208,7 +208,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
 
     async fn recover_stale_refreshing(&self, timeout: Duration) -> anyhow::Result<u64> {
         let seconds = timeout.as_secs() as i64;
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             r#"UPDATE provider_oauth_credentials SET
            status = 'connected',
@@ -221,7 +221,7 @@ impl OAuthCredentialStore for SqliteOAuthCredentialStore {
         .bind(seconds)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected())
     }
 }

@@ -1,11 +1,13 @@
 use std::ops::{Deref, DerefMut};
 
+use sqlx_core::transaction::TransactionManager as _;
 use sqlx_native::Connection as _;
 use tokio::{runtime::Handle, sync::OwnedMutexGuard};
 
 use crate::{
-    ConnectionHandle, Database, Error, PoolConnection, WriteMode,
+    ConnectionHandle, Database, Error, PoolConnection, SqlSafeStr, Sqlite, WriteMode,
     diagnostics::{self, Phase},
+    transaction_begin_phase, transaction_commit_phase, transaction_rollback_phase,
 };
 
 /// 持有 SQLite 写协调权及其墙钟计时 span。
@@ -30,6 +32,9 @@ impl Lease {
 }
 
 /// 持有连接及其 SQLite 写协调权。事务必须借用此连接，不能另从池中取连接。
+///
+/// 仅用于必须在事务外执行的写入（迁移期的 `PRAGMA foreign_keys`、SQLx 迁移器、
+/// `sqlite3_deserialize`）；业务写入使用 [`crate::Pool::begin_write`]。
 #[derive(Debug)]
 pub struct WriteConnection<DB: Database> {
     connection: Option<PoolConnection<DB>>,
@@ -37,6 +42,8 @@ pub struct WriteConnection<DB: Database> {
     runtime: Option<Handle>,
     discard_on_drop: bool,
     write_mode: Option<WriteMode<DB>>,
+    /// 由 [`WriteTransaction`] 开启且尚未提交或回滚；析构时须先向驱动排入回滚。
+    transaction_open: bool,
 }
 
 impl<DB: Database> WriteConnection<DB> {
@@ -47,6 +54,29 @@ impl<DB: Database> WriteConnection<DB> {
             lease,
             discard_on_drop: false,
             write_mode: None,
+            transaction_open: false,
+        }
+    }
+
+    fn native(&mut self) -> &mut DB::Connection {
+        self.connection
+            .as_mut()
+            .expect("live write connection")
+            .handle
+            .raw()
+    }
+
+    fn pool_name(&self) -> &'static str {
+        self.connection
+            .as_ref()
+            .expect("live write connection")
+            .handle
+            .name
+    }
+
+    fn record_failure(&mut self, error: &Error) {
+        if let Some(lease) = self.lease.as_mut() {
+            lease.hold.fail(error);
         }
     }
 
@@ -61,11 +91,10 @@ impl<DB: Database> WriteConnection<DB> {
             return Ok(());
         };
         let connection = self.connection.as_mut().expect("live write connection");
-        if let Err(error) = write_mode(connection.handle.raw(), true).await {
+        let result = write_mode(connection.handle.raw(), true).await;
+        if let Err(error) = result {
             self.discard_on_drop = true;
-            if let Some(lease) = self.lease.as_mut() {
-                lease.hold.fail(&error);
-            }
+            self.record_failure(&error);
             return Err(error);
         }
         Ok(())
@@ -139,11 +168,83 @@ impl<DB: Database> DerefMut for WriteConnection<DB> {
     }
 }
 
+/// 写事务。SQLite 持有同池写租约并以 `BEGIN IMMEDIATE` 开启；PostgreSQL 为普通事务。
+///
+/// 以 [`commit`](Self::commit) 或 [`rollback`](Self::rollback) 结束，二者在事务结束后
+/// 恢复连接只读并释放租约。未结束即析构（错误或取消）时排入回滚，后台清理确认回滚
+/// 完成后才放行下一个写者。事务内不能做文件或网络 I/O，也不能再开启同池写事务。
+#[derive(Debug)]
+pub struct WriteTransaction<DB: Database> {
+    connection: WriteConnection<DB>,
+}
+
+impl<DB: Database> WriteTransaction<DB> {
+    pub(super) async fn begin(mut connection: WriteConnection<DB>) -> Result<Self, Error> {
+        let mut phase = transaction_begin_phase::<DB>(connection.pool_name());
+        // 先标记：BEGIN 失败或被取消时析构照常排入回滚，驱动在无事务时忽略回滚。
+        connection.transaction_open = true;
+        // 立即取得数据库写锁：延迟事务升级时遇到外部写者会绕过 busy handler 直接失败。
+        let statement = (DB::NAME == <Sqlite as Database>::NAME)
+            .then(|| SqlSafeStr::into_sql_str("BEGIN IMMEDIATE"));
+        let result = DB::TransactionManager::begin(connection.native(), statement).await;
+        phase.finish(result.as_ref().err());
+        match result {
+            Ok(()) => Ok(Self { connection }),
+            Err(error) => {
+                connection.record_failure(&error);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn commit(mut self) -> Result<(), Error> {
+        let mut phase = transaction_commit_phase::<DB>(self.connection.pool_name());
+        let result = DB::TransactionManager::commit(self.connection.native()).await;
+        phase.finish(result.as_ref().err());
+        self.end(result).await
+    }
+
+    pub async fn rollback(mut self) -> Result<(), Error> {
+        let mut phase = transaction_rollback_phase::<DB>(self.connection.pool_name());
+        let result = DB::TransactionManager::rollback(self.connection.native()).await;
+        phase.finish(result.as_ref().err());
+        self.end(result).await
+    }
+
+    async fn end(mut self, result: Result<(), Error>) -> Result<(), Error> {
+        if let Err(error) = result {
+            // 事务仍活跃：析构排入回滚，并由后台清理持有协调权直至回滚完成。
+            self.connection.record_failure(&error);
+            return Err(error);
+        }
+        self.connection.transaction_open = false;
+        self.connection.finish().await
+    }
+}
+
+impl<DB: Database> Deref for WriteTransaction<DB> {
+    type Target = ConnectionHandle<'static, DB>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl<DB: Database> DerefMut for WriteTransaction<DB> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+
 impl<DB: Database> Drop for WriteConnection<DB> {
     fn drop(&mut self) {
         let Some(mut connection) = self.connection.take() else {
             return;
         };
+        if self.transaction_open {
+            // 与 SQLx 事务析构相同：只向驱动排入回滚，后续屏障或下次使用等候其完成。
+            DB::TransactionManager::start_rollback(connection.handle.raw());
+        }
         let Some(mut lease) = self.lease.take() else {
             return;
         };

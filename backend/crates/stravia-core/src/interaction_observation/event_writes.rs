@@ -138,7 +138,7 @@ macro_rules! flush_writes {
             /// 把已收集的行写入并清空缓冲；后续语句要读取这些行时（如用量修订回写）先调用。
             pub(super) async fn $name(
                 &mut self,
-                tx: &mut sqlx::Transaction<'_, $db>,
+                tx: &mut sqlx::ConnectionHandle<'_, $db>,
             ) -> anyhow::Result<()> {
                 let events = std::mem::take(&mut self.events);
                 let blocks = std::mem::take(&mut self.blocks);
@@ -160,7 +160,7 @@ macro_rules! flush_writes {
                             .push_bind(&event.tool_id)
                             .push_bind(&event.operation_id);
                     });
-                    insert.build().execute(&mut **tx).await?;
+                    insert.build().execute(&mut *tx).await?;
                 }
                 for rows in blocks.chunks(BLOCK_ROWS_PER_INSERT) {
                     let mut insert = QueryBuilder::<$db>::new(
@@ -177,7 +177,7 @@ macro_rules! flush_writes {
                             .push_bind(block.complete)
                             .push_bind(&block.envelope);
                     });
-                    insert.build().execute(&mut **tx).await?;
+                    insert.build().execute(&mut *tx).await?;
                 }
                 for rows in refs.chunks(REF_ROWS_PER_INSERT) {
                     let mut insert = QueryBuilder::<$db>::new(
@@ -188,7 +188,7 @@ macro_rules! flush_writes {
                             .push_bind(reference.ordinal)
                             .push_bind(reference.content_id);
                     });
-                    insert.build().execute(&mut **tx).await?;
+                    insert.build().execute(&mut *tx).await?;
                 }
                 for rows in tools.chunks(TOOL_ROWS_PER_INSERT) {
                     let mut insert = QueryBuilder::<$db>::new(
@@ -201,7 +201,7 @@ macro_rules! flush_writes {
                             .push_bind(tool.is_error)
                             .push_bind(tool.content_id);
                     });
-                    insert.build().execute(&mut **tx).await?;
+                    insert.build().execute(&mut *tx).await?;
                 }
                 Ok(())
             }

@@ -4,7 +4,7 @@ use std::str::FromStr;
 use anyhow::Context;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use sqlx::{Sqlite, SqliteConnection, Transaction};
+use sqlx::{Sqlite, SqliteConnection};
 
 use super::SqliteStorage;
 use super::routes::SqliteRouteStore;
@@ -114,8 +114,7 @@ impl ProviderModelStore for SqliteStorage {
         reconciliation: ProviderModelReconciliation,
         validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
     ) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         if let Some(expected) = &reconciliation.expected_provider {
             let provider = sqlx::query_as::<_, crate::db::models::Provider>(
                 "SELECT * FROM providers WHERE id = ?",
@@ -204,7 +203,6 @@ impl ProviderModelStore for SqliteStorage {
             bump_config_epoch(&mut tx).await?;
         }
         tx.commit().await?;
-        connection.finish().await?;
         Ok(())
     }
 
@@ -213,8 +211,7 @@ impl ProviderModelStore for SqliteStorage {
         input: NewProviderModelRecord,
         change_record: Option<ModelChangeRecord>,
     ) -> anyhow::Result<ProviderModelMutation> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let exists = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM provider_models WHERE provider_id = ? AND model_id = ?",
         )
@@ -225,7 +222,6 @@ impl ProviderModelStore for SqliteStorage {
             > 0;
         if exists {
             tx.rollback().await?;
-            connection.finish().await?;
             return Ok(ProviderModelMutation::Conflict);
         }
         let provider_id = input.provider_id.clone();
@@ -239,7 +235,6 @@ impl ProviderModelStore for SqliteStorage {
             .await?
             .context("created Provider Model not found")?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
@@ -251,8 +246,7 @@ impl ProviderModelStore for SqliteStorage {
         snapshot_state: SnapshotState,
         expected_revision: i64,
     ) -> anyhow::Result<ProviderModelMutation> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN").await?;
+        let mut tx = self.pool.begin_write().await?;
         let result = update_record_metadata(
             &mut tx,
             provider_id,
@@ -265,7 +259,6 @@ impl ProviderModelStore for SqliteStorage {
         if !result {
             let exists = model_exists(&mut tx, provider_id, model_id).await?;
             tx.rollback().await?;
-            connection.finish().await?;
             return Ok(if exists {
                 ProviderModelMutation::Conflict
             } else {
@@ -278,7 +271,6 @@ impl ProviderModelStore for SqliteStorage {
             .await?
             .context("updated Provider Model not found")?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
@@ -290,8 +282,7 @@ impl ProviderModelStore for SqliteStorage {
         validate_map: &crate::provider_models::ProviderModelThinkingMapValidator<'_>,
         before_commit: &(dyn Fn() -> anyhow::Result<()> + Send + Sync),
     ) -> anyhow::Result<ProviderModelRestore> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let updated = update_record_metadata(
             &mut tx,
             provider_id,
@@ -304,7 +295,6 @@ impl ProviderModelStore for SqliteStorage {
         if !updated {
             let exists = model_exists(&mut tx, provider_id, model_id).await?;
             tx.rollback().await?;
-            connection.finish().await?;
             return Ok(if exists {
                 ProviderModelRestore::Conflict
             } else {
@@ -330,7 +320,6 @@ impl ProviderModelStore for SqliteStorage {
         let active_routes = SqliteRouteStore::load_routes(&mut tx, true).await?;
         before_commit()?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ProviderModelRestore::Applied {
             model: Box::new(model),
             active_routes,
@@ -345,22 +334,18 @@ impl ProviderModelStore for SqliteStorage {
         expected_revision: i64,
         change_record: Option<ModelChangeRecord>,
     ) -> anyhow::Result<ProviderModelMutation> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         if let Some(record) = get_record(&mut tx, provider_id, model_id).await? {
             if record.revision != expected_revision {
                 tx.rollback().await?;
-                connection.finish().await?;
                 return Ok(ProviderModelMutation::Conflict);
             }
             if record.selection_policy == policy {
                 tx.rollback().await?;
-                connection.finish().await?;
                 return Ok(ProviderModelMutation::Applied(Box::new(record)));
             }
         } else {
             tx.rollback().await?;
-            connection.finish().await?;
             return Ok(ProviderModelMutation::NotFound);
         }
         let result = sqlx::query(
@@ -377,7 +362,6 @@ impl ProviderModelStore for SqliteStorage {
         if result.rows_affected() == 0 {
             let exists = get_record(&mut tx, provider_id, model_id).await?.is_some();
             tx.rollback().await?;
-            connection.finish().await?;
             return Ok(if exists {
                 ProviderModelMutation::Conflict
             } else {
@@ -394,7 +378,6 @@ impl ProviderModelStore for SqliteStorage {
             .await?
             .context("updated Provider Model not found")?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ProviderModelMutation::Applied(Box::new(record)))
     }
 
@@ -407,13 +390,11 @@ impl ProviderModelStore for SqliteStorage {
         provider_id: &str,
         enabled: bool,
     ) -> anyhow::Result<ProviderModelSyncState> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         sqlx::query("INSERT INTO provider_model_sync_state (provider_id, automatic_sync) VALUES (?, ?) ON CONFLICT(provider_id) DO UPDATE SET automatic_sync = excluded.automatic_sync")
             .bind(provider_id).bind(enabled).execute(&mut *tx).await?;
         let state = load_sync_state(&mut tx, provider_id).await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(state)
     }
 
@@ -423,8 +404,7 @@ impl ProviderModelStore for SqliteStorage {
         summary: ProviderModelSyncSummary,
         mut record: ModelChangeRecord,
     ) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         if sqlx::query_scalar::<_, String>("SELECT id FROM providers WHERE id = ?")
             .bind(provider_id)
             .fetch_optional(&mut *tx)
@@ -452,7 +432,6 @@ impl ProviderModelStore for SqliteStorage {
             insert_change(&mut tx, &record).await?;
         }
         tx.commit().await?;
-        connection.finish().await?;
         Ok(())
     }
 
@@ -517,18 +496,17 @@ impl ProviderModelStore for SqliteStorage {
     }
 
     async fn prune_changes(&self, before: &str) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query("DELETE FROM model_changes WHERE checked_at < ?")
             .bind(before)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(())
     }
 
     async fn delete_manual(&self, provider_id: &str, model_id: &str) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let result = sqlx::query(
     "DELETE FROM provider_models WHERE provider_id = ? AND model_id = ? AND source_kind = 'manual'",
             )
@@ -543,7 +521,6 @@ impl ProviderModelStore for SqliteStorage {
             bump_config_epoch(&mut tx).await?;
         }
         tx.commit().await?;
-        connection.finish().await?;
         Ok(deleted)
     }
 }
@@ -568,18 +545,18 @@ async fn load_sync_state(
 }
 
 async fn save_summary(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     provider_id: &str,
     summary: &ProviderModelSyncSummary,
     success: bool,
 ) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO provider_model_sync_state (provider_id, last_check, has_successful_sync) VALUES (?, ?, ?) ON CONFLICT(provider_id) DO UPDATE SET last_check = excluded.last_check, has_successful_sync = provider_model_sync_state.has_successful_sync OR excluded.has_successful_sync")
-        .bind(provider_id).bind(serde_json::to_string(summary)?).bind(success).execute(&mut **tx).await?;
+        .bind(provider_id).bind(serde_json::to_string(summary)?).bind(success).execute(&mut *connection).await?;
     Ok(())
 }
 
 async fn insert_change(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     record: &ModelChangeRecord,
 ) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO model_changes (id, provider_id, checked_at, source, record_json) VALUES (?, ?, ?, ?, ?)")
@@ -588,7 +565,7 @@ async fn insert_change(
     .bind(&record.checked_at)
     .bind(record.source.as_str())
     .bind(serde_json::to_string(record)?)
-    .execute(&mut **tx).await?;
+    .execute(&mut *connection).await?;
     for item in &record.changes {
         let name_key = item.name.to_lowercase();
         let model_id_key = item.model_id.to_lowercase();
@@ -598,7 +575,7 @@ async fn insert_change(
             .bind(&name_key)
             .bind(&model_id_key)
             .bind(kind.as_str())
-            .execute(&mut **tx).await?;
+            .execute(&mut *connection).await?;
         }
     }
     Ok(())
@@ -717,7 +694,7 @@ fn decode_rule(row: CostRuleRow) -> anyhow::Result<ProviderModelCostRule> {
 }
 
 async fn apply_discovered_metadata_update(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     provider_id: &str,
     update: &ProviderModelPresenceUpdate,
 ) -> anyhow::Result<()> {
@@ -728,7 +705,7 @@ async fn apply_discovered_metadata_update(
         )
         .bind(provider_id)
         .bind(&update.model_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(&mut *connection)
         .await?
         .context("Provider Model disappeared during reconciliation")?;
     let mut metadata = match &update.metadata {
@@ -770,17 +747,23 @@ async fn apply_discovered_metadata_update(
     .bind(provider_id)
     .bind(&update.model_id)
     .bind(update.expected_revision)
-    .execute(&mut **tx)
+    .execute(&mut *connection)
     .await?;
     anyhow::ensure!(
         result.rows_affected() == 1,
         "Provider Model has changed while synchronizing discovered models"
     );
-    replace_cost_rules(tx, provider_id, &update.model_id, &metadata.cost_rules()).await
+    replace_cost_rules(
+        connection,
+        provider_id,
+        &update.model_id,
+        &metadata.cost_rules(),
+    )
+    .await
 }
 
 async fn insert_record(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     input: NewProviderModelRecord,
 ) -> anyhow::Result<()> {
     let metadata_json = serde_json::to_string(&input.metadata)?;
@@ -818,10 +801,10 @@ async fn insert_record(
     .bind(decimal_text(prices.and_then(|prices| prices.cache_read)))
     .bind(decimal_text(prices.and_then(|prices| prices.cache_write)))
     .bind(metadata_json)
-    .execute(&mut **tx)
+    .execute(&mut *connection)
     .await?;
     replace_cost_rules(
-        tx,
+        connection,
         &input.provider_id,
         &input.model_id,
         &input.metadata.cost_rules(),
@@ -830,7 +813,7 @@ async fn insert_record(
 }
 
 async fn update_record_metadata(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     provider_id: &str,
     model_id: &str,
     metadata: &ProviderModelMetadata,
@@ -859,13 +842,13 @@ async fn update_record_metadata(
     .bind(provider_id)
     .bind(model_id)
     .bind(expected_revision)
-    .execute(&mut **tx)
+    .execute(&mut *connection)
     .await?;
     Ok(result.rows_affected() == 1)
 }
 
 async fn replace_cost_rules(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     provider_id: &str,
     model_id: &str,
     rules: &[ProviderModelCostRule],
@@ -873,7 +856,7 @@ async fn replace_cost_rules(
     sqlx::query("DELETE FROM provider_model_cost_rules WHERE provider_id = ? AND model_id = ?")
         .bind(provider_id)
         .bind(model_id)
-        .execute(&mut **tx)
+        .execute(&mut *connection)
         .await?;
     for rule in rules {
         sqlx::query(
@@ -894,14 +877,14 @@ async fn replace_cost_rules(
         .bind(decimal_text(rule.prices.output))
         .bind(decimal_text(rule.prices.cache_read))
         .bind(decimal_text(rule.prices.cache_write))
-        .execute(&mut **tx)
+        .execute(&mut *connection)
         .await?;
     }
     Ok(())
 }
 
 async fn model_exists(
-    tx: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection<'_>,
     provider_id: &str,
     model_id: &str,
 ) -> anyhow::Result<bool> {
@@ -910,7 +893,7 @@ async fn model_exists(
     )
     .bind(provider_id)
     .bind(model_id)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *connection)
     .await?
         > 0)
 }
@@ -918,10 +901,10 @@ async fn model_exists(
 /// Persist the configuration-change notification inside the caller's
 /// transaction so other replicas reload their runtime snapshot together with
 /// the configuration it announces. A missing or unparsable epoch counts as 0.
-async fn bump_config_epoch(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<()> {
+async fn bump_config_epoch(connection: &mut SqliteConnection<'_>) -> anyhow::Result<()> {
     let current: i64 = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE name = ?")
         .bind(CONFIG_EPOCH_KEY)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(&mut *connection)
         .await?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
@@ -934,7 +917,7 @@ async fn bump_config_epoch(tx: &mut Transaction<'_, Sqlite>) -> anyhow::Result<(
     )
     .bind(CONFIG_EPOCH_KEY)
     .bind(next.to_string())
-    .execute(&mut **tx)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
@@ -1168,7 +1151,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         for provider_id in ["matrix", "single", "empty"] {
             sqlx::query(
                 "INSERT INTO providers (id, name, protocol, base_url, api_key)
@@ -1180,7 +1163,7 @@ mod tests {
             .await
             .unwrap();
         }
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
         let storage = SqliteStorage::from_pool(pool);
 
         let mut next = 0;
@@ -1264,7 +1247,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
                      VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
@@ -1272,7 +1255,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
         let storage = SqliteStorage::from_pool(pool);
         for model_id in ["first", "second"] {
             storage
@@ -1356,7 +1339,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
-        let mut writer = pool.acquire_write().await.expect("writer connection");
+        let mut writer = pool.begin_write().await.expect("writer connection");
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
@@ -1364,7 +1347,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .expect("test Provider");
-        writer.finish().await.expect("release fixture lease");
+        writer.commit().await.expect("release fixture lease");
         let storage = SqliteStorage::from_pool(pool.clone());
 
         let mut writer = sqlx::sqlite::SqliteConnection::connect_with(&pool.connect_options())
@@ -1421,7 +1404,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
@@ -1429,7 +1412,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
         let storage = SqliteStorage::from_pool(pool);
         let mutation = storage
             .create(
@@ -1499,7 +1482,7 @@ mod tests {
         priority: i32,
         map: &[ThinkingLevelMapping],
     ) {
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query(
             "INSERT INTO models (id, model_id, balance, is_enabled)
              VALUES (?, ?, 'traffic_equalization', ?)",
@@ -1524,7 +1507,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
     }
 
     async fn target_row(
@@ -1614,13 +1597,13 @@ mod tests {
             },
             source: ThinkingMappingSource::Overridden,
         };
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query("UPDATE model_backends SET thinking_level_map = ? WHERE id = 'target-a'")
             .bind(sqlx::types::Json(&overridden_map))
             .execute(&mut *writer)
             .await
             .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
 
         let epoch_before = config_epoch(pool).await.unwrap().parse::<i64>().unwrap();
         let target_a_before = target_row(pool, "target-a").await;
@@ -1749,7 +1732,7 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '7')")
             .execute(&mut *writer)
             .await
@@ -1773,7 +1756,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_a_before = target_map(pool, "target-a").await;
@@ -1813,7 +1796,7 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '3')")
             .execute(&mut *writer)
             .await
@@ -1826,7 +1809,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
@@ -1865,12 +1848,12 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '4')")
             .execute(&mut *writer)
             .await
             .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
@@ -1987,14 +1970,14 @@ mod tests {
     async fn restore_treats_an_invalid_epoch_as_zero() {
         let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query(
             "INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', 'bogus')",
         )
         .execute(&mut *writer)
         .await
         .unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
 
         let result = storage
             .restore(

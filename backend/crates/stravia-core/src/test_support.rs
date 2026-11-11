@@ -27,6 +27,10 @@ pub(crate) async fn migrated_sqlite_pool() -> anyhow::Result<SqlitePool> {
         .require_write_lease()
         .connect("sqlite::memory:")
         .await?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sqlite3_deserialize 不能在事务内执行"
+    )]
     let mut connection = pool.acquire_write().await?;
     connection
         .deserialize(None, SqliteOwnedBuf::try_from(template.as_slice())?, false)

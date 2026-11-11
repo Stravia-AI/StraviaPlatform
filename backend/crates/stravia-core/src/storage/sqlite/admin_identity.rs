@@ -28,7 +28,7 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
     }
 
     async fn create_identity(&self, identity: NewAdminIdentity<'_>) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             "INSERT INTO admin_identity \
      (singleton_id, username, password_hash, jwt_secret, credential_revision) \
@@ -39,12 +39,12 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         .bind(identity.jwt_secret)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected() == 1)
     }
 
     async fn create_session(&self, session: NewAdminSession<'_>) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
             "INSERT INTO admin_sessions \
      (id, identity_id, credential_revision, refresh_hash, expires_at, revoked) \
@@ -57,7 +57,7 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         .bind(session.credential_revision)
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -90,7 +90,7 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         expected_refresh_hash: &str,
         new_refresh_hash: &str,
     ) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query(
     "UPDATE admin_sessions SET refresh_hash = ? \
      WHERE id = ? AND refresh_hash = ? AND revoked = 0 \
@@ -101,17 +101,17 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
             .bind(expected_refresh_hash)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected() == 1)
     }
 
     async fn revoke_session(&self, id: &str) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query("UPDATE admin_sessions SET revoked = 1 WHERE id = ?")
             .bind(id)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(())
     }
 
@@ -121,8 +121,7 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         username: &str,
         password_hash: &str,
     ) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut transaction = connection.begin().await?;
+        let mut transaction = self.pool.begin_write().await?;
         let result = sqlx::query(
             "UPDATE admin_identity SET username = ?, password_hash = ?, \
      credential_revision = credential_revision + 1 \
@@ -135,14 +134,12 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         .await?;
         if result.rows_affected() == 0 {
             transaction.rollback().await?;
-            connection.finish().await?;
             return Ok(false);
         }
         sqlx::query("UPDATE admin_sessions SET revoked = 1 WHERE revoked = 0")
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        connection.finish().await?;
         Ok(true)
     }
 
@@ -151,8 +148,7 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         username: &str,
         password_hash: &str,
     ) -> anyhow::Result<bool> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut transaction = connection.begin().await?;
+        let mut transaction = self.pool.begin_write().await?;
         let result = sqlx::query(
             "UPDATE admin_identity SET username = ?, password_hash = ?, \
      credential_revision = credential_revision + 1 WHERE singleton_id = 1",
@@ -163,14 +159,12 @@ impl AdminIdentityStore for SqliteAdminIdentityStore {
         .await?;
         if result.rows_affected() == 0 {
             transaction.rollback().await?;
-            connection.finish().await?;
             return Ok(false);
         }
         sqlx::query("UPDATE admin_sessions SET revoked = 1 WHERE revoked = 0")
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        connection.finish().await?;
         Ok(true)
     }
 }

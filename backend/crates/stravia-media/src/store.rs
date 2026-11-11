@@ -186,7 +186,7 @@ impl MediaDerivativeStore {
         let principal_key = principal.continuation_key();
         let insertion = match &self.database {
             MediaDatabase::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await
+                let mut connection = pool.begin_write().await
                     .map_err(|error| MediaStoreError::Storage(error.to_string()))?;
                 let result = sqlx::query(
                     "INSERT OR IGNORE INTO media_derivatives (principal, source_artifact_id, derivative_artifact_id, created_at) VALUES (?, ?, ?, ?)",
@@ -198,7 +198,7 @@ impl MediaDerivativeStore {
                 .execute(&mut *connection)
                 .await
                 .map_err(|error| MediaStoreError::Storage(error.to_string()))?;
-                connection.finish().await
+                connection.commit().await
                     .map_err(|error| MediaStoreError::Storage(error.to_string()))?;
                 Ok(result.rows_affected())
             }

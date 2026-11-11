@@ -750,14 +750,14 @@ impl Database {
     async fn expire_admission(&self, admission: &str) -> anyhow::Result<()> {
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut tx = pool.begin_write().await?;
                 sqlx::query(
                     "UPDATE vendor_atomic_leases SET expires_at_ms=0 WHERE admission_id=$1",
                 )
                 .bind(admission)
-                .execute(&mut *connection)
+                .execute(&mut *tx)
                 .await?;
-                connection.finish().await?;
+                tx.commit().await?;
             }
             Self::Postgres(pool) => {
                 sqlx::query(
@@ -774,11 +774,11 @@ impl Database {
     async fn expire_leases(&self) -> anyhow::Result<()> {
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut tx = pool.begin_write().await?;
                 sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=0")
-                    .execute(&mut *connection)
+                    .execute(&mut *tx)
                     .await?;
-                connection.finish().await?;
+                tx.commit().await?;
             }
             Self::Postgres(pool) => {
                 sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=0")

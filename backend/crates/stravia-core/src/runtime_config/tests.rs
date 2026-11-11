@@ -89,9 +89,9 @@ async fn failed_setting_write_preserves_durable_value_and_propagates_error() -> 
         config.settings().get(key).await?.as_deref(),
         Some("original")
     );
-    let mut connection = pool.acquire_write().await?;
+    let mut connection = pool.begin_write().await?;
     sqlx::query("CREATE TRIGGER reject_proxy BEFORE UPDATE ON settings WHEN NEW.name = 'outbound_proxy' BEGIN SELECT RAISE(ABORT, 'test rejection'); END").execute(&mut *connection).await?;
-    connection.finish().await?;
+    connection.commit().await?;
     assert!(config.settings().set(key, "rejected").await.is_err());
     assert_eq!(
         config.settings().get(key).await?.as_deref(),

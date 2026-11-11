@@ -450,9 +450,9 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     assert!(!encoded.contains(stravia_credential_protection::marker::PREFIX));
 
     let pool = gateway._sqlite_pool.as_ref().unwrap();
-    let mut writer = pool.acquire_write().await.unwrap();
+    let mut writer = pool.begin_write().await.unwrap();
     sqlx::query("CREATE TRIGGER reject_discovery_mapping BEFORE INSERT ON reversible_redaction_mappings BEGIN SELECT RAISE(FAIL, 'injected mapping failure'); END").execute(&mut *writer).await.unwrap();
-    writer.finish().await.unwrap();
+    writer.commit().await.unwrap();
     let other = Principal::new("discovery-other");
     let observer = credential_observer(&gateway, &other);
     let mut request = AiRequest::new("discovery-model", Vec::new());
@@ -503,11 +503,11 @@ async fn discovery_event_write_failure_does_not_change_protection_and_marks_inte
         ._sqlite_pool
         .as_ref()
         .unwrap()
-        .acquire_write()
+        .begin_write()
         .await
         .unwrap();
     sqlx::query("CREATE TRIGGER reject_discovery_event BEFORE INSERT ON observation_events WHEN NEW.kind = 'credential_mappings_created' BEGIN SELECT RAISE(FAIL, 'injected observation failure'); END").execute(&mut *writer).await.unwrap();
-    writer.finish().await.unwrap();
+    writer.commit().await.unwrap();
     let mut request = AiRequest::new("discovery-model", Vec::new());
     request.instructions = Some("api_key = \"Q8n4Vk7sT2p9X5a3Lc6D0h1R\"".into());
     let mut request = Arc::new(request);
@@ -891,7 +891,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
     .unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let pool = gateway._sqlite_pool.as_ref().unwrap();
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES ('hit-interaction','hit','Hit Key','hit-interaction','hit-run','route','completed',?,?,0)")
         .bind(now - 100)
         .bind(now - 50)
@@ -954,7 +954,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
 
     let detail = gateway
         .admin()
@@ -1012,12 +1012,12 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         CredentialDiscoveryHitDetail::Unavailable { .. } => panic!("body should be retained"),
     }
 
-    let mut connection = pool.acquire_write().await.unwrap();
+    let mut connection = pool.begin_write().await.unwrap();
     sqlx::query("DELETE FROM reversible_redaction_mappings WHERE reference='m-secret'")
         .execute(&mut *connection)
         .await
         .unwrap();
-    connection.finish().await.unwrap();
+    connection.commit().await.unwrap();
     let detail = gateway
         .admin()
         .credential_protection_discovery_hit("2.0", "0", CredentialVisibility::Revealed)

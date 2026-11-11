@@ -73,7 +73,6 @@ macro_rules! backend {
         $pool:ty,
         $db:ty,
         $conn:ty,
-        $begin:literal,
         $key_share:literal,
         $no_key_update:literal,
         $skip_locked:literal,
@@ -504,8 +503,7 @@ macro_rules! backend {
             pub(crate) async fn sweep(pool: &$pool) -> anyhow::Result<u64> {
                 let mut removed = 0u64;
                 loop {
-                    let mut connection = pool.acquire_write().await?;
-                    let mut transaction = connection.begin_with($begin).await?;
+                    let mut transaction = pool.begin_write().await?;
                     let journal_exists: bool = sqlx::query_scalar($journal_exists)
                         .fetch_one(&mut *transaction).await?;
                     let claim_sql = sqlx::AssertSqlSafe(format!(
@@ -517,7 +515,6 @@ macro_rules! backend {
                         .await?;
                     if rows.is_empty() {
                         transaction.commit().await?;
-                        connection.finish().await?;
                         return Ok(removed);
                     }
                     let mut selected = Vec::with_capacity(rows.len());
@@ -559,7 +556,6 @@ macro_rules! backend {
                     let scopes: Vec<i64> = selected.iter().map(|row| row.1).collect();
                     prune_scopes(&mut transaction, &scopes).await?;
                     transaction.commit().await?;
-                    connection.finish().await?;
                 }
             }
         }
@@ -572,7 +568,6 @@ backend!(
     sqlx::SqlitePool,
     sqlx::Sqlite,
     sqlx::SqliteConnection<'_>,
-    "BEGIN IMMEDIATE",
     "",
     "",
     "",
@@ -590,7 +585,6 @@ backend!(
     sqlx::PgPool,
     sqlx::Postgres,
     sqlx::PgConnection<'_>,
-    "BEGIN",
     " FOR KEY SHARE",
     " FOR NO KEY UPDATE",
     " FOR UPDATE SKIP LOCKED",

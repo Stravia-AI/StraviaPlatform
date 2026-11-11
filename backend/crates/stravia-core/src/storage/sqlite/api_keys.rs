@@ -83,7 +83,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
         let spend_limit_nanos = parse_spend_limit(input.spend_limit.as_deref())?;
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
     "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
@@ -100,7 +100,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .bind(input.expires_at.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()))
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
 
         replace_api_key_models(&self.pool, &id, &input.model_ids).await?;
         self.get(&id).await?.context("api key missing after create")
@@ -138,7 +138,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             None => current.spend_limit_nanos,
         };
 
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
     "UPDATE api_keys SET token=?, name=?, rpm_limit=?, spend_limit_nanos=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, inject_media_understanding=?, inject_web_search=?, inject_media_generation=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
             )
@@ -156,7 +156,7 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .bind(id)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
 
         if let Some(model_ids) = input.model_ids {
             replace_api_key_models(&self.pool, id, &model_ids).await?;
@@ -166,12 +166,12 @@ impl ApiKeyStore for SqliteApiKeyStore {
     }
 
     async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query("DELETE FROM api_keys WHERE id = ?")
             .bind(id)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(())
     }
 
@@ -358,8 +358,7 @@ pub(super) async fn replace_api_key_models(
     api_key_id: &str,
     model_ids: &[String],
 ) -> anyhow::Result<()> {
-    let mut connection = pool.acquire_write().await?;
-    let mut tx = connection.begin().await?;
+    let mut tx = pool.begin_write().await?;
     sqlx::query("DELETE FROM api_key_models WHERE api_key_id = ?")
         .bind(api_key_id)
         .execute(&mut *tx)
@@ -374,7 +373,6 @@ pub(super) async fn replace_api_key_models(
     }
 
     tx.commit().await?;
-    connection.finish().await?;
     Ok(())
 }
 

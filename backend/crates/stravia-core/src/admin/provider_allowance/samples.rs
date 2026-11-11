@@ -84,8 +84,7 @@ impl AllowanceSampleStore {
                 rows.retain(|sample| sample.sampled_at >= cutoff);
             }
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await?;
-                let mut transaction = connection.begin().await?;
+                let mut transaction = pool.begin_write().await?;
                 for sample in samples {
                     sqlx::query(
                         "INSERT INTO provider_allowance_samples (
@@ -113,7 +112,6 @@ impl AllowanceSampleStore {
                     .execute(&mut *transaction)
                     .await?;
                 transaction.commit().await?;
-                connection.finish().await?;
             }
             Self::Postgres(pool) => {
                 let mut transaction = pool.begin().await?;
@@ -158,12 +156,12 @@ impl AllowanceSampleStore {
                     .retain(|sample| sample.sampled_at >= cutoff);
             }
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 sqlx::query("DELETE FROM provider_allowance_samples WHERE sampled_at < ?")
                     .bind(cutoff)
                     .execute(&mut *connection)
                     .await?;
-                connection.finish().await?;
+                connection.commit().await?;
             }
             Self::Postgres(pool) => {
                 sqlx::query("DELETE FROM provider_allowance_samples WHERE sampled_at < $1")
@@ -341,7 +339,7 @@ mod tests {
         let data_dir = tempfile::tempdir()?;
         let pool = crate::db::init_pool(data_dir.path()).await?;
         crate::migrations::migrate_sqlite(&pool, None).await?;
-        let mut connection = pool.acquire_write().await?;
+        let mut connection = pool.begin_write().await?;
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES (?, ?, ?, ?, ?)",
@@ -353,16 +351,16 @@ mod tests {
         .bind("secret")
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
 
         let store = AllowanceSampleStore::sqlite(pool.clone());
         assert_sql_store_contract(store.clone()).await?;
-        let mut connection = pool.acquire_write().await?;
+        let mut connection = pool.begin_write().await?;
         sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind("provider-1")
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         assert!(
             store
                 .list_for_item("provider-1", "account", 0)

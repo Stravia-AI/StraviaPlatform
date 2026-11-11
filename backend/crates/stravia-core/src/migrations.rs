@@ -165,6 +165,10 @@ pub async fn run_sqlite_migrator(
         None,
     );
     // 迁移与升级钩子在同一写租约内运行；运行期写者须在其后排队，池连接在租约外只读。
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "PRAGMA foreign_keys 与 SQLx 迁移器须在事务外执行"
+    )]
     let mut pinned = SqliteMigrationConnection {
         connection: Some(pool.acquire_write().await?),
         // 保守标记：迁移会话可能执行过 PRAGMA foreign_keys=OFF，失败或取消时必须关闭连接。
@@ -2200,6 +2204,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_interrupted_migration_never_returns_fk_off_connection() {
         let pool = sqlite_pool().await;
+        #[expect(clippy::disallowed_methods, reason = "复现迁移会话的连接级写租约")]
         let mut pinned = super::SqliteMigrationConnection {
             connection: Some(pool.acquire_write().await.unwrap()),
             foreign_keys_may_be_off: true,
