@@ -444,7 +444,7 @@ SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移
 
 #### Debug manifest（文件，不是关系表）
 
-`debug_trace_manifests` 已由迁移 0008 删除。状态存放在 `diagnostics/observation-debug/<trace_id>/manifest.json`，以临时文件加 rename 原子替换，启动扫描建立进程内 `DebugTraceIndex`，writer 增量更新。详情、客户端错误列表和 Bundle 通过索引读取状态，API 结构不变；多实例只在拥有 Trace 文件的实例上可见。Run 终态提交并广播之前先写入 manifest 终态，不再持久化或广播 `trace_manifest_updated`。Rejected Request 保留 `debug_enabled` 准入快照，不再保存冗余 `debug_status` 列。运行时逐文件扫描隔离损坏或不可读 manifest，仅警告并跳过，不覆盖坏文件，不影响健康 Trace 查询与新捕获；升级导出则严格核对已有文件与数据库权威事实，匹配后才允许删表。升级的有界并发、临时查询索引和中断续迁契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+`debug_trace_manifests` 已由迁移 0008 删除。状态存放在 `diagnostics/observation-debug/<trace_id>/manifest.json`，以临时文件加 rename 原子替换，启动扫描建立进程内 `DebugTraceIndex`，writer 增量更新。详情、客户端错误列表和 Bundle 通过索引读取状态，API 结构不变；多实例只在拥有 Trace 文件的实例上可见。Run 终态提交并广播之前先 flush 已排队的 Wire 并写入当前 manifest，不再持久化或广播 `trace_manifest_updated`。客户端结束不关闭仍由后台执行持有的 Trace；最后一个 observer 释放后的 `Finalize` 才关闭捕获并更新最终 manifest，父请求结束时确定的保留截止时间不因后台字节续期。Rejected Request 保留 `debug_enabled` 准入快照，不再保存冗余 `debug_status` 列。运行时逐文件扫描隔离损坏或不可读 manifest，仅警告并跳过，不覆盖坏文件，不影响健康 Trace 查询与新捕获；升级导出则严格核对已有文件与数据库权威事实，匹配后才允许删表。升级的有界并发、临时查询索引和中断续迁契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
 
 ### 6.1.1 独立长期 Stats Usage
 

@@ -1197,6 +1197,8 @@ WebUI 的全局与单服务入口共用根布局中的一个「模型变更」�
 
 统一接口定义在 `backend/crates/stravia-core/src/storage/traits.rs`，上层代码不感知具体后端。`stravia-tools dump-schema` 在隔离数据库应用全部迁移后生成 PostgreSQL 与 SQLite 的最终结构，参考产物分别为 [PostgreSQL schema](../database/postgres.sql) 与 [SQLite schema](../database/sqlite.sql)，不包含业务数据或 SQLx 迁移历史。
 
+Bundled SQLite 通过 `.cargo/config.toml` 的 `LIBSQLITE3_FLAGS` 默认设置 `SQLITE_DEFAULT_MEMSTATUS=0`。独立数据库的分配原本也会争用进程级内存统计锁；产品与 SQLx 未使用这些统计及全局 soft/hard heap limit，因此关闭它们，保留线程安全、外键、事务、WAL 同步与各池写协调。此设置不限制测试并发，也不改变页缓存预算；取舍是 SQLite 的全局内存用量、高水位、状态统计及 heap limit 接口默认不可用，不影响进程 RSS 观测。构建产物缓存同时跟踪显式传入的 `LIBSQLITE3_FLAGS`，避免环境覆盖后复用旧二进制。接口边界见 SQLite 的 [编译选项](https://www.sqlite.org/compile.html#default_memstatus) 与 [MEMSTATUS 配置契约](https://www.sqlite.org/c3ref/c_config_covering_index_scan.html#sqliteconfigmemstatus)。
+
 #### 统一派生缓存与 Server 配置
 
 `backend/crates/stravia-core/src/runtime_cache.rs` 的 `RuntimeCache` 为同一 Gateway 的可丢弃派生数据提供共享逻辑预算，默认 16 MiB：Memory / SQLite 使用 TinyUFO，PostgreSQL 必须使用 Redis。Generation 精确物化对象、按 ingress 隔离的祖先引用目录、pricing、Cache Affinity 和 Provider Allowance 快照共用预算，不各自另设一份 16 MiB。预算包含 identity 与索引的逻辑估计，不是 allocator、进程 RSS 或 Redis 实际内存上限；超大值不入缓存，正常 SQL 读取结果不因此失败。SQL 历史、配置、权限、RPM、锁、连接及活动执行状态不迁入可淘汰缓存；官方 Allowance Monitor 仍是 live 额度事实源，SQL Sample 仍只服务趋势。
