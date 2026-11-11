@@ -91,6 +91,7 @@ async fn released_component_uses_real_native_http_and_websocket() -> anyhow::Res
                 revision: 1,
                 data_epoch: 1,
                 installed_at: 1,
+                origin: None,
             },
             None,
             &[],

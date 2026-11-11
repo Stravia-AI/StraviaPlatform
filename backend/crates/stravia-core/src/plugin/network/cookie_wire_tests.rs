@@ -204,6 +204,7 @@ async fn fixture() -> anyhow::Result<Fixture> {
                 revision: 1,
                 data_epoch: 1,
                 installed_at: 1,
+                origin: None,
             },
             None,
             &[],

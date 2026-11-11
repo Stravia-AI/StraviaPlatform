@@ -33,6 +33,22 @@ impl AdminService {
             })
     }
 
+    pub async fn preview_vendor_plugin_import(
+        &self,
+        component: Vec<u8>,
+        compressed: bool,
+    ) -> anyhow::Result<crate::plugin::PluginPreview> {
+        let component = if compressed {
+            tokio::task::spawn_blocking(move || {
+                crate::plugin::distribution::decode_component(&component, None)
+            })
+            .await??
+        } else {
+            component
+        };
+        self.preview_vendor_plugin(component).await
+    }
+
     pub async fn confirm_vendor_plugin(
         &self,
         input: crate::plugin::ConfirmPluginUpdate,

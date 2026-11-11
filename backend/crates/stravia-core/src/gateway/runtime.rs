@@ -614,6 +614,33 @@ impl Gateway {
             Arc::clone(&vendor_shapes),
         )
         .await?;
+        #[cfg(feature = "test-support")]
+        let marketplace_client = if let Some(origin) = &config.test_plugin_marketplace_url {
+            crate::plugin::marketplace::client::MarketClient::with_test_origins(
+                Arc::clone(&storage),
+                origin.clone(),
+                origin.clone(),
+                origin.clone(),
+            )
+            .map_err(|error| anyhow::anyhow!("invalid marketplace test origin: {error:?}"))?
+        } else {
+            crate::plugin::marketplace::client::MarketClient::new(
+                Arc::clone(&storage),
+                config.update_source_url.clone(),
+            )
+        };
+        #[cfg(not(feature = "test-support"))]
+        let marketplace_client = crate::plugin::marketplace::client::MarketClient::new(
+            Arc::clone(&storage),
+            config.update_source_url.clone(),
+        );
+        let marketplace = Arc::new(crate::plugin::marketplace::PluginMarketplace::new(
+            Arc::new(storage.vendor_plugins().clone()),
+            marketplace_client,
+        ));
+        if let Err(error) = marketplace.initialize_official().await {
+            tracing::warn!(error = ?error, "plugin marketplace official source initialization failed");
+        }
         let catalog_base_url = config.catalog_base_url.clone();
         let (browser_preferences, browser_path) =
             admin::browser::BrowserPreferences::load(&config.data_dir);
@@ -628,6 +655,7 @@ impl Gateway {
             vendor_transport: Arc::clone(&vendor_transport),
             vendor_shapes: Arc::clone(&vendor_shapes),
             vendor_resolver: Arc::clone(&vendor_resolver),
+            marketplace,
             vendor_plugins: vendor_plugins.clone(),
             vendor_websocket_pool: Arc::new(crate::plugin::network::VendorWebSocketPool::default()),
             provider_catalog: provider_catalog.clone(),
@@ -742,6 +770,27 @@ impl Gateway {
                     };
                     if let Err(error) = refresh {
                         tracing::warn!(error = ?error, "provider catalog refresh failed");
+                    }
+                }
+            });
+        }
+
+        {
+            let gw_refresh = gw.background_clone();
+            let cancellation = gw.lifecycle.cancellation.clone();
+            gw.lifecycle.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+                loop {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        _ = interval.tick() => {}
+                    }
+                    let refresh = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        result = gw_refresh.marketplace.refresh_due(&gw_refresh) => result,
+                    };
+                    if let Err(error) = refresh {
+                        tracing::warn!(error = ?error, "plugin marketplace refresh failed");
                     }
                 }
             });

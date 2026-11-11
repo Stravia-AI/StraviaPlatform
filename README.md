@@ -135,9 +135,9 @@ Availability depends on upstream account and model support. Size preferences do 
 
 ### Vendor plugins
 
-All model Vendors run as self-contained Wasm Components. Stravia embeds the base Vendor; Codex, Claude Code, Grok, Command Code, and Devin are dedicated plugins distributed as separate Release attachments. Import the corresponding local `.wasm` file in **Vendor Plugins** before adding a connection. Dedicated plugins own their full supplier identity and never fall back to the base package.
+All model Vendors run as self-contained Wasm Components. Stravia embeds the base Vendor; install dedicated plugins such as Codex, Claude Code, Grok, Command Code, and Devin in **Vendor Plugins** before adding a connection. The page combines installed plugins, available releases, and update checks. Dedicated plugins own their full supplier identity and never fall back to the base package.
 
-**Vendor Plugins** also supports local plugin updates without a marketplace. A plugin is trusted with the selected connection's upstream credentials and approved network destinations, so review its source and requested origins before use. See the [plugin design](docs/design/vendor-plugins.md) for setup, supported capabilities, isolation, updates, and lifecycle details.
+Use the official source or add a public GitHub repository that publishes a signed plugin catalog; review its key fingerprint before trusting it. Offline import accepts `.wasm` and `.wasm.zst`. Downloads are verified, but installation and updates still require confirmation: a plugin is trusted with the selected connection's upstream credentials and approved network destinations, and a valid signature does not establish code safety. See the [marketplace guide](docs/design/plugin-marketplace.md) for source requirements and the [plugin design](docs/design/vendor-plugins.md) for capabilities, isolation, and lifecycle details.
 
 ### Keys, usage, and request history
 

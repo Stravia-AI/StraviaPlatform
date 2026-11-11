@@ -18,6 +18,7 @@ mod atomic_journal_gc;
 #[cfg(test)]
 #[path = "atomic_journal_tests.rs"]
 mod atomic_journal_tests;
+mod marketplace;
 
 /// Storage-backed vendor plugin packages and their provider-scoped state.
 #[derive(Clone)]
@@ -54,6 +55,7 @@ struct MemoryPluginData {
     installed: BTreeMap<String, InstalledPlugin>,
     private_state: HashMap<String, MemoryPrivateState>,
     recovery: BTreeSet<(String, String)>,
+    marketplace: marketplace::MemoryMarketplace,
     atomic_revision: i64,
     atomic_provider_fences: HashMap<String, i64>,
     atomic_cells: HashMap<(String, String, String, String, String), AtomicStateSnapshot>,
@@ -114,6 +116,7 @@ pub(crate) struct InstalledPlugin {
     pub revision: i64,
     pub data_epoch: i64,
     pub installed_at: i64,
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -137,6 +140,10 @@ pub(crate) struct ProviderReset {
 pub(crate) enum PluginStorageError {
     #[error("plugin or provider changed; review the update again")]
     Changed,
+    #[error("plugin source signing key has changed")]
+    KeyChanged,
+    #[error("plugin version was observed with different content")]
+    VersionConflict,
     #[error("plugin operation is no longer current")]
     StaleOperation,
     #[error("plugin state lineage is unavailable")]
@@ -145,6 +152,15 @@ pub(crate) enum PluginStorageError {
     Limit,
     #[error("plugin storage operation failed")]
     Storage,
+}
+
+fn parse_install_origin(
+    next: &InstalledPlugin,
+) -> Result<Option<crate::plugin::types::PluginInstallOrigin>, PluginStorageError> {
+    next.origin
+        .as_deref()
+        .map(|json| serde_json::from_str(json).map_err(|_| PluginStorageError::Storage))
+        .transpose()
 }
 
 const ATOMIC_LOAD_SQL: &str = "WITH args AS (SELECT CAST($1 AS TEXT) AS provider_id, CAST($2 AS TEXT) AS vendor_id, CAST($3 AS TEXT) AS principal, CAST($4 AS TEXT) AS admission_id, CAST($5 AS TEXT) AS lease_id, CAST($6 AS TEXT) AS cell_key, CAST($7 AS BIGINT) AS now_ms, CAST($8 AS BIGINT) AS fence) SELECT v.data_epoch, c.revision, c.payload, c.journal_head FROM args a JOIN providers p ON p.id=a.provider_id AND p.vendor=a.vendor_id JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=p.vendor),'base') LEFT JOIN vendor_atomic_cells c ON c.provider_id=a.provider_id AND c.vendor_id=a.vendor_id AND c.principal=a.principal AND c.admission_id=a.admission_id AND c.cell_key=a.cell_key WHERE (a.fence IS NULL OR EXISTS (SELECT 1 FROM vendor_atomic_provider_fences f WHERE f.provider_id=a.provider_id AND f.generation=a.fence)) AND (a.principal='' OR EXISTS (SELECT 1 FROM vendor_atomic_leases l WHERE l.principal=a.principal AND l.admission_id=a.admission_id AND l.lease_id=a.lease_id AND l.expires_at_ms>a.now_ms))";
@@ -265,6 +281,40 @@ async fn install_memory(
     let mut provider_models = store.provider_models.write().await;
     let mut oauth_credentials = store.oauth_credentials.credentials.write().await;
     let mut data = store.data.write().await;
+
+    if let Some(origin) = parse_install_origin(next)? {
+        let source = data
+            .marketplace
+            .sources
+            .get(&origin.source_id)
+            .ok_or(PluginStorageError::Changed)?;
+        if !source.enabled
+            || source.trust_revision != origin.trust_revision
+            || source.repository_id != origin.repository_id
+            || source.fingerprint != origin.public_key_fingerprint
+        {
+            return Err(PluginStorageError::Changed);
+        }
+        if source
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "key_changed")
+        {
+            return Err(PluginStorageError::KeyChanged);
+        }
+        if !data
+            .marketplace
+            .seen
+            .get(&(
+                origin.source_id.clone(),
+                next.vendor_id.clone(),
+                next.version.clone(),
+            ))
+            .is_some_and(|(digest, conflict)| !conflict && digest == &next.digest)
+        {
+            return Err(PluginStorageError::VersionConflict);
+        }
+    }
 
     let revision_matches = match expected_revision {
         Some(expected) => data
@@ -664,7 +714,7 @@ impl PluginStore {
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<InstalledPlugin>, PluginStorageError> {
-        const SQL: &str = "SELECT vendor_id, version, source, descriptor, digest, revision, data_epoch, installed_at FROM vendor_plugins ORDER BY vendor_id";
+        const SQL: &str = "SELECT vendor_id, version, source, descriptor, digest, revision, data_epoch, installed_at, origin FROM vendor_plugins ORDER BY vendor_id";
         match &self.backend {
             PluginStoreBackend::Memory(store) => Ok(store
                 .data
@@ -689,7 +739,7 @@ impl PluginStore {
         &self,
         vendor_id: &str,
     ) -> Result<Option<InstalledPlugin>, PluginStorageError> {
-        const SQL: &str = "SELECT vendor_id, version, source, descriptor, digest, revision, data_epoch, installed_at FROM vendor_plugins WHERE vendor_id = $1";
+        const SQL: &str = "SELECT vendor_id, version, source, descriptor, digest, revision, data_epoch, installed_at, origin FROM vendor_plugins WHERE vendor_id = $1";
         match &self.backend {
             PluginStoreBackend::Memory(store) => {
                 Ok(store.data.read().await.installed.get(vendor_id).cloned())
@@ -843,13 +893,34 @@ impl PluginStore {
         resets: &[ProviderReset],
     ) -> Result<(), PluginStorageError> {
         macro_rules! install {
-    ($pool:expr, $begin:literal, $lock:literal) => {{
+    ($pool:expr, $begin:literal, $lock:literal, $source:literal) => {{
         let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
         let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
         sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
+        if let Some(origin) = parse_install_origin(next)? {
+            let source: Option<(String, String, String, i64, bool)> = sqlx::query_as($source)
+                .bind(&origin.source_id).fetch_optional(&mut *tx).await.map_err(storage_error)?;
+            let Some((repository_id, fingerprint, json, revision, enabled)) = source else {
+                return Err(PluginStorageError::Changed);
+            };
+            let source: crate::plugin::marketplace::PluginSourceSummary = serde_json::from_str(&json).map_err(|_| PluginStorageError::Storage)?;
+            if !enabled || revision != origin.trust_revision || repository_id != origin.repository_id.to_string()
+                || fingerprint != origin.public_key_fingerprint {
+                return Err(PluginStorageError::Changed);
+            }
+            if source.error.as_ref().is_some_and(|error| error.code == "key_changed") {
+                return Err(PluginStorageError::KeyChanged);
+            }
+            let seen: Option<(String, bool)> = sqlx::query_as("SELECT digest, conflict FROM vendor_plugin_seen_digests WHERE source_id=$1 AND vendor_id=$2 AND version=$3")
+                .bind(&origin.source_id).bind(&next.vendor_id).bind(&next.version)
+                .fetch_optional(&mut *tx).await.map_err(storage_error)?;
+            if !seen.is_some_and(|(digest, conflict)| !conflict && digest == next.digest) {
+                return Err(PluginStorageError::VersionConflict);
+            }
+        }
         let changed = if let Some(expected) = expected_revision {
             sqlx::query(
-                "UPDATE vendor_plugins SET version=$2, source=$3, digest=$4, revision=$5, data_epoch=$6, installed_at=$7, descriptor=$9 WHERE vendor_id=$1 AND revision=$8",
+                "UPDATE vendor_plugins SET version=$2, source=$3, digest=$4, revision=$5, data_epoch=$6, installed_at=$7, descriptor=$9, origin=$10 WHERE vendor_id=$1 AND revision=$8",
             )
             .bind(&next.vendor_id)
             .bind(&next.version)
@@ -860,13 +931,14 @@ impl PluginStore {
             .bind(next.installed_at)
             .bind(expected)
             .bind(&next.descriptor)
+            .bind(&next.origin)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?
             .rows_affected()
         } else {
             sqlx::query(
-                "INSERT INTO vendor_plugins (vendor_id,version,source,digest,revision,data_epoch,installed_at,descriptor) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(vendor_id) DO NOTHING",
+                "INSERT INTO vendor_plugins (vendor_id,version,source,digest,revision,data_epoch,installed_at,descriptor,origin) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(vendor_id) DO NOTHING",
             )
             .bind(&next.vendor_id)
             .bind(&next.version)
@@ -876,6 +948,7 @@ impl PluginStore {
             .bind(next.data_epoch)
             .bind(next.installed_at)
             .bind(&next.descriptor)
+            .bind(&next.origin)
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?
@@ -999,12 +1072,14 @@ impl PluginStore {
             PluginStoreBackend::Sqlite(pool) => install!(
                 pool,
                 "BEGIN IMMEDIATE",
-                "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1"
+                "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                "SELECT repository_id, fingerprint, source_json, trust_revision, enabled FROM vendor_plugin_sources WHERE id=$1"
             ),
             PluginStoreBackend::Postgres(pool) => install!(
                 pool,
                 "BEGIN",
-                "SELECT pg_advisory_xact_lock(7342179085017261)"
+                "SELECT pg_advisory_xact_lock(7342179085017261)",
+                "SELECT repository_id, fingerprint, source_json, trust_revision, enabled FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
         }
     }
@@ -2342,6 +2417,7 @@ mod tests {
                     revision: 1,
                     data_epoch: 1,
                     installed_at: 1,
+                    origin: None,
                 },
                 None,
                 &[ProviderReset {

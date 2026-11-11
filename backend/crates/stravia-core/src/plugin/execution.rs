@@ -1817,6 +1817,9 @@ fn plugin_storage_failure(error: PluginStorageError) -> HostFailure {
         PluginStorageError::StaleOperation
         | PluginStorageError::Changed
         | PluginStorageError::MissingLineage => cancelled_failure(),
+        PluginStorageError::KeyChanged | PluginStorageError::VersionConflict => {
+            HostFailure::new(ErrorKind::Trapped, error.to_string())
+        }
         PluginStorageError::Storage | PluginStorageError::Limit => storage_failure(),
     }
 }

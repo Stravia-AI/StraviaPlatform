@@ -813,6 +813,18 @@ _避免使用_：Profile、Network Profile、供应商 Profile、指纹伪装配
 Slot Header 是由宿主在插件指定的位置填入协议值的请求字段；它表达字段位置和协议意图，不授予插件覆盖宿主授权或连接凭据的能力。
 _避免使用_：默认头、任意请求头覆盖
 
+## Plugin Source
+
+Plugin Source 是发布 Vendor Plugin 的公开 GitHub 仓库及管理员已确认的签名公钥，以不可变的数字仓库身份识别，不以可变仓库名或自报的“官方”名称识别。
+
+## Plugin Catalog
+
+Plugin Catalog 是一个 Release 内经发布者签名的插件发布清单，描述可获取版本、宿主兼容要求及产物身份；它不是已安装插件清单，也不证明内容最新或代码安全。
+
+## Install Origin
+
+Install Origin 是一次 Vendor Plugin 安装实际使用的来源及其快照，区分内置、本地文件和插件市场。市场更新跟随该来源；删除来源不删除已安装插件，包自报信息不能重建可信的安装来源。
+
 ## Vendor Credential Authorization
 
 Vendor Credential Authorization 是管理员为选定 Vendor Plugin 的连接登录或填写凭据时，授予该插件处理本连接上游账户秘密的信任；连接尚未保存时，该信任限定于对应的待配置连接认证会话。它不授予其他 Provider、其他认证会话或 Stravia 平台凭据的访问权，也不表示凭据对插件不可见。

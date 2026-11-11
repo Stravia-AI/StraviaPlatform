@@ -143,6 +143,8 @@ fn atomic_state_error(error: PluginStorageError) -> StateError {
             StateError::new("resource-exhausted", "atomic state limit exceeded")
         }
         PluginStorageError::Changed
+        | PluginStorageError::KeyChanged
+        | PluginStorageError::VersionConflict
         | PluginStorageError::StaleOperation
         | PluginStorageError::MissingLineage => cancelled_state(),
         PluginStorageError::Storage => StateError::new("storage", "atomic state storage failed"),

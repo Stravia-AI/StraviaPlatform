@@ -32,6 +32,55 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 至少保留一份与 GitHub 分离的离线加密私钥备份，并把密码存放在独立的受控凭据系统中。记录备份责任人、创建日期和恢复演练日期；不得把私钥、密码或其未脱敏命令输出写入仓库、日志、Actions artifact 或 Release。
 
+## Vendor Plugin 目录与签名
+
+插件目录使用独立 Minisign 密钥，不复用 Desktop updater 密钥。生产私钥由维护者在受控离线环境生成和保管，不在仓库、共享终端或 CI runner 上生成；测试夹具的密钥不能用于发布。
+
+官方发布需要以下 GitHub 配置：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Repository variable | `STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY` | 完整 Minisign 公钥文本；构建时内嵌 Server/Desktop，并作为 Release 的 `stravia-plugin-catalog.pub` |
+| Secret | `STRAVIA_PLUGIN_CATALOG_SIGNING_KEY` | 与该公钥配对的加密 Minisign 私钥文本，仅用于签名步骤的临时文件 |
+| Secret | `STRAVIA_PLUGIN_CATALOG_SIGNING_PASSWORD` | 私钥的解密密码 |
+
+缺少配置或签名不能由固定公钥验证时，Release 工作流失败。Docker 构建只接收公钥 build arg，私钥和密码不进入应用或镜像。未配置公钥的开发构建停用官方源并显示 `source_not_configured`，不自动创建替代信任根。
+
+第三方使用同一 `stravia-tools plugin-catalog` 命令，不必复制官方工作流。准备 JSON 数组作为输入；以下为格式示例，路径、版本和展示名称必须替换为最终组件 descriptor 的真实值：
+
+```json
+[
+  {
+    "file": "dist/workbuddy.wasm",
+    "vendor_id": "workbuddy",
+    "version": "0.5.0",
+    "display_name": "WorkBuddy"
+  }
+]
+```
+
+```bash
+stravia-tools plugin-catalog \
+  --repository-id "$GITHUB_REPOSITORY_ID" \
+  --release-tag "$RELEASE_TAG" \
+  --host-version-req "$HOST_VERSION_REQ" \
+  --published-at "$PUBLISHED_AT" \
+  --input plugin-input.json --output dist/catalog
+
+minisign -S -s "$PLUGIN_SIGNING_KEY_FILE" \
+  -m dist/catalog/stravia-plugin-catalog.json \
+  -x dist/catalog/stravia-plugin-catalog.json.minisig
+minisign -V -p dist/catalog/stravia-plugin-catalog.pub \
+  -m dist/catalog/stravia-plugin-catalog.json \
+  -x dist/catalog/stravia-plugin-catalog.json.minisig
+```
+
+`GITHUB_REPOSITORY_ID` 是仓库数字 ID，不是名称；`HOST_VERSION_REQ` 是明确的 SemVer 范围，`PUBLISHED_AT` 是 RFC3339 时间。签名前将已保管的对应公钥复制为 `dist/catalog/stravia-plugin-catalog.pub`。工具会准入真实 Component、拒绝身份/版本/展示名称不一致、生成 level-19 单 frame Zstd、回环验证并计算压缩与组件双摘要；不生成或猜测签名密钥。
+
+将目录、公钥、签名和目录列出的所有 `.wasm.zst` 上传到同一 Release，核对完整资产清单后再公开；签名后不要重排或重写 JSON。官方目录只包含九个专属插件，不含内嵌 `base`，也不再附带这些插件的原始 `.wasm`。历史 Release 不补造签名。发布者应经独立渠道公布完整公钥指纹；宿主指纹是 Minisign 公钥二进制 payload 的 SHA-256，不是短 key ID。
+
+updater 的插件路由部署、镜像白名单及 WorkBuddy 发布迁移由相应维护者负责。只有明确 `not_mirrored` 才直连 GitHub；服务故障不回退。来源换钥需要管理员重新信任，官方换钥只能随宿主更新引入。完整契约见[插件市场设计](design/plugin-marketplace.md)。
+
 ## 发布
 
 1. 确保 `Cargo.toml`、`package.json` 和 `backend/apps/stravia-desktop/tauri.conf.json` 版本一致，并在 `CHANGELOG.md` 中存在该版本的非空章节。

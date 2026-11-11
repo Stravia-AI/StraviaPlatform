@@ -3580,6 +3580,57 @@ CREATE TABLE public.vendor_data_recovery (
 
 
 --
+-- Name: vendor_plugin_catalogs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_plugin_catalogs (
+    source_id text NOT NULL,
+    release_id text NOT NULL,
+    catalog_json text NOT NULL
+);
+
+
+--
+-- Name: vendor_plugin_check_sequence; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_plugin_check_sequence (
+    id integer NOT NULL,
+    generation bigint NOT NULL
+);
+
+
+--
+-- Name: vendor_plugin_seen_digests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_plugin_seen_digests (
+    source_id text NOT NULL,
+    vendor_id text NOT NULL,
+    version text NOT NULL,
+    digest text NOT NULL,
+    conflict boolean DEFAULT false NOT NULL
+);
+
+
+--
+-- Name: vendor_plugin_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.vendor_plugin_sources (
+    id text NOT NULL,
+    source_json text NOT NULL,
+    repository_id text NOT NULL,
+    repository text NOT NULL,
+    fingerprint text NOT NULL,
+    trust_revision bigint NOT NULL,
+    enabled boolean NOT NULL,
+    check_generation bigint DEFAULT 0 NOT NULL,
+    incomplete boolean DEFAULT false NOT NULL
+);
+
+
+--
 -- Name: vendor_plugins; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -3592,9 +3643,10 @@ CREATE TABLE public.vendor_plugins (
     revision bigint NOT NULL,
     data_epoch bigint NOT NULL,
     installed_at bigint NOT NULL,
+    origin text,
     CONSTRAINT vendor_plugins_data_epoch_check CHECK ((data_epoch >= 0)),
     CONSTRAINT vendor_plugins_revision_check CHECK ((revision > 0)),
-    CONSTRAINT vendor_plugins_source_check CHECK ((source = ANY (ARRAY['builtin'::text, 'local'::text])))
+    CONSTRAINT vendor_plugins_source_check CHECK ((source = ANY (ARRAY['builtin'::text, 'local'::text, 'marketplace'::text])))
 );
 
 
@@ -4351,6 +4403,46 @@ ALTER TABLE ONLY public.vendor_atomic_provider_fences
 
 ALTER TABLE ONLY public.vendor_data_recovery
     ADD CONSTRAINT vendor_data_recovery_pkey PRIMARY KEY (provider_id, data_kind);
+
+
+--
+-- Name: vendor_plugin_catalogs vendor_plugin_catalogs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugin_catalogs
+    ADD CONSTRAINT vendor_plugin_catalogs_pkey PRIMARY KEY (source_id, release_id);
+
+
+--
+-- Name: vendor_plugin_check_sequence vendor_plugin_check_sequence_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugin_check_sequence
+    ADD CONSTRAINT vendor_plugin_check_sequence_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: vendor_plugin_seen_digests vendor_plugin_seen_digests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugin_seen_digests
+    ADD CONSTRAINT vendor_plugin_seen_digests_pkey PRIMARY KEY (source_id, vendor_id, version);
+
+
+--
+-- Name: vendor_plugin_sources vendor_plugin_sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugin_sources
+    ADD CONSTRAINT vendor_plugin_sources_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: vendor_plugin_sources vendor_plugin_sources_repository_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugin_sources
+    ADD CONSTRAINT vendor_plugin_sources_repository_id_key UNIQUE (repository_id);
 
 
 --
@@ -5862,6 +5954,14 @@ ALTER TABLE ONLY public.vendor_atomic_provider_fences
 
 ALTER TABLE ONLY public.vendor_data_recovery
     ADD CONSTRAINT vendor_data_recovery_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: vendor_plugin_catalogs vendor_plugin_catalogs_source_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.vendor_plugin_catalogs
+    ADD CONSTRAINT vendor_plugin_catalogs_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.vendor_plugin_sources(id) ON DELETE CASCADE;
 
 
 --

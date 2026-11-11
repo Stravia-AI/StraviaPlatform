@@ -211,6 +211,10 @@ export async function prepareApp(page: Page): Promise<void> {
     const request = route.request()
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
 
+    if (path === '/plugin-marketplace') {
+      await route.fulfill({ json: { data: { sources: [], entries: [], update_count: 0 } } })
+      return
+    }
     if (path === '/startup') {
       await route.fulfill({ json: { status: 'ready', progress: null } })
       return

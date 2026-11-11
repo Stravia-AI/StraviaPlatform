@@ -376,6 +376,7 @@ fn installed_plugin() -> super::store::InstalledPlugin {
         revision: 1,
         data_epoch: 1,
         installed_at: 1,
+        origin: None,
     }
 }
 

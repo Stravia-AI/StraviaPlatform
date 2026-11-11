@@ -91,6 +91,9 @@ pub struct GatewayConfig {
     /// value fails update checks with `UPDATE_SOURCE_INVALID`, never falling back
     /// or blocking startup and unrelated application functionality.
     pub update_source_url: Option<String>,
+    /// Loopback-only fixture origin for marketplace integration tests.
+    #[cfg(feature = "test-support")]
+    pub test_plugin_marketplace_url: Option<String>,
     /// How often to poll the shared DB for a config epoch change and reload
     /// `model_cache` when a change is detected. Set to `Duration::ZERO` to
     /// disable (default for desktop / single-process deployments).
@@ -118,6 +121,8 @@ impl Default for GatewayConfig {
             cache: GatewayCacheConfig::default(),
             product_update_download_supported: false,
             update_source_url: None,
+            #[cfg(feature = "test-support")]
+            test_plugin_marketplace_url: None,
             config_poll_interval: Duration::ZERO,
             catalog_base_url: None,
             catalog_background_refresh: false,

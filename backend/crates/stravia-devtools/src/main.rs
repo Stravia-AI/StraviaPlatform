@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod capture_client;
 mod fixture;
 mod migrate_data;
+mod plugin_catalog;
 mod protocol;
 mod record;
 mod replay;
@@ -38,6 +39,8 @@ enum Command {
     CaptureClient(capture_client::CaptureArgs),
     /// Verify a packaged component's egress shape against a capture without networking.
     VerifyEgressShape(verify_egress_shape::VerifyEgressShapeArgs),
+    /// Generate and validate a signed-catalog-ready set of plugin assets (sign separately).
+    PluginCatalog(plugin_catalog::Args),
     /// Plan or explicitly apply an offline data-root migration without modifying source data.
     MigrateData(migrate_data::MigrateDataArgs),
     /// Scenario-driven recorder: replays fixed scenarios against a real LLM and writes .jsonl fixtures
@@ -58,6 +61,7 @@ async fn main() -> Result<()> {
         Command::WitCompat => wit_compat::run(),
         Command::CaptureClient(args) => capture_client::run(args).await,
         Command::VerifyEgressShape(args) => verify_egress_shape::run(args).await,
+        Command::PluginCatalog(args) => plugin_catalog::run(args).await,
         Command::MigrateData(args) => migrate_data::run(args).await,
         Command::Record(args) => record::run(args).await,
         Command::Replay(args) => replay::run(args).await,

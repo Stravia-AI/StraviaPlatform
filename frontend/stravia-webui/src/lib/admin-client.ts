@@ -102,6 +102,11 @@ import type {
   ConfirmPluginUpdate,
   PluginPreview,
   PluginSummary,
+  PluginSourceSummary,
+  SourcePreview,
+  MarketplaceView,
+  MarketplaceInstallInput,
+  MarketplaceProgress,
 } from '#lib/types.js'
 
 export { isTauri }
@@ -130,7 +135,7 @@ export interface ArtifactSettings {
   s3: ArtifactS3Settings | null
 }
 
-type HttpMethod = 'DELETE' | 'GET' | 'POST' | 'PUT'
+type HttpMethod = 'DELETE' | 'GET' | 'PATCH' | 'POST' | 'PUT'
 
 function queryString(query: object): string {
   const params = new URLSearchParams()
@@ -164,10 +169,86 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown): Pro
 async function uploadWasm<T>(path: string, file: File): Promise<T> {
   const response = await authenticatedFetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/wasm', 'X-Stravia-CSRF': '1' },
+    headers: {
+      'Content-Type': file.name.toLowerCase().endsWith('.wasm.zst') ? 'application/zstd' : 'application/wasm',
+      'X-Stravia-CSRF': '1',
+    },
     body: file,
   })
   return decodeAdmin<T>(response)
+}
+
+async function prepareMarketplaceInstall(
+  input: MarketplaceInstallInput,
+  onProgress: (progress: MarketplaceProgress) => void,
+  signal?: AbortSignal,
+): Promise<PluginPreview> {
+  const response = await authenticatedFetch('/plugin-marketplace/preview-install', {
+    method: 'POST',
+    headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json', 'X-Stravia-CSRF': '1' },
+    body: JSON.stringify(input),
+    signal,
+  })
+  if (!response.ok) return decodeAdmin<PluginPreview>(response)
+  if (!response.body || !response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream')) {
+    throw new Error('Expected marketplace preview event stream')
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let event = ''
+  let data: string[] = []
+  let preview: PluginPreview | undefined
+  const dispatch = () => {
+    if (data.length === 0) {
+      event = ''
+      return
+    }
+    const payload: unknown = JSON.parse(data.join('\n'))
+    if (event === 'progress') onProgress(payload as MarketplaceProgress)
+    else if (event === 'preview') preview = payload as PluginPreview
+    else if (event === 'error') {
+      const detail = payload as { code?: string; message?: string }
+      const error = new Error(detail.message ?? 'Marketplace preparation failed') as Error & { code?: string }
+      error.code = detail.code
+      throw error
+    }
+    event = ''
+    data = []
+  }
+  const line = (value: string) => {
+    if (!value) {
+      dispatch()
+      return
+    }
+    if (value.startsWith(':')) return
+    const colon = value.indexOf(':')
+    const field = colon < 0 ? value : value.slice(0, colon)
+    let fieldValue = colon < 0 ? '' : value.slice(colon + 1)
+    if (fieldValue.startsWith(' ')) fieldValue = fieldValue.slice(1)
+    if (field === 'event') event = fieldValue
+    else if (field === 'data') data.push(fieldValue)
+  }
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      buffer += decoder.decode(chunk.value, { stream: !chunk.done })
+      let end: number
+      while ((end = buffer.indexOf('\n')) !== -1) {
+        const current = buffer.slice(0, end)
+        buffer = buffer.slice(end + 1)
+        line(current.endsWith('\r') ? current.slice(0, -1) : current)
+      }
+      if (chunk.done) break
+    }
+    if (buffer) line(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer)
+    dispatch()
+    if (!preview) throw new Error('Marketplace preview stream ended without a preview')
+    return preview
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
 }
 
 export const admin = {
@@ -177,6 +258,27 @@ export const admin = {
       (await request<{ custom: CustomCurrency | null }>('GET', '/currency')).custom,
     save: async (input: { symbol: string; usd_rate: string }): Promise<CustomCurrency | null> =>
       (await request<{ custom: CustomCurrency | null }>('PUT', '/currency', input)).custom,
+  },
+  pluginSources: {
+    list: () => request<PluginSourceSummary[]>('GET', '/plugin-sources'),
+    preview: (input: { url: string; fingerprint?: string | null }) =>
+      request<SourcePreview>('POST', '/plugin-sources/preview', input),
+    confirm: (input: { preview_id: string }) => request<PluginSourceSummary>('POST', '/plugin-sources', input),
+    update: (id: string, input: { enabled?: boolean; include_prerelease?: boolean }) =>
+      request<PluginSourceSummary>('PATCH', `/plugin-sources/${encodeURIComponent(id)}`, input),
+    delete: (id: string) => request<void>('DELETE', `/plugin-sources/${encodeURIComponent(id)}`),
+    trustPreview: (id: string) =>
+      request<SourcePreview>('POST', `/plugin-sources/${encodeURIComponent(id)}/trust-preview`),
+    trustConfirm: (id: string, input: { preview_id: string }) =>
+      request<PluginSourceSummary>('POST', `/plugin-sources/${encodeURIComponent(id)}/trust-confirm`, input),
+  },
+  pluginMarketplace: {
+    get: () => request<MarketplaceView>('GET', '/plugin-marketplace'),
+    refresh: (input: { source_id?: string | null }) =>
+      request<MarketplaceView>('POST', '/plugin-marketplace/refresh', input),
+    previewInstall: (input: MarketplaceInstallInput) =>
+      request<PluginPreview>('POST', '/plugin-marketplace/preview-install', input),
+    prepareInstall: prepareMarketplaceInstall,
   },
   vendorPlugins: {
     list: () => request<PluginSummary[]>('GET', '/vendor-plugins'),

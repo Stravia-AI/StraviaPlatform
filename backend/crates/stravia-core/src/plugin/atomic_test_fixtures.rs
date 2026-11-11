@@ -34,6 +34,7 @@ pub(super) async fn install(storage: &DynStorage, vendor: &str) -> anyhow::Resul
                 revision: 1,
                 data_epoch: 1,
                 installed_at: 1,
+                origin: None,
             },
             None,
             &[],

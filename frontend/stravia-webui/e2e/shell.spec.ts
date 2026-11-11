@@ -6,6 +6,20 @@ test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })
 
+test('navigation shows the marketplace update count from the API', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 })
+  await page.route('**/api/v1/plugin-marketplace', (route) =>
+    route.fulfill({ json: { data: { sources: [], entries: [], update_count: 2 } } }),
+  )
+  await page.goto('/settings')
+  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+  const link = navigation.getByRole('link', { name: /Vendor plugins.*Update available.*2/i })
+  await expect(link).toBeVisible()
+  await expect(navigation.locator('a[href="/vendor-plugins"]').locator('..')).toContainText('2')
+  await page.getByRole('button', { name: 'Collapse navigation' }).click()
+  await expect(link).toHaveAttribute('aria-label', /Update available.*2/)
+})
+
 test('current navigation stays highlighted without hover across routes and sidebar modes', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 })
   await page.goto('/connect')

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Vendor plugin marketplace with signed release catalogs, explicit third-party source trust, source-bound update checks, bounded Zstd downloads and local `.wasm.zst` import. Installation still requires a credential and data-impact preview; changed keys and conflicting versions cannot silently replace installed code.
+- Unified Vendor Plugins workbench with source management, version selection, download progress and cancellation, plus a shared catalog publishing CLI. Official publishing requires a separately provisioned plugin signing key; updater routes and third-party release migration remain external deployment prerequisites.
+
 ### Fixed
 
 - SQLite requests no longer fail intermittently with HTTP 500 `... database is locked` errors, such as `history marker storage failed`, when another request starts while reasoning or platform tool results are being saved. Every Gateway write to the SQLite database, including prompt admission, usage statistics, settings and background cleanup, now waits in one shared write queue. Writes that bypass the queue are rejected instead of holding the database lock while other writers wait.

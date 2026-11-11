@@ -34,7 +34,9 @@ pub(crate) enum AtomicLeaseFailure {
 impl From<&PluginStorageError> for AtomicLeaseFailure {
     fn from(error: &PluginStorageError) -> Self {
         match error {
-            PluginStorageError::Changed => Self::Changed,
+            PluginStorageError::Changed
+            | PluginStorageError::KeyChanged
+            | PluginStorageError::VersionConflict => Self::Changed,
             PluginStorageError::StaleOperation => Self::StaleOperation,
             PluginStorageError::MissingLineage => Self::MissingLineage,
             PluginStorageError::Limit => Self::Limit,

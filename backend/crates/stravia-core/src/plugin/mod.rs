@@ -11,9 +11,11 @@ pub use egress_verification::synthesize_egress_client_hello;
 pub mod catalog_sync;
 #[cfg(debug_assertions)]
 pub(crate) mod development;
+pub mod distribution;
 pub(crate) mod execution;
 mod lifecycle;
 pub(crate) mod manager;
+pub mod marketplace;
 pub(crate) mod network;
 pub(crate) mod permissions;
 mod store;
@@ -34,7 +36,7 @@ pub(crate) use lifecycle::VendorPublicationFence;
 pub(crate) use store::PluginStorageError;
 pub use store::PluginStore;
 pub use types::{
-    ConfirmPluginUpdate, PluginBindingImpact, PluginDataDiscard, PluginNetworkPermission,
-    PluginPreview, PluginProvider, PluginSource, PluginSummary, ProviderMetadata,
-    ProviderPluginSource,
+    ConfirmPluginUpdate, PluginBindingImpact, PluginDataDiscard, PluginInstallOrigin,
+    PluginNetworkPermission, PluginPreview, PluginProvider, PluginSource, PluginSummary,
+    ProviderMetadata, ProviderPluginSource,
 };

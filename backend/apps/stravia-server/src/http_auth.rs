@@ -414,6 +414,7 @@ fn map_auth_error(error: AuthError) -> Response {
 pub(crate) fn auth_error(status: StatusCode, code: &'static str) -> Response {
     (
         status,
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
         Json(serde_json::json!({ "error": code, "code": code })),
     )
         .into_response()

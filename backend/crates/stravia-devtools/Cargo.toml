@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 stravia-core = { workspace = true }
+stravia-vendor-runtime = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 rcgen = { workspace = true }
 tokio-rustls = { workspace = true }

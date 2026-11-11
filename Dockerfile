@@ -33,6 +33,9 @@ COPY --from=web-builder /src/frontend/stravia-webui/dist frontend/stravia-webui/
 COPY --from=web-builder /src/frontend/stravia-webui/src/assets/icons frontend/stravia-webui/src/assets/icons
 COPY --from=web-builder /src/frontend/stravia-webui/static/stravia-logo.svg frontend/stravia-webui/static/stravia-logo.svg
 
+# Only the public trust anchor enters the build; signing keys never enter the image.
+ARG STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY
+
 # Cache downloads and compiled dependencies without carrying build artifacts into the runtime image.
 RUN --mount=type=cache,id=stravia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stravia-cargo-git,target=/usr/local/cargo/git,sharing=locked \

@@ -1877,6 +1877,8 @@ async fn local_builtin_replacement_survives_restart_until_explicit_restore() -> 
     assert_eq!(preview.vendor_id, "base");
     assert_eq!(preview.author.as_deref(), Some("Stravia Builtin Team"));
     assert_eq!(preview.target_source, PluginSource::Local);
+    assert!(preview.origin.is_none());
+    assert!(preview.previous_origin.is_none());
     let local = gateway
         .admin()
         .confirm_vendor_plugin(ConfirmPluginUpdate {
@@ -1948,7 +1950,10 @@ async fn installed_generation_and_private_state_survive_gateway_restart() -> any
         ..GatewayConfig::default()
     };
     let gateway = Gateway::new(config.clone()).await?;
-    install(&gateway, "lifecycle-v1.wasm", false).await?;
+    let installed = install(&gateway, "lifecycle-v1.wasm", false).await?;
+    assert!(installed.origin.is_none());
+    assert!(!installed.digest.is_empty());
+    assert!(installed.installed_at > 0);
     let mut upstream = TestUpstream::start().await;
     let target = connection(
         &gateway,
@@ -1984,6 +1989,9 @@ async fn installed_generation_and_private_state_survive_gateway_restart() -> any
         .expect("persisted lifecycle plugin");
     assert_eq!(persisted.version, "1.0.0");
     assert_eq!(persisted.source, PluginSource::Local);
+    assert!(persisted.origin.is_none());
+    assert_eq!(persisted.digest, installed.digest);
+    assert_eq!(persisted.installed_at, installed.installed_at);
     let second = tokio::spawn(invoke(create_router(gateway), token, target.route_id));
     let request = upstream.next().await;
     assert_eq!(request.header("x-state-before"), Some("1"));
