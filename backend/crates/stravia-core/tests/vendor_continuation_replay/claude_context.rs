@@ -49,6 +49,66 @@ fn assert_context(harness: &Harness, index: usize, tools: Value, prompt: u64) {
 }
 
 #[tokio::test]
+async fn unproven_compaction_history_continues_without_inventing_ordinals() -> anyhow::Result<()> {
+    for streaming in [false, true] {
+        let harness = Harness::start().await?;
+        harness.script([tool_message(), message("msg_result"), message("msg_next")]);
+        let compaction = json!({
+            "type": "compaction",
+            "content": "Continue the retained task.",
+            "signature": "fixture-compaction-signature"
+        });
+        let mut history = vec![
+            json!({"role":"assistant","content":[compaction.clone()]}),
+            json!({"role":"user","content":"Find the fixture."}),
+        ];
+        let (status, response) = send(&harness, history.clone(), streaming).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert!(response.contains("lookup"), "{response}");
+        history.push(json!({"role":"assistant","content":[
+            {"type":"tool_use","id":"toolu_fixture","name":"lookup","input":{}}
+        ]}));
+        history.push(json!({"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"toolu_fixture","content":"found"}
+        ]}));
+        let (status, response) = send(&harness, history.clone(), streaming).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert!(response.contains("READY"), "{response}");
+        history.push(json!({"role":"assistant","content":[{"type":"text","text":"READY"}]}));
+        history.push(json!({"role":"user","content":"Continue with the next task."}));
+        let (status, response) = send(&harness, history, streaming).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert!(response.contains("READY"), "{response}");
+        {
+            let bodies = harness.upstream.bodies.lock();
+            for body in bodies.iter() {
+                assert_eq!(body["messages"][0]["content"][0], compaction);
+                let billing = body["system"][0]["text"].as_str().unwrap();
+                assert!(!billing.contains("cc_prompt_index="), "{billing}");
+                assert!(!billing.contains("cc_turn_index="), "{billing}");
+            }
+            assert_eq!(bodies[1]["messages"][3]["content"][0]["content"], "found");
+            assert_eq!(
+                bodies[2]["messages"][5]["content"][0]["text"],
+                "Continue with the next task."
+            );
+            let headers = harness.upstream.headers.lock();
+            assert_eq!(
+                headers[0]["x-claude-code-prompt-id"],
+                headers[1]["x-claude-code-prompt-id"]
+            );
+            assert_ne!(
+                headers[1]["x-claude-code-prompt-id"],
+                headers[2]["x-claude-code-prompt-id"]
+            );
+        }
+        assert_eq!(harness.attempts().await?, completed(3));
+        harness.gateway.shutdown().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn delivered_client_tool_handoff_is_inherited_for_buffered_and_live_responses()
 -> anyhow::Result<()> {
     for streaming in [false, true] {

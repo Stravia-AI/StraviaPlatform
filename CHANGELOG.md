@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Claude Code requests no longer fail locally with HTTP 400 `vendor_request_invalid` when compacted or otherwise unproven history has unknown cumulative prompt/turn counts. Optional billing counters are omitted without inventing ordinals or changing retained history, signatures or prompt identity. Rebuild and re-import the standalone Claude Code plugin.
 - SQLite requests no longer fail intermittently with HTTP 500 `... database is locked` errors, such as `history marker storage failed`, when another request starts while reasoning or platform tool results are being saved. Every Gateway write to the SQLite database, including prompt admission, usage statistics, settings and background cleanup, now waits in one shared write queue. Writes that bypass the queue are rejected instead of holding the database lock while other writers wait.
 - Antigravity inference removes the exact RFC 2119 keyword declaration from outbound system text to avoid a reproducible upstream 429. Other system content, user messages, tool data, stored history and `requestType: agent` remain unchanged. Rebuild and re-import the standalone Antigravity plugin.
 
