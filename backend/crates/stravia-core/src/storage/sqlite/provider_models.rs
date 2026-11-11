@@ -1168,6 +1168,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
+        let mut writer = pool.acquire_write().await.unwrap();
         for provider_id in ["matrix", "single", "empty"] {
             sqlx::query(
                 "INSERT INTO providers (id, name, protocol, base_url, api_key)
@@ -1175,10 +1176,11 @@ mod tests {
             )
             .bind(provider_id)
             .bind(provider_id)
-            .execute(&pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
         }
+        writer.finish().await.unwrap();
         let storage = SqliteStorage::from_pool(pool);
 
         let mut next = 0;
@@ -1262,13 +1264,15 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
                      VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
         )
-        .execute(&pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+        writer.finish().await.unwrap();
         let storage = SqliteStorage::from_pool(pool);
         for model_id in ["first", "second"] {
             storage
@@ -1352,16 +1356,20 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
+        let mut writer = pool.acquire_write().await.expect("writer connection");
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
         )
-        .execute(&pool)
+        .execute(&mut *writer)
         .await
         .expect("test Provider");
+        writer.finish().await.expect("release fixture lease");
         let storage = SqliteStorage::from_pool(pool.clone());
 
-        let mut writer = pool.acquire().await.expect("writer connection");
+        let mut writer = sqlx::sqlite::SqliteConnection::connect_with(&pool.connect_options())
+            .await
+            .expect("outside writer connection");
         let writer_tx = writer
             .begin_with("BEGIN IMMEDIATE")
             .await
@@ -1413,13 +1421,15 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES ('provider', 'Provider', 'openai', 'https://example.com', 'key')",
         )
-        .execute(&pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+        writer.finish().await.unwrap();
         let storage = SqliteStorage::from_pool(pool);
         let mutation = storage
             .create(
@@ -1489,6 +1499,7 @@ mod tests {
         priority: i32,
         map: &[ThinkingLevelMapping],
     ) {
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query(
             "INSERT INTO models (id, model_id, balance, is_enabled)
              VALUES (?, ?, 'traffic_equalization', ?)",
@@ -1496,7 +1507,7 @@ mod tests {
         .bind(route)
         .bind(route)
         .bind(route_enabled)
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
         sqlx::query(
@@ -1510,9 +1521,10 @@ mod tests {
         .bind(target_enabled)
         .bind(priority)
         .bind(sqlx::types::Json(map))
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+        writer.finish().await.unwrap();
     }
 
     async fn target_row(
@@ -1602,11 +1614,13 @@ mod tests {
             },
             source: ThinkingMappingSource::Overridden,
         };
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query("UPDATE model_backends SET thinking_level_map = ? WHERE id = 'target-a'")
             .bind(sqlx::types::Json(&overridden_map))
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
+        writer.finish().await.unwrap();
 
         let epoch_before = config_epoch(pool).await.unwrap().parse::<i64>().unwrap();
         let target_a_before = target_row(pool, "target-a").await;
@@ -1735,17 +1749,18 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '7')")
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
         // Fail on the second Target write so a partial refresh is attempted.
         sqlx::query("CREATE TABLE update_attempts (n INTEGER NOT NULL)")
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
         sqlx::query("INSERT INTO update_attempts (n) VALUES (0)")
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
         sqlx::query(
@@ -1755,9 +1770,10 @@ mod tests {
                  WHERE (SELECT n FROM update_attempts) >= 2; \
              END",
         )
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+        writer.finish().await.unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_a_before = target_map(pool, "target-a").await;
@@ -1797,8 +1813,9 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '3')")
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
         sqlx::query(
@@ -1806,9 +1823,10 @@ mod tests {
              WHEN NEW.name = 'config_epoch' \
              BEGIN SELECT RAISE(FAIL, 'epoch write rejected'); END",
         )
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+        writer.finish().await.unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
@@ -1847,10 +1865,12 @@ mod tests {
             &all_hidden_map(),
         )
         .await;
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query("INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', '4')")
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
+        writer.finish().await.unwrap();
 
         let model_before = storage.get("provider", "model").await.unwrap().unwrap();
         let map_before = target_map(pool, "target-a").await;
@@ -1967,12 +1987,14 @@ mod tests {
     async fn restore_treats_an_invalid_epoch_as_zero() {
         let (_data_dir, storage) = restore_fixture().await;
         let pool = storage.pool();
+        let mut writer = pool.acquire_write().await.unwrap();
         sqlx::query(
             "INSERT OR REPLACE INTO settings (name, value) VALUES ('config_epoch', 'bogus')",
         )
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+        writer.finish().await.unwrap();
 
         let result = storage
             .restore(

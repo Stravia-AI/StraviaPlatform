@@ -366,7 +366,9 @@ SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前�
 
 同一 Gateway 内，来自同一 SQLite pool 及其克隆的运行期写入口统一通过 `Pool::acquire_write` 取得池级写租约，包括历史、普通 Observation、Artifact、History Marker、凭据映射及管理和后台存储。租约先取得共享 FIFO 异步写锁，再取得连接；事务必须从租约连接开启，autocommit DML 和 `UPDATE ... RETURNING` 同样不能绕过租约。独立只读查询和只读事务仍使用普通 pool，不因写协调而串行化。PostgreSQL 不增加全局写锁，保持原数据库并发与锁协议。
 
-正常提交或回滚后显式调用 `WriteConnection::finish`，在同一 SQLite worker 队列执行完成屏障并确认已退出事务后释放协调权。请求取消或错误退出时，租约的清理任务继续持锁，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
+这一约束由池强制执行，而不是只靠调用方遵守。`db::init_pool` 与无持久存储时的内存历史池以 `PoolOptions::require_write_lease` 创建：连接建立后、驱动与调用方初始化完成时设置 `PRAGMA query_only=ON`；`acquire_write` 取得连接后才设为 `OFF`，租约结束时再设回 `ON`，并兼作完成屏障。绕过租约的写入（包括 `BEGIN IMMEDIATE` 和延迟事务中的写语句）立即以 `SQLITE_READONLY` 失败，不会持有数据库写锁，也就不会让排队中的租约写者在 `busy_timeout` 后失败，或在延迟事务升级为写事务时立即 `SQLITE_BUSY`。迁移和升级钩子在同一写租约内运行。解除只读失败的连接不会归还池中，而是直接关闭。经 `Pool::connect_options` 建立的直连和离线维护池不受此约束。
+
+正常提交或回滚后显式调用 `WriteConnection::finish`，在同一 SQLite worker 队列执行完成屏障并确认已退出事务后释放协调权。请求取消或错误退出时，租约的清理任务继续持锁，并在归还连接前恢复只读，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
 
 写租约仅覆盖数据库阶段，不覆盖文件／网络 I/O、Artifact 对象锁等待或再次申请同池写租约。清理中的 owner 快照读事务在文件 tombstone 操作前提交；保留期更新也在完成数据库写租约后才改写 manifest。协调范围仅限同源 pool，不替代跨进程或独立连接池的数据库锁；外部写者与底层 I/O 停顿仍可能造成 SQLite 等待或 `SQLITE_BUSY`。现有 `busy_timeout` 和持久性配置不变。
 

@@ -146,12 +146,14 @@ mod tests {
             .create_source(&owner, "image/jpeg", bytes.clone(), Duration::from_secs(60))
             .await
             .expect("existing shared content");
+        let mut writer = pool.acquire_write().await.expect("write lease");
         sqlx::query(
             "CREATE TRIGGER reject_media_derivative_insert BEFORE INSERT ON media_derivatives BEGIN SELECT RAISE(ABORT, 'rejected'); END",
         )
-        .execute(&pool)
+        .execute(&mut *writer)
         .await
         .expect("failure trigger");
+        writer.finish().await.expect("finish write lease");
 
         assert!(matches!(
             store

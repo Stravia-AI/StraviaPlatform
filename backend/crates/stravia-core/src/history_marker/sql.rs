@@ -3,6 +3,23 @@ use super::*;
 use sqlx::FromRow;
 
 macro_rules! backend {
+    ($store:expr, $pool:ident, $connection:ident, $transaction:ident, $body:block) => {
+        match $store {
+            SqlHistoryMarkerStore::Sqlite($pool) => {
+                let mut $connection = $pool.acquire_write().await.map_err(storage)?;
+                let mut $transaction = $connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage)?;
+                $body
+            }
+            SqlHistoryMarkerStore::Postgres($pool) => {
+                let mut $connection = $pool.acquire_write().await.map_err(storage)?;
+                let mut $transaction = $connection.begin().await.map_err(storage)?;
+                $body
+            }
+        }
+    };
     ($store:expr, $pool:ident, $body:block) => {
         match $store {
             SqlHistoryMarkerStore::Sqlite($pool) => $body,
@@ -75,7 +92,12 @@ impl SqlHistoryMarkerStore {
         match self {
             Self::Sqlite(pool) => {
                 let mut connection = pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin().await.map_err(storage)?;
+                // 先读正文 scope 再写：IMMEDIATE 让门外写锁按 busy_timeout 等待，
+                // 而不是在 DEFERRED 读快照升级为写时立即 BUSY。
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage)?;
                 let (envelope, ids) =
                     super::payload::sqlite::intern_segment(&mut transaction, &principal, payload)
                         .await
@@ -299,7 +321,11 @@ impl SqlHistoryMarkerStore {
         match self {
             Self::Sqlite(pool) => {
                 let mut connection = pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin().await.map_err(storage)?;
+                // 先读正文 scope 再写，原因同 `insert_thinking`。
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage)?;
                 let (envelope, ids) =
                     super::payload::sqlite::intern_segment(&mut transaction, principal, payload)
                         .await
@@ -482,9 +508,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         if input.deadline_unix_ms <= now {
             return Err(HistoryMarkerError::TerminalConflict);
         }
-        backend!(self, pool, {
-            let mut connection = pool.acquire_write().await.map_err(storage)?;
-            let mut tx = connection.begin().await.map_err(storage)?;
+        backend!(self, pool, connection, tx, {
             // Preserve the original absolute acceptance deadline.
             sqlx::query(
                 "UPDATE history_markers SET execution_deadline = CASE WHEN execution_deadline < $1 \
@@ -583,9 +607,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         before_commit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), HistoryMarkerError> {
         let key = principal.continuation_key();
-        backend!(self, pool, {
-            let mut connection = pool.acquire_write().await.map_err(storage)?;
-            let mut transaction = connection.begin().await.map_err(storage)?;
+        backend!(self, pool, connection, transaction, {
             let updated = sqlx::query(
                 "UPDATE public_tool_executions SET handed_off_at = COALESCE(handed_off_at, $1) \
                  WHERE id = $2 AND principal = $3 AND id IN \
@@ -933,7 +955,11 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let updated = match self {
             Self::Sqlite(pool) => {
                 let mut connection = pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin().await.map_err(storage)?;
+                // 先读正文 scope 再写，原因同 `insert_thinking`。
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage)?;
                 let (envelope, ids) = super::payload::sqlite::intern_segment(
                     &mut transaction,
                     &principal_key,

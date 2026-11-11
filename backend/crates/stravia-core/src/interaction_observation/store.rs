@@ -4888,14 +4888,18 @@ mod tests {
         }
         assert_eq!(totals(pool.clone()).await?, (1, 10, 3));
         // A transaction interrupted before commit cannot leak a revised contribution.
-        let mut tx = pool.begin().await?;
+        let mut connection = pool.acquire_write().await?;
+        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE target_attempt_observations SET output_tokens=999 WHERE id='partial-usage-reported'")
             .execute(&mut *tx).await?;
         tx.rollback().await?;
+        connection.finish().await?;
         assert_eq!(totals(pool.clone()).await?, (1, 10, 3));
+        let mut connection = pool.acquire_write().await?;
         sqlx::query("DELETE FROM interaction_observations WHERE id='partial-usage'")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await?;
+        connection.finish().await?;
         assert_eq!(totals(pool.clone()).await?, (1, 10, 3));
         let checkpoints: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_usage_checkpoints")
             .fetch_one(&pool)
@@ -5938,15 +5942,17 @@ mod tests {
         admit_waiting_scenario_run(&store, "parent", "parent-child", Some("parent")).await?;
         // 固定闲置窗口两侧：stale/resolved/parent 上次活动远在窗口外，fresh 在窗口内。
         // resolved 与 parent 仅靠各自豁免条件存活，不能用活动时间掩盖。
+        let mut connection = pool.acquire_write().await?;
         sqlx::query("UPDATE inference_run_observations SET last_active_at=0 WHERE id IN ('stale','resolved','parent')")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await?;
         sqlx::query("UPDATE inference_run_observations SET last_active_at=100 WHERE id='fresh'")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await?;
         sqlx::query("UPDATE interaction_observations SET last_active_at=100 WHERE id='fresh'")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await?;
+        connection.finish().await?;
         let events = store.expire_idle_waiting_client(110, 20).await?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "run_state_changed");
@@ -6017,7 +6023,9 @@ mod tests {
         // 模拟旧版本已收齐结果但未重算的缓存投影。
         match store {
             ObservationStore::Sqlite(pool, _) => {
-                sqlx::query("UPDATE interaction_observations SET status='waiting_client' WHERE id='resolved'").execute(pool).await?;
+                let mut connection = pool.acquire_write().await?;
+                sqlx::query("UPDATE interaction_observations SET status='waiting_client' WHERE id='resolved'").execute(&mut *connection).await?;
+                connection.finish().await?;
             }
             ObservationStore::Postgres(pool, _) => {
                 sqlx::query("UPDATE interaction_observations SET status='waiting_client' WHERE id='resolved'").execute(pool).await?;
@@ -6885,9 +6893,11 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        let mut connection = pool.acquire_write().await?;
         sqlx::query("DROP TABLE observation_events")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await?;
+        connection.finish().await?;
         assert!(
             store
                 .filter_client_tool_results(

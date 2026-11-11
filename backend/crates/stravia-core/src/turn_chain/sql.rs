@@ -818,9 +818,9 @@ impl TurnChainStore for SqlTurnChainStore {
              ),
     ) -> Result<(), TurnUnavailable> {
         macro_rules! rebuild {
-            ($pool:expr, $restore:ident, $backend:ident, $lock:literal) => {{
+            ($pool:expr, $restore:ident, $backend:ident, $begin:literal, $lock:literal) => {{
                 let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin().await.map_err(storage)?;
+                let mut transaction = connection.begin_with($begin).await.map_err(storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(storage)?; }
                 let stale = format!("{namespace_prefix}%");
                 let mut nodes: Vec<PrefixRebuildNode> = sqlx::query_as(
@@ -882,11 +882,12 @@ impl TurnChainStore for SqlTurnChainStore {
             }};
         }
         match &self.backend {
-            Backend::Sqlite(pool) => rebuild!(pool, restore_sqlite, sqlite, ""),
+            Backend::Sqlite(pool) => rebuild!(pool, restore_sqlite, sqlite, "BEGIN IMMEDIATE", ""),
             Backend::Postgres(pool) => rebuild!(
                 pool,
                 restore_postgres,
                 postgres,
+                "BEGIN",
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
             ),
         }

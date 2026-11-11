@@ -231,8 +231,10 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let key = admin.create_api_key(CreateApiKey { key: None, name: "local publication client".into(), rpm_limit: None, expires_at: None, mcp_access_enabled: false, transparent_injection_enabled: false,
             spend_limit: None,
         inject_web_search: false, inject_media_generation: false, inject_media_understanding: false, model_ids: vec![route.id.into()], }).await.unwrap();
+        let mut connection = gateway._sqlite_pool.as_ref().unwrap().acquire_write().await.unwrap();
         sqlx::query("CREATE TRIGGER deny_native_publication BEFORE INSERT ON native_compactions BEGIN SELECT RAISE(ABORT, 'injected registration failure'); END")
-            .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
+            .execute(&mut *connection).await.unwrap();
+        connection.finish().await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let router = super::create_router(gateway.clone());
@@ -340,8 +342,10 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         assert_eq!(committed_runs, 1, "SSE public text is committed; failed unary output is not");
         // The identical real compact payload succeeds when only the database fault
         // is removed, ruling out Provider schema/routing errors as the failure cause.
+        let mut connection = gateway._sqlite_pool.as_ref().unwrap().acquire_write().await.unwrap();
         sqlx::query("DROP TRIGGER deny_native_publication")
-            .execute(gateway._sqlite_pool.as_ref().unwrap()).await.unwrap();
+            .execute(&mut *connection).await.unwrap();
+        connection.finish().await.unwrap();
         stage.set("standalone registration success exchange");
         let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)

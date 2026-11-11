@@ -41,6 +41,8 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
                 Ok(())
             })
         })
+        // 同一数据库的写者只能在池写租约内排队；门外写入直接失败，不与租约写者争用写锁。
+        .require_write_lease()
         .connect_with(options)
         .await?)
 }

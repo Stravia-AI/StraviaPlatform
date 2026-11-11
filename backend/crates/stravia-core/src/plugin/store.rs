@@ -639,7 +639,7 @@ impl PluginStore {
             .map_err(storage_error)?;
         data.atomic_leases.clear();
         tx.commit().await.map_err(storage_error)?;
-        drop(connection);
+        connection.finish().await.map_err(storage_error)?;
         *store
             .history_pool
             .write()

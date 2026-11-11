@@ -4,9 +4,8 @@ use crate::startup_progress::report;
 use anyhow::ensure;
 use sha2::{Digest, Sha384};
 use sqlx::{
-    PgPool, Sqlite, SqlitePool,
+    PgPool, Sqlite, SqlitePool, WriteConnection,
     migrate::{Migrate, Migrator},
-    pool::PoolConnection,
 };
 
 static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -79,14 +78,33 @@ pub async fn check_sqlite_source_history(
 }
 
 struct SqliteMigrationConnection {
-    connection: PoolConnection<Sqlite>,
+    connection: Option<WriteConnection<Sqlite>>,
     foreign_keys_may_be_off: bool,
+}
+
+impl SqliteMigrationConnection {
+    fn connection(&mut self) -> &mut sqlx::SqliteConnection<'static> {
+        self.connection
+            .as_mut()
+            .expect("live SQLite migration connection")
+    }
+
+    /// 外键约束已恢复，按正常路径归还连接并释放写租约。
+    async fn finish(mut self) -> anyhow::Result<()> {
+        self.foreign_keys_may_be_off = false;
+        if let Some(connection) = self.connection.take() {
+            connection.finish().await?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for SqliteMigrationConnection {
     fn drop(&mut self) {
-        if self.foreign_keys_may_be_off {
-            self.connection.close_on_drop();
+        if self.foreign_keys_may_be_off
+            && let Some(connection) = self.connection.as_mut()
+        {
+            connection.close_on_drop();
         }
     }
 }
@@ -146,20 +164,21 @@ pub async fn run_sqlite_migrator(
         0,
         None,
     );
+    // 迁移与升级钩子在同一写租约内运行；运行期写者须在其后排队，池连接在租约外只读。
     let mut pinned = SqliteMigrationConnection {
-        connection: pool.acquire().await?,
+        connection: Some(pool.acquire_write().await?),
         // 保守标记：迁移会话可能执行过 PRAGMA foreign_keys=OFF，失败或取消时必须关闭连接。
         foreign_keys_may_be_off: true,
     };
     let mut runner = unlocked_runner(migrator);
-    Migrate::lock(&mut *pinned.connection).await?;
+    Migrate::lock(pinned.connection()).await?;
     report(
         "migration_validate",
         "Checking database migration history",
         0,
         None,
     );
-    let applied = reject_incompatible_sqlite(&mut pinned.connection, &mut runner).await?;
+    let applied = reject_incompatible_sqlite(pinned.connection(), &mut runner).await?;
     let last_applied = if applied == 0 {
         0
     } else {
@@ -168,9 +187,9 @@ pub async fn run_sqlite_migrator(
     // 仅在历史校验成功且已覆盖当前列表时跳过升级工作。
     if applied == runner.iter().count() {
         // 已完整升级：不关闭外键约束、不扫描全部业务表，也不运行没有待处理工作的历史转换。
-        ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
-        Migrate::unlock(&mut *pinned.connection).await?;
-        pinned.foreign_keys_may_be_off = false;
+        ensure_sqlite_foreign_keys(pinned.connection()).await?;
+        Migrate::unlock(pinned.connection()).await?;
+        pinned.finish().await?;
         tracing::info!(
             backend = "sqlite",
             applied_migrations = applied,
@@ -183,35 +202,35 @@ pub async fn run_sqlite_migrator(
         .iter()
         .skip(applied)
         .any(|migration| !sqlite_migration_keeps_foreign_keys(migration));
-    ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
+    ensure_sqlite_foreign_keys(pinned.connection()).await?;
     if requires_rebuild {
         let existing_violations: Vec<(String, i64, String, i64)> =
             sqlx::query_as("PRAGMA foreign_key_check")
-                .fetch_all(&mut *pinned.connection)
+                .fetch_all(pinned.connection())
                 .await?;
         ensure!(
             existing_violations.is_empty(),
             "database already has foreign key violations: {existing_violations:?}"
         );
         sqlx::query("PRAGMA foreign_keys=OFF")
-            .execute(&mut *pinned.connection)
+            .execute(pinned.connection())
             .await?;
     }
     if runner.version_exists(7) {
         report("history_schema", "Preparing history schema", 0, None);
         runner
-            .run_direct(Some(6), &mut *pinned.connection, false)
+            .run_direct(Some(6), pinned.connection(), false)
             .await?;
         runner
-            .run_direct(Some(7), &mut *pinned.connection, false)
+            .run_direct(Some(7), pinned.connection(), false)
             .await?;
         report("history_data", "Checking history conversion", 0, None);
-        crate::turn_chain::upgrade::convert_history_sqlite(&mut pinned.connection).await?;
+        crate::turn_chain::upgrade::convert_history_sqlite(pinned.connection()).await?;
     }
     if runner.version_exists(8) {
         report("debug_manifests", "Checking diagnostic manifests", 0, None);
         crate::interaction_observation::upgrade::export_debug_manifests_sqlite(
-            &mut pinned.connection,
+            pinned.connection(),
             diagnostics,
         )
         .await?;
@@ -222,7 +241,7 @@ pub async fn run_sqlite_migrator(
             None,
         );
         runner
-            .run_direct(Some(8), &mut *pinned.connection, false)
+            .run_direct(Some(8), pinned.connection(), false)
             .await?;
         report(
             "observation_data",
@@ -230,10 +249,8 @@ pub async fn run_sqlite_migrator(
             0,
             None,
         );
-        crate::interaction_observation::upgrade::convert_event_storage_sqlite(
-            &mut pinned.connection,
-        )
-        .await?;
+        crate::interaction_observation::upgrade::convert_event_storage_sqlite(pinned.connection())
+            .await?;
     }
     // 0027 只能在错误详情回填完成后提交；之后的新升级不再扫描历史事件。
     if runner.version_exists(26) && last_applied < 27 {
@@ -245,7 +262,7 @@ pub async fn run_sqlite_migrator(
         );
         // 0026 先建立新列、视图与触发器；尝试错误详情必须在其后、计数回填 0027 之前写入。
         runner
-            .run_direct(Some(26), &mut *pinned.connection, false)
+            .run_direct(Some(26), pinned.connection(), false)
             .await?;
         report(
             "usage_backfill",
@@ -254,13 +271,13 @@ pub async fn run_sqlite_migrator(
             None,
         );
         crate::interaction_observation::upgrade::backfill_attempt_error_details_sqlite(
-            &mut pinned.connection,
+            pinned.connection(),
         )
         .await?;
     }
     if runner.version_exists(30) {
         runner
-            .run_direct(Some(30), &mut *pinned.connection, false)
+            .run_direct(Some(30), pinned.connection(), false)
             .await?;
         report(
             "model_pinning",
@@ -268,31 +285,31 @@ pub async fn run_sqlite_migrator(
             0,
             None,
         );
-        crate::provider_models::pinning_migration::run_sqlite(&mut pinned.connection).await?;
+        crate::provider_models::pinning_migration::run_sqlite(pinned.connection()).await?;
     }
     if runner.version_exists(32) {
         runner
-            .run_direct(Some(32), &mut *pinned.connection, false)
+            .run_direct(Some(32), pinned.connection(), false)
             .await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=33 AND success)",
         )
-        .fetch_one(&mut *pinned.connection)
+        .fetch_one(pinned.connection())
         .await?;
         if !finalized {
             report("history_data", "Normalizing history storage", 0, None);
-            crate::turn_chain::upgrade::normalize_sqlite(&mut pinned.connection).await?;
+            crate::turn_chain::upgrade::normalize_sqlite(pinned.connection()).await?;
         }
     }
     if runner.version_exists(35) {
         // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
         runner
-            .run_direct(Some(34), &mut *pinned.connection, false)
+            .run_direct(Some(34), pinned.connection(), false)
             .await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=35 AND success)",
         )
-        .fetch_one(&mut *pinned.connection)
+        .fetch_one(pinned.connection())
         .await?;
         if !finalized {
             report(
@@ -302,19 +319,19 @@ pub async fn run_sqlite_migrator(
                 None,
             );
             crate::interaction_observation::upgrade::retire_kingfisher_discoveries_sqlite(
-                &mut pinned.connection,
+                pinned.connection(),
             )
             .await?;
         }
     }
     if runner.version_exists(37) {
         runner
-            .run_direct(Some(37), &mut *pinned.connection, false)
+            .run_direct(Some(37), pinned.connection(), false)
             .await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=38 AND success)",
         )
-        .fetch_one(&mut *pinned.connection)
+        .fetch_one(pinned.connection())
         .await?;
         if !finalized {
             report(
@@ -323,22 +340,22 @@ pub async fn run_sqlite_migrator(
                 0,
                 None,
             );
-            crate::content_upgrade::run_sqlite(&mut pinned.connection).await?;
+            crate::content_upgrade::run_sqlite(pinned.connection()).await?;
         }
     }
     if runner.version_exists(39) {
         // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
         runner
-            .run_direct(Some(39), &mut *pinned.connection, false)
+            .run_direct(Some(39), pinned.connection(), false)
             .await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=40 AND success)",
         )
-        .fetch_one(&mut *pinned.connection)
+        .fetch_one(pinned.connection())
         .await?;
         if !finalized {
             report("retention_data", "Converting dependency retention", 0, None);
-            crate::turn_chain::upgrade::retention_sqlite(&mut pinned.connection).await?;
+            crate::turn_chain::upgrade::retention_sqlite(pinned.connection()).await?;
         }
     }
     if runner.version_exists(41) {
@@ -349,12 +366,12 @@ pub async fn run_sqlite_migrator(
             None,
         );
         runner
-            .run_direct(Some(41), &mut *pinned.connection, false)
+            .run_direct(Some(41), pinned.connection(), false)
             .await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=42 AND success)",
         )
-        .fetch_one(&mut *pinned.connection)
+        .fetch_one(pinned.connection())
         .await?;
         if !finalized {
             report(
@@ -364,7 +381,7 @@ pub async fn run_sqlite_migrator(
                 None,
             );
             crate::interaction_observation::upgrade_normalize::normalize_sqlite(
-                &mut pinned.connection,
+                pinned.connection(),
             )
             .await?;
         }
@@ -375,23 +392,21 @@ pub async fn run_sqlite_migrator(
         0,
         None,
     );
-    runner
-        .run_direct(None, &mut *pinned.connection, false)
-        .await?;
+    runner.run_direct(None, pinned.connection(), false).await?;
     report("migration_verify", "Verifying database integrity", 0, None);
     if requires_rebuild {
         let violations: Vec<(String, i64, String, i64)> =
             sqlx::query_as("PRAGMA foreign_key_check")
-                .fetch_all(&mut *pinned.connection)
+                .fetch_all(pinned.connection())
                 .await?;
         ensure!(
             violations.is_empty(),
             "migration created foreign key violations: {violations:?}"
         );
     }
-    ensure_sqlite_foreign_keys(&mut pinned.connection).await?;
-    Migrate::unlock(&mut *pinned.connection).await?;
-    pinned.foreign_keys_may_be_off = false;
+    ensure_sqlite_foreign_keys(pinned.connection()).await?;
+    Migrate::unlock(pinned.connection()).await?;
+    pinned.finish().await?;
     tracing::info!(
         backend = "sqlite",
         elapsed_ms = started.elapsed().as_millis(),
@@ -2186,11 +2201,11 @@ mod tests {
     async fn sqlite_interrupted_migration_never_returns_fk_off_connection() {
         let pool = sqlite_pool().await;
         let mut pinned = super::SqliteMigrationConnection {
-            connection: pool.acquire().await.unwrap(),
+            connection: Some(pool.acquire_write().await.unwrap()),
             foreign_keys_may_be_off: true,
         };
         sqlx::query("PRAGMA foreign_keys=OFF")
-            .execute(&mut *pinned.connection)
+            .execute(pinned.connection())
             .await
             .unwrap();
         drop(pinned); // Equivalent to cancelling after FK-off and before SQLx finishes.

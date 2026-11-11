@@ -1067,10 +1067,21 @@ async fn attachment_storage_failure_is_a_sanitized_server_error() {
     )
     .await;
     let headers = authorized_headers(&gateway).await;
+    let mut connection = gateway
+        ._sqlite_pool
+        .as_ref()
+        .expect("Gateway SQLite pool")
+        .acquire_write()
+        .await
+        .expect("SQLite write lease");
     sqlx::query("ALTER TABLE artifacts RENAME TO unavailable_artifacts")
-        .execute(gateway._sqlite_pool.as_ref().expect("Gateway SQLite pool"))
+        .execute(&mut *connection)
         .await
         .expect("make isolated Artifact storage unavailable");
+    connection
+        .finish()
+        .await
+        .expect("finish SQLite write lease");
 
     let response = execute_non_stream_request_with_headers(
         gateway,

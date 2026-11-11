@@ -4,7 +4,7 @@ use sqlx_native::Connection as _;
 use tokio::{runtime::Handle, sync::OwnedMutexGuard};
 
 use crate::{
-    ConnectionHandle, Database, Error, PoolConnection,
+    ConnectionHandle, Database, Error, PoolConnection, WriteMode,
     diagnostics::{self, Phase},
 };
 
@@ -36,6 +36,7 @@ pub struct WriteConnection<DB: Database> {
     lease: Option<Lease>,
     runtime: Option<Handle>,
     discard_on_drop: bool,
+    write_mode: Option<WriteMode<DB>>,
 }
 
 impl<DB: Database> WriteConnection<DB> {
@@ -45,7 +46,29 @@ impl<DB: Database> WriteConnection<DB> {
             runtime: lease.as_ref().map(|_| Handle::current()),
             lease,
             discard_on_drop: false,
+            write_mode: None,
         }
+    }
+
+    pub(super) fn with_write_mode(mut self, write_mode: Option<WriteMode<DB>>) -> Self {
+        self.write_mode = write_mode;
+        self
+    }
+
+    /// 解除池连接在租约外的只读状态。失败时连接状态不明，析构时关闭而不归还。
+    pub(super) async fn enable_writes(&mut self) -> Result<(), Error> {
+        let Some(write_mode) = self.write_mode else {
+            return Ok(());
+        };
+        let connection = self.connection.as_mut().expect("live write connection");
+        if let Err(error) = write_mode(connection.handle.raw(), true).await {
+            self.discard_on_drop = true;
+            if let Some(lease) = self.lease.as_mut() {
+                lease.hold.fail(&error);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// 等候驱动队列中的语句及回滚完成，再归还连接并释放协调权。
@@ -73,7 +96,7 @@ impl<DB: Database> WriteConnection<DB> {
         let mut phase = Phase::new(span);
         let result = {
             let connection = self.connection.as_mut().expect("live write connection");
-            settle(connection).await
+            settle(connection, self.write_mode).await
         };
         match result {
             Ok(()) => {
@@ -126,6 +149,7 @@ impl<DB: Database> Drop for WriteConnection<DB> {
         };
         let runtime = self.runtime.take().expect("SQLite writer runtime");
         let discard = self.discard_on_drop;
+        let write_mode = self.write_mode;
         lease.hold.cancel_if_unfinished();
         // 从进入析构路径开始计时，包含分离任务首次被 poll 前的等待。
         // 不进入此 span，避免 SQLite worker 克隆它并延长到清理任务结束之后。
@@ -143,7 +167,7 @@ impl<DB: Database> Drop for WriteConnection<DB> {
         // 事务的 Drop 已先向同一 worker 排入回滚，屏障完成前不能放行后续写入。
         let _cleanup = runtime.spawn(async move {
             let mut failed = false;
-            if !discard && let Err(error) = settle(&mut connection).await {
+            if !discard && let Err(error) = settle(&mut connection, write_mode).await {
                 phase.fail(&error);
                 lease.hold.fail(&error);
                 tracing::warn!(
@@ -177,8 +201,15 @@ impl<DB: Database> Drop for WriteConnection<DB> {
     }
 }
 
-async fn settle<DB: Database>(connection: &mut PoolConnection<DB>) -> Result<(), Error> {
-    connection.ping().await?;
+async fn settle<DB: Database>(
+    connection: &mut PoolConnection<DB>,
+    write_mode: Option<WriteMode<DB>>,
+) -> Result<(), Error> {
+    match write_mode {
+        // 恢复只读与 ping 同样排在该 worker 队列末尾，兼作完成屏障。
+        Some(write_mode) => write_mode(connection.handle.raw(), false).await?,
+        None => connection.ping().await?,
+    }
     if connection.handle.raw().is_in_transaction() {
         return Err(Error::Protocol(
             "SQLite write lease ended with an active transaction".into(),

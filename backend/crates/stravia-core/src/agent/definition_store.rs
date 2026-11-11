@@ -151,7 +151,10 @@ impl AgentDefinitionStore for SqlAgentDefinitionStore {
         match self {
             Self::Sqlite(pool) => {
                 let mut connection = pool.acquire_write().await.map_err(storage_error)?;
-                let mut transaction = connection.begin().await.map_err(storage_error)?;
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage_error)?;
                 sqlx::query(
                     "INSERT OR IGNORE INTO agent_definition_revisions \
                      (definition_id, slug, version, spec_hash, spec_json, created_at) \
