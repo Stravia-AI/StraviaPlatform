@@ -161,9 +161,6 @@ pub(super) fn parse_query(input: &str) -> Result<ParsedQuery, &'static str> {
     if let Some(begin) = start {
         pieces.push(&input[begin..]);
     }
-    if pieces.len() > 8 {
-        return Err("Search query must contain at most 8 terms.");
-    }
     let mut terms = Vec::new();
     for piece in pieces {
         let tokens = tokenize(piece);
@@ -179,6 +176,10 @@ pub(super) fn parse_query(input: &str) -> Result<ParsedQuery, &'static str> {
     }
     if terms.is_empty() {
         return Err("Search query has no searchable tokens.");
+    }
+    // 没有可检索词元的词项被忽略，不占 8 个词项的名额（设计文档 §5.1）。
+    if terms.len() > 8 {
+        return Err("Search query must contain at most 8 terms.");
     }
     Ok(ParsedQuery { terms })
 }
@@ -275,6 +276,8 @@ fn rejects_query_limits_and_empty_tokens() {
     assert!(parse_query(&format!("\"{}\"", "a ".repeat(17))).is_err());
     assert!(parse_query("\"unterminated").is_err());
     assert!(parse_query(&"a ".repeat(8)).is_ok());
+    assert_eq!(parse_query("a - b - c - d - e").unwrap().terms.len(), 5);
+    assert_eq!(parse_query("a b c d e f g h -").unwrap().terms.len(), 8);
     assert!(parse_query(&format!("a{}", " ".repeat(255))).is_ok());
     assert!(parse_query(&format!("\"{}\"", "a ".repeat(16))).is_ok());
     assert_eq!(tokenize(&"z".repeat(64)).len(), 1);

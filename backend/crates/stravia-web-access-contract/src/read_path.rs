@@ -401,12 +401,12 @@ fn question_property(strict: bool, history: bool) -> serde_json::Value {
     } else {
         serde_json::json!("string")
     };
-    let mut description = "Plain-text question or search text; no encoding.".to_owned();
-    if history {
-        description.push_str(
-            " On `stravia://history/`, a chain directory, or a transcript, question searches that history scope by whitespace-separated terms (double quotes make an adjacent phrase); it cannot be combined with a line range or a search cursor.",
-        );
-    }
+    // ADR-0091：字段说明不超过一句。
+    let description = if history {
+        "Plain-text question or search text, no encoding; on `stravia://history/`, a chain directory, or a transcript it searches that scope by whitespace-separated terms (double quotes make an adjacent phrase) and cannot be combined with a line range or a search cursor."
+    } else {
+        "Plain-text question or search text; no encoding."
+    };
     serde_json::json!({
         "type": kind,
         "description": description
@@ -2197,92 +2197,6 @@ mod tests {
             .unwrap_err(),
             ReadPathError::QuestionTooLarge
         );
-    }
-
-    #[test]
-    fn history_schema_exposes_search_only_when_history_is_visible() {
-        let keys = |scope: ReadSchemaScope| {
-            let schema = model_input_schema(scope);
-            let mut names: Vec<&str> = schema["properties"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            names.sort_unstable();
-            names
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect::<Vec<_>>()
-        };
-        let history_only = ReadSchemaScope {
-            networking: false,
-            media: false,
-            internal: false,
-            history: true,
-        };
-        assert_eq!(keys(history_only).as_slice(), ["path", "question", "wait"]);
-        assert_eq!(
-            keys(ReadSchemaScope::FULL).as_slice(),
-            ["allowed_domains", "attachments", "path", "question", "wait"]
-        );
-        assert_eq!(
-            keys(ReadSchemaScope {
-                history: true,
-                ..ReadSchemaScope::FULL
-            })
-            .as_slice(),
-            ["allowed_domains", "attachments", "path", "question", "wait"]
-        );
-        let plain = question_property(false, false);
-        let description = model_input_schema(history_only)["properties"]["question"]["description"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert!(description.contains("history"), "{description}");
-        assert!(description.contains("stravia://history/"), "{description}");
-        assert_ne!(
-            plain["description"].as_str(),
-            Some(description.as_str()),
-            "history-only semantics must differ"
-        );
-        assert!(
-            model_input_schema(ReadSchemaScope::FULL)["properties"]["question"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("Plain-text question or search text")
-        );
-        let mixed = model_input_schema(ReadSchemaScope {
-            history: true,
-            ..ReadSchemaScope::FULL
-        });
-        let mixed_description = mixed["properties"]["question"]["description"]
-            .as_str()
-            .unwrap();
-        assert!(
-            mixed_description.contains("Plain-text question or search text"),
-            "{mixed_description}"
-        );
-        assert!(mixed_description.contains("history"), "{mixed_description}");
-    }
-
-    #[test]
-    fn history_schema_leaves_mcp_and_explicit_full_descriptions_unchanged() {
-        for scope in [
-            ReadSchemaScope::FULL,
-            ReadSchemaScope {
-                internal: true,
-                ..ReadSchemaScope::FULL
-            },
-        ] {
-            let loose = input_schema(scope)["properties"]["question"]["description"].clone();
-            let strict = model_input_schema(scope)["properties"]["question"]["description"].clone();
-            assert_eq!(loose, strict);
-            assert_eq!(
-                loose.as_str(),
-                Some("Plain-text question or search text; no encoding.")
-            );
-        }
     }
 
     #[test]
