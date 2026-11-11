@@ -1718,8 +1718,7 @@ impl SqlHistoryMarkerStore {
             edit(&mut value);
             let segment: HiddenHistorySegment = serde_json::from_value(value)?;
             let payload = super::content::encode_segment(&segment)?;
-            let mut connection = pool.acquire_write().await?;
-            let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+            let mut transaction = pool.begin_write().await?;
             let (envelope, ids) =
                 super::payload::sqlite::intern_segment(&mut transaction, &principal, payload)
                     .await?;
@@ -1730,7 +1729,6 @@ impl SqlHistoryMarkerStore {
                 .execute(&mut *transaction)
                 .await?;
             transaction.commit().await?;
-            connection.finish().await?;
         }
         Ok(())
     }

@@ -1946,14 +1946,14 @@ mod tests {
             set_debug(&debug, true);
             let request = tracing::info_span!(target: "stravia::perf", "proxy.inference_run",
                 status = tracing::field::Empty);
-            let connection = pool
-                .acquire_write()
+            let tx = pool
+                .begin_write()
                 .instrument(request.clone())
                 .await
                 .unwrap();
             request.record("status", "cancelled");
             drop(request);
-            drop(connection);
+            drop(tx);
 
             // 当前线程尚未让出执行权：清理任务仍未 poll，租约必须继续活动，
             // 但它的因果父边不能把已经取消的请求延长到后台清理完成。
@@ -1972,7 +1972,7 @@ mod tests {
             assert_eq!(hold["ph"], "B");
             assert_eq!(hold["args"]["parent_id"], root["args"]["span_id"]);
             let hold_id = hold["args"]["span_id"].clone();
-            pool.acquire_write().await.unwrap().finish().await.unwrap();
+            pool.begin_write().await.unwrap().commit().await.unwrap();
             pool.close().await;
 
             let completed = timeline_snapshot();

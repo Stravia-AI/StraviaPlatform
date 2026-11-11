@@ -7,9 +7,10 @@
 //! Prometheus label. Dynamic query shape/literal changes produce different IDs.
 //! Stream timing covers the consumed driver stream lifetime, including consumer
 //! backpressure, rather than claiming database-server CPU time.
-//! Runtime SQLite writes explicitly acquire a pool-owned write lease; ordinary
-//! reads do not acquire the writer gate. Pools built with `require_write_lease`
-//! keep connections query-only outside the lease, so ungated writes fail with
+//! Runtime SQLite writes go through [`Pool::begin_write`], which queues on a
+//! pool-owned write lease and opens `BEGIN IMMEDIATE`; ordinary reads do not
+//! acquire the writer gate. Pools built with `require_write_lease` keep
+//! connections query-only outside the lease, so ungated writes fail with
 //! `SQLITE_READONLY` instead of contending for the database write lock.
 
 use futures::{future::BoxFuture, stream::BoxStream};
@@ -27,7 +28,7 @@ pub use sqlx_native::*;
 mod diagnostics;
 mod write;
 use write::Lease;
-pub use write::WriteConnection;
+pub use write::{WriteConnection, WriteTransaction};
 
 pub type SqlitePool = Pool<Sqlite>;
 pub type PgPool = Pool<Postgres>;
@@ -156,10 +157,15 @@ impl<DB: Database> Pool<DB> {
     }
     /// 在取得连接前协调同池 SQLite 写入；PostgreSQL 不加全局锁。
     ///
+    /// 只用于必须在事务外执行的写入（迁移期的 `PRAGMA foreign_keys`、SQLx 迁移器、
+    /// `sqlite3_deserialize`）；业务写入使用 [`Pool::begin_write`]。
     /// 租约只覆盖数据库阶段，不能跨文件、网络 I/O 或再次申请同池写租约。
     /// 正常路径应调用 `WriteConnection::finish`，取消路径自动等候驱动清理。
     /// SQLite 租约须在 Tokio runtime 中获取，取消后的清理继续由该 runtime 执行。
     pub async fn acquire_write(&self) -> Result<WriteConnection<DB>, Error> {
+        self.lease_connection().await
+    }
+    async fn lease_connection(&self) -> Result<WriteConnection<DB>, Error> {
         let guard = match &self.write_gate {
             Some(gate) => Some(
                 tracing::Instrument::instrument(
@@ -202,6 +208,14 @@ impl<DB: Database> Pool<DB> {
                 Err(error)
             }
         }
+    }
+    /// 开启写事务：SQLite 先按 FIFO 取得同池写租约，再以 `BEGIN IMMEDIATE` 取得数据库
+    /// 写锁；PostgreSQL 等同普通 `BEGIN`。读取继续使用池本身或 [`Pool::begin`]。
+    ///
+    /// 事务只覆盖数据库阶段，不能跨文件、网络 I/O 或再开启同池写事务。
+    /// SQLite 写事务须在 Tokio runtime 中开启，取消后的清理继续由该 runtime 执行。
+    pub async fn begin_write(&self) -> Result<WriteTransaction<DB>, Error> {
+        WriteTransaction::begin(self.lease_connection().await?).await
     }
     #[track_caller]
     pub fn begin(
@@ -421,9 +435,9 @@ impl<DB: Database> PoolOptions<DB> {
     }
 }
 impl PoolOptions<Sqlite> {
-    /// 池连接在写租约外保持 `PRAGMA query_only`，只有 [`Pool::acquire_write`]
-    /// 取得的连接可写；绕过写租约的写入以 `SQLITE_READONLY` 立即失败，
-    /// 而不是在并发时与持租约的写者争用数据库写锁。
+    /// 池连接在写租约外保持 `PRAGMA query_only`，只有 [`Pool::begin_write`] 与
+    /// [`Pool::acquire_write`] 取得的连接可写；绕过写租约的写入以 `SQLITE_READONLY`
+    /// 立即失败，而不是在并发时与持租约的写者争用数据库写锁。
     /// [`Pool::connect_options`] 建立的直连不受此约束。
     pub fn require_write_lease(mut self) -> Self {
         self.write_mode = Some(sqlite_write_mode);

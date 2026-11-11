@@ -179,12 +179,8 @@ impl SqlMappingStore {
                 if due.is_empty() {
                     return Ok(());
                 }
-                let mut connection = pool
-                    .acquire_write()
-                    .await
-                    .map_err(|error| self.storage(error))?;
-                let mut transaction = connection
-                    .begin_with("BEGIN IMMEDIATE")
+                let mut transaction = pool
+                    .begin_write()
                     .await
                     .map_err(|error| self.storage(error))?;
                 for references in due.chunks(400) {
@@ -213,10 +209,6 @@ impl SqlMappingStore {
                 }
                 transaction
                     .commit()
-                    .await
-                    .map_err(|error| self.storage(error))?;
-                connection
-                    .finish()
                     .await
                     .map_err(|error| self.storage(error))?;
             }
@@ -357,12 +349,8 @@ impl MappingStore for SqlMappingStore {
         // Secrets can be arbitrarily long (e.g. private keys), so do not B-tree index them.
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool
-                    .acquire_write()
-                    .await
-                    .map_err(|error| self.storage(error))?;
-                let mut transaction = connection
-                    .begin_with("BEGIN IMMEDIATE")
+                let mut transaction = pool
+                    .begin_write()
                     .await
                     .map_err(|error| self.storage(error))?;
                 let now = now();
@@ -401,10 +389,6 @@ impl MappingStore for SqlMappingStore {
                 }
                 transaction
                     .commit()
-                    .await
-                    .map_err(|error| self.storage(error))?;
-                connection
-                    .finish()
                     .await
                     .map_err(|error| self.storage(error))?;
             }
@@ -500,16 +484,12 @@ impl MappingStore for SqlMappingStore {
             .saturating_sub(millis(retention))
             .saturating_sub(millis(RENEWAL_GRANULARITY));
         macro_rules! sweep {
-            ($store:expr, $pool:expr, $begin:literal, $skip_locked:literal) => {{
+            ($store:expr, $pool:expr, $skip_locked:literal) => {{
                 let store = $store;
                 let pool = $pool;
                 {
-                    let mut connection = pool
-                        .acquire_write()
-                        .await
-                        .map_err(|error| store.storage(error))?;
-                    let mut tx = connection
-                        .begin_with($begin)
+                    let mut tx = pool
+                        .begin_write()
                         .await
                         .map_err(|error| store.storage(error))?;
                     for (name, column, horizon, filter) in [
@@ -539,16 +519,11 @@ impl MappingStore for SqlMappingStore {
                             .bind(name).bind(horizon).execute(&mut *tx).await.map_err(|error| store.storage(error))?;
                     }
                     tx.commit().await.map_err(|error| store.storage(error))?;
-                    connection.finish().await.map_err(|error| store.storage(error))?;
                 }
                 let mut removed = 0u64;
                 loop {
-                    let mut connection = pool
-                        .acquire_write()
-                        .await
-                        .map_err(|error| store.storage(error))?;
-                    let mut tx = connection
-                        .begin_with($begin)
+                    let mut tx = pool
+                        .begin_write()
                         .await
                         .map_err(|error| store.storage(error))?;
                     let claim = format!(
@@ -561,7 +536,6 @@ impl MappingStore for SqlMappingStore {
                         .fetch_all(&mut *tx).await.map_err(|error| store.storage(error))?;
                     if claimed.is_empty() {
                         tx.commit().await.map_err(|error| store.storage(error))?;
-                        connection.finish().await.map_err(|error| store.storage(error))?;
                         break;
                     }
                     for reference in &claimed {
@@ -581,14 +555,13 @@ impl MappingStore for SqlMappingStore {
                         }
                     }
                     tx.commit().await.map_err(|error| store.storage(error))?;
-                    connection.finish().await.map_err(|error| store.storage(error))?;
                 }
                 Ok(removed)
             }};
         }
         match self {
-            Self::Sqlite(pool) => sweep!(self, pool, "BEGIN IMMEDIATE", ""),
-            Self::Postgres(pool) => sweep!(self, pool, "BEGIN", " FOR UPDATE OF g, m SKIP LOCKED"),
+            Self::Sqlite(pool) => sweep!(self, pool, ""),
+            Self::Postgres(pool) => sweep!(self, pool, " FOR UPDATE OF g, m SKIP LOCKED"),
         }
     }
 }

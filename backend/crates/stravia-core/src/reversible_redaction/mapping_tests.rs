@@ -115,14 +115,14 @@ async fn set_last_used_at(store: &SqlMappingStore, reference: &str, value: i64) 
     let sql = "UPDATE reversible_redaction_mappings SET last_used_at = $2 WHERE reference = $1";
     match store {
         SqlMappingStore::Sqlite(pool) => {
-            let mut connection = pool.acquire_write().await.unwrap();
+            let mut connection = pool.begin_write().await.unwrap();
             sqlx::query(sql)
                 .bind(reference)
                 .bind(value)
                 .execute(&mut *connection)
                 .await
                 .unwrap();
-            connection.finish().await
+            connection.commit().await
         }
         SqlMappingStore::Postgres(pool) => sqlx::query(sql)
             .bind(reference)
@@ -141,13 +141,13 @@ async fn queued_for_reclamation(store: &SqlMappingStore, reference: &str, enqueu
     match store {
         SqlMappingStore::Sqlite(pool) => {
             if enqueue {
-                let mut connection = pool.acquire_write().await.unwrap();
+                let mut connection = pool.begin_write().await.unwrap();
                 sqlx::query(insert)
                     .bind(reference)
                     .execute(&mut *connection)
                     .await
                     .unwrap();
-                connection.finish().await.unwrap();
+                connection.commit().await.unwrap();
             }
             sqlx::query_scalar(count)
                 .bind(reference)

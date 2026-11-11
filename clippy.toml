@@ -6,3 +6,6 @@ await-holding-invalid-types = [
     "parking_lot::RwLockWriteGuard",
     "parking_lot::ReentrantMutexGuard",
 ]
+disallowed-methods = [
+    { path = "stravia_sql::Pool::acquire_write", reason = "业务写入使用 Pool::begin_write；仅迁移等必须在事务外执行的写入可持有写连接" },
+]

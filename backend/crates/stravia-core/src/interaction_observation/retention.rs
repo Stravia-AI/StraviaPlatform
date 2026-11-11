@@ -62,8 +62,7 @@ impl ObservationStore {
         match self {
             Self::Sqlite(p, _) => {
                 // 一个交互可能拥有大量 Run；不把多个交互的级联工作并入同一写租约。
-                let mut connection = p.acquire_write().await?;
-                let mut tx = connection.begin().await?;
+                let mut tx = p.begin_write().await?;
                 let rejected = sqlx::query("DELETE FROM rejected_request_observations WHERE occurred_at<=?1 AND id IN (SELECT id FROM rejected_request_observations WHERE occurred_at<=?1 ORDER BY occurred_at,id LIMIT ?2)")
                     .bind(cutoff)
                     .bind(REJECTION_BATCH_SIZE)
@@ -100,7 +99,6 @@ impl ObservationStore {
                         .await?;
                 }
                 tx.commit().await?;
-                connection.finish().await?;
 
                 Ok(RetentionBatch {
                     has_more: rejected == REJECTION_BATCH_SIZE as u64 || interaction.is_some(),
@@ -284,8 +282,7 @@ impl ObservationStore {
         match self {
             Self::Sqlite(p, _) => {
                 let deleted = {
-                    let mut connection = p.acquire_write().await?;
-                    let mut tx = connection.begin().await?;
+                    let mut tx = p.begin_write().await?;
                     sqlx::query("DELETE FROM rejected_request_observations")
                         .execute(&mut *tx)
                         .await?;
@@ -301,7 +298,6 @@ impl ObservationStore {
                     crate::content_store::sqlite::enqueue_unreferenced(&mut tx, &content_ids)
                         .await?;
                     tx.commit().await?;
-                    connection.finish().await?;
                     deleted
                 };
 

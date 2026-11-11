@@ -1,5 +1,4 @@
 use crate::db::models::RouteOutputModality;
-use sqlx::SqliteConnection;
 use stravia_runtime_contract::thinking::ThinkingLevel;
 
 use super::*;
@@ -92,7 +91,7 @@ struct TargetMapRow {
 
 impl SqliteRouteStore {
     pub(super) async fn load_routes(
-        connection: &mut SqliteConnection<'_>,
+        connection: &mut sqlx::ConnectionHandle<'_, sqlx::Sqlite>,
         active_only: bool,
     ) -> anyhow::Result<Vec<RouteConfig>> {
         let where_clause = if active_only {
@@ -119,7 +118,7 @@ impl SqliteRouteStore {
     }
 
     async fn load_targets(
-        connection: &mut SqliteConnection<'_>,
+        connection: &mut sqlx::ConnectionHandle<'_, sqlx::Sqlite>,
         route_storage_id: &str,
     ) -> anyhow::Result<Vec<TargetConfig>> {
         Ok(sqlx::query_as::<_, TargetRow>("SELECT id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms, target_retry_budget, target_cooldown_ms, created_at, thinking_level_map FROM model_backends WHERE model_id = ? ORDER BY priority DESC, created_at ASC")
@@ -132,7 +131,7 @@ impl SqliteRouteStore {
     }
 
     async fn load_route(
-        connection: &mut SqliteConnection<'_>,
+        connection: &mut sqlx::ConnectionHandle<'_, sqlx::Sqlite>,
         route_id: &str,
     ) -> anyhow::Result<Option<RouteConfig>> {
         let route = sqlx::query_as::<_, RouteRow>(
@@ -156,7 +155,7 @@ impl SqliteRouteStore {
     /// to `provider_id` + `provider_model_id`, inside the caller's transaction.
     /// Overridden rows, Target IDs and all other columns are preserved.
     pub(super) async fn refresh_generated_thinking_maps(
-        connection: &mut SqliteConnection<'_>,
+        connection: &mut sqlx::ConnectionHandle<'_, sqlx::Sqlite>,
         provider_id: &str,
         provider_model_id: &str,
         metadata: &crate::provider_models::ProviderModelMetadata,
@@ -228,8 +227,7 @@ impl RouteStore for SqliteRouteStore {
             .billing
             .clone()
             .map(|billing| billing.map(sqlx::types::Json));
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let conflict = sqlx::query_scalar::<_, String>(
             "SELECT id FROM models WHERE model_id = ? AND id != ? LIMIT 1",
         )
@@ -337,19 +335,18 @@ impl RouteStore for SqliteRouteStore {
         }
 
         tx.commit().await?;
-        connection.finish().await?;
         self.get(route.model_id.as_str().trim())
             .await?
             .context("Route missing after put")
     }
 
     async fn delete(&self, route_id: &str) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut tx = self.pool.begin_write().await?;
         sqlx::query("DELETE FROM models WHERE model_id = ?")
             .bind(route_id)
-            .execute(&mut *connection)
+            .execute(&mut *tx)
             .await?;
-        connection.finish().await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -473,7 +470,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
-        let mut writer = pool.acquire_write().await.expect("writer connection");
+        let mut writer = pool.begin_write().await.expect("writer transaction");
         sqlx::query(
             "INSERT INTO providers (
                 id, name, protocol, base_url, api_key, auth_mode
@@ -482,7 +479,7 @@ mod tests {
         .execute(&mut *writer)
         .await
         .expect("Provider");
-        writer.finish().await.expect("release fixture lease");
+        writer.commit().await.expect("release fixture lease");
         let store = SqliteRouteStore { pool: pool.clone() };
 
         let mut writer = sqlx::sqlite::SqliteConnection::connect_with(&pool.connect_options())

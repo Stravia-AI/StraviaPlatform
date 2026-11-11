@@ -40,7 +40,7 @@ impl UploadGrantIssuer {
         let candidate = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
         // 并发初始化只插入一次；重启不能使已交付的短期上传授权失效。
         let secret: String = if let Some(pool) = sqlite {
-            let mut connection = pool.acquire_write().await?;
+            let mut connection = pool.begin_write().await?;
             sqlx::query(
                 "INSERT INTO settings (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
             )
@@ -48,7 +48,7 @@ impl UploadGrantIssuer {
             .bind(&candidate)
             .execute(&mut *connection)
             .await?;
-            connection.finish().await?;
+            connection.commit().await?;
             sqlx::query_scalar("SELECT value FROM settings WHERE name = ?")
                 .bind(SIGNING_KEY_SETTING)
                 .fetch_one(pool)

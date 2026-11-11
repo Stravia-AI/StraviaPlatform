@@ -28,11 +28,11 @@ impl Database {
         let sql = sql.into();
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
                     .execute(&mut *connection)
                     .await?;
-                connection.finish().await?;
+                connection.commit().await?;
             }
             Self::Postgres(pool) => {
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql))

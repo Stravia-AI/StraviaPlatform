@@ -241,7 +241,7 @@ impl SqlCustomRuleStore {
         let now = now();
         match &self.backend {
             Backend::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
+                let mut connection = pool.begin_write().await.map_err(storage)?;
                 sqlx::query(concat!(
                     "INSERT INTO credential_custom_rules (",
                     columns!(),
@@ -257,7 +257,7 @@ impl SqlCustomRuleStore {
                 .execute(&mut *connection)
                 .await
                 .map_err(storage)?;
-                connection.finish().await
+                connection.commit().await
             }
             Backend::Postgres(pool) => sqlx::query(concat!(
                 "INSERT INTO credential_custom_rules (",
@@ -297,7 +297,7 @@ impl SqlCustomRuleStore {
         let row: Option<Row> =
             match &self.backend {
                 Backend::Sqlite(pool) => {
-                    let mut connection = pool.acquire_write().await.map_err(storage)?;
+                    let mut connection = pool.begin_write().await.map_err(storage)?;
                     let row = sqlx::query_as(concat!(
                     "UPDATE credential_custom_rules SET name = ?, description = ?, enabled = ?, \
                          spec = ?, updated_at = ? WHERE id = ? RETURNING ",
@@ -312,7 +312,7 @@ impl SqlCustomRuleStore {
                 .fetch_optional(&mut *connection)
                 .await
                 .map_err(storage)?;
-                    connection.finish().await.map_err(storage)?;
+                    connection.commit().await.map_err(storage)?;
                     Ok(row)
                 }
                 Backend::Postgres(pool) => sqlx::query_as(concat!(
@@ -336,13 +336,13 @@ impl SqlCustomRuleStore {
     pub async fn delete(&self, id: &str) -> Result<(), CustomRuleError> {
         let affected = match &self.backend {
             Backend::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
+                let mut connection = pool.begin_write().await.map_err(storage)?;
                 let result = sqlx::query("DELETE FROM credential_custom_rules WHERE id = ?")
                     .bind(id)
                     .execute(&mut *connection)
                     .await
                     .map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
+                connection.commit().await.map_err(storage)?;
                 Ok(result.rows_affected())
             }
             Backend::Postgres(pool) => {

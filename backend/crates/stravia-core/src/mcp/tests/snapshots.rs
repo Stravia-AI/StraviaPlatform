@@ -262,7 +262,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         ._sqlite_pool
         .as_ref()
         .unwrap()
-        .acquire_write()
+        .begin_write()
         .await
         .unwrap();
     sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
@@ -270,7 +270,7 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         .execute(&mut *writer)
         .await
         .unwrap();
-    writer.finish().await.unwrap();
+    writer.commit().await.unwrap();
     assert_eq!(call(&client, next).await.is_error, Some(true));
 }
 

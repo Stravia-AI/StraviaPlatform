@@ -57,9 +57,8 @@ impl Store {
             .map(|state| serde_json::to_string(&state.payload).map_err(storage))
             .collect::<Result<Vec<_>, _>>()?;
         macro_rules! insert {
-            ($pool:expr, $begin:literal, $for_key_share:literal, $lease_lock:literal) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+            ($pool:expr, $for_key_share:literal, $lease_lock:literal) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage)?;
                 if let Some(source) = record.source_generation_id.as_deref() {
                     let query = format!(
                         "SELECT CAST(1 AS BIGINT) FROM turn_nodes n \
@@ -116,13 +115,12 @@ impl Store {
                         .execute(&mut *tx).await.map_err(storage)?;
                 }
                 tx.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
                 Ok(())
             }};
         }
         match self {
-            Self::Sqlite(pool) => insert!(pool, "BEGIN IMMEDIATE", "", ""),
-            Self::Postgres(pool) => insert!(pool, "BEGIN", " FOR KEY SHARE", " FOR UPDATE OF l"),
+            Self::Sqlite(pool) => insert!(pool, "", ""),
+            Self::Postgres(pool) => insert!(pool, " FOR KEY SHARE", " FOR UPDATE OF l"),
         }
     }
 
@@ -245,9 +243,8 @@ impl Store {
         let principal = principal.continuation_key();
         let now = chrono::Utc::now().timestamp_millis();
         macro_rules! confirm {
-            ($pool:expr, $begin:literal, $lock:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+            ($pool:expr, $lock:expr) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage)?;
                 if !$lock.is_empty() {
                     sqlx::query($lock)
                         .execute(&mut *tx)
@@ -271,14 +268,13 @@ impl Store {
                     }
                 }
                 tx.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
                 Ok(())
             }};
         }
         match self {
-            Self::Sqlite(pool) => confirm!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Sqlite(pool) => confirm!(pool, ""),
             Self::Postgres(pool) => {
-                confirm!(pool, "BEGIN", crate::history_retention::PG_GC_LOCK_SHARED)
+                confirm!(pool, crate::history_retention::PG_GC_LOCK_SHARED)
             }
         }
     }
@@ -291,11 +287,10 @@ impl Store {
     ) -> Result<u64, CompactionError> {
         let threshold = now.saturating_sub(retention_ms(retention));
         macro_rules! sweep {
-            ($pool:expr, $begin:literal, $lock:expr, $skip_locked:literal) => {{
+            ($pool:expr, $lock:expr, $skip_locked:literal) => {{
                 let mut recovered = 0u64;
                 {
-                    let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                    let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+                    let mut tx = $pool.begin_write().await.map_err(storage)?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                     for (name, column, horizon) in [
                         (WATERMARK_PENDING, "pending_until", now),
@@ -324,11 +319,9 @@ impl Store {
                             .bind(name).bind(horizon).execute(&mut *tx).await.map_err(storage)?;
                     }
                     tx.commit().await.map_err(storage)?;
-                    connection.finish().await.map_err(storage)?;
                 }
                 loop {
-                    let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                    let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+                    let mut tx = $pool.begin_write().await.map_err(storage)?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                     let claim = format!(
                         "SELECT g.record_id FROM native_compaction_gc g \
@@ -340,7 +333,6 @@ impl Store {
                         .fetch_all(&mut *tx).await.map_err(storage)?;
                     if claimed.is_empty() {
                         tx.commit().await.map_err(storage)?;
-                        connection.finish().await.map_err(storage)?;
                         break;
                     }
                     for id in &claimed {
@@ -362,16 +354,14 @@ impl Store {
                         }
                     }
                     tx.commit().await.map_err(storage)?;
-                    connection.finish().await.map_err(storage)?;
                 }
                 Ok(recovered)
             }};
         }
         match self {
-            Self::Sqlite(pool) => sweep!(pool, "BEGIN IMMEDIATE", "", ""),
+            Self::Sqlite(pool) => sweep!(pool, "", ""),
             Self::Postgres(pool) => sweep!(
                 pool,
-                "BEGIN",
                 crate::history_retention::PG_GC_LOCK,
                 " FOR UPDATE OF g, c SKIP LOCKED"
             ),

@@ -364,11 +364,13 @@ Observation writer 为持久化事件分配递增 `event_sequence`；持久事�
 
 SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
 
-同一 Gateway 内，来自同一 SQLite pool 及其克隆的运行期写入口统一通过 `Pool::acquire_write` 取得池级写租约，包括历史、普通 Observation、Artifact、History Marker、凭据映射及管理和后台存储。租约先取得共享 FIFO 异步写锁，再取得连接；事务必须从租约连接开启，autocommit DML 和 `UPDATE ... RETURNING` 同样不能绕过租约。独立只读查询和只读事务仍使用普通 pool，不因写协调而串行化。PostgreSQL 不增加全局写锁，保持原数据库并发与锁协议。
+同一 Gateway 内，来自同一 SQLite pool 及其克隆的运行期写入口统一通过 `Pool::begin_write` 开启写事务，包括历史、普通 Observation、Artifact、History Marker、凭据映射及管理和后台存储。它先取得共享 FIFO 异步写锁（池级写租约），再取得连接并执行 `BEGIN IMMEDIATE`；单条 autocommit DML 和 `UPDATE ... RETURNING` 同样写在写事务内。调用方不接触租约、BEGIN 语句或完成屏障，切换写协调实现不需要改业务存储代码。独立只读查询和只读事务仍使用普通 pool，不因写协调而串行化。PostgreSQL 上 `begin_write` 等同普通 `BEGIN`，不增加全局写锁，保持原数据库并发与锁协议。
 
-这一约束由池强制执行，而不是只靠调用方遵守。`db::init_pool` 与无持久存储时的内存历史池以 `PoolOptions::require_write_lease` 创建：连接建立后、驱动与调用方初始化完成时设置 `PRAGMA query_only=ON`；`acquire_write` 取得连接后才设为 `OFF`，租约结束时再设回 `ON`，并兼作完成屏障。绕过租约的写入（包括 `BEGIN IMMEDIATE` 和延迟事务中的写语句）立即以 `SQLITE_READONLY` 失败，不会持有数据库写锁，也就不会让排队中的租约写者在 `busy_timeout` 后失败，或在延迟事务升级为写事务时立即 `SQLITE_BUSY`。迁移和升级钩子在同一写租约内运行。解除只读失败的连接不会归还池中，而是直接关闭。经 `Pool::connect_options` 建立的直连和离线维护池不受此约束。
+必须在事务外执行的写入（迁移期的 `PRAGMA foreign_keys`、SQLx 迁移器、测试夹具的 `sqlite3_deserialize` 与 `PRAGMA wal_checkpoint`）才使用连接级的 `Pool::acquire_write` 与 `WriteConnection::finish`。仓库 `clippy.toml` 把 `acquire_write` 列入 `disallowed-methods`，例外处须以 `#[expect(clippy::disallowed_methods, reason = …)]` 写明原因。
 
-正常提交或回滚后显式调用 `WriteConnection::finish`，在同一 SQLite worker 队列执行完成屏障并确认已退出事务后释放协调权。请求取消或错误退出时，租约的清理任务继续持锁，并在归还连接前恢复只读，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
+这一约束由池强制执行，而不是只靠调用方遵守。`db::init_pool` 与无持久存储时的内存历史池以 `PoolOptions::require_write_lease` 创建：连接建立后、驱动与调用方初始化完成时设置 `PRAGMA query_only=ON`；`begin_write`（及连接级 `acquire_write`）取得连接后才设为 `OFF`，写事务结束时再设回 `ON`，并兼作完成屏障。绕过租约的写入（包括 `BEGIN IMMEDIATE` 和延迟事务中的写语句）立即以 `SQLITE_READONLY` 失败，不会持有数据库写锁，也就不会让排队中的租约写者在 `busy_timeout` 后失败，或在延迟事务升级为写事务时立即 `SQLITE_BUSY`。迁移和升级钩子在同一写租约内运行。解除只读失败的连接不会归还池中，而是直接关闭。经 `Pool::connect_options` 建立的直连和离线维护池不受此约束。
+
+`WriteTransaction::commit` 或 `rollback` 结束事务后，在同一 SQLite worker 队列执行完成屏障，确认已退出事务后释放协调权。写事务未结束即被丢弃（`?` 早退、请求取消）时向驱动排入回滚，租约的清理任务继续持锁，并在回滚完成、归还连接前恢复只读，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。因此成功路径必须显式提交，丢弃即回滚。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
 
 写租约仅覆盖数据库阶段，不覆盖文件／网络 I/O、Artifact 对象锁等待或再次申请同池写租约。清理中的 owner 快照读事务在文件 tombstone 操作前提交；保留期更新也在完成数据库写租约后才改写 manifest。协调范围仅限同源 pool，不替代跨进程或独立连接池的数据库锁；外部写者与底层 I/O 停顿仍可能造成 SQLite 等待或 `SQLITE_BUSY`。现有 `busy_timeout` 和持久性配置不变。
 
@@ -646,7 +648,7 @@ SQLite 写租约和观测文件写入另外记录以下 `stravia::perf` 阶段�
 | 操作 | 计时边界 |
 | --- | --- |
 | `sqlite.write_gate.hold` | 获得写协调权后开始，释放协调权后结束；包括随后取连接、调用方持有租约及正常结束或异步清理，不包含获得协调权之前的排队 |
-| `sqlite.write_gate.finish` | 正常归还写连接时的 driver `ping` 屏障与事务状态检查，不是 COMMIT |
+| `sqlite.write_gate.finish` | 写事务提交或回滚后（或连接级租约正常结束时）的完成屏障与事务状态检查：要求写租约的池为恢复 `PRAGMA query_only=ON`，其他池为 driver `ping`；不是 COMMIT |
 | `sqlite.write_gate.cleanup` | 原有取消／错误清理任务的调度与执行；覆盖屏障以及必要的连接关闭，不为正常归还另建后台任务 |
 | `sql.transaction.begin` / `commit` / `rollback` | 显式事务包装边界，包括连接／嵌套事务；池级 begin 包含取连接，隐式 Drop 回滚仍由 driver 执行，不伪装为一条受采集查询 |
 | `observation.manifest.persist` | `write_entry` 的异步生命周期，包括序列化、阻塞任务调度／执行及索引更新；不含调用方此前等待 mutation lock 的时间 |
@@ -654,7 +656,7 @@ SQLite 写租约和观测文件写入另外记录以下 `stravia::perf` 阶段�
 | `observation.manifest.sync` | 上述闭包中的 `sync_all()` 调用 |
 | `observation.trace.flush` / `finish` | Trace barrier 入队与回执等待；finish 还读取最终 manifest，只有存储成功且 manifest 完整时才标记 `completed` |
 
-写租约以创建时解析的内部因果身份关联业务操作，不持有请求父 span；请求取消后，hold 可以继续覆盖实际清理，但不会把请求生命周期延长。SQL 阶段记录 `completed`、`error` 或 `cancelled`；未经成功 finish 而丢弃的租约为 `cancelled`，不表示已确认数据库回滚失败。事务阶段不进入 tracing 当前上下文，既不让 SQLite worker 延长其生命周期，也不改变既有查询归属或增加 `sql.query` 次数。没有进入执行区间的阶段可以不含 `active_us`，不能据此判为零耗时。
+写租约以创建时解析的内部因果身份关联业务操作，不持有请求父 span；请求取消后，hold 可以继续覆盖实际清理，但不会把请求生命周期延长。SQL 阶段记录 `completed`、`error` 或 `cancelled`；未经成功提交、回滚或 finish 而丢弃的租约为 `cancelled`，不表示已确认数据库回滚失败。事务阶段不进入 tracing 当前上下文，既不让 SQLite worker 延长其生命周期，也不改变既有查询归属或增加 `sql.query` 次数。没有进入执行区间的阶段可以不含 `active_us`，不能据此判为零耗时。
 
 这些区间存在包含与重叠，不能直接求和作为请求独占耗时；`persist - write` 还包含序列化和索引更新，不能直接称为阻塞线程排队时间。COMMIT 或 `sync_all()` 变慢可以定位等待边界，但仅凭客户端时长不能证明磁盘、WAL checkpoint 或操作系统调度中的哪一项是根因。
 
