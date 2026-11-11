@@ -38,6 +38,7 @@ pub(crate) use bundle::hex;
 pub(crate) use hydrate::{index_events_postgres, index_events_sqlite};
 pub(crate) use recall::*;
 pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
+pub(crate) use search_index_task::index_progress_inconsistent;
 pub(crate) use trace::optimize_trace_directory;
 pub use types::*;
 

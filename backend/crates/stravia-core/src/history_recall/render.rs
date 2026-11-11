@@ -601,6 +601,9 @@ impl<'a> Transcript<'a> {
     }
 }
 
+/// 行数不包含参数正文；参数第一行为 `TOOL_FILE_HEADER_LINES + 1`。
+pub(super) const TOOL_FILE_HEADER_LINES: u64 = 5;
+
 /// 工具文件：头部、完整参数，再按出现顺序追加每个结果段。
 pub(super) fn tool_file(
     interaction: &RecallInteraction,
@@ -627,6 +630,7 @@ pub(super) fn tool_file(
         String::new(),
         "## arguments".to_owned(),
     ];
+    assert_eq!(lines.len() as u64, TOOL_FILE_HEADER_LINES);
     lines.extend(argument_lines(call.payload.get("input"), secrets));
     let tool_id = str_field(&call.payload, "tool_id");
     let mut ordinal = 0;
