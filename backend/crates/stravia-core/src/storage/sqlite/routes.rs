@@ -473,17 +473,21 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("migrations");
+        let mut writer = pool.acquire_write().await.expect("writer connection");
         sqlx::query(
             "INSERT INTO providers (
                 id, name, protocol, base_url, api_key, auth_mode
              ) VALUES ('provider-1', 'Provider 1', 'openai-compatible', 'https://example.com', '', 'apikey')",
         )
-        .execute(&pool)
+        .execute(&mut *writer)
         .await
         .expect("Provider");
+        writer.finish().await.expect("release fixture lease");
         let store = SqliteRouteStore { pool: pool.clone() };
 
-        let mut writer = pool.acquire().await.expect("writer connection");
+        let mut writer = sqlx::sqlite::SqliteConnection::connect_with(&pool.connect_options())
+            .await
+            .expect("outside writer connection");
         let writer_tx = writer
             .begin_with("BEGIN IMMEDIATE")
             .await

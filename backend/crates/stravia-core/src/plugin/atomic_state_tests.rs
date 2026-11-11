@@ -558,8 +558,10 @@ async fn expire_memory_lease(
         .atomic_leases
         .get_mut(&key)
         .expect("active lease") = 0;
+    let mut connection = pool.acquire_write().await?;
     sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=0 WHERE principal=$1 AND admission_id=$2 AND lease_id=$3")
-        .bind(principal).bind(admission).bind(lease).execute(pool).await?;
+        .bind(principal).bind(admission).bind(lease).execute(&mut *connection).await?;
+    connection.finish().await?;
     Ok(())
 }
 
@@ -1180,11 +1182,13 @@ async fn memory_acquire_does_not_recreate_missing_mirrored_lineage() -> anyhow::
             key: "cell",
         })
         .await?;
+    let mut connection = pool.acquire_write().await?;
     sqlx::query("DELETE FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$2")
         .bind("alice")
         .bind("root")
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
+    connection.finish().await?;
     assert!(matches!(
         store
             .renew_atomic_state_lease("alice", "root", ROOT_LEASE)
@@ -1266,22 +1270,26 @@ async fn memory_fork_rejects_mismatched_mirrored_checkpoint_provenance() -> anyh
     store
         .checkpoint_atomic_state("alice", "root", "parent", ROOT_LEASE)
         .await?;
+    let mut connection = pool.acquire_write().await?;
     sqlx::query(
         "UPDATE vendor_atomic_checkpoints SET lease_id=$1 WHERE principal=$2 AND checkpoint_id=$3",
     )
     .bind(BOB_LEASE)
     .bind("alice")
     .bind("parent")
-    .execute(&pool)
+    .execute(&mut *connection)
     .await?;
+    connection.finish().await?;
     assert!(matches!(
         store
             .fork_atomic_state("alice", "wrong-lease", Some("parent"), A_LEASE)
             .await,
         Err(PluginStorageError::StaleOperation)
     ));
+    let mut connection = pool.acquire_write().await?;
     sqlx::query("UPDATE vendor_atomic_checkpoints SET lease_id=$1, admission_id=$2 WHERE principal=$3 AND checkpoint_id=$4")
-        .bind(ROOT_LEASE).bind("wrong-admission").bind("alice").bind("parent").execute(&pool).await?;
+        .bind(ROOT_LEASE).bind("wrong-admission").bind("alice").bind("parent").execute(&mut *connection).await?;
+    connection.finish().await?;
     assert!(matches!(
         store
             .fork_atomic_state("alice", "wrong-admission", Some("parent"), B_LEASE)
@@ -1890,7 +1898,8 @@ async fn sqlite_existing_fence_does_not_wait_for_writer() -> anyhow::Result<()> 
     let fence = store
         .open_atomic_provider_fence("fence-vendor", &provider.id, 1)
         .await?;
-    let mut transaction = pool.begin().await?;
+    let mut outside = sqlx::sqlite::SqliteConnection::connect_with(&pool.connect_options()).await?;
+    let mut transaction = outside.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query("UPDATE vendor_atomic_revision SET revision=revision WHERE id=1")
         .execute(&mut *transaction)
         .await?;
@@ -1921,9 +1930,11 @@ async fn sqlite_committed_install_and_uninstall_survive_journal_cleanup_failure(
         .open_atomic_provider_fence("cleanup-vendor", &provider.id, 1)
         .await?;
     // Break only the later GC query, not the install/reset transaction.
+    let mut connection = pool.acquire_write().await?;
     sqlx::query("ALTER TABLE vendor_atomic_boundary_facts RENAME TO unavailable_boundary_facts")
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
+    connection.finish().await?;
     assert!(store.sweep_atomic_journal().await.is_err());
     let mut next = store
         .list()

@@ -1141,6 +1141,7 @@ mod tests {
         assert!(!store.any_active().await?);
 
         let now = chrono::Utc::now().timestamp_millis();
+        let mut connection = pool.acquire_write().await?;
         sqlx::query(
             "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,last_used_at,pending_until) VALUES (?,?,?,?,?,?)",
         )
@@ -1150,8 +1151,9 @@ mod tests {
         .bind(now)
         .bind(now)
         .bind(now + 60_000)
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
+        connection.finish().await?;
         assert!(store.any_active().await?);
 
         let ids = vec!["interaction".to_owned(), "other".to_owned()];
@@ -1201,16 +1203,18 @@ mod tests {
             crate::generation_chain::test_chain().await,
         )
         .await;
+        let mut connection = pool.acquire_write().await?;
         sqlx::query(
             "INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('interaction','owner','root','run','route','completed',0,0)",
         )
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
         sqlx::query(
             "INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES ('other','other','other-root','other-run','route','completed',0,0)",
         )
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
+        connection.finish().await?;
         Ok((directory, pool, observation))
     }
 }

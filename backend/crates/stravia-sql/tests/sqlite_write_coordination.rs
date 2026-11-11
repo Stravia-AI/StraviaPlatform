@@ -153,3 +153,103 @@ async fn cancelled_write_holds_admission_until_worker_rollback_finishes() {
     );
     pool.close().await;
 }
+
+fn assert_readonly<T: std::fmt::Debug>(result: Result<T, stravia_sql::Error>, context: &str) {
+    let error = result.expect_err(context);
+    assert!(
+        error
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("readonly database")),
+        "{context}: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn lease_required_pool_rejects_every_write_outside_the_lease() {
+    let directory = tempfile::tempdir().unwrap();
+    // 单连接：每次归还后复用同一连接，验证租约结束后只读状态被恢复。
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                stravia_sql::query("PRAGMA cache_size = -1234")
+                    .execute(connection)
+                    .await
+                    .map(drop)
+            })
+        })
+        .require_write_lease()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(directory.path().join("lease-required.db"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+    let cache_size: i64 = stravia_sql::query_scalar("PRAGMA cache_size")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cache_size, -1234, "caller connection setup must still run");
+
+    let mut writer = pool.acquire_write().await.unwrap();
+    stravia_sql::query("CREATE TABLE counter (value INTEGER NOT NULL)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    stravia_sql::query("INSERT INTO counter VALUES (0)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+
+    assert_readonly(
+        stravia_sql::query("UPDATE counter SET value = value + 100")
+            .execute(&pool)
+            .await,
+        "autocommit write after finish",
+    );
+    assert_readonly(
+        pool.begin_with("BEGIN IMMEDIATE").await,
+        "immediate transaction outside the lease",
+    );
+    let mut transaction = pool.begin().await.unwrap();
+    assert_readonly(
+        stravia_sql::query("UPDATE counter SET value = value + 100")
+            .execute(&mut *transaction)
+            .await,
+        "deferred transaction write outside the lease",
+    );
+    transaction.rollback().await.unwrap();
+
+    let mut abandoned = pool.acquire_write().await.unwrap();
+    stravia_sql::query("UPDATE counter SET value = value + 1")
+        .execute(&mut *abandoned)
+        .await
+        .unwrap();
+    // 未 finish 的错误或取消路径同样必须在归还前恢复只读。
+    drop(abandoned);
+    assert_readonly(
+        stravia_sql::query("UPDATE counter SET value = value + 100")
+            .execute(&pool)
+            .await,
+        "autocommit write after an abandoned lease",
+    );
+
+    let mut external = stravia_sql::sqlite::SqliteConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap();
+    stravia_sql::query("UPDATE counter SET value = value + 10")
+        .execute(&mut external)
+        .await
+        .expect("connections outside the pool keep their own write mode");
+    external.close().await.unwrap();
+
+    let committed: i64 = stravia_sql::query_scalar("SELECT value FROM counter")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(committed, 11);
+    pool.close().await;
+}

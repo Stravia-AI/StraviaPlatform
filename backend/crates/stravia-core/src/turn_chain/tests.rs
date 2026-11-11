@@ -100,12 +100,16 @@ async fn checkpoint_reference_is_principal_scoped_and_follows_node_retention() {
     };
     let owner = principal("checkpoint-owner");
     let checkpoint = "checkpoint-1";
-    sqlx::query("INSERT INTO vendor_atomic_leases(principal,admission_id,lease_id,expires_at_ms) VALUES($1,$2,$3,$4)")
-        .bind(owner.continuation_key()).bind("admission-1").bind("lease-1").bind(now_millis() + BEYOND_RETENTION_MS)
-        .execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms) VALUES($1,$2,$3,$4,$5)")
-        .bind(owner.continuation_key()).bind(checkpoint).bind("admission-1").bind("lease-1").bind(now_millis())
-        .execute(pool).await.unwrap();
+    {
+        let mut writer = pool.acquire_write().await.unwrap();
+        sqlx::query("INSERT INTO vendor_atomic_leases(principal,admission_id,lease_id,expires_at_ms) VALUES($1,$2,$3,$4)")
+            .bind(owner.continuation_key()).bind("admission-1").bind("lease-1").bind(now_millis() + BEYOND_RETENTION_MS)
+            .execute(&mut *writer).await.unwrap();
+        sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms) VALUES($1,$2,$3,$4,$5)")
+            .bind(owner.continuation_key()).bind(checkpoint).bind("admission-1").bind("lease-1").bind(now_millis())
+            .execute(&mut *writer).await.unwrap();
+        writer.finish().await.unwrap();
+    }
     let make_commit = |id: TurnNodeId, principal: Principal, checkpoint: &str| TurnCommit {
         id,
         kind: TurnNodeKind::Response,
@@ -139,12 +143,16 @@ async fn checkpoint_reference_is_principal_scoped_and_follows_node_retention() {
         Err(TurnCommitError::AtomicStateUnavailable)
     );
     assert_eq!(scoped_node_count(&store, &wrong_owner).await, 0);
-    sqlx::query("INSERT INTO vendor_atomic_leases(principal,admission_id,lease_id,expires_at_ms) VALUES($1,$2,$3,$4)")
-        .bind(owner.continuation_key()).bind("admission-1").bind("stale-lease").bind(now_millis() - 1)
-        .execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms) VALUES($1,$2,$3,$4,$5)")
-        .bind(owner.continuation_key()).bind("stale-checkpoint").bind("admission-1").bind("stale-lease").bind(now_millis())
-        .execute(pool).await.unwrap();
+    {
+        let mut writer = pool.acquire_write().await.unwrap();
+        sqlx::query("INSERT INTO vendor_atomic_leases(principal,admission_id,lease_id,expires_at_ms) VALUES($1,$2,$3,$4)")
+            .bind(owner.continuation_key()).bind("admission-1").bind("stale-lease").bind(now_millis() - 1)
+            .execute(&mut *writer).await.unwrap();
+        sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms) VALUES($1,$2,$3,$4,$5)")
+            .bind(owner.continuation_key()).bind("stale-checkpoint").bind("admission-1").bind("stale-lease").bind(now_millis())
+            .execute(&mut *writer).await.unwrap();
+        writer.finish().await.unwrap();
+    }
     let stale = TurnNodeId::response();
     assert_eq!(
         store
@@ -172,12 +180,16 @@ async fn checkpoint_reference_is_principal_scoped_and_follows_node_retention() {
     assert_eq!(references, 1);
     // Once the operation ends, the committed node—not its admission or lease—
     // must retain the checkpoint until the node itself is collected.
-    sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=$1 WHERE lease_id=$2")
-        .bind(now_millis() - 1)
-        .bind("lease-1")
-        .execute(pool)
-        .await
-        .unwrap();
+    {
+        let mut writer = pool.acquire_write().await.unwrap();
+        sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=$1 WHERE lease_id=$2")
+            .bind(now_millis() - 1)
+            .bind("lease-1")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
+    }
     let plugins = crate::plugin::PluginStore::sqlite(pool.clone());
     let storage = crate::storage::SqliteStorage::from_pool(pool.clone());
     let admissions = crate::storage::Storage::prompt_admissions(&storage);
@@ -236,9 +248,10 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
     let queue = "INSERT INTO turn_node_gc(node_pk) SELECT node_pk FROM turn_nodes WHERE id=$1 ON CONFLICT(node_pk) DO NOTHING";
     match &store.backend {
         Backend::Sqlite(pool) => {
+            let mut writer = pool.acquire_write().await.unwrap();
             sqlx::query(queue)
                 .bind(id.as_str())
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
             sqlx::query(
@@ -246,9 +259,10 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
                  WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1)",
             )
             .bind(id.as_str())
-            .execute(pool)
+            .execute(&mut *writer)
             .await
             .unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             sqlx::query(queue)
@@ -271,12 +285,14 @@ async fn mark_deleting(store: &SqlTurnChainStore, id: &TurnNodeId) {
 async fn set_node_created_at(store: &SqlTurnChainStore, id: &TurnNodeId, created_at: i64) {
     match &store.backend {
         Backend::Sqlite(pool) => {
+            let mut writer = pool.acquire_write().await.unwrap();
             sqlx::query("UPDATE turn_nodes SET created_at = $2 WHERE id = $1")
                 .bind(id.as_str())
                 .bind(created_at)
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             sqlx::query("UPDATE turn_nodes SET created_at = $2 WHERE id = $1")
@@ -377,7 +393,22 @@ async fn begin_collecting_first_reference(store: &SqlTurnChainStore, id: &TurnNo
     }
     match &store.backend {
         Backend::Sqlite(pool) => {
-            begin!(pool, crate::content_store::sqlite::enqueue_unreferenced)
+            let mut writer = pool.acquire_write().await.unwrap();
+            let mut transaction = writer.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            let removed: Vec<i64> = sqlx::query_scalar(
+                "DELETE FROM turn_node_contents \
+                 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $1) AND ordinal = 0 \
+                 RETURNING content_id",
+            )
+            .bind(id.as_str())
+            .fetch_all(&mut *transaction)
+            .await
+            .unwrap();
+            crate::content_store::sqlite::enqueue_unreferenced(&mut transaction, &removed)
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             begin!(pool, crate::content_store::postgres::enqueue_unreferenced)
@@ -426,6 +457,7 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
             .fetch_one(&pool)
             .await
             .expect("live descriptor");
+    let mut writer = pool.acquire_write().await.expect("SQLite writer");
     sqlx::query(
         "WITH RECURSIVE expired(n) AS (
              SELECT 1 UNION ALL SELECT n+1 FROM expired WHERE n<8000
@@ -434,7 +466,7 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
          SELECT 'expired-' || n, ?, 'response', 6, 0 FROM expired",
     )
     .bind(scope)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("expired history metadata");
     sqlx::query(
@@ -442,14 +474,14 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
          SELECT node_pk, ? FROM turn_nodes WHERE id LIKE 'expired-%'",
     )
     .bind(&live_payload)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("expired history payloads");
     sqlx::query(
         "INSERT INTO turn_node_retention (node_pk, deleting)
          SELECT node_pk, 0 FROM turn_nodes WHERE id LIKE 'expired-%'",
     )
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("expired history retention");
     sqlx::query(
@@ -459,9 +491,10 @@ async fn large_retention_sweep_preserves_live_history_and_native_login() {
          WHERE n.id LIKE 'expired-%' AND r.node_pk = ?",
     )
     .bind(live_pk)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("shared history references");
+    writer.finish().await.expect("release SQLite writer");
 
     let auth = Arc::new(crate::admin::identity::AdminAuth::new(Arc::new(
         crate::storage::SqliteStorage::from_pool(pool.clone()),
@@ -590,7 +623,7 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
     // 模拟中断或重建后仍在表里的持久候选：600 个孤儿内容以及一个仍被节点引用的内容，
     // 全部经由共享正文存储的公开入口写入与登记；仍被引用的内容不会进入队列。
     {
-        let mut connection = pool.acquire().await.expect("connection");
+        let mut connection = pool.acquire_write().await.expect("SQLite writer");
         let mut orphans: Vec<crate::content_store::Content> = (0..600)
             .map(|index| crate::content_store::Content::text(format!("orphan content {index}")))
             .collect();
@@ -602,6 +635,7 @@ async fn sqlite_gc_collects_persisted_content_candidates_without_scanning_live_c
             .await
             .expect("persisted content candidates");
         assert_eq!(enqueued, 600, "referenced content must not be queued");
+        connection.finish().await.expect("release SQLite writer");
     }
 
     assert_eq!(store.sweep_history(now_millis()).await.expect("sweep"), 0);
@@ -1191,11 +1225,15 @@ async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
         }]
     );
 
-    sqlx::query("DELETE FROM turn_node_payloads WHERE node_pk = ?")
-        .bind(node_pk)
-        .execute(&pool)
-        .await
-        .expect("remove payload");
+    {
+        let mut writer = pool.acquire_write().await.expect("SQLite writer");
+        sqlx::query("DELETE FROM turn_node_payloads WHERE node_pk = ?")
+            .bind(node_pk)
+            .execute(&mut *writer)
+            .await
+            .expect("remove payload");
+        writer.finish().await.expect("release SQLite writer");
+    }
     assert!(
         matches!(
             store.materialize(&owner, TurnNodeKind::Response, &id).await,
@@ -1203,18 +1241,25 @@ async fn sqlite_materialize_rejects_missing_or_corrupt_storage_facts() {
         ),
         "missing payload is corruption, not a shorter chain"
     );
-    sqlx::query("INSERT INTO turn_node_payloads(node_pk, payload) VALUES(?, ?)")
-        .bind(node_pk)
-        .bind(&descriptor)
-        .execute(&pool)
-        .await
-        .expect("restore payload");
-
-    sqlx::query("UPDATE turn_node_payloads SET payload = X'00' WHERE node_pk = ?")
-        .bind(node_pk)
-        .execute(&pool)
-        .await
-        .expect("corrupt descriptor");
+    {
+        let mut writer = pool.acquire_write().await.expect("SQLite writer");
+        sqlx::query("INSERT INTO turn_node_payloads(node_pk, payload) VALUES(?, ?)")
+            .bind(node_pk)
+            .bind(&descriptor)
+            .execute(&mut *writer)
+            .await
+            .expect("restore payload");
+        writer.finish().await.expect("release SQLite writer");
+    }
+    {
+        let mut writer = pool.acquire_write().await.expect("SQLite writer");
+        sqlx::query("UPDATE turn_node_payloads SET payload = X'00' WHERE node_pk = ?")
+            .bind(node_pk)
+            .execute(&mut *writer)
+            .await
+            .expect("corrupt descriptor");
+        writer.finish().await.expect("release SQLite writer");
+    }
     assert!(matches!(
         store.materialize(&owner, TurnNodeKind::Response, &id).await,
         Err(TurnUnavailable::Storage(_))
@@ -1862,6 +1907,7 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
     let descriptor = content::encode(serde_json::json!({}))
         .expect("empty descriptor")
         .payload;
+    let mut writer = pool.acquire_write().await.expect("SQLite writer");
     sqlx::query(
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) \
          INSERT INTO turn_nodes (id, scope_id, kind, payload_version, created_at) \
@@ -1871,7 +1917,7 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
     .bind(scope)
     .bind(TurnNodeKind::Agent.as_str())
     .bind(now)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("insert unrelated nodes");
     sqlx::query(
@@ -1879,16 +1925,17 @@ async fn sqlite_ancestor_walks_do_not_scan_unrelated_principal_nodes() {
          SELECT node_pk, ? FROM turn_nodes WHERE id LIKE 'unrelated-%'",
     )
     .bind(&descriptor)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("insert unrelated payloads");
     sqlx::query(
         "INSERT INTO turn_node_retention (node_pk, deleting) \
          SELECT node_pk, 0 FROM turn_nodes WHERE id LIKE 'unrelated-%'",
     )
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("insert unrelated retention");
+    writer.finish().await.expect("release SQLite writer");
 
     let ticks = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let handler_ticks = ticks.clone();
@@ -1963,10 +2010,11 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
         .expect("SQLite migrations");
     let owner = principal("owner");
     let now = chrono::Utc::now().timestamp_millis();
+    let mut writer = pool.acquire_write().await.expect("SQLite writer");
     let scope: i64 =
         sqlx::query_scalar("INSERT INTO content_scopes(principal) VALUES(?) RETURNING id")
             .bind(owner.continuation_key())
-            .fetch_one(&pool)
+            .fetch_one(&mut *writer)
             .await
             .expect("owner scope");
     sqlx::query(
@@ -1980,7 +2028,7 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
     .bind(scope)
     .bind(TurnNodeKind::Response.as_str())
     .bind(now)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("insert matching and unrelated prefix nodes");
     let descriptor = content::encode(serde_json::json!({}))
@@ -1991,16 +2039,17 @@ async fn sqlite_prefix_lookup_does_not_scan_unrelated_namespace_nodes() {
          SELECT node_pk, ? FROM turn_nodes WHERE id LIKE 'prefix-budget-%'",
     )
     .bind(&descriptor)
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("insert prefix payloads");
     sqlx::query(
         "INSERT INTO turn_node_retention (node_pk, deleting) \
          SELECT node_pk, 0 FROM turn_nodes WHERE id LIKE 'prefix-budget-%'",
     )
-    .execute(&pool)
+    .execute(&mut *writer)
     .await
     .expect("insert prefix retention");
+    writer.finish().await.expect("release SQLite writer");
 
     let ticks = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let handler_ticks = ticks.clone();
@@ -2097,14 +2146,18 @@ async fn request_context_reuses_validated_ancestors_before_payload_fetch() {
     let super::sql::Backend::Sqlite(pool) = &store.backend else {
         unreachable!()
     };
-    sqlx::query(
-        "UPDATE turn_node_payloads SET payload = X'00' \
-         WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)",
-    )
-    .bind(root.as_str())
-    .execute(pool)
-    .await
-    .unwrap();
+    {
+        let mut writer = pool.acquire_write().await.unwrap();
+        sqlx::query(
+            "UPDATE turn_node_payloads SET payload = X'00' \
+             WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)",
+        )
+        .bind(root.as_str())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        writer.finish().await.unwrap();
+    }
     let chain = store
         .materialize_in_context(&owner, TurnNodeKind::Response, &child, &mut context)
         .await
@@ -2601,11 +2654,13 @@ async fn assert_projection_proofs_exclude_only_known_mismatches_and_rebuild_old_
          AND scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
     match &store.backend {
         Backend::Sqlite(pool) => {
+            let mut writer = pool.acquire_write().await.unwrap();
             sqlx::query(partial)
                 .bind(owner.continuation_key())
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             sqlx::query(partial)
@@ -2814,13 +2869,15 @@ async fn overwrite_context_content(
          AND scope_id = (SELECT id FROM content_scopes WHERE principal = $3)";
     match &store.backend {
         Backend::Sqlite(pool) => {
+            let mut writer = pool.acquire_write().await.unwrap();
             sqlx::query(query)
                 .bind(bytes)
                 .bind(content_id)
                 .bind(owner.continuation_key())
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             sqlx::query(query)
@@ -3023,12 +3080,14 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
          WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = $2)";
     match &store.backend {
         Backend::Sqlite(pool) => {
+            let mut writer = pool.acquire_write().await.unwrap();
             sqlx::query(query)
                 .bind(vec![0u8])
                 .bind(corrupt.as_str())
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             sqlx::query(query)
@@ -3116,16 +3175,18 @@ async fn assert_request_context_contract(store: &SqlTurnChainStore) {
          WHERE scope_id = (SELECT id FROM content_scopes WHERE principal = $1)";
     match &store.backend {
         Backend::Sqlite(pool) => {
+            let mut writer = pool.acquire_write().await.unwrap();
             sqlx::query(delete_references)
                 .bind(owner.continuation_key())
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
             sqlx::query(delete_contents)
                 .bind(owner.continuation_key())
-                .execute(pool)
+                .execute(&mut *writer)
                 .await
                 .unwrap();
+            writer.finish().await.unwrap();
         }
         Backend::Postgres(pool) => {
             sqlx::query(delete_references)
@@ -3236,7 +3297,13 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     let data_dir = tempfile::tempdir().unwrap();
     let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
     let migrator = sqlx::migrate!("./migrations/sqlite");
-    migrator.run_to(7, pool.migration_pool()).await.unwrap();
+    // 升级前的旧库属于离线前置状态；独立、未启用运行期写租约的单连接池。
+    let staged = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    migrator.run_to(7, staged.migration_pool()).await.unwrap();
     assert!(
         expected
             .namespace
@@ -3260,9 +3327,10 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     .bind(legacy_payload)
     .bind(now)
     .bind(now + 60_000)
-    .execute(&pool)
+    .execute(&staged)
     .await
     .unwrap();
+    staged.close().await;
     crate::migrations::migrate_sqlite(&pool, None)
         .await
         .unwrap();
@@ -3332,7 +3400,7 @@ impl SqlTurnChainStore {
         mut edit: impl FnMut(&mut serde_json::Value),
     ) -> anyhow::Result<()> {
         macro_rules! rewrite {
-            ($pool:expr, $put:ident, $restore:ident, $enqueue:path, $backend:ident, $lock:literal) => {{
+            ($pool:expr, $put:ident, $restore:ident, $enqueue:path, $backend:ident, $begin:literal, $lock:literal) => {{
                 let nodes: Vec<(i64,String,i64,String)> = sqlx::query_as(
                     "SELECT node_pk,id,scope_id,kind FROM turn_nodes",
                 ).fetch_all($pool).await?;
@@ -3359,7 +3427,7 @@ impl SqlTurnChainStore {
                     edit(&mut payload);
                     let mut encoded = tokio::task::spawn_blocking(move || content::encode(payload)).await??;
                     let mut connection = $pool.acquire_write().await?;
-                    let mut transaction = connection.begin().await?;
+                    let mut transaction = connection.begin_with($begin).await?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await?; }
                     let removed: Vec<i64> = sqlx::query_scalar(
                         "DELETE FROM turn_node_contents WHERE node_pk=$1 RETURNING content_id",
@@ -3384,6 +3452,7 @@ impl SqlTurnChainStore {
                 restore_sqlite,
                 crate::content_store::sqlite::enqueue_unreferenced,
                 sqlite,
+                "BEGIN IMMEDIATE",
                 ""
             ),
             Backend::Postgres(pool) => rewrite!(
@@ -3392,6 +3461,7 @@ impl SqlTurnChainStore {
                 restore_postgres,
                 crate::content_store::postgres::enqueue_unreferenced,
                 postgres,
+                "BEGIN",
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
             ),
         }

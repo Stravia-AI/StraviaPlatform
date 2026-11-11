@@ -750,12 +750,14 @@ impl Database {
     async fn expire_admission(&self, admission: &str) -> anyhow::Result<()> {
         match self {
             Self::Sqlite(pool) => {
+                let mut connection = pool.acquire_write().await?;
                 sqlx::query(
                     "UPDATE vendor_atomic_leases SET expires_at_ms=0 WHERE admission_id=$1",
                 )
                 .bind(admission)
-                .execute(pool)
+                .execute(&mut *connection)
                 .await?;
+                connection.finish().await?;
             }
             Self::Postgres(pool) => {
                 sqlx::query(
@@ -772,9 +774,11 @@ impl Database {
     async fn expire_leases(&self) -> anyhow::Result<()> {
         match self {
             Self::Sqlite(pool) => {
+                let mut connection = pool.acquire_write().await?;
                 sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=0")
-                    .execute(pool)
+                    .execute(&mut *connection)
                     .await?;
+                connection.finish().await?;
             }
             Self::Postgres(pool) => {
                 sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=0")
@@ -897,7 +901,8 @@ async fn sqlite_journal_persistence() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let pool = crate::db::init_pool(directory.path()).await?;
     crate::migrations::migrate_sqlite(&pool, None).await?;
-    let result = scenario(Database::Sqlite(pool.clone())).await;
+    // 完整日志场景的 future 在调试构建下超出默认测试线程栈；放到堆上执行。
+    let result = Box::pin(scenario(Database::Sqlite(pool.clone()))).await;
     pool.close().await;
     result
 }

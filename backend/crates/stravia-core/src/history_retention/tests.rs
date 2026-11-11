@@ -405,12 +405,14 @@ impl Fixture {
         let shift = stravia_credential_protection::store::RENEWAL_GRANULARITY.as_millis() as i64;
         match &self.db {
             Db::Sqlite(pool) => {
+                let mut connection = pool.acquire_write().await.expect("acquire write lease");
                 sqlx::query("UPDATE reversible_redaction_mappings SET last_used_at = last_used_at - ? WHERE reference = ?")
                     .bind(shift)
                     .bind(reference)
-                    .execute(pool)
+                    .execute(&mut *connection)
                     .await
-                    .map(|_| ())
+                    .expect("align mapping floor with markers");
+                connection.finish().await
             }
             Db::Postgres(pool) => {
                 sqlx::query("UPDATE reversible_redaction_mappings SET last_used_at = last_used_at - $1 WHERE reference = $2")
@@ -1081,10 +1083,12 @@ async fn atomic_checkpoints_survive_active_leases_and_expire_after_release(fx: F
     // End the durable operation leases without waiting for the heartbeat timeout.
     match &fx.db {
         Db::Sqlite(pool) => {
+            let mut connection = pool.acquire_write().await.unwrap();
             sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms = 0")
-                .execute(pool)
+                .execute(&mut *connection)
                 .await
                 .unwrap();
+            connection.finish().await.unwrap();
         }
         Db::Postgres(pool) => {
             sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms = 0")
@@ -1191,7 +1195,14 @@ async fn clear_history_reports_multiple_failures_after_clearing_admissions(fx: F
         "ALTER TABLE vendor_atomic_journal_pins RENAME TO vendor_atomic_journal_pins_broken",
     ] {
         match &fx.db {
-            Db::Sqlite(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
+            Db::Sqlite(pool) => {
+                let mut connection = pool.acquire_write().await.expect("acquire write lease");
+                sqlx::query(statement)
+                    .execute(&mut *connection)
+                    .await
+                    .expect("inject a storage failure");
+                connection.finish().await
+            }
             Db::Postgres(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
         }
         .expect("inject a storage failure");
@@ -2175,7 +2186,14 @@ async fn a_failing_step_does_not_skip_the_remaining_steps(fx: Fixture) {
     let statement =
         "ALTER TABLE interaction_observations RENAME TO interaction_observations_broken";
     match &fx.db {
-        Db::Sqlite(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
+        Db::Sqlite(pool) => {
+            let mut connection = pool.acquire_write().await.expect("acquire write lease");
+            sqlx::query(statement)
+                .execute(&mut *connection)
+                .await
+                .expect("break the observation store");
+            connection.finish().await
+        }
         Db::Postgres(pool) => sqlx::query(statement).execute(pool).await.map(|_| ()),
     }
     .expect("break the observation store");

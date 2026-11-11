@@ -186,10 +186,15 @@ async fn restart_manager_identifies_current_sqlite_file_owner() {
     let pool = crate::db::init_pool(directory.path())
         .await
         .expect("SQLite pool");
+    let mut connection = pool.acquire_write().await.expect("SQLite write lease");
     sqlx::query("CREATE TABLE lock_owner_probe (id INTEGER)")
-        .execute(&pool)
+        .execute(&mut *connection)
         .await
         .expect("open SQLite database and WAL");
+    connection
+        .finish()
+        .await
+        .expect("finish SQLite write lease");
     let root = directory.path().to_path_buf();
     let path = root.join("db").join("gateway.db");
     // Exercise the same contextual io::Error returned by strict gateway cleanup,

@@ -8,7 +8,9 @@
 //! Stream timing covers the consumed driver stream lifetime, including consumer
 //! backpressure, rather than claiming database-server CPU time.
 //! Runtime SQLite writes explicitly acquire a pool-owned write lease; ordinary
-//! reads and upstream-owned migrations do not acquire the writer gate.
+//! reads do not acquire the writer gate. Pools built with `require_write_lease`
+//! keep connections query-only outside the lease, so ungated writes fail with
+//! `SQLITE_READONLY` instead of contending for the database write lock.
 
 use futures::{future::BoxFuture, stream::BoxStream};
 use sqlx_native::{ConnectOptions as _, Connection as NativeConnection};
@@ -91,6 +93,7 @@ pub struct Pool<DB: Database> {
     inner: sqlx_native::Pool<DB>,
     name: &'static str,
     write_gate: Option<Arc<tokio::sync::Mutex<()>>>,
+    write_mode: Option<WriteMode<DB>>,
 }
 impl<DB: Database> Clone for Pool<DB> {
     fn clone(&self) -> Self {
@@ -98,6 +101,7 @@ impl<DB: Database> Clone for Pool<DB> {
             inner: self.inner.clone(),
             name: self.name,
             write_gate: self.write_gate.clone(),
+            write_mode: self.write_mode,
         }
     }
 }
@@ -110,12 +114,13 @@ impl<DB: Database> fmt::Debug for Pool<DB> {
     }
 }
 impl<DB: Database> Pool<DB> {
-    fn wrap(inner: sqlx_native::Pool<DB>) -> Self {
+    fn wrap(inner: sqlx_native::Pool<DB>, write_mode: Option<WriteMode<DB>>) -> Self {
         Self {
             inner,
             name: "main",
             write_gate: (DB::NAME == <Sqlite as Database>::NAME)
                 .then(|| Arc::new(tokio::sync::Mutex::new(()))),
+            write_mode,
         }
     }
     pub fn named(mut self, name: &'static str) -> Self {
@@ -123,20 +128,18 @@ impl<DB: Database> Pool<DB> {
         self
     }
     pub async fn connect(url: &str) -> Result<Self, Error> {
-        sqlx_native::Pool::<DB>::connect(url).await.map(Self::wrap)
+        PoolOptions::new().connect(url).await
     }
     pub async fn connect_with(
         options: <DB::Connection as NativeConnection>::Options,
     ) -> Result<Self, Error> {
-        sqlx_native::Pool::<DB>::connect_with(options)
-            .await
-            .map(Self::wrap)
+        PoolOptions::new().connect_with(options).await
     }
     pub fn connect_lazy(url: &str) -> Result<Self, Error> {
-        sqlx_native::Pool::<DB>::connect_lazy(url).map(Self::wrap)
+        PoolOptions::new().connect_lazy(url)
     }
     pub fn connect_lazy_with(options: <DB::Connection as NativeConnection>::Options) -> Self {
-        Self::wrap(sqlx_native::Pool::<DB>::connect_lazy_with(options))
+        PoolOptions::new().connect_lazy_with(options)
     }
     #[track_caller]
     pub fn acquire(&self) -> impl Future<Output = Result<PoolConnection<DB>, Error>> + Send + '_ {
@@ -185,7 +188,13 @@ impl<DB: Database> Pool<DB> {
         ));
         let mut lease = Lease::new(guard, hold, self.name);
         match self.acquire().await {
-            Ok(connection) => Ok(WriteConnection::new(connection, Some(lease))),
+            Ok(connection) => {
+                let mut connection =
+                    WriteConnection::new(connection, Some(lease)).with_write_mode(self.write_mode);
+                // 先建立 WriteConnection：解除只读失败或被取消时，由析构清理恢复只读或关闭连接。
+                connection.enable_writes().await?;
+                Ok(connection)
+            }
             Err(error) => {
                 lease.fail(&error);
                 // 先释放协调权，再关闭 hold span。
@@ -254,6 +263,7 @@ impl<DB: Database> Pool<DB> {
     }
     /// Native migration entry point only: SQLx's internal migration queries bypass
     /// this executor and are not exported as observed application queries.
+    /// 要求写租约的 SQLite 池在租约外只读，不能经此入口迁移。
     pub fn migration_pool(&self) -> &sqlx_native::Pool<DB> {
         &self.inner
     }
@@ -264,7 +274,41 @@ pub fn sample_pool<DB: Database>(pool: &Pool<DB>, pool_name: &'static str) {
     diagnostics::sample_pool(&pool.inner, pool_name);
 }
 
-pub struct PoolOptions<DB: Database>(sqlx_native::pool::PoolOptions<DB>);
+type AfterConnect<DB> = Arc<
+    dyn for<'c> Fn(
+            &'c mut <DB as Database>::Connection,
+            sqlx_native::pool::PoolConnectionMetadata,
+        ) -> BoxFuture<'c, Result<(), Error>>
+        + Send
+        + Sync,
+>;
+
+/// 切换池连接是否允许写入；只有要求写租约的 SQLite 池会设置。
+type WriteMode<DB> =
+    for<'c> fn(&'c mut <DB as Database>::Connection, bool) -> BoxFuture<'c, Result<(), Error>>;
+
+fn sqlite_write_mode(
+    connection: &mut sqlx_native::sqlite::SqliteConnection,
+    writable: bool,
+) -> BoxFuture<'_, Result<(), Error>> {
+    Box::pin(async move {
+        let statement = if writable {
+            "PRAGMA query_only = OFF"
+        } else {
+            "PRAGMA query_only = ON"
+        };
+        sqlx_native::query(statement)
+            .execute(connection)
+            .await
+            .map(drop)
+    })
+}
+
+pub struct PoolOptions<DB: Database> {
+    native: sqlx_native::pool::PoolOptions<DB>,
+    after_connect: Option<AfterConnect<DB>>,
+    write_mode: Option<WriteMode<DB>>,
+}
 impl<DB: Database> Default for PoolOptions<DB> {
     fn default() -> Self {
         Self::new()
@@ -272,32 +316,43 @@ impl<DB: Database> Default for PoolOptions<DB> {
 }
 impl<DB: Database> PoolOptions<DB> {
     pub fn new() -> Self {
-        Self(sqlx_native::pool::PoolOptions::new())
+        Self {
+            native: sqlx_native::pool::PoolOptions::new(),
+            after_connect: None,
+            write_mode: None,
+        }
+    }
+    fn map_native(
+        mut self,
+        update: impl FnOnce(sqlx_native::pool::PoolOptions<DB>) -> sqlx_native::pool::PoolOptions<DB>,
+    ) -> Self {
+        self.native = update(self.native);
+        self
     }
     pub fn max_connections(self, value: u32) -> Self {
-        Self(self.0.max_connections(value))
+        self.map_native(|native| native.max_connections(value))
     }
     pub fn min_connections(self, value: u32) -> Self {
-        Self(self.0.min_connections(value))
+        self.map_native(|native| native.min_connections(value))
     }
     pub fn acquire_timeout(self, value: Duration) -> Self {
-        Self(self.0.acquire_timeout(value))
+        self.map_native(|native| native.acquire_timeout(value))
     }
     pub fn idle_timeout(self, value: impl Into<Option<Duration>>) -> Self {
-        Self(self.0.idle_timeout(value))
+        self.map_native(|native| native.idle_timeout(value))
     }
     pub fn max_lifetime(self, value: impl Into<Option<Duration>>) -> Self {
-        Self(self.0.max_lifetime(value))
+        self.map_native(|native| native.max_lifetime(value))
     }
     pub fn test_before_acquire(self, value: bool) -> Self {
-        Self(self.0.test_before_acquire(value))
+        self.map_native(|native| native.test_before_acquire(value))
     }
     pub fn acquire_time_level(self, value: log::LevelFilter) -> Self {
-        Self(self.0.acquire_time_level(value))
+        self.map_native(|native| native.acquire_time_level(value))
     }
     /// SQLx connection initialization callbacks use native driver connections.
     /// Their driver-internal setup statements are outside application diagnostics.
-    pub fn after_connect<F>(self, callback: F) -> Self
+    pub fn after_connect<F>(mut self, callback: F) -> Self
     where
         F: for<'c> Fn(
                 &'c mut DB::Connection,
@@ -307,25 +362,72 @@ impl<DB: Database> PoolOptions<DB> {
             + Send
             + Sync,
     {
-        Self(self.0.after_connect(callback))
+        self.after_connect = Some(Arc::new(callback));
+        self
+    }
+    fn into_native(self) -> (sqlx_native::pool::PoolOptions<DB>, Option<WriteMode<DB>>) {
+        let Self {
+            native,
+            after_connect,
+            write_mode,
+        } = self;
+        let native = match (after_connect, write_mode) {
+            (None, None) => native,
+            (Some(callback), None) => {
+                native.after_connect(move |connection, metadata| callback(connection, metadata))
+            }
+            (callback, Some(write_mode)) => native.after_connect(move |connection, metadata| {
+                let callback = callback.clone();
+                Box::pin(async move {
+                    if let Some(callback) = callback {
+                        callback(&mut *connection, metadata).await?;
+                    }
+                    // 驱动设置（含 journal_mode）和调用方初始化完成后才进入只读。
+                    write_mode(connection, false).await
+                })
+            }),
+        };
+        (native, write_mode)
     }
     pub async fn connect(self, url: &str) -> Result<Pool<DB>, Error> {
-        self.0.connect(url).await.map(Pool::wrap)
+        let (native, write_mode) = self.into_native();
+        native
+            .connect(url)
+            .await
+            .map(|inner| Pool::wrap(inner, write_mode))
     }
     pub async fn connect_with(
         self,
         options: <DB::Connection as NativeConnection>::Options,
     ) -> Result<Pool<DB>, Error> {
-        self.0.connect_with(options).await.map(Pool::wrap)
+        let (native, write_mode) = self.into_native();
+        native
+            .connect_with(options)
+            .await
+            .map(|inner| Pool::wrap(inner, write_mode))
     }
     pub fn connect_lazy(self, url: &str) -> Result<Pool<DB>, Error> {
-        self.0.connect_lazy(url).map(Pool::wrap)
+        let (native, write_mode) = self.into_native();
+        native
+            .connect_lazy(url)
+            .map(|inner| Pool::wrap(inner, write_mode))
     }
     pub fn connect_lazy_with(
         self,
         options: <DB::Connection as NativeConnection>::Options,
     ) -> Pool<DB> {
-        Pool::wrap(self.0.connect_lazy_with(options))
+        let (native, write_mode) = self.into_native();
+        Pool::wrap(native.connect_lazy_with(options), write_mode)
+    }
+}
+impl PoolOptions<Sqlite> {
+    /// 池连接在写租约外保持 `PRAGMA query_only`，只有 [`Pool::acquire_write`]
+    /// 取得的连接可写；绕过写租约的写入以 `SQLITE_READONLY` 立即失败，
+    /// 而不是在并发时与持租约的写者争用数据库写锁。
+    /// [`Pool::connect_options`] 建立的直连不受此约束。
+    pub fn require_write_lease(mut self) -> Self {
+        self.write_mode = Some(sqlite_write_mode);
+        self
     }
 }
 

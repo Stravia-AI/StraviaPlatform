@@ -1256,7 +1256,10 @@ impl LocalArtifactStore {
         match &self.database {
             ArtifactDatabase::Sqlite(pool) => {
                 let mut connection = pool.acquire_write().await.map_err(storage_error)?;
-                let mut transaction = connection.begin().await.map_err(storage_error)?;
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage_error)?;
                 sqlx::query(
                     "INSERT INTO artifacts \
              (id, principal, mime_type, size, backend_key, state, expires_at, created_at, \
@@ -1401,7 +1404,10 @@ impl LocalArtifactStore {
                 Self::complete_guarded(async move {
         let _guards = guards;
         let mut connection = pool.acquire_write().await.map_err(storage_error)?;
-        let mut transaction = connection.begin().await.map_err(storage_error)?;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
         for id in &ids {
             let rows_affected = sqlx::query(
                 "UPDATE artifacts SET expires_at = MAX(expires_at, ?) WHERE id = ? AND principal = ? AND state = 'ready' AND expires_at > ?",

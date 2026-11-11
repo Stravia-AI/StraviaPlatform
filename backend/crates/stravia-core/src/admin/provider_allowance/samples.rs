@@ -341,6 +341,7 @@ mod tests {
         let data_dir = tempfile::tempdir()?;
         let pool = crate::db::init_pool(data_dir.path()).await?;
         crate::migrations::migrate_sqlite(&pool, None).await?;
+        let mut connection = pool.acquire_write().await?;
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key)
              VALUES (?, ?, ?, ?, ?)",
@@ -350,15 +351,18 @@ mod tests {
         .bind("openai-compatible")
         .bind("https://example.test")
         .bind("secret")
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
+        connection.finish().await?;
 
         let store = AllowanceSampleStore::sqlite(pool.clone());
         assert_sql_store_contract(store.clone()).await?;
+        let mut connection = pool.acquire_write().await?;
         sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind("provider-1")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await?;
+        connection.finish().await?;
         assert!(
             store
                 .list_for_item("provider-1", "account", 0)

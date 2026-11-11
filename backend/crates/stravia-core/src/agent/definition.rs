@@ -510,24 +510,29 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .expect("SQLite migrations");
+        let mut connection = pool.acquire_write().await.expect("SQLite write lease");
         sqlx::query(
             "INSERT INTO providers (id, name, protocol, base_url, api_key, auth_mode) \
              VALUES ('provider-1', 'Provider', 'openai-compatible', 'http://localhost', 'key', 'apikey')",
         )
-        .execute(&pool)
+        .execute(&mut *connection)
         .await
         .expect("insert Provider");
         sqlx::query("INSERT INTO models (id, model_id) VALUES ('model-1', 'Model')")
-            .execute(&pool)
+            .execute(&mut *connection)
             .await
             .expect("insert Model");
         sqlx::query(
             "INSERT INTO model_backends (id, model_id, provider_id, model) \
              VALUES ('target-1', 'model-1', 'provider-1', 'upstream')",
         )
-        .execute(&pool)
+        .execute(&mut *connection)
         .await
         .expect("insert Target");
+        connection
+            .finish()
+            .await
+            .expect("finish SQLite write lease");
         let registry = AgentDefinitionRegistry::with_store(Arc::new(
             SqlAgentDefinitionStore::sqlite(pool.clone()),
         ));

@@ -575,9 +575,11 @@ async fn sqlite_storage_never_serializes_volatile_payload() -> anyhow::Result<()
         .await?;
     assert_eq!(durable.revision, 0);
     assert_eq!(durable.payload, None);
+    let mut connection = pool.acquire_write().await?;
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-        .execute(&pool)
+        .execute(&mut *connection)
         .await?;
+    connection.finish().await?;
     drop(storage);
     pool.close().await;
     let database = std::fs::read(directory.path().join("db/gateway.db"))?;

@@ -346,6 +346,7 @@ impl Gateway {
         let history_sqlite_pool = if sqlite_pool.is_none() && postgres_pool.is_none() {
             let pool = sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
+                .require_write_lease()
                 .connect("sqlite::memory:")
                 .await?;
             migrations::migrate_sqlite(&pool, None).await?;

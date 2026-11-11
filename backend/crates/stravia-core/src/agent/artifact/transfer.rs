@@ -331,7 +331,10 @@ impl LocalArtifactStore {
         match &self.database {
             ArtifactDatabase::Sqlite(pool) => {
                 let mut connection = pool.acquire_write().await.map_err(storage_error)?;
-                let mut transaction = connection.begin().await.map_err(storage_error)?;
+                let mut transaction = connection
+                    .begin_with("BEGIN IMMEDIATE")
+                    .await
+                    .map_err(storage_error)?;
                 sqlx::query("UPDATE artifact_uploads SET declared_size=? WHERE id=?")
                     .bind(part.size as i64)
                     .bind(&upload.upload_id)

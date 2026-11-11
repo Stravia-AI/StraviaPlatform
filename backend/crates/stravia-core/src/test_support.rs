@@ -21,15 +21,16 @@ pub(crate) async fn migrated_sqlite_pool() -> anyhow::Result<SqlitePool> {
             Ok::<_, anyhow::Error>(bytes)
         })
         .await?;
+    // 与 Gateway 存储池相同：租约外只读，单元测试也能暴露门外写入。
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        .require_write_lease()
         .connect("sqlite::memory:")
         .await?;
-    {
-        let mut connection = pool.acquire().await?;
-        connection
-            .deserialize(None, SqliteOwnedBuf::try_from(template.as_slice())?, false)
-            .await?;
-    }
+    let mut connection = pool.acquire_write().await?;
+    connection
+        .deserialize(None, SqliteOwnedBuf::try_from(template.as_slice())?, false)
+        .await?;
+    connection.finish().await?;
     Ok(pool)
 }

@@ -1719,7 +1719,7 @@ impl SqlHistoryMarkerStore {
             let segment: HiddenHistorySegment = serde_json::from_value(value)?;
             let payload = super::content::encode_segment(&segment)?;
             let mut connection = pool.acquire_write().await?;
-            let mut transaction = connection.begin().await?;
+            let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
             let (envelope, ids) =
                 super::payload::sqlite::intern_segment(&mut transaction, &principal, payload)
                     .await?;
@@ -1734,4 +1734,112 @@ impl SqlHistoryMarkerStore {
         }
         Ok(())
     }
+}
+
+/// 不经本 Gateway 写门协调的写者（例如另一进程）短暂持有写锁，期间执行 `operation`。
+async fn during_outside_write<T>(pool: &sqlx::SqlitePool, operation: impl Future<Output = T>) -> T {
+    let mut connection = sqlx::sqlite::SqliteConnection::connect_with(&pool.connect_options())
+        .await
+        .expect("outside SQLite connection");
+    let transaction = connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("outside SQLite write lock");
+    let outside = async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        transaction
+            .commit()
+            .await
+            .expect("release outside SQLite write lock");
+    };
+    let (result, ()) = tokio::join!(operation, outside);
+    result
+}
+
+#[tokio::test]
+async fn sqlite_marker_writes_wait_for_writer_outside_the_gateway() {
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let pool = crate::db::init_pool(data_dir.path())
+        .await
+        .expect("SQLite pool");
+    crate::migrations::migrate_sqlite(&pool, None)
+        .await
+        .expect("SQLite migrations");
+    let store = SqlHistoryMarkerStore::sqlite(pool.clone());
+    let owner = principal("owner");
+    let platform = |id: &str, execution_limit| PlatformMarkerInput {
+        tool_id: "web-search".into(),
+        call: call(id),
+        activity: "Searching the web".into(),
+        execution_limit,
+    };
+    let expired = store
+        .create_platform(&owner, platform("expired", Duration::from_millis(1)))
+        .await
+        .unwrap();
+    let running = store
+        .create_platform(&owner, platform("running", Duration::from_secs(30)))
+        .await
+        .unwrap();
+    store
+        .claim_execution(
+            &owner,
+            &running.reference,
+            "worker",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let thinking = during_outside_write(
+        &pool,
+        store.create_thinking(
+            &owner,
+            ThinkingMarkerInput {
+                source: None,
+                block: ContentBlock::Thinking {
+                    thinking: "authoritative".into(),
+                    signature: Some("opaque-signature".into()),
+                },
+                activity: "Preserving protected reasoning".into(),
+            },
+        ),
+    )
+    .await;
+    let finished = during_outside_write(
+        &pool,
+        store.finish_execution(
+            &owner,
+            &running.reference,
+            "worker",
+            PlatformExecutionState::Completed,
+            HiddenHistorySegment::Platform {
+                call: call("running"),
+                result: ContentBlock::ToolResult {
+                    content_kind: Some(
+                        stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+                    ),
+                    tool_use_id: "running".into(),
+                    content: serde_json::json!({"answer": "stable"}),
+                    is_error: Some(false),
+                    cache_control: None,
+                },
+            },
+        ),
+    )
+    .await;
+    let expired = during_outside_write(&pool, store.resolve(&owner, &expired.reference)).await;
+
+    assert!(
+        thinking.is_ok() && finished.is_ok() && expired.is_ok(),
+        "marker writes must wait for the outside writer: thinking={:?} finished={:?} expired={:?}",
+        thinking.err(),
+        finished.err(),
+        expired.as_ref().err()
+    );
+    assert_eq!(
+        expired.unwrap().expect("expired marker").execution_state,
+        Some(PlatformExecutionState::Failed)
+    );
 }

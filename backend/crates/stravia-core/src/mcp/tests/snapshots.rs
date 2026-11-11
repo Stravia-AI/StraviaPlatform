@@ -257,12 +257,20 @@ async fn cursor_validation_and_expiry_cannot_bypass_snapshot_ownership() {
         .unwrap();
     assert_eq!(call(&other_client, next).await.is_error, Some(true));
     let id = ArtifactId::from_reference(reference).unwrap();
-    let pool = crate::db::init_pool(app._data_dir.path()).await.unwrap();
-    sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
-        .bind(id.as_str())
-        .execute(&pool)
+    let mut writer = app
+        .gateway
+        ._sqlite_pool
+        .as_ref()
+        .unwrap()
+        .acquire_write()
         .await
         .unwrap();
+    sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
+        .bind(id.as_str())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
     assert_eq!(call(&client, next).await.is_error, Some(true));
 }
 

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use super::{MemoryStorage, PromptAdmission, PromptAdmissionStore, SqliteStorage, Storage};
 
 fn record(
@@ -247,6 +250,70 @@ async fn sqlite_contract_and_reopen() -> anyhow::Result<()> {
     );
     assert_eq!(window.context_window_index, Some(3));
     retention_contract(store.as_ref()).await
+}
+
+/// 持门事务可以先读后写；租约期间的 admission 写入必须排队，不能使其读快照失效。
+async fn write_queued_behind_lease<T: Send + 'static>(
+    pool: &sqlx::SqlitePool,
+    write: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+) -> anyhow::Result<T> {
+    let mut lease = pool.acquire_write().await?;
+    let mut transaction = lease.begin().await?;
+    sqlx::query("SELECT epoch FROM prompt_admission_epoch WHERE id = 1")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let mut write = tokio::spawn(write);
+    // 绕过租约的写入会在此窗口内提交；排队的写入则等到租约释放。
+    let finished_early = tokio::time::timeout(Duration::from_millis(300), &mut write)
+        .await
+        .ok();
+    sqlx::query("UPDATE prompt_admission_epoch SET epoch = epoch WHERE id = 1")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    lease.finish().await?;
+    match finished_early {
+        Some(result) => result?,
+        None => write.await?,
+    }
+}
+
+#[tokio::test]
+async fn sqlite_admission_writes_queue_behind_write_lease() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let pool = crate::db::init_pool(directory.path()).await?;
+    crate::migrations::migrate_sqlite(&pool, None).await?;
+    let store = SqliteStorage::from_pool(pool.clone()).prompt_admissions();
+
+    let epoch = store.history_epoch().await?;
+    let admit = Arc::clone(&store);
+    write_queued_behind_lease(&pool, async move {
+        admit
+            .insert_at_epoch(&record("old", "alice", None, 1, 1, "a"), epoch)
+            .await
+    })
+    .await?;
+    assert!(store.get("alice", "old").await?.is_some());
+
+    let prune = Arc::clone(&store);
+    let pruned = write_queued_behind_lease(&pool, async move { prune.prune_before(200).await });
+    assert_eq!(pruned.await?, 1);
+
+    store
+        .insert(&record("purged", "alice", None, 1, 1, "b"))
+        .await?;
+    let purge = Arc::clone(&store);
+    let purged =
+        write_queued_behind_lease(&pool, async move { purge.purge_principal("alice").await });
+    assert_eq!(purged.await?, 1);
+
+    store
+        .insert(&record("cleared", "bob", None, 1, 1, "c"))
+        .await?;
+    let clear = Arc::clone(&store);
+    let cleared = write_queued_behind_lease(&pool, async move { clear.clear().await });
+    assert_eq!(cleared.await?, 1);
+    Ok(())
 }
 
 #[tokio::test]

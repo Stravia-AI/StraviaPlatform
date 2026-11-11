@@ -2112,16 +2112,18 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .await
         .unwrap();
     // 祖先处于回收中（deleting）时不可用，前缀重建不能依赖它。
+    let mut writer = pool.acquire_write().await.unwrap();
     sqlx::query("UPDATE turn_node_retention SET deleting = 1 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
         .bind(a.id())
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
     sqlx::query("UPDATE turn_nodes SET prefix_namespace = 'old-controls' WHERE id = ?")
         .bind(b.id())
-        .execute(pool)
+        .execute(&mut *writer)
         .await
         .unwrap();
+    writer.finish().await.unwrap();
     // Prefix rebuilds must leave the immutable stored payload byte-identical.
     let payload_before: Vec<u8> =
         sqlx::query_scalar("SELECT payload FROM turn_node_payloads WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")

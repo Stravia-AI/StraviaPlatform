@@ -28,7 +28,7 @@ Turn Chain 的不可变节点继续拥有模型历史事实。0032/0033 将内�
 
 GC 使用持久 `turn_node_gc` 候选与共享的 `content_gc`。节点候选来自 `created_at` 期限水位扫描与引用归零触发器（子节点删除后登记 parent）；被其他 child 或 native compaction source 保留的节点不可删，删除前重检按当前保留天数已过下限窗口且无引用。每批最多处理 128 个节点、2,048 条引用、512 个内容及 8 MiB 内容字节，单个不可拆大内容例外；节点和内容共享一个有界事务，释放写协调后再取下一批。首批引用删除与 retention.deleting 标记原子提交，并在同一事务内只为失去最后引用的内容登记候选；仍被共享的内容不反复入队和出队。数据库读取与前缀拒绝 deleting，恢复继续处理其持久队列。祖先按需求值，只物化并复用小批节点候选；内容先领取有界候选，再按主键读正文，避免 SQLite 为排序扫描整个正文表。最终删除仍重检 NOT EXISTS，不靠 refcount 推断活性，也不让级联一次删除大节点的全部引用。批次公平性与总 GC CPU 成本分别验证。
 
-同一 Gateway 的 SQLite 写入沿用 pool-owned 写租约，在取得连接与写事务前排队，持有到提交或回滚完成；历史、Observation、Artifact、Marker、凭据映射及管理/后台持久化共用协调，不在 SQLite busy handler 中互相争抢。独立只读查询与文件 I/O 不持有租约，也不在外部持租约后再次调用写入口。它不协调其他进程；PostgreSQL 不使用这份租约，仍遵循数据库锁协议。
+同一 Gateway 的 SQLite 写入沿用 pool-owned 写租约，在取得连接与写事务前排队，持有到提交或回滚完成；历史、Observation、Artifact、Marker、凭据映射及管理/后台持久化共用协调，不在 SQLite busy handler 中互相争抢。Gateway 的 SQLite 池在租约外以 `PRAGMA query_only` 保持只读，漏走租约的写入会立即失败，而不是在并发时与租约写者争用写锁。独立只读查询与文件 I/O 不持有租约，也不在外部持租约后再次调用写入口。它不协调其他进程；PostgreSQL 不使用这份租约，仍遵循数据库锁协议。
 
 节点 descriptor、内容 `body`、History Marker 外壳及 Observation 的 `attrs`/`envelope` 共用 `crate::storage_codec::{encode,decode}`。body 后固定追加 14 字节 trailer：第 0 字节 codec（0 raw / 1 zstd），第 1–4 字节 little-endian `u32 dict_id`（当前必须为 0），第 5–12 字节 little-endian `u64` 原始字节长度，第 13 字节版本（1）。原始载荷至少 128 字节且压缩 body 确实更小时才选择 zstd level 1；压缩帧开启 checksum。压缩与解压上下文按线程复用，不共享全局热锁。读取拒绝未知版本、codec、字典、长度不符、损坏帧和多余帧字节。字典槽只是格式预留，不启用字典压缩。
 
