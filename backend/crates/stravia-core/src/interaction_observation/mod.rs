@@ -889,7 +889,9 @@ impl IngressObserver {
             redaction::ProtectedSecrets::default,
             TraceHandle::protected_secrets,
         );
+        let (interaction_sender, interaction_id) = tokio::sync::watch::channel(None);
         let mut inner = RunObserverInner {
+            interaction_id,
             observation: self.observation.clone(),
             run_id: start.id.clone(),
             principal: start.principal.clone(),
@@ -954,6 +956,7 @@ impl IngressObserver {
                     debug_enabled,
                     trace: inner.trace.clone(),
                     discarded_trace,
+                    interaction_id: interaction_sender,
                 })))
                 .is_closed()
         } else {
@@ -1042,6 +1045,7 @@ pub(crate) struct RunPublicationGuard {
 }
 
 struct RunObserverInner {
+    interaction_id: tokio::sync::watch::Receiver<Option<String>>,
     observation: InteractionObservation,
     run_id: String,
     principal: String,
@@ -1071,6 +1075,10 @@ struct RunObserverInner {
     protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
+    pub(crate) fn interaction_id(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.inner.interaction_id.clone()
+    }
+
     /// 后台执行独立保留；其内部 Model Turn 不额外保护来源诊断记录。
     pub(crate) fn for_public_execution(&self) -> Self {
         Self {
@@ -2366,6 +2374,27 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn admitted_run_exposes_writer_attribution() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "attributed-run", facts(Vec::new()));
+        let mut attribution = run.interaction_id();
+        while attribution.borrow_and_update().is_none() {
+            attribution.changed().await?;
+        }
+        let interaction_id = attribution.borrow().clone().unwrap();
+        observation.flush().await?;
+        let persisted: String = sqlx::query_scalar(
+            "SELECT interaction_id FROM inference_run_observations WHERE id='attributed-run'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(interaction_id, persisted);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delivered_final_receipt_settles_before_finish_without_tail_window()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -2644,6 +2673,9 @@ mod snapshot_tests {
             .collect();
         observation.flush().await?;
         for run in rejected {
+            let mut attribution = run.interaction_id();
+            assert!(attribution.changed().await.is_err());
+            assert!(attribution.borrow().is_none());
             run.record(RunEvent::ModelTurnStarted {
                 retention_detached: false,
                 model_turn_id: "orphan-turn".into(),

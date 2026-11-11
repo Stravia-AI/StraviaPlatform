@@ -97,6 +97,8 @@ pub enum StraviaReadDomain {
 pub struct ToolExecutionContext {
     pub request_id: String,
     pub run_id: String,
+    /// In-memory Run admission attribution, resolved by the observation writer.
+    pub interaction_id: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub principal: Principal,
     pub read_scope: ReadExposureScope,
     pub cancellation: CancellationToken,

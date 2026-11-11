@@ -14,10 +14,10 @@ mod search_text;
 mod tests;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use stravia_credential_protection::KnownSecrets;
 use stravia_runtime_contract::{Principal, hook::PlatformToolError};
-use stravia_web_access_contract::read_path::{HistoryNode, HistoryPath};
+use stravia_web_access_contract::read_path::{HISTORY_ROOT, HistoryNode, HistoryPath};
 
 use crate::interaction_observation::{InteractionObservation, ObservationEvent, RecallInteraction};
 use page::{ChunkMark, FileCursor, Offer, Page, Position, invalid_cursor, outside, stale_cursor};
@@ -34,6 +34,7 @@ pub(crate) async fn read(
     gateway: &crate::Gateway,
     principal: &Principal,
     path: HistoryPath,
+    current_interaction: Option<&str>,
 ) -> Result<Value, PlatformToolError> {
     let secrets = KnownSecrets::load(&*gateway.redaction.mappings, principal)
         .await
@@ -46,6 +47,7 @@ pub(crate) async fn read(
         observation: &gateway.observation,
         secrets,
         retention_days: retention.days(),
+        current_interaction,
         active_since: chrono::Utc::now()
             .timestamp_millis()
             .saturating_sub(retention.window_millis()),
@@ -81,6 +83,7 @@ struct SearchPageCursor {
     kind: String,
     path: String,
     query: String,
+    exclude: Option<String>,
     score: i32,
     at: i64,
     id: String,
@@ -90,6 +93,8 @@ struct Recall<'a> {
     observation: &'a InteractionObservation,
     secrets: KnownSecrets,
     retention_days: u32,
+    /// 发起检索的 Interaction；来自准入时的内存归属，由执行上下文传入。
+    current_interaction: Option<&'a str>,
     /// 最近活动时间严格大于它的 Interaction 才在回看窗口内，与到期清理互补。
     active_since: i64,
 }
@@ -170,6 +175,19 @@ impl Recall<'_> {
             .ok_or_else(invalid_cursor)?;
         let query = search_text::parse_query(question).map_err(PlatformToolError::new)?;
         let after = cursor.as_ref().map(|c| (c.score, c.at, c.id.clone()));
+        let mut excluded: Vec<&str> = Vec::new();
+        if let Some(id) = cursor.as_ref().and_then(|c| c.exclude.as_deref()) {
+            excluded.push(id);
+        }
+        if let Some(id) = self.current_interaction
+            && !excluded.contains(&id)
+        {
+            excluded.push(id);
+        }
+        let original_exclude = cursor
+            .as_ref()
+            .map(|c| c.exclude.clone())
+            .unwrap_or_else(|| self.current_interaction.map(str::to_owned));
         let results = search_store::search(
             self.observation,
             principal,
@@ -177,20 +195,77 @@ impl Recall<'_> {
             scope,
             &query,
             after,
+            &excluded,
         )
         .await
         .map_err(storage)?;
+        let retention = render::plural(u64::from(self.retention_days), "day", "days");
+        let index_state = if results.unindexed == 0 {
+            "index current".to_owned()
+        } else {
+            format!(
+                "index {} pending",
+                render::plural(results.unindexed as u64, "interaction", "interactions")
+            )
+        };
         let mut content = format!(
-            "# Search results for {:?}\n",
+            "# Search results for {:?} in {address} · {index_state} · retention {retention}\n",
             self.secrets.replace(question)
         );
-        for hit in &results.interactions {
+        let mut limitations = vec![format!("Retention: {retention}.")];
+        if results.unindexed > 0 {
+            let subject = render::plural(results.unindexed as u64, "interaction", "interactions");
+            let verb = if results.unindexed == 1 { "is" } else { "are" };
+            limitations.push(format!("{subject} in scope {verb} not fully indexed."));
+        }
+        if !results.truncated_terms.is_empty() {
+            let terms = results
+                .truncated_terms
+                .iter()
+                .map(|term| self.secrets.replace(term).into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            limitations.push(format!(
+                "Query terms reached the 2,000-interaction limit: {terms}."
+            ));
+        }
+        if results
+            .interactions
+            .iter()
+            .any(|hit| hit.has_observation_gap)
+        {
+            limitations.push("Some matching interactions have observation gaps.".to_owned());
+        }
+        if query.terms.iter().any(|term| term.prefix) {
+            limitations.push(
+                "A single CJK character is matched as a word prefix and may miss results."
+                    .to_owned(),
+            );
+        }
+        let ids = results
+            .interactions
+            .iter()
+            .map(|hit| hit.id.clone())
+            .collect::<Vec<_>>();
+        let previews = self
+            .observation
+            .recall_previews(principal, &ids)
+            .await
+            .map_err(storage)?;
+        let mut oversized_line = false;
+        for (index, hit) in results.interactions.iter().enumerate() {
             let interaction = self.interaction(principal, &hit.root_id, &hit.id).await?;
-            content.push_str(&format!("\n## {}\n", hit.id));
+            let transcript = format!("{HISTORY_ROOT}{}/{}", hit.root_id, hit.id);
+            let preview = render::preview(previews.get(&hit.id).map(String::as_str), &self.secrets);
+            content.push_str(&format!(
+                "{}. {transcript} · {} · {preview}\n",
+                index + 1,
+                render::timestamp(interaction.started_at)
+            ));
             for segment in &hit.segments {
                 let start = usize::try_from(segment.byte_start).map_err(|_| stale_cursor())?;
                 let end = usize::try_from(segment.byte_end).map_err(|_| stale_cursor())?;
-                let (location, snippet, _after_first_page) = search_render::render_hit(
+                let (location, snippet, after_first_page) = search_render::render_hit(
                     self,
                     &interaction,
                     segment.event_sequence,
@@ -199,8 +274,22 @@ impl Recall<'_> {
                     &query,
                 )
                 .await?;
-                content.push_str(&format!("- {location} — {snippet}\n"));
+                oversized_line |= after_first_page;
+                let role = render::role_name(segment.role_weight);
+                content.push_str(&format!("  {location} · {role} · {snippet}\n"));
             }
+        }
+        if oversized_line {
+            limitations.push(
+                "Some hits occur after the first page of an oversized line; follow next_path when reading the hit."
+                    .to_owned(),
+            );
+        }
+        if results.interactions.is_empty() {
+            limitations.push(
+                "No hits does not mean the history does not exist; check the retention window and indexing lag, try different terms, or adjust the scope."
+                    .to_owned(),
+            );
         }
         let next = if results.has_more {
             let last = results.interactions.last().ok_or_else(invalid_cursor)?;
@@ -209,6 +298,7 @@ impl Recall<'_> {
                 kind: "search".to_owned(),
                 path: address.to_owned(),
                 query: question.to_owned(),
+                exclude: original_exclude,
                 score: last.score,
                 at: last.latest_hit_at,
                 id: last.id.clone(),
@@ -216,7 +306,9 @@ impl Recall<'_> {
         } else {
             None
         };
-        Ok(page::output(address, content, None, next))
+        let mut output = page::output(address, content, None, next);
+        output["limitations"] = json!(limitations);
+        Ok(output)
     }
 
     async fn interaction(

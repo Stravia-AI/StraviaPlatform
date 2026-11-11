@@ -79,6 +79,7 @@ async fn document_fixture() -> (
     let context = ToolExecutionContext {
         request_id: "doc".into(),
         run_id: "doc".into(),
+        interaction_id: None,
         principal: Principal::new(key.id),
         read_scope: ReadExposureScope::FULL,
         cancellation: CancellationToken::new(),
@@ -249,6 +250,7 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
     let context = ToolExecutionContext {
         request_id: "delivery".into(),
         run_id: "delivery".into(),
+        interaction_id: None,
         principal: Principal::new("owner"),
         read_scope: ReadExposureScope::FULL,
         cancellation: CancellationToken::new(),

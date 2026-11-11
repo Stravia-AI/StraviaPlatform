@@ -88,6 +88,8 @@ pub struct SessionContext {
     pub tools_fixed: bool,
     pub request_id: String,
     pub run_id: String,
+    /// In-memory attribution of the admitted Run, when observation is available.
+    pub interaction_id: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub request_kind: RequestKind,
     pub ingress: ProtocolId,
     pub transport: TransportKind,

@@ -40,6 +40,7 @@ async fn merged_full_read_scope_does_not_count_as_client_declaration() {
         tools_fixed: false,
         request_id: "request".into(),
         run_id: "run".into(),
+        interaction_id: None,
         request_kind: RequestKind::Generation,
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,

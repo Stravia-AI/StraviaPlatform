@@ -177,6 +177,7 @@ impl InferenceRun {
             ToolExecutionContext {
                 request_id: self.context.request_id.clone(),
                 run_id: self.context.run_id.clone(),
+                interaction_id: self.context.interaction_id.clone(),
                 principal: self.context.principal.clone(),
                 read_scope: self.read_scope,
                 cancellation: self.cancellation.clone(),

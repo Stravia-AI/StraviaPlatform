@@ -168,10 +168,12 @@ test result: ok. 12 passed……
 4. 每页 10 个 Interaction。每个 Interaction 最多列 3 个命中段，优先覆盖更多词项、再取更新的段。命中位置通过渲染该 Interaction 的转录，把段的字节区间换算为行范围。
 
 ```text
-# 3 interactions match "迁移 0041" in stravia://history/ · index current · retention 7 days
+# Search results for "迁移 0041" in stravia://history/ · index current · retention 7 days
 1. stravia://history/<root-id>/<interaction-id> · 2026-11-09T06:20:20Z · "修复 PG 迁移 0041 升级钩子"
    stravia://history/<root-id>/<interaction-id>:41-58 · user · …PG 上«迁移»«0041»升级钩子失败后如何…
 ```
+
+标题包含查询、规范检索范围、索引状态（尚未完成索引的 Interaction 数）和回看时限；不写命中总数，以免 `next_path` 翻页时把本页数误作全局总数。每个 Interaction 按本页顺序编号，列出转录路径、起始时间和凭据替换后的 P1 预览；每个命中段列出可读取的路径、角色（`user`、`assistant`、`tool call`）与摘要。
 
 摘要在凭据替换后的文本上重新分词定位，以命中词元为中心，不超过 160 个字符，命中部分用 `«»` 标出。
 
@@ -184,9 +186,13 @@ test result: ok. 12 passed……
 - 范围内尚未完成索引的 Interaction 数；
 - 查询过宽被截断的词项；
 - 回看时限；
-- 存在观测缺口的命中。
+- 存在观测缺口的命中；
+- 查询含单个 CJK 字时，它只按词首前缀匹配，可能漏检；
+- 命中位于超长单行首包之后时，读取须沿 `next_path` 继续。
 
 没有命中时，提示「未命中不代表不存在」，并建议换词或缩小、扩大范围。
+
+发起检索的 Interaction 不出现在结果中，也不计入尚未索引的数量。它取自 Run 准入时 Observation writer 已确定的内存归属，经执行上下文传入，不读取异步持久化的结果；翻页游标记录首页排除的 Interaction，从后续轮次继续翻页时同时排除两者。
 
 ## 6. 暴露
 
@@ -219,7 +225,7 @@ Observation 保存原文。所有历史输出在离开 Core 前，用所属 Prin
   - 索引任务由 Gateway lifecycle 启动与停止，模式同既有的 sweep 任务。
 - **Observation 存储**：新增按 Principal 限定的链路列表、链路成员与事件分页查询。现有管理面查询不带 Principal 过滤，不复用作授权边界。
 - **StraviaRead 分发**：负责历史范围的暴露与执行范围校验，然后转交历史回看模块。暴露范围增加 `history` 位，只由透明注入的读取规划在 Key 选中「历史回看」时设置；显式声明与 MCP 使用的完整范围不含它，内部 Agent 也不含它。
-- **当前 Interaction**：执行上下文目前只带 Run id。检索要排除发起本次检索的 Interaction，需要从 Run 准入时已确定的 Interaction 归属中取得它，不能查询异步持久化的结果。
+- **当前 Interaction**：Observation writer 在准入 Run 时确定 Interaction 归属，并通过 `watch` 通道发布；网关把接收端放进 `SessionContext` 与 `ToolExecutionContext` 的 `interaction_id`。StraviaRead 只在历史检索（`question` 或检索游标）时等待该值，Observation 未启用或准入未入队时为空，此时不排除任何 Interaction。MCP、内部 Agent 与媒体生成的执行上下文不带它。
 
 ## 9. 存储变更
 

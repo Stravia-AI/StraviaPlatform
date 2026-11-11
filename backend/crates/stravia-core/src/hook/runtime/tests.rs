@@ -156,6 +156,7 @@ fn session_context(kind: RequestKind) -> SessionContext {
         tools_fixed: false,
         request_id: "req-1".into(),
         run_id: "run-1".into(),
+        interaction_id: None,
         request_kind: kind,
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,

@@ -95,6 +95,7 @@ async fn platform_output_roundtrip(blocks: Vec<ContentBlock>) -> (AiRequest, Pla
             stravia_runtime_contract::hook::ToolExecutionContext {
                 request_id: "request".into(),
                 run_id: "run".into(),
+                interaction_id: None,
                 principal: Principal::new("owner"),
                 read_scope: stravia_runtime_contract::hook::ReadExposureScope::NONE,
                 cancellation: CancellationToken::new(),

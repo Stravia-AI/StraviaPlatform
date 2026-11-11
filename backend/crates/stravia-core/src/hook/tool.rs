@@ -327,6 +327,7 @@ mod tests {
                 ToolExecutionContext {
                     request_id: "request".into(),
                     run_id: "run".into(),
+                    interaction_id: None,
                     principal: Principal::new("test-key"),
                     read_scope: ReadExposureScope::NONE,
                     cancellation: stravia_runtime_contract::CancellationToken::new(),

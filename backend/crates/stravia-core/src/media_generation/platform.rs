@@ -231,6 +231,7 @@ impl McpTool for GenerateTool {
         let execution_context = ToolExecutionContext {
             request_id: run_id.clone(),
             run_id,
+            interaction_id: None,
             principal: Principal::new(context.api_key_id.clone()),
             read_scope: stravia_runtime_contract::hook::ReadExposureScope::FULL,
             cancellation,

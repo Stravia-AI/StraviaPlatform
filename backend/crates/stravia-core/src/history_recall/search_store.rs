@@ -37,12 +37,14 @@ pub(super) struct SearchSegment {
     pub occurred_at: i64,
     /// 本段命中的查询词项下标；用于优先选择覆盖更多词项的段。
     pub terms: Vec<usize>,
+    pub role_weight: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SearchInteraction {
     pub id: String,
     pub root_id: String,
+    pub has_observation_gap: bool,
     pub score: i32,
     pub latest_hit_at: i64,
     pub segments: Vec<SearchSegment>,
@@ -52,6 +54,8 @@ pub(super) struct SearchInteraction {
 pub(super) struct SearchPage {
     pub interactions: Vec<SearchInteraction>,
     pub has_more: bool,
+    pub unindexed: i64,
+    pub truncated_terms: Vec<String>,
 }
 
 /// 一个词项的命中 Interaction：最高角色权重与最近命中时间。
@@ -176,7 +180,7 @@ fn term_query<DB: Database>(
     }
     common_predicates(builder, principal, active_since, scope);
     builder.push(" GROUP BY s.interaction_id,s.root_id ORDER BY MAX(s.occurred_at) DESC,s.interaction_id LIMIT ")
-        .push(TERM_INTERACTION_LIMIT);
+        .push(TERM_INTERACTION_LIMIT + 1);
 }
 
 #[cfg(test)]
@@ -249,6 +253,75 @@ async fn postgres_term_hits(
     Ok(query.fetch_all(pool).await?)
 }
 
+async fn count_unindexed(
+    observation: &InteractionObservation,
+    principal: &str,
+    active_since: i64,
+    scope: SearchScope<'_>,
+    current_interaction: &[&str],
+) -> anyhow::Result<i64> {
+    fn build<DB: Database>(
+        builder: &mut QueryBuilder<DB>,
+        principal: &str,
+        active_since: i64,
+        scope: SearchScope<'_>,
+        current: &[&str],
+    ) where
+        DB::Arguments: Default,
+        String: for<'q> Encode<'q, DB> + Type<DB>,
+        i64: for<'q> Encode<'q, DB> + Type<DB>,
+    {
+        builder.push("SELECT COUNT(*) FROM interaction_observations i LEFT JOIN history_search_progress p ON p.interaction_id=i.id WHERE i.principal=").push_bind(principal.to_owned());
+        builder
+            .push(" AND i.last_active_at>")
+            .push_bind(active_since);
+        builder.push(" AND (").push(eligible("i")).push(")");
+        builder.push(" AND (p.interaction_id IS NULL OR p.last_event_sequence<>i.last_event_sequence OR (i.status NOT IN ('running','waiting_client'))<>COALESCE(p.indexed_terminal,FALSE))");
+        match scope {
+            SearchScope::Root => {}
+            SearchScope::Chain(root) => {
+                builder.push(" AND i.root_id=").push_bind(root.to_owned());
+            }
+            SearchScope::Interaction(root, id) => {
+                builder.push(" AND i.root_id=").push_bind(root.to_owned());
+                builder.push(" AND i.id=").push_bind(id.to_owned());
+            }
+        }
+        if !current.is_empty() {
+            builder.push(" AND i.id NOT IN (");
+            let mut separated = builder.separated(",");
+            for id in current {
+                separated.push_bind((*id).to_owned());
+            }
+            separated.push_unseparated(")");
+        }
+    }
+    let (sqlite, postgres) = observation.search_pools();
+    if let Some(pool) = sqlite {
+        let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
+        build(
+            &mut builder,
+            principal,
+            active_since,
+            scope,
+            current_interaction,
+        );
+        Ok(builder.build_query_scalar().fetch_one(pool).await?)
+    } else if let Some(pool) = postgres {
+        let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
+        build(
+            &mut builder,
+            principal,
+            active_since,
+            scope,
+            current_interaction,
+        );
+        Ok(builder.build_query_scalar().fetch_one(pool).await?)
+    } else {
+        anyhow::bail!("history search has no observation SQL backend")
+    }
+}
+
 pub(super) async fn search(
     observation: &InteractionObservation,
     principal: &str,
@@ -256,17 +329,31 @@ pub(super) async fn search(
     scope: SearchScope<'_>,
     query: &ParsedQuery,
     after: Option<SearchCursor>,
+    current_interaction: &[&str],
 ) -> anyhow::Result<SearchPage> {
+    let unindexed = count_unindexed(
+        observation,
+        principal,
+        active_since,
+        scope,
+        current_interaction,
+    )
+    .await?;
+    let mut truncated_terms = Vec::new();
     let (sqlite, postgres) = observation.search_pools();
     let mut ranked: BTreeMap<String, Ranked> = BTreeMap::new();
     for (index, term) in query.terms.iter().enumerate() {
-        let rows = if let Some(pool) = sqlite {
+        let mut rows = if let Some(pool) = sqlite {
             sqlite_term_hits(pool, principal, active_since, scope, term).await?
         } else if let Some(pool) = postgres {
             postgres_term_hits(pool, principal, active_since, scope, term).await?
         } else {
             anyhow::bail!("history search has no observation SQL backend");
         };
+        if rows.len() > TERM_INTERACTION_LIMIT as usize {
+            truncated_terms.push(phrase(term));
+            rows.truncate(TERM_INTERACTION_LIMIT as usize);
+        }
         let mut term_hits: HashMap<String, (i32, i64, String)> = HashMap::with_capacity(rows.len());
         for TermHitRow {
             interaction_id,
@@ -305,7 +392,8 @@ pub(super) async fn search(
     let mut ordered: Vec<(String, Ranked)> = ranked
         .into_iter()
         .filter(|(id, hit)| {
-            hit.matched.len() == query.terms.len()
+            !current_interaction.contains(&id.as_str())
+                && hit.matched.len() == query.terms.len()
                 && after.as_ref().is_none_or(|(score, at, last_id)| {
                     hit.score < *score
                         || (hit.score == *score
@@ -326,9 +414,47 @@ pub(super) async fn search(
         return Ok(SearchPage {
             interactions: Vec::new(),
             has_more: false,
+            unindexed,
+            truncated_terms,
         });
     }
     let ids: Vec<String> = ordered.iter().map(|(id, _)| id.clone()).collect();
+    let gap_ids: std::collections::BTreeSet<String> = {
+        fn build<DB: Database>(builder: &mut QueryBuilder<DB>, ids: &[String])
+        where
+            DB::Arguments: Default,
+            String: for<'q> Encode<'q, DB> + Type<DB>,
+        {
+            builder
+                .push("SELECT id FROM interaction_observations WHERE observation_gap AND id IN (");
+            let mut separated = builder.separated(",");
+            for id in ids {
+                separated.push_bind(id.clone());
+            }
+            separated.push_unseparated(")");
+        }
+        if let Some(pool) = sqlite {
+            let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
+            build(&mut builder, &ids);
+            builder
+                .build_query_scalar()
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .collect()
+        } else if let Some(pool) = postgres {
+            let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
+            build(&mut builder, &ids);
+            builder
+                .build_query_scalar()
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .collect()
+        } else {
+            Default::default()
+        }
+    };
     let segment_rows = if let Some(pool) = sqlite {
         sqlite_segments(pool, principal, active_since, scope, query, &ids).await?
     } else if let Some(pool) = postgres {
@@ -348,6 +474,7 @@ pub(super) async fn search(
                 byte_end: row.byte_end,
                 occurred_at: row.occurred_at,
                 terms,
+                role_weight: row.role_weight,
             });
     }
     let interactions = ordered
@@ -372,9 +499,11 @@ pub(super) async fn search(
                     && left.byte_end == right.byte_end
             });
             segments.truncate(SEGMENTS_PER_INTERACTION);
+            let has_observation_gap = gap_ids.contains(&id);
             SearchInteraction {
                 id,
                 root_id: rank.root_id,
+                has_observation_gap,
                 score: rank.score,
                 latest_hit_at: rank.latest,
                 segments,
@@ -384,6 +513,8 @@ pub(super) async fn search(
     Ok(SearchPage {
         interactions,
         has_more,
+        unindexed,
+        truncated_terms,
     })
 }
 
@@ -391,6 +522,7 @@ pub(super) async fn search(
 #[derive(Debug, FromRow)]
 struct SegmentRow {
     id: i64,
+    role_weight: i32,
     interaction_id: String,
     event_sequence: i64,
     segment_ordinal: i64,
@@ -430,7 +562,7 @@ async fn sqlite_segments(
     let mut result = Vec::new();
     for (index, term) in query.terms.iter().enumerate() {
         let mut builder = QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT s.id,s.interaction_id,s.event_sequence,s.segment_ordinal,s.occurred_at,s.byte_start,s.byte_end FROM history_search_segments_fts JOIN history_search_segments s ON s.id=history_search_segments_fts.rowid JOIN interaction_observations i ON i.id=s.interaction_id WHERE history_search_segments_fts MATCH ",
+            "SELECT s.id,s.role_weight,s.interaction_id,s.event_sequence,s.segment_ordinal,s.occurred_at,s.byte_start,s.byte_end FROM history_search_segments_fts JOIN history_search_segments s ON s.id=history_search_segments_fts.rowid JOIN interaction_observations i ON i.id=s.interaction_id WHERE history_search_segments_fts MATCH ",
         );
         builder.push_bind(sqlite_match(term));
         segment_query(&mut builder, principal, active_since, scope, ids);
@@ -454,7 +586,7 @@ async fn postgres_segments(
     let mut result = Vec::new();
     for (index, term) in query.terms.iter().enumerate() {
         let mut builder = QueryBuilder::<sqlx::Postgres>::new(
-            "SELECT s.id,s.interaction_id,s.event_sequence,s.segment_ordinal,s.occurred_at,s.byte_start,s.byte_end FROM history_search_segments s JOIN interaction_observations i ON i.id=s.interaction_id WHERE s.tokens @@ ",
+            "SELECT s.id,s.role_weight,s.interaction_id,s.event_sequence,s.segment_ordinal,s.occurred_at,s.byte_start,s.byte_end FROM history_search_segments s JOIN interaction_observations i ON i.id=s.interaction_id WHERE s.tokens @@ ",
         );
         builder.push_bind(postgres_tsquery(term)).push("::tsquery");
         segment_query(&mut builder, principal, active_since, scope, ids);
@@ -493,47 +625,228 @@ fn merge_segments(rows: Vec<(SegmentRow, Vec<usize>)>) -> Vec<(SegmentRow, Vec<u
 #[cfg(test)]
 mod tests {
     use super::parse_query;
-    use super::{
-        SearchBackend, SearchScope, TERM_INTERACTION_LIMIT, postgres_tsquery, sqlite_match,
-        term_query_sql,
-    };
+    use super::{SearchBackend, SearchScope, search, sqlite_match, term_query_sql};
+    use sqlx::{PgPool, SqlitePool};
 
-    #[test]
-    fn term_queries_cap_filtered_interactions_in_both_dialects() {
-        for backend in [SearchBackend::Sqlite, SearchBackend::Postgres] {
-            for scope in [
-                SearchScope::Root,
-                SearchScope::Chain("root"),
-                SearchScope::Interaction("root", "interaction"),
-            ] {
-                let sql = term_query_sql(backend, scope);
-                assert_eq!(sql.matches("ORDER BY").count(), 1);
-                assert!(sql.contains(&format!("GROUP BY s.interaction_id,s.root_id ORDER BY MAX(s.occurred_at) DESC,s.interaction_id LIMIT {TERM_INTERACTION_LIMIT}")));
-                let where_end = sql.find("GROUP BY").expect("grouping");
-                let where_sql = &sql[..where_end];
-                assert!(where_sql.contains("s.principal="));
-                assert!(where_sql.contains("i.last_active_at>"));
-                assert!(where_sql.contains("inference_run_observations"));
-                if let SearchScope::Chain(_) = scope {
-                    assert!(where_sql.contains("s.root_id="));
+    struct SearchFixture {
+        observation: crate::interaction_observation::InteractionObservation,
+        backend: Backend,
+        _directory: tempfile::TempDir,
+    }
+
+    enum Backend {
+        Sqlite(SqlitePool),
+        Postgres {
+            pool: PgPool,
+            admin: PgPool,
+            schema: String,
+        },
+    }
+
+    impl SearchFixture {
+        async fn sqlite() -> anyhow::Result<Self> {
+            let pool = crate::test_support::migrated_sqlite_pool().await?;
+            let directory = tempfile::tempdir()?;
+            let observation = crate::interaction_observation::InteractionObservation::new(
+                Some(pool.clone()),
+                None,
+                directory.path().to_path_buf(),
+                crate::history_retention::HistoryRetention::new(1),
+                true,
+                crate::generation_chain::test_chain().await,
+            )
+            .await;
+            Ok(Self {
+                observation,
+                backend: Backend::Sqlite(pool),
+                _directory: directory,
+            })
+        }
+
+        async fn postgres() -> anyhow::Result<Self> {
+            let url = std::env::var("STRAVIA_TEST_POSTGRES_URL")
+                .expect("set STRAVIA_TEST_POSTGRES_URL to an isolated test database");
+            let directory = tempfile::tempdir()?;
+            let admin = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await?;
+            let schema = format!("stravia_search_test_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+                .execute(&admin)
+                .await?;
+            let options: sqlx::postgres::PgConnectOptions = url.parse()?;
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(options.options([("search_path", schema.as_str())]))
+                .await?;
+            crate::migrations::migrate_postgres(&pool, None).await?;
+            let observation = crate::interaction_observation::InteractionObservation::new(
+                None,
+                Some(pool.clone()),
+                directory.path().to_path_buf(),
+                crate::history_retention::HistoryRetention::new(1),
+                true,
+                crate::generation_chain::test_chain().await,
+            )
+            .await;
+            Ok(Self {
+                observation,
+                backend: Backend::Postgres {
+                    pool,
+                    admin,
+                    schema,
+                },
+                _directory: directory,
+            })
+        }
+
+        async fn execute(&self, sql: &'static str) -> anyhow::Result<()> {
+            match &self.backend {
+                Backend::Sqlite(pool) => {
+                    sqlx::raw_sql(sql).execute(pool).await?;
                 }
-                if let SearchScope::Interaction(_, _) = scope {
-                    assert!(
-                        where_sql.contains("s.root_id=") && where_sql.contains("s.interaction_id=")
-                    );
+                Backend::Postgres { pool, .. } => {
+                    sqlx::raw_sql(sql).execute(pool).await?;
                 }
             }
+            Ok(())
+        }
+
+        async fn close(self) -> anyhow::Result<()> {
+            self.observation.shutdown().await;
+            match self.backend {
+                Backend::Sqlite(pool) => pool.close().await,
+                Backend::Postgres {
+                    pool,
+                    admin,
+                    schema,
+                } => {
+                    pool.close().await;
+                    let result =
+                        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                            .execute(&admin)
+                            .await;
+                    admin.close().await;
+                    result?;
+                }
+            }
+            Ok(())
         }
     }
 
-    #[test]
-    fn query_expressions_use_unanchored_phrases_and_prefixes() {
-        let query = parse_query("\"run admitted\" 中 run_admitted").unwrap();
-        assert_eq!(sqlite_match(&query.terms[0]), "\"run admitted\"");
-        assert_eq!(sqlite_match(&query.terms[1]), "\"中\"*");
-        assert_eq!(sqlite_match(&query.terms[2]), "\"run admitted\"");
-        assert_eq!(postgres_tsquery(&query.terms[0]), "'run' <-> 'admitted'");
-        assert_eq!(postgres_tsquery(&query.terms[1]), "'中':*");
+    /// 两个 Interaction 有相同命中词；第三个只缺进度，用来验证搜索如实报告索引滞后。
+    async fn limitations_contract(fixture: &SearchFixture) -> anyhow::Result<()> {
+        fixture.execute("INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,last_event_sequence) VALUES ('current','owner','current','current-run','route','completed',1000,1000,1),('past','owner','past','past-run','route','completed',1000,1000,1),('lag','owner','lag','lag-run','route','completed',1000,1000,1); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,client_output_committed) VALUES ('current-run','current','responses','route','completed',false,1000,1000,true),('past-run','past','responses','route','completed',false,1000,1000,true),('lag-run','lag','responses','route','completed',false,1000,1000,true)").await?;
+        match &fixture.backend {
+            Backend::Sqlite(pool) => {
+                for (id, event) in [("current", 1_i64), ("past", 2_i64)] {
+                    let segment: i64 = sqlx::query_scalar("INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end) VALUES ($1,'owner',$1,$2,0,3,1000,0,6) RETURNING id")
+                        .bind(id).bind(event).fetch_one(pool).await?;
+                    sqlx::query("INSERT INTO history_search_segments_fts(rowid,tokens) VALUES ($1,'needle')").bind(segment).execute(pool).await?;
+                }
+                sqlx::query("INSERT INTO history_search_progress(interaction_id,last_event_sequence,indexed_terminal) VALUES ('current',1,1),('past',1,1)").execute(pool).await?;
+            }
+            Backend::Postgres { pool, .. } => {
+                sqlx::query("INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end,tokens) VALUES ('current','owner','current',1,0,3,1000,0,6,'needle:1'),('past','owner','past',2,0,3,1000,0,6,'needle:1')").execute(pool).await?;
+                sqlx::query("INSERT INTO history_search_progress(interaction_id,last_event_sequence,indexed_terminal) VALUES ('current',1,true),('past',1,true)").execute(pool).await?;
+            }
+        }
+        let query = parse_query("needle").unwrap();
+        let page = search(
+            &fixture.observation,
+            "owner",
+            0,
+            SearchScope::Root,
+            &query,
+            None,
+            &["current"],
+        )
+        .await?;
+        assert_eq!(
+            page.interactions
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            ["past"]
+        );
+        assert_eq!(
+            page.unindexed, 1,
+            "the issuing Interaction is fully indexed, only lag is pending"
+        );
+        assert!(page.truncated_terms.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_search_reports_index_lag_and_excludes_issuing_interaction() -> anyhow::Result<()>
+    {
+        let fixture = SearchFixture::sqlite().await?;
+        limitations_contract(&fixture).await?;
+        fixture.close().await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test database"]
+    async fn postgres_search_reports_index_lag_and_excludes_issuing_interaction()
+    -> anyhow::Result<()> {
+        let fixture = SearchFixture::postgres().await?;
+        limitations_contract(&fixture).await?;
+        fixture.close().await
+    }
+
+    /// 词项候选上限只计入当前 Principal 在回看时限内、可列出的 Interaction：过期与 MCP 根
+    /// Interaction 命中且得分最高，也不能占用上限或出现在结果中。`broad` 命中 2,001 个可列出的
+    /// Interaction，超过上限；`edge` 恰好命中 2,000 个，不算过宽。
+    async fn candidate_cap_contract(fixture: &SearchFixture) -> anyhow::Result<()> {
+        fixture.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2001) INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,last_event_sequence) SELECT 'i'||x,'owner','i'||x,'r'||x,'route','completed',1000,1000+x,1 FROM n; WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2001) INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,client_output_committed) SELECT 'r'||x,'i'||x,'responses','route','completed',false,1000,1000+x,true FROM n; INSERT INTO interaction_observations(id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at,last_event_sequence) VALUES ('expired','owner','expired','expired-run','route','completed',800,800,1),('mcp','owner','mcp','mcp-run','route','completed',5000,5000,1); INSERT INTO inference_run_observations(id,interaction_id,ingress_protocol,route_id,status,debug_enabled,started_at,last_active_at,client_output_committed) VALUES ('expired-run','expired','responses','route','completed',false,800,800,true),('mcp-run','mcp','mcp','route','completed',false,5000,5000,true)").await?;
+        match &fixture.backend {
+            Backend::Sqlite(pool) => {
+                sqlx::raw_sql("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2001) INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end) SELECT 'i'||x,'owner','i'||x,x,0,1,1000+x,0,10 FROM n; INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end) VALUES ('expired','owner','expired',3001,0,3,800,0,10),('mcp','owner','mcp',3002,0,3,5000,0,10); INSERT INTO history_search_segments_fts(rowid,tokens) SELECT id,CASE WHEN event_sequence=2001 THEN 'broad' ELSE 'broad edge' END FROM history_search_segments").execute(pool).await?;
+            }
+            Backend::Postgres { pool, .. } => {
+                sqlx::raw_sql("INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end,tokens) SELECT 'i'||x,'owner','i'||x,x,0,1,1000+x,0,10,CASE WHEN x=2001 THEN 'broad:1'::tsvector ELSE 'broad:1 edge:2'::tsvector END FROM generate_series(1,2001) x; INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end,tokens) VALUES ('expired','owner','expired',3001,0,3,800,0,10,'broad:1 edge:2'),('mcp','owner','mcp',3002,0,3,5000,0,10,'broad:1 edge:2')").execute(pool).await?;
+            }
+        }
+        let query = parse_query("broad edge").unwrap();
+        let page = search(
+            &fixture.observation,
+            "owner",
+            900,
+            SearchScope::Root,
+            &query,
+            None,
+            &[],
+        )
+        .await?;
+        assert_eq!(page.truncated_terms, ["broad"]);
+        // `broad` 保留最近的 2,000 个（i2..i2001），与 `edge` 的交集按最近命中倒序分页。
+        assert_eq!(
+            page.interactions
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            (1991..=2000)
+                .rev()
+                .map(|x| format!("i{x}"))
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_term_cap_counts_only_listable_interactions() -> anyhow::Result<()> {
+        let fixture = SearchFixture::sqlite().await?;
+        candidate_cap_contract(&fixture).await?;
+        fixture.close().await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test database"]
+    async fn postgres_term_cap_counts_only_listable_interactions() -> anyhow::Result<()> {
+        let fixture = SearchFixture::postgres().await?;
+        candidate_cap_contract(&fixture).await?;
+        fixture.close().await
     }
 
     #[tokio::test]

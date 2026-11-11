@@ -114,6 +114,7 @@ impl Fixture {
             observation: &self.observation,
             secrets,
             retention_days: 7,
+            current_interaction: None,
             active_since: 0,
         }
     }
@@ -324,11 +325,22 @@ async fn search(recall: &Recall<'_>, principal: &str, path: &str, question: &str
 fn search_hits(page: &Value) -> Vec<(&str, Vec<&str>)> {
     let mut hits: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in content(page).lines() {
-        if let Some(id) = line.strip_prefix("## ") {
-            hits.push((id, Vec::new()));
-        } else if let Some(line) = line.strip_prefix("- stravia://history/") {
-            let path = line.split_whitespace().next().expect("hit path");
+        // 命中行以两个空格缩进；轮次行以「序号. 」开头。命中路径去掉 `stravia://history/` 前缀返回。
+        if let Some(hit) = line.strip_prefix("  ") {
+            let location = hit.split(" · ").next().expect("hit path");
+            let path = location
+                .strip_prefix("stravia://history/")
+                .expect("history hit path");
             hits.last_mut().expect("hit interaction").1.push(path);
+        } else if let Some((number, rest)) = line.split_once(". ")
+            && number.parse::<usize>().is_ok()
+        {
+            let transcript = rest.split(" · ").next().expect("transcript path");
+            let id = transcript
+                .rsplit('/')
+                .next()
+                .expect("transcript interaction id");
+            hits.push((id, Vec::new()));
         }
     }
     hits
@@ -622,14 +634,17 @@ async fn shared_search_corpus(
         observation,
         secrets,
         retention_days: 7,
+        current_interaction: None,
         active_since: 0,
     };
     let mut results = Vec::new();
     let root_path = "stravia://history/".to_owned();
     let chain_path = format!("stravia://history/{}/", roots[0]);
     let transcript_path = format!("stravia://history/{}/{}", roots[0], ids[0]);
-    let cases: [(&str, &str, &[usize]); 8] = [
+    let cases: [(&str, &str, &[usize]); 9] = [
         (&root_path, "迁移失败", &[0, 1]),
+        // 单个汉字按词首前缀命中「迁移」。
+        (&root_path, "迁", &[0, 1]),
         (&root_path, "retention.rs", &[0, 1]),
         // corpus-a 的两个词项位于不同消息中。
         (&root_path, "迁移失败 cobalt", &[0, 1]),
@@ -649,14 +664,16 @@ async fn shared_search_corpus(
         }
         let snippets: Vec<String> = content(&page)
             .lines()
-            .filter_map(|line| line.strip_prefix("- stravia://history/"))
-            .map(|line| {
-                let (_, snippet) = line.split_once(" — ").expect("hit snippet");
-                assert!(
-                    snippet.chars().count() <= 160,
-                    "snippet exceeds 160 characters"
-                );
-                snippet.to_owned()
+            .filter_map(|line| {
+                line.trim().strip_prefix("stravia://history/").map(|line| {
+                    let (_, snippet) = line.split_once(" · ").expect("hit role");
+                    let (_, snippet) = snippet.split_once(" · ").expect("hit snippet");
+                    assert!(
+                        snippet.chars().count() <= 160,
+                        "snippet exceeds 160 characters"
+                    );
+                    snippet.to_owned()
+                })
             })
             .collect();
         let mut rows = Vec::new();
@@ -684,6 +701,7 @@ async fn shared_search_corpus(
         observation,
         secrets: other_secrets,
         retention_days: 7,
+        current_interaction: None,
         active_since: 0,
     };
     let other_page = search(&other_recall, OTHER, &root_path, "迁移失败 cobalt").await;
@@ -787,6 +805,12 @@ async fn history_search_hit_beyond_long_line_page_cut_remains_readable() -> anyh
     let hits = search_hits(&page);
     assert_eq!(hits.len(), 1);
     assert!(!hits[0].1.is_empty());
+    assert!(page["limitations"].as_array().expect("limitations").iter().any(
+        |value| {
+            value.as_str()
+                == Some("Some hits occur after the first page of an oversized line; follow next_path when reading the hit.")
+        }
+    ));
     let hit_path = format!("stravia://history/{}", hits[0].1[0]);
     let first = read(&recall, OWNER, &hit_path).await?;
     assert!(!content(&first).contains("distantneedle"));
@@ -914,6 +938,106 @@ async fn history_search_matches_postgres_shared_corpus() -> anyhow::Result<()> {
 
 fn content(page: &Value) -> &str {
     page["content"].as_str().expect("page content")
+}
+
+#[tokio::test]
+async fn history_search_renders_scope_index_retention_metadata_and_limitations()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let indexed = admit(
+        &fixture.observation,
+        "indexed-hit",
+        OWNER,
+        vec![user(&format!("迁移 0041 {SECRET}"))],
+        None,
+    );
+    indexed.record(RunEvent::ObservationGap {
+        reason: "missing stream segment".into(),
+    });
+    indexed.record(visible("indexed-answer", "迁移 0041 resolved", true));
+    finish(&indexed, "completed", now(), None);
+    let unindexed = admit(
+        &fixture.observation,
+        "unindexed-pending",
+        OWNER,
+        vec![user("ordinary input")],
+        None,
+    );
+    finish(&unindexed, "completed", now(), None);
+    fixture.observation.flush().await?;
+    let indexed_id = indexed
+        .interaction_id()
+        .borrow()
+        .clone()
+        .expect("indexed interaction attributed");
+    while index::index_sqlite(&fixture.pool, &indexed_id).await? {}
+    let recall = fixture.recall(OWNER).await;
+    // 单个汉字「迁」按词首前缀命中「迁移」。
+    let page = search(&recall, OWNER, "stravia://history/", "迁 0041").await;
+    let text = content(&page);
+    assert!(
+        text.starts_with(
+            "# Search results for \"迁 0041\" in stravia://history/ · index 1 interaction pending · retention 7 days\n"
+        ),
+        "{text}"
+    );
+    let header = text
+        .lines()
+        .find(|line| line.starts_with("1. stravia://history/"))
+        .unwrap_or_else(|| panic!("numbered transcript header: {text}"));
+    assert!(header.contains(" · 20"), "{header}");
+    assert!(header.contains(&reference()), "{header}");
+    assert!(!header.contains(SECRET), "{header}");
+    let segment = text
+        .lines()
+        .find(|line| line.trim().starts_with("stravia://history/"))
+        .expect("hit path line");
+    assert!(segment.contains(" · assistant · "), "{segment}");
+    assert!(segment.contains("«0041»"), "{segment}");
+    let limitations = page["limitations"].as_array().expect("limitations");
+    for expected in [
+        "Retention: 7 days.",
+        "1 interaction in scope is not fully indexed.",
+        "A single CJK character is matched as a word prefix and may miss results.",
+        "Some matching interactions have observation gaps.",
+    ] {
+        assert!(
+            limitations
+                .iter()
+                .any(|value| value.as_str() == Some(expected)),
+            "missing {expected}: {limitations:?}"
+        );
+    }
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_search_no_hits_advises_retention_lag_and_terms() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let page = search(
+        &fixture.recall(OWNER).await,
+        OWNER,
+        "stravia://history/",
+        "no-such-memory",
+    )
+    .await;
+    assert_eq!(content(&page).lines().count(), 1);
+    let limitations = page["limitations"].as_array().expect("limitations");
+    for expected in [
+        "Retention: 7 days.",
+        "No hits does not mean the history does not exist; check the retention window and indexing lag, try different terms, or adjust the scope.",
+    ] {
+        assert!(
+            limitations
+                .iter()
+                .any(|value| value.as_str() == Some(expected)),
+            "missing {expected}: {limitations:?}"
+        );
+    }
+    fixture.close().await;
+    Ok(())
 }
 
 /// 按页读完一个文件，返回 (行号, 行) 列表；每页的 `returned_ranges` 必须与内容逐行对应。

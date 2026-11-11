@@ -27,7 +27,7 @@ pub(super) fn timestamp(ms: i64) -> String {
     )
 }
 
-fn plural(count: u64, singular: &str, plural: &str) -> String {
+pub(super) fn plural(count: u64, singular: &str, plural: &str) -> String {
     if count == 1 {
         format!("1 {singular}")
     } else {
@@ -369,6 +369,15 @@ pub(crate) fn indexable_event_text(event: &ObservationEvent) -> Option<Indexable
         _ => return None,
     };
     Some(IndexableEventText { text, weight })
+}
+
+/// 还原 `indexable_event_text` 写入段的角色权重；检索结果按它标注命中角色。
+pub(crate) fn role_name(weight: i32) -> &'static str {
+    match weight {
+        3 => "user",
+        2 => "assistant",
+        _ => "tool call",
+    }
 }
 
 /// 转录跨事件的已确定计数；游标续读时从持久化的工具编号与上一个 Run 恢复。

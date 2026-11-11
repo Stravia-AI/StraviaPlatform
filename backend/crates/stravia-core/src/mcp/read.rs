@@ -300,10 +300,31 @@ impl ReadTool {
             parse_read_input(&input).map_err(|error| PlatformToolError::new(error.to_string()))?;
         let resource_path = match target {
             ReadTarget::History(history) => {
-                return before_execution(
-                    &context.cancellation,
-                    crate::history_recall::read(&self.gateway, &context.principal, history),
-                )
+                return before_execution(&context.cancellation, async {
+                    let interaction_id = if history.question.is_some() || history.cursor.is_some() {
+                        if let Some(mut receiver) = context.interaction_id.clone() {
+                            loop {
+                                if let Some(id) = receiver.borrow_and_update().clone() {
+                                    break Some(id);
+                                }
+                                if receiver.changed().await.is_err() {
+                                    break None;
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    crate::history_recall::read(
+                        &self.gateway,
+                        &context.principal,
+                        history,
+                        interaction_id.as_deref(),
+                    )
+                    .await
+                })
                 .await?
                 .map(output);
             }
@@ -1258,6 +1279,7 @@ impl McpTool for ReadTool {
         let context = ToolExecutionContext {
             request_id: run_id.clone(),
             run_id,
+            interaction_id: None,
             principal: Principal::new(context.api_key_id.clone()),
             read_scope: ReadExposureScope::FULL,
             cancellation,
