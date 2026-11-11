@@ -12,11 +12,17 @@ use super::{
     page::ChunkMark,
     render,
     search_text::{self, ParsedQuery},
-    stale_cursor, storage,
+    storage,
 };
 
 /// 摘要总字符预算，包含每个命中词两侧的 `«»` 标记。
 const SNIPPET_CHARS: usize = 160;
+
+/// 渲染命中时转录与索引不再对应：检索后该轮被清除或改写。检索结果本身不带游标，
+/// 不能报游标失效。
+fn changed_during_search() -> PlatformToolError {
+    PlatformToolError::new("History changed while rendering search results; search again")
+}
 
 /// 按索引使用的规范词元查找查询词，并保留原文偏移。
 fn matches(text: &str, query: &ParsedQuery) -> Vec<Range<usize>> {
@@ -169,7 +175,7 @@ impl Recall<'_> {
             .walker(transcript, &interaction.id, &ChunkMark::header())
             .await?;
         while let Some(mut chunk) = walker.next().await? {
-            let Some(mut event) = chunk.event.take() else {
+            let Some(event) = chunk.event.take() else {
                 continue;
             };
             if !segments
@@ -178,11 +184,7 @@ impl Recall<'_> {
             {
                 continue;
             }
-            // 常规回填不保留 channel；重建索引文本时恢复 visible。
-            if event.kind == "client_visible_content" {
-                event.payload["channel"] = serde_json::Value::String("visible".to_owned());
-            }
-            let indexed = render::indexable_event_text(&event).ok_or_else(stale_cursor)?;
+            let indexed = render::indexable_event_text(&event).ok_or_else(changed_during_search)?;
             let text = &indexed.text;
             let mut renderer = EventRenderer {
                 recall: self,
@@ -198,8 +200,9 @@ impl Recall<'_> {
                 if segment.event_sequence != event.sequence {
                     continue;
                 }
-                let start = usize::try_from(segment.byte_start).map_err(|_| stale_cursor())?;
-                let end = usize::try_from(segment.byte_end).map_err(|_| stale_cursor())?;
+                let start =
+                    usize::try_from(segment.byte_start).map_err(|_| changed_during_search())?;
+                let end = usize::try_from(segment.byte_end).map_err(|_| changed_during_search())?;
                 results[index] = Some(renderer.render(start, end).await?);
                 remaining -= 1;
             }
@@ -209,7 +212,7 @@ impl Recall<'_> {
         }
         results
             .into_iter()
-            .map(|result| result.ok_or_else(stale_cursor))
+            .map(|result| result.ok_or_else(changed_during_search))
             .collect()
     }
 }
@@ -242,7 +245,7 @@ impl EventRenderer<'_, '_> {
             || !text.is_char_boundary(start)
             || !text.is_char_boundary(end)
         {
-            return Err(stale_cursor());
+            return Err(changed_during_search());
         }
         let hit = hits
             .iter()
@@ -270,7 +273,7 @@ impl EventRenderer<'_, '_> {
                     .recall_tool(&interaction.id, number)
                     .await
                     .map_err(storage)?
-                    .ok_or_else(stale_cursor)?;
+                    .ok_or_else(changed_during_search)?;
                 *tool_lines = Some(render::tool_file(
                     interaction,
                     number,
@@ -278,8 +281,10 @@ impl EventRenderer<'_, '_> {
                     &recall.secrets,
                 ));
             }
-            let lines = tool_lines.as_ref().ok_or_else(stale_cursor)?;
-            let arguments = text.get(argument_start..).ok_or_else(stale_cursor)?;
+            let lines = tool_lines.as_ref().ok_or_else(changed_during_search)?;
+            let arguments = text
+                .get(argument_start..)
+                .ok_or_else(changed_during_search)?;
             let (first_line, last_line) = line_window(
                 arguments,
                 argument.start.max(argument_start) - argument_start,
@@ -289,7 +294,7 @@ impl EventRenderer<'_, '_> {
             let end_line = render::TOOL_FILE_HEADER_LINES + 1 + last_line;
             let selected = lines
                 .get((start_line - 1) as usize..end_line as usize)
-                .ok_or_else(stale_cursor)?
+                .ok_or_else(changed_during_search)?
                 .join("\n");
             return Ok(RenderedHit {
                 location: format!("{base}/tools/{number}:{start_line}-{end_line}"),
@@ -309,7 +314,7 @@ impl EventRenderer<'_, '_> {
                     line == "## assistant"
                 }
             })
-            .ok_or_else(stale_cursor)?;
+            .ok_or_else(changed_during_search)?;
         let (first, last) = if tool {
             let line = chunk.mark.line + heading as u64;
             (line, line)
@@ -322,7 +327,7 @@ impl EventRenderer<'_, '_> {
         let selected = chunk
             .lines
             .get(first_index..last_index)
-            .ok_or_else(stale_cursor)?
+            .ok_or_else(changed_during_search)?
             .join("\n");
         Ok(RenderedHit {
             location: format!("{base}:{first}-{last}"),

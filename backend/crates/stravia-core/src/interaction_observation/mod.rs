@@ -66,6 +66,13 @@ pub(crate) struct InteractionObservation {
     inner: Arc<Inner>,
 }
 
+/// 观察库所在后端的连接池；历史检索按后端生成 SQL。
+#[derive(Clone, Copy)]
+pub(crate) enum SearchPool<'a> {
+    Sqlite(&'a SqlitePool),
+    Postgres(&'a PgPool),
+}
+
 #[derive(Clone)]
 pub(crate) struct ClientConnectionObservation {
     observation: InteractionObservation,
@@ -275,10 +282,11 @@ impl InteractionObservation {
             websocket,
         }
     }
-    pub(crate) fn search_pools(&self) -> (Option<&SqlitePool>, Option<&PgPool>) {
+    /// 历史检索直接查询观察库；按后端分派，调用方无需处理「两者皆无」。
+    pub(crate) fn search_pool(&self) -> SearchPool<'_> {
         match &self.inner.store {
-            store::ObservationStore::Sqlite(pool, _) => (Some(pool), None),
-            store::ObservationStore::Postgres(pool, _) => (None, Some(pool)),
+            store::ObservationStore::Sqlite(pool, _) => SearchPool::Sqlite(pool),
+            store::ObservationStore::Postgres(pool, _) => SearchPool::Postgres(pool),
         }
     }
 

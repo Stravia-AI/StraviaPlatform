@@ -119,6 +119,8 @@ pub(super) fn tokenize(input: &str) -> Vec<Token> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct QueryTerm {
+    /// 用户写下的词项原文（短语带引号），用于在说明中回显，而不是归一化后的词元。
+    pub(super) text: String,
     pub(super) tokens: Vec<Token>,
     pub(super) prefix: bool,
 }
@@ -138,18 +140,18 @@ pub(super) fn parse_query(input: &str) -> Result<ParsedQuery, &'static str> {
     for (index, ch) in input.char_indices() {
         if ch == '"' {
             if quoted {
-                pieces.push(&input[start.take().unwrap()..index]);
+                pieces.push((&input[start.take().unwrap()..index], true));
                 quoted = false;
             } else {
                 if let Some(begin) = start.take() {
-                    pieces.push(&input[begin..index]);
+                    pieces.push((&input[begin..index], false));
                 }
                 quoted = true;
                 start = Some(index + ch.len_utf8());
             }
         } else if ch.is_whitespace() && !quoted {
             if let Some(begin) = start.take() {
-                pieces.push(&input[begin..index]);
+                pieces.push((&input[begin..index], false));
             }
         } else if start.is_none() {
             start = Some(index);
@@ -159,10 +161,10 @@ pub(super) fn parse_query(input: &str) -> Result<ParsedQuery, &'static str> {
         return Err("Search query has an unclosed quote.");
     }
     if let Some(begin) = start {
-        pieces.push(&input[begin..]);
+        pieces.push((&input[begin..], false));
     }
     let mut terms = Vec::new();
-    for piece in pieces {
+    for (piece, phrase) in pieces {
         let tokens = tokenize(piece);
         if tokens.len() > 16 {
             return Err("Each search term must contain at most 16 tokens.");
@@ -171,7 +173,16 @@ pub(super) fn parse_query(input: &str) -> Result<ParsedQuery, &'static str> {
             let mut chars = tokens[0].text.chars();
             let prefix =
                 tokens.len() == 1 && chars.next().is_some_and(is_cjk) && chars.next().is_none();
-            terms.push(QueryTerm { tokens, prefix });
+            let text = if phrase {
+                format!("\"{piece}\"")
+            } else {
+                piece.to_owned()
+            };
+            terms.push(QueryTerm {
+                text,
+                tokens,
+                prefix,
+            });
         }
     }
     if terms.is_empty() {
@@ -264,6 +275,15 @@ fn parses_phrases_and_single_character_modes() {
             .map(|term| term.prefix)
             .collect::<Vec<_>>(),
         [false, true, false, false]
+    );
+    // 回显用原文：短语带引号，不是归一化后的词元。
+    assert_eq!(
+        query
+            .terms
+            .iter()
+            .map(|term| term.text.as_str())
+            .collect::<Vec<_>>(),
+        ["\"run admitted\"", "中", "x", "run_admitted"]
     );
     assert_eq!(query.terms[3].tokens, tokenize("run_admitted"));
 }

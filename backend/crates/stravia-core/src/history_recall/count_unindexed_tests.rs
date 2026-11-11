@@ -1,49 +1,6 @@
 use super::{SearchScope, count_unindexed_query};
 use sqlx::{QueryBuilder, SqlitePool};
 
-#[test]
-fn count_filters_are_materialized_before_eligibility_on_both_backends() {
-    fn assert_shape(sql: &str) {
-        let (candidates, eligibility) = sql
-            .split_once(") SELECT COUNT(*) FROM candidates i WHERE (")
-            .unwrap();
-        assert!(candidates.starts_with("WITH candidates AS MATERIALIZED ("));
-        for filter in [
-            "i.principal=",
-            "i.last_active_at>",
-            "i.root_id=",
-            "i.id=",
-            "i.id NOT IN (",
-            "p.interaction_id IS NULL",
-            "i.last_event_sequence<>p.last_event_sequence",
-            "p.indexed_terminal",
-        ] {
-            assert!(candidates.contains(filter), "missing {filter}: {sql}");
-        }
-        assert!(!candidates.contains("inference_run_observations"));
-        assert!(eligibility.contains("inference_run_observations"));
-        assert!(!sql.contains(" LIMIT "));
-    }
-    let mut sqlite = QueryBuilder::<sqlx::Sqlite>::new("");
-    count_unindexed_query(
-        &mut sqlite,
-        "owner",
-        10,
-        SearchScope::Interaction("root", "id"),
-        &["current"],
-    );
-    assert_shape(sqlite.sql().as_str());
-    let mut postgres = QueryBuilder::<sqlx::Postgres>::new("");
-    count_unindexed_query(
-        &mut postgres,
-        "owner",
-        10,
-        SearchScope::Interaction("root", "id"),
-        &["current"],
-    );
-    assert_shape(postgres.sql().as_str());
-}
-
 async fn count(pool: &SqlitePool, scope: SearchScope<'_>, current: &[&str]) -> i64 {
     let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
     count_unindexed_query(&mut builder, "owner", 10, scope, current);

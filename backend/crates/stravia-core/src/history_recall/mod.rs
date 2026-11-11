@@ -226,7 +226,8 @@ impl Recall<'_> {
                 .collect::<Vec<_>>()
                 .join(", ");
             limitations.push(format!(
-                "Query terms reached the 2,000-interaction limit: {terms}."
+                "Query terms reached the {}-interaction limit: {terms}.",
+                search_store::TERM_INTERACTION_LIMIT
             ));
         }
         if results
@@ -253,13 +254,24 @@ impl Recall<'_> {
             .await
             .map_err(storage)?;
         let mut oversized_line = false;
-        for (index, hit) in results.interactions.iter().enumerate() {
-            let interaction = self.interaction(principal, &hit.root_id, &hit.id).await?;
+        let mut removed = false;
+        let mut number = 0;
+        for hit in &results.interactions {
+            // 检索之后该轮可能被清除历史或移出保留期；跳过并在 limitations 说明，整页不因此失败。
+            let Some(interaction) = self
+                .observation
+                .recall_interaction(principal, &hit.root_id, &hit.id, self.active_since)
+                .await
+                .map_err(storage)?
+            else {
+                removed = true;
+                continue;
+            };
+            number += 1;
             let transcript = format!("{HISTORY_ROOT}{}/{}", hit.root_id, hit.id);
             let preview = render::preview(previews.get(&hit.id).map(String::as_str), &self.secrets);
             content.push_str(&format!(
-                "{}. {transcript} · {} · {preview}\n",
-                index + 1,
+                "{number}. {transcript} · {} · {preview}\n",
                 render::timestamp(interaction.started_at)
             ));
             let rendered = self
@@ -277,6 +289,12 @@ impl Recall<'_> {
         if oversized_line {
             limitations.push(
                 "Some hits occur after the first page of an oversized line; follow next_path when reading the hit."
+                    .to_owned(),
+            );
+        }
+        if removed {
+            limitations.push(
+                "Some matching interactions were removed after the search ran and are not listed."
                     .to_owned(),
             );
         }

@@ -11,10 +11,10 @@ use sqlx::{Database, Encode, FromRow, PgPool, QueryBuilder, SqlitePool, Type};
 use super::search_text::parse_query;
 use super::search_text::{ParsedQuery, QueryTerm, Token};
 use crate::interaction_observation::{
-    InteractionObservation, eligible, index_progress_inconsistent,
+    InteractionObservation, SearchPool, eligible, index_progress_inconsistent,
 };
 
-const TERM_INTERACTION_LIMIT: i64 = 2_000;
+pub(super) const TERM_INTERACTION_LIMIT: i64 = 2_000;
 const SEARCH_PAGE: usize = 10;
 const SEGMENTS_PER_INTERACTION: usize = 3;
 
@@ -170,7 +170,7 @@ fn term_query<DB: Database>(
 {
     match backend {
         SearchBackend::Sqlite => {
-            // Keep FTS hits on the outer side so SQLite probes segments by rowid.
+            // CROSS JOIN 固定连接顺序：FTS 命中在外层，按 rowid 回表，避免规划器改走 scope 索引扫描整个 Principal。
             builder.push("WITH hits AS MATERIALIZED (SELECT rowid FROM history_search_segments_fts WHERE history_search_segments_fts MATCH ")
                 .push_bind(sqlite_match(term))
                 .push(") SELECT s.interaction_id,s.root_id,CAST(MAX(s.role_weight) AS BIGINT) AS weight,MAX(s.occurred_at) AS latest_hit_at FROM hits CROSS JOIN history_search_segments s ON s.id=hits.rowid JOIN interaction_observations i ON i.id=s.interaction_id WHERE 1=1");
@@ -276,29 +276,29 @@ async fn count_unindexed(
     scope: SearchScope<'_>,
     current_interaction: &[&str],
 ) -> anyhow::Result<i64> {
-    let (sqlite, postgres) = observation.search_pools();
-    if let Some(pool) = sqlite {
-        let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
-        count_unindexed_query(
-            &mut builder,
-            principal,
-            active_since,
-            scope,
-            current_interaction,
-        );
-        Ok(builder.build_query_scalar().fetch_one(pool).await?)
-    } else if let Some(pool) = postgres {
-        let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
-        count_unindexed_query(
-            &mut builder,
-            principal,
-            active_since,
-            scope,
-            current_interaction,
-        );
-        Ok(builder.build_query_scalar().fetch_one(pool).await?)
-    } else {
-        anyhow::bail!("history search has no observation SQL backend")
+    match observation.search_pool() {
+        SearchPool::Sqlite(pool) => {
+            let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
+            count_unindexed_query(
+                &mut builder,
+                principal,
+                active_since,
+                scope,
+                current_interaction,
+            );
+            Ok(builder.build_query_scalar().fetch_one(pool).await?)
+        }
+        SearchPool::Postgres(pool) => {
+            let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
+            count_unindexed_query(
+                &mut builder,
+                principal,
+                active_since,
+                scope,
+                current_interaction,
+            );
+            Ok(builder.build_query_scalar().fetch_one(pool).await?)
+        }
     }
 }
 
@@ -320,18 +320,19 @@ pub(super) async fn search(
     )
     .await?;
     let mut truncated_terms = Vec::new();
-    let (sqlite, postgres) = observation.search_pools();
+    let pool = observation.search_pool();
     let mut ranked: BTreeMap<String, Ranked> = BTreeMap::new();
     for (index, term) in query.terms.iter().enumerate() {
-        let mut rows = if let Some(pool) = sqlite {
-            sqlite_term_hits(pool, principal, active_since, scope, term).await?
-        } else if let Some(pool) = postgres {
-            postgres_term_hits(pool, principal, active_since, scope, term).await?
-        } else {
-            anyhow::bail!("history search has no observation SQL backend");
+        let mut rows = match pool {
+            SearchPool::Sqlite(pool) => {
+                sqlite_term_hits(pool, principal, active_since, scope, term).await?
+            }
+            SearchPool::Postgres(pool) => {
+                postgres_term_hits(pool, principal, active_since, scope, term).await?
+            }
         };
         if rows.len() > TERM_INTERACTION_LIMIT as usize {
-            truncated_terms.push(phrase(term));
+            truncated_terms.push(term.text.clone());
             rows.truncate(TERM_INTERACTION_LIMIT as usize);
         }
         let mut term_hits: HashMap<String, (i32, i64, String)> = HashMap::with_capacity(rows.len());
@@ -413,34 +414,36 @@ pub(super) async fn search(
             }
             separated.push_unseparated(")");
         }
-        if let Some(pool) = sqlite {
-            let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
-            build(&mut builder, &ids);
-            builder
-                .build_query_scalar()
-                .fetch_all(pool)
-                .await?
-                .into_iter()
-                .collect()
-        } else if let Some(pool) = postgres {
-            let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
-            build(&mut builder, &ids);
-            builder
-                .build_query_scalar()
-                .fetch_all(pool)
-                .await?
-                .into_iter()
-                .collect()
-        } else {
-            Default::default()
+        match pool {
+            SearchPool::Sqlite(pool) => {
+                let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
+                build(&mut builder, &ids);
+                builder
+                    .build_query_scalar()
+                    .fetch_all(pool)
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
+            SearchPool::Postgres(pool) => {
+                let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
+                build(&mut builder, &ids);
+                builder
+                    .build_query_scalar()
+                    .fetch_all(pool)
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
         }
     };
-    let segment_rows = if let Some(pool) = sqlite {
-        sqlite_segments(pool, principal, active_since, scope, query, &ids).await?
-    } else if let Some(pool) = postgres {
-        postgres_segments(pool, principal, active_since, scope, query, &ids).await?
-    } else {
-        Vec::new()
+    let segment_rows = match pool {
+        SearchPool::Sqlite(pool) => {
+            sqlite_segments(pool, principal, active_since, scope, query, &ids).await?
+        }
+        SearchPool::Postgres(pool) => {
+            postgres_segments(pool, principal, active_since, scope, query, &ids).await?
+        }
     };
     let mut segments_by_id: HashMap<String, Vec<SearchSegment>> = HashMap::new();
     for (row, terms) in segment_rows {
@@ -792,7 +795,8 @@ mod tests {
                 sqlx::raw_sql("INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end,tokens) SELECT 'i'||x,'owner','i'||x,x,0,1,1000+x,0,10,CASE WHEN x=2001 THEN 'broad:1'::tsvector ELSE 'broad:1 edge:2'::tsvector END FROM generate_series(1,2001) x; INSERT INTO history_search_segments(interaction_id,principal,root_id,event_sequence,segment_ordinal,role_weight,occurred_at,byte_start,byte_end,tokens) VALUES ('expired','owner','expired',3001,0,3,800,0,10,'broad:1 edge:2'),('mcp','owner','mcp',3002,0,3,5000,0,10,'broad:1 edge:2')").execute(pool).await?;
             }
         }
-        let query = parse_query("broad edge").unwrap();
+        // 词项按用户原文回显（大小写、全角不归一化）。
+        let query = parse_query("ＢＲＯＡＤ edge").unwrap();
         let page = search(
             &fixture.observation,
             "owner",
@@ -803,7 +807,7 @@ mod tests {
             &[],
         )
         .await?;
-        assert_eq!(page.truncated_terms, ["broad"]);
+        assert_eq!(page.truncated_terms, ["ＢＲＯＡＤ"]);
         // `broad` 保留最近的 2,000 个（i2..i2001），与 `edge` 的交集按最近命中倒序分页。
         assert_eq!(
             page.interactions

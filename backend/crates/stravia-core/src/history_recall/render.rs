@@ -314,6 +314,11 @@ pub(crate) struct IndexableEventText {
     pub weight: i32,
 }
 
+/// 段的角色权重：检索按它排序，结果按它标注命中角色。
+const USER_WEIGHT: i32 = 3;
+const ASSISTANT_WEIGHT: i32 = 2;
+const TOOL_CALL_WEIGHT: i32 = 1;
+
 fn visible_answer(payload: &Value) -> String {
     let text = str_field(payload, "text").unwrap_or_default();
     let placeholders: Vec<String> = payload
@@ -340,31 +345,42 @@ fn visible_answer(payload: &Value) -> String {
 
 /// 提取转录或工具文件渲染使用的未脱敏内容。
 /// 工具名与完整参数之间以换行分隔，字节区间相对于拼接后的事件文本。
+/// 渲染器生成的占位（非文本内容块的 `[image]` 等、`(no arguments)`）不是历史内容，
+/// 不入索引；它们只出现在正文之后，去掉后正文的行号不变。
 pub(crate) fn indexable_event_text(event: &ObservationEvent) -> Option<IndexableEventText> {
     let payload = &event.payload;
     let (text, weight) = match event.kind.as_str() {
         "user_input_recorded" => (
             lines(str_field(payload, "text").unwrap_or_default()).join("\n"),
-            3,
+            USER_WEIGHT,
         ),
         "client_visible_content"
             if payload.get("complete").and_then(Value::as_bool) == Some(true)
                 && str_field(payload, "channel") == Some("visible") =>
         {
-            (visible_answer(payload), 2)
+            (
+                lines(str_field(payload, "text").unwrap_or_default()).join("\n"),
+                ASSISTANT_WEIGHT,
+            )
         }
         "client_tool_handoff" | "platform_tool_started" => {
-            let input = payload.get("input");
-            let arguments = match parse_arguments(input) {
-                Arguments::Missing => NO_ARGUMENTS.to_owned(),
-                Arguments::Plain(text) => text.to_owned(),
-                Arguments::Json(value) => format!("{value:#}"),
+            let arguments = match parse_arguments(payload.get("input")) {
+                Arguments::Missing => None,
+                Arguments::Plain(text) => Some(text.to_owned()),
+                Arguments::Json(value) => Some(format!("{value:#}")),
             };
-            if arguments.contains("stravia://history/") {
+            if arguments
+                .as_deref()
+                .is_some_and(|arguments| arguments.contains(HISTORY_ROOT))
+            {
                 return None;
             }
             let name = single_line(str_field(payload, "name").unwrap_or("unknown tool"));
-            (format!("{name}\n{}", lines(&arguments).join("\n")), 1)
+            let text = match arguments {
+                Some(arguments) => format!("{name}\n{}", lines(&arguments).join("\n")),
+                None => name,
+            };
+            (text, TOOL_CALL_WEIGHT)
         }
         _ => return None,
     };
@@ -374,8 +390,8 @@ pub(crate) fn indexable_event_text(event: &ObservationEvent) -> Option<Indexable
 /// 还原 `indexable_event_text` 写入段的角色权重；检索结果按它标注命中角色。
 pub(crate) fn role_name(weight: i32) -> &'static str {
     match weight {
-        3 => "user",
-        2 => "assistant",
+        USER_WEIGHT => "user",
+        ASSISTANT_WEIGHT => "assistant",
         _ => "tool call",
     }
 }
@@ -716,10 +732,8 @@ mod indexable_tests {
             }),
         ))
         .unwrap();
-        assert_eq!(
-            (answer.text.as_str(), answer.weight),
-            ("answer\n[image]", 2)
-        );
+        // 渲染占位不入索引：搜 "image" 不应命中所有带图片的回答。
+        assert_eq!((answer.text.as_str(), answer.weight), ("answer", 2));
         assert!(
             indexable_event_text(&event(
                 "client_visible_content",
@@ -750,6 +764,9 @@ mod indexable_tests {
             (tool.text.as_str(), tool.weight),
             ("lookup\n{\n  \"query\": \"alpha\"\n}", 1)
         );
+        let argless =
+            indexable_event_text(&event("platform_tool_started", json!({"name": "now"}))).unwrap();
+        assert_eq!(argless.text, "now");
     }
 
     #[test]
