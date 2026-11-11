@@ -131,6 +131,7 @@ dotenvy = "0.15"
 walkdir = "2"
 url = { version = "2", features = ["serde"] }
 urlencoding = "2.1.3"
+unicode-normalization = "=0.1.25"
 toml = { version = "1.1.4", features = ["std", "parse", "display", "serde"] }
 shellexpand = "3"
 rust-embed = { version = "8", features = ["compression"] }

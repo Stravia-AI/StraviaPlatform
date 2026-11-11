@@ -7,6 +7,8 @@
 mod page;
 mod render;
 #[cfg(test)]
+mod search_text;
+#[cfg(test)]
 mod tests;
 
 use serde::{Deserialize, Serialize};

@@ -8374,6 +8374,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tungstenite 0.27.0",
+ "unicode-normalization",
  "url",
  "uuid",
  "zip 9.0.5",
