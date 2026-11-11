@@ -144,53 +144,112 @@ fn line_window(text: &str, start: usize, end: usize) -> (u64, u64) {
     )
 }
 
-/// 把索引段换算为只追加转录的稳定行范围，并从已替换凭据的渲染文本生成摘要。
-pub(super) async fn render_hit(
-    recall: &Recall<'_>,
-    interaction: &RecallInteraction,
-    event_sequence: i64,
-    start: usize,
-    end: usize,
-    query: &ParsedQuery,
-) -> Result<(String, String, bool), PlatformToolError> {
-    let mut event = recall
-        .observation
-        .recall_events(&interaction.id, event_sequence.saturating_sub(1), 1)
-        .await
-        .map_err(storage)?
-        .into_iter()
-        .next()
-        .filter(|event| event.sequence == event_sequence)
-        .ok_or_else(stale_cursor)?;
-    // recall_events 只返回 visible 且 complete 的内容块，但常规回填不保留
-    // channel；索引回填会补上该字段，重建索引文本时需保持一致。
-    if event.kind == "client_visible_content" {
-        event.payload["channel"] = serde_json::Value::String("visible".to_owned());
-    }
-    let indexed = render::indexable_event_text(&event).ok_or_else(stale_cursor)?;
-    let text = &indexed.text;
-    if start >= end
-        || end > text.len()
-        || !text.is_char_boundary(start)
-        || !text.is_char_boundary(end)
-    {
-        return Err(stale_cursor());
-    }
-    let hits = matches(text, query);
-    let hit = hits
-        .iter()
-        .find(|range| range.start >= start && range.end <= end)
-        .cloned()
-        .unwrap_or(start..end);
-    let (segment_start, segment_end) = line_window(text, hit.start, hit.end);
-    let transcript = Transcript::new(interaction, &recall.secrets);
-    let mut walker = recall
-        .walker(transcript, &interaction.id, &ChunkMark::header())
-        .await?;
-    while let Some(chunk) = walker.next().await? {
-        if chunk.mark.event != Some(event_sequence) {
-            continue;
+#[derive(Clone)]
+pub(super) struct RenderedHit {
+    pub(super) location: String,
+    pub(super) snippet: String,
+    pub(super) after_first_page: bool,
+}
+
+impl Recall<'_> {
+    /// 一次遍历转录，按原始排序返回每个索引段的稳定行范围与摘要。
+    pub(super) async fn render_hits(
+        &self,
+        interaction: &RecallInteraction,
+        segments: &[super::search_store::SearchSegment],
+        query: &ParsedQuery,
+    ) -> Result<Vec<RenderedHit>, PlatformToolError> {
+        let mut results = vec![None; segments.len()];
+        let mut remaining = segments.len();
+        if remaining == 0 {
+            return Ok(Vec::new());
         }
+        let transcript = Transcript::new(interaction, &self.secrets);
+        let mut walker = self
+            .walker(transcript, &interaction.id, &ChunkMark::header())
+            .await?;
+        while let Some(mut chunk) = walker.next().await? {
+            let Some(mut event) = chunk.event.take() else {
+                continue;
+            };
+            if !segments
+                .iter()
+                .any(|segment| segment.event_sequence == event.sequence)
+            {
+                continue;
+            }
+            // 常规回填不保留 channel；重建索引文本时恢复 visible。
+            if event.kind == "client_visible_content" {
+                event.payload["channel"] = serde_json::Value::String("visible".to_owned());
+            }
+            let indexed = render::indexable_event_text(&event).ok_or_else(stale_cursor)?;
+            let text = &indexed.text;
+            let mut renderer = EventRenderer {
+                recall: self,
+                interaction,
+                event: &event,
+                chunk: &chunk,
+                text,
+                hits: matches(text, query),
+                query,
+                tool_lines: None,
+            };
+            for (index, segment) in segments.iter().enumerate() {
+                if segment.event_sequence != event.sequence {
+                    continue;
+                }
+                let start = usize::try_from(segment.byte_start).map_err(|_| stale_cursor())?;
+                let end = usize::try_from(segment.byte_end).map_err(|_| stale_cursor())?;
+                results[index] = Some(renderer.render(start, end).await?);
+                remaining -= 1;
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.ok_or_else(stale_cursor))
+            .collect()
+    }
+}
+
+struct EventRenderer<'a, 'b> {
+    recall: &'a Recall<'b>,
+    interaction: &'a RecallInteraction,
+    event: &'a super::ObservationEvent,
+    chunk: &'a super::Chunk,
+    text: &'a str,
+    hits: Vec<Range<usize>>,
+    query: &'a ParsedQuery,
+    tool_lines: Option<Vec<String>>,
+}
+
+impl EventRenderer<'_, '_> {
+    async fn render(&mut self, start: usize, end: usize) -> Result<RenderedHit, PlatformToolError> {
+        let Self {
+            recall,
+            interaction,
+            event,
+            chunk,
+            text,
+            hits,
+            query,
+            tool_lines,
+        } = self;
+        if start >= end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            return Err(stale_cursor());
+        }
+        let hit = hits
+            .iter()
+            .find(|range| range.start >= start && range.end <= end)
+            .cloned()
+            .unwrap_or(start..end);
+        let (segment_start, segment_end) = line_window(text, hit.start, hit.end);
         let base = format!("{HISTORY_ROOT}{}/{}", interaction.root_id, interaction.id);
         let tool = matches!(
             event.kind.as_str(),
@@ -205,30 +264,38 @@ pub(super) async fn render_hit(
             .find(|range| range.end > argument_start && range.start >= start && range.end <= end);
         if tool && let Some(argument) = argument_hit {
             let number = chunk.mark.tools.saturating_add(1);
-            let tool = recall
-                .observation
-                .recall_tool(&interaction.id, number)
-                .await
-                .map_err(storage)?
-                .ok_or_else(stale_cursor)?;
-            let lines = render::tool_file(interaction, number, &tool, &recall.secrets);
+            if tool_lines.is_none() {
+                let tool = recall
+                    .observation
+                    .recall_tool(&interaction.id, number)
+                    .await
+                    .map_err(storage)?
+                    .ok_or_else(stale_cursor)?;
+                *tool_lines = Some(render::tool_file(
+                    interaction,
+                    number,
+                    &tool,
+                    &recall.secrets,
+                ));
+            }
+            let lines = tool_lines.as_ref().ok_or_else(stale_cursor)?;
             let arguments = text.get(argument_start..).ok_or_else(stale_cursor)?;
             let (first_line, last_line) = line_window(
                 arguments,
                 argument.start.max(argument_start) - argument_start,
                 argument.end - argument_start,
             );
-            let start_line = 6 + first_line;
-            let end_line = 6 + last_line;
+            let start_line = render::TOOL_FILE_HEADER_LINES + 1 + first_line;
+            let end_line = render::TOOL_FILE_HEADER_LINES + 1 + last_line;
             let selected = lines
                 .get((start_line - 1) as usize..end_line as usize)
                 .ok_or_else(stale_cursor)?
                 .join("\n");
-            return Ok((
-                format!("{base}/tools/{number}:{start_line}-{end_line}"),
-                snippet(&selected, query),
-                hit_after_first_page(&selected, query),
-            ));
+            return Ok(RenderedHit {
+                location: format!("{base}/tools/{number}:{start_line}-{end_line}"),
+                snippet: snippet(&selected, query),
+                after_first_page: hit_after_first_page(&selected, query),
+            });
         }
         let heading = chunk
             .lines
@@ -257,11 +324,10 @@ pub(super) async fn render_hit(
             .get(first_index..last_index)
             .ok_or_else(stale_cursor)?
             .join("\n");
-        return Ok((
-            format!("{base}:{first}-{last}"),
-            snippet(&selected, query),
-            hit_after_first_page(&selected, query),
-        ));
+        Ok(RenderedHit {
+            location: format!("{base}:{first}-{last}"),
+            snippet: snippet(&selected, query),
+            after_first_page: hit_after_first_page(&selected, query),
+        })
     }
-    Err(stale_cursor())
 }

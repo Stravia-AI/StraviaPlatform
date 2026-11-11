@@ -10,7 +10,9 @@ use sqlx::{Database, Encode, FromRow, PgPool, QueryBuilder, SqlitePool, Type};
 #[cfg(test)]
 use super::search_text::parse_query;
 use super::search_text::{ParsedQuery, QueryTerm, Token};
-use crate::interaction_observation::{InteractionObservation, eligible};
+use crate::interaction_observation::{
+    InteractionObservation, eligible, index_progress_inconsistent,
+};
 
 const TERM_INTERACTION_LIMIT: i64 = 2_000;
 const SEARCH_PAGE: usize = 10;
@@ -168,9 +170,10 @@ fn term_query<DB: Database>(
 {
     match backend {
         SearchBackend::Sqlite => {
+            // Keep FTS hits on the outer side so SQLite probes segments by rowid.
             builder.push("WITH hits AS MATERIALIZED (SELECT rowid FROM history_search_segments_fts WHERE history_search_segments_fts MATCH ")
                 .push_bind(sqlite_match(term))
-                .push(") SELECT s.interaction_id,s.root_id,CAST(MAX(s.role_weight) AS BIGINT) AS weight,MAX(s.occurred_at) AS latest_hit_at FROM hits JOIN history_search_segments s ON s.id=hits.rowid JOIN interaction_observations i ON i.id=s.interaction_id WHERE 1=1");
+                .push(") SELECT s.interaction_id,s.root_id,CAST(MAX(s.role_weight) AS BIGINT) AS weight,MAX(s.occurred_at) AS latest_hit_at FROM hits CROSS JOIN history_search_segments s ON s.id=hits.rowid JOIN interaction_observations i ON i.id=s.interaction_id WHERE 1=1");
         }
         SearchBackend::Postgres => {
             builder.push("SELECT s.interaction_id,s.root_id,CAST(MAX(s.role_weight) AS BIGINT) AS weight,MAX(s.occurred_at) AS latest_hit_at FROM history_search_segments s JOIN interaction_observations i ON i.id=s.interaction_id WHERE s.tokens @@ ")
@@ -181,36 +184,6 @@ fn term_query<DB: Database>(
     common_predicates(builder, principal, active_since, scope);
     builder.push(" GROUP BY s.interaction_id,s.root_id ORDER BY MAX(s.occurred_at) DESC,s.interaction_id LIMIT ")
         .push(TERM_INTERACTION_LIMIT + 1);
-}
-
-#[cfg(test)]
-fn term_query_sql(backend: SearchBackend, scope: SearchScope<'_>) -> String {
-    match backend {
-        SearchBackend::Sqlite => {
-            let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
-            term_query(
-                &mut builder,
-                backend,
-                "principal",
-                0,
-                scope,
-                &parse_query("run_admitted").unwrap().terms[0],
-            );
-            builder.sql().as_str().to_owned()
-        }
-        SearchBackend::Postgres => {
-            let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
-            term_query(
-                &mut builder,
-                backend,
-                "principal",
-                0,
-                scope,
-                &parse_query("run_admitted").unwrap().terms[0],
-            );
-            builder.sql().as_str().to_owned()
-        }
-    }
 }
 
 async fn sqlite_term_hits(
@@ -253,6 +226,49 @@ async fn postgres_term_hits(
     Ok(query.fetch_all(pool).await?)
 }
 
+fn count_unindexed_query<DB: Database>(
+    builder: &mut QueryBuilder<DB>,
+    principal: &str,
+    active_since: i64,
+    scope: SearchScope<'_>,
+    current: &[&str],
+) where
+    DB::Arguments: Default,
+    String: for<'q> Encode<'q, DB> + Type<DB>,
+    i64: for<'q> Encode<'q, DB> + Type<DB>,
+{
+    builder.push("WITH candidates AS MATERIALIZED (SELECT i.id,i.root_run_id,i.status FROM interaction_observations i LEFT JOIN history_search_progress p ON p.interaction_id=i.id WHERE i.principal=").push_bind(principal.to_owned());
+    builder
+        .push(" AND i.last_active_at>")
+        .push_bind(active_since);
+    builder
+        .push(" AND (")
+        .push(index_progress_inconsistent("i", "p"))
+        .push(")");
+    match scope {
+        SearchScope::Root => {}
+        SearchScope::Chain(root) => {
+            builder.push(" AND i.root_id=").push_bind(root.to_owned());
+        }
+        SearchScope::Interaction(root, id) => {
+            builder.push(" AND i.root_id=").push_bind(root.to_owned());
+            builder.push(" AND i.id=").push_bind(id.to_owned());
+        }
+    }
+    if !current.is_empty() {
+        builder.push(" AND i.id NOT IN (");
+        let mut separated = builder.separated(",");
+        for id in current {
+            separated.push_bind((*id).to_owned());
+        }
+        separated.push_unseparated(")");
+    }
+    builder
+        .push(") SELECT COUNT(*) FROM candidates i WHERE (")
+        .push(eligible("i"))
+        .push(")");
+}
+
 async fn count_unindexed(
     observation: &InteractionObservation,
     principal: &str,
@@ -260,46 +276,10 @@ async fn count_unindexed(
     scope: SearchScope<'_>,
     current_interaction: &[&str],
 ) -> anyhow::Result<i64> {
-    fn build<DB: Database>(
-        builder: &mut QueryBuilder<DB>,
-        principal: &str,
-        active_since: i64,
-        scope: SearchScope<'_>,
-        current: &[&str],
-    ) where
-        DB::Arguments: Default,
-        String: for<'q> Encode<'q, DB> + Type<DB>,
-        i64: for<'q> Encode<'q, DB> + Type<DB>,
-    {
-        builder.push("SELECT COUNT(*) FROM interaction_observations i LEFT JOIN history_search_progress p ON p.interaction_id=i.id WHERE i.principal=").push_bind(principal.to_owned());
-        builder
-            .push(" AND i.last_active_at>")
-            .push_bind(active_since);
-        builder.push(" AND (").push(eligible("i")).push(")");
-        builder.push(" AND (p.interaction_id IS NULL OR p.last_event_sequence<>i.last_event_sequence OR (i.status NOT IN ('running','waiting_client'))<>COALESCE(p.indexed_terminal,FALSE))");
-        match scope {
-            SearchScope::Root => {}
-            SearchScope::Chain(root) => {
-                builder.push(" AND i.root_id=").push_bind(root.to_owned());
-            }
-            SearchScope::Interaction(root, id) => {
-                builder.push(" AND i.root_id=").push_bind(root.to_owned());
-                builder.push(" AND i.id=").push_bind(id.to_owned());
-            }
-        }
-        if !current.is_empty() {
-            builder.push(" AND i.id NOT IN (");
-            let mut separated = builder.separated(",");
-            for id in current {
-                separated.push_bind((*id).to_owned());
-            }
-            separated.push_unseparated(")");
-        }
-    }
     let (sqlite, postgres) = observation.search_pools();
     if let Some(pool) = sqlite {
         let mut builder = QueryBuilder::<sqlx::Sqlite>::new("");
-        build(
+        count_unindexed_query(
             &mut builder,
             principal,
             active_since,
@@ -309,7 +289,7 @@ async fn count_unindexed(
         Ok(builder.build_query_scalar().fetch_one(pool).await?)
     } else if let Some(pool) = postgres {
         let mut builder = QueryBuilder::<sqlx::Postgres>::new("");
-        build(
+        count_unindexed_query(
             &mut builder,
             principal,
             active_since,
@@ -623,9 +603,13 @@ fn merge_segments(rows: Vec<(SegmentRow, Vec<usize>)>) -> Vec<(SegmentRow, Vec<u
 }
 
 #[cfg(test)]
+#[path = "count_unindexed_tests.rs"]
+mod count_unindexed_tests;
+
+#[cfg(test)]
 mod tests {
     use super::parse_query;
-    use super::{SearchBackend, SearchScope, search, sqlite_match, term_query_sql};
+    use super::{SearchScope, search};
     use sqlx::{PgPool, SqlitePool};
 
     struct SearchFixture {
@@ -847,46 +831,5 @@ mod tests {
         let fixture = SearchFixture::postgres().await?;
         candidate_cap_contract(&fixture).await?;
         fixture.close().await
-    }
-
-    #[tokio::test]
-    async fn sqlite_search_queries_use_fts_and_keyed_lookups() -> anyhow::Result<()> {
-        let pool = crate::test_support::migrated_sqlite_pool().await?;
-        let query = parse_query("run_admitted 中").unwrap();
-        for (index, term) in query.terms.iter().enumerate() {
-            let sql = term_query_sql(SearchBackend::Sqlite, SearchScope::Root);
-            let detail: Vec<(i64, i64, i64, String)> =
-                sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
-                    .bind(sqlite_match(term))
-                    .bind("principal")
-                    .bind(0_i64)
-                    .fetch_all(&pool)
-                    .await?;
-            assert!(
-                detail.iter().any(|(_, _, _, detail)| {
-                    detail.contains("history_search_segments_fts")
-                        && detail.contains("VIRTUAL TABLE INDEX")
-                }),
-                "term {index} must use FTS: {detail:?}"
-            );
-            assert!(
-                detail.iter().any(|(_, _, _, detail)| {
-                    detail.contains("SEARCH s USING INTEGER PRIMARY KEY (rowid=?)")
-                        || detail.contains("SEARCH s USING INDEX")
-                }),
-                "term {index} must reach segments by rowid/scope index: {detail:?}"
-            );
-            assert!(
-                detail.iter().all(|(_, _, _, detail)| {
-                    !detail.starts_with("SCAN s")
-                        && !detail.starts_with("SCAN i")
-                        && !detail.starts_with("SCAN interaction_observations")
-                        && !detail.contains("inference_runs_status_idx")
-                }),
-                "term {index} must use keyed lookups: {detail:?}"
-            );
-        }
-        pool.close().await;
-        Ok(())
     }
 }

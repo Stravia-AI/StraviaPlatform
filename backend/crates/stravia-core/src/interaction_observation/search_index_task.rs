@@ -10,10 +10,17 @@ use crate::history_recall::index::{index_postgres, index_sqlite};
 
 const RECONCILE_BATCH: i64 = 64;
 
+pub(crate) fn index_progress_inconsistent(interaction: &str, progress: &str) -> String {
+    format!(
+        "{progress}.interaction_id IS NULL OR {interaction}.last_event_sequence<>{progress}.last_event_sequence OR ({interaction}.status NOT IN ('running','waiting_client'))<>COALESCE({progress}.indexed_terminal,FALSE)"
+    )
+}
+
 fn reconcile_sql() -> String {
     let member = eligible("i");
+    let inconsistent = index_progress_inconsistent("i", "p");
     format!(
-        "SELECT i.id FROM interaction_observations i LEFT JOIN history_search_progress p ON p.interaction_id=i.id WHERE i.id>$1 AND ((({member}) AND (p.interaction_id IS NULL OR i.last_event_sequence<>p.last_event_sequence OR (i.status NOT IN ('running','waiting_client'))<>COALESCE(p.indexed_terminal,FALSE))) OR (NOT ({member}) AND (p.interaction_id IS NOT NULL OR EXISTS (SELECT 1 FROM history_search_segments s WHERE s.interaction_id=i.id)))) ORDER BY i.id LIMIT $2"
+        "SELECT i.id FROM interaction_observations i LEFT JOIN history_search_progress p ON p.interaction_id=i.id WHERE i.id>$1 AND ((({member}) AND ({inconsistent})) OR (NOT ({member}) AND (p.interaction_id IS NOT NULL OR EXISTS (SELECT 1 FROM history_search_segments s WHERE s.interaction_id=i.id)))) ORDER BY i.id LIMIT $2"
     )
 }
 

@@ -262,21 +262,16 @@ impl Recall<'_> {
                 index + 1,
                 render::timestamp(interaction.started_at)
             ));
-            for segment in &hit.segments {
-                let start = usize::try_from(segment.byte_start).map_err(|_| stale_cursor())?;
-                let end = usize::try_from(segment.byte_end).map_err(|_| stale_cursor())?;
-                let (location, snippet, after_first_page) = search_render::render_hit(
-                    self,
-                    &interaction,
-                    segment.event_sequence,
-                    start,
-                    end,
-                    &query,
-                )
+            let rendered = self
+                .render_hits(&interaction, &hit.segments, &query)
                 .await?;
-                oversized_line |= after_first_page;
+            for (segment, rendered_hit) in hit.segments.iter().zip(rendered) {
+                oversized_line |= rendered_hit.after_first_page;
                 let role = render::role_name(segment.role_weight);
-                content.push_str(&format!("  {location} · {role} · {snippet}\n"));
+                content.push_str(&format!(
+                    "  {} · {role} · {}\n",
+                    rendered_hit.location, rendered_hit.snippet
+                ));
             }
         }
         if oversized_line {
@@ -650,6 +645,7 @@ impl Recall<'_> {
 struct Chunk {
     mark: ChunkMark,
     lines: Vec<String>,
+    event: Option<ObservationEvent>,
 }
 
 /// 按事件序号分批读取并渲染转录；不渲染的事件不产生块。
@@ -703,6 +699,7 @@ impl Walker<'_> {
             }
             let mut chunk = self.chunk(Some(event.sequence), lines);
             (chunk.mark.tools, chunk.mark.run) = before;
+            chunk.event = Some(event);
             return Ok(Some(chunk));
         }
     }
@@ -715,6 +712,10 @@ impl Walker<'_> {
             run: None,
         };
         self.next_line += lines.len() as u64;
-        Chunk { mark, lines }
+        Chunk {
+            mark,
+            lines,
+            event: None,
+        }
     }
 }
