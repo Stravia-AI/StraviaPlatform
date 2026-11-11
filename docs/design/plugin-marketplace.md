@@ -29,8 +29,8 @@
 | --- | --- |
 | Platform Release | 生成九个专属插件的 `.wasm.zst`、v2 目录及独立签名；生产签名配置缺失时发布失败 |
 | Platform Core | 来源登记、目录发现、受限下载、验签与解压、预览确认、安装来源记录；保留本地导入 |
-| updater | 外部仓库须实现多仓库插件路由、资产授权及缓存隔离；客户端不会把服务故障当作未收录 |
-| 目录协议 | Core 使用 v2；规范和 JSON Schema 的唯一维护位置仍在 updater 仓库，需同步该外部契约 |
+| updater | 多仓库插件路由、资产授权及缓存隔离已在外部仓库实现，尚未部署；客户端不会把服务故障当作未收录 |
+| 目录协议 | Core 使用 v2；规范和 JSON Schema 的唯一维护位置在 updater 仓库，已切换到 v2 |
 | WorkBuddy | 外部维护者须用同一工具发布目录、Zstd 资产与签名；旧 Release 不自动成为市场来源 |
 
 依据：[发布工作流](../../.github/workflows/release.yml)、[插件管理](../../backend/crates/stravia-core/src/plugin/manager.rs)、[插件类型](../../backend/crates/stravia-core/src/plugin/types.rs)、[安装存储](../../backend/crates/stravia-core/src/plugin/store.rs)、[产品更新客户端](../../backend/crates/stravia-core/src/admin/updates.rs)。外部仓库的本地调查位置见第 11 节。
@@ -121,7 +121,7 @@ stravia-plugin-catalog.pub
 
 不能假定已部署的 updater 已提供这些接口。插件路由不得沿用 Desktop 对 `Stravia/<SemVer>` 的应用版本过滤，否则独立插件的新版本会被漏掉。tag 和文件名按路径段编码；服务端重新校验，不能拼接为任意上游 URL。
 
-updater 按数字仓库 ID 配置镜像白名单。官方源默认纳入；WorkBuddy 作为首个第三方接入验收源，在运营者确认后纳入。白名单决定带宽与缓存服务范围，不代表代码审查或安全背书。
+updater 按数字仓库 ID 固定镜像白名单。官方源与 Qoder（`Chikage0o0/stravia-vendor-qoder`）已纳入；WorkBuddy 在运营者确认后纳入。白名单决定带宽与缓存服务范围，不代表代码审查或安全背书。
 
 - 白名单内：目录通过 updater 获取；每次实际资产 GET/HEAD 根据请求 IP 决定国内缓存交付或境外跳转 GitHub，不能依据早先目录查询地域固定地址。
 - 白名单外：返回明确 `not_mirrored` 能力结果，宿主直接读取 GitHub Release 和资产。任意公开第三方仓库仍可添加，但不承诺国内加速。
@@ -250,7 +250,7 @@ WorkBuddy 的外部维护者需采用同一流程，目录身份固定 `workbudd
 ## 10. 外部上线前置与验收
 
 1. 发布维护者配置独立插件目录公钥、签名私钥和签名密码；私钥不进入宿主、镜像或仓库。缺失配置不得发布伪造的官方源。
-2. updater 维护者发布 v2 schema/验证样例，部署插件路由、白名单和缓存隔离，保留 Desktop 路由契约。
+2. updater 维护者部署已实现的插件路由、白名单与缓存隔离（v2 schema 与样例已发布在 updater 仓库），保留 Desktop 路由契约。
 3. 官方及 WorkBuddy 维护者用同一工具生成产物并分别签名，发布新的兼容 Release；部署和公开发布需单独授权。
 4. 上述真实服务与发布材料就绪后，再验收生产分流和首次官方安装。本地隔离测试不宣称已经验证这些外部生产条件。
 
@@ -267,12 +267,12 @@ WorkBuddy 的外部维护者需采用同一流程，目录身份固定 `workbudd
 
 ## 11. 调研来源与外部边界
 
-设计基于当前工作树和以下外部本地仓库的只读调查，不代表外部仓库已完成市场实现：
+设计基于当前工作树和以下外部本地仓库的调查；updater 的插件路由已在其仓库实现但未部署，其他外部仓库不代表已完成市场实现：
 
-- `/home/chikage/projects/updater/docs/protocol/plugin-marketplace-v1.md`、`schemas/plugin-catalog-v1.schema.json`：现有原始 Wasm 目录契约。
-- `/home/chikage/projects/updater/src/service.rs`、`src/github.rs`、`src/upstream.rs`、`src/cache.rs`、`README.md`：单仓库 Desktop 分流、下载授权与缓存。
+- `/home/chikage/projects/updater/docs/protocol/plugin-marketplace-v2.md`、`schemas/plugin-catalog-v2.schema.json`：v2 目录契约。
+- `/home/chikage/projects/updater/src/plugins.rs`、`src/service.rs`、`src/upstream.rs`、`src/cache.rs`、`README.md`：多仓库插件路由、Desktop 分流、下载授权与缓存。
 - `/home/chikage/projects/stravia-vendor-workbuddy/.github/workflows/release.yml`、`Taskfile.yml`、`Cargo.toml`、`src/profile.rs`、`README.md`：现有第三方构建、元数据和手工安装流程。
 - [GitHub Release REST API](https://docs.github.com/en/rest/releases/releases)、[API 限流](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)：发现与限流契约。
 - [Zstd Decoder 0.14.3](https://docs.rs/zstd/0.14.3/zstd/stream/read/struct.Decoder.html)、[Zstd 1.5.7 参数表](https://github.com/facebook/zstd/blob/v1.5.7/lib/compress/clevels.h)：单 frame 与 window 限制能力。
 
-独立目录签名/TOFU、公开 API、持久化与 Core 签名依赖已按批准规格在本仓库实施。第三方镜像白名单的运营范围、外部仓库改动、生产密钥生成与配置、发布和部署不在本次实现范围；测试密钥仅用于隔离夹具，不作为任何生产信任根。
+独立目录签名/TOFU、公开 API、持久化与 Core 签名依赖已按批准规格在本仓库实施；updater 的插件路由与白名单已在其仓库实现。其余外部仓库改动、生产密钥生成与配置、发布和部署不在本次实现范围；测试密钥仅用于隔离夹具，不作为任何生产信任根。
