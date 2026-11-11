@@ -171,8 +171,9 @@ pub(super) fn parse_query(input: &str) -> Result<ParsedQuery, &'static str> {
             return Err("Each search term must contain at most 16 tokens.");
         }
         if !tokens.is_empty() {
-            let normalized = normalized(piece);
-            let prefix = normalized.len() == 1 && is_cjk(normalized[0].ch);
+            let mut chars = tokens[0].text.chars();
+            let prefix =
+                tokens.len() == 1 && chars.next().is_some_and(is_cjk) && chars.next().is_none();
             terms.push(QueryTerm { tokens, prefix });
         }
     }
@@ -193,6 +194,46 @@ fn retains_ranges_through_compatibility_and_composition() {
         tokens.iter().map(|t| t.range.clone()).collect::<Vec<_>>(),
         [0..3, 4..10, 11..14, 11..14, 11..14]
     );
+}
+
+#[test]
+fn punctuation_does_not_disable_single_cjk_prefix() {
+    let query = parse_query("中! x! 中文!").unwrap();
+    assert_eq!(
+        query
+            .terms
+            .iter()
+            .map(|term| term.prefix)
+            .collect::<Vec<_>>(),
+        [true, false, false]
+    );
+}
+
+#[test]
+fn tokenization_matches_nfkc_and_lowercase() {
+    use unicode_normalization::UnicodeNormalization;
+
+    for input in [
+        "ＡＢＣ ㍿ ① ｶﾞ",
+        "ﬃ ﬁ ﬄ",
+        "e\u{301} a\u{315}\u{300} a\u{300}\u{315}",
+        "각 각 한글",
+        "ا\u{0654}\u{0651} ש\u{05c1}\u{05b8}",
+        "İ ẞ Σ ΟΣ",
+        "👩\u{200d}💻 ✨ 中文abcかな한글123",
+        "\u{301}\u{323} A\u{301}\u{327}",
+    ] {
+        let canonical: String = input.nfkc().flat_map(char::to_lowercase).collect();
+        let actual: Vec<_> = tokenize(input)
+            .into_iter()
+            .map(|token| token.text)
+            .collect();
+        let expected: Vec<_> = tokenize(&canonical)
+            .into_iter()
+            .map(|token| token.text)
+            .collect();
+        assert_eq!(actual, expected, "input: {input:?}");
+    }
 }
 
 #[test]
