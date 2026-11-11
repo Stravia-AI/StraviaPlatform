@@ -250,6 +250,49 @@ async fn sqlite_contract_and_reopen() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn sqlite_writes_wait_for_pool_write_lease() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let busy_timeout = std::time::Duration::from_millis(25);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(directory.path().join("admissions.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .busy_timeout(busy_timeout),
+        )
+        .await?;
+    crate::migrations::migrate_sqlite(&pool, None).await?;
+    let store = SqliteStorage::from_pool(pool.clone()).prompt_admissions();
+
+    // 持有写租约超过 BUSY 时限（如后台索引回填）：准入写入与保留清理应排队，而不是报 database is locked。
+    let mut connection = pool.acquire_write().await?;
+    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query("UPDATE prompt_admission_epoch SET epoch=epoch WHERE id=1")
+        .execute(&mut *transaction)
+        .await?;
+    let mut writes = {
+        let store = std::sync::Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .insert(&record("queued", "alice", None, 1, 1, "hash-q"))
+                .await?;
+            store.prune_before(0).await
+        })
+    };
+    let early = tokio::time::timeout(busy_timeout * 6, &mut writes).await;
+    transaction.commit().await?;
+    connection.finish().await?;
+    match early {
+        Ok(result) => result??,
+        Err(_) => tokio::time::timeout(std::time::Duration::from_secs(5), writes).await???,
+    };
+    assert!(store.get("alice", "queued").await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn postgres_contract_and_reopen() -> anyhow::Result<()> {
     let Ok(url) = std::env::var("DB_URL") else {
         return Ok(());
