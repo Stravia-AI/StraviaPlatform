@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,11 +14,15 @@ use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tungstenite_deflate::{Message, Utf8Bytes};
 
 use crate::Gateway;
 use crate::proxy::context::RequestContext;
 use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+
+mod upgrade;
+use upgrade::{Socket, Upgrade};
 
 const MAX_MESSAGE_BYTES: usize = 100 * 1024 * 1024;
 const OUTGOING_QUEUE_CAPACITY: usize = 64;
@@ -157,7 +160,7 @@ fn websocket_ingress(
 }
 
 pub async fn handler(
-    ws: WebSocketUpgrade,
+    upgrade: Upgrade,
     State(gateway): State<Gateway>,
     headers: HeaderMap,
     origins: Option<Extension<AllowedWebSocketOrigins>>,
@@ -197,12 +200,10 @@ pub async fn handler(
     }
 
     let (handshake_sender, handshake_receiver) = tokio::sync::oneshot::channel();
-    let response = ws
-        .max_message_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
-            let pending_handshake = handshake_receiver.await.unwrap_or(None);
-            serve(socket, gateway, headers, pending_handshake).await;
-        });
+    let response = upgrade.on_upgrade(MAX_MESSAGE_BYTES, move |socket| async move {
+        let pending_handshake = handshake_receiver.await.unwrap_or(None);
+        serve(socket, gateway, headers, pending_handshake).await;
+    });
     let pending_handshake = pending_handshake_request.map(|request| PendingHandshake {
         request,
         response_recorded_at: chrono::Utc::now().timestamp_millis(),
@@ -254,7 +255,7 @@ impl StreamForwardProgress {
 }
 
 async fn serve(
-    socket: WebSocket,
+    socket: Socket,
     gateway: Gateway,
     headers: HeaderMap,
     mut pending_handshake: Option<PendingHandshake>,
@@ -617,7 +618,7 @@ async fn serve(
                                 "close",
                                 frame.map_or(Value::Null, |frame| {
                                     serde_json::json!({
-                                        "code": frame.code,
+                                        "code": u16::from(frame.code),
                                         "reason": frame.reason.as_str(),
                                     })
                                 }),
@@ -626,6 +627,8 @@ async fn serve(
                     }
                     break;
                 }
+                // 读取路径不会产出原始帧；列出分支以保持匹配穷尽。
+                Message::Frame(_) => {}
                 Message::Binary(payload) => {
                     let ingress = websocket_ingress(&gateway, pending_handshake.take());
                     ingress.record_debug(|| ws_wire(

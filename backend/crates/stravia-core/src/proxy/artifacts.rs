@@ -33,9 +33,12 @@ pub async fn upload(State(gateway): State<Gateway>, headers: HeaderMap, body: Bo
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok());
-    let stream = body
-        .into_data_stream()
-        .map(|chunk| chunk.map_err(|error| ArtifactError::Storage(error.to_string())));
+    // 请求体读取失败（含压缩数据损坏）是客户端侧问题，不能渲染为存储故障。
+    let stream = body.into_data_stream().map(|chunk| {
+        chunk.map_err(|error| {
+            ArtifactError::Invalid(format!("Request body could not be read: {error}"))
+        })
+    });
     match store
         .ingest(&principal, mime_type, size, Box::pin(stream), retention)
         .await

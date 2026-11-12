@@ -242,6 +242,8 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
         let client = reqwest::Client::new();
         let sending = client.post(format!("http://{address}/v1/responses"))
             .bearer_auth(&key.token)
+            // 声明可压缩的客户端仍须逐帧收到 SSE；reqwest 此处不会解压，被压缩或缓冲都会让下面的断言失败。
+            .header("accept-encoding", "gzip, deflate, br, zstd")
             .json(&json!({"model":"native-publication","stream":true,"input":"publish public text before native state","context_management":[{"type":"compaction","compact_threshold":128}]}));
         stage.set("inline provider request and headers");
         let mut sending = tokio::spawn(async move { sending.send().await });

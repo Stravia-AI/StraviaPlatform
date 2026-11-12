@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- The proxy accepts request bodies compressed with `Content-Encoding: gzip`, `deflate`, `br` or `zstd` on every inference, Artifact upload and MCP route, so clients that compress requests can connect directly. Bodies are decompressed before parsing and the existing size limits apply to the decompressed bytes. Unsupported encodings return 415 and corrupt compressed data returns 400.
+- The proxy compresses non-streaming responses with the encoding the client accepts in `Accept-Encoding` (`zstd`, `br`, `gzip` or `deflate`). Server-Sent Events, images, audio, video and responses under 32 bytes stay uncompressed, so streaming latency is unchanged.
+- The Responses WebSocket endpoint negotiates `permessage-deflate` (RFC 7692) when the client offers it, as Codex does, and honours the offered context-takeover and window-size limits. Clients that do not offer it are unaffected. The 100 MiB message limit applies to the decompressed size.
+
 ### Changed
 
 - `StraviaRead` treats zero-value fields like omitted or `null` fields: a blank `question`, `"wait": 0`, and empty `attachments` or `allowed_domains` arrays are no longer rejected on paths that do not use them. Models that fill every schema field with placeholders, such as Gemini, can now list `stravia://history/` and read resources on the first call. `allowed_domains: []` now means unrestricted for a new search and inherits the parent policy for a continuation, instead of failing; searches and continuations with a blank `question` report the missing `question`.

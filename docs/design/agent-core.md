@@ -713,6 +713,7 @@ Content-Type: <MIME>
 - 请求体就是文件字节，`Content-Type` 就是 MIME；缺少 Content-Type、`application/x-www-form-urlencoded`（curl `--data-binary` 不带 `-H` 时的默认值）或 `multipart/*` 返回 415，避免把表单边界写进文件内容。MIME 校验与归一化沿用 ingest 现有规则；
 - 使用 inference API key principal 或临时 Upload Grant；anonymous 在读取上传 body 前拒绝；
 - 请求体流式写入 `ArtifactStore::ingest`，不整体缓冲；单 Artifact 100 MiB absolute limit，per-principal 16 个/400 MiB staging reservation，并叠加 Definition size/count/declared MIME policy，均由 ingest 路径执行；
+- 请求体可带 `Content-Encoding: gzip | deflate | br | zstd`，解压后才进入 ingest，内容身份与限制都按解码后的文件字节计算；此时没有声明长度。压缩数据损坏返回 400，其它编码返回 415；
 - ingest 的 staging idle TTL 为 1 小时，覆盖大文件单请求上传的耗时；Gateway sweeper 清理过期 staging 与 metadata；
 - Artifact 保留期跟随 `log_retention_days`；
 - 内容身份由服务端对完整内容计算，同一 principal 重复上传相同内容得到同一 `path`；不接受客户端声明的内容摘要；
