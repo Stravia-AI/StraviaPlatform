@@ -15,9 +15,8 @@ impl PluginStore {
     /// Remove one bounded batch; subsequent maintenance passes collect the rest.
     pub(crate) async fn sweep_atomic_journal(&self) -> anyhow::Result<u64> {
         macro_rules! sweep {
-            ($pool:expr, $begin:literal, $lock:literal, $content:ident) => {{
-                let mut connection = $pool.acquire_write().await?;
-                let mut tx = connection.begin_with($begin).await?;
+            ($pool:expr, $lock:literal, $content:ident) => {{
+                let mut tx = $pool.begin_write().await?;
                 sqlx::query($lock).execute(&mut *tx).await?;
                 let now = chrono::Utc::now().timestamp_millis();
                 sqlx::query(EXPIRED_PINS)
@@ -34,20 +33,17 @@ impl PluginStore {
                     .rows_affected();
                 crate::content_store::$content::enqueue_unreferenced(&mut *tx, &bodies).await?;
                 tx.commit().await?;
-                connection.finish().await?;
                 Ok(bodies.len() as u64 + facts)
             }};
         }
         match &self.backend {
             PluginStoreBackend::Sqlite(pool) => sweep!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 sqlite
             ),
             PluginStoreBackend::Postgres(pool) => sweep!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock(7342179085017261)",
                 postgres
             ),

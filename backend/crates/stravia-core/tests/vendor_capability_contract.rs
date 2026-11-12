@@ -81,10 +81,8 @@ impl TestHarness {
                 expires_at: None,
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,
-                inject_web_search: false,
-                inject_media_generation: false,
+                transparent_injections: Default::default(),
                 model_ids: Vec::new(),
-                inject_media_understanding: false,
                 spend_limit: None,
             })
             .await?;
@@ -125,10 +123,8 @@ impl TestHarness {
                 expires_at: None,
                 mcp_access_enabled: true,
                 transparent_injection_enabled: false,
-                inject_web_search: false,
-                inject_media_generation: false,
+                transparent_injections: Default::default(),
                 model_ids: Vec::new(),
-                inject_media_understanding: false,
                 spend_limit: None,
             })
             .await?;
@@ -3143,10 +3139,8 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![image_route.id.clone().into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await?;
@@ -3349,9 +3343,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: vec![inference_route.id.clone().into()],
             spend_limit: None,
         })
@@ -3537,9 +3529,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
-            inject_media_understanding: false,
+            transparent_injections: Default::default(),
             model_ids: vec![openai_route.id.clone().into()],
             spend_limit: None,
         })

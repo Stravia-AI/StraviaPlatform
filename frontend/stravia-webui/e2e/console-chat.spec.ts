@@ -40,8 +40,7 @@ const key = {
   rpm_limit: null,
   mcp_access_enabled: false,
   transparent_injection_enabled: false,
-  inject_web_search: false,
-  inject_media_understanding: false,
+  transparent_injections: [],
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }

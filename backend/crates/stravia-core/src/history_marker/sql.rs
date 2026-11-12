@@ -3,19 +3,14 @@ use super::*;
 use sqlx::FromRow;
 
 macro_rules! backend {
-    ($store:expr, $pool:ident, $connection:ident, $transaction:ident, $body:block) => {
+    ($store:expr, $pool:ident, $transaction:ident, $body:block) => {
         match $store {
             SqlHistoryMarkerStore::Sqlite($pool) => {
-                let mut $connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut $transaction = $connection
-                    .begin_with("BEGIN IMMEDIATE")
-                    .await
-                    .map_err(storage)?;
+                let mut $transaction = $pool.begin_write().await.map_err(storage)?;
                 $body
             }
             SqlHistoryMarkerStore::Postgres($pool) => {
-                let mut $connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut $transaction = $connection.begin().await.map_err(storage)?;
+                let mut $transaction = $pool.begin_write().await.map_err(storage)?;
                 $body
             }
         }
@@ -91,13 +86,9 @@ impl SqlHistoryMarkerStore {
         let pending_until = Self::after(now, PENDING_RETENTION);
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
                 // 先读正文 scope 再写：IMMEDIATE 让门外写锁按 busy_timeout 等待，
                 // 而不是在 DEFERRED 读快照升级为写时立即 BUSY。
-                let mut transaction = connection
-                    .begin_with("BEGIN IMMEDIATE")
-                    .await
-                    .map_err(storage)?;
+                let mut transaction = pool.begin_write().await.map_err(storage)?;
                 let (envelope, ids) =
                     super::payload::sqlite::intern_segment(&mut transaction, &principal, payload)
                         .await
@@ -121,7 +112,6 @@ impl SqlHistoryMarkerStore {
                     .await
                     .map_err(segment_storage)?;
                 transaction.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
             }
             Self::Postgres(pool) => {
                 let mut transaction = pool.begin().await.map_err(storage)?;
@@ -320,12 +310,8 @@ impl SqlHistoryMarkerStore {
         let payload = super::content::encode_segment(&segment).map_err(segment_storage)?;
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
                 // 先读正文 scope 再写，原因同 `insert_thinking`。
-                let mut transaction = connection
-                    .begin_with("BEGIN IMMEDIATE")
-                    .await
-                    .map_err(storage)?;
+                let mut transaction = pool.begin_write().await.map_err(storage)?;
                 let (envelope, ids) =
                     super::payload::sqlite::intern_segment(&mut transaction, principal, payload)
                         .await
@@ -359,7 +345,6 @@ impl SqlHistoryMarkerStore {
                 } else {
                     transaction.rollback().await.map_err(storage)?;
                 }
-                connection.finish().await.map_err(storage)?;
             }
             Self::Postgres(pool) => {
                 let mut transaction = pool.begin().await.map_err(storage)?;
@@ -508,7 +493,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         if input.deadline_unix_ms <= now {
             return Err(HistoryMarkerError::TerminalConflict);
         }
-        backend!(self, pool, connection, tx, {
+        backend!(self, pool, tx, {
             // Preserve the original absolute acceptance deadline.
             sqlx::query(
                 "UPDATE history_markers SET execution_deadline = CASE WHEN execution_deadline < $1 \
@@ -542,7 +527,6 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                 return Err(HistoryMarkerError::TerminalConflict);
             }
             tx.commit().await.map_err(storage)?;
-            connection.finish().await.map_err(storage)?;
         });
         Ok(id)
     }
@@ -607,7 +591,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         before_commit: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<(), HistoryMarkerError> {
         let key = principal.continuation_key();
-        backend!(self, pool, connection, transaction, {
+        backend!(self, pool, transaction, {
             let updated = sqlx::query(
                 "UPDATE public_tool_executions SET handed_off_at = COALESCE(handed_off_at, $1) \
                  WHERE id = $2 AND principal = $3 AND id IN \
@@ -622,13 +606,11 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
             .rows_affected();
             if updated != 1 || !before_commit() {
                 transaction.rollback().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
                 return Err(HistoryMarkerError::TerminalConflict);
             }
             match transaction.commit().await {
-                Ok(()) => connection.finish().await.map_err(storage),
+                Ok(()) => Ok(()),
                 Err(commit_error) => {
-                    connection.finish().await.map_err(storage)?;
                     // A failed acknowledgement does not establish that COMMIT
                     // failed. Read the durable fact without replaying the update.
                     let persisted: Result<i64, sqlx::Error> = sqlx::query_scalar(
@@ -653,9 +635,8 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
 
     async fn recover_public_executions(&self) -> Result<(), HistoryMarkerError> {
         macro_rules! recover {
-            ($pool:expr, $begin:literal, $lock:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin_with($begin).await.map_err(storage)?;
+            ($pool:expr, $lock:expr) => {{
+                let mut transaction = $pool.begin_write().await.map_err(storage)?;
                 // 多行更新 Marker：PostgreSQL 上与回收事务互斥（共享模式），行锁顺序不与
                 // 回收的释放触发器交叉。
                 if !$lock.is_empty() {
@@ -677,14 +658,13 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                 .await
                 .map_err(storage)?;
                 transaction.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
                 interrupted
             }};
         }
         let interrupted: Vec<(String, String)> = match self {
-            Self::Sqlite(pool) => recover!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Sqlite(pool) => recover!(pool, ""),
             Self::Postgres(pool) => {
-                recover!(pool, "BEGIN", crate::history_retention::PG_GC_LOCK_SHARED)
+                recover!(pool, crate::history_retention::PG_GC_LOCK_SHARED)
             }
         };
         for (principal, reference) in interrupted {
@@ -713,7 +693,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let pending_until = Self::after(now, PENDING_RETENTION);
         match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
+                let mut connection = pool.begin_write().await.map_err(storage)?;
                 sqlx::query(
                     "INSERT INTO history_markers \
              (reference, principal, kind, activity, tool_id, call_payload, execution_state, \
@@ -732,7 +712,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                 .execute(&mut *connection)
                 .await
                 .map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
+                connection.commit().await.map_err(storage)?;
             }
             Self::Postgres(pool) => {
                 sqlx::query(
@@ -859,7 +839,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let principal_key = principal.continuation_key();
         let updated = match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
+                let mut connection = pool.begin_write().await.map_err(storage)?;
                 let updated = sqlx::query(
                 "UPDATE history_markers SET execution_state = 'running', execution_owner = ?, \
      lease_expires_at = ?, updated_at = ? WHERE principal = ? AND reference = ? \
@@ -877,7 +857,7 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
             .await
             .map_err(storage)?
             .rows_affected();
-                connection.finish().await.map_err(storage)?;
+                connection.commit().await.map_err(storage)?;
                 updated
             }
             Self::Postgres(pool) => sqlx::query(
@@ -954,12 +934,8 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let principal_key = principal.continuation_key();
         let updated = match self {
             Self::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage)?;
                 // 先读正文 scope 再写，原因同 `insert_thinking`。
-                let mut transaction = connection
-                    .begin_with("BEGIN IMMEDIATE")
-                    .await
-                    .map_err(storage)?;
+                let mut transaction = pool.begin_write().await.map_err(storage)?;
                 let (envelope, ids) = super::payload::sqlite::intern_segment(
                     &mut transaction,
                     &principal_key,
@@ -996,7 +972,6 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                 } else {
                     transaction.rollback().await.map_err(storage)?;
                 }
-                connection.finish().await.map_err(storage)?;
                 updated
             }
             Self::Postgres(pool) => {
@@ -1101,9 +1076,8 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let principal = principal.continuation_key();
         let now = Self::now();
         macro_rules! publish {
-            ($pool:expr, $begin:literal, $lock:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin_with($begin).await.map_err(storage)?;
+            ($pool:expr, $lock:expr) => {{
+                let mut transaction = $pool.begin_write().await.map_err(storage)?;
                 if !$lock.is_empty() {
                     sqlx::query($lock)
                         .execute(&mut *transaction)
@@ -1130,13 +1104,12 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                     }
                 }
                 transaction.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
             }};
         }
         match self {
-            Self::Sqlite(pool) => publish!(pool, "BEGIN IMMEDIATE", ""),
+            Self::Sqlite(pool) => publish!(pool, ""),
             Self::Postgres(pool) => {
-                publish!(pool, "BEGIN", crate::history_retention::PG_GC_LOCK_SHARED)
+                publish!(pool, crate::history_retention::PG_GC_LOCK_SHARED)
             }
         }
         Ok(())
@@ -1147,9 +1120,8 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         let threshold =
             now.saturating_sub(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
         macro_rules! sweep {
-            ($pool:expr, $begin:literal, $lock:expr, $skip_locked:literal, $enqueue:path) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+            ($pool:expr, $lock:expr, $skip_locked:literal, $enqueue:path) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                 // 到期的公开工具执行先删除；触发器把失去执行记录的 marker 入队。
                 sqlx::query("DELETE FROM public_tool_executions WHERE expires_at <= $1")
@@ -1184,11 +1156,9 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                         .bind(name).bind(horizon).execute(&mut *tx).await.map_err(storage)?;
                 }
                 tx.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
                 let mut removed = 0u64;
                 loop {
-                    let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                    let mut tx = connection.begin_with($begin).await.map_err(storage)?;
+                    let mut tx = $pool.begin_write().await.map_err(storage)?;
                     if !$lock.is_empty() { sqlx::query($lock).execute(&mut *tx).await.map_err(storage)?; }
                     let claim = format!(
                         "SELECT g.reference FROM history_marker_gc g \
@@ -1200,7 +1170,6 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                         .fetch_all(&mut *tx).await.map_err(storage)?;
                     if claimed.is_empty() {
                         tx.commit().await.map_err(storage)?;
-                        connection.finish().await.map_err(storage)?;
                         break;
                     }
                     // 整批释放的正文 ID：删除 Marker 会级联移除引用行，所以先取回；
@@ -1232,7 +1201,6 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
                     }
                     $enqueue(&mut tx, &released).await.map_err(segment_storage)?;
                     tx.commit().await.map_err(storage)?;
-                    connection.finish().await.map_err(storage)?;
                 }
                 Ok(removed)
             }};
@@ -1240,14 +1208,12 @@ impl HistoryMarkerStore for SqlHistoryMarkerStore {
         match self {
             Self::Sqlite(pool) => sweep!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "",
                 "",
                 crate::content_store::sqlite::enqueue_unreferenced
             ),
             Self::Postgres(pool) => sweep!(
                 pool,
-                "BEGIN",
                 crate::history_retention::PG_GC_LOCK,
                 " FOR UPDATE OF g, m SKIP LOCKED",
                 crate::content_store::postgres::enqueue_unreferenced

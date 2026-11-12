@@ -62,7 +62,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 ### 统一资源读取与文本分页
 
-资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>[:<选择器>...]`，Artifact Reference 使用 `stravia://artifacts/<artifact-id>`，源 URL 的 query 与 fragment 原样保留，平台问题通过 `question` 字段传递，不发送给源站。选择器从 path 末尾按 `:` 剥离：`raw`、`download`、`cursor=<base64url>` 与行范围（`N`、`N-M`、`N+K`、`-K`，逗号分隔多段）。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照。authority 内的 `:` 不剥离；源 URL 字面以选择器形态结尾时把属于 URL 的 `:` 写成 `%3A`，裸 `host:port` 后加 `/` 再追加选择器。资源 path 不接受续接；媒体续接使用 Turn path 加 `attachments`，HTML／文本不接受媒体续接。旧平台调用别名、顶层 `url` 和 Artifact query 选项不再执行。示例：`{"path": "stravia://artifacts/<artifact-id>:1-50", "question": "What does this section say?"}`。
+资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>[:<选择器>...]`，Artifact Reference 使用 `stravia://artifacts/<artifact-id>`，源 URL 的 query 与 fragment 原样保留，平台问题通过 `question` 字段传递，不发送给源站。选择器从 path 末尾按 `:` 剥离：`raw`、`download`、`cursor=<base64url>` 与行范围（`N`、`N-M`、`N+K`、`-K`，逗号分隔多段）。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照与历史回看路径（`stravia://history/`，见[历史回看设计](history-recall.md)）。authority 内的 `:` 不剥离；源 URL 字面以选择器形态结尾时把属于 URL 的 `:` 写成 `%3A`，裸 `host:port` 后加 `/` 再追加选择器。资源 path 不接受续接；媒体续接使用 Turn path 加 `attachments`，HTML／文本不接受媒体续接。旧平台调用别名、顶层 `url` 和 Artifact query 选项不再执行。示例：`{"path": "stravia://artifacts/<artifact-id>:1-50", "question": "What does this section say?"}`。
 
 公网与所属 Artifact 按内容类型一致读取：JPEG/PNG/WebP 默认理解并提取文字；HTML 默认 Markdown，附问题只返回 `question_applied=false`；JSON/XML/text 类文件读取原文本。未知二进制返回未读取说明与下载信息，不能用下载冒充指定内容操作。显式下载不执行模型。公网默认 HTML 保留现有 Provider／渲染路径；raw 直接取得正文一次，再严格按 BOM、Content-Type charset、HTML meta、缺省 UTF-8 解码，支持既有 UTF-8、Latin1、Windows-1252、UTF-16LE/BE；未知或无效编码失败。raw 正文不加行号或提示。
 
@@ -88,10 +88,10 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 |---|---|---|
 | 客户端显式 `StraviaRead` 联网分流 | 平台 Gate 开启 | 无 |
 | Hosted/native web search 声明 | 平台 Gate 开启 | 无 |
-| Stravia 自动暴露联网分流 | Key 的 master 与 `inject_web_search` 均开启 | 同时暴露搜索和网页读取 |
+| Stravia 自动暴露联网分流 | Key 的 `transparent_injection_enabled` 开启，且注入选择包含 `web_search` | 同时暴露搜索和网页读取 |
 | MCP 联网调用 | `mcp_access_enabled` 与平台 Gate 均开启 | 无；所属 Artifact 显式下载独立可用 |
 
-关闭平台 Gate 后，Key 上已保存的 `inject_web_search` 不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
+关闭平台 Gate 后，Key 上已保存的 `web_search` 注入选择不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
 
 Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_ids` 与 `fetch_provider_ids`，分别表示搜索与网页读取来源的有序选择；管理 HTTP 与 Desktop 使用同一结构。旧实例的 `web_access_enabled` 设置不再读写，也不再决定运行时可用性。该调整不自动启用 `web_search_config.enabled`，不改变 API Key、MCP 或网络安全校验。
 

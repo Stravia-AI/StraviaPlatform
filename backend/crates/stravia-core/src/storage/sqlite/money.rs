@@ -66,8 +66,7 @@ impl MoneyStore for SqliteStorage {
         usd_rate: Decimal,
     ) -> anyhow::Result<CustomCurrency> {
         let symbol = symbol.trim().to_string();
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let existing: Option<(String,)> =
             sqlx::query_as("SELECT value FROM settings WHERE name = ?")
                 .bind(money::CUSTOM_CURRENCY_SETTING_KEY)
@@ -118,7 +117,6 @@ impl MoneyStore for SqliteStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(currency)
     }
 
@@ -154,8 +152,7 @@ impl MoneyStore for SqliteStorage {
         input: NewProviderCostPlan,
     ) -> anyhow::Result<ProviderCostPlan> {
         money::validate_new_cost_plan(&input)?;
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE id = ?)")
                 .bind(provider_id)
@@ -216,7 +213,6 @@ impl MoneyStore for SqliteStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ProviderCostPlan {
             id,
             provider_id: provider_id.to_string(),
@@ -250,8 +246,7 @@ impl MoneyStore for SqliteStorage {
 
     async fn reset_api_key_spend(&self, api_key_id: &str) -> anyhow::Result<ApiKeySpend> {
         let now = Self::now_rfc3339();
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin().await?;
+        let mut tx = self.pool.begin_write().await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_keys WHERE id = ?)")
             .bind(api_key_id)
             .fetch_one(&mut *tx)
@@ -270,7 +265,6 @@ impl MoneyStore for SqliteStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ApiKeySpend {
             spent_custom_nanos: 0,
             spent_usd_unconverted_nanos: 0,

@@ -233,10 +233,8 @@ async fn failed_background_search_is_a_successful_status_read_and_owner_is_not_d
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

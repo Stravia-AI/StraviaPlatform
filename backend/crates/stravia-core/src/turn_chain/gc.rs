@@ -27,7 +27,7 @@ impl Candidate {
 }
 
 macro_rules! backend {
-    ($scan:ident, $collect:ident, $prune:ident, $prune_scopes:path, $enqueue:path, $pool:ty, $conn:ty, $db:ty, $begin:literal, $locks:expr, $skip_locked:literal) => {
+    ($scan:ident, $collect:ident, $prune:ident, $prune_scopes:path, $enqueue:path, $pool:ty, $conn:ty, $db:ty, $locks:expr, $skip_locked:literal) => {
         async fn $prune(connection: &mut $conn, scopes: &mut Vec<i64>) -> anyhow::Result<()> {
             let scopes = std::mem::take(scopes);
             $prune_scopes(connection, &scopes).await
@@ -36,8 +36,7 @@ macro_rules! backend {
         /// 期限跨越扫描：只扫 `(W, T]`，没有子节点且不是原生登记来源的节点入队，同一事务推进水位。
         async fn $scan(pool: &$pool, now: i64, window: i64) -> anyhow::Result<()> {
             let threshold = now.saturating_sub(window);
-            let mut connection = pool.acquire_write().await?;
-            let mut transaction = connection.begin_with($begin).await?;
+            let mut transaction = pool.begin_write().await?;
             let watermark: i64 = sqlx::query_scalar(
                 "SELECT position FROM history_retention_watermarks WHERE name = $1",
             ).bind(WATERMARK).fetch_one(&mut *transaction).await?;
@@ -45,7 +44,6 @@ macro_rules! backend {
                 sqlx::query("UPDATE history_retention_watermarks SET position = $2 WHERE name = $1")
                     .bind(WATERMARK).bind(threshold).execute(&mut *transaction).await?;
                 transaction.commit().await?;
-                connection.finish().await?;
                 return Ok(());
             }
             let mut query = sqlx::QueryBuilder::<$db>::new(
@@ -61,15 +59,13 @@ macro_rules! backend {
             sqlx::query("UPDATE history_retention_watermarks SET position = $2 WHERE name = $1")
                 .bind(WATERMARK).bind(threshold).execute(&mut *transaction).await?;
             transaction.commit().await?;
-            connection.finish().await?;
             Ok(())
         }
 
         /// 从队列领取候选，加锁重检后删除；返回 `(访问数, 删除节点数, 进展数)`。
         async fn $collect(pool: &$pool, now: i64, window: i64) -> anyhow::Result<(usize,u64,u64)> {
             let threshold = now.saturating_sub(window);
-            let mut connection = pool.acquire_write().await?;
-            let mut transaction = connection.begin_with($begin).await?;
+            let mut transaction = pool.begin_write().await?;
             // 与提交共享的锁序：turn_nodes -> content_scopes；SHARE ROW EXCLUSIVE 阻止写入穿插。
             // 表锁在前、咨询锁在后：等待在途提交结束期间不持有咨询锁，Marker/映射发布与原生压缩
             // 确认（取咨询锁共享模式）不会排在这次等待之后；取得表锁后再取咨询锁，使并发回收事务的
@@ -152,7 +148,6 @@ macro_rules! backend {
             $enqueue(&mut *transaction, &released).await?;
             $prune(&mut transaction, &mut scopes).await?;
             transaction.commit().await?;
-            connection.finish().await?;
             Ok((visited, removed, removed + removed_refs + marked + blocked.len() as u64))
         }
     };
@@ -167,7 +162,6 @@ backend!(
     sqlx::SqlitePool,
     sqlx::SqliteConnection<'_>,
     sqlx::Sqlite,
-    "BEGIN IMMEDIATE",
     [] as [&str; 0],
     ""
 );
@@ -180,7 +174,6 @@ backend!(
     sqlx::PgPool,
     sqlx::PgConnection<'_>,
     sqlx::Postgres,
-    "BEGIN",
     [
         "LOCK TABLE turn_nodes IN SHARE ROW EXCLUSIVE MODE",
         crate::history_retention::PG_GC_LOCK

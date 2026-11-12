@@ -68,8 +68,7 @@ impl MoneyStore for PostgresStorage {
         usd_rate: Decimal,
     ) -> anyhow::Result<CustomCurrency> {
         let symbol = symbol.trim().to_string();
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin().await?;
+        let mut tx = self.pool.begin_write().await?;
         // First setup converts every spend limit exactly once; serialize all
         // currency writes with a transaction-scoped advisory lock.
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -127,7 +126,6 @@ impl MoneyStore for PostgresStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(currency)
     }
 
@@ -163,8 +161,7 @@ impl MoneyStore for PostgresStorage {
         input: NewProviderCostPlan,
     ) -> anyhow::Result<ProviderCostPlan> {
         money::validate_new_cost_plan(&input)?;
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin().await?;
+        let mut tx = self.pool.begin_write().await?;
         let exists: Option<String> =
             sqlx::query_scalar("SELECT id FROM providers WHERE id = $1 FOR UPDATE")
                 .bind(provider_id)
@@ -225,7 +222,6 @@ impl MoneyStore for PostgresStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ProviderCostPlan {
             id,
             provider_id: provider_id.to_string(),
@@ -259,8 +255,7 @@ impl MoneyStore for PostgresStorage {
 
     async fn reset_api_key_spend(&self, api_key_id: &str) -> anyhow::Result<ApiKeySpend> {
         let now = Self::now_rfc3339();
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin().await?;
+        let mut tx = self.pool.begin_write().await?;
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_keys WHERE id = $1)")
                 .bind(api_key_id)
@@ -279,7 +274,6 @@ impl MoneyStore for PostgresStorage {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(ApiKeySpend {
             spent_custom_nanos: 0,
             spent_usd_unconverted_nanos: 0,

@@ -164,6 +164,8 @@ Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通�
 
 数据库、事务日志或实例文件存储失败（包括容量耗尽）适用 [ADR-0060 的请求/任务局部处理约束](../adr/0060-own-interaction-observation-outside-generation-chain.md#存储失败只影响所属请求或任务)：关键同步操作沿原 Result 失败当前相关请求或任务，Observation/Debug 独立异步写入失败只归所属诊断任务并保留 gap/partial，不牵连推理与无关请求/后台任务，Server/Desktop 继续服务。诊断不作为执行事实源；不新增全局 fatal 广播、全入口 scope、降级模式、健康检查或自动重试，不补造用量、不自动重放模型调用。独立长期 Stats 未可靠汇总时相关破坏性清理仍明确失败。队列满、Trace 限额及普通缺口保留原语义；该局部策略已实现，真实 Server SQLite/PostgreSQL 与 Desktop SQLite 的[宿主/HTTP 测试](../../tests/e2e/storage/test_storage_failures.py)覆盖在途/后续请求、已交付后的后台 Media 任务、诊断 gap/partial 与双库 Stats 写失败的清理保护；真实 SQLITE_FULL 与隔离固定 PostgreSQL trigger 的边界见[整体架构 §4.10](architecture.md#410-interaction-observation)。
 
+历史回看（[ADR-0096](../adr/0096-recall-interaction-chains-through-read-paths.md)，[设计](history-recall.md)）是 Observation 的只读使用方：按 Principal 读取保留期内的 Interaction、Run 与普通事件，渲染给同一 API Key 透明注入的 StraviaRead。它不写 Observation，不改变保留、清理、清除历史记录或归属规则，也不读取 Debug Trace；观测缺口照常以缺口行出现，不从 Generation Chain 补写。Observation 仍是诊断投影，回看不把它升级为执行事实源。按 Principal 列出链路使用 `interaction_observations (principal, last_active_at DESC, id)` 索引（迁移 0050）。
+
 ### 3.5 凭据命中记录
 
 命中记录从普通 `credential_mappings_created` 与 `credential_mappings_reused` 事件投影，不另建秘密目录或会话事实源。两个事件载荷同形：`discoveries: [{ rule_ids, source_types, locators, omitted_locators?, marker? }]` 加可选 `omitted_discoveries`，每个元素对应一个映射。`created` 在映射实际新建提交后、可失败的替换前由 `RunObserver` 发出；`reused` 有两处来源：一是出站替换，命中已有有效映射、且位置在本次请求新提交的文本时，在替换完成后发出（最后一条 Assistant 之后的条目；更早的是客户端重放的历史，不写入；没有 Assistant 条目时整个请求都是新提交）；二是模型响应，完整响应里工具调用参数的引用被还原时发出，来源 `tool_arguments`，块标识是该调用 ID，流式中途断开而没有完整响应时不记。同一 Model Turn 新建与复用并存时各发一个事件；模型在同一轮就把刚新建的凭据用到工具调用里时，该 Interaction 同时有新增与复用。复用命中的位置来自实际发生的替换与还原而不是检测器，因此已知凭据出现在检测器认不出的上下文（例如只有裸值的工具结果）也会记录；规则取自映射表的 `rule_ids`，由检测器在创建映射时写入且之后不改写，创建之前的映射没有规则，只受保护、不产生复用命中。`locators` 逐项保存「规则 + 来源」配对及块级标识：工具参数与工具结果带 provider 原始 `tool_id`，用户消息只带 `latest_input`（是否为请求窗口里最后一条用户输入；内部 Agent 轮次的用户条目是平台构造的，一律为假），其余来源不带标识；去重后每个映射至多 50 项，每个事件至多 50 个映射，超出部分只记 `omitted_locators` / `omitted_discoveries` 计数；位置超限时每种「规则 + 来源 + 是否最新输入」先各留一项，再按序补满，不让排在后面的来源整体丢失。不使用请求条目下标（`protect` 之前历史标记还原会拆分、注入条目），不保存字符偏移、消息片段、指纹或完整 JSON 路径。来源类型为 `user_message`、`system_or_history`、`tool_arguments`、`tool_result`、`other_text`，来自本次提取和最终规则命中，不从历史正文补推。没有 `locators` 的旧事件按空处理：列表回退为 `rule_ids` × `source_types` 的组合，请求记录只打开 Interaction 而不高亮。`marker` 是该映射的不透明占位符（= 映射 `reference`），所有 Run 都记录，不再受 Debug 开关约束；同一占位符即同一映射，复用查询靠它把 `credential_mappings_reused` 事件关联回创建行。占位符不含秘密，持有它也不能脱离对应 Principal 的有效映射还原，且命中记录列表接口永不返回它，只以 `linkable` 表达「是否记录了占位符」。事件仍不含秘密、指纹和消息片段；Debug Trace 仍只保存 wire 本身。本变更之前创建的事件没有占位符（Debug 开启的 Run 除外），不回填，对应行的复用区显示无法关联。
@@ -364,11 +366,13 @@ Observation writer 为持久化事件分配递增 `event_sequence`；持久事�
 
 SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
 
-同一 Gateway 内，来自同一 SQLite pool 及其克隆的运行期写入口统一通过 `Pool::acquire_write` 取得池级写租约，包括历史、普通 Observation、Artifact、History Marker、凭据映射及管理和后台存储。租约先取得共享 FIFO 异步写锁，再取得连接；事务必须从租约连接开启，autocommit DML 和 `UPDATE ... RETURNING` 同样不能绕过租约。独立只读查询和只读事务仍使用普通 pool，不因写协调而串行化。PostgreSQL 不增加全局写锁，保持原数据库并发与锁协议。
+同一 Gateway 内，来自同一 SQLite pool 及其克隆的运行期写入口统一通过 `Pool::begin_write` 开启写事务，包括历史、普通 Observation、Artifact、History Marker、凭据映射及管理和后台存储。它先取得共享 FIFO 异步写锁（池级写租约），再取得连接并执行 `BEGIN IMMEDIATE`；单条 autocommit DML 和 `UPDATE ... RETURNING` 同样写在写事务内。调用方不接触租约、BEGIN 语句或完成屏障，切换写协调实现不需要改业务存储代码。独立只读查询和只读事务仍使用普通 pool，不因写协调而串行化。PostgreSQL 上 `begin_write` 等同普通 `BEGIN`，不增加全局写锁，保持原数据库并发与锁协议。
 
-这一约束由池强制执行，而不是只靠调用方遵守。`db::init_pool` 与无持久存储时的内存历史池以 `PoolOptions::require_write_lease` 创建：连接建立后、驱动与调用方初始化完成时设置 `PRAGMA query_only=ON`；`acquire_write` 取得连接后才设为 `OFF`，租约结束时再设回 `ON`，并兼作完成屏障。绕过租约的写入（包括 `BEGIN IMMEDIATE` 和延迟事务中的写语句）立即以 `SQLITE_READONLY` 失败，不会持有数据库写锁，也就不会让排队中的租约写者在 `busy_timeout` 后失败，或在延迟事务升级为写事务时立即 `SQLITE_BUSY`。迁移和升级钩子在同一写租约内运行。解除只读失败的连接不会归还池中，而是直接关闭。经 `Pool::connect_options` 建立的直连和离线维护池不受此约束。
+必须在事务外执行的写入（迁移期的 `PRAGMA foreign_keys`、SQLx 迁移器、测试夹具的 `sqlite3_deserialize` 与 `PRAGMA wal_checkpoint`）才使用连接级的 `Pool::acquire_write` 与 `WriteConnection::finish`。仓库 `clippy.toml` 把 `acquire_write` 列入 `disallowed-methods`，例外处须以 `#[expect(clippy::disallowed_methods, reason = …)]` 写明原因。
 
-正常提交或回滚后显式调用 `WriteConnection::finish`，在同一 SQLite worker 队列执行完成屏障并确认已退出事务后释放协调权。请求取消或错误退出时，租约的清理任务继续持锁，并在归还连接前恢复只读，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
+这一约束由池强制执行，而不是只靠调用方遵守。`db::init_pool` 与无持久存储时的内存历史池以 `PoolOptions::require_write_lease` 创建：连接建立后、驱动与调用方初始化完成时设置 `PRAGMA query_only=ON`；`begin_write`（及连接级 `acquire_write`）取得连接后才设为 `OFF`，写事务结束时再设回 `ON`，并兼作完成屏障。绕过租约的写入（包括 `BEGIN IMMEDIATE` 和延迟事务中的写语句）立即以 `SQLITE_READONLY` 失败，不会持有数据库写锁，也就不会让排队中的租约写者在 `busy_timeout` 后失败，或在延迟事务升级为写事务时立即 `SQLITE_BUSY`。迁移和升级钩子在同一写租约内运行。解除只读失败的连接不会归还池中，而是直接关闭。经 `Pool::connect_options` 建立的直连和离线维护池不受此约束。
+
+`WriteTransaction::commit` 或 `rollback` 结束事务后，在同一 SQLite worker 队列执行完成屏障，确认已退出事务后释放协调权。写事务未结束即被丢弃（`?` 早退、请求取消）时向驱动排入回滚，租约的清理任务继续持锁，并在回滚完成、归还连接前恢复只读，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。因此成功路径必须显式提交，丢弃即回滚。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
 
 写租约仅覆盖数据库阶段，不覆盖文件／网络 I/O、Artifact 对象锁等待或再次申请同池写租约。清理中的 owner 快照读事务在文件 tombstone 操作前提交；保留期更新也在完成数据库写租约后才改写 manifest。协调范围仅限同源 pool，不替代跨进程或独立连接池的数据库锁；外部写者与底层 I/O 停顿仍可能造成 SQLite 等待或 `SQLITE_BUSY`。现有 `busy_timeout` 和持久性配置不变。
 
@@ -646,7 +650,7 @@ SQLite 写租约和观测文件写入另外记录以下 `stravia::perf` 阶段�
 | 操作 | 计时边界 |
 | --- | --- |
 | `sqlite.write_gate.hold` | 获得写协调权后开始，释放协调权后结束；包括随后取连接、调用方持有租约及正常结束或异步清理，不包含获得协调权之前的排队 |
-| `sqlite.write_gate.finish` | 正常归还写连接时的 driver `ping` 屏障与事务状态检查，不是 COMMIT |
+| `sqlite.write_gate.finish` | 写事务提交或回滚后（或连接级租约正常结束时）的完成屏障与事务状态检查：要求写租约的池为恢复 `PRAGMA query_only=ON`，其他池为 driver `ping`；不是 COMMIT |
 | `sqlite.write_gate.cleanup` | 原有取消／错误清理任务的调度与执行；覆盖屏障以及必要的连接关闭，不为正常归还另建后台任务 |
 | `sql.transaction.begin` / `commit` / `rollback` | 显式事务包装边界，包括连接／嵌套事务；池级 begin 包含取连接，隐式 Drop 回滚仍由 driver 执行，不伪装为一条受采集查询 |
 | `observation.manifest.persist` | `write_entry` 的异步生命周期，包括序列化、阻塞任务调度／执行及索引更新；不含调用方此前等待 mutation lock 的时间 |
@@ -654,7 +658,7 @@ SQLite 写租约和观测文件写入另外记录以下 `stravia::perf` 阶段�
 | `observation.manifest.sync` | 上述闭包中的 `sync_all()` 调用 |
 | `observation.trace.flush` / `finish` | Trace barrier 入队与回执等待；finish 还读取最终 manifest，只有存储成功且 manifest 完整时才标记 `completed` |
 
-写租约以创建时解析的内部因果身份关联业务操作，不持有请求父 span；请求取消后，hold 可以继续覆盖实际清理，但不会把请求生命周期延长。SQL 阶段记录 `completed`、`error` 或 `cancelled`；未经成功 finish 而丢弃的租约为 `cancelled`，不表示已确认数据库回滚失败。事务阶段不进入 tracing 当前上下文，既不让 SQLite worker 延长其生命周期，也不改变既有查询归属或增加 `sql.query` 次数。没有进入执行区间的阶段可以不含 `active_us`，不能据此判为零耗时。
+写租约以创建时解析的内部因果身份关联业务操作，不持有请求父 span；请求取消后，hold 可以继续覆盖实际清理，但不会把请求生命周期延长。SQL 阶段记录 `completed`、`error` 或 `cancelled`；未经成功提交、回滚或 finish 而丢弃的租约为 `cancelled`，不表示已确认数据库回滚失败。事务阶段不进入 tracing 当前上下文，既不让 SQLite worker 延长其生命周期，也不改变既有查询归属或增加 `sql.query` 次数。没有进入执行区间的阶段可以不含 `active_us`，不能据此判为零耗时。
 
 这些区间存在包含与重叠，不能直接求和作为请求独占耗时；`persist - write` 还包含序列化和索引更新，不能直接称为阻塞线程排队时间。COMMIT 或 `sync_all()` 变慢可以定位等待边界，但仅凭客户端时长不能证明磁盘、WAL checkpoint 或操作系统调度中的哪一项是根因。
 

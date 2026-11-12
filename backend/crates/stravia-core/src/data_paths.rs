@@ -177,14 +177,14 @@ mod tests {
         let source = parent.path().join("source");
         let target = parent.path().join("数据 moved");
         let pool = crate::db::init_pool(&source).await?;
-        let mut connection = pool.acquire_write().await?;
+        let mut tx = pool.begin_write().await?;
         sqlx::query("CREATE TABLE saved (value TEXT NOT NULL)")
-            .execute(&mut *connection)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT INTO saved VALUES ('retained')")
-            .execute(&mut *connection)
+            .execute(&mut *tx)
             .await?;
-        connection.finish().await?;
+        tx.commit().await?;
         pool.close().await;
         fs::rename(&source, &target)?;
         let pool = crate::db::init_pool(&target).await?;

@@ -576,6 +576,10 @@ async fn sqlite_storage_never_serializes_volatile_payload() -> anyhow::Result<()
         .await?;
     assert_eq!(durable.revision, 0);
     assert_eq!(durable.payload, None);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "PRAGMA wal_checkpoint 必须在事务外执行，只能直接持有写连接"
+    )]
     let mut connection = pool.acquire_write().await?;
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
         .execute(&mut *connection)

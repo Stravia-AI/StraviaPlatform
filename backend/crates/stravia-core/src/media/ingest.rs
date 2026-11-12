@@ -616,13 +616,14 @@ pub(crate) async fn materialize_request(
         settings: &settings,
         retention: retention(gateway).await?,
         annotate_references: crate::proxy::security::Security::new(gateway.storage.auth())
-            .transparent_injection_enabled(principal)
+            .authorize_transparent_injections(principal)
             .await
             .map_err(|error| {
                 ArtifactError::Storage(format!(
                     "Failed to resolve transparent tool injection: {error}"
                 ))
-            })?,
+            })?
+            .enabled,
     };
     let mut transfers = Vec::new();
     for item in &mut Arc::make_mut(request).items {

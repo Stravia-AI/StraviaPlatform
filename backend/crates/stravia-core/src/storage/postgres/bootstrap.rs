@@ -50,7 +50,7 @@ pub(super) fn provider_select(suffix: Option<&str>) -> String {
 
 pub(super) fn api_key_select(suffix: Option<&str>) -> String {
     let mut sql = String::from(
-        "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, inject_media_understanding, inject_web_search, inject_media_generation, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
+        "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, transparent_injections, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS expires_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM api_keys",
     );
     if let Some(suffix) = suffix {
         sql.push(' ');
@@ -72,9 +72,7 @@ pub(super) fn api_key_with_bindings(row: ApiKey, model_ids: Vec<String>) -> ApiK
         is_enabled: row.is_enabled,
         mcp_access_enabled: row.mcp_access_enabled,
         transparent_injection_enabled: row.transparent_injection_enabled,
-        inject_media_understanding: row.inject_media_understanding,
-        inject_web_search: row.inject_web_search,
-        inject_media_generation: row.inject_media_generation,
+        transparent_injections: row.transparent_injections,
         expires_at: row.expires_at,
         created_at: row.created_at,
         updated_at: row.updated_at,

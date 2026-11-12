@@ -32,9 +32,7 @@ impl AdminService {
                 rpm_limit,
                 mcp_access_enabled: input.mcp_access_enabled,
                 transparent_injection_enabled: input.transparent_injection_enabled,
-                inject_media_understanding: input.inject_media_understanding,
-                inject_web_search: input.inject_web_search,
-                inject_media_generation: input.inject_media_generation,
+                transparent_injections: input.transparent_injections,
                 expires_at,
                 model_ids: input.model_ids,
                 spend_limit: input.spend_limit,
@@ -78,13 +76,9 @@ impl AdminService {
         let transparent_injection_enabled = input
             .transparent_injection_enabled
             .unwrap_or(current.transparent_injection_enabled);
-        let inject_media_understanding = input
-            .inject_media_understanding
-            .unwrap_or(current.inject_media_understanding);
-        let inject_web_search = input.inject_web_search.unwrap_or(current.inject_web_search);
-        let inject_media_generation = input
-            .inject_media_generation
-            .unwrap_or(current.inject_media_generation);
+        let transparent_injections = input
+            .transparent_injections
+            .unwrap_or(current.transparent_injections);
         let expires_at = match input.expires_at {
             Some(value) => normalize_api_key_expiry(Some(value))?,
             None => current.expires_at,
@@ -101,9 +95,7 @@ impl AdminService {
                     is_enabled: Some(is_enabled),
                     mcp_access_enabled: Some(mcp_access_enabled),
                     transparent_injection_enabled: Some(transparent_injection_enabled),
-                    inject_media_understanding: Some(inject_media_understanding),
-                    inject_web_search: Some(inject_web_search),
-                    inject_media_generation: Some(inject_media_generation),
+                    transparent_injections: Some(transparent_injections),
                     expires_at,
                     model_ids: input.model_ids,
                     spend_limit: input.spend_limit,
@@ -236,9 +228,7 @@ mod expiry_tests {
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
-                inject_web_search: false,
-                inject_media_generation: false,
-                inject_media_understanding: false,
+                transparent_injections: Default::default(),
                 model_ids: Vec::new(),
                 spend_limit: None,
             })
@@ -256,9 +246,7 @@ mod expiry_tests {
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
-                    inject_web_search: None,
-                    inject_media_generation: None,
-                    inject_media_understanding: None,
+                    transparent_injections: None,
                     expires_at: None,
                     model_ids: None,
                     spend_limit: None,
@@ -278,9 +266,7 @@ mod expiry_tests {
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
-                    inject_web_search: None,
-                    inject_media_generation: None,
-                    inject_media_understanding: None,
+                    transparent_injections: None,
                     expires_at: None,
                     model_ids: None,
                     spend_limit: None,
@@ -300,9 +286,7 @@ mod expiry_tests {
                     is_enabled: None,
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
-                    inject_web_search: None,
-                    inject_media_generation: None,
-                    inject_media_understanding: None,
+                    transparent_injections: None,
                     expires_at: None,
                     model_ids: None,
                     spend_limit: None,
@@ -325,9 +309,7 @@ mod expiry_tests {
                         expires_at: None,
                         mcp_access_enabled: false,
                         transparent_injection_enabled: false,
-                        inject_media_understanding: false,
-                        inject_web_search: false,
-                        inject_media_generation: false,
+                        transparent_injections: Default::default(),
                         model_ids: Vec::new(),
                         spend_limit: None,
                     })
@@ -396,50 +378,131 @@ mod expiry_tests {
         .expect("gateway");
         let admin = gateway.admin();
 
+        let empty = admin
+            .create_api_key(serde_json::from_value(serde_json::json!({ "name": "Empty" })).unwrap())
+            .await
+            .expect("create without injections");
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap()["transparent_injections"],
+            serde_json::json!([])
+        );
+
         let create = serde_json::from_value(serde_json::json!({
             "name": "Transparent injection",
             "transparent_injection_enabled": true,
-            "inject_media_understanding": true,
-            "inject_web_search": false,
+            "transparent_injections": ["media_generation", "web_search", "media_understanding"],
             "model_ids": []
         }))
         .expect("new API key contract");
         let created = admin.create_api_key(create).await.expect("API key");
         let created_json = serde_json::to_value(&created).expect("API key JSON");
         assert_eq!(created_json["transparent_injection_enabled"], true);
-        assert_eq!(created_json["inject_media_understanding"], true);
-        assert_eq!(created_json["inject_web_search"], false);
-        assert_eq!(created_json["inject_media_generation"], false);
-        assert!(created_json.get("allow_web_research").is_none());
-        assert!(created_json.get("allow_media_understanding").is_none());
-        assert!(created_json.get("web_search_injection_enabled").is_none());
+        assert_eq!(
+            created_json["transparent_injections"],
+            serde_json::json!(["web_search", "media_understanding", "media_generation"])
+        );
+        for legacy_field in [
+            "inject_web_search",
+            "inject_media_understanding",
+            "inject_media_generation",
+            "allow_web_research",
+            "allow_media_understanding",
+            "web_search_injection_enabled",
+        ] {
+            assert!(created_json.get(legacy_field).is_none());
+        }
 
-        let update = serde_json::from_value(serde_json::json!({
-            "inject_web_search": true,
-            "inject_media_generation": true
-        }))
-        .expect("partial update");
-        let updated = admin
-            .update_api_key(&created.id, update)
+        let preserved = admin
+            .update_api_key(
+                &created.id,
+                serde_json::from_value(serde_json::json!({
+                    "transparent_injection_enabled": false
+                }))
+                .unwrap(),
+            )
             .await
-            .expect("updated API key");
-        let updated_json = serde_json::to_value(&updated).expect("updated API key JSON");
-        assert_eq!(updated_json["transparent_injection_enabled"], true);
-        assert_eq!(updated_json["inject_media_understanding"], true);
-        assert_eq!(updated_json["inject_web_search"], true);
-        assert_eq!(updated_json["inject_media_generation"], true);
+            .expect("preserve selections while disabled");
+        let preserved_json = serde_json::to_value(&preserved).unwrap();
+        assert_eq!(preserved_json["transparent_injection_enabled"], false);
+        assert_eq!(
+            preserved_json["transparent_injections"],
+            created_json["transparent_injections"]
+        );
+
+        let updated = admin
+            .update_api_key(
+                &created.id,
+                serde_json::from_value(serde_json::json!({
+                    "transparent_injections": ["media_generation", "web_search"]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("replace selections");
+        assert_eq!(
+            serde_json::to_value(&updated).unwrap()["transparent_injections"],
+            serde_json::json!(["web_search", "media_generation"])
+        );
+        let cleared = admin
+            .update_api_key(
+                &created.id,
+                serde_json::from_value(serde_json::json!({
+                    "transparent_injections": []
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("clear selections");
+        assert_eq!(
+            serde_json::to_value(&cleared).unwrap()["transparent_injections"],
+            serde_json::json!([])
+        );
+
+        for invalid in [
+            serde_json::json!(["unknown"]),
+            serde_json::json!(["web_search", "web_search"]),
+            serde_json::json!(true),
+        ] {
+            let create_error =
+                serde_json::from_value::<crate::db::models::CreateApiKey>(serde_json::json!({
+                    "name": "Invalid", "transparent_injections": invalid
+                }))
+                .unwrap_err()
+                .to_string();
+            let update_error =
+                serde_json::from_value::<crate::db::models::UpdateApiKey>(serde_json::json!({
+                    "transparent_injections": invalid
+                }))
+                .unwrap_err()
+                .to_string();
+            for error in [create_error, update_error] {
+                for allowed in ["web_search", "media_understanding", "media_generation"] {
+                    assert!(error.contains(allowed), "{error} must list {allowed}");
+                }
+            }
+        }
 
         for legacy_field in [
             "allow_web_research",
             "allow_media_understanding",
             "web_search_injection_enabled",
+            "inject_web_search",
+            "inject_media_understanding",
+            "inject_media_generation",
         ] {
             assert!(
                 serde_json::from_value::<crate::db::models::CreateApiKey>(
                     serde_json::json!({ "name": "Legacy", legacy_field: true })
                 )
                 .is_err(),
-                "{legacy_field} must not remain in the Admin contract"
+                "{legacy_field} must not remain in the create contract"
+            );
+            assert!(
+                serde_json::from_value::<crate::db::models::UpdateApiKey>(
+                    serde_json::json!({ legacy_field: true })
+                )
+                .is_err(),
+                "{legacy_field} must not remain in the update contract"
             );
         }
     }

@@ -494,7 +494,7 @@ where
             let turn_id = SearchTurnId::from_reference(&continuation.turn_path).ok()?;
             is_search_turn(turn_id).await
         }
-        ReadTarget::Resource(_) | ReadTarget::ToolExecution(_) => false,
+        ReadTarget::Resource(_) | ReadTarget::ToolExecution(_) | ReadTarget::History(_) => false,
     };
     if !applies {
         return None;

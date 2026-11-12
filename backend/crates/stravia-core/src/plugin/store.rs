@@ -472,11 +472,7 @@ async fn mirror_memory_atomic(
     let Some(pool) = pool else {
         return Ok(());
     };
-    let mut connection = pool.acquire_write().await.map_err(storage_error)?;
-    let mut tx = connection
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(storage_error)?;
+    let mut tx = pool.begin_write().await.map_err(storage_error)?;
     sqlx::query("UPDATE vendor_atomic_revision SET revision=revision WHERE id=1")
         .execute(&mut *tx)
         .await
@@ -515,7 +511,6 @@ async fn mirror_memory_atomic(
             .bind(principal).bind(checkpoint).bind(admission).bind(lease).bind(chrono::Utc::now().timestamp_millis()).execute(&mut *tx).await.map_err(storage_error)?;
     }
     tx.commit().await.map_err(storage_error)?;
-    connection.finish().await.map_err(storage_error)?;
     Ok(())
 }
 
@@ -664,11 +659,7 @@ impl PluginStore {
         let fallback = store
             .fallback_epoch
             .load(std::sync::atomic::Ordering::Acquire);
-        let mut connection = pool.acquire_write().await.map_err(storage_error)?;
-        let mut tx = connection
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(storage_error)?;
+        let mut tx = pool.begin_write().await.map_err(storage_error)?;
         let current: i64 =
             sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id=1")
                 .fetch_one(&mut *tx)
@@ -689,7 +680,6 @@ impl PluginStore {
             .map_err(storage_error)?;
         data.atomic_leases.clear();
         tx.commit().await.map_err(storage_error)?;
-        connection.finish().await.map_err(storage_error)?;
         *store
             .history_pool
             .write()
@@ -799,16 +789,16 @@ impl PluginStore {
                 Ok(())
             }
             PluginStoreBackend::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage_error)?;
+                let mut tx = pool.begin_write().await.map_err(storage_error)?;
                 let changed =
                     sqlx::query("DELETE FROM vendor_plugins WHERE vendor_id=$1 AND revision=$2")
                         .bind(vendor_id)
                         .bind(expected_revision)
-                        .execute(&mut *connection)
+                        .execute(&mut *tx)
                         .await
                         .map_err(storage_error)?
                         .rows_affected();
-                connection.finish().await.map_err(storage_error)?;
+                tx.commit().await.map_err(storage_error)?;
                 if changed != 1 {
                     return Err(PluginStorageError::Changed);
                 }
@@ -893,9 +883,8 @@ impl PluginStore {
         resets: &[ProviderReset],
     ) -> Result<(), PluginStorageError> {
         macro_rules! install {
-    ($pool:expr, $begin:literal, $lock:literal, $source:literal) => {{
-        let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-        let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+    ($pool:expr, $lock:literal, $source:literal) => {{
+        let mut tx = $pool.begin_write().await.map_err(storage_error)?;
         sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
         if let Some(origin) = parse_install_origin(next)? {
             let source: Option<(String, String, String, i64, bool)> = sqlx::query_as($source)
@@ -1061,7 +1050,6 @@ impl PluginStore {
             }
         }
         tx.commit().await.map_err(storage_error)?;
-        connection.finish().await.map_err(storage_error)?;
         Ok(())
     }};
             }
@@ -1071,13 +1059,11 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => install!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 "SELECT repository_id, fingerprint, source_json, trust_revision, enabled FROM vendor_plugin_sources WHERE id=$1"
             ),
             PluginStoreBackend::Postgres(pool) => install!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock(7342179085017261)",
                 "SELECT repository_id, fingerprint, source_json, trust_revision, enabled FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
@@ -1092,7 +1078,7 @@ impl PluginStore {
     ) -> Result<i64, PluginStorageError> {
         const EXISTING: &str = "SELECT v.data_epoch, f.generation FROM providers p JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=p.vendor),'base') LEFT JOIN vendor_atomic_provider_fences f ON f.provider_id=p.id WHERE p.id=$1 AND p.vendor=$2";
         macro_rules! open {
-            ($pool:expr, $begin:literal, $gate:literal, $revision:literal, $pg:expr) => {{
+            ($pool:expr, $gate:literal, $revision:literal, $pg:expr) => {{
                 // The snapshot validates owner, epoch and fence together. A later reset
                 // revokes this generation when the caller actually uses it.
                 let existing: Option<(i64, Option<i64>)> = sqlx::query_as(EXISTING)
@@ -1103,8 +1089,7 @@ impl PluginStore {
                     _ => return Err(PluginStorageError::StaleOperation),
                 }
                 // Serialize creation with reset/delete and recheck after taking locks.
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 sqlx::query($gate).execute(&mut *tx).await.map_err(storage_error)?;
                 if $pg {
                     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('provider:' || $1),hashtext($2))").bind(vendor).bind(provider).execute(&mut *tx).await.map_err(storage_error)?;
@@ -1119,7 +1104,6 @@ impl PluginStore {
                     fence
                 };
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok(fence)
             }};
         }
@@ -1169,14 +1153,12 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => open!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 "UPDATE vendor_atomic_revision SET revision=revision+1 WHERE id=1 RETURNING revision",
                 false
             ),
             PluginStoreBackend::Postgres(pool) => open!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
                 "SELECT nextval('vendor_atomic_revision_seq')",
                 true
@@ -1391,9 +1373,8 @@ impl PluginStore {
         expected_epoch: Option<i64>,
     ) -> Result<(), PluginStorageError> {
         macro_rules! lease_sql {
-            ($pool:expr, $begin:literal, $lock:literal, $pg:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+            ($pool:expr, $lock:literal, $pg:expr) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
                 if let Some(expected) = expected_epoch {
                     let epoch_sql = if $pg { "SELECT epoch FROM prompt_admission_epoch WHERE id=1 FOR SHARE" } else { "SELECT epoch FROM prompt_admission_epoch WHERE id=1" };
@@ -1421,7 +1402,6 @@ impl PluginStore {
                 };
                 if changed != 1 { return Err(PluginStorageError::StaleOperation); }
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok(())
             }};
         }
@@ -1515,13 +1495,11 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => lease_sql!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 false
             ),
             PluginStoreBackend::Postgres(pool) => lease_sql!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
                 true
             ),
@@ -1561,9 +1539,8 @@ impl PluginStore {
         expected_epoch: Option<i64>,
     ) -> Result<(), PluginStorageError> {
         macro_rules! fork {
-            ($pool:expr, $begin:literal, $lock:literal, $pg:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+            ($pool:expr, $lock:literal, $pg:expr) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
                 let epoch_sql = if $pg { "SELECT epoch FROM prompt_admission_epoch WHERE id=1 FOR SHARE" } else { "SELECT epoch FROM prompt_admission_epoch WHERE id=1" };
                 let current_epoch: i64 = sqlx::query_scalar(epoch_sql).fetch_one(&mut *tx).await.map_err(storage_error)?;
@@ -1589,7 +1566,6 @@ impl PluginStore {
                     .bind(principal).bind(admission).bind(lease).bind(chrono::Utc::now().timestamp_millis() + 120_000).execute(&mut *tx).await.map_err(storage_error)?.rows_affected();
                 if inserted != 1 { return Err(PluginStorageError::StaleOperation); }
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok(())
             }};
         }
@@ -1697,13 +1673,11 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => fork!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 false
             ),
             PluginStoreBackend::Postgres(pool) => fork!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
                 true
             ),
@@ -1718,9 +1692,8 @@ impl PluginStore {
         lease: &str,
     ) -> Result<(), PluginStorageError> {
         macro_rules! checkpoint {
-            ($pool:expr, $begin:literal, $lock:literal, $pg:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+            ($pool:expr, $lock:literal, $pg:expr) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
                 if $pg {
                     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('lineage:' || $1),hashtext($2))").bind(principal).bind(admission).execute(&mut *tx).await.map_err(storage_error)?;
@@ -1733,7 +1706,6 @@ impl PluginStore {
                 sqlx::query("INSERT INTO vendor_atomic_checkpoint_cells(principal,checkpoint_id,vendor_id,provider_id,cell_key,revision,payload,journal_head) SELECT principal,$3,vendor_id,provider_id,cell_key,revision,payload,journal_head FROM vendor_atomic_cells WHERE principal=$1 AND admission_id=$2")
                     .bind(principal).bind(admission).bind(checkpoint).execute(&mut *tx).await.map_err(storage_error)?;
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok(())
             }};
         }
@@ -1815,13 +1787,11 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => checkpoint!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 false
             ),
             PluginStoreBackend::Postgres(pool) => checkpoint!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
                 true
             ),
@@ -1988,9 +1958,8 @@ impl PluginStore {
             }
         }
         macro_rules! sql {
-            ($pool:expr, $begin:literal, $lock:literal, $owner:literal, $revision:literal, $pg:expr) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+            ($pool:expr, $lock:literal, $owner:literal, $revision:literal, $pg:expr) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
                 if $pg {
                     let (namespace, first, second) = if principal.is_empty() { ("provider:", vendor_id, provider_id) } else { ("lineage:", principal, admission) };
@@ -2026,7 +1995,6 @@ impl PluginStore {
                     }
                 }
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok((snapshot, changed))
             }};
         }
@@ -2114,7 +2082,6 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => sql!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 "SELECT v.data_epoch FROM providers p JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=p.vendor),'base') WHERE p.id=$1 AND p.vendor=$2",
                 "UPDATE vendor_atomic_revision SET revision=revision+1 WHERE id=1 RETURNING revision",
@@ -2122,7 +2089,6 @@ impl PluginStore {
             ),
             PluginStoreBackend::Postgres(pool) => sql!(
                 pool,
-                "BEGIN",
                 "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
                 "SELECT v.data_epoch FROM providers p JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=p.vendor),'base') WHERE p.id=$1 AND p.vendor=$2 FOR SHARE OF p,v",
                 "SELECT nextval('vendor_atomic_revision_seq')",
@@ -2182,9 +2148,8 @@ impl PluginStore {
     WHERE p.id=$1 AND p.vendor=$2 AND v.data_epoch=$3
     ON CONFLICT(provider_id) DO UPDATE SET vendor_id=excluded.vendor_id,format_version=excluded.format_version,payload=excluded.payload,updated_at=excluded.updated_at";
         macro_rules! write {
-            ($pool:expr, $begin:literal, $lock:literal) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+            ($pool:expr, $lock:literal) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 // PostgreSQL 的 INSERT ... SELECT 可持有旧 MVCC 快照；
                 // 与包切换锁住同一行，确保旧写入在重置之前提交或被拒绝。
                 let current: Option<i64> = sqlx::query_scalar($lock)
@@ -2210,7 +2175,6 @@ impl PluginStore {
                     return Err(PluginStorageError::StaleOperation);
                 }
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok(())
             }};
         }
@@ -2243,12 +2207,10 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => write!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "SELECT data_epoch FROM vendor_plugins WHERE vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=$1),'base')"
             ),
             PluginStoreBackend::Postgres(pool) => write!(
                 pool,
-                "BEGIN",
                 "SELECT data_epoch FROM vendor_plugins WHERE vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=$1),'base') FOR SHARE"
             ),
         }
@@ -2300,14 +2262,14 @@ impl PluginStore {
                 Ok(())
             }
             PluginStoreBackend::Sqlite(pool) => {
-                let mut connection = pool.acquire_write().await.map_err(storage_error)?;
+                let mut tx = pool.begin_write().await.map_err(storage_error)?;
                 sqlx::query(SQL)
                     .bind(provider_id)
                     .bind(kind)
-                    .execute(&mut *connection)
+                    .execute(&mut *tx)
                     .await
                     .map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)
+                tx.commit().await.map_err(storage_error)
             }
             PluginStoreBackend::Postgres(pool) => sqlx::query(SQL)
                 .bind(provider_id)

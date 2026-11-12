@@ -146,13 +146,13 @@ async fn generation_http_fixture(
     execute_generate: bool,
     generation_enabled: bool,
     transparent_injection_enabled: bool,
-    inject_media_generation: bool,
+    media_generation_selected: bool,
 ) -> GenerationHttpFixture {
     generation_http_fixture_with_usage(
         execute_generate,
         generation_enabled,
         transparent_injection_enabled,
-        inject_media_generation,
+        media_generation_selected,
         1,
         false,
         ImageUsage::RequiredOnly,
@@ -164,7 +164,7 @@ async fn generation_http_fixture_with_usage(
     execute_generate: bool,
     generation_enabled: bool,
     transparent_injection_enabled: bool,
-    inject_media_generation: bool,
+    media_generation_selected: bool,
     image_calls: usize,
     retry_first_image: bool,
     image_usage: ImageUsage,
@@ -399,10 +399,14 @@ async fn generation_http_fixture_with_usage(
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled,
-            inject_web_search: false,
-            inject_media_generation,
+            transparent_injections: if media_generation_selected {
+                crate::db::models::TransparentInjectionSet::from_items([
+                    crate::db::models::TransparentInjection::MediaGeneration,
+                ])
+            } else {
+                Default::default()
+            },
             model_ids: vec![parent_route_id],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -447,7 +451,7 @@ async fn post_responses(fixture: &GenerationHttpFixture, body: Value) -> (Status
 async fn set_generation_injection(
     fixture: &GenerationHttpFixture,
     transparent_injection_enabled: bool,
-    inject_media_generation: bool,
+    media_generation_selected: bool,
 ) {
     fixture
         .gateway
@@ -461,9 +465,13 @@ async fn set_generation_injection(
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: Some(transparent_injection_enabled),
-                inject_web_search: None,
-                inject_media_generation: Some(inject_media_generation),
-                inject_media_understanding: None,
+                transparent_injections: Some(if media_generation_selected {
+                    crate::db::models::TransparentInjectionSet::from_items([
+                        crate::db::models::TransparentInjection::MediaGeneration,
+                    ])
+                } else {
+                    Default::default()
+                }),
                 expires_at: None,
                 model_ids: None,
                 spend_limit: None,

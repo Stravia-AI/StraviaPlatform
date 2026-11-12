@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
 use sqlx::{FromRow, types::Json};
 use stravia_vendor_sdk::{ConnectionCheckVerification, ValidationIssue};
 
@@ -8,6 +9,154 @@ use crate::pricing::{DisplayCurrency, DisplayMoney};
 use crate::thinking::ThinkingLevelMapping;
 use crate::thinking::mapping_control;
 use stravia_runtime_contract::thinking::ThinkingLevel;
+
+macro_rules! transparent_injections {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// An optional platform capability that Transparent Injection can expose for a Key.
+        /// Declaration order is the stable canonical order of `TransparentInjectionSet`.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum TransparentInjection {
+            $($variant),+
+        }
+
+        impl TransparentInjection {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+transparent_injections! {
+    WebSearch => "web_search",
+    MediaUnderstanding => "media_understanding",
+    MediaGeneration => "media_generation",
+    HistoryRecall => "history_recall",
+}
+
+impl TransparentInjection {
+    fn allowed_values() -> String {
+        Self::ALL
+            .iter()
+            .map(|item| item.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl FromStr for TransparentInjection {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|item| item.as_str() == s)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown transparent injection {s}; allowed values: {}",
+                    Self::allowed_values()
+                )
+            })
+    }
+}
+
+/// Selected Transparent Injections for one API Key. Membership is canonicalized on
+/// construction; the master switch is deliberately not a member of this set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransparentInjectionSet([bool; TransparentInjection::ALL.len()]);
+
+impl TransparentInjectionSet {
+    pub const fn empty() -> Self {
+        Self([false; TransparentInjection::ALL.len()])
+    }
+
+    pub fn from_items<I: IntoIterator<Item = TransparentInjection>>(items: I) -> Self {
+        let mut set = Self::empty();
+        for item in items {
+            set.0[item as usize] = true;
+        }
+        set
+    }
+
+    pub const fn contains(&self, item: TransparentInjection) -> bool {
+        self.0[item as usize]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = TransparentInjection> + '_ {
+        TransparentInjection::ALL
+            .iter()
+            .copied()
+            .filter(|item| self.contains(*item))
+    }
+}
+
+impl Serialize for TransparentInjectionSet {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.iter().count()))?;
+        for item in self.iter() {
+            sequence.serialize_element(item.as_str())?;
+        }
+        sequence.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for TransparentInjectionSet {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct InjectionSetVisitor;
+
+        fn invalid_array<E: de::Error>() -> E {
+            de::Error::custom(format!(
+                "transparent injections must be an array; allowed values: {}",
+                TransparentInjection::allowed_values()
+            ))
+        }
+
+        impl<'de> Visitor<'de> for InjectionSetVisitor {
+            type Value = TransparentInjectionSet;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    formatter,
+                    "a JSON array of distinct transparent injections (allowed values: {})",
+                    TransparentInjection::allowed_values()
+                )
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut set = TransparentInjectionSet::empty();
+                while let Some(name) = seq.next_element::<String>().map_err(|error| {
+                    de::Error::custom(format!(
+                        "{error}; allowed values: {}",
+                        TransparentInjection::allowed_values()
+                    ))
+                })? {
+                    let item = name
+                        .parse::<TransparentInjection>()
+                        .map_err(|error| de::Error::custom(error.to_string()))?;
+                    if set.contains(item) {
+                        return Err(de::Error::custom(format!(
+                            "duplicate transparent injection {name}; allowed values: {}",
+                            TransparentInjection::allowed_values()
+                        )));
+                    }
+                    set.0[item as usize] = true;
+                }
+                Ok(set)
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+                Err(invalid_array())
+            }
+        }
+
+        deserializer.deserialize_any(InjectionSetVisitor)
+    }
+}
 
 pub fn default_provider_auth_mode() -> String {
     "apikey".to_string()
@@ -418,11 +567,8 @@ pub struct ApiKey {
     #[serde(default)]
     pub transparent_injection_enabled: bool,
     #[serde(default)]
-    pub inject_media_understanding: bool,
-    #[serde(default)]
-    pub inject_web_search: bool,
-    #[serde(default)]
-    pub inject_media_generation: bool,
+    #[sqlx(json)]
+    pub transparent_injections: TransparentInjectionSet,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -447,11 +593,7 @@ pub struct ApiKeyWithBindings {
     #[serde(default)]
     pub transparent_injection_enabled: bool,
     #[serde(default)]
-    pub inject_media_understanding: bool,
-    #[serde(default)]
-    pub inject_web_search: bool,
-    #[serde(default)]
-    pub inject_media_generation: bool,
+    pub transparent_injections: TransparentInjectionSet,
     pub expires_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -689,11 +831,7 @@ pub struct CreateApiKey {
     #[serde(default)]
     pub transparent_injection_enabled: bool,
     #[serde(default)]
-    pub inject_media_understanding: bool,
-    #[serde(default)]
-    pub inject_web_search: bool,
-    #[serde(default)]
-    pub inject_media_generation: bool,
+    pub transparent_injections: TransparentInjectionSet,
     #[serde(default)]
     pub model_ids: Vec<String>,
 }
@@ -711,11 +849,125 @@ pub struct UpdateApiKey {
     pub is_enabled: Option<bool>,
     pub mcp_access_enabled: Option<bool>,
     pub transparent_injection_enabled: Option<bool>,
-    pub inject_media_understanding: Option<bool>,
-    pub inject_web_search: Option<bool>,
-    pub inject_media_generation: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub transparent_injections: Option<TransparentInjectionSet>,
     pub expires_at: Option<String>,
     pub model_ids: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod transparent_injection_tests {
+    use super::{TransparentInjection, TransparentInjectionSet};
+
+    #[test]
+    fn default_injection_set_is_empty() {
+        let set = TransparentInjectionSet::default();
+        assert_eq!(
+            serde_json::to_value(set).expect("empty set JSON"),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn arbitrary_input_order_serializes_in_canonical_order() {
+        let set = serde_json::from_str::<TransparentInjectionSet>(
+            r#"["history_recall","media_generation","web_search","media_understanding"]"#,
+        )
+        .expect("valid injection set");
+        assert_eq!(
+            set.iter().collect::<Vec<_>>(),
+            TransparentInjection::ALL.to_vec()
+        );
+        assert_eq!(
+            serde_json::to_value(&set).expect("canonical set JSON"),
+            serde_json::json!([
+                "web_search",
+                "media_understanding",
+                "media_generation",
+                "history_recall"
+            ])
+        );
+        let round_trip = serde_json::from_str::<TransparentInjectionSet>(
+            &serde_json::to_string(&set).expect("set JSON"),
+        )
+        .expect("round trip");
+        assert_eq!(round_trip, set);
+    }
+
+    #[test]
+    fn unknown_duplicate_and_non_array_values_are_rejected_with_allowed_values() {
+        for (case, payload) in [
+            ("unknown", r#"["web_search","network_access"]"#),
+            ("duplicate", r#"["web_search","web_search"]"#),
+            ("non-array", r#"{"web_search":true}"#),
+        ] {
+            let error = serde_json::from_str::<TransparentInjectionSet>(payload)
+                .expect_err(case)
+                .to_string();
+            assert!(error.contains("allowed values"), "{case}: {error}");
+            for name in TransparentInjection::ALL.iter().map(|item| item.as_str()) {
+                assert!(error.contains(name), "{case} omitted {name}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_declared_injection_can_be_selected_and_round_tripped() {
+        for &item in TransparentInjection::ALL {
+            let set = TransparentInjectionSet::from_items([item]);
+            assert!(set.contains(item));
+            let json = serde_json::to_string(&set).expect("serialize selection");
+            let decoded: TransparentInjectionSet =
+                serde_json::from_str(&json).expect("parse selection");
+            assert_eq!(decoded, set);
+        }
+    }
+
+    #[test]
+    fn members_are_queryable_and_update_omission_preserves_the_set() {
+        use super::{CreateApiKey, UpdateApiKey};
+
+        let set = TransparentInjectionSet::from_items([
+            TransparentInjection::MediaGeneration,
+            TransparentInjection::WebSearch,
+        ]);
+        assert!(set.contains(TransparentInjection::WebSearch));
+        assert!(!set.contains(TransparentInjection::MediaUnderstanding));
+
+        let created: CreateApiKey = serde_json::from_value(serde_json::json!({
+            "name": "Injection key",
+            "transparent_injections": ["media_generation", "web_search"]
+        }))
+        .expect("create with injection set");
+        assert_eq!(created.transparent_injections, set);
+
+        let omitted: UpdateApiKey =
+            serde_json::from_value(serde_json::json!({})).expect("omitted injection update");
+        assert_eq!(omitted.transparent_injections, None);
+        let null_error = serde_json::from_value::<UpdateApiKey>(serde_json::json!({
+            "transparent_injections": null
+        }))
+        .expect_err("explicit null must not mean omitted")
+        .to_string();
+        assert!(
+            null_error.contains("allowed values"),
+            "null error: {null_error}"
+        );
+        for name in TransparentInjection::ALL.iter().map(|item| item.as_str()) {
+            assert!(
+                null_error.contains(name),
+                "null error omitted {name}: {null_error}"
+            );
+        }
+        let replaced: UpdateApiKey = serde_json::from_value(serde_json::json!({
+            "transparent_injections": []
+        }))
+        .expect("explicit empty injection update");
+        assert_eq!(
+            replaced.transparent_injections,
+            Some(TransparentInjectionSet::empty())
+        );
+    }
 }
 
 #[cfg(test)]

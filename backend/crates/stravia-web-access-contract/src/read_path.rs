@@ -11,8 +11,11 @@
 //! - `stravia://tool-executions/<28 lowercase>`：观察已有执行；等待秒数放在 `wait`。
 //! - `stravia://artifacts/<55 lowercase>[选择器]`：Artifact 资源。
 //! - `http(s)://…[选择器]`：公网资源。
+//! - `stravia://history/…[选择器]`：历史回看的目录、交互转录与工具文件（[`HistoryNode`]）；
+//!   根目录、链路目录和转录接受 `question` 在该范围内检索，工具文件不接受；选择器只有行范围（仅文件）与 `cursor=`，
+//!   `question` 与两者互斥。是否可用由 core 按执行范围判定。
 //!
-//! 选择器只对资源路径有效，从 path 末尾按 `:` 自右向左剥离：
+//! 资源路径与历史路径接受选择器，从 path 末尾按 `:` 自右向左剥离：
 //! `raw`、`download`、`cursor=<base64url>`，以及行范围 `N`、`N-M`、`N+K`、`-K`
 //! （逗号分隔多段）。剥离有“底线”：Artifact 的底线是 55 位 id 结束处；HTTP(S) 的
 //! 底线是 authority 结束处，即 `scheme://` 之后第一个 `/`、`?` 或 `#`。没有该字符时
@@ -43,6 +46,11 @@ const SEARCH_PATH: &str = "stravia://search";
 const TURN_REFERENCE_PREFIX: &str = "stravia://turns/";
 const TOOL_EXECUTION_PREFIX: &str = "stravia://tool-executions/";
 const ARTIFACT_REFERENCE_PREFIX: &str = "stravia://artifacts/";
+/// 历史回看根目录；所有历史目录都以 `/` 结尾。
+pub const HISTORY_ROOT: &str = "stravia://history/";
+const HISTORY_SCHEME_PATH: &str = "stravia://history";
+/// 历史 id 段的最大字节数；平台 id 为 28 位，上限留给升级前保留的旧格式 id。
+const MAX_HISTORY_ID_LEN: usize = 64;
 /// 旧 HTTP(S) 工具选项所在的保留 fragment 前缀。
 const LEGACY_OPTIONS_FRAGMENT_PREFIX: &str = "stravia?";
 const TURN_ID_LEN: usize = 28;
@@ -74,6 +82,64 @@ pub enum ReadTarget {
     Continuation(ContinuationTarget),
     Resource(ResourcePath),
     ToolExecution(ToolExecutionPath),
+    History(HistoryPath),
+}
+
+/// 一次历史回看读取；是否允许由 core 按执行范围判定，解析器只校验语法。
+///
+/// 根目录、链路目录和转录可用 `question` 在该范围内检索；工具文件不接受检索。
+/// 目录只可能带 `cursor`；文件带行范围或 `cursor`，两者互斥。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryPath {
+    pub node: HistoryNode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<LineSelection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+}
+
+/// 历史路径节点：段数决定类型，目录以 `/` 结尾，文件不以 `/` 结尾。
+///
+/// id 只是定位用的不透明字符串，不证明存在或归属；core 按 Principal 校验。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum HistoryNode {
+    /// `stravia://history/`：当前 Principal 的交互链路目录。
+    Root,
+    /// `stravia://history/<root-id>/`：一条链路内的 Interaction 目录。
+    Chain { root_id: String },
+    /// `stravia://history/<root-id>/<interaction-id>`：交互转录文件。
+    Transcript {
+        root_id: String,
+        interaction_id: String,
+    },
+    /// `stravia://history/<root-id>/<interaction-id>/tools/<n>`：第 n 次工具调用，从 1 开始。
+    Tool {
+        root_id: String,
+        interaction_id: String,
+        index: u32,
+    },
+}
+
+impl HistoryNode {
+    /// 不带选择器的规范路径，与 [`parse_read_input`] 接受的写法一一对应。
+    pub fn address(&self) -> String {
+        match self {
+            Self::Root => HISTORY_ROOT.to_owned(),
+            Self::Chain { root_id } => format!("{HISTORY_ROOT}{root_id}/"),
+            Self::Transcript {
+                root_id,
+                interaction_id,
+            } => format!("{HISTORY_ROOT}{root_id}/{interaction_id}"),
+            Self::Tool {
+                root_id,
+                interaction_id,
+                index,
+            } => format!("{HISTORY_ROOT}{root_id}/{interaction_id}/tools/{index}"),
+        }
+    }
 }
 
 /// 一次搜索读取。
@@ -251,6 +317,9 @@ pub enum ReadPathError {
     /// 选择器互斥或上下文限制被违反。
     #[error("conflicting read options: {reason}")]
     ConflictingOptions { reason: &'static str },
+    /// 历史路径的结构或选择器非法；`reason` 给出正确写法。
+    #[error("invalid history path: {reason}")]
+    InvalidHistoryPath { reason: &'static str },
 }
 
 /// 工具 schema 的暴露范围；由 core 的 `ReadExposureScope` 映射而来。
@@ -259,6 +328,7 @@ pub struct ReadSchemaScope {
     pub networking: bool,
     pub media: bool,
     pub internal: bool,
+    pub history: bool,
 }
 
 impl ReadSchemaScope {
@@ -267,6 +337,7 @@ impl ReadSchemaScope {
         networking: true,
         media: true,
         internal: false,
+        history: false,
     };
 }
 
@@ -301,8 +372,8 @@ fn schema_properties(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut properties = serde_json::Map::new();
     properties.insert("path".into(), path_property());
-    if scope.networking || scope.media {
-        properties.insert("question".into(), question_property(strict));
+    if scope.networking || scope.media || scope.history {
+        properties.insert("question".into(), question_property(strict, scope.history));
     }
     if scope.media {
         properties.insert("attachments".into(), attachments_property(strict));
@@ -324,15 +395,21 @@ fn path_property() -> serde_json::Value {
     })
 }
 
-fn question_property(strict: bool) -> serde_json::Value {
+fn question_property(strict: bool, history: bool) -> serde_json::Value {
     let kind = if strict {
         serde_json::json!(["string", "null"])
     } else {
         serde_json::json!("string")
     };
+    // ADR-0091：字段说明不超过一句。
+    let description = if history {
+        "Plain-text question or search text, no encoding; on `stravia://history/`, a chain directory, or a transcript it searches that scope by whitespace-separated terms (double quotes make an adjacent phrase) and cannot be combined with a line range or a search cursor."
+    } else {
+        "Plain-text question or search text; no encoding."
+    };
     serde_json::json!({
         "type": kind,
-        "description": "Plain-text question or search text; no encoding."
+        "description": description
     })
 }
 
@@ -433,6 +510,9 @@ pub fn parse_read_input(input: &ReadInput) -> Result<ReadTarget, ReadPathError> 
     }
     if path.starts_with(ARTIFACT_REFERENCE_PREFIX) {
         return parse_artifact(input, path);
+    }
+    if is_history_path(path) {
+        return parse_history(input, path);
     }
     if path.starts_with(READ_SCHEME_PREFIX) {
         return Err(ReadPathError::InvalidScheme);
@@ -559,6 +639,170 @@ fn parse_http_resource(input: &ReadInput, path: &str) -> Result<ReadTarget, Read
     reject_resource_fields(input)?;
     let options = finish_resource_options(input, selectors, false)?;
     Ok(ReadTarget::Resource(ResourcePath { url, options }))
+}
+
+/// path 以 `stravia://history` 开头且其后为结尾、`/` 或 `:` 时属于历史回看。
+///
+/// Core 在解析前用它判断执行范围，未获授权时任何历史写法（包括错误写法）都得到
+/// 同一个错误，不暴露语法细节。
+pub fn is_history_path(path: &str) -> bool {
+    path.strip_prefix(HISTORY_SCHEME_PATH)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', ':']))
+}
+
+const HISTORY_TARGET: &str = "a `stravia://history/` path";
+const HISTORY_FORMS: &str = "use `stravia://history/`, `stravia://history/<root-id>/`, `stravia://history/<root-id>/<interaction-id>` or `stravia://history/<root-id>/<interaction-id>/tools/<n>`";
+
+fn history_error(reason: &'static str) -> ReadPathError {
+    ReadPathError::InvalidHistoryPath { reason }
+}
+
+fn parse_history(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+    let (address, selectors) = split_selectors(path, Some(HISTORY_ROOT.len()))?;
+    let Some(rest) = address.strip_prefix(HISTORY_ROOT) else {
+        return Err(history_error(
+            "the history root is the directory `stravia://history/`; directories end with `/`",
+        ));
+    };
+    if let Some((_, token)) = rest.rsplit_once(':') {
+        // 选择器剥离在第一个不合语法的 token 处停止；形似行范围时给出行范围本身的错误。
+        if !token.is_empty()
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b',' | b'-' | b'+'))
+        {
+            parse_line_selections(token)?;
+        }
+        return Err(history_error(
+            "unknown `:` selector; files accept line ranges such as :41-58 or :cursor=<cursor>, directories accept only :cursor=<cursor>",
+        ));
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    let node = match segments.as_slice() {
+        [""] => HistoryNode::Root,
+        [_] => {
+            return Err(history_error(
+                "a chain is a directory; end it with `/`: `stravia://history/<root-id>/`",
+            ));
+        }
+        [root, ""] => HistoryNode::Chain {
+            root_id: history_id(root)?,
+        },
+        [root, interaction] => HistoryNode::Transcript {
+            root_id: history_id(root)?,
+            interaction_id: history_id(interaction)?,
+        },
+        [_, _, ""] => {
+            return Err(history_error(
+                "a transcript is a file; remove the trailing `/`: `stravia://history/<root-id>/<interaction-id>`",
+            ));
+        }
+        [root, interaction, "tools", index] if !index.is_empty() => HistoryNode::Tool {
+            root_id: history_id(root)?,
+            interaction_id: history_id(interaction)?,
+            index: tool_index(index)?,
+        },
+        [_, _, "tools"] | [_, _, "tools", ""] | [_, _, "tools", _, ""] => {
+            return Err(history_error(
+                "a tool call is a file numbered from 1 without a trailing `/`: `stravia://history/<root-id>/<interaction-id>/tools/<n>`",
+            ));
+        }
+        _ => return Err(history_error(HISTORY_FORMS)),
+    };
+    if selectors.raw || selectors.download {
+        return Err(history_error(
+            "`:raw` and `:download` do not apply to history; files accept line ranges such as :41-58 or :cursor=<cursor>",
+        ));
+    }
+    if matches!(node, HistoryNode::Root | HistoryNode::Chain { .. }) && selectors.lines.is_some() {
+        return Err(history_error(
+            "directories accept only :cursor=<cursor>; read a transcript or tool file for line ranges",
+        ));
+    }
+    if selectors.lines.is_some() && selectors.cursor.is_some() {
+        return Err(ReadPathError::ConflictingOptions {
+            reason: "cursor cannot be combined with other options",
+        });
+    }
+    let question = match input.question.as_deref() {
+        None => None,
+        Some(text) if text.trim().is_empty() => return Err(ReadPathError::BlankQuestion),
+        Some(text) if text.len() > MAX_SEARCH_TEXT_BYTES => {
+            return Err(ReadPathError::QuestionTooLarge);
+        }
+        Some(text) => Some(text.to_owned()),
+    };
+    if question.is_some() {
+        if matches!(node, HistoryNode::Tool { .. }) {
+            return Err(ReadPathError::FieldNotAllowed {
+                field: "question",
+                target: "a history tool file",
+                hint: "tool results are not indexed; search a root, chain directory or transcript, then read the linked `tools/<n>` file",
+            });
+        }
+        if selectors.lines.is_some() {
+            return Err(ReadPathError::ConflictingOptions {
+                reason: "question cannot be combined with line ranges; first search without a line range, then read the returned `path:L-M`",
+            });
+        }
+        if selectors.cursor.is_some() {
+            return Err(ReadPathError::ConflictingOptions {
+                reason: "a search cursor already carries its question; to continue, omit question, or start a new search without a cursor",
+            });
+        }
+    }
+    reject_field(
+        non_empty(input.attachments.as_ref()),
+        "attachments",
+        HISTORY_TARGET,
+        "attachments only apply to media turn continuations",
+    )?;
+    reject_field(
+        input.allowed_domains.as_ref(),
+        "allowed_domains",
+        HISTORY_TARGET,
+        "allowed_domains only applies to search and turn continuations",
+    )?;
+    reject_field(
+        input.wait.as_ref(),
+        "wait",
+        HISTORY_TARGET,
+        "history reads return immediately",
+    )?;
+    Ok(ReadTarget::History(HistoryPath {
+        node,
+        lines: selectors.lines,
+        cursor: selectors.cursor,
+        question,
+    }))
+}
+
+/// 历史 id 段：1 到 [`MAX_HISTORY_ID_LEN`] 字节的 `[A-Za-z0-9_-]`。
+fn history_id(segment: &str) -> Result<String, ReadPathError> {
+    if segment.is_empty()
+        || segment.len() > MAX_HISTORY_ID_LEN
+        || !segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(history_error(
+            "copy `<root-id>` and `<interaction-id>` exactly from a history listing",
+        ));
+    }
+    Ok(segment.to_owned())
+}
+
+/// 工具编号只接受不带前导零的十进制正整数，保证每次调用只有一个规范路径。
+fn tool_index(segment: &str) -> Result<u32, ReadPathError> {
+    let invalid = || {
+        history_error(
+            "tool calls are numbered from 1 without leading zeros, as linked from the transcript: `/tools/1`",
+        )
+    };
+    if segment.starts_with('0') || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    segment.parse().map_err(|_| invalid())
 }
 
 /// 资源 path 不接受的字段；`attachments: []` 视为缺省，不会触发。
@@ -1736,11 +1980,19 @@ mod tests {
             networking,
             media,
             internal,
+            history: false,
         };
         assert_eq!(ReadSchemaScope::FULL, scope(true, true, false));
         let cases = [
             (
                 scope(true, true, false),
+                vec!["allowed_domains", "attachments", "path", "question", "wait"],
+            ),
+            (
+                ReadSchemaScope {
+                    history: true,
+                    ..scope(true, true, false)
+                },
                 vec!["allowed_domains", "attachments", "path", "question", "wait"],
             ),
             (
@@ -1754,6 +2006,13 @@ mod tests {
             (
                 scope(false, true, false),
                 vec!["attachments", "path", "question", "wait"],
+            ),
+            (
+                ReadSchemaScope {
+                    history: true,
+                    ..scope(false, false, false)
+                },
+                vec!["path", "question", "wait"],
             ),
             (scope(false, false, false), vec!["path", "wait"]),
             (scope(false, false, true), vec!["path"]),
@@ -1837,5 +2096,307 @@ mod tests {
         }
         let input: ReadInput = serde_json::from_value(arguments).unwrap();
         assert!(parse_read_input(&input).is_ok());
+    }
+
+    fn history(
+        node: HistoryNode,
+        lines: Option<Vec<LineSelection>>,
+        cursor: Option<&str>,
+        question: Option<&str>,
+    ) -> ReadTarget {
+        ReadTarget::History(HistoryPath {
+            node,
+            lines,
+            cursor: cursor.map(str::to_owned),
+            question: question.map(str::to_owned),
+        })
+    }
+
+    fn history_error(path: &str) -> String {
+        match parse(path).unwrap_err() {
+            error @ ReadPathError::InvalidHistoryPath { .. } => error.to_string(),
+            other => panic!("{path}: unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_root_chain_and_transcript_accept_search_question() {
+        let nodes = [
+            ("stravia://history/", HistoryNode::Root),
+            (
+                "stravia://history/root-1/",
+                HistoryNode::Chain {
+                    root_id: "root-1".into(),
+                },
+            ),
+            (
+                "stravia://history/root-1/Child_2",
+                HistoryNode::Transcript {
+                    root_id: "root-1".into(),
+                    interaction_id: "Child_2".into(),
+                },
+            ),
+        ];
+        for (path, node) in nodes {
+            assert_eq!(
+                parse_read_input(&with_question(path, "PG 迁移")).unwrap(),
+                ReadTarget::History(HistoryPath {
+                    node,
+                    lines: None,
+                    cursor: None,
+                    question: Some("PG 迁移".into()),
+                }),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_search_rejects_tool_paths_and_conflicting_selectors() {
+        let tool = "stravia://history/root/child/tools/1";
+        let error = parse_read_input(&with_question(tool, "PG 迁移")).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ReadPathError::FieldNotAllowed {
+                    field: "question",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("tool result"), "{error}");
+        assert!(error.to_string().contains("tools/<n>"), "{error}");
+
+        for path in [
+            "stravia://history/root/child:1-5",
+            "stravia://history/:cursor=Ab_9-",
+            "stravia://history/root/:cursor=Ab_9-",
+            "stravia://history/root/child:cursor=Ab_9-",
+        ] {
+            let error = parse_read_input(&with_question(path, "PG 迁移")).unwrap_err();
+            assert!(
+                matches!(error, ReadPathError::ConflictingOptions { .. }),
+                "{path}: {error:?}"
+            );
+            assert!(error.to_string().contains("question"), "{path}: {error}");
+        }
+    }
+
+    #[test]
+    fn history_question_schema_requires_nonblank_plain_text() {
+        assert_eq!(
+            parse_read_input(&with_question("stravia://history/", " \t ")).unwrap_err(),
+            ReadPathError::BlankQuestion
+        );
+        assert_eq!(
+            parse_read_input(&with_question(
+                "stravia://history/",
+                &"a".repeat(MAX_SEARCH_TEXT_BYTES + 1),
+            ))
+            .unwrap_err(),
+            ReadPathError::QuestionTooLarge
+        );
+    }
+
+    #[test]
+    fn history_paths_parse_four_node_kinds_with_canonical_addresses() {
+        let chain = || HistoryNode::Chain {
+            root_id: "root-1".into(),
+        };
+        let transcript = || HistoryNode::Transcript {
+            root_id: "root-1".into(),
+            interaction_id: "Child_2".into(),
+        };
+        let tool = || HistoryNode::Tool {
+            root_id: "root-1".into(),
+            interaction_id: "Child_2".into(),
+            index: 12,
+        };
+        let cases = [
+            (
+                "stravia://history/",
+                history(HistoryNode::Root, None, None, None),
+            ),
+            (
+                "stravia://history/:cursor=Ab_9-",
+                history(HistoryNode::Root, None, Some("Ab_9-"), None),
+            ),
+            (
+                "stravia://history/root-1/",
+                history(chain(), None, None, None),
+            ),
+            (
+                "stravia://history/root-1/:cursor=c",
+                history(chain(), None, Some("c"), None),
+            ),
+            (
+                "stravia://history/root-1/Child_2",
+                history(transcript(), None, None, None),
+            ),
+            (
+                "stravia://history/root-1/Child_2/tools/12:cursor=x",
+                history(tool(), None, Some("x"), None),
+            ),
+            (
+                "stravia://history/root-1/Child_2/tools/12:-20",
+                history(tool(), Some(vec![LineSelection::Last(20)]), None, None),
+            ),
+        ];
+        for (path, expected) in cases {
+            let parsed = parse(path).unwrap();
+            assert_eq!(parsed, expected, "{path}");
+            let ReadTarget::History(history) = parsed else {
+                unreachable!()
+            };
+            let address = path.split_once(":cursor").map_or(path, |(head, _)| head);
+            let address = address.strip_suffix(":-20").unwrap_or(address);
+            assert_eq!(history.node.address(), address, "{path}");
+        }
+        assert_eq!(
+            parse("stravia://history/r/i:41-58,1-3").unwrap(),
+            history(
+                HistoryNode::Transcript {
+                    root_id: "r".into(),
+                    interaction_id: "i".into(),
+                },
+                Some(vec![
+                    LineSelection::Inclusive { start: 1, end: 3 },
+                    LineSelection::Inclusive { start: 41, end: 58 },
+                ]),
+                None,
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn history_slash_mistakes_point_to_the_correct_form() {
+        let cases = [
+            ("stravia://history", "`stravia://history/`"),
+            ("stravia://history:cursor=a", "`stravia://history/`"),
+            ("stravia://history/root", "`stravia://history/<root-id>/`"),
+            (
+                "stravia://history/root/child/",
+                "`stravia://history/<root-id>/<interaction-id>`",
+            ),
+            ("stravia://history/root/child/tools", "/tools/<n>`"),
+            ("stravia://history/root/child/tools/", "/tools/<n>`"),
+            ("stravia://history/root/child/tools/1/", "/tools/<n>`"),
+        ];
+        for (path, form) in cases {
+            let message = history_error(path);
+            assert!(message.contains(form), "{path}: {message}");
+        }
+    }
+
+    #[test]
+    fn malformed_history_segments_and_selectors_are_rejected() {
+        let too_long = format!("stravia://history/{}/", "a".repeat(65));
+        let longest = format!("stravia://history/{}/", "a".repeat(64));
+        assert!(parse(&longest).is_ok());
+        for path in [
+            "stravia://history//",
+            "stravia://history/r%41/",
+            "stravia://history/r.1/",
+            too_long.as_str(),
+            "stravia://history/r//i",
+            "stravia://history/r/i/tools/0",
+            "stravia://history/r/i/tools/01",
+            "stravia://history/r/i/tools/1x",
+            "stravia://history/r/i/tools/4294967296",
+            "stravia://history/r/i/calls/1",
+            "stravia://history/r/i/tools/1/extra",
+            "stravia://history/r/i:foo",
+            "stravia://history/r/i:cursor=",
+            "stravia://history/r/i:foo:1-5",
+            "stravia://history/:raw",
+            "stravia://history/r/i:raw",
+            "stravia://history/r/i:download",
+            "stravia://history/r/i/tools/1:raw",
+            "stravia://history/:1-5",
+            "stravia://history/r/:1-5",
+        ] {
+            history_error(path);
+        }
+        let segments = (1..=17)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(matches!(
+            parse(&format!("stravia://history/r/i:{segments}")).unwrap_err(),
+            ReadPathError::InvalidLineSelection { .. }
+        ));
+        assert!(matches!(
+            parse("stravia://history/r/i:1-5:cursor=a").unwrap_err(),
+            ReadPathError::ConflictingOptions { .. }
+        ));
+        assert!(matches!(
+            parse("stravia://history/r/i:cursor=a:cursor=b").unwrap_err(),
+            ReadPathError::DuplicateSelector { selector: "cursor" }
+        ));
+    }
+
+    #[test]
+    fn history_paths_reject_unrelated_fields() {
+        type Setter = fn(&mut ReadInput);
+        let setters: [(Setter, &str); 3] = [
+            (|input| input.wait = Some(0), "wait"),
+            (
+                |input| input.allowed_domains = Some(vec!["docs.rs".into()]),
+                "allowed_domains",
+            ),
+            (
+                |input| input.attachments = Some(vec![artifact_path()]),
+                "attachments",
+            ),
+        ];
+        for path in [
+            "stravia://history/",
+            "stravia://history/r/",
+            "stravia://history/r/i",
+            "stravia://history/r/i/tools/1",
+        ] {
+            for (set, field) in setters {
+                let mut input = read_input(path);
+                set(&mut input);
+                let error = parse_read_input(&input).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        ReadPathError::FieldNotAllowed { field: actual, .. } if actual == field
+                    ),
+                    "{path} {field}: {error:?}"
+                );
+            }
+            let input = ReadInput {
+                attachments: Some(Vec::new()),
+                ..read_input(path)
+            };
+            assert!(parse_read_input(&input).is_ok(), "{path}");
+        }
+    }
+
+    #[test]
+    fn history_path_detection_covers_every_history_spelling_only() {
+        for path in [
+            "stravia://history",
+            "stravia://history/",
+            "stravia://history/r/i:1-5",
+            "stravia://history:cursor=a",
+        ] {
+            assert!(is_history_path(path), "{path}");
+        }
+        for path in [
+            "stravia://historyx/",
+            "stravia://search",
+            "https://example.com/stravia://history/",
+        ] {
+            assert!(!is_history_path(path), "{path}");
+        }
+        assert_eq!(
+            parse("stravia://historyx/").unwrap_err(),
+            ReadPathError::InvalidScheme
+        );
     }
 }

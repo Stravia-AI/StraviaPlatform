@@ -324,6 +324,14 @@ fn read_schema_fields_follow_exposure_scope() {
     );
     assert_eq!(keys(ReadExposureScope::NONE, false), ["path", "wait"]);
     assert_eq!(
+        keys(ReadExposureScope::NONE.with_history(), false),
+        ["path", "question", "wait"]
+    );
+    assert_eq!(
+        keys(ReadExposureScope::FULL.with_history(), false),
+        ["allowed_domains", "attachments", "path", "question", "wait"]
+    );
+    assert_eq!(
         keys(ReadExposureScope::FULL, true),
         ["allowed_domains", "attachments", "path", "question"]
     );
@@ -354,10 +362,10 @@ async fn test_app_with_tools(mcp_tools: Vec<Arc<dyn McpTool>>) -> TestApp {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: true,
-            inject_web_search: true,
-            inject_media_generation: false,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items([
+                crate::db::models::TransparentInjection::WebSearch,
+            ]),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -393,11 +401,9 @@ async fn set_rpm_limit(app: &TestApp, limit: i32) {
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
-                inject_web_search: None,
-                inject_media_generation: None,
+                transparent_injections: None,
                 expires_at: None,
                 model_ids: None,
-                inject_media_understanding: None,
                 spend_limit: None,
             },
         )
@@ -488,10 +494,8 @@ async fn media_test_app_with_answer(
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -673,6 +677,34 @@ fn registry_rejects_non_object_schemas() {
             .expect("invalid schema rejection");
         assert!(error.to_string().contains("schema must be an object"));
     }
+}
+
+#[tokio::test]
+async fn mcp_tools_list_does_not_advertise_history_for_history_key() {
+    let app = test_app().await;
+    app.gateway
+        .admin()
+        .update_api_key(
+            &app.key_id,
+            serde_json::from_value(json!({
+                "mcp_access_enabled": true,
+                "transparent_injection_enabled": true,
+                "transparent_injections": ["history_recall"]
+            }))
+            .expect("key update"),
+        )
+        .await
+        .expect("enable MCP and History Recall");
+    let client = connect(&app).await;
+    let listed = client.list_tools(None).await.expect("tools/list");
+    let reader = listed
+        .tools
+        .iter()
+        .find(|tool| tool.name == "StraviaRead")
+        .expect("MCP reader");
+    let advertised = serde_json::to_string(reader).expect("reader description and schema");
+    assert!(!advertised.contains("stravia://history/"), "{advertised}");
+    assert!(!advertised.contains("History Recall"), "{advertised}");
 }
 
 #[tokio::test]
@@ -1313,10 +1345,8 @@ async fn artifact_download_remains_available_without_media_and_rejects_other_pri
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -1358,11 +1388,9 @@ async fn media_tool_requires_mcp_access_independently_from_transparent_injection
                 is_enabled: None,
                 mcp_access_enabled: Some(false),
                 transparent_injection_enabled: None,
-                inject_web_search: None,
-                inject_media_generation: None,
+                transparent_injections: None,
                 expires_at: None,
                 model_ids: None,
-                inject_media_understanding: None,
                 spend_limit: None,
             },
         )
@@ -1388,11 +1416,9 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
                 is_enabled: None,
                 mcp_access_enabled: Some(true),
                 transparent_injection_enabled: Some(false),
-                inject_web_search: Some(false),
-                inject_media_generation: None,
+                transparent_injections: Some(Default::default()),
                 expires_at: None,
                 model_ids: None,
-                inject_media_understanding: None,
                 spend_limit: None,
             },
         )
@@ -1427,11 +1453,9 @@ async fn web_search_requires_mcp_access_independently_from_transparent_injection
                 is_enabled: None,
                 mcp_access_enabled: Some(false),
                 transparent_injection_enabled: None,
-                inject_web_search: None,
-                inject_media_generation: None,
+                transparent_injections: None,
                 expires_at: None,
                 model_ids: None,
-                inject_media_understanding: None,
                 spend_limit: None,
             },
         )
@@ -1499,11 +1523,9 @@ async fn mcp_transport_preserves_bearer_only_authentication_mappings() {
                 is_enabled: Some(false),
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
-                inject_web_search: None,
-                inject_media_generation: None,
+                transparent_injections: None,
                 expires_at: None,
                 model_ids: None,
-                inject_media_understanding: None,
                 spend_limit: None,
             },
         )
@@ -1571,11 +1593,9 @@ async fn expired_mcp_credential_uses_canonical_unauthorized_status() {
                 is_enabled: None,
                 mcp_access_enabled: None,
                 transparent_injection_enabled: None,
-                inject_web_search: None,
-                inject_media_generation: None,
+                transparent_injections: None,
                 expires_at: Some("2000-01-01T00:00:00Z".into()),
                 model_ids: None,
-                inject_media_understanding: None,
                 spend_limit: None,
             },
         )

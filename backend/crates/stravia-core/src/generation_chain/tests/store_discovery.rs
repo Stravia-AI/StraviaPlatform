@@ -1999,10 +1999,10 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     // changing immutable payloads or parent edges.
     let pool = backend.sqlite_pool_for_test().expect("sqlite backend");
     {
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query("UPDATE turn_nodes SET prefix_namespace = 'old-controls', prefix_fingerprint = 'old-projection', prefix_item_count = 99, prefix_projection_version = 999, prefix_controls_fingerprint = 'stale-controls', prefix_context_fingerprint = 'stale-context' WHERE id = ?")
             .bind(b.id()).execute(&mut *writer).await.unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
     }
     let mut rebuild = PrefixRebuild::default();
     backend
@@ -2112,7 +2112,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .await
         .unwrap();
     // 祖先处于回收中（deleting）时不可用，前缀重建不能依赖它。
-    let mut writer = pool.acquire_write().await.unwrap();
+    let mut writer = pool.begin_write().await.unwrap();
     sqlx::query("UPDATE turn_node_retention SET deleting = 1 WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")
         .bind(a.id())
         .execute(&mut *writer)
@@ -2123,7 +2123,7 @@ async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
         .execute(&mut *writer)
         .await
         .unwrap();
-    writer.finish().await.unwrap();
+    writer.commit().await.unwrap();
     // Prefix rebuilds must leave the immutable stored payload byte-identical.
     let payload_before: Vec<u8> =
         sqlx::query_scalar("SELECT payload FROM turn_node_payloads WHERE node_pk = (SELECT node_pk FROM turn_nodes WHERE id = ?)")

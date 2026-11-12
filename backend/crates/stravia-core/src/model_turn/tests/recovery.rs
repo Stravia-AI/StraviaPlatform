@@ -86,10 +86,8 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -181,10 +179,8 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -309,10 +305,8 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

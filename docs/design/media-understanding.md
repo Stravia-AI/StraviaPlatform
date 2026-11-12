@@ -76,10 +76,10 @@ StraviaRead
 |---|---|---|
 | 显式 `StraviaRead` 媒体分流 | Media Gate 开启且 Key 有效 | 无 |
 | MCP 媒体调用 | Media Gate、有效 Key、`mcp_access_enabled` | 无 |
-| non-vision parent 自动 bridge | Media Gate、有效 Key、master 与 `inject_media_understanding` | 决定是否启用 bridge |
+| non-vision parent 自动 bridge | Media Gate、有效 Key、`transparent_injection_enabled` 开启且注入选择包含 `media_understanding` | 决定是否启用 bridge |
 | 原生 vision Target | 逻辑 Model 自身的图片能力 | 无；原生路径优先 |
 
-Gate 关闭时，API Key 已保存的 `inject_media_understanding` 保留但运行时忽略。重新开启 Gate 后，该选择恢复生效。
+Gate 关闭时，API Key 已保存的 `media_understanding` 注入选择保留但运行时忽略。重新开启 Gate 后，该选择恢复生效。
 
 ## 4. 路由策略
 
@@ -174,16 +174,13 @@ WebUI route：
 
 ## 9. Persistence 与升级
 
-Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 26 为 `agent_definition_configs` 增加 nullable `thinking_level`；启用 Media Understanding 时，专用 Admin API 要求该值属于所选逻辑 Model 的支持等级。migration 18 把 API Key 权限改为：
+Media Definition、Agent Turn、Artifact 与 `media_derivatives` 继续使用既有 schema。migration 26 为 `agent_definition_configs` 增加 nullable `thinking_level`；启用 Media Understanding 时，专用 Admin API 要求该值属于所选逻辑 Model 的支持等级。migration 18 将 API Key 权限拆为 MCP 访问、透明注入总开关与各注入项选择；旧 `allow_media_understanding` 只在 migration 中用于恢复既有自动工具行为，然后删除，不再是显式 capability grant。
 
-- `mcp_access_enabled`；
-- `transparent_injection_enabled`；
-- `inject_media_understanding`；
-- `inject_web_search`。
+这是权限扩大的 clean cutover：Media Gate 开启后，所有有效 Key 都能显式使用能力。升级前必须备份数据库和匹配的旧二进制。回滚到 migration 18 之前的版本必须恢复兼容该旧二进制的升级前数据库；不能只回退应用文件。
 
-旧 `allow_media_understanding` 只在 migration 中用于恢复既有自动工具行为，然后删除；它不再是显式 capability grant。
+依据 [ADR-0097](../adr/0097-store-api-key-transparent-injections-as-a-set.md)，SQLite 与 PostgreSQL 的 migration 0049 将三个旧注入布尔列合并为 `transparent_injections` JSON 数组，保留每个 Key 的选择，再删除旧列；`mcp_access_enabled` 和 `transparent_injection_enabled` 仍独立保存。SQLite 还须重建引用旧列的布尔契约触发器。转换工作量随 Key 数量增长；该迁移在启动期一次性完成，不单独展示进度，已完成的库再次启动不会重复转换。隔离合成测试在各自新库迁移至 0048 后插入 10,000 个 Key，均匀覆盖三项选择与总开关的 16 种组合，再以 Core 真实 migrator 升级至最新版本：Rust test 非优化调试构建、单连接下，SQLite 耗时 249.411 ms，逻辑数据库大小由 2,744,320 增至 3,174,400 字节（WAL、`synchronous=FULL`，大小不含 WAL）；PostgreSQL 16.15 容器耗时 120.193 ms，`pg_database_size` 由 14,670,871 增至 16,096,279 字节（`fsync`、`synchronous_commit`、`full_page_writes` 均开启，`wal_level=replica`，大小不含 WAL）。两库迁移后均保留 10,000 行；这只是各一次合成测量，未测峰值 RSS 或波动，不代表完整服务启动或生产负载。
 
-这是权限扩大的 clean cutover：Media Gate 开启后，所有有效 Key 都能显式使用能力。升级前必须备份数据库和匹配的旧二进制。回滚必须恢复 migration 18 之前的数据库；不能只回退应用文件。
+0049 完成后，不含该 migration 的旧二进制不能直接使用升级后的数据库：旧迁移器会拒绝不在其内嵌迁移列表中的已应用历史，且旧列已删除。回滚必须恢复与旧二进制匹配、未应用其不支持迁移的数据库备份；不要仅删除 `_sqlx_migrations` 记录或只恢复旧列来绕过历史校验。恢复备份会丢失备份之后的写入。
 
 ## 10. 验证边界
 

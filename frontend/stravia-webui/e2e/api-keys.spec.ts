@@ -9,6 +9,7 @@ test.beforeEach(async ({ page }) => {
 
 test('API Key editor preserves disabled transparent injection selections', async ({ page }) => {
   let writes = 0
+  let submittedInjections: string[] | undefined
   let persistedKey = {
     id: 'key-advanced',
     key: 'sk-advanced',
@@ -17,9 +18,7 @@ test('API Key editor preserves disabled transparent injection selections', async
     is_enabled: true,
     mcp_access_enabled: true,
     transparent_injection_enabled: true,
-    inject_media_understanding: true,
-    inject_media_generation: true,
-    inject_web_search: true,
+    transparent_injections: ['web_search', 'media_understanding', 'media_generation'],
     expires_at: null,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
@@ -32,6 +31,7 @@ test('API Key editor preserves disabled transparent injection selections', async
   await page.route('**/api/v1/api-keys/key-advanced', async (route) => {
     writes += 1
     const input = route.request().postDataJSON()
+    submittedInjections = input.transparent_injections
     persistedKey = { ...persistedKey, ...input }
     await route.fulfill({ json: { data: persistedKey } })
   })
@@ -92,6 +92,10 @@ test('API Key editor preserves disabled transparent injection selections', async
   const mediaSelection = page.locator('#api-key-inject-media-understanding')
   const generationSelection = page.locator('#api-key-inject-media-generation')
   const searchSelection = page.locator('#api-key-inject-web-search')
+  const historySelection = page.locator('#api-key-inject-history-recall')
+  await expect(historySelection).toBeEnabled()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'false')
+  await historySelection.click()
   await expect(mediaSelection).toHaveAttribute('aria-checked', 'true')
   await expect(generationSelection).toHaveAttribute('aria-checked', 'true')
   await expect(searchSelection).toHaveAttribute('aria-checked', 'true')
@@ -101,18 +105,118 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(
     page.getByRole('link', { name: 'Turn on this feature in Advanced Features before Stravia can expose it.' }),
   ).toHaveCount(3)
+  await page.locator('#api-key-transparent-injection').click()
+  await expect(historySelection).toBeHidden()
   await page.getByRole('button', { name: 'Save API Key' }).click()
 
-  expect(persistedKey.inject_media_understanding).toBe(true)
-  expect(persistedKey.inject_media_generation).toBe(true)
-  expect(persistedKey.inject_web_search).toBe(true)
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
+  expect(persistedKey.transparent_injection_enabled).toBe(false)
+  expect(persistedKey.transparent_injections).toEqual([
+    'web_search',
+    'media_understanding',
+    'media_generation',
+    'history_recall',
+  ])
   await expect(editor).toBeHidden()
   await expect(page).toHaveURL(/\/api-keys$/)
   await page.reload()
   await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(2).click()
+  await expect(page.locator('#api-key-transparent-injection')).toHaveAttribute('aria-checked', 'false')
+  await page.locator('#api-key-transparent-injection').click()
   await expect(page.locator('#api-key-inject-media-understanding')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-inject-media-generation')).toHaveAttribute('aria-checked', 'true')
   await expect(page.locator('#api-key-inject-web-search')).toHaveAttribute('aria-checked', 'true')
+  await expect(historySelection).toBeEnabled()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'true')
+  await page.getByRole('button', { name: 'Save API Key' }).click()
+  await expect(editor).toBeHidden()
+  expect(persistedKey.transparent_injection_enabled).toBe(true)
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
+  await page.reload()
+  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'true')
+})
+
+test('API Key editor saves injection selections in canonical order', async ({ page }) => {
+  let submittedInjections: string[] | undefined
+  let persistedKey = {
+    id: 'key-selections',
+    key: 'sk-selections',
+    name: 'Selection client',
+    rpm_limit: null,
+    is_enabled: true,
+    mcp_access_enabled: false,
+    transparent_injection_enabled: true,
+    transparent_injections: [] as string[],
+    expires_at: null,
+    created_at: '2026-08-17T00:00:00Z',
+    updated_at: '2026-08-17T00:00:00Z',
+    model_ids: [],
+  }
+
+  await page.route('**/api/v1/models', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
+  await page.route('**/api/v1/api-keys/key-selections', async (route) => {
+    const input = route.request().postDataJSON()
+    submittedInjections = input.transparent_injections
+    persistedKey = { ...persistedKey, ...input }
+    await route.fulfill({ json: { data: persistedKey } })
+  })
+  await page.route('**/api/v1/api-keys', async (route) => {
+    await route.fulfill({ json: { data: [persistedKey] } })
+  })
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    await route.fulfill({ json: { data: { enabled: true } } })
+  })
+  await page.route('**/api/v1/media-understanding', async (route) => {
+    await route.fulfill({ json: { data: { image: { enabled: true }, audio: { enabled: false } } } })
+  })
+  await page.route('**/api/v1/media-generation/config', async (route) => {
+    await route.fulfill({
+      json: {
+        data: {
+          config: { enabled: true, image: { route_id: 'image' } },
+          validation: { valid: true, code: null, message: null },
+        },
+      },
+    })
+  })
+
+  await page.goto('/api-keys')
+  await page.getByRole('row').filter({ hasText: 'Selection client' }).getByRole('cell').nth(1).click()
+  const editor = page.locator('[data-slot="sheet-content"]')
+  const mediaSelection = editor.locator('#api-key-inject-media-understanding')
+  const generationSelection = editor.locator('#api-key-inject-media-generation')
+  const searchSelection = editor.locator('#api-key-inject-web-search')
+  const historySelection = editor.locator('#api-key-inject-history-recall')
+  await expect(historySelection).toBeEnabled()
+  await expect(historySelection).toHaveAttribute('aria-checked', 'false')
+  await expect(mediaSelection).toBeEnabled()
+  await expect(generationSelection).toBeEnabled()
+  await expect(searchSelection).toBeEnabled()
+  await expect(mediaSelection).toHaveAttribute('aria-checked', 'false')
+  await expect(generationSelection).toHaveAttribute('aria-checked', 'false')
+  await expect(searchSelection).toHaveAttribute('aria-checked', 'false')
+  await historySelection.click()
+  await generationSelection.click()
+  await mediaSelection.click()
+  await searchSelection.click()
+  await editor.getByRole('button', { name: 'Save API Key' }).click()
+  await expect(editor).toBeHidden()
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
+
+  await page.reload()
+  await page.getByRole('row').filter({ hasText: 'Selection client' }).getByRole('cell').nth(1).click()
+  await expect(editor.locator('#api-key-transparent-injection')).toHaveAttribute('aria-checked', 'true')
+  await expect(mediaSelection).toHaveAttribute('aria-checked', 'true')
+  await expect(generationSelection).toHaveAttribute('aria-checked', 'true')
+  await expect(searchSelection).toHaveAttribute('aria-checked', 'true')
+  await expect(historySelection).toHaveAttribute('aria-checked', 'true')
+  await historySelection.click()
+  await editor.getByRole('button', { name: 'Save API Key' }).click()
+  await expect(editor).toBeHidden()
+  expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation'])
 })
 
 test('API Key editor keeps optional help in tooltips and required scope visible at every width', async ({ page }) => {
@@ -198,9 +302,7 @@ test('API Key editor groups and filters allowed model selections', async ({ page
     is_enabled: true,
     mcp_access_enabled: true,
     transparent_injection_enabled: true,
-    inject_media_understanding: true,
-    inject_media_generation: true,
-    inject_web_search: true,
+    transparent_injections: ['web_search', 'media_understanding', 'media_generation'],
     expires_at: null,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
@@ -314,9 +416,7 @@ test('API Key direct page titles itself with the key name, falls back to its ID,
     is_enabled: true,
     mcp_access_enabled: false,
     transparent_injection_enabled: false,
-    inject_media_understanding: false,
-    inject_media_generation: false,
-    inject_web_search: false,
+    transparent_injections: [],
     expires_at: null,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
@@ -348,9 +448,7 @@ const advancedKey = {
   is_enabled: true,
   mcp_access_enabled: true,
   transparent_injection_enabled: true,
-  inject_media_understanding: false,
-  inject_media_generation: false,
-  inject_web_search: true,
+  transparent_injections: ['web_search'],
   expires_at: null,
   created_at: '2026-08-17T00:00:00Z',
   updated_at: '2026-08-17T00:00:00Z',
@@ -378,6 +476,65 @@ async function mockLayoutKey(page: Page, update?: (route: Route) => Promise<void
       },
     }),
   )
+}
+
+for (const locale of ['en-US', 'zh-CN'] as const) {
+  test(`history recall remains readable and available when platform capabilities are unavailable (${locale}, 390px)`, async ({
+    page,
+  }) => {
+    await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await mockLayoutKey(page)
+    for (const endpoint of ['web-search/config', 'media-understanding', 'media-generation/config']) {
+      await page.route(`**/api/v1/${endpoint}`, (route) => route.fulfill({ status: 503 }))
+    }
+    await page.goto('/api-keys/key-layout')
+    await expect(page.locator('html')).toHaveAttribute('lang', locale)
+    const history = page.locator('#api-key-inject-history-recall')
+    await history.scrollIntoViewIfNeeded()
+    await expect(history).toBeVisible()
+    await expect(history).toBeEnabled()
+    await expect(history).toHaveAttribute('aria-checked', 'false')
+    if (locale === 'zh-CN') {
+      await expect(page.getByRole('switch', { name: '历史回看', exact: true })).toBeVisible()
+    }
+    const descriptionId = await history.getAttribute('aria-describedby')
+    expect(descriptionId).toBeTruthy()
+    const description = page.locator(`[id="${descriptionId}"]`)
+    await description.scrollIntoViewIfNeeded()
+    await expect(description).toBeVisible()
+    await expect(description).toContainText(locale === 'zh-CN' ? /[\u4e00-\u9fff]/ : /[a-zA-Z]/)
+    expect(
+      await description.evaluate((element) => {
+        const style = getComputedStyle(element)
+        const range = document.createRange()
+        range.selectNodeContents(element)
+        const bounds = element.getBoundingClientRect()
+        let horizontallyVisible = bounds.left >= 0 && bounds.right <= window.innerWidth
+        for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+          const parentStyle = getComputedStyle(parent)
+          if (parentStyle.overflowX !== 'visible') {
+            const parentBounds = parent.getBoundingClientRect()
+            horizontallyVisible &&= bounds.left >= parentBounds.left - 1 && bounds.right <= parentBounds.right + 1
+          }
+        }
+        const textFits = [...range.getClientRects()].every(
+          (rect) => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.bottom <= bounds.bottom + 1,
+        )
+        return (
+          horizontallyVisible &&
+          textFits &&
+          element.scrollWidth <= element.clientWidth &&
+          element.scrollHeight <= element.clientHeight &&
+          style.textOverflow !== 'ellipsis' &&
+          style.getPropertyValue('-webkit-line-clamp') === 'none'
+        )
+      }),
+    ).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await history.click()
+    await expect(history).toHaveAttribute('aria-checked', 'true')
+  })
 }
 
 const editorControlIds = (scope: Locator) =>

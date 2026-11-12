@@ -125,10 +125,11 @@ async fn ensure_sqlite_foreign_keys(
 
 fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> bool {
     // 重建表及其数据转换（2、7、8、12、24、32、33）仍需 FK-off 和完整审计。
+    // 52 只重建没有入站外键的 vendor_plugins，其余为新表，FK 保持开启即可。
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=52
     ) {
         return false;
     }
@@ -165,6 +166,10 @@ pub async fn run_sqlite_migrator(
         None,
     );
     // 迁移与升级钩子在同一写租约内运行；运行期写者须在其后排队，池连接在租约外只读。
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "PRAGMA foreign_keys 与 SQLx 迁移器须在事务外执行"
+    )]
     let mut pinned = SqliteMigrationConnection {
         connection: Some(pool.acquire_write().await?),
         // 保守标记：迁移会话可能执行过 PRAGMA foreign_keys=OFF，失败或取消时必须关闭连接。
@@ -1296,6 +1301,244 @@ mod tests {
         );
     }
 
+    fn expected_injections(bits: i32) -> serde_json::Value {
+        let items: Vec<&str> = ["web_search", "media_understanding", "media_generation"]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, item)| (bits & (1 << index) != 0).then_some(item))
+            .collect();
+        serde_json::json!(items)
+    }
+
+    #[tokio::test]
+    async fn sqlite_api_key_injections_migrate_all_combinations_and_enforce_contracts() {
+        let pool = sqlite_pool().await;
+        let prefix = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 48)
+                .cloned()
+                .collect(),
+        );
+        super::run_sqlite_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "PRAGMA foreign_keys=OFF;
+             INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+             VALUES ('missing-provider','orphan','manual','present','{}');
+             PRAGMA foreign_keys=ON;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for bits in 0..8 {
+            sqlx::query("INSERT INTO api_keys (id, token, name, inject_web_search, inject_media_understanding, inject_media_generation, transparent_injection_enabled) VALUES (?, ?, 'Key', ?, ?, ?, ?)")
+                .bind(format!("key-{bits}"))
+                .bind(format!("token-{bits}"))
+                .bind(bits & 1 != 0)
+                .bind(bits & 2 != 0)
+                .bind(bits & 4 != 0)
+                .bind(bits & 1 != 0)
+                .execute(&pool).await.unwrap();
+        }
+        migrate_sqlite(&pool, None).await.unwrap();
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'missing-provider'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+        let error = sqlx::query("INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json) VALUES ('missing-provider','another-orphan','manual','present','{}')")
+            .execute(&pool).await.expect_err("foreign keys remain enforced after migration");
+        assert!(
+            error
+                .as_database_error()
+                .unwrap()
+                .is_foreign_key_violation()
+        );
+        for bits in 0..8 {
+            let (json, enabled): (String, bool) = sqlx::query_as("SELECT transparent_injections, transparent_injection_enabled FROM api_keys WHERE id = ?")
+                .bind(format!("key-{bits}"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+                expected_injections(bits)
+            );
+            assert_eq!(enabled, bits & 1 != 0);
+        }
+        for column in [
+            "is_enabled",
+            "mcp_access_enabled",
+            "transparent_injection_enabled",
+        ] {
+            let update = format!("UPDATE api_keys SET {column} = 2 WHERE id = 'key-0'");
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+            let insert = format!(
+                "INSERT INTO api_keys (id, token, name, {column}) VALUES ('invalid', 'invalid', 'Key', 2)"
+            );
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(insert))
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+        }
+        for value in ["{}", "null", "42", "\"string\"", "not json"] {
+            assert!(
+                sqlx::query("UPDATE api_keys SET transparent_injections = ? WHERE id = 'key-0'")
+                    .bind(value)
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+            assert!(sqlx::query("INSERT INTO api_keys (id, token, name, transparent_injections) VALUES ('invalid', 'invalid', 'Key', ?)")
+                .bind(value).execute(&pool).await.is_err());
+        }
+        sqlx::query(
+            "UPDATE api_keys SET transparent_injections = '[\"future_item\"]' WHERE id = 'key-0'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query("UPDATE api_keys SET transparent_injections = NULL WHERE id = 'key-0'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        for column in [
+            "inject_web_search",
+            "inject_media_understanding",
+            "inject_media_generation",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SELECT {column} FROM api_keys"
+                )))
+                .execute(&pool)
+                .await
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_api_key_injections_migrate_all_combinations_and_enforce_contracts_when_configured()
+     {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("api_key_injections_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .unwrap();
+        let prefix = Migrator::with_migrations(
+            super::POSTGRES_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 48)
+                .cloned()
+                .collect(),
+        );
+        super::run_postgres_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        for bits in 0..8 {
+            sqlx::query("INSERT INTO api_keys (id, token, name, inject_web_search, inject_media_understanding, inject_media_generation, transparent_injection_enabled) VALUES ($1, $2, 'Key', $3, $4, $5, $6)")
+                .bind(format!("key-{bits}"))
+                .bind(format!("token-{bits}"))
+                .bind(bits & 1 != 0)
+                .bind(bits & 2 != 0)
+                .bind(bits & 4 != 0)
+                .bind(bits & 1 != 0)
+                .execute(&pool).await.unwrap();
+        }
+        migrate_postgres(&pool, None).await.unwrap();
+        for bits in 0..8 {
+            let (json, enabled): (String, bool) = sqlx::query_as("SELECT transparent_injections::text, transparent_injection_enabled FROM api_keys WHERE id = $1")
+                .bind(format!("key-{bits}"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+                expected_injections(bits)
+            );
+            assert_eq!(enabled, bits & 1 != 0);
+        }
+        for column in [
+            "is_enabled",
+            "mcp_access_enabled",
+            "transparent_injection_enabled",
+        ] {
+            let update = format!("UPDATE api_keys SET {column} = 2 WHERE id = 'key-0'");
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+            let insert = format!(
+                "INSERT INTO api_keys (id, token, name, {column}) VALUES ('invalid', 'invalid', 'Key', 2)"
+            );
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(insert))
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+        }
+        for value in ["{}", "null", "42", "\"string\"", "not json"] {
+            assert!(sqlx::query("UPDATE api_keys SET transparent_injections = $1::text::jsonb WHERE id = 'key-0'")
+                .bind(value).execute(&pool).await.is_err());
+            assert!(sqlx::query("INSERT INTO api_keys (id, token, name, transparent_injections) VALUES ('invalid', 'invalid', 'Key', $1::text::jsonb)")
+                .bind(value).execute(&pool).await.is_err());
+        }
+        sqlx::query("UPDATE api_keys SET transparent_injections = '[\"future_item\"]'::jsonb WHERE id = 'key-0'")
+            .execute(&pool).await.unwrap();
+        assert!(
+            sqlx::query("UPDATE api_keys SET transparent_injections = NULL WHERE id = 'key-0'")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        for column in [
+            "inject_web_search",
+            "inject_media_understanding",
+            "inject_media_generation",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SELECT {column} FROM api_keys"
+                )))
+                .execute(&pool)
+                .await
+                .is_err()
+            );
+        }
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
+
     #[tokio::test]
     async fn sqlite_baseline_applies_to_empty_database_and_is_idempotent() {
         let pool = sqlite_pool().await;
@@ -1308,15 +1551,15 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert relying on column defaults");
-        let (enabled, mcp, media): (bool, bool, bool) = sqlx::query_as(
-            "SELECT is_enabled, mcp_access_enabled, inject_media_generation FROM api_keys WHERE id = 'k'",
+        let (enabled, mcp, injections): (bool, bool, String) = sqlx::query_as(
+            "SELECT is_enabled, mcp_access_enabled, transparent_injections FROM api_keys WHERE id = 'k'",
         )
         .fetch_one(&pool)
         .await
         .expect("defaults materialized");
         assert!(enabled);
         assert!(!mcp);
-        assert!(!media);
+        assert_eq!(injections, "[]");
 
         let (use_proxy, api_key, engines): (bool, Option<String>, String) = sqlx::query_as(
             "SELECT use_proxy, api_key, local_engines FROM web_providers WHERE id = 'web-provider-local'",
@@ -2200,6 +2443,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_interrupted_migration_never_returns_fk_off_connection() {
         let pool = sqlite_pool().await;
+        #[expect(clippy::disallowed_methods, reason = "复现迁移会话的连接级写租约")]
         let mut pinned = super::SqliteMigrationConnection {
             connection: Some(pool.acquire_write().await.unwrap()),
             foreign_keys_may_be_off: true,

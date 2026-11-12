@@ -108,9 +108,8 @@ impl PluginStore {
         }
         let json = serde_json::to_string(&stored)?;
         let expected_json = expected.map(serde_json::to_string).transpose()?;
-        macro_rules! put { ($pool:expr, $begin:literal) => {{
-            let mut connection = $pool.acquire_write().await?;
-            let mut tx = connection.begin_with($begin).await?;
+        macro_rules! put { ($pool:expr) => {{
+            let mut tx = $pool.begin_write().await?;
             let result = if let Some(old) = &expected_json {
                 sqlx::query("UPDATE vendor_plugin_sources SET source_json=$2, repository_id=$3, repository=$4, fingerprint=$5, trust_revision=$6, enabled=$7 WHERE id=$1 AND source_json=$8")
                     .bind(&source.id).bind(&json).bind(source.repository_id.to_string()).bind(&source.repository).bind(&source.fingerprint).bind(source.trust_revision).bind(source.enabled).bind(old).execute(&mut *tx).await?
@@ -124,7 +123,6 @@ impl PluginStore {
                 sqlx::query("UPDATE vendor_plugin_sources SET incomplete=$2 WHERE id=$1").bind(&source.id).bind(false).execute(&mut *tx).await?;
             }
             tx.commit().await?;
-            connection.finish().await?;
             Ok(())
         }} }
         match &self.backend {
@@ -153,8 +151,8 @@ impl PluginStore {
                 data.marketplace.sources.insert(source.id.clone(), stored);
                 Ok(())
             }
-            PluginStoreBackend::Sqlite(pool) => put!(pool, "BEGIN IMMEDIATE"),
-            PluginStoreBackend::Postgres(pool) => put!(pool, "BEGIN"),
+            PluginStoreBackend::Sqlite(pool) => put!(pool),
+            PluginStoreBackend::Postgres(pool) => put!(pool),
         }
     }
 
@@ -165,9 +163,8 @@ impl PluginStore {
         );
         let json = serde_json::to_string(expected)?;
         macro_rules! delete {
-            ($pool:expr, $begin:literal) => {{
-                let mut connection = $pool.acquire_write().await?;
-                let mut tx = connection.begin_with($begin).await?;
+            ($pool:expr) => {{
+                let mut tx = $pool.begin_write().await?;
                 let result =
                     sqlx::query("DELETE FROM vendor_plugin_sources WHERE id=$1 AND source_json=$2")
                         .bind(id)
@@ -176,7 +173,6 @@ impl PluginStore {
                         .await?;
                 anyhow::ensure!(result.rows_affected() == 1, PluginStorageError::Changed);
                 tx.commit().await?;
-                connection.finish().await?;
                 Ok(())
             }};
         }
@@ -199,8 +195,8 @@ impl PluginStore {
                 data.marketplace.generations.remove(id);
                 Ok(())
             }
-            PluginStoreBackend::Sqlite(pool) => delete!(pool, "BEGIN IMMEDIATE"),
-            PluginStoreBackend::Postgres(pool) => delete!(pool, "BEGIN"),
+            PluginStoreBackend::Sqlite(pool) => delete!(pool),
+            PluginStoreBackend::Postgres(pool) => delete!(pool),
         }
     }
 
@@ -234,15 +230,14 @@ impl PluginStore {
             );
             Ok(())
         }
-        macro_rules! begin { ($pool:expr, $begin:literal, $lock:literal) => {{
-            let mut connection = $pool.acquire_write().await?;
-            let mut tx = connection.begin_with($begin).await?;
+        macro_rules! begin { ($pool:expr, $lock:literal) => {{
+            let mut tx = $pool.begin_write().await?;
             let row: Option<String> = sqlx::query_scalar($lock).bind(&expected.id).fetch_optional(&mut *tx).await?;
             let source: PluginSourceSummary = serde_json::from_str(&row.ok_or(PluginStorageError::Changed)?)?;
             check(&source, expected)?;
             let generation: i64 = sqlx::query_scalar("UPDATE vendor_plugin_check_sequence SET generation=generation+1 WHERE id=1 RETURNING generation").fetch_one(&mut *tx).await?;
             sqlx::query("UPDATE vendor_plugin_sources SET check_generation=$2 WHERE id=$1").bind(&expected.id).bind(generation).execute(&mut *tx).await?;
-            tx.commit().await?; connection.finish().await?; Ok(generation)
+            tx.commit().await?; Ok(generation)
         }} }
         match &self.backend {
             PluginStoreBackend::Memory(store) => {
@@ -265,12 +260,10 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => begin!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "SELECT source_json, check_generation FROM vendor_plugin_sources WHERE id=$1"
             ),
             PluginStoreBackend::Postgres(pool) => begin!(
                 pool,
-                "BEGIN",
                 "SELECT source_json, check_generation FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
         }
@@ -300,9 +293,8 @@ impl PluginStore {
             .iter()
             .map(|c| Ok((c.release_id.to_string(), serde_json::to_string(c)?)))
             .collect::<Result<_>>()?;
-        macro_rules! replace { ($pool:expr, $begin:literal, $lock:literal) => {{
-            let mut connection = $pool.acquire_write().await?;
-            let mut tx = connection.begin_with($begin).await?;
+        macro_rules! replace { ($pool:expr, $lock:literal) => {{
+            let mut tx = $pool.begin_write().await?;
             let row: Option<(String, i64)> = sqlx::query_as($lock).bind(source_id).fetch_optional(&mut *tx).await?;
             let (json, current_generation) = row.ok_or(PluginStorageError::Changed)?;
             anyhow::ensure!(generation == current_generation, PluginStorageError::Changed);
@@ -313,7 +305,7 @@ impl PluginStore {
             sqlx::query("UPDATE vendor_plugin_sources SET source_json=$2, incomplete=$3 WHERE id=$1").bind(source_id).bind(serde_json::to_string(&source)?).bind(incomplete).execute(&mut *tx).await?;
             sqlx::query("DELETE FROM vendor_plugin_catalogs WHERE source_id=$1").bind(source_id).execute(&mut *tx).await?;
             for (id, json) in &encoded { sqlx::query("INSERT INTO vendor_plugin_catalogs (source_id,release_id,catalog_json) VALUES ($1,$2,$3)").bind(source_id).bind(id).bind(json).execute(&mut *tx).await?; }
-            tx.commit().await?; connection.finish().await?; Ok(())
+            tx.commit().await?; Ok(())
         }} }
         match &self.backend {
             PluginStoreBackend::Memory(store) => {
@@ -351,12 +343,10 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => replace!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "SELECT source_json, check_generation FROM vendor_plugin_sources WHERE id=$1"
             ),
             PluginStoreBackend::Postgres(pool) => replace!(
                 pool,
-                "BEGIN",
                 "SELECT source_json, check_generation FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
         }
@@ -393,9 +383,8 @@ impl PluginStore {
             }
         }
         macro_rules! record {
-            ($pool:expr, $begin:literal, $lock:literal) => {{
-                let mut connection = $pool.acquire_write().await?;
-                let mut tx = connection.begin_with($begin).await?;
+            ($pool:expr, $lock:literal) => {{
+                let mut tx = $pool.begin_write().await?;
                 let row: Option<(String, i64)> = sqlx::query_as($lock)
                     .bind(source_id)
                     .fetch_optional(&mut *tx)
@@ -415,7 +404,6 @@ impl PluginStore {
                     .execute(&mut *tx)
                     .await?;
                 tx.commit().await?;
-                connection.finish().await?;
                 Ok(())
             }};
         }
@@ -438,12 +426,10 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => record!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "SELECT source_json, check_generation FROM vendor_plugin_sources WHERE id=$1"
             ),
             PluginStoreBackend::Postgres(pool) => record!(
                 pool,
-                "BEGIN",
                 "SELECT source_json, check_generation FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
         }
@@ -475,9 +461,8 @@ impl PluginStore {
             Ok(())
         }
         macro_rules! mark_sql {
-            ($pool:expr, $begin:literal, $lock:literal) => {{
-                let mut connection = $pool.acquire_write().await?;
-                let mut tx = connection.begin_with($begin).await?;
+            ($pool:expr, $lock:literal) => {{
+                let mut tx = $pool.begin_write().await?;
                 let json: Option<String> = sqlx::query_scalar($lock)
                     .bind(source_id)
                     .fetch_optional(&mut *tx)
@@ -496,7 +481,6 @@ impl PluginStore {
                     .execute(&mut *tx)
                     .await?;
                 tx.commit().await?;
-                connection.finish().await?;
                 Ok(())
             }};
         }
@@ -512,12 +496,10 @@ impl PluginStore {
             }
             PluginStoreBackend::Sqlite(pool) => mark_sql!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "SELECT source_json FROM vendor_plugin_sources WHERE id=$1"
             ),
             PluginStoreBackend::Postgres(pool) => mark_sql!(
                 pool,
-                "BEGIN",
                 "SELECT source_json FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
         }
@@ -530,14 +512,12 @@ impl PluginStore {
         version: &str,
         digest: &str,
     ) -> Result<bool> {
-        macro_rules! record { ($pool:expr, $begin:literal, $lock:literal) => {{
-            let mut connection = $pool.acquire_write().await?;
-            let mut tx = connection.begin_with($begin).await?;
+        macro_rules! record { ($pool:expr, $lock:literal) => {{
+            let mut tx = $pool.begin_write().await?;
             let source: Option<String> = sqlx::query_scalar($lock).bind(source_id).fetch_optional(&mut *tx).await?;
             source.ok_or(PluginStorageError::Changed)?;
             let conflict: bool = sqlx::query_scalar("INSERT INTO vendor_plugin_seen_digests (source_id,vendor_id,version,digest) VALUES ($1,$2,$3,$4) ON CONFLICT(source_id,vendor_id,version) DO UPDATE SET conflict = vendor_plugin_seen_digests.conflict OR vendor_plugin_seen_digests.digest <> excluded.digest RETURNING conflict").bind(source_id).bind(vendor_id).bind(version).bind(digest).fetch_one(&mut *tx).await?;
             tx.commit().await?;
-            connection.finish().await?;
             Ok(conflict)
         }} }
         match &self.backend {
@@ -559,14 +539,11 @@ impl PluginStore {
                 existing.1 |= existing.0 != digest;
                 Ok(existing.1)
             }
-            PluginStoreBackend::Sqlite(pool) => record!(
-                pool,
-                "BEGIN IMMEDIATE",
-                "SELECT id FROM vendor_plugin_sources WHERE id=$1"
-            ),
+            PluginStoreBackend::Sqlite(pool) => {
+                record!(pool, "SELECT id FROM vendor_plugin_sources WHERE id=$1")
+            }
             PluginStoreBackend::Postgres(pool) => record!(
                 pool,
-                "BEGIN",
                 "SELECT id FROM vendor_plugin_sources WHERE id=$1 FOR UPDATE"
             ),
         }

@@ -539,7 +539,7 @@ def configure_background_media(env, parent_route):
     assert body['data']['audio']['eligible_models'] == [], body
     status, body = http_request('POST', env['admin'] + '/api/v1/api-keys', {
         'name': 'background-media-key', 'model_ids': [parent_route],
-        'transparent_injection_enabled': True, 'inject_media_understanding': True,
+        'transparent_injection_enabled': True, 'transparent_injections': ['media_understanding'],
         'mcp_access_enabled': True}, env['auth'])
     assert status == 200, body
     return body['data']['key']

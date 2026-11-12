@@ -583,9 +583,8 @@ impl TurnChainStore for SqlTurnChainStore {
         compaction_record_ids.sort_unstable();
         compaction_record_ids.dedup();
         macro_rules! persist {
-            ($pool:expr, $begin:literal, $lock:literal, $checkpoint_lock:literal, $lineage_lock:literal, $resolve_scope:path, $deps:ident, $put:ident) => {{
-                let mut connection = $pool.acquire_write().await.map_err(commit_storage)?;
-                let mut transaction = connection.begin_with($begin).await.map_err(commit_storage)?;
+            ($pool:expr, $lock:literal, $checkpoint_lock:literal, $lineage_lock:literal, $resolve_scope:path, $deps:ident, $put:ident) => {{
+                let mut transaction = $pool.begin_write().await.map_err(commit_storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(commit_storage)?; }
                 let duplicate: Option<i64> = sqlx::query_scalar(
                     "SELECT node_pk FROM turn_nodes WHERE id=$1",
@@ -709,14 +708,12 @@ impl TurnChainStore for SqlTurnChainStore {
                 }
                 content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await.map_err(commit_storage)?;
                 transaction.commit().await.map_err(commit_storage)?;
-                connection.finish().await.map_err(commit_storage)?;
             }};
         }
         match &self.backend {
             Backend::Sqlite(pool) => {
                 persist!(
                     pool,
-                    "BEGIN IMMEDIATE",
                     "",
                     "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                     "",
@@ -727,7 +724,6 @@ impl TurnChainStore for SqlTurnChainStore {
             }
             Backend::Postgres(pool) => persist!(
                 pool,
-                "BEGIN",
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE",
                 "",
                 " FOR UPDATE OF l",
@@ -818,9 +814,8 @@ impl TurnChainStore for SqlTurnChainStore {
              ),
     ) -> Result<(), TurnUnavailable> {
         macro_rules! rebuild {
-            ($pool:expr, $restore:ident, $backend:ident, $begin:literal, $lock:literal) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage)?;
-                let mut transaction = connection.begin_with($begin).await.map_err(storage)?;
+            ($pool:expr, $restore:ident, $backend:ident, $lock:literal) => {{
+                let mut transaction = $pool.begin_write().await.map_err(storage)?;
                 if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(storage)?; }
                 let stale = format!("{namespace_prefix}%");
                 let mut nodes: Vec<PrefixRebuildNode> = sqlx::query_as(
@@ -878,16 +873,14 @@ impl TurnChainStore for SqlTurnChainStore {
                         .execute(&mut *transaction).await.map_err(storage)?;
                 }
                 transaction.commit().await.map_err(storage)?;
-                connection.finish().await.map_err(storage)?;
             }};
         }
         match &self.backend {
-            Backend::Sqlite(pool) => rebuild!(pool, restore_sqlite, sqlite, "BEGIN IMMEDIATE", ""),
+            Backend::Sqlite(pool) => rebuild!(pool, restore_sqlite, sqlite, ""),
             Backend::Postgres(pool) => rebuild!(
                 pool,
                 restore_postgres,
                 postgres,
-                "BEGIN",
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
             ),
         }

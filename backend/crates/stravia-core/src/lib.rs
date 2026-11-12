@@ -13,6 +13,7 @@ pub mod error;
 mod gateway;
 pub(crate) mod generation_chain;
 pub mod history_marker;
+mod history_recall;
 pub(crate) mod history_retention;
 pub mod hook;
 mod interaction_observation;

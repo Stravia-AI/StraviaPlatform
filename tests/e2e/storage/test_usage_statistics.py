@@ -1179,7 +1179,7 @@ def test_capability_upstream_failure_counts_as_upstream_error(usage_env):
             payload={
                 "name": "usage-capability-key", "model_ids": [vision_route],
                 "mcp_access_enabled": True, "transparent_injection_enabled": True,
-                "inject_media_understanding": True,
+                "transparent_injections": ["media_understanding"],
             },
             headers=env["auth"],
         )

@@ -17,9 +17,8 @@ impl PluginStore {
         admissions: &dyn crate::storage::PromptAdmissionStore,
     ) -> anyhow::Result<u64> {
         macro_rules! clear_sql {
-            ($pool:expr, $begin:literal, $lock:literal) => {{
-                let mut connection = $pool.acquire_write().await?;
-                let mut tx = connection.begin_with($begin).await?;
+            ($pool:expr, $lock:literal) => {{
+                let mut tx = $pool.begin_write().await?;
                 sqlx::query($lock).execute(&mut *tx).await?;
                 let changed =
                     sqlx::query("UPDATE prompt_admission_epoch SET epoch=epoch+1 WHERE id=1")
@@ -34,20 +33,16 @@ impl PluginStore {
                     .execute(&mut *tx)
                     .await?;
                 tx.commit().await?;
-                connection.finish().await?;
             }};
         }
         match &self.backend {
             PluginStoreBackend::Sqlite(pool) => clear_sql!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1"
             ),
-            PluginStoreBackend::Postgres(pool) => clear_sql!(
-                pool,
-                "BEGIN",
-                "SELECT pg_advisory_xact_lock(7342179085017261)"
-            ),
+            PluginStoreBackend::Postgres(pool) => {
+                clear_sql!(pool, "SELECT pg_advisory_xact_lock(7342179085017261)")
+            }
             PluginStoreBackend::Memory(store) => {
                 let lock = admissions
                     .memory_history_lock()
@@ -62,8 +57,7 @@ impl PluginStore {
                     .map_err(|_| anyhow::anyhow!("atomic history pool lock poisoned"))?
                     .clone();
                 if let Some(pool) = pool {
-                    let mut connection = pool.acquire_write().await?;
-                    let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+                    let mut tx = pool.begin_write().await?;
                     let changed =
                         sqlx::query("UPDATE prompt_admission_epoch SET epoch=epoch+1 WHERE id=1")
                             .execute(&mut *tx)
@@ -74,7 +68,6 @@ impl PluginStore {
                         .execute(&mut *tx)
                         .await?;
                     tx.commit().await?;
-                    connection.finish().await?;
                 }
             }
         }
@@ -92,9 +85,8 @@ impl PluginStore {
             () => { "created_at_ms < $1 AND NOT EXISTS (SELECT 1 FROM prompt_admissions a WHERE a.principal=vendor_atomic_checkpoints.principal AND a.id=vendor_atomic_checkpoints.admission_id) AND NOT EXISTS (SELECT 1 FROM vendor_atomic_leases l WHERE l.principal=vendor_atomic_checkpoints.principal AND l.admission_id=vendor_atomic_checkpoints.admission_id AND l.expires_at_ms > $2) AND NOT EXISTS (SELECT 1 FROM turn_node_atomic_checkpoints r WHERE r.principal=vendor_atomic_checkpoints.principal AND r.checkpoint_id=vendor_atomic_checkpoints.checkpoint_id) AND NOT EXISTS (SELECT 1 FROM native_compaction_atomic_checkpoints r WHERE r.principal=vendor_atomic_checkpoints.principal AND r.checkpoint_id=vendor_atomic_checkpoints.checkpoint_id)" };
         }
         macro_rules! sweep {
-            ($pool:expr, $begin:literal, $lock:literal, $postgres:expr) => {{
-                let mut connection = $pool.acquire_write().await?;
-                let mut tx = connection.begin_with($begin).await?;
+            ($pool:expr, $lock:literal, $postgres:expr) => {{
+                let mut tx = $pool.begin_write().await?;
                 sqlx::query($lock)
                     .execute(&mut *tx).await?;
                 let mut deleted = 0u64;
@@ -119,23 +111,18 @@ impl PluginStore {
                 deleted = deleted.saturating_add(sqlx::query("DELETE FROM vendor_atomic_lineages WHERE created_at_ms < $2 AND NOT EXISTS (SELECT 1 FROM prompt_admissions a WHERE a.principal=vendor_atomic_lineages.principal AND a.id=vendor_atomic_lineages.admission_id) AND NOT EXISTS (SELECT 1 FROM vendor_atomic_leases l WHERE l.principal=vendor_atomic_lineages.principal AND l.admission_id=vendor_atomic_lineages.admission_id AND l.expires_at_ms > $1)")
                     .bind(now).bind(cutoff_ms).execute(&mut *tx).await?.rows_affected());
                 tx.commit().await?;
-                connection.finish().await?;
                 Ok(deleted)
             }};
         }
         match &self.backend {
             PluginStoreBackend::Sqlite(pool) => sweep!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 false
             ),
-            PluginStoreBackend::Postgres(pool) => sweep!(
-                pool,
-                "BEGIN",
-                "SELECT pg_advisory_xact_lock(7342179085017261)",
-                true
-            ),
+            PluginStoreBackend::Postgres(pool) => {
+                sweep!(pool, "SELECT pg_advisory_xact_lock(7342179085017261)", true)
+            }
             PluginStoreBackend::Memory(store) => {
                 // Serialize memory publication with collection. SQL turn and compaction
                 // attachments take the revision lock, but never the memory lock.
@@ -175,8 +162,7 @@ impl PluginStore {
                     .collect();
                 let mut removed = Vec::new();
                 if let Some(pool) = pool {
-                    let mut connection = pool.acquire_write().await?;
-                    let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+                    let mut tx = pool.begin_write().await?;
                     sqlx::query("UPDATE vendor_atomic_revision SET revision=revision WHERE id=1")
                         .execute(&mut *tx)
                         .await?;
@@ -214,7 +200,6 @@ impl PluginStore {
                         .execute(&mut *tx)
                         .await?;
                     tx.commit().await?;
-                    connection.finish().await?;
                 } else {
                     removed = candidates;
                 }

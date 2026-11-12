@@ -431,24 +431,36 @@ fn infer(
     let mut plan = store
         .plan(&scope, session_id, &body, now_ms()?)
         .map_err(invalid)?;
-    let position = |key: &str| -> Result<usize, PluginError> {
+    let position = |key: &str| -> Result<Option<usize>, PluginError> {
         provider
             .operation_metadata
             .get(key)
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| invalid(format!("Claude inference requires host {key}")))
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| invalid(format!("Claude inference received invalid host {key}")))
+            })
+            .transpose()
     };
     let prompt_index = position("dialogue_prompt_index")?;
     let turn_index = position("user_turn_index")?;
-    if turn_index == 0 || prompt_index > turn_index {
+    if turn_index == Some(0)
+        || prompt_index
+            .zip(turn_index)
+            .is_some_and(|(prompt, turn)| prompt > turn)
+    {
         return Err(invalid(
             "Claude inference received invalid host turn position",
         ));
     }
-    plan.context.prompt_index = prompt_index;
-    plan.context.turn_index = turn_index;
-    plan.context.prompt_id = prompt_id_for_turn(turn_index)?;
+    // 未证明的历史没有累计序数。保留 SessionStore 的提示身份并省略计费头计数，
+    // 不能因可选诊断缺失拒绝推理，也不能按压缩后窗口的消息数补造计数。
+    if let (Some(prompt_index), Some(turn_index)) = (prompt_index, turn_index) {
+        plan.context.prompt_index = prompt_index;
+        plan.context.turn_index = turn_index;
+        plan.context.prompt_id = prompt_id_for_turn(turn_index)?;
+    }
     let url = format!(
         "{}?beta=true",
         common::endpoint_url(&provider.base_url, &encoded.path)?

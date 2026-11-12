@@ -245,7 +245,7 @@ WorkBuddy 的外部维护者需采用同一流程，目录身份固定 `workbudd
 
 增加来源表、目录缓存/检查状态以及安装来源关联；来源 ID 与来源快照分开，移除来源不能级联删除插件。缓存不是信任根，签名原始字节和固定公钥必须能再次校验。已见版本/摘要用于检测替换，设置明确容量及历史保留策略，不能把无限 Release 历史全部写入通用 settings。
 
-既有 `builtin/local` 数据不凭空回填市场来源。SQLite/PostgreSQL 均通过增量迁移 `0049_vendor_plugin_marketplace.sql` 增加结构，保持 revision CAS 与已有安装事务。多实例共享数据库时，确认事务同时校验来源信任、启用状态及已见版本冲突；来源锁将检查与换钥、冲突记录串行化。参考结构见 [SQLite](../database/sqlite.sql) 与 [PostgreSQL](../database/postgres.sql)。
+既有 `builtin/local` 数据不凭空回填市场来源。SQLite/PostgreSQL 均通过增量迁移 `0052_vendor_plugin_marketplace.sql` 增加结构，保持 revision CAS 与已有安装事务。多实例共享数据库时，确认事务同时校验来源信任、启用状态及已见版本冲突；来源锁将检查与换钥、冲突记录串行化。参考结构见 [SQLite](../database/sqlite.sql) 与 [PostgreSQL](../database/postgres.sql)。
 
 ## 10. 外部上线前置与验收
 

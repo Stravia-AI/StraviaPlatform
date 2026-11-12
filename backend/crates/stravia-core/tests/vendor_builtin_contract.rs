@@ -270,9 +270,7 @@ async fn provider_route_and_key(
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_media_understanding: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![route.id.into()],
             spend_limit: None,
         })
@@ -3115,9 +3113,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_media_understanding: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![route.id.into()],
             spend_limit: None,
         })

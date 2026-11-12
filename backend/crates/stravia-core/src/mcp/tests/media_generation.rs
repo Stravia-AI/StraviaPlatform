@@ -764,13 +764,13 @@ async fn execution_storage_failure_never_claims_handoff_or_success_or_retries_ge
         crate::migrations::migrate_sqlite(&pool, None)
             .await
             .unwrap();
-        let mut writer = pool.acquire_write().await.unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
         sqlx::query(if fail_handoff {
             "CREATE TRIGGER fail_execution_write BEFORE UPDATE OF handed_off_at ON public_tool_executions BEGIN SELECT RAISE(ABORT, 'controlled handoff storage failure'); END"
         } else {
             "CREATE TRIGGER fail_execution_write BEFORE UPDATE OF execution_state ON history_markers WHEN NEW.execution_state = 'completed' BEGIN SELECT RAISE(ABORT, 'controlled result storage failure'); END"
         }).execute(&mut *writer).await.unwrap();
-        writer.finish().await.unwrap();
+        writer.commit().await.unwrap();
         fixture.app.gateway.history_markers =
             Arc::new(crate::history_marker::SqlHistoryMarkerStore::sqlite(pool));
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -1122,7 +1122,7 @@ async fn foreign_expired_missing_and_corrupt_artifacts_fail_before_generation() 
         ._sqlite_pool
         .as_ref()
         .unwrap()
-        .acquire_write()
+        .begin_write()
         .await
         .unwrap();
     sqlx::query("UPDATE artifacts SET expires_at=0 WHERE id=?")
@@ -1130,7 +1130,7 @@ async fn foreign_expired_missing_and_corrupt_artifacts_fail_before_generation() 
         .execute(&mut *writer)
         .await
         .unwrap();
-    writer.finish().await.unwrap();
+    writer.commit().await.unwrap();
     let missing = upload_image(&fixture.app, png_bytes(4, 4), "image/png").await;
     let reader = store
         .open(

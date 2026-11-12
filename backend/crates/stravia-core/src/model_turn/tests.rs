@@ -651,10 +651,8 @@ async fn gateway_with_captured_protocol(
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids,
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -822,10 +820,8 @@ async fn first_token_timeout_fixture() -> (
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -1048,10 +1044,8 @@ async fn run_anthropic_reasoning_rejection(
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -1184,10 +1178,8 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -1624,9 +1616,7 @@ mod rpm_admission {
                 expires_at: None,
                 mcp_access_enabled: false,
                 transparent_injection_enabled: false,
-                inject_web_search: false,
-                inject_media_generation: false,
-                inject_media_understanding: false,
+                transparent_injections: Default::default(),
                 model_ids: route_ids,
                 spend_limit: None,
             })
@@ -2628,10 +2618,8 @@ async fn execute_tools_without_model_capability_declarations() {
             expires_at: None,
             mcp_access_enabled: true,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![model.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

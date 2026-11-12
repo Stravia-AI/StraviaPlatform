@@ -947,6 +947,11 @@ impl Gateway {
             let maintenance = gw.history_maintenance();
             let artifact_store = gw.artifact_store.clone();
             let cancellation = gw.lifecycle.cancellation.clone();
+            let (sweep_sender, sweep_receiver) = tokio::sync::mpsc::channel(1);
+            gw.lifecycle.spawn(
+                gw.observation
+                    .search_index_task(sweep_receiver, cancellation.clone()),
+            );
             gw.lifecycle.spawn(async move {
                 let mut interval = tokio::time::interval(STORE_SWEEP_INTERVAL);
                 loop {
@@ -962,6 +967,15 @@ impl Gateway {
                     };
                     if let Err(error) = sweep {
                         tracing::warn!(error = ?error, "history retention sweep failed");
+                    }
+                    // 满队列表示已有对账通知，合并即可，不能阻塞回收或关闭。
+                    match sweep_sender.try_send(()) {
+                        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                            if !cancellation.is_cancelled() {
+                                tracing::warn!("history search indexing task stopped");
+                            }
+                        }
                     }
 
                     if let Some(artifact_store) = artifact_store.as_ref() {

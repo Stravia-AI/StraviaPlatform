@@ -13,9 +13,17 @@ mod manifest_index;
 mod query;
 #[cfg(test)]
 mod read_tests;
+mod recall;
+#[cfg(test)]
+mod recall_tests;
 mod redaction;
 mod retention;
 pub(crate) mod scope;
+mod search_index_task;
+#[cfg(test)]
+mod search_index_task_tests;
+#[cfg(test)]
+mod search_index_tests;
 mod store;
 mod tail;
 mod trace;
@@ -27,7 +35,10 @@ mod writer;
 
 pub(crate) use attribution::AdmissionFacts;
 pub(crate) use bundle::hex;
+pub(crate) use hydrate::{index_events_postgres, index_events_sqlite};
+pub(crate) use recall::*;
 pub(crate) use redaction::{ProtectedSecrets, redact_text, redact_url, redact_value};
+pub(crate) use search_index_task::index_progress_inconsistent;
 pub(crate) use trace::optimize_trace_directory;
 pub use types::*;
 
@@ -53,6 +64,13 @@ use writer::WriterCommand;
 #[derive(Clone)]
 pub(crate) struct InteractionObservation {
     inner: Arc<Inner>,
+}
+
+/// 观察库所在后端的连接池；历史检索按后端生成 SQL。
+#[derive(Clone, Copy)]
+pub(crate) enum SearchPool<'a> {
+    Sqlite(&'a SqlitePool),
+    Postgres(&'a PgPool),
 }
 
 #[derive(Clone)]
@@ -264,6 +282,14 @@ impl InteractionObservation {
             websocket,
         }
     }
+    /// 历史检索直接查询观察库；按后端分派，调用方无需处理「两者皆无」。
+    pub(crate) fn search_pool(&self) -> SearchPool<'_> {
+        match &self.inner.store {
+            store::ObservationStore::Sqlite(pool, _) => SearchPool::Sqlite(pool),
+            store::ObservationStore::Postgres(pool, _) => SearchPool::Postgres(pool),
+        }
+    }
+
     pub(crate) async fn query_forest(&self, q: ForestQuery) -> anyhow::Result<ForestPage> {
         self.inner.store.query_forest(q).await
     }
@@ -433,6 +459,21 @@ impl InteractionObservation {
             .store(partial, Ordering::Release);
         Ok(removed)
     }
+
+    /// 索引任务复用 Observation 的存储连接，通知不经过推理写入路径。
+    pub(crate) fn search_index_task(
+        &self,
+        sweeps: mpsc::Receiver<()>,
+        cancellation: stravia_runtime_contract::CancellationToken,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        search_index_task::run(
+            self.inner.store.clone(),
+            self.inner.updates.subscribe(),
+            sweeps,
+            cancellation,
+        )
+    }
+
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
         let store = self.inner.store.clone();
         let mut live = self.inner.updates.subscribe();
@@ -857,7 +898,9 @@ impl IngressObserver {
             redaction::ProtectedSecrets::default,
             TraceHandle::protected_secrets,
         );
+        let (interaction_sender, interaction_id) = tokio::sync::watch::channel(None);
         let mut inner = RunObserverInner {
+            interaction_id,
             observation: self.observation.clone(),
             run_id: start.id.clone(),
             principal: start.principal.clone(),
@@ -922,6 +965,7 @@ impl IngressObserver {
                     debug_enabled,
                     trace: inner.trace.clone(),
                     discarded_trace,
+                    interaction_id: interaction_sender,
                 })))
                 .is_closed()
         } else {
@@ -1010,6 +1054,7 @@ pub(crate) struct RunPublicationGuard {
 }
 
 struct RunObserverInner {
+    interaction_id: tokio::sync::watch::Receiver<Option<String>>,
     observation: InteractionObservation,
     run_id: String,
     principal: String,
@@ -1039,6 +1084,10 @@ struct RunObserverInner {
     protected: redaction::ProtectedSecrets,
 }
 impl RunObserver {
+    pub(crate) fn interaction_id(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.inner.interaction_id.clone()
+    }
+
     /// 后台执行独立保留；其内部 Model Turn 不额外保护来源诊断记录。
     pub(crate) fn for_public_execution(&self) -> Self {
         Self {
@@ -2020,9 +2069,9 @@ mod snapshot_tests {
     }
 
     async fn write_fixture(pool: &sqlx::SqlitePool, sql: &'static str) -> anyhow::Result<()> {
-        let mut connection = pool.acquire_write().await?;
+        let mut connection = pool.begin_write().await?;
         sqlx::raw_sql(sql).execute(&mut *connection).await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(())
     }
 
@@ -2033,7 +2082,7 @@ mod snapshot_tests {
         let observation = test_observation(&pool, directory.path(), false).await;
         // 活动时间取 0..=1024，清理时间固定在保留窗口之后 10 秒，窗口两侧都由数据决定。
         let sweep_at = i64::from(observation.inner.retention.days()) * 86_400_000 + 10_000;
-        let mut connection = pool.acquire_write().await?;
+        let mut connection = pool.begin_write().await?;
         sqlx::query(
             "WITH RECURSIVE seeds(n) AS (
                  VALUES(0) UNION ALL SELECT n+1 FROM seeds WHERE n<1024
@@ -2058,7 +2107,7 @@ mod snapshot_tests {
         )
         .execute(&mut *connection)
         .await?;
-        connection.finish().await?;
+        connection.commit().await?;
 
         let error = observation
             .sweep_history(sweep_at, retention_window(&observation))
@@ -2331,6 +2380,27 @@ mod snapshot_tests {
     }
 
     #[tokio::test]
+    async fn admitted_run_exposes_writer_attribution() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
+        let observation = test_observation(&pool, directory.path(), false).await;
+        let run = test_run(&observation, "attributed-run", facts(Vec::new()));
+        let mut attribution = run.interaction_id();
+        while attribution.borrow_and_update().is_none() {
+            attribution.changed().await?;
+        }
+        let interaction_id = attribution.borrow().clone().unwrap();
+        observation.flush().await?;
+        let persisted: String = sqlx::query_scalar(
+            "SELECT interaction_id FROM inference_run_observations WHERE id='attributed-run'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(interaction_id, persisted);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn delivered_final_receipt_settles_before_finish_without_tail_window()
     -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
@@ -2541,7 +2611,7 @@ mod snapshot_tests {
         let directory = tempfile::tempdir()?;
         let pool = crate::test_support::migrated_sqlite_pool().await?;
         let observation = test_observation(&pool, directory.path(), false).await;
-        let mut connection = pool.acquire_write().await?;
+        let mut connection = pool.begin_write().await?;
         for index in 0..205 {
             let id = format!("expired-{index:04}");
             sqlx::query("INSERT INTO interaction_observations (id,principal,root_id,root_run_id,first_route_id,status,started_at,last_active_at) VALUES (?,'owner',?,?,'route','completed',0,0)")
@@ -2550,7 +2620,7 @@ mod snapshot_tests {
         // 用存储屏障检验实际写入先后，不依赖机器速度或调度延迟。
         sqlx::raw_sql("CREATE TRIGGER require_admission_progress BEFORE DELETE ON interaction_observations WHEN OLD.id='expired-0204' AND NOT EXISTS (SELECT 1 FROM inference_run_observations WHERE id='during-retention') BEGIN SELECT RAISE(ABORT,'retention starved admission'); END;")
             .execute(&mut *connection).await?;
-        connection.finish().await?;
+        connection.commit().await?;
         let mut resets = observation.inner.updates.subscribe();
         let purge = observation.purge_history(Some(1));
         tokio::pin!(purge);
@@ -2611,6 +2681,9 @@ mod snapshot_tests {
             .collect();
         observation.flush().await?;
         for run in rejected {
+            let mut attribution = run.interaction_id();
+            assert!(attribution.changed().await.is_err());
+            assert!(attribution.borrow().is_none());
             run.record(RunEvent::ModelTurnStarted {
                 retention_detached: false,
                 model_turn_id: "orphan-turn".into(),
@@ -5192,8 +5265,7 @@ mod snapshot_tests {
     ) -> anyhow::Result<()> {
         match observations {
             store::ObservationStore::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
-                let mut tx = connection.begin().await?;
+                let mut tx = pool.begin_write().await?;
                 store::upsert_credential_mapping_reuses_sqlite(
                     &mut tx,
                     interaction_id,
@@ -5203,7 +5275,6 @@ mod snapshot_tests {
                 )
                 .await?;
                 tx.commit().await?;
-                connection.finish().await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
@@ -5475,7 +5546,7 @@ mod snapshot_tests {
         }
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 for id in interactions {
                     sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES (?,?,?,?,?,?,?,?,?,?)")
                         .bind(id).bind("api-key:test").bind("测试 API Key").bind(id).bind(id)
@@ -5493,7 +5564,7 @@ mod snapshot_tests {
                         .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
                         .bind(kind).bind(payload).execute(&mut *connection).await?;
                 }
-                connection.finish().await?;
+                connection.commit().await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
                 for id in interactions {
@@ -5539,8 +5610,7 @@ mod snapshot_tests {
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
                 for seed in seeds {
-                    let mut connection = pool.acquire_write().await?;
-                    let mut tx = connection.begin().await?;
+                    let mut tx = pool.begin_write().await?;
                     let principal: String = sqlx::query_scalar(
                         "SELECT principal FROM interaction_observations WHERE id=?",
                     )
@@ -5564,7 +5634,6 @@ mod snapshot_tests {
                             .execute(&mut *tx).await?;
                     }
                     tx.commit().await?;
-                    connection.finish().await?;
                 }
             }
             store::ObservationStore::Postgres(pool, _) => {
@@ -5872,7 +5941,7 @@ mod snapshot_tests {
         ];
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 for (sequence, interaction, run_id, kind, occurred_at, payload) in events {
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,run_id,kind,attrs) VALUES (?,?,?,?,?,?)")
                         .bind(sequence).bind(occurred_at).bind(interaction).bind(run_id)
@@ -5880,7 +5949,7 @@ mod snapshot_tests {
                 }
                 sqlx::query("UPDATE observation_events SET tool_id=CASE sequence WHEN 17 THEN 'call-5' WHEN 18 THEN 'call-4' WHEN 19 THEN 'call-3' WHEN 20 THEN 'call-1' END WHERE sequence BETWEEN 17 AND 20")
                     .execute(&mut *connection).await?;
-                connection.finish().await?;
+                connection.commit().await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
                 for (sequence, interaction, run_id, kind, occurred_at, payload) in events {
@@ -6351,13 +6420,13 @@ mod snapshot_tests {
         ];
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 for (sequence, kind, payload) in events {
                     sqlx::query("INSERT INTO observation_events(sequence,occurred_at,interaction_id,kind,attrs) VALUES (?,?,?,?,?)")
                         .bind(sequence).bind(now).bind("first").bind(kind).bind(payload)
                         .execute(&mut *connection).await?;
                 }
-                connection.finish().await?;
+                connection.commit().await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
                 for (sequence, kind, payload) in events {
@@ -6452,7 +6521,7 @@ mod snapshot_tests {
         ];
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 for (id, principal, key, active_at) in interactions {
                     sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES (?,?,?,?,?,?,?,?,?,?)")
                         .bind(id).bind(principal).bind(key).bind(id).bind(id)
@@ -6465,7 +6534,7 @@ mod snapshot_tests {
                         .bind("completed").bind(false).bind(now - 100).bind(active_at)
                         .execute(&mut *connection).await?;
                 }
-                connection.finish().await?;
+                connection.commit().await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
                 for (id, principal, key, active_at) in interactions {
@@ -6899,12 +6968,12 @@ mod snapshot_tests {
     ) -> anyhow::Result<()> {
         match store {
             store::ObservationStore::Sqlite(pool, _) => {
-                let mut connection = pool.acquire_write().await?;
+                let mut connection = pool.begin_write().await?;
                 sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES (?,?,?,?,?,?,?,?,?,?)")
                     .bind(id).bind(principal).bind("Page Key").bind(id).bind(id)
                     .bind("test-route").bind("completed").bind(now - 100).bind(now - 50)
                     .bind(false).execute(&mut *connection).await?;
-                connection.finish().await?;
+                connection.commit().await?;
             }
             store::ObservationStore::Postgres(pool, _) => {
                 sqlx::query("INSERT INTO interaction_observations(id,principal,api_key_name,root_id,root_run_id,first_route_id,status,started_at,last_active_at,observation_gap) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")

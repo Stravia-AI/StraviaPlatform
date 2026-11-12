@@ -8,7 +8,7 @@ pub(super) struct SqliteSettingsStore {
 #[async_trait]
 impl SettingsStore for SqliteSettingsStore {
     async fn get_or_insert(&self, key: &str, value: &str) -> anyhow::Result<String> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
             "INSERT INTO settings (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
         )
@@ -20,7 +20,7 @@ impl SettingsStore for SqliteSettingsStore {
             .bind(key)
             .fetch_one(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(stored)
     }
 
@@ -33,7 +33,7 @@ impl SettingsStore for SqliteSettingsStore {
     }
 
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
     "INSERT INTO settings (name, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             )
@@ -41,7 +41,7 @@ impl SettingsStore for SqliteSettingsStore {
             .bind(value)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(())
     }
 }

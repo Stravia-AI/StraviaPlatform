@@ -245,9 +245,8 @@ impl PluginStore {
             _ => {}
         }
         macro_rules! sql {
-            ($pool:expr, $begin:literal, $lock:literal, $owner:literal, $content:ident, $pg:expr, $revision:literal) => {{
-                let mut connection = $pool.acquire_write().await.map_err(storage_error)?;
-                let mut tx = connection.begin_with($begin).await.map_err(storage_error)?;
+            ($pool:expr, $lock:literal, $owner:literal, $content:ident, $pg:expr, $revision:literal) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
                 if $pg {
                     sqlx::query("SELECT pg_advisory_xact_lock_shared(7342179085017261)").execute(&mut *tx).await.map_err(storage_error)?;
                     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('lineage:' || $1),hashtext($2))").bind(&s.principal).bind(&s.admission).execute(&mut *tx).await.map_err(storage_error)?;
@@ -360,14 +359,12 @@ impl PluginStore {
                     }
                 };
                 tx.commit().await.map_err(storage_error)?;
-                connection.finish().await.map_err(storage_error)?;
                 Ok(result)
             }};
         }
         match &self.backend {
             PluginStoreBackend::Sqlite(pool) => sql!(
                 pool,
-                "BEGIN IMMEDIATE",
                 "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
                 "SELECT v.data_epoch FROM providers p JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=p.vendor),'base') WHERE p.id=$1 AND p.vendor=$2",
                 sqlite,
@@ -376,7 +373,6 @@ impl PluginStore {
             ),
             PluginStoreBackend::Postgres(pool) => sql!(
                 pool,
-                "BEGIN",
                 "SELECT 1",
                 "SELECT v.data_epoch FROM providers p JOIN vendor_plugins v ON v.vendor_id=COALESCE((SELECT vendor_id FROM vendor_plugins WHERE vendor_id=p.vendor),'base') WHERE p.id=$1 AND p.vendor=$2 FOR SHARE OF p,v",
                 postgres,

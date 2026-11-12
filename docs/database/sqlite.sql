@@ -65,8 +65,9 @@ CREATE TABLE api_keys (
     expires_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, inject_media_understanding INTEGER NOT NULL DEFAULT 0, inject_web_search INTEGER NOT NULL DEFAULT 0, inject_media_generation INTEGER NOT NULL DEFAULT 0, rpm_limit INTEGER CHECK (rpm_limit IS NULL OR rpm_limit > 0), spend_limit_nanos INTEGER
-    CHECK (spend_limit_nanos IS NULL OR spend_limit_nanos > 0));
+, mcp_access_enabled INTEGER NOT NULL DEFAULT 0, transparent_injection_enabled INTEGER NOT NULL DEFAULT 0, rpm_limit INTEGER CHECK (rpm_limit IS NULL OR rpm_limit > 0), spend_limit_nanos INTEGER
+    CHECK (spend_limit_nanos IS NULL OR spend_limit_nanos > 0), transparent_injections TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(transparent_injections) AND json_type(transparent_injections) = 'array'));
 
 CREATE TABLE artifact_download_grants (
     token_hash TEXT PRIMARY KEY,
@@ -190,6 +191,38 @@ CREATE TABLE history_retention_watermarks (
     name TEXT PRIMARY KEY,
     position BIGINT NOT NULL
 );
+
+CREATE TABLE history_search_progress (
+    interaction_id TEXT PRIMARY KEY REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    last_event_sequence BIGINT NOT NULL DEFAULT 0,
+    indexed_terminal INTEGER NOT NULL DEFAULT 0 CHECK(indexed_terminal IN (0, 1))
+);
+
+CREATE TABLE history_search_segments (
+    id INTEGER PRIMARY KEY,
+    interaction_id TEXT NOT NULL REFERENCES interaction_observations(id) ON DELETE CASCADE,
+    principal TEXT NOT NULL,
+    root_id TEXT NOT NULL,
+    event_sequence BIGINT NOT NULL,
+    segment_ordinal BIGINT NOT NULL,
+    role_weight INTEGER NOT NULL,
+    occurred_at BIGINT NOT NULL,
+    byte_start BIGINT NOT NULL,
+    byte_end BIGINT NOT NULL,
+    UNIQUE(event_sequence, segment_ordinal)
+);
+
+CREATE VIRTUAL TABLE history_search_segments_fts USING fts5(
+    tokens, content='', contentless_delete=1, tokenize='ascii'
+);
+
+CREATE TABLE 'history_search_segments_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+
+CREATE TABLE 'history_search_segments_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+
+CREATE TABLE 'history_search_segments_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB, origin INTEGER);
+
+CREATE TABLE 'history_search_segments_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
 
 CREATE TABLE inference_run_observations (
     id TEXT PRIMARY KEY,
@@ -923,6 +956,10 @@ CREATE INDEX history_markers_pending_until_idx ON history_markers(pending_until)
 
 CREATE INDEX history_markers_published_at_idx ON history_markers(published_at);
 
+CREATE INDEX history_search_segments_interaction_idx ON history_search_segments(interaction_id);
+
+CREATE INDEX history_search_segments_scope_idx ON history_search_segments(principal, root_id, interaction_id);
+
 CREATE INDEX idx_admin_sessions_expiry ON admin_sessions(expires_at);
 
 CREATE INDEX idx_agent_definition_revisions_slug
@@ -1003,6 +1040,9 @@ CREATE INDEX interaction_observations_activity_idx
 CREATE INDEX interaction_observations_filter_idx ON interaction_observations(status, api_key_name, last_active_at DESC);
 
 CREATE INDEX interaction_observations_parent_idx ON interaction_observations(parent_interaction_id);
+
+CREATE INDEX interaction_observations_principal_activity_idx
+    ON interaction_observations(principal, last_active_at DESC, id);
 
 CREATE INDEX interaction_observations_window_idx ON interaction_observations(root_id, last_active_at DESC, id);
 
@@ -1733,12 +1773,20 @@ BEGIN
 END;
 
 CREATE TRIGGER api_keys_boolean_insert BEFORE INSERT ON api_keys
-WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
+WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1))
+  OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1))
+  OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 
 CREATE TRIGGER api_keys_boolean_update BEFORE UPDATE ON api_keys
-WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)) OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1)) OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1)) OR (typeof(NEW.inject_media_understanding) <> 'integer' OR NEW.inject_media_understanding NOT IN (0, 1)) OR (typeof(NEW.inject_web_search) <> 'integer' OR NEW.inject_web_search NOT IN (0, 1)) OR (typeof(NEW.inject_media_generation) <> 'integer' OR NEW.inject_media_generation NOT IN (0, 1))
+WHEN (typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1))
+  OR (typeof(NEW.mcp_access_enabled) <> 'integer' OR NEW.mcp_access_enabled NOT IN (0, 1))
+  OR (typeof(NEW.transparent_injection_enabled) <> 'integer' OR NEW.transparent_injection_enabled NOT IN (0, 1))
 BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
+
+CREATE TRIGGER history_search_segments_delete AFTER DELETE ON history_search_segments BEGIN
+    DELETE FROM history_search_segments_fts WHERE rowid = old.id;
+END;
 
 CREATE TRIGGER inference_run_observations_boolean_insert BEFORE INSERT ON inference_run_observations
 WHEN (typeof(NEW.user_interrupted) <> 'integer' OR NEW.user_interrupted NOT IN (0, 1)) OR (typeof(NEW.debug_enabled) <> 'integer' OR NEW.debug_enabled NOT IN (0, 1)) OR (typeof(NEW.client_output_committed) <> 'integer' OR NEW.client_output_committed NOT IN (0, 1)) OR (typeof(NEW.rejected_before_target) <> 'integer' OR NEW.rejected_before_target NOT IN (0, 1))

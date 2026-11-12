@@ -128,10 +128,8 @@ async fn expired_key_is_rejected_before_request_hook_model_rewrite() {
             expires_at: Some("2000-01-01T00:00:00Z".into()),
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![final_route.id.into()],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await
@@ -239,10 +237,8 @@ async fn hook_rewrite_checks_the_final_model_binding() {
             expires_at: None,
             mcp_access_enabled: false,
             transparent_injection_enabled: false,
-            inject_web_search: false,
-            inject_media_generation: false,
+            transparent_injections: Default::default(),
             model_ids: vec![initial_model_id],
-            inject_media_understanding: false,
             spend_limit: None,
         })
         .await

@@ -18,8 +18,7 @@ impl PromptAdmissionStore for SqliteStorage {
         a: &PromptAdmission,
         expected_epoch: i64,
     ) -> anyhow::Result<()> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let epoch: i64 =
             sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id = 1")
                 .fetch_one(&mut *tx)
@@ -47,7 +46,6 @@ impl PromptAdmissionStore for SqliteStorage {
             "admission parent not found or ordinal precedes parent"
         );
         tx.commit().await?;
-        connection.finish().await?;
         Ok(())
     }
 
@@ -98,25 +96,24 @@ impl PromptAdmissionStore for SqliteStorage {
     }
 
     async fn prune_before(&self, cutoff_ms: i64) -> anyhow::Result<u64> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query("WITH RECURSIVE live(id, parent_id) AS (SELECT id, parent_id FROM prompt_admissions WHERE created_at_ms >= ?1 UNION SELECT p.id, p.parent_id FROM prompt_admissions p JOIN live l ON p.id = l.parent_id) DELETE FROM prompt_admissions WHERE created_at_ms < ?1 AND id NOT IN (SELECT id FROM live)")
             .bind(cutoff_ms).execute(&mut *connection).await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected())
     }
 
     async fn purge_principal(&self, principal: &str) -> anyhow::Result<u64> {
-        let mut connection = self.pool.acquire_write().await?;
+        let mut connection = self.pool.begin_write().await?;
         let result = sqlx::query("DELETE FROM prompt_admissions WHERE principal = ?1")
             .bind(principal)
             .execute(&mut *connection)
             .await?;
-        connection.finish().await?;
+        connection.commit().await?;
         Ok(result.rows_affected())
     }
     async fn clear(&self) -> anyhow::Result<u64> {
-        let mut connection = self.pool.acquire_write().await?;
-        let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_write().await?;
         let changed = sqlx::query("UPDATE prompt_admission_epoch SET epoch = epoch + 1 WHERE id = 1 AND epoch < 9223372036854775807").execute(&mut *tx).await?;
         anyhow::ensure!(
             changed.rows_affected() == 1,
@@ -126,7 +123,6 @@ impl PromptAdmissionStore for SqliteStorage {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        connection.finish().await?;
         Ok(result.rows_affected())
     }
 }
