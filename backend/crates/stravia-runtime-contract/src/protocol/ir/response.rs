@@ -24,64 +24,6 @@ pub fn mark_response_history(items: &mut [AiItem], group: &str) {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum EmbeddingVector {
-    Floats(Vec<f64>),
-    Base64(String),
-}
-
-impl<'de> Deserialize<'de> for EmbeddingVector {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct VectorVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for VectorVisitor {
-            type Value = EmbeddingVector;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a numeric embedding array or a base64 string")
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                // Untagged buffering loses floating-point numbers when serde_json enables
-                // arbitrary_precision; deserialize the typed sequence without that buffer.
-                Vec::<f64>::deserialize(serde::de::value::SeqAccessDeserializer::new(sequence))
-                    .map(EmbeddingVector::Floats)
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(EmbeddingVector::Base64(value.to_owned()))
-            }
-
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-                Ok(EmbeddingVector::Base64(value))
-            }
-        }
-
-        deserializer.deserialize_any(VectorVisitor)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingData {
-    pub object: Option<String>,
-    pub index: u32,
-    pub embedding: EmbeddingVector,
-    #[serde(flatten)]
-    pub extensions: serde_json::Map<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingOutput {
-    pub object: Option<String>,
-    pub data: Vec<EmbeddingData>,
-    #[serde(flatten)]
-    pub extensions: serde_json::Map<String, Value>,
-}
-
 /// 原生压缩结果不是一次 Generation。`items` 与 `usage` 是交付的语义来源；
 /// `wire` 仅保留上游身份、时间及原生用量扩展，交付前仍须通过协议编码器。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +48,6 @@ pub struct AiResponse {
     pub stop_reason: Option<String>,
     /// Token usage.
     pub usage: Usage,
-    /// Typed embedding payload for embedding responses.
-    pub embedding_output: Option<EmbeddingOutput>,
     /// Normalized error — populated when the provider returns an error response
     /// or the parser detects a mid-stream error.
     pub error: Option<AiError>,
@@ -125,7 +65,6 @@ impl AiResponse {
             items: Vec::new(),
             stop_reason: None,
             usage: Usage::default(),
-            embedding_output: None,
             error: None,
             vendor: VendorExtensions::default(),
             trusted_media_turn_ids: Vec::new(),
@@ -353,26 +292,6 @@ where
 mod tests {
     use super::*;
     use crate::protocol::ir::{ContentBlock, MessageContent, ToolCall};
-
-    #[test]
-    fn embedding_vectors_round_trip_through_json_bytes() {
-        for vector in [
-            EmbeddingVector::Floats(vec![0.25, -0.5, 1.0]),
-            EmbeddingVector::Base64("AACAPwAAAMA=".into()),
-        ] {
-            let bytes = serde_json::to_vec(&vector).unwrap();
-            let restored = serde_json::from_slice::<EmbeddingVector>(&bytes).unwrap();
-            match (vector, restored) {
-                (EmbeddingVector::Floats(expected), EmbeddingVector::Floats(actual)) => {
-                    assert_eq!(actual, expected);
-                }
-                (EmbeddingVector::Base64(expected), EmbeddingVector::Base64(actual)) => {
-                    assert_eq!(actual, expected);
-                }
-                _ => panic!("embedding encoding changed across the JSON boundary"),
-            }
-        }
-    }
 
     #[test]
     fn assistant_item_keeps_tool_calls_in_client_visible_block_order() {

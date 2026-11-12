@@ -13,7 +13,6 @@ use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
 use stravia_runtime_contract::protocol::ids::Protocol;
 use stravia_runtime_contract::protocol::ids::ProtocolEndpoint;
 
@@ -246,7 +245,6 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
 
     // ── Tier 1: Old canonical (backward compat) ───────────────────────────────
     m.insert("openai/chat/v1", OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
-    m.insert("openai/embeddings/v1", OPENAI_COMPATIBLE_EMBEDDINGS_V1);
     m.insert(
         "anthropic/messages/2023-06-01",
         ANTHROPIC_MESSAGES_2023_06_01,
@@ -263,7 +261,6 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
     );
     m.insert("open-responses", OPEN_RESPONSES_2026_04_24);
-    m.insert("openai-embeddings", OPENAI_COMPATIBLE_EMBEDDINGS_V1);
     m.insert("anthropic-messages", ANTHROPIC_MESSAGES_2023_06_01);
     m.insert("google-generate", GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
     m.insert(
@@ -272,7 +269,6 @@ fn default_endpoint_aliases() -> HashMap<&'static str, ProtocolEndpoint> {
     );
     // ── Tier 3: Legacy brand / friendly aliases ────────────────────────────────
     m.insert("openai", OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
-    m.insert("embeddings", OPENAI_COMPATIBLE_EMBEDDINGS_V1);
     m.insert("anthropic", ANTHROPIC_MESSAGES_2023_06_01);
     m.insert("claude", ANTHROPIC_MESSAGES_2023_06_01);
     m.insert("gemini", GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA);
@@ -312,10 +308,9 @@ mod tests {
         let reg = ProtocolRegistry::global();
         assert!(reg.contains(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
         assert!(reg.contains(&OPEN_RESPONSES_2026_04_24));
-        assert!(reg.contains(&OPENAI_COMPATIBLE_EMBEDDINGS_V1));
         assert!(reg.contains(&ANTHROPIC_MESSAGES_2023_06_01));
         assert!(reg.contains(&GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA));
-        assert_eq!(reg.endpoints().len(), 5);
+        assert_eq!(reg.endpoints().len(), 4);
     }
 
     #[test]
@@ -450,9 +445,8 @@ mod tests {
     fn endpoints_for_protocol_group_correctly() {
         let reg = ProtocolRegistry::global();
         let openai_compat = reg.endpoints_for_protocol(Protocol::OpenAICompatible);
-        assert_eq!(openai_compat.len(), 2);
+        assert_eq!(openai_compat.len(), 1);
         assert!(openai_compat.contains(&OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
-        assert!(openai_compat.contains(&OPENAI_COMPATIBLE_EMBEDDINGS_V1));
 
         assert_eq!(reg.endpoints_for_protocol(Protocol::OpenResponses).len(), 1);
         assert_eq!(
@@ -523,10 +517,6 @@ mod tests {
         assert_eq!(
             reg.resolve_ingress_route("POST", "/v1/messages"),
             Some(ANTHROPIC_MESSAGES_2023_06_01)
-        );
-        assert_eq!(
-            reg.resolve_ingress_route("POST", "/v1/embeddings"),
-            Some(OPENAI_COMPATIBLE_EMBEDDINGS_V1)
         );
         assert!(
             reg.resolve_ingress_route("GET", "/v1/chat/completions")

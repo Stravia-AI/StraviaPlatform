@@ -22,7 +22,6 @@ const CAPS: EndpointCapabilities = EndpointCapabilities {
     streaming: true,
     tools: true,
     reasoning: true,
-    embeddings: false,
     override_model_in_body: true,
     ingress_routes: &[("POST", "/v1beta/models/:model_action")],
     ..EndpointCapabilities::CHAT_STANDARD

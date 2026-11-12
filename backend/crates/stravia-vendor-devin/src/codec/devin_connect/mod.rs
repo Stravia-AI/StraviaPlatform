@@ -69,7 +69,6 @@ use stravia_runtime_contract::thinking::TargetThinkingControl;
 
 /// 私有协议能力只在插件中投影；正文编码器逐项省略不支持的内容。
 pub(crate) fn prepare_request(request: &mut AiRequest) {
-    request.embedding = None;
     // 私有 wire 没有这些控制；正文与受保护思考由本插件的编码器投影。
     request.generation.presence_penalty = None;
     request.generation.frequency_penalty = None;

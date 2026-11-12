@@ -201,29 +201,24 @@ pub fn select_protocol(
         "azure" | "azure-cognitive-services"
             if operation == Operation::Infer && channel == "default" =>
         {
-            Ok(azure_endpoint(request))
+            Ok(azure_endpoint())
         }
-        "custom" | "openai-compatible" => Ok(generic::select_protocol(provider, request)),
+        "custom" | "openai-compatible" => Ok(provider.protocol.clone()),
         provider_id if is_static_profile(provider_id) => Ok(provider.protocol.clone()),
         _ => match catalog_implementation(provider).as_deref() {
             Some("@ai-sdk/openai") => {
                 openai::select_protocol(operation, channel, provider, request)
             }
             Some("@ai-sdk/azure") if operation == Operation::Infer && channel == "default" => {
-                Ok(azure_endpoint(request))
+                Ok(azure_endpoint())
             }
             _ => Ok(provider.protocol.clone()),
         },
     }
 }
 
-fn azure_endpoint(request: &AiRequest) -> String {
-    let endpoint = if request.embedding.is_some() {
-        stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1
-    } else {
-        stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-    };
-    endpoint.to_string()
+fn azure_endpoint() -> String {
+    stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string()
 }
 
 pub fn check_connection(

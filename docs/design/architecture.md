@@ -98,8 +98,7 @@ stravia/
 │           │       ├── observation.rs  # observation admission / rejection shell
 │           │       ├── openai_compatible/
 │           │       │   ├── mod.rs
-│           │       │   ├── chat_completions.rs   # decode → inference_run::execute
-│           │       │   └── embeddings.rs
+│           │       │   └── chat_completions.rs   # decode → inference_run::execute
 │           │       ├── open_responses/
 │           │       │   ├── responses.rs
 │           │       │   └── websocket.rs
@@ -128,7 +127,7 @@ stravia/
 │           │       ├── reasoning.rs       # think-tag 提取工具
 │           │       ├── tool_correlation.rs
 │           │       ├── openai/
-│           │       │   └── compatible/    # chat_completions + embeddings
+│           │       │   └── compatible/    # chat_completions
 │           │       ├── open_responses/    # dated 2026-04-24 Responses contract
 │           │       ├── anthropic/
 │           │       │   └── messages/
@@ -473,7 +472,7 @@ Model Turn Executor 的 private `live/lifecycle.rs` 集中事件与输出推进�
 
 `Operation` 在发布媒体 delta 前执行现有 normalization，precommit 保留每个事件的原 fence 与顺序，并沿用 16 MiB 占用估算和精确边界；committing delta 释放 buffer，不额外占用 pre-output 预算。runtime `Completed` / `Compacted` 通知不发布成功终态，typed return 仍为权威结果。无 plugin delta 时先规范化完整响应，再合成 canonical delta；typed terminal 使用同一输出 owner 发布。driver 保留 retry、认证恢复、Thinking Replay、Target Continuation、健康与最终策略 accounting，成功 accounting 后由输出 owner 完成 reservation 与 ready 通知。现有还原与映射发布 gate 保持独立；Executor 的 canonical 输出提交不等于 Client Output Commit，也不接管客户端 Delivery。
 
-管理面（`AdminService` / `/api/v1/*`）、健康探针、模型目录等非推理路由不进入 HookRuntime；生成和 embeddings 这两类推理请求会创建 `InferenceRun`。HTTP 管线始终经过 decoder、canonical pipeline 和 encoder，不暴露原始 wire body。
+管理面（`AdminService` / `/api/v1/*`）、健康探针、模型目录等非推理路由不进入 HookRuntime；推理请求会创建 `InferenceRun`。HTTP 管线始终经过 decoder、canonical pipeline 和 encoder，不暴露原始 wire body。
 
 Client credential policy 只存在于 crate-private `proxy/security` deep module。该 module 直接使用 `AuthAccessStore` seam：Inference profile 接受 Bearer、`x-api-key` 与 `x-goog-api-key`，MCP profile 只接受 Bearer；models list 复用同一 implementation，凭据无效或存储失败时 fail-closed。Security interface 返回 Principal、Model access grant、visible Model IDs 或 typed `GatewayError`，不修改 `RequestContext`，不记录日志，也不渲染 transport response。
 
@@ -544,7 +543,7 @@ Gateway::builder(config)
 
 `build()` 校验 HookId 非空且不重复，校验 PlatformTool 的稳定 `ToolId`，然后以 builder 顺序构造一个不可变的 `HookRuntime`。运行时不使用 hook 的进程级隐式发现；Hook 与 PlatformTool 是受信的、进程内 Rust 实现，依赖在构造时注入。
 
-每个客户端推理 turn 只把 `RunInput` 交给 `inference_run::execute`；该一次性 `interface` 独占完整生命周期，并调用 `HookRuntime::begin(SessionContext, &AiRequest, ContextCompleteness, processed_input_items)` 创建 crate-private run state 与每个 Hook 的 `HookSession`。已处理位置由宿主从可信执行历史恢复，不接受客户端或 Hook 自报。一次 Inference Run 覆盖初始 provider round、纯 PlatformTool 隐藏续跑，以及混合工具等待客户端结果后的恢复；普通 provider Target 重试复用本 round 已校验的 canonical 请求。`SessionContext` 只含 request/run ID、RequestKind、ingress、HTTP/WebSocket transport 和脱敏主体；路由确定后事件才收到 model/provider/target/egress。
+每个客户端推理 turn 只把 `RunInput` 交给 `inference_run::execute`；该一次性 `interface` 独占完整生命周期，并调用 `HookRuntime::begin(SessionContext, &AiRequest, ContextCompleteness, processed_input_items)` 创建 crate-private run state 与每个 Hook 的 `HookSession`。已处理位置由宿主从可信执行历史恢复，不接受客户端或 Hook 自报。一次 Inference Run 覆盖初始 provider round、纯 PlatformTool 隐藏续跑，以及混合工具等待客户端结果后的恢复；普通 provider Target 重试复用本 round 已校验的 canonical 请求。`SessionContext` 只含 request/run ID、ingress、HTTP/WebSocket transport 和脱敏主体；路由确定后事件才收到 model/provider/target/egress。
 
 交付准备与收口集中在 `engine/settlement.rs`。`CompletionSettlement` 的私有状态一起持有待提交的 Generation Chain Write 与 Vendor 围栏，完整响应收口按值消费该对象；调用方不再自行配对围栏、交付时间和可选收口字段。buffered 形态还持有 staged Marker 与其执行工作；stream 形态只持有最终响应工作，先前未通过 Marker 交付门的执行不会在最终收口中补启动。`MarkerExecutions` 仅在确有工作时接管所属 Hook run，空执行保留调用方的清理所有权；Marker 发布仍不等于工具执行交接。
 
@@ -567,7 +566,6 @@ pub trait HookSession: Send {
 
 pub struct HookDescriptor {
     pub id: HookId,
-    pub request_kinds: Vec<RequestKind>,   // Generation / Embeddings
     pub event_kinds: Vec<EventKind>,       // 见下
     pub requires_full_context: bool,
     pub max_buffered_bytes: usize,
@@ -575,7 +573,7 @@ pub struct HookDescriptor {
 }
 ```
 
-Hook 是并发安全的共享工厂；Session 是每次 `InferenceRun` 的可变状态。Runtime 严格按 builder 顺序串行调用接受当前 `RequestKind`/`EventKind` 的 session，后一个 hook 只会看到前一个 hook 已成功应用的结果。
+Hook 是并发安全的共享工厂；Session 是每次 `InferenceRun` 的可变状态。Runtime 严格按 builder 顺序串行调用接受当前 `EventKind` 的 session，后一个 hook 只会看到前一个 hook 已成功应用的结果。
 
 ### 4.3 规范化事件面
 
@@ -587,7 +585,7 @@ Hook 是并发安全的共享工厂；Session 是每次 `InferenceRun` 的可变
 | `ClientOutput` | 隐藏平台调用和中间 round 处理后、编码返回客户端前 | 最终客户端可见 response 的语义字段 |
 | `Stream` | 上游规范化 `AiStreamDelta` 到达时 | 仅由 session 的 `StreamTransformer` 处理 text/reasoning/client tool arguments |
 
-`HookEvent` 携带最小稳定 `SessionContext`、`round` 和必要的 canonical 只读 view；`UpstreamResponse`、`ToolResult`、`ClientOutput` 还需要已设置的 `RouteContext`。Embedding 使用 `RequestKind::Embeddings`，可由 descriptor 自然隔离。
+`HookEvent` 携带最小稳定 `SessionContext`、`round` 和必要的 canonical 只读 view；`UpstreamResponse`、`ToolResult`、`ClientOutput` 还需要已设置的 `RouteContext`。
 
 `Request.current` 仍可读取完整上下文；内容变换只处理 `current.items[input_start..]`。`input_start` 区分已经处理的执行前缀与尚未处理的输入，不等于客户端 delta：上一轮模型输出首次成为下一轮输入时也必须处理。请求决策仍会执行，历史复用不缓存路由、能力或权限判定。
 
@@ -614,7 +612,7 @@ pub enum HookControl {
 
 一个 `ActionBatch` 先整体验证，再原子应用；任一 Patch 非法、hook 返回错误、hook session 创建 panic 或 runtime 状态非法都会 fail-closed。`Respond` 只允许 `Request`；`Reject` 只允许首字节发出前的 Request/UpstreamResponse；首字节后只能 `StreamAbort`，不能改变已经发送的 HTTP 状态。Hook 调用不设默认超时，但必须响应请求取消。
 
-Request Patch 可改写 canonical model、system/instructions、ContextItems、generation、tools/tool choice、embedding input 和 protocol extension，但不得改变主体、认证、provider target 或凭据。请求不再提供 `ReplaceCanonical`：新增内容用 `SpliceInput { range, items }`，范围相对于当前未处理输入，越界使整批动作回滚；路由计划用 `SetMediaRouting`，不改写历史。确需修改已有历史时显式使用 `ReplaceContextSpans`。宿主按成功应用的 splice 投影历史 gap，无法证明替换区间内部的来源时不保留该 gap；显式 context rewrite 使原边界证明失效，不能凭内容相等恢复。Response/ToolResult Patch 不能修改 usage、stop/lifecycle、tool ownership/ID 或结构性 stream 事件；平台工具所有权在核心分类后保持不可变，arguments 可被安全语义 patch 后重新校验。
+Request Patch 可改写 canonical model、system/instructions、ContextItems、generation、tools/tool choice 和 protocol extension，但不得改变主体、认证、provider target 或凭据。请求不再提供 `ReplaceCanonical`：新增内容用 `SpliceInput { range, items }`，范围相对于当前未处理输入，越界使整批动作回滚；路由计划用 `SetMediaRouting`，不改写历史。确需修改已有历史时显式使用 `ReplaceContextSpans`。宿主按成功应用的 splice 投影历史 gap，无法证明替换区间内部的来源时不保留该 gap；显式 context rewrite 使原边界证明失效，不能凭内容相等恢复。Response/ToolResult Patch 不能修改 usage、stop/lifecycle、tool ownership/ID 或结构性 stream 事件；平台工具所有权在核心分类后保持不可变，arguments 可被安全语义 patch 后重新校验。
 
 ### 4.5 ContextSnapshot 与状态
 
@@ -688,7 +686,7 @@ SQLite 与 PostgreSQL 的启动重建在同一事务内先去重旧索引 head �
 
 Hook、Vendor Plugin 协议选择与 representability gate 完成后，dispatcher 才对完整 Effective Model Request 查找 Reusable Response Prefix。索引只保存已完整交付、upstream terminal 为 `completed` 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点；匹配以完整 `AiItem` 边界进行，并要求 Principal、精确 Target、Provider 账号/配置、resolved model、egress protocol、instructions、tools、reasoning、response format 和其它请求控制严格一致。最长前缀优先；同长度按完成时间与节点 ID 确定性排序。无安全候选、当前 Target 不可续接或全请求相同时发送完整历史，不构造空自动 delta。
 
-OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通过同一个受控 host transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择，Embeddings 保持 HTTP。连接按 Target namespace、affinity、URL、认证和握手参数隔离，记录最新成功完成的 upstream response ID，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须原子取得匹配 tip 的可用 socket；分支占用、tip 前移、断线或淘汰时，不先发送旧 ID，而是使用 Executor 已保留的完整历史，不消耗恢复预算。Codex 连接身份由 affinity 派生，轮次 ID 留在消息中。
+OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Vendor Plugin 通过同一个受控 host transport seam 使用上游 Responses WebSocket；客户端协议与 stream/non-stream 交付模式不影响选择。连接按 Target namespace、affinity、URL、认证和握手参数隔离，记录最新成功完成的 upstream response ID，同一 socket 一次只有一个 in-flight response，硬性 max-age 为 60 分钟。`store=false` 续接必须原子取得匹配 tip 的可用 socket；分支占用、tip 前移、断线或淘汰时，不先发送旧 ID，而是使用 Executor 已保留的完整历史，不消耗恢复预算。Codex 连接身份由 affinity 派生，轮次 ID 留在消息中。
 
 续接恢复统一由宿主处理，插件每次 Infer 最多发送一次模型请求，只报告明确的失效事实。Codex 只报告本地未发送的连接 miss，或实际带续接 ID、尚无任何模型响应事件时的明确 `previous_response_not_found`／精确无 code 的 ``Invalid `previous_response_id`.``；Claude Code 只报告明确的 thread 拒绝。宿主在 Client Output Commit 前最多恢复一次完整历史，正常路径继续共享 `Arc`；已有完整输入则复用该输入，尚未提交的失败 operation 控制元数据随其缓冲区丢弃。重放时通过 `operation_metadata.continuation_replay=true` 禁止该操作复用被拒的 native thread。拒绝与重放共用一个逻辑 attempt，成功不留下失败记录，失败只记录最终错误。此恢复不占 Target Retry Budget，半开与冷却额外 attempt 同样允许，仍逐次扣实际发送 RPM；OpenAI direct 也使用同一规则。普通 400、已提交输出与未知接受状态不获得许可，Compact 不恢复。
 
@@ -814,7 +812,7 @@ inventory::submit! {
 
 | 目录 | 注册的 `ProtocolEndpoint` |
 |---|---|
-| `codec/openai/compatible/` | `openai-compatible/chat-completions/v1`、`openai-compatible/embeddings/v1` |
+| `codec/openai/compatible/` | `openai-compatible/chat-completions/v1` |
 | `codec/open_responses/` | `open-responses/responses/2026-04-24` |
 | `codec/anthropic/messages/` | `anthropic-messages/messages/2023-06-01` |
 | `codec/google/gemini/` | `google-gemini/generate-content/v1beta` |
@@ -842,7 +840,6 @@ Request/response encode 和 stream delta encode 按目标协议的 per-value rep
 | `streaming` | bool | 支持 SSE 流式 |
 | `tools` / `function_calling` | bool | 支持 tool call |
 | `reasoning` / `extended_reasoning` | bool | 支持 thinking / reasoning |
-| `embeddings` | bool | Embeddings endpoint |
 | `override_model_in_body` | bool | model 写入请求 body 而不是 URL path（Google） |
 | `ingress_routes` | `&[(method, path)]` | endpoint 声明的 ingress route |
 | `multimodal` / `structured_output` / `parallel_tool_calls` / `deterministic_seed` | bool | 请求语义能力 |
@@ -862,8 +859,6 @@ Request/response encode 和 stream delta encode 按目标协议的 per-value rep
 **Google GenerateContent**：generationConfig 的已知采样／输出控制拆入 `generation`、`parameters` 与 `response_format`，thinkingConfig 拆入 `reasoning`（`includeThoughts` 对应 `reasoning.summary`）；`candidateCount`、`responseLogprobs`＋`logprobs`、`responseModalities` 与 `speechConfig` 的 voiceName 分别归入统一字段，`allowedFunctionNames` 对应 `ToolChoice::Allowed`。编码时从这些 canonical 字段重建 generationConfig，不保存整份 raw generationConfig 再 overlay。`safetySettings`、`cachedContent`、`audioTimestamp`、`mediaResolution`、`routingConfig`、`imageConfig` 与 `urlContext` 等未统一工具丢弃。
 
 **Bedrock Converse**：`outputConfig.textFormat.structure.jsonSchema` 归一到 `response_format` 的 schema、name 与 description；出站从 canonical 重建官方结构，省略目标没有等价表达的 strict 或 JsonObject 控制。`requestMetadata` 对应 `metadata`，`serviceTier` 对应 `service_tier`；guardrail、performance、prompt variables 与 additional model response field paths 丢弃。
-
-**OpenAI Embeddings**：input、dimensions、encoding_format 明确解析到 typed `AiRequest.embedding`，`user` 归入 `end_user_id` 并在出口写回 embeddings 的 `user`；`VendorFieldPolicy::Drop`，unknown fields 保存在 ingress 的 `__vendor_ingress` 中但不转发，不以旧 `__emb_*` 作为运行时参数接口。
 
 ### 5.5 语义工具（codec/reasoning.rs & codec/tool_correlation.rs）
 
@@ -888,7 +883,7 @@ stravia-vendor-grok/         ← Release 附件；vendor_id=xai-grok；完整拥
 stravia-vendor-command-code/ ← Release 附件；vendor_id=command-code；完整拥有 Command Code
 stravia-vendor-devin/        ← Release 附件；vendor_id=devin；完整拥有 Devin
 stravia-vendor-common/       ← 多个 guest 共用的 Rust rlib，不是 Vendor
-stravia-protocol-codec/      ← OpenAI-compatible（含 embeddings）、Anthropic、Gemini、Open Responses 四个标准 family
+stravia-protocol-codec/      ← OpenAI-compatible、Anthropic、Gemini、Open Responses 四个标准 family
 stravia-core/plugin/         ← 安装、版本、权限、网络、状态、调度与发布栅栏
 model_turn/                  ← 路由与尝试策略；只调用 Gateway::execute_vendor
 ```

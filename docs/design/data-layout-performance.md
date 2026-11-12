@@ -59,7 +59,7 @@ CPU 准备尽量在写协调外完成：复用序列化 scratch，计算内容�
 
 client/effective/parent/replacement/pending 窗口、FrozenResponse 与引用目录持有共享 Item 句柄。序列化仍是原有 Item 数组，真正可变 AiRequest 边界才生成 owned 数据；没有改公开 IR 或协议。canonical 比较按语义单元展平，保留 grouped/split Item 等价，不把分组形式当历史身份。
 
-缓存估重包含共享窗口的唯一 Item allocation、metadata 的完整 JSON 结构与任意精度数字；深层值不能因固定深度截断漏算。effective_request 的 instructions、工具/schema、response_format、parameters/native_tools 同属预算，不能用“小 items”绕过准入。请求局部工作区还计入解码 delta 保留的响应 vendor metadata、错误及 embedding 数据，不能把很短的 JSON 编码长度当作容器占用。内容、物化缓存与 precommit 共用借用式 JSON 估重：容器保留空间、保守 map 条目开销和数字词法均计入；内容条目另计数值键、Arc 头与槽位。发现阶段不再为准入把整节点序列化一遍，也不构造第二棵 DOM。逻辑预算不是 allocator/RSS 硬上限，跨条目共享、容器和分配器开销仍须用整体进程实测观察。
+缓存估重包含共享窗口的唯一 Item allocation、metadata 的完整 JSON 结构与任意精度数字；深层值不能因固定深度截断漏算。effective_request 的 instructions、工具/schema、response_format、parameters/native_tools 同属预算，不能用“小 items”绕过准入。请求局部工作区还计入解码 delta 保留的响应 vendor metadata 与错误，不能把很短的 JSON 编码长度当作容器占用。内容、物化缓存与 precommit 共用借用式 JSON 估重：容器保留空间、保守 map 条目开销和数字词法均计入；内容条目另计数值键、Arc 头与槽位。发现阶段不再为准入把整节点序列化一遍，也不构造第二棵 DOM。逻辑预算不是 allocator/RSS 硬上限，跨条目共享、容器和分配器开销仍须用整体进程实测观察。
 
 metadata 的扩展对象同样复用 JSON map 的保守条目估重，而不只计算 key 和 Value 本体；大量 `null` 字段也占用容器空间。真实 TinyUFO 回归使用 3,072 个小扩展字段，在 256 KiB 预算下拒绝缓存准入、第二次恢复仍走权威存储，并保持完整 metadata。此修订及共享 Item trait、Observation usage 吸收谓词的维护性收口，已通过 118 项 Generation Chain 与两后端 durable usage 用例；这些结果不冒用此前冻结二进制的产品验证。
 

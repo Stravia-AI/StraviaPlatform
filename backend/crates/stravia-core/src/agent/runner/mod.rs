@@ -21,8 +21,7 @@ use stravia_runtime_contract::agent::{
 };
 use stravia_runtime_contract::artifact::{ArtifactId, ArtifactStore};
 use stravia_runtime_contract::hook::{
-    ContextCompleteness, HookControl, PlatformToolResult, RequestKind, SessionContext, ToolId,
-    TransportKind,
+    ContextCompleteness, HookControl, PlatformToolResult, SessionContext, ToolId, TransportKind,
 };
 use stravia_runtime_contract::model_turn::CanonicalEvent;
 use stravia_runtime_contract::protocol::ir::{

@@ -22,7 +22,6 @@ const CAPS: EndpointCapabilities = EndpointCapabilities {
     structured_output: true,
     deterministic_seed: false,
     reasoning: true,
-    embeddings: false,
     override_model_in_body: false,
     ingress_routes: &[("POST", "/v1/messages")],
     extended_reasoning: true,

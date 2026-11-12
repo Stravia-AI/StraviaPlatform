@@ -53,9 +53,7 @@ impl HookRuntime {
         let original = sessions
             .iter()
             .any(|session| {
-                session
-                    .descriptor
-                    .accepts(context.request_kind, EventKind::Request)
+                session.descriptor.accepts(EventKind::Request)
                     && !should_skip_for_partial(&session.descriptor, &completeness)
             })
             .then(|| Arc::new(ContextSnapshot::from_request(request, completeness.clone())));
@@ -157,12 +155,8 @@ impl InferenceRun {
     pub fn requires_terminal_buffering(&self) -> bool {
         self.sessions.iter().any(|session| {
             session.session.requires_terminal_buffering()
-                && (session
-                    .descriptor
-                    .accepts(self.context.request_kind, EventKind::UpstreamResponse)
-                    || session
-                        .descriptor
-                        .accepts(self.context.request_kind, EventKind::ClientOutput))
+                && (session.descriptor.accepts(EventKind::UpstreamResponse)
+                    || session.descriptor.accepts(EventKind::ClientOutput))
         })
     }
 
@@ -203,9 +197,7 @@ impl InferenceRun {
         }
         let mut history_edits = Vec::new();
         for index in 0..self.sessions.len() {
-            let accepts = self.sessions[index]
-                .descriptor
-                .accepts(self.context.request_kind, EventKind::Request);
+            let accepts = self.sessions[index].descriptor.accepts(EventKind::Request);
             if !accepts {
                 continue;
             }
@@ -316,7 +308,7 @@ impl InferenceRun {
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
                 .descriptor
-                .accepts(self.context.request_kind, EventKind::UpstreamResponse);
+                .accepts(EventKind::UpstreamResponse);
             if !accepts {
                 continue;
             }
@@ -374,7 +366,7 @@ impl InferenceRun {
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
                 .descriptor
-                .accepts(self.context.request_kind, EventKind::ToolResult);
+                .accepts(EventKind::ToolResult);
             if !accepts {
                 continue;
             }
@@ -427,7 +419,7 @@ impl InferenceRun {
         for index in 0..self.sessions.len() {
             let accepts = self.sessions[index]
                 .descriptor
-                .accepts(self.context.request_kind, EventKind::ClientOutput);
+                .accepts(EventKind::ClientOutput);
             if !accepts {
                 continue;
             }
@@ -547,7 +539,6 @@ impl InferenceRun {
         };
         let transformed = transform_through(
             &mut self.sessions,
-            self.context.request_kind,
             &self.completeness,
             &mut self.skips,
             vec![delta],
@@ -571,9 +562,7 @@ impl InferenceRun {
         let mut output = Vec::new();
         let mut first_error = None;
         for index in 0..self.sessions.len() {
-            let accepts = self.sessions[index]
-                .descriptor
-                .accepts(self.context.request_kind, EventKind::Stream);
+            let accepts = self.sessions[index].descriptor.accepts(EventKind::Stream);
             if !accepts {
                 continue;
             }
@@ -680,7 +669,6 @@ impl InferenceRun {
             }
             match transform_through(
                 &mut self.sessions[index + 1..],
-                self.context.request_kind,
                 &self.completeness,
                 &mut self.skips,
                 flushed,
@@ -736,16 +724,12 @@ fn record_skip(skips: &mut Vec<HookSkip>, hook_id: &HookId, event: EventKind, re
 
 fn transform_through(
     sessions: &mut [RuntimeSession],
-    request_kind: RequestKind,
     completeness: &ContextCompleteness,
     skips: &mut Vec<HookSkip>,
     mut events: Vec<AiStreamDelta>,
 ) -> Result<Vec<AiStreamDelta>, HookError> {
     for runtime_session in sessions {
-        if !runtime_session
-            .descriptor
-            .accepts(request_kind, EventKind::Stream)
-        {
+        if !runtime_session.descriptor.accepts(EventKind::Stream) {
             continue;
         }
         if should_skip_for_partial(&runtime_session.descriptor, completeness) {

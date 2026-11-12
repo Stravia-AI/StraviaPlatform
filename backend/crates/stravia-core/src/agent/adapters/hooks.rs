@@ -14,7 +14,6 @@ impl Hook for AgentDefinitionHook {
     fn descriptor(&self) -> HookDescriptor {
         HookDescriptor {
             id: stravia_runtime_contract::hook::HookId::new("agent-definitions"),
-            request_kinds: vec![RequestKind::Generation],
             event_kinds: vec![
                 EventKind::Request,
                 EventKind::ToolResult,

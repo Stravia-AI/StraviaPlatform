@@ -94,12 +94,7 @@ async fn incremental_input_edits_preserve_history_and_roll_back_invalid_batches(
             ],
         );
         let mut run = runtime
-            .begin(
-                session_context(RequestKind::Generation),
-                &request,
-                ContextCompleteness::Full,
-                1,
-            )
+            .begin(session_context(), &request, ContextCompleteness::Full, 1)
             .unwrap();
         let result = run.on_request_with_provenance(&mut request).await;
         if invalid {
@@ -151,13 +146,12 @@ fn anonymous_principal_cannot_be_constructed() {
     Principal::new("anonymous");
 }
 
-fn session_context(kind: RequestKind) -> SessionContext {
+fn session_context() -> SessionContext {
     SessionContext {
         tools_fixed: false,
         request_id: "req-1".into(),
         run_id: "run-1".into(),
         interaction_id: None,
-        request_kind: kind,
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,
         principal: Principal::new("test-key"),
@@ -226,7 +220,7 @@ async fn assert_abandoned_inference_delivery(cancel: bool) {
         })])
         .unwrap(),
     );
-    let context = session_context(RequestKind::Generation);
+    let context = session_context();
     let principal = context.principal.clone();
     let cancellation = context.cancellation.clone();
     let run = runtime
@@ -335,7 +329,7 @@ async fn marker_delivery_persistence_failure_returns_to_owning_inference_run() {
         })])
         .unwrap(),
     );
-    let context = session_context(RequestKind::Generation);
+    let context = session_context();
     let principal = context.principal.clone();
     let mut run = runtime
         .begin(
@@ -431,7 +425,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
         })
         .await
         .unwrap();
-    let mut context = session_context(RequestKind::Generation);
+    let mut context = session_context();
     context.principal = Principal::new(key.id);
     let principal = context.principal.clone();
     let mut run = runtime
@@ -489,7 +483,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
         .expect("bounded delivery contains its execution reference");
     assert_eq!(content["delivery_hook"], true);
     let id = path.strip_prefix("stravia://tool-executions/").unwrap();
-    let mut query_context = session_context(RequestKind::Generation);
+    let mut query_context = session_context();
     query_context.principal = principal.clone();
     let query_cancellation = query_context.cancellation.clone();
     let query_run = runtime
@@ -596,12 +590,7 @@ async fn request_hooks_run_in_order_and_observe_prior_changes() {
     let runtime = HookRuntime::new(hooks);
     let mut request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
 
     let control = run
@@ -684,12 +673,7 @@ async fn request_provenance_distinguishes_controls_from_structural_replacements(
         let runtime = provenance_runtime(&patches);
         let mut request = AiRequest::new("model", vec![AiItem::output_text("visible")]);
         let mut run = runtime
-            .begin(
-                session_context(RequestKind::Generation),
-                &request,
-                ContextCompleteness::Full,
-                0,
-            )
+            .begin(session_context(), &request, ContextCompleteness::Full, 0)
             .unwrap();
         let outcome = run.on_request_with_provenance(&mut request).await.unwrap();
         assert!(matches!(outcome.control, HookControl::Continue));
@@ -719,12 +703,7 @@ async fn request_provenance_survives_early_hook_control() {
     ]);
     let mut request = AiRequest::new("model", vec![AiItem::output_text("visible")]);
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     let outcome = run.on_request_with_provenance(&mut request).await.unwrap();
     assert!(matches!(outcome.control, HookControl::Reject(_)));
@@ -742,12 +721,7 @@ async fn invalid_action_batch_leaves_request_unchanged() {
     })]);
     let mut request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
 
     let outcome = run.on_request_with_provenance(&mut request).await;
@@ -778,7 +752,7 @@ async fn hook_requiring_full_context_is_skipped_for_partial_request() {
     let mut request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
         .begin(
-            session_context(RequestKind::Generation),
+            session_context(),
             &request,
             ContextCompleteness::Partial {
                 opaque_refs: vec![],
@@ -868,7 +842,7 @@ async fn completing_partial_context_enables_later_full_context_consumers() {
     request.instructions = Some("preserved system".into());
     let mut run = runtime
         .begin(
-            session_context(RequestKind::Generation),
+            session_context(),
             &request,
             ContextCompleteness::Partial {
                 opaque_refs: vec![],
@@ -918,7 +892,7 @@ async fn failed_context_completion_does_not_enable_full_context_response_hooks()
     let mut request = AiRequest::new("model", Vec::new());
     let mut run = runtime
         .begin(
-            session_context(RequestKind::Generation),
+            session_context(),
             &request,
             ContextCompleteness::Partial {
                 opaque_refs: vec![],
@@ -953,12 +927,7 @@ async fn no_hooks_preserve_route_errors_and_client_tool_ownership() {
         defer_loading: None,
     }]);
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     assert!(matches!(
         run.on_request_with_provenance(&mut request)
@@ -1064,12 +1033,7 @@ async fn response_and_tool_result_stages_are_distinct_and_ordered() {
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     run.set_route(route_context());
     let mut response = AiResponse::new("response", "model");
@@ -1101,12 +1065,7 @@ async fn protected_response_fields_make_the_whole_batch_fail() {
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     run.set_route(route_context());
     let mut response = AiResponse::new("response", "model");
@@ -1249,12 +1208,7 @@ fn stream_transformer_panics_are_fail_closed() {
         })]);
         let request = AiRequest::new("model", Vec::<AiItem>::new());
         let mut run = runtime
-            .begin(
-                session_context(RequestKind::Generation),
-                &request,
-                ContextCompleteness::Full,
-                0,
-            )
+            .begin(session_context(), &request, ContextCompleteness::Full, 0)
             .unwrap();
         let first = run.transform_stream(
             stravia_runtime_contract::protocol::ir::AiStreamDelta::TextDelta("text".into()),
@@ -1290,12 +1244,7 @@ async fn stream_transformer_holds_across_deltas_and_flushes_semantic_content() {
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
 
     let first = run
@@ -1379,12 +1328,7 @@ async fn stream_transformer_cannot_drop_structural_events() {
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
 
     let error = run
@@ -1415,12 +1359,7 @@ async fn stream_transformer_is_rejected_when_its_buffer_exceeds_descriptor_limit
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
 
     let error = run
@@ -1502,12 +1441,7 @@ async fn exposed_platform_tool_is_classified_without_claiming_client_tool() {
         defer_loading: None,
     }]);
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     run.on_request_with_provenance(&mut request).await.unwrap();
     let platform_name = request
@@ -1551,12 +1485,7 @@ fn session_creation_panic_is_fail_closed() {
     let request = AiRequest::new("model", Vec::<AiItem>::new());
 
     let error = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .err()
         .expect("session creation should fail");
 
@@ -1632,12 +1561,7 @@ async fn client_tool_arguments_pass_through_verbatim_even_when_not_json() {
     })]);
     let request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     run.set_route(route_context());
     let mut response = AiResponse::new("response", "model");
@@ -1672,12 +1596,7 @@ async fn valid_platform_call_does_not_block_malformed_client_arguments() {
     );
     let mut request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     run.on_request_with_provenance(&mut request).await.unwrap();
     run.set_route(route_context());
@@ -1725,12 +1644,7 @@ async fn platform_tool_malformed_arguments_are_refused_at_execution() {
     );
     let mut request = AiRequest::new("model", Vec::<AiItem>::new());
     let mut run = runtime
-        .begin(
-            session_context(RequestKind::Generation),
-            &request,
-            ContextCompleteness::Full,
-            0,
-        )
+        .begin(session_context(), &request, ContextCompleteness::Full, 0)
         .unwrap();
     run.on_request_with_provenance(&mut request).await.unwrap();
     run.set_route(route_context());

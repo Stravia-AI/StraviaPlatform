@@ -91,19 +91,16 @@ const PROTOCOL_ALIASES: Record<string, Protocol> = {
 
   // Old canonical endpoint strings (Tier-1 backward compat)
   'openai/chat/v1': 'openai-compatible',
-  'openai/embeddings/v1': 'openai-compatible',
   'anthropic/messages/2023-06-01': 'anthropic-messages',
   'google/generate/v1beta': 'google-gemini',
 
   // Deprecated canonical endpoint strings
   'openai-compat/chat-completions/v1': 'openai-compatible',
-  'openai-compat/embeddings/v1': 'openai-compatible',
   'anthropic-msgs/messages/2023-06-01': 'anthropic-messages',
   'google-genai/generate-content/v1beta': 'google-gemini',
 
   // New canonical endpoint strings
   'openai-compatible/chat-completions/v1': 'openai-compatible',
-  'openai-compatible/embeddings/v1': 'openai-compatible',
   'open-responses/responses/2026-04-24': 'open-responses',
   'anthropic-messages/messages/2023-06-01': 'anthropic-messages',
   'google-gemini/generate-content/v1beta': 'google-gemini',

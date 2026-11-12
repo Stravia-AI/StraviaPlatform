@@ -1393,7 +1393,6 @@ async fn prepare_attempt(
         })?;
     let provider_model = execution.provider().model_metadata.as_ref();
     if !compact
-        && input.request.embedding.is_none()
         && !stravia_protocol_codec::codec::open_responses::hosted_image_generation_requested(
             &input.request,
         )

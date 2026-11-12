@@ -304,26 +304,6 @@ async fn chat_with_headers(
     Ok((status, value))
 }
 
-async fn embeddings(
-    gateway: Gateway,
-    token: &str,
-    body: Value,
-) -> anyhow::Result<(StatusCode, Value)> {
-    let response = stravia_core::proxy::server::create_router(gateway)
-        .oneshot(
-            Request::post("/v1/embeddings")
-                .header("authorization", format!("Bearer {token}"))
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&body)?))?,
-        )
-        .await?;
-    let status = response.status();
-    let body = to_bytes(response.into_body(), 16 * 1024 * 1024).await?;
-    let value = serde_json::from_slice(&body)
-        .unwrap_or_else(|_| json!({"non_json_body": String::from_utf8_lossy(&body).into_owned()}));
-    Ok((status, value))
-}
-
 fn standard_client_request(model: &str) -> Value {
     json!({
         "model": model,
@@ -526,71 +506,6 @@ async fn custom_compatible_connection_can_call_an_explicit_local_upstream_withou
             !requests[0].headers.contains_key(name),
             "custom target forwarded {name}"
         );
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn custom_and_standard_openai_profiles_use_the_embeddings_codec_over_wasm()
--> anyhow::Result<()> {
-    for (name, vendor) in [
-        ("custom-embeddings", "custom"),
-        ("standard-openai-embeddings", "openai-compatible"),
-    ] {
-        let (base_url, server) = local_upstream(1, |_| {
-            MockResponse::json(json!({
-                "object": "list",
-                "data": [{"object": "embedding", "index": 0, "embedding": [0.25, -0.75]}],
-                "model": "custom-embedding-model",
-                "usage": {"prompt_tokens": 2, "total_tokens": 2}
-            }))
-        })
-        .await?;
-        let (_directory, gateway) = gateway().await?;
-        let (route, token) = provider_route_and_key(
-            &gateway,
-            name,
-            ProviderSourceInput::Custom {
-                vendor: vendor.into(),
-                channel: "default".into(),
-                protocol: Some("openai-compatible".into()),
-                base_url,
-                models_source: None,
-                static_models: None,
-            },
-            "custom-embedding-model",
-            ProviderCredentialInput::ApiKey {
-                value: "custom-embedding-key".into(),
-            },
-            Default::default(),
-            json!({"id": "custom-embedding-model", "name": "custom-embedding-model"}),
-        )
-        .await?;
-
-        let (status, response) = embeddings(
-            gateway,
-            &token,
-            json!({
-                "model": route,
-                "input": "embed this",
-                "dimensions": 2,
-                "encoding_format": "float"
-            }),
-        )
-        .await?;
-        assert_eq!(status, StatusCode::OK, "{name}: {response}");
-        assert_eq!(response["data"][0]["embedding"], json!([0.25, -0.75]));
-
-        let requests = server.await??;
-        assert_eq!(requests[0].path, "/v1/embeddings", "{name}");
-        assert_eq!(
-            requests[0].headers.get("authorization").map(String::as_str),
-            Some("Bearer custom-embedding-key")
-        );
-        let body: Value = serde_json::from_slice(&requests[0].body)?;
-        assert_eq!(body["model"], "custom-embedding-model");
-        assert_eq!(body["input"], "embed this");
-        assert_eq!(body["dimensions"], 2);
     }
     Ok(())
 }
@@ -2095,83 +2010,6 @@ async fn gitlab_403_does_not_refresh_or_replay() -> anyhow::Result<()> {
             "/ai/v1/proxy/openai/v1/chat/completions",
         ]
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn azure_builtin_embeddings_use_the_native_endpoint_and_codec_over_wasm() -> anyhow::Result<()>
-{
-    let (base_url, server) = local_upstream(1, |_| {
-        MockResponse::json(json!({
-            "object": "list",
-            "data": [
-                {"object": "embedding", "index": 0, "embedding": [0.125, -0.5, 0.75]},
-                {"object": "embedding", "index": 1, "embedding": [1.0, 0.0, -1.0]}
-            ],
-            "model": "embedding-deployment",
-            "usage": {"prompt_tokens": 4, "total_tokens": 4}
-        }))
-    })
-    .await?;
-    let (_directory, gateway) = gateway().await?;
-    let (route, token) = provider_route_and_key(
-        &gateway,
-        "azure-embeddings",
-        ProviderSourceInput::Custom {
-            vendor: "azure".to_string(),
-            channel: "default".to_string(),
-            protocol: Some("openai-compatible".to_string()),
-            base_url: format!("{base_url}/openai/v1"),
-            models_source: None,
-            static_models: None,
-        },
-        "embedding-deployment",
-        ProviderCredentialInput::ApiKey {
-            value: "azure-contract-key".into(),
-        },
-        serde_json::Map::from_iter([
-            ("resourceName".into(), json!("unused-explicit-proxy")),
-            ("apiVersion".into(), json!("2024-02-01")),
-        ]),
-        json!({"id": "embedding-deployment", "name": "embedding-deployment"}),
-    )
-    .await?;
-
-    let (status, response) = embeddings(
-        gateway,
-        &token,
-        json!({
-            "model": route,
-            "input": ["first input", "second input"],
-            "dimensions": 3,
-            "encoding_format": "float",
-            "user": "azure-contract"
-        }),
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK, "{response}");
-    assert_eq!(response["model"], "embedding-deployment");
-    assert_eq!(response["data"][0]["embedding"], json!([0.125, -0.5, 0.75]));
-    assert_eq!(response["data"][1]["embedding"], json!([1.0, 0.0, -1.0]));
-    assert_eq!(
-        response["usage"],
-        json!({"prompt_tokens": 4, "total_tokens": 4})
-    );
-
-    let requests = server.await??;
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert_eq!(request.path, "/openai/v1/embeddings?api-version=2024-02-01");
-    assert_eq!(
-        request.headers.get("api-key").map(String::as_str),
-        Some("azure-contract-key")
-    );
-    let body: Value = serde_json::from_slice(&request.body)?;
-    assert_eq!(body["model"], "embedding-deployment");
-    assert_eq!(body["input"], json!(["first input", "second input"]));
-    assert_eq!(body["dimensions"], 3);
-    assert_eq!(body["encoding_format"], "float");
-    assert_eq!(body["user"], "azure-contract");
     Ok(())
 }
 

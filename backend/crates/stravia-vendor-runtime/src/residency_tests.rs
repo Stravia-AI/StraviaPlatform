@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use stravia_runtime_contract::protocol::ir::AiItem;
 use stravia_runtime_contract::protocol::ir::canonical::{hash_bytes, hash_hex};
-use stravia_runtime_contract::protocol::ir::{EmbeddingInput, EmbeddingRequest};
 use stravia_runtime_contract::{CancellationToken, Deadline};
 use stravia_vendor_sdk::{AiRequest, ErrorKind, Operation, ProviderSnapshot};
 
@@ -22,7 +22,8 @@ use super::{
 };
 
 const IDLE: Duration = Duration::from_secs(60 * 60);
-const EXPECTED_PROTOCOL: &str = "openai-compatible/embeddings/v1";
+// OpenAI 供应商对含内容的请求选择 Responses；返回值由插件计算，不是对输入协议的回显。
+const EXPECTED_PROTOCOL: &str = "open-responses/responses/2026-04-24";
 
 struct CountingSource {
     bytes: Vec<u8>,
@@ -54,7 +55,7 @@ impl ComponentSource for CountingSource {
 
 fn provider() -> ProviderSnapshot {
     ProviderSnapshot {
-        provider_id: "custom".into(),
+        provider_id: "openai".into(),
         channel: "default".into(),
         base_url: "https://upstream.invalid/v1".into(),
         protocol: "openai-compatible".into(),
@@ -68,14 +69,7 @@ fn provider() -> ProviderSnapshot {
 }
 
 fn request() -> AiRequest {
-    let mut request = AiRequest::new("model", Vec::new());
-    request.embedding = Some(EmbeddingRequest {
-        input: EmbeddingInput::Text("input".into()),
-        dimensions: None,
-        encoding_format: None,
-        user: None,
-    });
-    request
+    AiRequest::new("model", vec![AiItem::output_text("input")])
 }
 
 async fn select_protocol(

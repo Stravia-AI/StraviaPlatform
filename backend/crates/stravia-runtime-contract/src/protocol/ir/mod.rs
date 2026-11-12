@@ -51,16 +51,13 @@ pub use parameters::{
 pub use request::TOOL_RESULT_CONTENT_KIND_META;
 pub use request::{
     AiItem, AiItemAudience, AiItemMetadata, AiItemProvenance, AiItemStatus, AiRequest,
-    CanonicalItemId, ContentBlock, DocumentSource, EmbeddingInput, EmbeddingRequest,
-    GenerationConfig, ItemReference, MediaSource, MessageContent, ReasoningConfig,
-    ReasoningSummary, RequestMetadata, ResponseFormat, Role, StreamConfig, ToolCall, ToolCallId,
-    ToolChoice, ToolResultContentKind, ToolSpec,
+    CanonicalItemId, ContentBlock, DocumentSource, GenerationConfig, ItemReference, MediaSource,
+    MessageContent, ReasoningConfig, ReasoningSummary, RequestMetadata, ResponseFormat, Role,
+    StreamConfig, ToolCall, ToolCallId, ToolChoice, ToolResultContentKind, ToolSpec,
 };
 
 // ── Response ──────────────────────────────────────────────────────────────────
-pub use response::{
-    AiResponse, EmbeddingData, EmbeddingOutput, EmbeddingVector, NativeCompactionResponse,
-};
+pub use response::{AiResponse, NativeCompactionResponse};
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 pub use schema::SchemaObject;

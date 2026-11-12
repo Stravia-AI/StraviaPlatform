@@ -102,7 +102,6 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 | ------------------------- | ------------------------------------------------------ |
 | OpenAI Chat Completions   | `POST /v1/chat/completions`                            |
 | Open Responses 2026-04-24 | `POST /v1/responses` (JSON, SSE, WebSocket)            |
-| OpenAI Embeddings         | `POST /v1/embeddings`                                  |
 | Anthropic Messages        | `POST /v1/messages`                                    |
 | Gemini GenerateContent    | `POST /v1beta/models/{model}:generateContent`          |
 | Gemini streaming          | `POST /v1beta/models/{model}:streamGenerateContent`    |

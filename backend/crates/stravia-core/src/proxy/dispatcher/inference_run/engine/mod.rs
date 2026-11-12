@@ -454,14 +454,6 @@ pub(super) async fn orchestrate(
     crate::model_turn::normalize_request_headers(&mut request, |name| {
         headers.get(name).and_then(|value| value.to_str().ok())
     });
-    let ingress_capabilities = stravia_protocol_codec::registry::ProtocolRegistry::global()
-        .capabilities(&ingress)
-        .expect("registered ingress protocol");
-    let request_kind = if ingress_capabilities.embeddings {
-        stravia_runtime_contract::hook::RequestKind::Embeddings
-    } else {
-        stravia_runtime_contract::hook::RequestKind::Generation
-    };
     if request.parameters.background == Some(true) {
         // This ingress executes synchronously; omit unsupported background
         // delivery rather than rejecting otherwise representable inference.
@@ -531,11 +523,7 @@ pub(super) async fn orchestrate(
     } else {
         None
     };
-    let mut generation_chain_write = if !compact
-        && matches!(
-            request_kind,
-            stravia_runtime_contract::hook::RequestKind::Generation
-        ) {
+    let mut generation_chain_write = if !compact {
         let native_compaction_requested =
             stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);
         let begin = tokio::select! {
@@ -1053,7 +1041,6 @@ pub(super) async fn orchestrate(
         request_id: ctx.request_id.clone(),
         run_id: stravia_runtime_contract::identifier::new_id(),
         interaction_id: Some(observer.interaction_id()),
-        request_kind,
         ingress,
         transport: stravia_runtime_contract::hook::TransportKind::Http,
         inherited_media_turns,

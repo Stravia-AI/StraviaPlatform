@@ -120,7 +120,6 @@ fn scrub_request(request: &mut AiRequest) -> Result<(), ArtifactError> {
         scrub(text);
     }
     scrub_serialized(&mut request.generation)?;
-    scrub_serialized(&mut request.embedding)?;
     scrub_serialized(&mut request.stream)?;
     scrub_serialized(&mut request.tools)?;
     scrub_serialized(&mut request.tool_choice)?;
@@ -251,7 +250,6 @@ fn request_contains_upload_grant(request: &AiRequest) -> Result<bool, ArtifactEr
             .as_deref()
             .is_some_and(text_contains_upload_grant)
         || contains_upload_grant(&request.generation)?
-        || contains_upload_grant(&request.embedding)?
         || contains_upload_grant(&request.stream)?
         || contains_upload_grant(&request.tools)?
         || contains_upload_grant(&request.tool_choice)?

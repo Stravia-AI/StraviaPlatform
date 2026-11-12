@@ -7,11 +7,10 @@ use stravia_vendor_common::thinking;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use stravia_protocol_codec::codec::openai::compatible::chat_completions::OpenAIChatCompletionsV1;
-use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_runtime_contract::protocol::ids::{
     ANTHROPIC_MESSAGES_2023_06_01, COHERE_CHAT_V2, GATEWAY_LANGUAGE_MODEL_V4,
     GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1, Protocol,
+    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, Protocol,
 };
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::net::{ConnectRequest, Fields, Request};
@@ -494,18 +493,6 @@ pub(crate) fn classify_gemini_error(
     (mentions_signature && rejected).then(|| protected_reasoning_rejected("Gemini"))
 }
 
-pub(crate) fn select_protocol(provider: &ProviderSnapshot, request: &AiRequest) -> String {
-    if request.embedding.is_some()
-        && ProtocolRegistry::global()
-            .resolve_alias(&provider.protocol)
-            .is_some_and(|endpoint| endpoint.protocol == OPENAI_COMPATIBLE_EMBEDDINGS_V1.protocol)
-    {
-        OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string()
-    } else {
-        provider.protocol.clone()
-    }
-}
-
 fn protocol_for(vendor_id: &str, provider: &ProviderSnapshot) -> Result<String, PluginError> {
     let fixed = match vendor_id {
         "kimi-for-coding" | "minimax-coding-plan" | "minimax-cn-coding-plan" => {
@@ -539,17 +526,13 @@ fn protocol_for(vendor_id: &str, provider: &ProviderSnapshot) -> Result<String, 
     };
     let supported = match vendor_id {
         "google" => endpoint == GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
-        "openai-compatible" => matches!(
-            endpoint,
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 | OPENAI_COMPATIBLE_EMBEDDINGS_V1
-        ),
+        "openai-compatible" => endpoint == OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         "kimi-for-coding" | "minimax-coding-plan" | "minimax-cn-coding-plan" => {
             endpoint == ANTHROPIC_MESSAGES_2023_06_01
         }
         "custom" => matches!(
             endpoint,
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-                | OPENAI_COMPATIBLE_EMBEDDINGS_V1
                 | OPEN_RESPONSES_2026_04_24
                 | ANTHROPIC_MESSAGES_2023_06_01
                 | GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
@@ -1421,7 +1404,6 @@ mod tests {
     fn custom_and_standard_profiles_accept_only_their_complete_standard_families() {
         for protocol in [
             OPENAI_CHAT_PROTOCOL,
-            "openai-compatible/embeddings/v1",
             OPEN_RESPONSES_PROTOCOL,
             ANTHROPIC_PROTOCOL,
             GEMINI_PROTOCOL,
@@ -1432,26 +1414,6 @@ mod tests {
             );
         }
 
-        let embeddings = provider("openai-compatible", "");
-        let mut request = AiRequest::new("model", Vec::new());
-        request.embedding = Some(stravia_runtime_contract::protocol::ir::EmbeddingRequest {
-            input: stravia_runtime_contract::protocol::ir::EmbeddingInput::Text("input".into()),
-            dimensions: None,
-            encoding_format: None,
-            user: None,
-        });
-        assert_eq!(
-            select_protocol(&embeddings, &request),
-            OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string()
-        );
-        assert_eq!(
-            protocol_for(
-                "custom",
-                &provider(&OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string(), "")
-            )
-            .unwrap(),
-            OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string()
-        );
         assert_eq!(
             protocol_for("custom", &provider("google-gemini", "")).unwrap(),
             GEMINI_PROTOCOL

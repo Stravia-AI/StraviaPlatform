@@ -4,7 +4,7 @@ use super::*;
 async fn merged_full_read_scope_does_not_count_as_client_declaration() {
     use stravia_runtime_contract::hook::{
         ContextCompleteness, ContextSnapshot, Hook, HookAction, HookEvent, ReadExposureScope,
-        RequestKind, SessionContext, TransportKind,
+        SessionContext, TransportKind,
     };
 
     let data_dir = tempfile::tempdir().expect("temporary data directory");
@@ -41,7 +41,6 @@ async fn merged_full_read_scope_does_not_count_as_client_declaration() {
         request_id: "request".into(),
         run_id: "run".into(),
         interaction_id: None,
-        request_kind: RequestKind::Generation,
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,
         principal: stravia_runtime_contract::Principal::new(key.id),

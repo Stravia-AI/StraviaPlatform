@@ -311,7 +311,7 @@ WebSocket 不在 `response.create` body 中重复传 token。所谓“每轮重�
 
 Custom Open Responses 连接可通过独立的 `use_websocket`（默认关闭）和 `use_previous_response_id`（默认开启）选择传输与原生续接。关闭后者只停止上游 ID 优化，保留本地历史、客户端续接、图片、推理恢复及 prompt cache；WebSocket 仍可使用完整历史。配置与严格 socket-tip 约束见 [Vendor 插件设计](vendor-plugins.md#custom-responses-的传输与续接)。
 
-下游 WebSocket ingress 与 Vendor Plugin 使用的上游受控 host transport 是两个独立 seam。OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Wasm Vendor Plugin 使用上游 Responses WebSocket；Chat Completions、Open Responses、Anthropic Messages、Gemini 以及 stream/non-stream 客户端均经过同一个 Inference Run，Embeddings 仍走 HTTP。插件从 Responses HTTP URL 选择对应的 `ws:`/`wss:` 目标，宿主 transport 复用同一网络栈的 HTTP/HTTPS proxy、CONNECT、proxy authentication、TLS 与 Provider headers，并执行 origin 授权。Codex guest 固定 `store=false`、当前 `OpenAI-Beta` 与 request/client metadata；rolling wire 差异不进入 dated Open Responses 公共协议。
+下游 WebSocket ingress 与 Vendor Plugin 使用的上游受控 host transport 是两个独立 seam。OpenAI direct 与 Codex OAuth 的 generation Target 由各自 Wasm Vendor Plugin 使用上游 Responses WebSocket；Chat Completions、Open Responses、Anthropic Messages、Gemini 以及 stream/non-stream 客户端均经过同一个 Inference Run。插件从 Responses HTTP URL 选择对应的 `ws:`/`wss:` 目标，宿主 transport 复用同一网络栈的 HTTP/HTTPS proxy、CONNECT、proxy authentication、TLS 与 Provider headers，并执行 origin 授权。Codex guest 固定 `store=false`、当前 `OpenAI-Beta` 与 request/client metadata；rolling wire 差异不进入 dated Open Responses 公共协议。
 
 连接池按精确 Target namespace、affinity、URL、认证与握手参数隔离，并保存每条空闲连接最新成功完成的 upstream response ID；每个连接同一时刻只执行一个 response。连接 60 分钟后不再复用，宿主最多保留 64 条空闲连接，满时淘汰最早归池的连接；该限制不是 in-flight 连接上限。`store=false` 只有在原子取得匹配 tip 的可用 socket 后才能发送续接 ID。sibling 占用、tip 前移、重启、断线、淘汰或 max-age 导致匹配失败时，在任何增量请求发出前切换为完整 Effective Model Request，不消耗上游恢复预算。取消关闭所属 socket。
 

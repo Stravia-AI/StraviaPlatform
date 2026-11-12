@@ -727,7 +727,6 @@ impl serde::Serialize for RequestControls<'_> {
             optional!("stop", &r.generation.stop);
             optional!("presence_penalty", &r.generation.presence_penalty);
             optional!("frequency_penalty", &r.generation.frequency_penalty);
-            optional!("embedding", &r.embedding);
             // Sampling and output scores affect history identity, not the
             // prompt prefix eligible for reuse on the same Target.
             optional!("top_k", &p.top_k);

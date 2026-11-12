@@ -5,7 +5,7 @@
 | 研究截点 | 2026-08-17 |
 | 范围 | 仅 OpenAI 官方文档、官方 API reference、`openai-node`/`openai-python` 官方仓库与 release；不把 Realtime API 当作 Responses WebSocket mode。 |
 | 总结 | **Responses API WebSocket mode 已有公开官方文档和官方 SDK 实现，可作为公开 API 接入；但官方材料没有给出明确的 GA/稳定性声明，SDK 仍保留 `OpenAI-Beta: responses_websockets=2026-02-06` 的可选 beta header 示例。因此生产接入应按“公开可用、GA 状态未确认/需保守演进”处理。** |
-| Stravia 判断 | Stravia 将下游 `/v1/responses` HTTP/SSE/WebSocket ingress 与 Provider Transport 分离。OpenAI direct 与 Codex OAuth 的可表示 generation 请求由 Model Turn Executor 优先通过 Responses WebSocket 调用上游；Embeddings 与不具备该能力的 Target 保持 HTTP。Open Responses 公共协议仍固定为 `2026-04-24`，rolling OpenAI wire 仅存在于 Vendor transport adapter。 |
+| Stravia 判断 | Stravia 将下游 `/v1/responses` HTTP/SSE/WebSocket ingress 与 Provider Transport 分离。OpenAI direct 与 Codex OAuth 的可表示 generation 请求由 Model Turn Executor 优先通过 Responses WebSocket 调用上游；不具备该能力的 Target 保持 HTTP。Open Responses 公共协议仍固定为 `2026-04-24`，rolling OpenAI wire 仅存在于 Vendor transport adapter。 |
 
 ## 1. 公开状态、beta/GA 标识
 

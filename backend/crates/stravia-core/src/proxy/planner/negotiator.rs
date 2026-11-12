@@ -180,7 +180,6 @@ mod tests {
     use std::time::Duration;
     use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
     use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-    use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
 
     fn make_decl(default: ProtocolId, base_url: &str) -> ProviderProtocols {
         ProviderProtocols {
@@ -213,36 +212,6 @@ mod tests {
         assert_eq!(plan.mode, ProtocolMode::Native);
         assert_eq!(plan.egress, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
         assert!(!plan.needs_conversion);
-    }
-
-    #[test]
-    fn native_when_same_protocol_family() {
-        let decl = make_decl(
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            "https://api.openai.com",
-        );
-        let mut c = ctx();
-        let plan = negotiate(OPENAI_COMPATIBLE_EMBEDDINGS_V1, None, Some(&decl), &mut c).unwrap();
-        assert_eq!(plan.mode, ProtocolMode::Native);
-        assert_eq!(plan.egress, OPENAI_COMPATIBLE_EMBEDDINGS_V1);
-        assert!(!plan.needs_conversion);
-    }
-
-    #[test]
-    fn route_pref_in_same_protocol_wins_over_ingress_match() {
-        let decl = make_decl(
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            "https://api.openai.com",
-        );
-        let mut c = ctx();
-        let plan = negotiate(
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            Some(OPENAI_COMPATIBLE_EMBEDDINGS_V1),
-            Some(&decl),
-            &mut c,
-        )
-        .unwrap();
-        assert_eq!(plan.egress, OPENAI_COMPATIBLE_EMBEDDINGS_V1);
     }
 
     #[test]

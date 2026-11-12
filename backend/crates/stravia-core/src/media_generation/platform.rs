@@ -9,8 +9,8 @@ use stravia_runtime_contract::{
     CancellationToken, Principal,
     hook::{
         ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
-        HookSession, PlatformTool, PlatformToolError, PlatformToolOutput, RequestKind,
-        RequestPatch, SessionContext, ToolExecutionContext, ToolId,
+        HookSession, PlatformTool, PlatformToolError, PlatformToolOutput, RequestPatch,
+        SessionContext, ToolExecutionContext, ToolId,
     },
     protocol::ir::{ContentBlock, ToolChoice},
 };
@@ -277,7 +277,6 @@ impl Hook for GenerateHook {
     fn descriptor(&self) -> HookDescriptor {
         HookDescriptor {
             id: HookId::new(TOOL_ID),
-            request_kinds: vec![RequestKind::Generation],
             event_kinds: vec![EventKind::Request],
             requires_full_context: false,
             max_buffered_bytes: 0,

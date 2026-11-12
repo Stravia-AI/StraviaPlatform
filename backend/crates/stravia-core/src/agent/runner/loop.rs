@@ -492,7 +492,6 @@ impl AgentRunner {
                         request_id: format!("agent-request-{}", turn_id.as_str()),
                         run_id: turn_id.as_str().to_owned(),
                         interaction_id: None,
-                        request_kind: RequestKind::Generation,
                         ingress: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
                         transport: TransportKind::Http,
                         principal: input.principal.clone(),

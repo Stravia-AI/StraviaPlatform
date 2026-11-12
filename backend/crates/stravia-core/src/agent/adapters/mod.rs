@@ -36,7 +36,6 @@ use stravia_runtime_contract::hook::HookEvent;
 use stravia_runtime_contract::hook::HookSession;
 use stravia_runtime_contract::hook::PlatformTool;
 use stravia_runtime_contract::hook::PlatformToolError;
-use stravia_runtime_contract::hook::RequestKind;
 use stravia_runtime_contract::hook::ResponsePatch;
 use stravia_runtime_contract::hook::SessionContext;
 use stravia_runtime_contract::hook::ToolExecutionContext;
