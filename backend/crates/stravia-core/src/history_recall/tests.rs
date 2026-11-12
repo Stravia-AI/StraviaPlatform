@@ -39,8 +39,11 @@ struct OwnerMappings;
 
 #[async_trait]
 impl MappingStore for OwnerMappings {
-    async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError> {
-        Ok(if principal.api_key_id() == OWNER {
+    async fn active(
+        &self,
+        principal: &Principal,
+    ) -> Result<stravia_credential_protection::store::MappingSnapshot, RedactionError> {
+        Ok(Arc::new(if principal.api_key_id() == OWNER {
             vec![Mapping {
                 reference: reference(),
                 secret: SECRET.to_owned(),
@@ -48,7 +51,7 @@ impl MappingStore for OwnerMappings {
             }]
         } else {
             Vec::new()
-        })
+        }))
     }
 
     async fn intern(

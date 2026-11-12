@@ -6,7 +6,7 @@ members = ["backend/crates/stravia-core", "backend/crates/stravia-devtools", "ba
 default-members = ["backend/apps/stravia-server"]
 
 [workspace.metadata.patch]
-crates = ["rustls@0.23.46", "rama-http-core@0.4.0", "rama-http-types@0.4.0"]
+crates = ["rustls@0.23.46", "rama-http-core@0.4.0", "rama-http-types@0.4.0", "TinyUFO@0.9.0"]
 
 [workspace.package]
 version = "0.7.0"
@@ -205,6 +205,7 @@ debug = true
 rustls = { path = "target/patch/rustls-0.23.46" }
 rama-http-core = { path = "target/patch/rama-http-core-0.4.0" }
 rama-http-types = { path = "target/patch/rama-http-types-0.4.0" }
+TinyUFO = { path = "target/patch/TinyUFO-0.9.0" }
 
 [profile.dev.package.glob]
 debug = true

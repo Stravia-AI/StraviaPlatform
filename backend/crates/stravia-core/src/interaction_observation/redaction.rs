@@ -29,34 +29,81 @@ pub(crate) fn user_input_units(
 #[derive(Clone, Default)]
 pub(crate) struct ProtectedSecrets(std::sync::Arc<parking_lot::RwLock<Vec<ProtectedSecret>>>);
 
+enum SecretText {
+    Owned(String),
+    Mapping(stravia_credential_protection::store::MappingSnapshot, usize),
+}
+
 struct ProtectedSecret {
-    raw: String,
-    json: String,
+    raw: SecretText,
+    json: Option<String>,
     /// 弱秘密只在词边界处遮罩，与出站替换同一判定，避免 `pass` 把 `password` 拆开。
     weak: bool,
 }
 
 impl ProtectedSecret {
-    fn new(secret: &str) -> Self {
-        let raw = secret.to_owned();
-        let encoded = serde_json::to_string(secret).expect("string serialization");
-        Self {
-            weak: stravia_credential_protection::strength::is_weak(&raw),
-            json: encoded[1..encoded.len() - 1].to_owned(),
-            raw,
+    fn new(raw: SecretText) -> Self {
+        let text = match &raw {
+            SecretText::Owned(text) => text.as_str(),
+            SecretText::Mapping(snapshot, index) => snapshot[*index].secret.as_str(),
+        };
+        let weak = stravia_credential_protection::strength::is_weak(text);
+        let json = text
+            .bytes()
+            .any(|b| b < 0x20 || b == b'"' || b == b'\\')
+            .then(|| {
+                let encoded = serde_json::to_string(text).expect("string serialization");
+                encoded[1..encoded.len() - 1].to_owned()
+            });
+        Self { raw, json, weak }
+    }
+
+    fn raw(&self) -> &str {
+        match &self.raw {
+            SecretText::Owned(text) => text,
+            SecretText::Mapping(snapshot, index) => &snapshot[*index].secret,
         }
     }
 }
 
 impl ProtectedSecrets {
+    pub(crate) fn from_snapshot(
+        snapshot: stravia_credential_protection::store::MappingSnapshot,
+        scope: &stravia_credential_protection::policy::RuleScope,
+    ) -> Self {
+        let protected = Self::default();
+        protected.register_snapshot_filtered(snapshot, |mapping| scope.allows(mapping));
+        protected
+    }
+
+    fn register_snapshot_filtered(
+        &self,
+        snapshot: stravia_credential_protection::store::MappingSnapshot,
+        allows: impl Fn(&stravia_credential_protection::store::Mapping) -> bool,
+    ) {
+        let mut values = self.0.write();
+        for (index, mapping) in snapshot.iter().enumerate() {
+            if !mapping.secret.is_empty()
+                && allows(mapping)
+                && !values.iter().any(|value| value.raw() == mapping.secret)
+            {
+                values.push(ProtectedSecret::new(SecretText::Mapping(
+                    snapshot.clone(),
+                    index,
+                )));
+            }
+        }
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw().len()));
+    }
+
     pub(crate) fn register<'a>(&self, secrets: impl IntoIterator<Item = &'a str>) {
         let mut values = self.0.write();
         for secret in secrets {
-            if !secret.is_empty() && !values.iter().any(|value| value.raw == secret) {
-                values.push(ProtectedSecret::new(secret));
+            if !secret.is_empty() && !values.iter().any(|value| value.raw() == secret) {
+                values.push(ProtectedSecret::new(SecretText::Owned(secret.to_owned())));
             }
         }
-        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw.len()));
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.raw().len()));
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -65,12 +112,8 @@ impl ProtectedSecrets {
 
     /// 已注册明文的稳定指纹；用于内容端点 ETag，映射新增或消失都会改变结果。
     pub(crate) fn version(&self) -> [u8; 32] {
-        let mut raws: Vec<String> = self
-            .0
-            .read()
-            .iter()
-            .map(|secret| secret.raw.clone())
-            .collect();
+        let values = self.0.read();
+        let mut raws: Vec<&str> = values.iter().map(ProtectedSecret::raw).collect();
         raws.sort_unstable();
         let mut hasher = Sha256::new();
         for raw in raws {
@@ -142,10 +185,10 @@ impl ProtectedSecrets {
 fn redact_protected_literals(text: &mut String, values: &[ProtectedSecret]) {
     let Some(first_marker) = marker::find_reference(text) else {
         for secret in values {
-            redact_protected_literal(text, &secret.raw, secret.weak);
+            redact_protected_literal(text, secret.raw(), secret.weak);
             // Wire and tool argument strings may contain another serialized JSON layer.
-            if secret.json != secret.raw {
-                redact_protected_literal(text, &secret.json, secret.weak);
+            if let Some(json) = &secret.json {
+                redact_protected_literal(text, json, secret.weak);
             }
         }
         return;
@@ -158,9 +201,9 @@ fn redact_protected_literals(text: &mut String, values: &[ProtectedSecret]) {
         let marker_start = cursor + offset;
         let mut unprotected = text[cursor..marker_start].to_owned();
         for secret in values {
-            redact_protected_literal(&mut unprotected, &secret.raw, secret.weak);
-            if secret.json != secret.raw {
-                redact_protected_literal(&mut unprotected, &secret.json, secret.weak);
+            redact_protected_literal(&mut unprotected, secret.raw(), secret.weak);
+            if let Some(json) = &secret.json {
+                redact_protected_literal(&mut unprotected, json, secret.weak);
             }
         }
         output.push_str(&unprotected);
@@ -171,9 +214,9 @@ fn redact_protected_literals(text: &mut String, values: &[ProtectedSecret]) {
 
     let mut unprotected = text[cursor..].to_owned();
     for secret in values {
-        redact_protected_literal(&mut unprotected, &secret.raw, secret.weak);
-        if secret.json != secret.raw {
-            redact_protected_literal(&mut unprotected, &secret.json, secret.weak);
+        redact_protected_literal(&mut unprotected, secret.raw(), secret.weak);
+        if let Some(json) = &secret.json {
+            redact_protected_literal(&mut unprotected, json, secret.weak);
         }
     }
     output.push_str(&unprotected);
@@ -1284,6 +1327,34 @@ mod tests {
             report.kinds.into_iter().collect::<Vec<_>>(),
             vec![RedactionKind::CredentialText]
         );
+    }
+
+    #[test]
+    fn snapshot_masking_preserves_escaped_and_weak_secret_behavior() {
+        use stravia_credential_protection::{policy::RuleScope, store::Mapping};
+
+        let mappings = std::sync::Arc::new(vec![
+            Mapping {
+                reference: "first".into(),
+                secret: "private\"mapped\nvalue".into(),
+                rule_ids: Default::default(),
+            },
+            Mapping {
+                reference: "second".into(),
+                secret: "pass".into(),
+                rule_ids: Default::default(),
+            },
+        ]);
+        let protected = ProtectedSecrets::from_snapshot(mappings, &RuleScope::default());
+        let mut payload = serde_json::json!({
+            "arguments": "{\"value\":\"before private\\u0022mapped\\nvalue after\"}",
+            "text": "pass password"
+        });
+        protected.value(&mut payload);
+        let arguments: Value =
+            serde_json::from_str(payload["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["value"], "before *** after");
+        assert_eq!(payload["text"], "*** password");
     }
 
     #[test]

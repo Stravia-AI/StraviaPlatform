@@ -24,7 +24,7 @@ use futures::StreamExt;
 
 pub use policy::DisabledRulesError;
 use policy::{RedactionPolicy, RuleScope, RuleScopeSource};
-use store::{DetectedSecret, Mapping, MappingStore};
+use store::{DetectedSecret, Mapping, MappingSnapshot, MappingStore};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::model_turn::{CanonicalEvent, CanonicalEventStream, ModelTurnError};
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -237,7 +237,7 @@ impl ReversibleRedaction {
         principal: &Principal,
         request: &mut Arc<AiRequest>,
         observer: Option<Arc<dyn RedactionObserver>>,
-    ) -> Result<Vec<Mapping>, RedactionError> {
+    ) -> Result<MappingSnapshot, RedactionError> {
         let policy = self.host.policy().await?;
         let enabled = policy.enabled;
         let mut mappings = self.mappings.active(principal).await?;
@@ -328,7 +328,7 @@ impl ReversibleRedaction {
                         .iter()
                         .any(|existing| existing.reference == mapping.reference)
                     {
-                        mappings.push(mapping);
+                        Arc::make_mut(&mut mappings).push(mapping);
                     }
                 }
             }
@@ -394,7 +394,7 @@ impl ReversibleRedaction {
     pub fn restore_stream(
         &self,
         input: CanonicalEventStream,
-        mappings: Vec<Mapping>,
+        mappings: MappingSnapshot,
         trace: RedactionTrace,
         observer: Option<Arc<dyn RedactionObserver>>,
     ) -> CanonicalEventStream {
@@ -403,7 +403,7 @@ impl ReversibleRedaction {
         }
         struct State {
             input: CanonicalEventStream,
-            mappings: Vec<Mapping>,
+            mappings: MappingSnapshot,
             trace: RedactionTrace,
             observer: Option<Arc<dyn RedactionObserver>>,
             restorer: stream::StreamRestorer,

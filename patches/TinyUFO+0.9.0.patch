@@ -1,0 +1,190 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -123,6 +123,7 @@
+ // the data and its metadata
+ pub struct Bucket<T> {
+     uses: Uses,
++    generation: usize,
+     queue: Location,
+     weight: Weight,
+     data: T,
+@@ -132,11 +133,12 @@
+ 
+ struct FiFoQueues<T> {
+     total_weight_limit: usize,
+-
+-    small: SegQueue<Key>,
++    next_generation: AtomicUsize,
++
++    small: SegQueue<(Key, usize)>,
+     small_weight: AtomicUsize,
+ 
+-    main: SegQueue<Key>,
++    main: SegQueue<(Key, usize)>,
+     main_weight: AtomicUsize,
+ 
+     // this replaces the ghost queue of S3-FIFO with similar goal: track the evicted assets
+@@ -163,7 +165,7 @@
+ 
+         assert!(weight > 0);
+         let new_bucket = {
+-            let Some((uses, queue, weight)) = buckets.get_map(&key, |bucket| {
++            let Some((uses, queue, weight, generation)) = buckets.get_map(&key, |bucket| {
+                 // the item exists, in case weight changes
+                 let old_weight = bucket.weight;
+                 let uses = bucket.uses.inc_uses();
+@@ -184,7 +186,7 @@
+                 } else {
+                     update_atomic(&self.small_weight, old_weight, weight);
+                 }
+-                (uses, queue, weight)
++                (uses, queue, weight, bucket.generation)
+             }) else {
+                 let mut evicted = self.evict_to_limit(weight, buckets);
+                 // TODO: figure out the right way to compare frequencies of different weights across
+@@ -207,7 +209,9 @@
+                     (key, data, weight)
+                 };
+ 
++                let generation = self.next_generation.fetch_add(1, Relaxed);
+                 let bucket = Bucket {
++                    generation,
+                     queue: Location::new_small(),
+                     weight,
+                     uses: Default::default(), // 0
+@@ -218,13 +222,14 @@
+                     // Always push key first before updating weight
+                     // If doing the other order, another concurrent thread might not
+                     // find things to evict
+-                    self.small.push(key);
++                    self.small.push((key, generation));
+                     self.small_weight.fetch_add(weight as usize, SeqCst);
+                 } // else: two threads are racing adding the item
+                   // TODO: compare old.weight and update accordingly
+                 return evicted;
+             };
+             Bucket {
++                generation,
+                 queue: Location(queue.into()),
+                 weight,
+                 uses: Uses(uses.into()),
+@@ -275,7 +280,14 @@
+                 return evicted;
+             }
+         }
+-        self.evict_one_from_main(buckets)
++        self.evict_one_from_main(buckets).or_else(|| {
++            if evict_small {
++                None
++            } else {
++                self.evict_one_from_small(buckets)
++                    .or_else(|| self.evict_one_from_main(buckets))
++            }
++        })
+     }
+ 
+     fn small_weight_limit(&self) -> usize {
+@@ -284,20 +296,21 @@
+ 
+     fn evict_one_from_small(&self, buckets: &Buckets<T>) -> Option<KV<T>> {
+         loop {
+-            let Some(to_evict) = self.small.pop() else {
++            let Some((to_evict, generation)) = self.small.pop() else {
+                 // empty queue, this is caught between another pop() and fetch_sub()
+                 return None;
+             };
+ 
+             let v = buckets
+                 .get_map(&to_evict, |bucket| {
++                    if bucket.generation != generation { return None; }
+                     let weight = bucket.weight;
+                     self.small_weight.fetch_sub(weight as usize, SeqCst);
+ 
+                     if bucket.uses.uses() > 1 {
+                         // move to main
+                         bucket.queue.move_to_main();
+-                        self.main.push(to_evict);
++                        self.main.push((to_evict, generation));
+                         self.main_weight.fetch_add(weight as usize, SeqCst);
+                         // continue until find one to evict
+                         None
+@@ -322,13 +335,14 @@
+ 
+     fn evict_one_from_main(&self, buckets: &Buckets<T>) -> Option<KV<T>> {
+         loop {
+-            let to_evict = self.main.pop()?;
++            let (to_evict, generation) = self.main.pop()?;
+ 
+             if let Some(v) = buckets
+                 .get_map(&to_evict, |bucket| {
++                    if bucket.generation != generation { return None; }
+                     if bucket.uses.decr_uses() > 0 {
+                         // put it back
+-                        self.main.push(to_evict);
++                        self.main.push((to_evict, generation));
+                         // continue the loop
+                         None
+                     } else {
+@@ -370,6 +384,7 @@
+             main: SegQueue::new(),
+             main_weight: 0.into(),
+             total_weight_limit,
++            next_generation: AtomicUsize::new(0),
+             estimator: TinyLfu::new(estimated_size),
+             _t: PhantomData,
+         };
+@@ -392,6 +407,7 @@
+             main: SegQueue::new(),
+             main_weight: 0.into(),
+             total_weight_limit,
++            next_generation: AtomicUsize::new(0),
+             estimator: TinyLfu::new_compact(estimated_size),
+             _t: PhantomData,
+         };
+@@ -422,6 +438,28 @@
+     pub fn put(&self, key: K, data: T, weight: Weight) -> Vec<KV<T>> {
+         let key = self.random_status.hash_one(&key);
+         self.queues.admit(key, data, weight, false, &self.buckets)
++    }
++
++    /// Evict one entry using the native S3-FIFO queues.
++    pub fn evict(&self) -> Option<KV<T>> {
++        self.queues.evict_one(&self.buckets)
++    }
++
++    /// Discard removed queue nodes. The caller must serialize this with all
++    /// puts, removes and evictions; concurrent reads remain safe.
++    pub fn compact_queues(&self) {
++        for (queue, is_main) in [(&self.queues.small, false), (&self.queues.main, true)] {
++            // Writers are excluded, so each original node is visited once.
++            for _ in 0..queue.len() {
++                let Some((key, generation)) = queue.pop() else { break; };
++                let live = self.buckets.get_map(&key, |bucket| {
++                    bucket.generation == generation && bucket.queue.is_main() == is_main
++                }).unwrap_or(false);
++                if live {
++                    queue.push((key, generation));
++                }
++            }
++        }
+     }
+ 
+     /// Remove the given key from the cache if it exists
+--- a/src/buckets.rs
++++ b/src/buckets.rs
+@@ -139,6 +139,7 @@
+         assert!(fast.get_map(&1, |_| ()).is_none());
+ 
+         let bucket = Bucket {
++            generation: 0,
+             queue: crate::Location::new_small(),
+             weight: 1,
+             uses: Default::default(),
+@@ -159,6 +160,7 @@
+         assert!(compact.get_map(&1, |_| ()).is_none());
+ 
+         let bucket = Bucket {
++            generation: 0,
+             queue: crate::Location::new_small(),
+             weight: 1,
+             uses: Default::default(),

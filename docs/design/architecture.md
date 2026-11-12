@@ -784,6 +784,10 @@ SQL 映射以 Principal 为唯一访问边界，引用格式为固定长度短 H
 
 映射的「使用」是其占位符出现在一次成功完成的 Model Turn 的共享 trace 中，包括出站替换、客户端重放历史中的引用与模型响应里被还原的引用；回合末 `publish` 登记，创建也算，管理端查看与观测遮罩不算。续期搭已有发布 UPDATE 的便车，不新增事务；谓词为 `published_at IS NULL OR last_used_at < now - G`（G = 1 小时），并在写前只读筛选需要更新的引用，无需更新则不开写事务。SQLite 因而不必为 G 内重复使用抢唯一写锁并同步 WAL。未发布映射仍按一小时 `pending_until` 回收，已发布且无 Turn 节点引用的映射按 `last_used_at + N + G` 回收；额外 G 补偿续期节流，保证最近使用后至少保留 N 天，至多约 N 天 + G + 一个扫描周期。读取路径 `active()` 不比较时间，到期但未被扫描删除的映射仍可用。迁移 0045 在 SQLite/PostgreSQL 将 `updated_at` 改名为 `last_used_at`，保留仅表示已发布过的 `published_at`；回收索引换成 `reversible_redaction_mappings_last_used_at_idx`，水位从 `reversible_redaction_mappings.published_at` 改名为 `reversible_redaction_mappings.last_used_at` 并重置为最小值。水位扫描与滑动列的正确性及尚未实测的性能边界见[数据布局与性能 §10.2](data-layout-performance.md#102-引用保留与扫描成本模型)。映射过期后同一凭据再次出现，若被规则检出会生成新映射与新占位符；规则认不出的裸出现会原样发往上游。
 
+同一 Gateway 的请求保护、还原、History Recall 与管理端观测遮罩共用 `CachedMappingStore` 适配器，映射快照与存在性结果统一存入 `RuntimeCache` 的 `credential_mappings`、`credential_mapping_presence` domain。凭据与其他 domain 共用配置预算（默认 16 MiB），不再另设内存缓存、预算或主体数量上限。缓存按 Principal 隔离；Memory / SQLite 的 TinyUFO 命中共享不可变的 `Arc<Vec<Mapping>>`，PostgreSQL 的 Redis 命中反序列化为快照。过滤规则仍按当前请求读取，不因缓存冻结开关。超大快照不入缓存，但正常返回 SQL 结果；正在使用的快照可在淘汰后继续存活。PostgreSQL 的凭据明文会进入 Redis，须按下文的网络隔离、ACL 与 TLS 约束保护。
+
+快照从开始加载起固定 60 秒刷新，热读取及发布不延长这个窗口，也不改变 SQL 保留期；空结果同样缓存，同一 Principal 的并发冷读取合并。成功创建新映射、登记失败或等待确认时取消，会推进凭据缓存的失效代次；仅检出已有映射不失效，避免每次规则命中都重新加载。清扫实际删除映射、失败或被取消时同样失效；没有删除则保留缓存。值内的适配器身份与代次阻止并发冷读取或迟到的 Redis 写入复活旧快照；失效值立即不可用，存储空间由既有 TTL 或预算淘汰释放。缓存故障按 `RuntimeCache` 约定回退 SQL；SQL 读取失败不使用失效快照或伪造空结果。即时一致性仅覆盖经同一适配器执行的写入；绕过它的 SQL 修改或其他实例写入没有即时通知，未失效快照最多沿用至该 60 秒窗口结束。本缓存不修改既有映射续期与回收语义。
+
 当前请求含本 Principal 的有效引用时，`protect` 在替换后追加一次系统说明：`Preserve Stravia redaction markers verbatim when used; Stravia restores their values.` 关闭新增保护但仍有可恢复引用时也适用；无引用、仅未知或跨 Principal 引用的请求不追加。说明仅属于当前模型请求，不写回客户端历史。本次为面向新部署和全新数据库的干净切换；迁移 0046 仍是从 `~stravia-secret:…~` 转到旧长 HTML 注释格式的历史迁移，本次不修改。两种旧格式均不再读取或还原，也不重写 Stravia 的不可变历史或外部客户端、上游历史；不应直接复用依赖旧引用的数据库；旧数据库与用户数据应另行保留而不是删除，并在全新数据库上新开会话。
 
 工具结果由生产者通过 `ToolResultContentKind` 明确声明为业务 JSON 或 content blocks，不根据业务字段 `type` 猜测。Platform Tool、Agent Tool adapter、Hook 重建和历史保存共同保留该语义；业务 JSON 遍历字符串值，content blocks 只遍历已知可读字段，媒体与不透明数据保持原样。`AgentToolOutput` 携带内容及语义，平台与 Agent 路径共用可失败的内容块转换，序列化失败作为工具错误交付而不是 panic。
@@ -1201,7 +1205,23 @@ Bundled SQLite 通过 `.cargo/config.toml` 的 `LIBSQLITE3_FLAGS` 默认设置 `
 
 #### 统一派生缓存与 Server 配置
 
-`backend/crates/stravia-core/src/runtime_cache.rs` 的 `RuntimeCache` 为同一 Gateway 的可丢弃派生数据提供共享逻辑预算，默认 16 MiB：Memory / SQLite 使用 TinyUFO，PostgreSQL 必须使用 Redis。Generation 精确物化对象、按 ingress 隔离的祖先引用目录、pricing、Cache Affinity 和 Provider Allowance 快照共用预算，不各自另设一份 16 MiB。预算包含 identity 与索引的逻辑估计，不是 allocator、进程 RSS 或 Redis 实际内存上限；超大值不入缓存，正常 SQL 读取结果不因此失败。SQL 历史、配置、权限、RPM、锁、连接及活动执行状态不迁入可淘汰缓存；官方 Allowance Monitor 仍是 live 额度事实源，SQL Sample 仍只服务趋势。
+`backend/crates/stravia-core/src/runtime_cache.rs` 的 `RuntimeCache` 为同一 Gateway 的可丢弃派生数据提供共享逻辑预算，默认 16 MiB：Memory / SQLite 使用 TinyUFO，PostgreSQL 必须使用 Redis。Generation 精确物化对象、按 ingress 隔离的祖先引用目录、pricing、Cache Affinity、Provider Allowance 与凭据映射快照共用预算，不各自另设一份 16 MiB；凭据缓存的刷新与失效边界见 §4.11。预算包含 identity 与索引的逻辑估计，不是 allocator、进程 RSS 或 Redis 实际内存上限；超大值不入缓存，正常 SQL 读取结果不因此失败。SQL 历史、配置、权限、RPM、锁、连接及活动执行状态不迁入可淘汰缓存；官方 Allowance Monitor 仍是 live 额度事实源，SQL Sample 仍只服务趋势。
+
+用户只通过 `cache.capacity_mb` 调整总预算。优先级与保护份额固定在 `runtime_cache/policy.rs`，按可用预算自动缩放，不提供类别配额或优先级配置：
+
+| 类别 | 优先级 | 保护份额权重 | 16 MiB 本地预算示例 |
+| --- | --- | --- | --- |
+| pricing、凭据存在性 | P0 | 1 / 32 | 0.5 MiB |
+| Provider Allowance | P0 | 3 / 32 | 1.5 MiB |
+| 凭据映射快照 | P1 | 6 / 32 | 3 MiB |
+| Generation 精确物化 | P1 | 16 / 32 | 8 MiB |
+| Generation 引用目录 | P2 | 2 / 32 | 1 MiB |
+| Cache Affinity | P2 | 4 / 32 | 2 MiB |
+| 未登记的其他 domain | P3 | 0 | 无保护份额 |
+
+P0 优先级最高。保护份额不是硬上限：空闲空间可借用，各类仍受同一个总预算约束。压力下先清理已知过期条目，再从低优先级的超额占用回收；同优先级优先回收超额较大的类别。类别可更换自身条目，不能为扩大借用挤掉别类已占用的保护份额；类别需要取回自身保护份额时，高优先级借用者也必须归还空间。条目不可拆分，一次整条淘汰可能越过保护目标；保守准入无法找到足够可回收空间时不缓存新值，拒绝替换保留仍有效的同键旧值，正常数据源读取不因此失败。初始权重是固定取舍，不代表针对所有负载的最优比例。
+
+本地预算向下取整为 KiB，条目权重向上取整；Redis 先扣除 2 KiB 固定逻辑开销，再按字节分配。各类份额向下取整，余量继续共享；极小或零预算不会产生额外的最小配额。本地类别队列仅用于 TinyUFO 原生 S3-FIFO 淘汰选择，统一记账器先释放空间再写入，优先级准入先于 TinyLFU，不伪造访问次数或字节权重；删除重插使用代次隔离，并摊还压缩失效队列节点。热命中不获取全局 mutation 锁。Redis 使用同一份程序内策略，由 Lua 原子维护总量与类别占用，类内按写入顺序 FIFO 淘汰。这些策略只影响派生缓存，不改变业务保留期或持久化清理规则。
 
 Server 的配置路径默认由 `DataPaths::server_config()` 指向所选数据根的 `server.toml`，CLI `--config` 可指定其他文件。在现有文件加入：
 
@@ -1213,9 +1233,9 @@ redis_url = "redis://127.0.0.1:6379/0"
 
 示例 URL 不含凭据；生产连接按实际隔离网络、ACL 与 TLS 配置，不在日志或文档暴露真实 URL 凭据。SQLite 不使用 `redis_url`。首次存储设置前允许仅有 `[cache]` 的文件，保存存储设置保留该段。**既有 PostgreSQL 安装须在升级启动前配置可达 Redis**；缺失、无效或初始连接失败时启动失败关闭，不回退 SQLite。Core 使用官方 Redis client，连接超时 5 秒、响应超时 1 秒；运行中 get 错误按 miss、put 错误丢弃，不自动重连或重试，不把缓存故障转成历史事实丢失。
 
-每个 Gateway 创建随机 Redis namespace；五个容器 key（values、weights、expiry、order、used）由 Lua 原子维护 TTL、逻辑预算与 FIFO 淘汰。正常 shutdown 只 `DEL` 自己的五个 key，异常退出由最长 7 天 TTL 回收；不复用跨进程或重启缓存，不支持 Redis Cluster，也不提供多实例适配。pricing 的 24 小时 TTL 与本地失效代次、affinity 的 24 小时 TTL 与本地发布协调、allowance 的 180 秒 fresh / 最多 7 天 last-good 保留，各自保留原语义；并发读取合并、定时刷新和其他运行协调仍是本实例状态。
+每个 Gateway 创建随机 Redis namespace；五个容器 key（values、weights、expiry、order、used）由 Lua 原子维护 TTL、共享分级预算与类内 FIFO 淘汰。正常 shutdown 只 `DEL` 自己的五个 key，异常退出由最长 7 天 TTL 回收；不复用跨进程或重启缓存，不支持 Redis Cluster，也不提供多实例适配。pricing 的 24 小时 TTL 与本地失效代次、affinity 的 24 小时 TTL 与本地发布协调、allowance 的 180 秒 fresh / 最多 7 天 last-good 保留，各自保留原语义；并发读取合并、定时刷新和其他运行协调仍是本实例状态。
 
-Redis 至少 6.2，部署使用 `noeviction`，`maxmemory` 须为实际容器与索引开销预留余量，不能把逻辑预算直接作为真实内存配额。缓存值可能包含请求上下文，与 SQL 历史同样敏感；应隔离网络并配置 ACL / TLS。Redis 不用于恢复历史，不替代 SQL、实例文件与外部数据库的备份。
+Redis 至少 6.2，部署使用 `noeviction`，`maxmemory` 须为实际容器与索引开销预留余量，不能把逻辑预算直接作为真实内存配额。缓存值可能包含请求上下文与凭据明文，与 SQL 历史同样敏感；应隔离网络并配置 ACL / TLS。Redis 不用于恢复历史，不替代 SQL、实例文件与外部数据库的备份。
 
 #### Wasmtime 编译缓存
 

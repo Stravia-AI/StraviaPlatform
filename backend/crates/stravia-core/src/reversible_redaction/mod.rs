@@ -1,4 +1,6 @@
 //! Core settings and observation adapters for the credential protection capability.
+mod cache;
+
 use std::sync::Arc;
 
 use crate::interaction_observation::{RunObserver, RunPublicationGuard};
@@ -6,7 +8,7 @@ use crate::storage::DynStorage;
 use stravia_credential_protection::policy::{
     self, DISABLED_RULES_KEY, RedactionPolicy, RuleScope, RuleScopeSource,
 };
-use stravia_credential_protection::store::{Mapping, MappingStore};
+use stravia_credential_protection::store::{Mapping, MappingSnapshot, MappingStore};
 use stravia_credential_protection::{
     CredentialDiscovery, RedactionHost, RedactionObserver, SqlCustomRuleStore,
 };
@@ -111,7 +113,10 @@ impl ReversibleRedaction {
         storage: DynStorage,
         mappings: Arc<dyn MappingStore>,
         custom_rules: Arc<SqlCustomRuleStore>,
+        runtime_cache: crate::runtime_cache::RuntimeCache,
     ) -> Self {
+        let mappings: Arc<dyn MappingStore> =
+            Arc::new(cache::CachedMappingStore::new(mappings, runtime_cache));
         Self {
             capability: stravia_credential_protection::ReversibleRedaction::new(
                 Arc::new(SettingsHost(storage)),
@@ -145,7 +150,7 @@ impl ReversibleRedaction {
         principal: &Principal,
         request: &mut Arc<AiRequest>,
         observer: Option<&RunObserver>,
-    ) -> Result<Vec<Mapping>, RedactionError> {
+    ) -> Result<MappingSnapshot, RedactionError> {
         self.capability
             .protect(principal, request, observation_host(observer))
             .await
@@ -162,7 +167,7 @@ impl ReversibleRedaction {
     pub(crate) fn restore_stream(
         &self,
         input: CanonicalEventStream,
-        mappings: Vec<Mapping>,
+        mappings: MappingSnapshot,
         trace: RedactionTrace,
         observer: Option<&RunObserver>,
     ) -> CanonicalEventStream {
@@ -178,6 +183,8 @@ impl RuleScopeSource for ReversibleRedaction {
     }
 }
 
+#[cfg(test)]
+mod cache_tests;
 #[cfg(test)]
 mod custom_rule_tests;
 #[cfg(test)]
