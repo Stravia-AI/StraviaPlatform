@@ -32,7 +32,7 @@ GC 使用持久 `turn_node_gc` 候选与共享的 `content_gc`。节点候选来
 
 节点 descriptor、内容 `body`、History Marker 外壳及 Observation 的 `attrs`/`envelope` 共用 `crate::storage_codec::{encode,decode}`。body 后固定追加 14 字节 trailer：第 0 字节 codec（0 raw / 1 zstd），第 1–4 字节 little-endian `u32 dict_id`（当前必须为 0），第 5–12 字节 little-endian `u64` 原始字节长度，第 13 字节版本（1）。原始载荷至少 128 字节且压缩 body 确实更小时才选择 zstd level 1；压缩帧开启 checksum。压缩与解压上下文按线程复用，不共享全局热锁。读取拒绝未知版本、codec、字典、长度不符、损坏帧和多余帧字节。字典槽只是格式预留，不启用字典压缩。
 
-PostgreSQL 的 `turn_node_payloads.payload` 与 `contents.body`（0037 前为 `turn_contents.content`）延续旧表的 `STORAGE EXTERNAL` 策略：TOAST 可外置大值，但不再尝试压缩已由应用 codec 编码的正文。请求工作区、物化缓存与 precommit 复用同一 JSON 堆估重，按保留容器而非编码长度准入；数字词法、内容条目的 Arc 头与槽位均计费。解码 delta 的响应 vendor metadata、错误与 embedding 也属于工作区预算，不靠再序列化整节点估算。
+PostgreSQL 的 `turn_node_payloads.payload` 与 `contents.body`（0037 前为 `turn_contents.content`）延续旧表的 `STORAGE EXTERNAL` 策略：TOAST 可外置大值，但不再尝试压缩已由应用 codec 编码的正文。请求工作区、物化缓存与 precommit 复用同一 JSON 堆估重，按保留容器而非编码长度准入；数字词法、内容条目的 Arc 头与槽位均计费。解码 delta 的响应 vendor metadata 与错误也属于工作区预算，不靠再序列化整节点估算。
 
 压缩默认等级由 3 调整为 1，只影响新写入帧的编码成本；等级不作为 trailer 的版本或解码条件。存量 level 3 帧原样读取，不触发数据重写、schema 迁移或指纹重算，历史与普通 Observation 均保持启用。选择依据及实测限制见[协议 HTTP 基准](../research/protocol-http-benchmark.md#生产默认切换为-level-1-与-sha256-后端筛选)。
 

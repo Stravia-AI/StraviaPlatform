@@ -1,8 +1,8 @@
 use super::*;
 use crate::protocol::ids::ProtocolId;
 use crate::protocol::ir::{
-    AiItem, AiRequest, AiResponse, EmbeddingInput, GenerationConfig, RequestParameters, ToolCall,
-    ToolChoice, ToolSpec,
+    AiItem, AiRequest, AiResponse, GenerationConfig, RequestParameters, ToolCall, ToolChoice,
+    ToolSpec,
 };
 use async_trait::async_trait;
 use std::fmt;
@@ -27,12 +27,6 @@ impl fmt::Display for HookId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RequestKind {
-    Generation,
-    Embeddings,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
     Request,
     UpstreamResponse,
@@ -52,7 +46,6 @@ use crate::Principal;
 #[derive(Debug, Clone)]
 pub struct HookDescriptor {
     pub id: HookId,
-    pub request_kinds: Vec<RequestKind>,
     pub event_kinds: Vec<EventKind>,
     pub requires_full_context: bool,
     pub max_buffered_bytes: usize,
@@ -63,7 +56,6 @@ impl HookDescriptor {
     pub fn all(id: impl Into<String>) -> Self {
         Self {
             id: HookId::new(id),
-            request_kinds: vec![RequestKind::Generation, RequestKind::Embeddings],
             event_kinds: vec![
                 EventKind::Request,
                 EventKind::UpstreamResponse,
@@ -77,8 +69,8 @@ impl HookDescriptor {
         }
     }
 
-    pub fn accepts(&self, request_kind: RequestKind, event_kind: EventKind) -> bool {
-        self.request_kinds.contains(&request_kind) && self.event_kinds.contains(&event_kind)
+    pub fn accepts(&self, event_kind: EventKind) -> bool {
+        self.event_kinds.contains(&event_kind)
     }
 }
 
@@ -90,7 +82,6 @@ pub struct SessionContext {
     pub run_id: String,
     /// In-memory attribution of the admitted Run, when observation is available.
     pub interaction_id: Option<tokio::sync::watch::Receiver<Option<String>>>,
-    pub request_kind: RequestKind,
     pub ingress: ProtocolId,
     pub transport: TransportKind,
     pub principal: Principal,
@@ -169,7 +160,6 @@ pub enum RequestPatch {
     SetGeneration(GenerationConfig),
     ReplaceTools(Option<Vec<ToolSpec>>),
     SetToolChoice(Option<ToolChoice>),
-    SetEmbeddingInput(EmbeddingInput),
     SetParameters(Box<RequestParameters>),
     ReplaceContextSpans(Vec<ReplaceContextSpan>),
 }
@@ -180,7 +170,6 @@ pub enum ResponsePatch {
     SetContent(String),
     SetReasoning(Option<String>),
     ReplaceItems(Vec<AiItem>),
-    SetEmbeddingOutput(crate::protocol::ir::response::EmbeddingOutput),
     SetToolArguments { call_id: String, arguments: String },
 }
 

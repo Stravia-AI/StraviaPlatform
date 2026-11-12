@@ -10,9 +10,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use stravia_runtime_contract::protocol::ids::{
-    OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, OPENAI_COMPATIBLE_EMBEDDINGS_V1,
-};
+use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 use stravia_vendor_sdk::net::Request;
 use stravia_vendor_sdk::{
     AuthResponse, AuthStep, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
@@ -131,9 +129,7 @@ fn infer_azure(
 ) -> Result<OperationOutput, PluginError> {
     apply_snapshot_model(provider, &mut request)?;
     let protocol = common::endpoint(&provider.protocol)?;
-    if protocol != OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-        && protocol != OPENAI_COMPATIBLE_EMBEDDINGS_V1
-    {
+    if protocol != OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 {
         return Err(common::plugin_error(
             ErrorKind::Unsupported,
             "protocol is not supported by the Azure vendor",

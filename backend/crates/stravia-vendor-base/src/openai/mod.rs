@@ -7,7 +7,6 @@ use stravia_protocol_codec::registry::ProtocolRegistry;
 use stravia_protocol_codec::transform::ProtocolTransform;
 use stravia_runtime_contract::protocol::ids::{
     OPEN_RESPONSES_2026_04_24, OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-    OPENAI_COMPATIBLE_EMBEDDINGS_V1,
 };
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_vendor_sdk::{
@@ -122,21 +121,6 @@ pub(crate) fn select_protocol(
     if !matches!(operation, Operation::Infer | Operation::Compact) || channel != DEFAULT_CHANNEL {
         return Ok(provider.protocol.clone());
     }
-    if request.embedding.is_some() {
-        return Ok(
-            if ProtocolRegistry::global()
-                .resolve_alias(&provider.protocol)
-                .is_some_and(|configured| {
-                    configured.protocol == OPENAI_COMPATIBLE_EMBEDDINGS_V1.protocol
-                })
-            {
-                OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string()
-            } else {
-                provider.protocol.clone()
-            },
-        );
-    }
-
     let ingress = ProtocolTransform::inferred_ingress(request).unwrap_or(OPEN_RESPONSES_2026_04_24);
     let Ok(pair) = ProtocolTransform::global().bind(ingress, OPEN_RESPONSES_2026_04_24) else {
         return Ok(provider.protocol.clone());
@@ -206,10 +190,7 @@ fn infer(
     let protocol = ProtocolRegistry::global()
         .resolve_alias(&provider.protocol)
         .ok_or_else(|| unsupported("OpenAI provider protocol is not registered"))?;
-    if protocol != OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1
-        && protocol != OPENAI_COMPATIBLE_EMBEDDINGS_V1
-        && protocol != OPEN_RESPONSES_2026_04_24
-    {
+    if protocol != OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1 && protocol != OPEN_RESPONSES_2026_04_24 {
         return Err(unsupported(
             "protocol is not supported by the OpenAI vendor",
         ));
@@ -737,39 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn selection_preserves_embedding_and_operation_boundaries() {
-        use stravia_runtime_contract::protocol::ir::{EmbeddingInput, EmbeddingRequest};
-
-        let mut request = AiRequest::new("model", Vec::new());
-        request.embedding = Some(EmbeddingRequest {
-            input: EmbeddingInput::Text("input".into()),
-            dimensions: None,
-            encoding_format: None,
-            user: None,
-        });
-        for (configured, expected) in [
-            (
-                "openai-compatible",
-                OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string(),
-            ),
-            ("openai-responses", "openai-responses".into()),
-        ] {
-            let provider = provider(configured);
-            for operation in [Operation::Infer, Operation::Compact] {
-                assert_eq!(
-                    select_protocol(operation, DEFAULT_CHANNEL, &provider, &request).unwrap(),
-                    expected
-                );
-            }
-            assert_eq!(
-                select_protocol(Operation::Discover, DEFAULT_CHANNEL, &provider, &request).unwrap(),
-                configured
-            );
-            assert_eq!(
-                select_protocol(Operation::Infer, "other", &provider, &request).unwrap(),
-                configured
-            );
-        }
+    fn selection_keeps_configured_protocol_outside_default_inference() {
+        let provider = provider("openai-compatible");
+        let request = AiRequest::new("model", Vec::new());
+        assert_eq!(
+            select_protocol(Operation::Discover, DEFAULT_CHANNEL, &provider, &request).unwrap(),
+            provider.protocol
+        );
+        assert_eq!(
+            select_protocol(Operation::Infer, "other", &provider, &request).unwrap(),
+            provider.protocol
+        );
     }
 
     #[test]

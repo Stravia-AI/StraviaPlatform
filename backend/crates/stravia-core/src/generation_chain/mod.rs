@@ -1831,18 +1831,16 @@ impl Serialize for FrozenResponse {
             items: _,
             stop_reason,
             usage,
-            embedding_output,
             error,
             vendor,
             trusted_media_turn_ids: _,
         } = &self.response;
-        let mut state = serializer.serialize_struct("AiResponse", 8)?;
+        let mut state = serializer.serialize_struct("AiResponse", 7)?;
         state.serialize_field("id", id)?;
         state.serialize_field("model", model)?;
         state.serialize_field("items", &self.items)?;
         state.serialize_field("stop_reason", stop_reason)?;
         state.serialize_field("usage", usage)?;
-        state.serialize_field("embedding_output", embedding_output)?;
         state.serialize_field("error", error)?;
         state.serialize_field("vendor", vendor)?;
         state.end()

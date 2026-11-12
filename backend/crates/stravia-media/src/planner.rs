@@ -8,7 +8,7 @@ use crate::types::MediaKind;
 use stravia_runtime_contract::hook::{
     ActionBatch, ContextCompleteness, ContextSnapshot, EventKind, Hook, HookAction, HookDescriptor,
     HookEvent, HookId, HookRejection, HookSession, ReadExposureScope, ReplaceContextSpan,
-    RequestKind, RequestPatch, ResponsePatch, SessionContext,
+    RequestPatch, ResponsePatch, SessionContext,
 };
 use stravia_runtime_contract::protocol::ir::request::{MediaRoutingMode, MediaRoutingPlan};
 
@@ -26,7 +26,6 @@ impl Hook for MediaPlanningHook {
     fn descriptor(&self) -> HookDescriptor {
         HookDescriptor {
             id: HookId::new("media-understanding-planner"),
-            request_kinds: vec![RequestKind::Generation],
             event_kinds: vec![
                 EventKind::Request,
                 EventKind::ToolResult,

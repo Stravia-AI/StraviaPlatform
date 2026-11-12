@@ -1084,7 +1084,6 @@ mod tests {
                     request_id: "req-1".into(),
                     run_id: "leg-run".into(),
                     interaction_id: Some(observer.interaction_id()),
-                    request_kind: stravia_runtime_contract::hook::RequestKind::Generation,
                     ingress: INGRESS,
                     transport: stravia_runtime_contract::hook::TransportKind::Http,
                     principal: principal.clone(),

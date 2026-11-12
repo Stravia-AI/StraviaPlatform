@@ -131,7 +131,7 @@ class ToolHandler(BaseHTTPRequestHandler):
             }]}]
         self.send_json({
             "id": "fixture-infer", "model": "fixture-model", "items": items,
-            "stop_reason": "stop", "embedding_output": None, "error": None,
+            "stop_reason": "stop", "error": None,
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
                       "required_components_known": True},
             "vendor": {"ingress": {}, "egress": {}, "passthrough_safe": {}},

@@ -26,7 +26,6 @@ _RESPONSE = json.dumps({
     "items": [{"role": "assistant", "content": "forwarded origin response"}],
     "stop_reason": "stop",
     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "required_components_known": True},
-    "embedding_output": None,
     "error": None,
     "vendor": {"ingress": {}, "egress": {}, "passthrough_safe": {}},
 }).encode()

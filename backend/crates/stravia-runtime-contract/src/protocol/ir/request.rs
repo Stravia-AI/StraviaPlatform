@@ -1587,22 +1587,6 @@ pub struct RequestMetadata {
 
 // ── AiRequest ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EmbeddingInput {
-    Text(String),
-    Texts(Vec<String>),
-    Tokens(Vec<u32>),
-    TokenBatches(Vec<Vec<u32>>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmbeddingRequest {
-    pub input: EmbeddingInput,
-    pub dimensions: Option<u32>,
-    pub encoding_format: Option<String>,
-    pub user: Option<String>,
-}
-
 /// Unified ingress IR consumed by all codec encoders and the dispatcher.
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1621,8 +1605,6 @@ pub struct AiRequest {
     // ── Generation ────────────────────────────────────────────────────────────
     /// [IR] Core generation parameters.
     pub generation: GenerationConfig,
-    /// [IR] Embedding parameters. Present only for embedding requests.
-    pub embedding: Option<EmbeddingRequest>,
 
     // ── Streaming ─────────────────────────────────────────────────────────────
     /// [IR] Streaming configuration.
@@ -1737,8 +1719,6 @@ struct AiRequestWire {
     #[serde(default)]
     generation: Option<GenerationConfigWire>,
     #[serde(default)]
-    embedding: Option<EmbeddingRequest>,
-    #[serde(default)]
     stream: StreamConfig,
     #[serde(default)]
     tools: Option<Vec<ToolSpec>>,
@@ -1794,7 +1774,6 @@ impl From<AiRequestWire> for AiRequest {
             items: wire.items,
             instructions,
             generation,
-            embedding: wire.embedding,
             stream: wire.stream,
             tools: wire.tools,
             tool_choice: wire.tool_choice.and_then(ToolChoiceWire::into_choice),
@@ -1820,7 +1799,6 @@ impl AiRequest {
             items,
             instructions: None,
             generation: GenerationConfig::default(),
-            embedding: None,
             stream: StreamConfig::default(),
             tools: None,
             tool_choice: None,

@@ -9,7 +9,7 @@ use serde_json::Value;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
-    HookSession, PlatformTool, PlatformToolError, PlatformToolOutput, RequestKind, ResponsePatch,
+    HookSession, PlatformTool, PlatformToolError, PlatformToolOutput, ResponsePatch,
     SessionContext, ToolExecutionContext, ToolId, ToolProgress, ToolProgressSink,
 };
 use stravia_runtime_contract::protocol::ir::{
@@ -271,7 +271,6 @@ impl Hook for WebSearchHook {
     fn descriptor(&self) -> HookDescriptor {
         HookDescriptor {
             id: HookId::new("web-search"),
-            request_kinds: vec![RequestKind::Generation],
             event_kinds: vec![EventKind::Request, EventKind::UpstreamResponse],
             requires_full_context: false,
             max_buffered_bytes: 0,

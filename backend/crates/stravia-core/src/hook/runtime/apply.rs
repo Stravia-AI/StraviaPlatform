@@ -167,12 +167,6 @@ pub(super) fn apply_response_patch(
             }
         }
         ResponsePatch::ReplaceItems(items) => response.items = items,
-        ResponsePatch::SetEmbeddingOutput(output) => {
-            if response.embedding_output.is_none() {
-                return Err("embedding output is only writable for embedding responses".into());
-            }
-            response.embedding_output = Some(output);
-        }
         ResponsePatch::SetToolArguments { call_id, arguments } => {
             serde_json::from_str::<serde_json::Value>(&arguments)
                 .map_err(|error| format!("tool arguments are not valid JSON: {error}"))?;
@@ -212,9 +206,6 @@ pub(super) fn validate_response_protected_fields(
         .collect::<Vec<_>>();
     if original_signatures != candidate_signatures {
         return Err("reasoning signature is read-only".into());
-    }
-    if original.embedding_output.is_some() && candidate.embedding_output.is_none() {
-        return Err("embedding output cannot be removed".into());
     }
     if serde_json::to_value(&original.usage).ok() != serde_json::to_value(&candidate.usage).ok() {
         return Err("usage is read-only".into());
@@ -546,12 +537,6 @@ fn apply_request_patch(
         RequestPatch::SetGeneration(generation) => request.generation = generation,
         RequestPatch::ReplaceTools(tools) => request.tools = tools,
         RequestPatch::SetToolChoice(tool_choice) => request.tool_choice = tool_choice,
-        RequestPatch::SetEmbeddingInput(input) => {
-            let Some(embedding) = request.embedding.as_mut() else {
-                return Err("embedding input is only writable for embedding requests".into());
-            };
-            embedding.input = input;
-        }
         RequestPatch::SetParameters(parameters) => {
             request.parameters = *parameters;
             refresh_context = true;

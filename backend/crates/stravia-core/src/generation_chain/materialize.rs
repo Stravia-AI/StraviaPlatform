@@ -661,18 +661,13 @@ pub(super) fn persisted_node_retained_bytes(node: &PersistedResponseNode<'_>) ->
 
 fn response_metadata_heap_bytes(response: &AiResponse) -> usize {
     use crate::memory::{json_heap_bytes, json_object_heap_bytes};
-    use stravia_runtime_contract::protocol::ir::{
-        error::AiError,
-        response::{EmbeddingData, EmbeddingOutput, EmbeddingVector},
-        vendor_ext::VendorExtensions,
-    };
+    use stravia_runtime_contract::protocol::ir::{error::AiError, vendor_ext::VendorExtensions};
     let AiResponse {
         id,
         model,
         items: _,
         stop_reason,
         usage: _,
-        embedding_output,
         error,
         vendor,
         trusted_media_turn_ids,
@@ -700,37 +695,6 @@ fn response_metadata_heap_bytes(response: &AiResponse) -> usize {
         bytes = bytes
             .saturating_add(message.capacity())
             .saturating_add(raw.as_ref().map_or(0, json_heap_bytes));
-    }
-    if let Some(EmbeddingOutput {
-        object,
-        data,
-        extensions,
-    }) = embedding_output
-    {
-        bytes = bytes
-            .saturating_add(option_string_bytes(object))
-            .saturating_add(
-                data.capacity()
-                    .saturating_mul(std::mem::size_of::<EmbeddingData>()),
-            )
-            .saturating_add(json_object_heap_bytes(extensions.iter()));
-        for EmbeddingData {
-            object,
-            index: _,
-            embedding,
-            extensions,
-        } in data
-        {
-            bytes = bytes
-                .saturating_add(option_string_bytes(object))
-                .saturating_add(json_object_heap_bytes(extensions.iter()))
-                .saturating_add(match embedding {
-                    EmbeddingVector::Floats(values) => {
-                        values.capacity().saturating_mul(std::mem::size_of::<f64>())
-                    }
-                    EmbeddingVector::Base64(value) => value.capacity(),
-                });
-        }
     }
     bytes
 }

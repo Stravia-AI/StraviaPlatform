@@ -98,7 +98,6 @@ const CAPS: EndpointCapabilities = EndpointCapabilities {
     streaming: true,
     tools: true,
     reasoning: true,
-    embeddings: false,
     override_model_in_body: false,
     ingress_routes: &[],
     multimodal: true,

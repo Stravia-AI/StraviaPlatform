@@ -89,12 +89,6 @@ pub(crate) fn infer(
         }
         None
     };
-    if request.embedding.is_some() {
-        return Err(common::plugin_error(
-            ErrorKind::Unsupported,
-            "Antigravity does not provide embeddings",
-        ));
-    }
     // 在跨协议校验前删除 CLI 没有承诺的控制；最后的递归投影仍是唯一出口。
     request.generation.seed = None;
     request.generation.presence_penalty = None;

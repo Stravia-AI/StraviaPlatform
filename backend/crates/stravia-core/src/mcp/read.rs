@@ -17,8 +17,8 @@ use stravia_runtime_contract::{
     artifact::{ArtifactId, ArtifactRef, ArtifactSettings, ArtifactSource, bytes_stream},
     hook::{
         ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookSession,
-        PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, RequestKind,
-        SessionContext, StraviaReadDomain, ToolExecutionContext, ToolId,
+        PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, SessionContext,
+        StraviaReadDomain, ToolExecutionContext, ToolId,
     },
     protocol::ir::ContentBlock,
     turn_chain::{TurnNodeId, TurnNodeKind, TurnUnavailable},
@@ -1444,7 +1444,6 @@ impl Hook for ReadPlanningHook {
     fn descriptor(&self) -> HookDescriptor {
         HookDescriptor {
             id: HookId::new("stravia-read"),
-            request_kinds: vec![RequestKind::Generation],
             event_kinds: vec![EventKind::Request],
             requires_full_context: false,
             max_buffered_bytes: 0,

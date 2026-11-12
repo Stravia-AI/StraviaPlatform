@@ -14,8 +14,8 @@ use super::{
 };
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::{
-    AiItem, AiRequest, AiResponse, ContentBlock, CustomTool, DocumentSource, EmbeddingInput,
-    MessageContent, NamespaceMember, NativeTool, ResponseFormat, TOOL_RESULT_CONTENT_KIND_META,
+    AiItem, AiRequest, AiResponse, ContentBlock, CustomTool, DocumentSource, MessageContent,
+    NamespaceMember, NativeTool, ResponseFormat, TOOL_RESULT_CONTENT_KIND_META,
     ToolResultContentKind, ToolSpec,
 };
 
@@ -808,7 +808,6 @@ pub(super) fn request(request: & $($qualifier)* AiRequest, reject_ambiguous: boo
         let origin = location.with_latest_input(Some(index) == latest_input).with_fresh(index >= history_end.unwrap_or(0));
         item_text(item, reject_ambiguous, origin, visit)?;
     }
-    if let Some(embedding) = & $($qualifier)* request.embedding { match & $($qualifier)* embedding.input { EmbeddingInput::Text(text) => apply(text, None, location, visit)?, EmbeddingInput::Texts(texts) => for text in texts { apply(text, None, location, visit)?; }, _ => {} } }
     if let Some(tools) = & $($qualifier)* request.tools { for tool in tools { function_tool(tool, location, visit)?; } }
     if let Some(ResponseFormat::JsonSchema { schema: value, description, .. }) = & $($qualifier)* request.response_format {
         schema(value, location, visit)?;

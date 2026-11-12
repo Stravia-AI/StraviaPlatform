@@ -198,7 +198,6 @@ class _LifecycleHandler(BaseHTTPRequestHandler):
                     "total_tokens": 2,
                     "required_components_known": True,
                 },
-                "embedding_output": None,
                 "error": None,
                 "vendor": {"ingress": {}, "egress": {}, "passthrough_safe": {}},
             }

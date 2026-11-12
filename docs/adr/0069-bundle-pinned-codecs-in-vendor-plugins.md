@@ -4,7 +4,7 @@ status: accepted
 
 # Vendor Plugin 携带锁定版本的 codec
 
-`stravia-protocol-codec` 集中维护四类标准 Protocol Codec：OpenAI-compatible（包括 embeddings）、Anthropic、Gemini 与 Open Responses，以及它们共用的 canonical 转换辅助。需要这些实现的 Vendor crate 在 Rust 源码层直接依赖该库，构建时静态编入各自的自包含 Wasm Component；实现采用源码链接，不采用 Component composition。安装不另行获取 codec 包，运行时也不绑定宿主提供的可变 codec 实现，因此插件采用的协议行为只随整个插件产物更新。
+`stravia-protocol-codec` 集中维护四类标准 Protocol Codec：OpenAI-compatible、Anthropic、Gemini 与 Open Responses，以及它们共用的 canonical 转换辅助。需要这些实现的 Vendor crate 在 Rust 源码层直接依赖该库，构建时静态编入各自的自包含 Wasm Component；实现采用源码链接，不采用 Component composition。安装不另行获取 codec 包，运行时也不绑定宿主提供的可变 codec 实现，因此插件采用的协议行为只随整个插件产物更新。
 
 随程序交付的最终实现是 `stravia-vendor-base`、`stravia-vendor-codex`、`stravia-vendor-grok`、`stravia-vendor-command-code`、`stravia-vendor-devin` 五个 crate。Codex 与 Grok 可复用标准 codec；Command Code 与 Devin 的私有 codec 分别归各自 guest crate；Bedrock、Cohere、Gateway、WatsonX 等非标准实现归 `stravia-vendor-base`。标准库和宿主构建不得反向引用这些供应商私有 codec。跨插件共用且不包含供应商流程的辅助代码由 `stravia-vendor-common` 提供，认证、额度和私有协议编排仍留在所属 guest。
 

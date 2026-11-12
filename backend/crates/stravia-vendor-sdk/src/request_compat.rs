@@ -247,7 +247,6 @@ impl Serialize for RequestView<'_> {
         field!(model);
         field!(items);
         field!(generation);
-        field!(embedding);
         field!(stream);
         field!(tools);
         if let Some(instructions) = &r.instructions {

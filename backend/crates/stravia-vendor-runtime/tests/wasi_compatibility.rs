@@ -299,7 +299,7 @@ async fn real_base_executes_with_stable_wasi_patches_and_mixed_imports() {
     let text = wasmprinter::print_bytes(base_component()).expect("print real base component");
     let runtime = VendorRuntime::new().expect("runtime");
     let provider = ProviderSnapshot {
-        provider_id: "custom".into(),
+        provider_id: "openai".into(),
         channel: "default".into(),
         base_url: "https://upstream.invalid/v1".into(),
         protocol: "openai-compatible".into(),
@@ -310,13 +310,13 @@ async fn real_base_executes_with_stable_wasi_patches_and_mixed_imports() {
         client_headers: Vec::new(),
         operation_metadata: BTreeMap::new(),
     };
-    let mut request = AiRequest::new("model", Vec::new());
-    request.embedding = Some(stravia_runtime_contract::protocol::ir::EmbeddingRequest {
-        input: stravia_runtime_contract::protocol::ir::EmbeddingInput::Text("input".into()),
-        dimensions: None,
-        encoding_format: None,
-        user: None,
-    });
+    // OpenAI 供应商对含内容的请求选择 Responses；返回值由插件计算，不是对输入协议的回显。
+    let request = AiRequest::new(
+        "model",
+        vec![stravia_runtime_contract::protocol::ir::AiItem::output_text(
+            "input",
+        )],
+    );
     for mode in [
         WasiImports::Uniform("0.2.0"),
         WasiImports::Uniform("0.2.9"),
@@ -343,7 +343,7 @@ async fn real_base_executes_with_stable_wasi_patches_and_mixed_imports() {
             )
             .await
             .unwrap_or_else(|error| panic!("{mode:?}: real protocol selection failed: {error}"));
-        assert_eq!(protocol, "openai-compatible/embeddings/v1", "{mode:?}");
+        assert_eq!(protocol, "open-responses/responses/2026-04-24", "{mode:?}");
     }
 
     // The prepared blueprint belongs to the component's Engine, not to the
@@ -367,7 +367,7 @@ async fn real_base_executes_with_stable_wasi_patches_and_mixed_imports() {
             )
             .await
             .expect("foreign runtime reuses the prepared blueprint");
-        assert_eq!(protocol, "openai-compatible/embeddings/v1");
+        assert_eq!(protocol, "open-responses/responses/2026-04-24");
     }
 
     // Keep all real guest exports intact. A newer patch name alone is allowed,

@@ -21,7 +21,6 @@
 //! Each `codec/<vendor>/<protocol>/` directory co-locates one wire adapter.
 //!
 //! - `codec/openai/compatible/chat_completions.rs` — `OpenAICompatibleChatCompletionsV1`
-//! - `codec/openai/compatible/embeddings.rs` — `OpenAICompatibleEmbeddingsV1`
 //! - `codec/open_responses/adapter.rs` — `OpenResponses20260424`
 //! - `codec/anthropic/messages/adapter.rs` — `AnthropicMessages2023`
 //! - `codec/google/gemini/generate_content.rs` — `GoogleGeminiGenerateContentV1Beta`

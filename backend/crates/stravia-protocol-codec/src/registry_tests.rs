@@ -1,9 +1,8 @@
 //! Protocol registry acceptance.
 //!
-//! Five standard adapters are registered:
+//! Four standard adapters are registered:
 //! - OpenAI Chat / Open Responses
 //! - Anthropic Messages / Google Generate
-//! - OpenAI Embeddings (registered for ingress route and capability discovery).
 //!
 //! Proprietary upstream codecs live in their owning vendor guests and are not
 //! linked into this registry.
@@ -14,7 +13,6 @@ use stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01;
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
 use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
-use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_EMBEDDINGS_V1;
 use stravia_runtime_contract::protocol::ids::Protocol;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::Role;
@@ -22,12 +20,11 @@ use stravia_runtime_contract::protocol::ir::Role;
 #[test]
 fn registers_all_adapters_with_correct_ids() {
     let reg = ProtocolRegistry::global();
-    assert_eq!(reg.endpoints().len(), 5);
+    assert_eq!(reg.endpoints().len(), 4);
 
     for id in [
         OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         OPEN_RESPONSES_2026_04_24,
-        OPENAI_COMPATIBLE_EMBEDDINGS_V1,
         ANTHROPIC_MESSAGES_2023_06_01,
         GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
     ] {
@@ -41,7 +38,7 @@ fn endpoints_for_protocol_segment() {
     let reg = ProtocolRegistry::global();
     assert_eq!(
         reg.endpoints_for_protocol(Protocol::OpenAICompatible).len(),
-        2
+        1
     );
     assert_eq!(reg.endpoints_for_protocol(Protocol::OpenResponses).len(), 1);
     assert_eq!(
@@ -199,70 +196,4 @@ fn stream_state_constructs_for_generation_adapters() {
         h.stream_decoder().expect("stream decoder");
         h.stream_encoder().expect("stream encoder");
     }
-}
-
-// ── Embeddings — registered unary adapter ──
-
-#[test]
-fn embeddings_adapter_advertises_unary_capabilities() {
-    let reg = ProtocolRegistry::global();
-    let caps = reg
-        .adapter(&OPENAI_COMPATIBLE_EMBEDDINGS_V1)
-        .unwrap()
-        .capabilities();
-    assert!(caps.embeddings);
-    assert!(!caps.streaming);
-    assert!(!caps.tools);
-    assert!(!caps.override_model_in_body);
-}
-
-#[test]
-fn embeddings_route_resolves_to_adapter() {
-    let reg = ProtocolRegistry::global();
-    let path = "/v1/embeddings";
-    let endpoint = reg
-        .resolve_ingress_route("POST", path)
-        .unwrap_or_else(|| panic!("no adapter for POST {path}"));
-    assert_eq!(endpoint, OPENAI_COMPATIBLE_EMBEDDINGS_V1);
-}
-
-#[test]
-fn embeddings_aliases_resolve() {
-    let reg = ProtocolRegistry::global();
-    assert_eq!(
-        reg.resolve_alias("openai-embeddings"),
-        Some(OPENAI_COMPATIBLE_EMBEDDINGS_V1)
-    );
-    assert_eq!(
-        reg.resolve_alias("embeddings"),
-        Some(OPENAI_COMPATIBLE_EMBEDDINGS_V1)
-    );
-    assert_eq!(
-        reg.resolve_alias("openai/embeddings/v1"),
-        Some(OPENAI_COMPATIBLE_EMBEDDINGS_V1)
-    );
-}
-
-#[test]
-fn embeddings_decoder_round_trips_body() {
-    let reg = ProtocolRegistry::global();
-    let body = json!({
-        "model": "text-embedding-3-small",
-        "input": ["hello", "world"],
-        "encoding_format": "float"
-    });
-    let internal = reg
-        .adapter(&OPENAI_COMPATIBLE_EMBEDDINGS_V1)
-        .unwrap()
-        .decode_request(body.clone())
-        .unwrap();
-    assert_eq!(internal.model, "text-embedding-3-small");
-    assert!(!internal.stream.enabled);
-
-    let (encoded, _headers) = reg
-        .adapter(&OPENAI_COMPATIBLE_EMBEDDINGS_V1)
-        .unwrap()
-        .encode_request(internal)
-        .unwrap();
-    assert_eq!(encoded, body, "encoder must round-trip the original body");
 }

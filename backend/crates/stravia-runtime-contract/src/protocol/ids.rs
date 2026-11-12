@@ -3,7 +3,7 @@
 //! Canonical string form: `{protocol}/{name}/{version}`.
 //!
 //! - `protocol`: wire-format protocol suite.
-//! - `name`: wire-format endpoint name (`chat-completions` / `responses` / `messages` / `generate-content` / `embeddings`).
+//! - `name`: wire-format endpoint name (`chat-completions` / `responses` / `messages` / `generate-content`).
 //! - `version`: pinned wire-schema version (`v1`, `2026-04-24`, `2023-06-01`, `v1beta`).
 //!
 //! `ProtocolEndpoint` is `Copy` and stores `&'static str` slices — values must be const.
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// (e.g. OpenAI, Moonshot, DeepSeek) may implement the same `Protocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Protocol {
-    /// OpenAI Chat Completions-compatible protocol (`/v1/chat/completions`, `/v1/embeddings`).
+    /// OpenAI Chat Completions-compatible protocol (`/v1/chat/completions`).
     OpenAICompatible,
     /// Vendor-neutral Open Responses Protocol (`/v1/responses`).
     OpenResponses,
@@ -222,9 +222,6 @@ impl From<ProtocolEndpoint> for ProtocolIdentity {
 pub const OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1: ProtocolEndpoint =
     ProtocolEndpoint::new(Protocol::OpenAICompatible, "chat-completions", "v1");
 
-pub const OPENAI_COMPATIBLE_EMBEDDINGS_V1: ProtocolEndpoint =
-    ProtocolEndpoint::new(Protocol::OpenAICompatible, "embeddings", "v1");
-
 pub const OPEN_RESPONSES_2026_04_24: ProtocolEndpoint =
     ProtocolEndpoint::new(Protocol::OpenResponses, "responses", "2026-04-24");
 
@@ -256,10 +253,6 @@ impl ProtocolEndpoint {
             | "openai/chat/v1"
             | "openai-chat"
             | "openai-chat-completions" => OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-            "openai-compatible/embeddings/v1"
-            | "openai/embeddings/v1"
-            | "openai-embeddings"
-            | "embeddings" => OPENAI_COMPATIBLE_EMBEDDINGS_V1,
             "open-responses/responses/2026-04-24" | "open-responses" => OPEN_RESPONSES_2026_04_24,
             "anthropic-messages/messages/2023-06-01" | "anthropic-messages" => {
                 ANTHROPIC_MESSAGES_2023_06_01
@@ -284,7 +277,6 @@ impl<'de> Deserialize<'de> for ProtocolEndpoint {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "openai-compatible/chat-completions/v1" => Ok(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1),
-            "openai-compatible/embeddings/v1" => Ok(OPENAI_COMPATIBLE_EMBEDDINGS_V1),
             "open-responses/responses/2026-04-24" => Ok(OPEN_RESPONSES_2026_04_24),
             "anthropic-messages/messages/2023-06-01" => Ok(ANTHROPIC_MESSAGES_2023_06_01),
             "google-gemini/generate-content/v1beta" => Ok(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA),
@@ -346,7 +338,6 @@ pub struct EndpointCapabilities {
     pub streaming: bool,
     pub tools: bool,
     pub reasoning: bool,
-    pub embeddings: bool,
     /// The encoder writes the actual model name into the request body rather
     /// than the URL path. Currently only true for Google Generate.
     pub override_model_in_body: bool,
@@ -378,7 +369,6 @@ impl EndpointCapabilities {
         streaming: false,
         tools: false,
         reasoning: false,
-        embeddings: false,
         override_model_in_body: false,
         ingress_routes: &[],
         multimodal: false,
@@ -396,7 +386,6 @@ impl EndpointCapabilities {
         streaming: true,
         tools: true,
         reasoning: false,
-        embeddings: false,
         override_model_in_body: false,
         ingress_routes: &[],
         multimodal: true,
@@ -435,10 +424,6 @@ mod tests {
         assert_eq!(
             GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.to_string(),
             "google-gemini/generate-content/v1beta"
-        );
-        assert_eq!(
-            OPENAI_COMPATIBLE_EMBEDDINGS_V1.to_string(),
-            "openai-compatible/embeddings/v1"
         );
     }
 
@@ -504,6 +489,5 @@ mod tests {
     fn selected_protocol_identity_exposes_known_semantics_without_a_codec() {
         let standard = ProtocolIdentity::new("openai/chat/v1");
         assert!(standard.matches_endpoint(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1));
-        assert!(standard.matches_endpoint(OPENAI_COMPATIBLE_EMBEDDINGS_V1));
     }
 }

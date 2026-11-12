@@ -29,7 +29,7 @@ Core 不拥有 HTTP listener；Desktop 复用 Server crate 的 HTTP application�
 
 ## 后端实际执行链
 
-1. HTTP Router 登记 Chat Completions、Responses（含 WebSocket 与 compact）、Anthropic Messages、Embeddings、Gemini 与 MCP 等入口。[Proxy Router](../../backend/crates/stravia-core/src/proxy/server.rs)（24–75 行）、[MCP Server](../../backend/crates/stravia-core/src/mcp/server.rs)（34–66 行）。
+1. HTTP Router 登记 Chat Completions、Responses（含 WebSocket 与 compact）、Anthropic Messages、Gemini 与 MCP 等入口。[Proxy Router](../../backend/crates/stravia-core/src/proxy/server.rs)（24–75 行）、[MCP Server](../../backend/crates/stravia-core/src/mcp/server.rs)（34–66 行）。
 2. Ingress codec 将 wire 请求解码为 canonical `AiRequest`，交给 Dispatcher / Inference Run。[Chat ingress](../../backend/crates/stravia-core/src/proxy/ingress/openai_compatible/chat_completions.rs)（16–88 行）、[Dispatcher](../../backend/crates/stravia-core/src/proxy/dispatcher/mod.rs)（16–39 行）。
 3. Inference Run 编排授权、Admission、Hook、Model Turn 与最终交付；RouteSelector 选择 Target，Vendor execution lease 锁定连接与插件。[Inference Run](../../backend/crates/stravia-core/src/proxy/dispatcher/inference_run.rs)（14–103 行）、[RouteSelector](../../backend/crates/stravia-core/src/router/selection.rs)（73–128 行）。
 4. Vendor 选择出口协议，Host 编码 WIT operation，通过受控网络与 Wasmtime 执行组件，再归一化 canonical 输出。[插件执行](../../backend/crates/stravia-core/src/plugin/execution.rs)（258–313、727–818 行）。

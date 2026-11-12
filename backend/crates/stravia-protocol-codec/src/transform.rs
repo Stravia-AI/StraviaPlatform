@@ -738,9 +738,6 @@ fn prune_request(
     {
         request.reasoning.target_control = None;
     }
-    if !capabilities.embeddings {
-        request.embedding = None;
-    }
     if !capabilities.function_calling {
         request.tools = None;
         request.tool_choice = None;
