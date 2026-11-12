@@ -105,13 +105,7 @@ impl CredentialMasker {
         for principal in principals {
             let active = mappings.active(&Principal::new(principal)).await?;
             // 创建它的规则已全部停用的映射不再遮罩：与出站替换一致，其明文不再被当作受保护内容。
-            let secrets = ProtectedSecrets::default();
-            secrets.register(
-                active
-                    .iter()
-                    .filter(|mapping| scope.allows(mapping))
-                    .map(|mapping| mapping.secret.as_str()),
-            );
+            let secrets = ProtectedSecrets::from_snapshot(active, &scope);
             if secrets.is_empty() {
                 continue;
             }
@@ -326,13 +320,7 @@ impl LiveCredentialMasker {
             let active = self.mappings.active(&Principal::new(principal)).await?;
             if !active.is_empty() {
                 let scope = self.rules.rule_scope().await?;
-                let protected = ProtectedSecrets::default();
-                protected.register(
-                    active
-                        .iter()
-                        .filter(|mapping| scope.allows(mapping))
-                        .map(|mapping| mapping.secret.as_str()),
-                );
+                let protected = ProtectedSecrets::from_snapshot(active, &scope);
                 if !protected.is_empty() {
                     secrets = Some(protected);
                 }
@@ -547,7 +535,10 @@ mod tests {
 
     #[async_trait]
     impl MappingStore for CountingMappings {
-        async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError> {
+        async fn active(
+            &self,
+            principal: &Principal,
+        ) -> Result<stravia_credential_protection::store::MappingSnapshot, RedactionError> {
             self.active_calls
                 .lock()
                 .push(principal.api_key_id().to_owned());
@@ -555,16 +546,18 @@ mod tests {
                 return Err(RedactionError::Storage);
             }
             let plaintexts = self.plaintexts.lock();
-            Ok(plaintexts
-                .get(principal.api_key_id())
-                .into_iter()
-                .flatten()
-                .map(|secret| Mapping {
-                    reference: format!("ref-{secret}"),
-                    secret: secret.clone(),
-                    rule_ids: self.attributed_to.clone().into(),
-                })
-                .collect())
+            Ok(Arc::new(
+                plaintexts
+                    .get(principal.api_key_id())
+                    .into_iter()
+                    .flatten()
+                    .map(|secret| Mapping {
+                        reference: format!("ref-{secret}"),
+                        secret: secret.clone(),
+                        rule_ids: self.attributed_to.clone().into(),
+                    })
+                    .collect(),
+            ))
         }
 
         async fn any_active(&self) -> Result<bool, RedactionError> {

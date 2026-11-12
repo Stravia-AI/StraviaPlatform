@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- Credential mappings now use the Gateway's shared `RuntimeCache` across protection, restoration, History Recall and observation masking, with no separate cache or budget: Memory / SQLite uses TinyUFO; PostgreSQL uses Redis. Concurrent cold reads are coalesced, snapshots refresh after a fixed 60-second window, and creation, failed or cancelled mutations and garbage collection invalidate stale snapshots. PostgreSQL credential plaintext enters Redis and requires the existing network isolation, ACL and TLS protections. Existing retention semantics are unchanged.
+- `RuntimeCache` now applies fixed program-defined priorities and proportional protected shares within the existing total budget. Idle shares can be borrowed and reclaimed without starving lower-priority classes; expired entries are reclaimed before live eviction, and rejected replacements preserve live old values. TinyUFO and Redis enforce the same shared-budget policy; users still configure only `cache.capacity_mb`, with no per-class quota or priority settings.
+
 ## [0.7.0] - 2026-11-12
 
 ### Verification

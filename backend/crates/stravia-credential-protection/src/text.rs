@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{
     RedactionError, marker,
-    store::{Mapping, MappingStore},
+    store::{Mapping, MappingSnapshot, MappingStore},
     strength,
 };
 use stravia_runtime_contract::Principal;
@@ -122,7 +122,8 @@ pub(super) fn active(mapping: &Mapping) -> bool {
 /// 只保存已有映射，不检测或登记新秘密，也不发布映射或记录追踪。
 /// 读边界可能一次处理数千段文本，候选顺序只在这里准备一次。
 pub struct KnownSecrets {
-    entries: Vec<(Mapping, bool)>,
+    mappings: MappingSnapshot,
+    entries: Vec<(usize, bool)>,
 }
 
 impl KnownSecrets {
@@ -133,18 +134,21 @@ impl KnownSecrets {
         store: &dyn MappingStore,
         principal: &Principal,
     ) -> Result<Self, RedactionError> {
-        let mut entries: Vec<_> = store
-            .active(principal)
-            .await?
-            .into_iter()
-            .filter(|mapping| active(mapping) && !mapping.secret.is_empty())
-            .map(|mapping| {
+        let mappings = store.active(principal).await?;
+        let mut entries: Vec<_> = mappings
+            .iter()
+            .enumerate()
+            .filter(|(_, mapping)| active(mapping) && !mapping.secret.is_empty())
+            .map(|(index, mapping)| {
                 let weak = strength::is_weak(&mapping.secret);
-                (mapping, weak)
+                (index, weak)
             })
             .collect();
-        entries.sort_by(|(a, _), (b, _)| candidate_order((&a.secret, a), (&b.secret, b)));
-        Ok(Self { entries })
+        entries.sort_by(|(a, _), (b, _)| {
+            let (a, b) = (&mappings[*a], &mappings[*b]);
+            candidate_order((&a.secret, a), (&b.secret, b))
+        });
+        Ok(Self { mappings, entries })
     }
 
     /// 输入是任意历史纯文本，输出把已知秘密换成该映射的凭据标记。
@@ -162,8 +166,10 @@ impl KnownSecrets {
             |text, position| {
                 self.entries
                     .iter()
-                    .find(|(mapping, weak)| matches_at(text, position, &mapping.secret, *weak))
-                    .map(|(mapping, _)| mapping)
+                    .find(|(index, weak)| {
+                        matches_at(text, position, &self.mappings[*index].secret, *weak)
+                    })
+                    .map(|(index, _)| &self.mappings[*index])
             },
             |_| {},
         )
@@ -2019,13 +2025,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::store::MappingStore for TestStore {
-        async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError> {
+        async fn active(&self, principal: &Principal) -> Result<MappingSnapshot, RedactionError> {
             self.active_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(if principal == &self.owner {
+            Ok(std::sync::Arc::new(if principal == &self.owner {
                 self.mappings.clone()
             } else {
                 Vec::new()
-            })
+            }))
         }
         async fn intern(
             &self,

@@ -25,7 +25,7 @@ impl stravia_credential_protection::store::MappingStore for HeldPublicationStore
         &self,
         principal: &Principal,
     ) -> Result<
-        Vec<stravia_credential_protection::store::Mapping>,
+        stravia_credential_protection::store::MappingSnapshot,
         stravia_runtime_contract::redaction::RedactionError,
     > {
         self.inner.active(principal).await
@@ -122,6 +122,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
         gateway.storage.clone(),
         store.clone(),
         gateway.redaction.custom_rules.clone(),
+        gateway.runtime_cache.clone(),
     );
     let observer = credential_observer(&gateway, &principal);
     let mut request = AiRequest::new("discovery-model", Vec::new());
@@ -415,6 +416,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
         gateway.storage.clone(),
         store.clone(),
         gateway.redaction.custom_rules.clone(),
+        gateway.runtime_cache.clone(),
     );
     let observer = credential_observer(&gateway, &principal);
     let mut request = AiRequest::new("discovery-model", Vec::new());
@@ -577,11 +579,13 @@ async fn held_publication_turn(
         gateway.storage.clone(),
         store.clone(),
         gateway.redaction.custom_rules.clone(),
+        gateway.runtime_cache.clone(),
     );
     let mut request = AiRequest::new("publication-model", Vec::new());
     if !late_reference {
-        let mapping = store
-            .inner
+        let mapping = gateway
+            .redaction
+            .mappings
             .intern(&principal, &["synthetic-secret".into()])
             .await
             .unwrap()
@@ -647,8 +651,9 @@ async fn held_publication_turn(
     if late_reference {
         // The returned turn captured no local mappings. A related turn now adds a
         // valid reference to its shared trace through normal request protection.
-        let mapping = store
-            .inner
+        let mapping = gateway
+            .redaction
+            .mappings
             .intern(&principal, &["related-secret".into()])
             .await
             .unwrap()

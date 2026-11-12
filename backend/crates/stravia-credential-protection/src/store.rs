@@ -1,6 +1,7 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use super::RedactionError;
 use stravia_runtime_contract::Principal;
@@ -20,7 +21,7 @@ const PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 pub const RENEWAL_GRANULARITY: Duration = Duration::from_secs(60 * 60);
 
 // Intentionally no Debug: mapping plaintext must never enter diagnostics.
-#[derive(Clone, sqlx::FromRow)]
+#[derive(Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Mapping {
     pub reference: String,
     pub secret: String,
@@ -29,8 +30,12 @@ pub struct Mapping {
     pub rule_ids: RuleIds,
 }
 
+/// 同一主体的不可变映射快照；读取与流式还原共享秘密原文，不逐请求深拷贝。
+pub type MappingSnapshot = Arc<Vec<Mapping>>;
+
 /// 映射表里以 JSON 数组文本保存的规则 ID。
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct RuleIds(Vec<String>);
 
 impl RuleIds {
@@ -76,7 +81,7 @@ pub struct InternedMappings {
 
 #[async_trait]
 pub trait MappingStore: Send + Sync {
-    async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError>;
+    async fn active(&self, principal: &Principal) -> Result<MappingSnapshot, RedactionError>;
     /// 实例内是否存在映射（映射不再有过期时间，回收前都有效）。没有映射时读取路径直接返回原响应，不做主体解析与载荷遍历。
     /// 默认返回 `true`，让未知实现保持保守行为。
     async fn any_active(&self) -> Result<bool, RedactionError> {
@@ -290,7 +295,7 @@ impl SqlMappingStore {
 
 #[async_trait]
 impl MappingStore for SqlMappingStore {
-    async fn active(&self, principal: &Principal) -> Result<Vec<Mapping>, RedactionError> {
+    async fn active(&self, principal: &Principal) -> Result<MappingSnapshot, RedactionError> {
         let principal = principal.continuation_key();
         match self {
             Self::Sqlite(pool) => sqlx::query_as::<_, Mapping>(
@@ -300,6 +305,7 @@ impl MappingStore for SqlMappingStore {
             .bind(principal)
             .fetch_all(pool)
             .await
+            .map(Arc::new)
             .map_err(|error| self.storage(error)),
             Self::Postgres(pool) => sqlx::query_as::<_, Mapping>(
                 "SELECT reference, secret, rule_ids FROM reversible_redaction_mappings \
@@ -308,6 +314,7 @@ impl MappingStore for SqlMappingStore {
             .bind(principal)
             .fetch_all(pool)
             .await
+            .map(Arc::new)
             .map_err(|error| self.storage(error)),
         }
     }

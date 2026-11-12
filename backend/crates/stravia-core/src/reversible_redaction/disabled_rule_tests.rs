@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use stravia_credential_protection::store::Mapping;
+use stravia_credential_protection::store::MappingSnapshot;
 use stravia_credential_protection::{CustomRuleInput, DisabledRulesError, SETTING_KEY};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -48,7 +48,7 @@ fn literal(text: &str, enabled: bool) -> CustomRuleInput {
 }
 
 /// 返回发往上游的文本与 `protect` 交给还原环节的全部映射。
-async fn protect(gateway: &Gateway, owner: &Principal, text: &str) -> (String, Vec<Mapping>) {
+async fn protect(gateway: &Gateway, owner: &Principal, text: &str) -> (String, MappingSnapshot) {
     let mut request = AiRequest::new("model", Vec::new());
     request.instructions = Some(text.into());
     let mut request = Arc::new(request);

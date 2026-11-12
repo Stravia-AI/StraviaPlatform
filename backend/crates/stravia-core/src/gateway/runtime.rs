@@ -491,6 +491,7 @@ impl Gateway {
             Arc::clone(&storage),
             mappings,
             custom_rules,
+            runtime_cache.clone(),
         );
         let upload_grants = Arc::new(
             agent::upload_grant::UploadGrantIssuer::load(

@@ -28,6 +28,7 @@ tasks:
       - target/patch/rustls-0.23.46/Cargo.toml
       - target/patch/rama-http-core-0.4.0/Cargo.toml
       - target/patch/rama-http-types-0.4.0/Cargo.toml
+      - target/patch/TinyUFO-0.9.0/Cargo.toml
     cmds:
       - cargo patch-crate --force
   brand:generate:
