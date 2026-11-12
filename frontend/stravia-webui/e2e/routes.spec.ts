@@ -609,7 +609,17 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
   await page.route('**/api/v1/api-keys', async (route) => {
     await route.fulfill({
       json: {
-        data: [{ id: 'key-gpt', key: 'sk-test-secret', name: 'GPT key', is_enabled: true, model_ids: ['model-gpt'] }],
+        data: [
+          {
+            id: 'key-gpt',
+            key: 'sk-test-secret',
+            name: 'GPT key',
+            is_enabled: true,
+            transparent_injection_enabled: false,
+            transparent_injections: [],
+            model_ids: ['model-gpt'],
+          },
+        ],
       },
     })
   })

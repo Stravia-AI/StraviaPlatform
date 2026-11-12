@@ -1,28 +1,11 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 import { admin } from '../src/lib/admin-client'
 
 const originalFetch = globalThis.fetch
-const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
 const input = { source_id: 'source', release_id: 1, vendor_id: 'vendor', version: '1.0.0', catalog_sha256: 'digest' }
 
-beforeEach(() => {
-  Object.defineProperty(globalThis, 'window', {
-    configurable: true,
-    value: {
-      __TAURI_INTERNALS__: {
-        invoke(command: string) {
-          if (command === 'get_server_port') return Promise.resolve(18473)
-          if (command === 'get_admin_session') return Promise.resolve({ access_token: 'test-session' })
-          return Promise.reject(new Error(`Unexpected native command: ${command}`))
-        },
-      },
-    },
-  })
-})
 afterEach(() => {
   globalThis.fetch = originalFetch
-  if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-  else Reflect.deleteProperty(globalThis, 'window')
 })
 
 test('preparation parses split SSE events', async () => {
