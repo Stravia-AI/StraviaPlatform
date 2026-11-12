@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- `GET /codex/models` serves a Codex-format model catalog (`{"models": [...]}`) for the same API Keys and model visibility as `GET /v1/models`, so a Codex provider can point `model_catalog_url` at the Gateway and read live context windows, image input and thinking levels. It lists only text-output Routes the Key may use.
+- Responses WebSocket now accepts standalone compaction: a `response.create` whose `input` ends with exactly one `compaction_trigger` returns the same native compaction item and `response.completed` frames as HTTP, and the connection can continue with ordinary requests. A misplaced or repeated trigger returns `invalid_request` and is never sent upstream. Publication is confirmed when the terminal `response.completed` frame is written, so a dropped connection leaves the compaction unconfirmed.
+
 ### Changed
 
+- Connect Client Apply for Codex now writes `model_catalog_url` (the Gateway's `/codex/models`) and `supports_websockets = true` on the Stravia provider instead of a static `model_catalog_json` and `stravia-models.json`, so Codex reads the live catalog. It declares `remote_compaction = "v2"` only when every text Route in the list supports it, and removes a stale `model_catalog_json`, which would otherwise take precedence over the URL. Re-apply the configuration to switch an existing Codex setup; the old `stravia-models.json` is left on disk and can be deleted.
 - `StraviaRead` treats zero-value fields like omitted or `null` fields: a blank `question`, `"wait": 0`, and empty `attachments` or `allowed_domains` arrays are no longer rejected on paths that do not use them. Models that fill every schema field with placeholders, such as Gemini, can now list `stravia://history/` and read resources on the first call. `allowed_domains: []` now means unrestricted for a new search and inherits the parent policy for a continuation, instead of failing; searches and continuations with a blank `question` report the missing `question`.
 
 ### Fixed

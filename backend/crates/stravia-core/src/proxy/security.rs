@@ -5,6 +5,8 @@
 //! lifecycle ordering, context mutation, logging, and transport rendering to
 //! its callers.
 
+use std::collections::HashSet;
+
 use axum::http::{HeaderMap, header};
 use chrono::{NaiveDateTime, Utc};
 
@@ -71,6 +73,24 @@ impl EffectiveInjections {
     }
 }
 
+/// 一个 Key 的客户端模型目录视图：可见 Route 范围与透明注入授权。
+pub(crate) struct ModelCatalogAccess {
+    bound_route_ids: HashSet<String>,
+    injections: EffectiveInjections,
+}
+
+impl ModelCatalogAccess {
+    /// 没有绑定任何 Route 的 Key 可使用全部 Route，与 `/v1/models` 一致。
+    pub(crate) fn allows(&self, route_id: &str) -> bool {
+        self.bound_route_ids.is_empty() || self.bound_route_ids.contains(route_id)
+    }
+
+    pub(crate) fn media_understanding(&self) -> bool {
+        self.injections
+            .contains(TransparentInjection::MediaUnderstanding)
+    }
+}
+
 pub(crate) struct Security<'a> {
     auth: Option<&'a dyn AuthAccessStore>,
 }
@@ -91,20 +111,7 @@ impl<'a> Security<'a> {
         &self,
         credential: &ClientCredential,
     ) -> Result<AuthenticatedPrincipal, GatewayError> {
-        let raw_key = credential.secret().ok_or(GatewayError::Unauthorized {
-            reason: AuthFailure::Missing,
-        })?;
-        let auth = self.auth.ok_or_else(|| {
-            GatewayError::internal(anyhow::anyhow!("API key authentication is unavailable"))
-        })?;
-        let key = auth
-            .find_api_key(raw_key)
-            .await
-            .map_err(auth_storage_error)?
-            .ok_or(GatewayError::Unauthorized {
-                reason: AuthFailure::Invalid,
-            })?;
-        validate_key_state(&key)?;
+        let (_, key) = self.authenticated_key(credential).await?;
         Ok(AuthenticatedPrincipal {
             principal: stravia_runtime_contract::Principal::new(key.id),
             api_key_name: key.name,
@@ -117,6 +124,37 @@ impl<'a> Security<'a> {
         &self,
         credential: &ClientCredential,
     ) -> Result<Vec<String>, GatewayError> {
+        let (auth, key) = self.authenticated_key(credential).await?;
+        auth.list_bound_model_ids(&key.id)
+            .await
+            .map_err(auth_storage_error)
+    }
+
+    /// 一次 Key 查询同时给出模型可见范围与透明注入授权，供客户端模型目录使用。
+    pub(crate) async fn model_catalog_access(
+        &self,
+        credential: &ClientCredential,
+    ) -> Result<ModelCatalogAccess, GatewayError> {
+        let (auth, key) = self.authenticated_key(credential).await?;
+        let bound_route_ids = auth
+            .list_bound_model_ids(&key.id)
+            .await
+            .map_err(auth_storage_error)?
+            .into_iter()
+            .collect();
+        Ok(ModelCatalogAccess {
+            bound_route_ids,
+            injections: EffectiveInjections {
+                enabled: key.transparent_injection_enabled,
+                selections: key.transparent_injections,
+            },
+        })
+    }
+
+    async fn authenticated_key(
+        &self,
+        credential: &ClientCredential,
+    ) -> Result<(&'a dyn AuthAccessStore, ApiKeyAccessRecord), GatewayError> {
         let raw_key = credential.secret().ok_or(GatewayError::Unauthorized {
             reason: AuthFailure::Missing,
         })?;
@@ -131,9 +169,7 @@ impl<'a> Security<'a> {
                 reason: AuthFailure::Invalid,
             })?;
         validate_key_state(&key)?;
-        auth.list_bound_model_ids(&key.id)
-            .await
-            .map_err(auth_storage_error)
+        Ok((auth, key))
     }
 
     pub(crate) async fn authorize_principal_model(

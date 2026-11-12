@@ -273,6 +273,11 @@ impl WebSocketRunDelivery {
                 self.delivery_completed_at.get_or_insert(sent_at);
                 self.terminal.publish_prepared_client_completion(sent_at);
             }
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("response.completed") {
+                // 独立压缩结果在校验后整体缓冲交付;终态帧发出即与 HTTP 完整响应体
+                // 等价，此前的 compaction 条目帧已按序发送。
+                self.terminal.receive_standalone_completion(&self.observer);
+            }
             if self.terminal.has_pending_inline_publications() {
                 self.terminal.receive_native_event(&self.observer, &value);
             }
@@ -921,6 +926,11 @@ impl RunTerminalContext {
                 );
             }
         }))
+    }
+
+    fn receive_standalone_completion(&self, observer: &RunObserver) {
+        let receipts = self.receive_native_items(&[], true);
+        let _ = self.confirm_native_receipts(observer, receipts);
     }
 
     fn receive_native_event(&self, observer: &RunObserver, value: &serde_json::Value) {

@@ -54,6 +54,7 @@ pub fn create_router(gateway: Gateway) -> Router {
             post(ingress::google_generative::generate_content::handler),
         )
         .route("/v1/models", get(handler::models_list))
+        .route("/codex/models", get(handler::codex_models_list))
         .with_state(gateway)
         .merge(mcp_router)
         .fallback(protocol_not_found)

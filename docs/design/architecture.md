@@ -475,6 +475,8 @@ Model Turn Executor 的 private `live/lifecycle.rs` 集中事件与输出推进�
 
 管理面（`AdminService` / `/api/v1/*`）、健康探针、模型目录等非推理路由不进入 HookRuntime；生成和 embeddings 这两类推理请求会创建 `InferenceRun`。HTTP 管线始终经过 decoder、canonical pipeline 和 encoder，不暴露原始 wire body。
 
+`GET /codex/models` 是 Codex provider `model_catalog_url` 的目录端点，返回 `{"models": [ModelInfo, ...]}`（不是 `/v1/models` 的 `{"data": [...]}`），与 Connect Client Apply 写入的 Codex catalog 共用同一构造函数。认证与可见范围同 `/v1/models`；只列出 Key 可见且输出为文本的 Route，按展示名、模型 ID 排序并以序号作为 `priority`。上下文窗口与图片输入从已启用 Target 的 Provider Model 规格实时投影（该规格已含 Canonical Model 共享规格与 Provider 覆盖），不探测原生压缩；Key 启用 `media_understanding` 透明注入时，所有 Route 的 `input_modalities` 含 `image`。认证失败按原状态码返回，Codex 据此清空目录。该路径属于协议命名空间：Server 的 Admin Entry、启动期 503 与内嵌 WebUI fallback 都把 `/codex` 与 `/v1` 同等对待。
+
 Client credential policy 只存在于 crate-private `proxy/security` deep module。该 module 直接使用 `AuthAccessStore` seam：Inference profile 接受 Bearer、`x-api-key` 与 `x-goog-api-key`，MCP profile 只接受 Bearer；models list 复用同一 implementation，凭据无效或存储失败时 fail-closed。Security interface 返回 Principal、Model access grant、visible Model IDs 或 typed `GatewayError`，不修改 `RequestContext`，不记录日志，也不渲染 transport response。
 
 Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并计一次 API Key Root RPM，在 Hook 后针对 final Model 检查绑定；Target retry、隐藏 Model Turn、透明 Tool 与后台 execution 保留同一 RootRequest，不重复计入口请求。普通 Target retry 属于同一 round，复用该 round 的授权结果。Active Provider 与 Provider Model lookup 仍由 Inference Run 拥有。Expired client credential 统一映射为 `AuthFailure::Expired` 与 HTTP 401；MCP 保持其他 401/403/503 mapping，models list 仅返回有效 Key 已绑定的 Model。RPM 运行态只在单个 Gateway 实例内共享，配置持久化但窗口不持久化，重启清空窗口；不协调多实例额度。

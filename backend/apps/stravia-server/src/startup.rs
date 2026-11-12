@@ -206,6 +206,8 @@ async fn boot_request(State(boot): State<BootState>, request: Request) -> Respon
         || path.starts_with("/v1beta/")
         || path == "/mcp"
         || path.starts_with("/mcp/")
+        || path == "/codex"
+        || path.starts_with("/codex/")
     {
         return unavailable(State(boot)).await.into_response();
     }
@@ -290,6 +292,7 @@ mod tests {
             "/api/v1/auth/state",
             "/api/v1/setup/claim",
             "/v1/responses",
+            "/codex/models",
             "/mcp",
         ] {
             let response = client
