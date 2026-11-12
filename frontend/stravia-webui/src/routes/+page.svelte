@@ -7,7 +7,12 @@ import { toast } from 'svelte-sonner'
 import { isTauri } from '#lib/admin-client.js'
 import { getConsoleChat } from '#lib/console-chat.svelte.js'
 import { consoleAssistantBlocks, consoleAssistantContent, consoleVisibleText } from '#lib/console-chat.js'
-import type { ConsoleChatSnapshot, ConsoleConversation, ConsoleImageAttachment } from '#lib/console-chat-types.js'
+import type {
+  ConsoleChatSnapshot,
+  ConsoleConversation,
+  ConsoleImageAttachment,
+  ConsoleMessage,
+} from '#lib/console-chat-types.js'
 
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { formatLogTime, formatNumber } from '#lib/format.js'
@@ -20,6 +25,7 @@ import ObservationActivity from '#lib/components/observation-activity.svelte'
 import DesktopPortNotice from '#lib/components/desktop-port-notice.svelte'
 import MarkdownContent from '#lib/components/markdown-content.svelte'
 import StreamingMarkdown from '#lib/components/streaming-markdown.svelte'
+import VirtualList from '#lib/components/virtual-list.svelte'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 import BrandMark from '#lib/components/brand-mark.svelte'
@@ -48,7 +54,8 @@ let follow = $state(true)
 let editingId = $state<string | null>(null)
 let editText = $state('')
 let editor = $state<HTMLTextAreaElement | null>(null)
-let scroller: HTMLElement | null = null
+let scroller = $state<HTMLElement | null>(null)
+let messageList = $state<{ scrollToEnd(): void }>()
 let previousConversation: string | null = null
 let previousAddress: string | null | undefined
 let preservedNavigation: string | null | undefined
@@ -124,19 +131,9 @@ $effect(() => {
   const id = snapshot.currentConversationId
   if (id !== previousConversation) {
     previousConversation = id
-    follow = true
     editingId = null
+    followLatest()
   }
-  const messages = conversation?.messages
-  const liveText = generation?.text
-  const activities = generation?.activities
-  void messages
-  void liveText
-  void activities
-  if (untrack(() => follow))
-    void tick().then(() => {
-      if (scroller && follow) scroller.scrollTop = scroller.scrollHeight
-    })
 })
 onMount(() => {
   scroller = surface?.closest('main') ?? null
@@ -146,7 +143,8 @@ onMount(() => {
   scroller?.addEventListener('scroll', onScroll, { passive: true })
   const resize = new ResizeObserver(() => {
     if (surface && scroller) surface.style.setProperty('--chat-workspace-height', `${scroller.clientHeight - 32}px`)
-    if (scroller && follow) scroller.scrollTop = scroller.scrollHeight
+    // 输入框增高会推高页面底部，正文列表看不到这类变化。
+    if (follow) messageList?.scrollToEnd()
   })
   if (surface) resize.observe(surface)
   if (scroller) resize.observe(scroller)
@@ -155,6 +153,23 @@ onMount(() => {
     resize.disconnect()
   }
 })
+// 尚未测量的消息按文字量估高；挂载后以实测高度为准。
+const estimatedHeights = new WeakMap<ConsoleMessage, number>()
+function estimateMessageHeight(message: ConsoleMessage): number {
+  let height = estimatedHeights.get(message)
+  if (height === undefined) {
+    const text = message.role === 'user' ? message.text : consoleAssistantContent(message).text
+    const images = message.role === 'user' && message.images?.length ? 300 : 0
+    height = 96 + images + Math.ceil(text.length / 80) * 24
+    estimatedHeights.set(message, height)
+  }
+  return height
+}
+// 列表在尾部追加时只会跟随已贴底的读者，发送与切换对话要显式回到最新。
+function followLatest() {
+  follow = true
+  void tick().then(() => messageList?.scrollToEnd())
+}
 async function command(action: () => Promise<unknown>) {
   try {
     await action()
@@ -169,7 +184,7 @@ async function send() {
   // 发送即清空，生成期间可以撰写下一条；发送键在本轮结束后才恢复。
   text = ''
   images = []
-  follow = true
+  followLatest()
   let id: string | null = null
   let sent = false
   let rolledBack = false
@@ -222,7 +237,7 @@ async function startEdit(id: string, value: string) {
 }
 async function submitEdit(id: string) {
   if (!editText.trim() || generation) return
-  follow = true
+  followLatest()
   try {
     await chat.edit(id, editText)
   } catch (cause) {
@@ -249,6 +264,174 @@ async function submitEdit(id: string) {
       })}><Icon class={compact ? 'size-3.5' : undefined} /></Tooltip.Trigger>
     <Tooltip.Content>{label}</Tooltip.Content>
   </Tooltip.Root>
+{/snippet}
+
+{#snippet messageRow(message: ConsoleMessage)}
+  <div class="message-row">
+    {#if message.role === 'user'}
+      {@const editing = editingId === message.id}
+      {@const userText = message.text}
+      <ConversationMessage user label={m.console_chat_user_message()}>
+        {#if editing}<form
+            class="flex w-[40rem] max-w-full flex-col gap-2"
+            onsubmit={(event) => {
+              event.preventDefault()
+              void submitEdit(message.id)
+            }}>
+            <label for="chat-edit-message" class="sr-only">{m.console_chat_edit_message()}</label>
+            <Textarea
+              bind:ref={editor}
+              id="chat-edit-message"
+              bind:value={editText}
+              rows={3}
+              class="max-h-72 min-h-20 resize-none bg-background dark:bg-background"
+              onkeydown={(event: KeyboardEvent) => {
+                if (event.isComposing) return
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  editingId = null
+                } else if (event.key === 'Enter') {
+                  event.preventDefault()
+                  if (event.ctrlKey || event.metaKey || event.shiftKey) {
+                    const input = event.currentTarget as HTMLTextAreaElement
+                    input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end')
+                    input.dispatchEvent(new Event('input', { bubbles: true }))
+                  } else if (!event.repeat) {
+                    void submitEdit(message.id)
+                  }
+                }
+              }} />
+
+            <div class="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onclick={() => (editingId = null)}>{m.common_cancel()}</Button>
+
+              <Button
+                type="submit"
+                disabled={!editText.trim() ||
+                  Boolean(generation) ||
+                  !snapshot.selectedModelId ||
+                  Boolean(guide) ||
+                  Boolean(snapshot.catalogError)}>{m.console_chat_resend()}</Button>
+            </div>
+          </form>
+        {:else}<p class="whitespace-pre-wrap">{consoleVisibleText(message.text)}</p>{/if}
+        {#if message.images?.length}<div class="flex flex-wrap gap-2">
+            {#each message.images as image (image.id)}<img
+                src={image.dataUrl}
+                alt={image.name}
+                class="max-h-72 max-w-full rounded-lg border object-contain" />{/each}
+          </div>{/if}
+        {#snippet meta()}
+          <div class="flex items-center gap-1">
+            <time datetime={message.createdAt} class="px-1 font-technical">{formatLogTime(message.createdAt)}</time>
+            {@render iconAction(m.console_chat_copy_message(), CopyIcon, () => void copy(userText), false, true)}
+            {#if !snapshot.readOnlyReason && !editing}
+              {@render iconAction(
+                m.console_chat_edit_message(),
+                PencilIcon,
+                () => void startEdit(message.id, consoleVisibleText(userText)),
+                Boolean(generation),
+                true,
+              )}
+            {/if}
+          </div>
+        {/snippet}
+      </ConversationMessage>
+    {:else}
+      {@const content = consoleAssistantContent(message)}
+      {@const usage = message.usage}
+      {@const live = generation && message === lastMessage}
+      {@const blocks = live ? (generation.blocks ?? []) : consoleAssistantBlocks(message)}
+      <ConversationMessage label={m.console_chat_assistant_response()}>
+        {#if live || message.elapsedMs !== undefined}
+          <ConsoleResponseProgress {message} active={Boolean(live)} />
+        {/if}
+        {#each blocks as block (block.id)}
+          {#if block.kind === 'thinking'}
+            <ObservationActivity
+              activity={block}
+              expansionPolicy="chat"
+              followed={live && generation.followedThinkingIds.includes(block.id)}
+              minimumHeadingLevel={2} />
+          {:else if consoleVisibleText(block.text).trim()}
+            {#if live}<StreamingMarkdown
+                text={consoleVisibleText(block.text)}
+                active
+                allowImages
+                minimumHeadingLevel={2}
+                variant="document" />
+            {:else}<MarkdownContent
+                text={consoleVisibleText(block.text)}
+                allowImages
+                minimumHeadingLevel={2}
+                variant="document" />
+            {/if}
+          {/if}
+        {/each}
+
+        {#if message.status === 'failed' && !live}
+          <div role="alert" class="text-destructive">
+            {localizeBackendErrorMessage(
+              message.error ?? m.console_chat_request_failed(),
+            )}{#if message === lastMessage && !snapshot.retryModelAvailable}
+              <p class="mt-1 text-sm">{m.console_chat_model_recovery()}</p>
+            {/if}
+          </div>
+        {/if}
+
+        {#if live}
+          <span role="status" class="sr-only">{m.console_chat_generating()}</span>
+        {:else}
+          <div class="flex items-center gap-1">
+            {@render iconAction(m.console_chat_copy(), CopyIcon, () => void copy(content.text), false, true)}
+            {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
+              {#if message.status === 'failed'}<Button
+                  variant="outline"
+                  disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)}
+                  onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button>
+              {/if}
+
+              {@render iconAction(
+                m.console_chat_regenerate(),
+                RefreshCwIcon,
+                () => void command(() => chat.regenerate()),
+                !snapshot.selectedModelId ||
+                  Boolean(guide) ||
+                  Boolean(snapshot.catalogError) ||
+                  (snapshot.historyHasImages && !snapshot.modelSupportsImages),
+                true,
+              )}
+            {/if}
+
+            <div
+              class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-xs text-muted-foreground tabular-nums">
+              <span class="font-technical break-all">{message.routeId}</span><span
+                >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
+                  ? m.console_chat_default()
+                  : message.thinkingLevel}</span
+              ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
+              {#if usage?.inputTokens !== undefined}<span
+                  >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
+                >{/if}
+              {#if usage?.outputTokens !== undefined}<span
+                  >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
+                >{/if}
+              {#if usage?.cacheReadTokens !== undefined}<span
+                  >{m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}</span
+                >{/if}
+              {#if usage?.cacheWriteTokens !== undefined}<span
+                  >{m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}</span
+                >{/if}
+              {#if message.elapsedMs === undefined}
+                {#if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
+                  >{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span
+                  >{/if}
+              {/if}
+            </div>
+          </div>{/if}
+      </ConversationMessage>
+    {/if}
+  </div>
 {/snippet}
 
 <svelte:head><title>{title} · Stravia</title></svelte:head>
@@ -285,176 +468,14 @@ async function submitEdit(id: string) {
       ></Empty.Root>
   {:else}
     {#if conversation?.messages.length}
-      <div class="flex w-full flex-col gap-6 pb-6">
-        {#each conversation.messages as message (message.id)}
-          {#if message.role === 'user'}
-            {@const editing = editingId === message.id}
-            {@const userText = message.text}
-            <ConversationMessage user label={m.console_chat_user_message()}>
-              {#if editing}<form
-                  class="flex w-[40rem] max-w-full flex-col gap-2"
-                  onsubmit={(event) => {
-                    event.preventDefault()
-                    void submitEdit(message.id)
-                  }}>
-                  <label for="chat-edit-message" class="sr-only">{m.console_chat_edit_message()}</label>
-                  <Textarea
-                    bind:ref={editor}
-                    id="chat-edit-message"
-                    bind:value={editText}
-                    rows={3}
-                    class="max-h-72 min-h-20 resize-none bg-background dark:bg-background"
-                    onkeydown={(event: KeyboardEvent) => {
-                      if (event.isComposing) return
-                      if (event.key === 'Escape') {
-                        event.preventDefault()
-                        editingId = null
-                      } else if (event.key === 'Enter') {
-                        event.preventDefault()
-                        if (event.ctrlKey || event.metaKey || event.shiftKey) {
-                          const input = event.currentTarget as HTMLTextAreaElement
-                          input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end')
-                          input.dispatchEvent(new Event('input', { bubbles: true }))
-                        } else if (!event.repeat) {
-                          void submitEdit(message.id)
-                        }
-                      }
-                    }} />
-
-                  <div class="flex justify-end gap-2">
-                    <Button type="button" variant="ghost" onclick={() => (editingId = null)}
-                      >{m.common_cancel()}</Button>
-
-                    <Button
-                      type="submit"
-                      disabled={!editText.trim() ||
-                        Boolean(generation) ||
-                        !snapshot.selectedModelId ||
-                        Boolean(guide) ||
-                        Boolean(snapshot.catalogError)}>{m.console_chat_resend()}</Button>
-                  </div>
-                </form>
-              {:else}<p class="whitespace-pre-wrap">{consoleVisibleText(message.text)}</p>{/if}
-              {#if message.images?.length}<div class="flex flex-wrap gap-2">
-                  {#each message.images as image (image.id)}<img
-                      src={image.dataUrl}
-                      alt={image.name}
-                      class="max-h-72 max-w-full rounded-lg border object-contain" />{/each}
-                </div>{/if}
-              {#snippet meta()}
-                <div class="flex items-center gap-1">
-                  <time datetime={message.createdAt} class="px-1 font-technical"
-                    >{formatLogTime(message.createdAt)}</time>
-                  {@render iconAction(m.console_chat_copy_message(), CopyIcon, () => void copy(userText), false, true)}
-                  {#if !snapshot.readOnlyReason && !editing}
-                    {@render iconAction(
-                      m.console_chat_edit_message(),
-                      PencilIcon,
-                      () => void startEdit(message.id, consoleVisibleText(userText)),
-                      Boolean(generation),
-                      true,
-                    )}
-                  {/if}
-                </div>
-              {/snippet}
-            </ConversationMessage>
-          {:else}
-            {@const content = consoleAssistantContent(message)}
-            {@const usage = message.usage}
-            {@const live = generation && message === lastMessage}
-            {@const blocks = live ? (generation.blocks ?? []) : consoleAssistantBlocks(message)}
-            <ConversationMessage label={m.console_chat_assistant_response()}>
-              {#if live || message.elapsedMs !== undefined}
-                <ConsoleResponseProgress {message} active={Boolean(live)} />
-              {/if}
-              {#each blocks as block (block.id)}
-                {#if block.kind === 'thinking'}
-                  <ObservationActivity
-                    activity={block}
-                    expansionPolicy="chat"
-                    followed={live && generation.followedThinkingIds.includes(block.id)}
-                    minimumHeadingLevel={2} />
-                {:else if consoleVisibleText(block.text).trim()}
-                  {#if live}<StreamingMarkdown
-                      text={consoleVisibleText(block.text)}
-                      active
-                      allowImages
-                      minimumHeadingLevel={2}
-                      variant="document" />
-                  {:else}<MarkdownContent
-                      text={consoleVisibleText(block.text)}
-                      allowImages
-                      minimumHeadingLevel={2}
-                      variant="document" />
-                  {/if}
-                {/if}
-              {/each}
-
-              {#if message.status === 'failed' && !live}
-                <div role="alert" class="text-destructive">
-                  {localizeBackendErrorMessage(
-                    message.error ?? m.console_chat_request_failed(),
-                  )}{#if message === lastMessage && !snapshot.retryModelAvailable}
-                    <p class="mt-1 text-sm">{m.console_chat_model_recovery()}</p>
-                  {/if}
-                </div>
-              {/if}
-
-              {#if live}
-                <span role="status" class="sr-only">{m.console_chat_generating()}</span>
-              {:else}
-                <div class="flex items-center gap-1">
-                  {@render iconAction(m.console_chat_copy(), CopyIcon, () => void copy(content.text), false, true)}
-                  {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
-                    {#if message.status === 'failed'}<Button
-                        variant="outline"
-                        disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)}
-                        onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button>
-                    {/if}
-
-                    {@render iconAction(
-                      m.console_chat_regenerate(),
-                      RefreshCwIcon,
-                      () => void command(() => chat.regenerate()),
-                      !snapshot.selectedModelId ||
-                        Boolean(guide) ||
-                        Boolean(snapshot.catalogError) ||
-                        (snapshot.historyHasImages && !snapshot.modelSupportsImages),
-                      true,
-                    )}
-                  {/if}
-
-                  <div
-                    class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-xs text-muted-foreground tabular-nums">
-                    <span class="font-technical break-all">{message.routeId}</span><span
-                      >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
-                        ? m.console_chat_default()
-                        : message.thinkingLevel}</span
-                    ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
-                    {#if usage?.inputTokens !== undefined}<span
-                        >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
-                      >{/if}
-                    {#if usage?.outputTokens !== undefined}<span
-                        >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
-                      >{/if}
-                    {#if usage?.cacheReadTokens !== undefined}<span
-                        >{m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}</span
-                      >{/if}
-                    {#if usage?.cacheWriteTokens !== undefined}<span
-                        >{m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}</span
-                      >{/if}
-                    {#if message.elapsedMs === undefined}
-                      {#if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
-                        >{:else if message.status === 'incomplete'}<span role="status"
-                          >{m.console_chat_incomplete()}</span
-                        >{/if}
-                    {/if}
-                  </div>
-                </div>{/if}
-            </ConversationMessage>
-          {/if}
-        {/each}
-      </div>
+      <VirtualList
+        bind:this={messageList}
+        items={conversation.messages}
+        itemKey={(message: ConsoleMessage) => message.id}
+        estimateSize={estimateMessageHeight}
+        {scroller}
+        row={messageRow}
+        endThreshold={follow ? 80 : -1} />
     {:else if !guide && !snapshot.loadError && !snapshot.catalogError}
       <Empty.Root class="flex-1"
         ><Empty.Header
@@ -489,7 +510,7 @@ async function submitEdit(id: string) {
               aria-label={m.console_chat_latest()}
               onclick={() => {
                 follow = true
-                if (scroller) scroller.scrollTop = scroller.scrollHeight
+                messageList?.scrollToEnd()
               }}
               class={buttonVariants({
                 variant: 'outline',
@@ -523,6 +544,10 @@ async function submitEdit(id: string) {
   flex-direction: column;
   gap: 1.5rem;
   margin-inline: auto;
+}
+/* 消息间距由行承担：虚拟化器只量得到行高，量不到外边距。 */
+.message-row {
+  padding-bottom: 1.5rem;
 }
 .composer-dock {
   position: sticky;

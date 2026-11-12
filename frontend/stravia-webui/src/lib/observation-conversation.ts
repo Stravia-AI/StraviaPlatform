@@ -181,18 +181,22 @@ export function observationConversationMessages(
   const model = interaction.first_model_display_name?.trim() || interaction.first_route_id
   const runs = detail.runs.toSorted((a, b) => a.started_at - b.started_at)
   const firstInput = runs[0] && runInputText(runs[0])
-  const messages: ObservationChatMessage[] = [
-    {
-      id: `user:${interaction.id}`,
-      role: 'user',
-      runId: runs[0]?.id,
-      text: detail.input_text || firstInput || '',
-      at: interaction.started_at,
-      model: '',
-      live: false,
-      unsaved: false,
-    },
-  ]
+  // 更早的事件尚未读完时，初始输入夹在未读区间之前：显示它会让它紧贴最新一页，仿佛两者相邻。
+  const messages: ObservationChatMessage[] =
+    detail.older_events_cursor !== null
+      ? []
+      : [
+          {
+            id: `user:${interaction.id}`,
+            role: 'user',
+            runId: runs[0]?.id,
+            text: detail.input_text || firstInput || '',
+            at: interaction.started_at,
+            model: '',
+            live: false,
+            unsaved: false,
+          },
+        ]
   const pendingBlocks = blocks.filter((block) => block.interaction_id === interaction.id)
   const visible = pendingBlocks.filter((block) => block.kind === 'client_visible_content_delta')
   for (const [index, run] of runs.entries()) {
@@ -239,7 +243,7 @@ export function observationConversationMessages(
       unsaved: true,
     })
   }
-  if (messages.length === 1)
+  if (!messages.some((message) => message.role === 'assistant'))
     messages.push({
       id: `assistant:${interaction.id}`,
       role: 'assistant',

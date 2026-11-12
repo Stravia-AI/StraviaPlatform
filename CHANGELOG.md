@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- Request history conversations, request diagnostics and the Console chat now render long histories through a virtualized list: only the rows near the viewport are mounted, so opening, scrolling and loading earlier events stay smooth however long the conversation is. A conversation opens at the latest content and keeps following new output only while you stay at the bottom; expanded thinking, tool and diagnostic details survive scrolling away and back. Browser find and full-page copy only cover the rows currently mounted.
+- Request history conversations no longer show the first user input while earlier events are still unloaded; it appears at the top once the earlier history has been read.
+
 ## [0.7.0] - 2026-11-12
 
 ### Verification

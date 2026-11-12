@@ -263,11 +263,13 @@ function collectIncrements(viewport: Locator): Promise<{ seen: number[]; duplica
 
 // 向上滚到加载行出现，并每帧记录锚点相对视口的位置；加载前、加载中与加载后都不允许位移。
 async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, text?: string): Promise<void> {
+  // 加载行铺在列表顶端的起始内边距里：先滚到顶端，它才进入视口。
   await viewport.evaluate((element) => {
-    const loader = element.querySelector('[data-older-loader]')
-    if (!loader) throw new Error('missing older-events loader')
-    element.scrollTop += loader.getBoundingClientRect().top - element.getBoundingClientRect().top
+    element.scrollTop = 0
   })
+  await expect
+    .poll(() => viewport.evaluate((element) => element.querySelector('[data-older-loader]') !== null))
+    .toBe(true)
   // Offscreen bodies are materialized asynchronously. Start measuring once the reader's anchor exists.
   await expect
     .poll(() =>
@@ -1149,6 +1151,48 @@ test.describe('Interaction Observation canvas', () => {
     ).toEqual(['251', '51'])
   })
 
+  test('expanding or collapsing a detail at the bottom keeps its trigger where the reader clicked', async ({
+    page,
+  }) => {
+    await installObservationFixture(page, false, false, false, (detail) => {
+      if (detail.interaction.id !== 'interaction-cinder') return
+      const owner = detail.runs[0]
+      owner.status = 'waiting_client'
+      owner.events = [
+        ...owner.events.filter((event) => event.sequence <= 10),
+        {
+          sequence: 11,
+          kind: 'client_tool_handoff',
+          payload: {
+            tool_id: 'long-input',
+            name: 'Bash',
+            input: { command: Array.from({ length: 40 }, (_, index) => `echo line-${index + 1}`).join('\n') },
+          },
+          run_id: owner.id,
+          interaction_id: detail.interaction.id,
+          rejection_id: null,
+          occurred_at: startedAt + 11,
+        },
+      ]
+    })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/logs?interaction=interaction-cinder')
+    const conversation = page.getByRole('log', { name: 'Conversation' })
+    const trigger = conversation.locator('[data-activity-kind="tool"]').getByRole('button')
+    await expect(trigger).toBeInViewport()
+    await expect.poll(() => distanceFromBottom(conversation)).toBeLessThanOrEqual(2)
+    const top = async () => (await trigger.boundingBox())?.y ?? Number.NaN
+    const before = await top()
+    await trigger.click()
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    await expect(conversation.getByText('echo line-40', { exact: false })).toBeVisible()
+    // 展开的内容长在触发器下方：贴底不能把读者刚点开的内容整段卷走。
+    expect(await top()).toBeCloseTo(before, 0)
+    await trigger.click()
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(await top()).toBeCloseTo(before, 0)
+  })
+
   test('diagnostics follow the latest run and reveal earlier runs as history loads without moving the reading position', async ({
     page,
   }) => {
@@ -1203,11 +1247,9 @@ test.describe('Interaction Observation canvas', () => {
     await expect(runRow(runCount)).toHaveAttribute('aria-expanded', 'false')
     await expect(diagnostics.locator('.stream-row[data-sequence]:visible')).toHaveCount(0)
     await expect.poll(() => distanceFromBottom(diagnostics)).toBeLessThanOrEqual(2)
-    // 最新事件页（401–600）之前的 Run 尚未加载：不显示成空 Run，续接关系只保留编号。
+    // 虚拟列表只挂载视口附近的 Run；最新事件页之前的 Run 尚未加载，不会显示成空 Run。
+    await expect(diagnostics.locator('button[data-run]')).not.toHaveCount(runCount - 26)
     await expect(runRow(26)).toHaveCount(0)
-    await expect(runRow(27)).toHaveCount(1)
-    await expect(diagnostics.getByRole('button', { name: 'Continued from R26', exact: true })).toHaveCount(0)
-    await expect(diagnostics.getByText('Continued from R26', { exact: true })).toHaveCount(1)
 
     // 实时到达的上游尝试只更新折叠的 Run 摘要，阅读位置仍跟随最新内容。
     const liveEvent = (sequence: number, kind: string, payload: Record<string, unknown>) =>
@@ -1246,18 +1288,35 @@ test.describe('Interaction Observation canvas', () => {
     const release = fixture.holdNextRead('interaction-cinder')
     await revealLoaderTrackingAnchor(diagnostics, 'button[data-run="run-page-27"]')
     await expect(loader).toBeInViewport()
+    // 最新事件页（401–600）之前的 Run 尚未加载：续接关系只保留编号。
+    await expect(runRow(26)).toHaveCount(0)
+    await expect(diagnostics.getByRole('button', { name: 'Continued from R26', exact: true })).toHaveCount(0)
+    await expect(diagnostics.getByText('Continued from R26', { exact: true })).toHaveCount(1)
     release()
-    await expect(runRow(14)).toHaveCount(1)
+    await expect(diagnostics.getByRole('button', { name: 'Continued from R26', exact: true })).toHaveCount(1)
     expectAnchorHeld(await stopAnchorTracking(page))
     await expect(loader).not.toBeInViewport()
+
+    // 第二页（201–400）补入的 Run 在列表顶端；回到顶端时下一页仍在读取，已加载的最早 Run 是 R14。
+    const releaseSecond = fixture.holdNextRead('interaction-cinder')
+    await diagnostics.evaluate((element) => {
+      element.scrollTop = 0
+    })
+    await expect(runRow(14)).toHaveCount(1)
     await expect(runRow(13)).toHaveCount(0)
-    await expect(diagnostics.getByRole('button', { name: 'Continued from R26', exact: true })).toHaveCount(1)
     await expect(diagnostics.getByText('Continued from R13', { exact: true })).toHaveCount(1)
+    await expect(loader).toBeInViewport()
+    releaseSecond()
+    await expect(loader).toHaveCount(0)
+    await diagnostics.evaluate((element) => {
+      element.scrollTop = 0
+    })
+    await expect(runRow(1)).toHaveCount(1)
     expect(
       fixture.eventRequests
         .filter((url) => url.searchParams.has('before_sequence'))
         .map((url) => url.searchParams.get('before_sequence')),
-    ).toEqual(['401'])
+    ).toEqual(['401', '201'])
   })
 
   test('refreshes unopened previews and new interactions through summaries without fetching details', async ({

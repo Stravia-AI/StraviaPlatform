@@ -776,6 +776,120 @@ test('legacy history preserves reasoning and replay without presenting unconvert
   await expect(answers.first()).not.toContainText('Input:')
 })
 
+test('a long history mounts only nearby messages, opens at the latest and follows a reply only while pinned', async ({
+  page,
+}) => {
+  await prepareChat(page)
+  await page.goto('/api/v1/auth/state')
+  const turns = 150
+  await page.evaluate(async (turns) => {
+    const messages = Array.from({ length: turns }, (_, index) => [
+      { id: `user-${index + 1}`, role: 'user', text: `Long question ${index + 1}`, createdAt: '2026-01-01T00:00:00Z' },
+      {
+        id: `answer-${index + 1}`,
+        role: 'assistant',
+        status: 'completed',
+        routeId: 'console-model',
+        thinkingLevel: 'default',
+        createdAt: '2026-01-01T00:00:00Z',
+        outputItems: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [
+              {
+                type: 'output_text',
+                text: Array.from({ length: 6 }, (_, line) => `Long answer ${index + 1} paragraph ${line + 1}.`).join(
+                  '\n\n',
+                ),
+              },
+            ],
+          },
+        ],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ]).flat()
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('stravia-console-chat', 1)
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore('conversations', { keyPath: 'id' })
+        request.result.createObjectStore('preferences')
+      }
+      request.onerror = () => reject(request.error ?? new Error('History database open failed'))
+      request.onsuccess = () => {
+        const database = request.result
+        const transaction = database.transaction(['conversations', 'preferences'], 'readwrite')
+        transaction
+          .objectStore('conversations')
+          .put({
+            id: 'long',
+            title: 'Long conversation',
+            apiKeyId: 'key-console',
+            apiKeyName: 'Console key',
+            selectedModelId: 'console-model',
+            thinkingSelection: 'default',
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+            messages,
+          })
+        transaction.objectStore('preferences').put({ apiKeyId: 'key-console', modelId: 'console-model' }, 'selection')
+        transaction.oncomplete = () => {
+          database.close()
+          resolve()
+        }
+        transaction.onabort = () => {
+          database.close()
+          reject(transaction.error ?? new Error('History seed transaction aborted'))
+        }
+      }
+    })
+  }, turns)
+  await page.goto('/?conversation=long')
+  const main = page.getByRole('main')
+  const articles = page.getByRole('article')
+  const distanceFromBottom = () =>
+    main.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)
+  await expect(page.getByText(`Long answer ${turns} paragraph 6.`, { exact: true })).toBeInViewport()
+  await expect.poll(distanceFromBottom).toBeLessThanOrEqual(2)
+  expect(await articles.count()).toBeLessThan(40)
+  await expect(page.getByText('Long question 1', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Jump to latest', exact: true })).toHaveCount(0)
+
+  await main.evaluate((element) => {
+    element.scrollTop = 0
+  })
+  await expect(page.getByText('Long question 1', { exact: true })).toBeInViewport()
+  await expect(page.getByText(`Long answer ${turns} paragraph 6.`, { exact: true })).toHaveCount(0)
+  const jump = page.getByRole('button', { name: 'Jump to latest', exact: true })
+  await expect(jump).toBeVisible()
+  await jump.click()
+  await expect(page.getByText(`Long answer ${turns} paragraph 6.`, { exact: true })).toBeInViewport()
+  await expect.poll(distanceFromBottom).toBeLessThanOrEqual(2)
+  await expect(jump).toHaveCount(0)
+
+  // 贴底时回复一路跟随到最新一行。
+  await send(page, 'Follow this reply', 1)
+  await emit(page, 0, {
+    type: 'response.output_text.delta',
+    delta: Array.from({ length: 40 }, (_, index) => `Streamed paragraph ${index + 1}.`).join('\n\n'),
+  })
+  await expect(page.getByText('Streamed paragraph 40.', { exact: true })).toBeInViewport()
+  await expect.poll(distanceFromBottom).toBeLessThanOrEqual(2)
+
+  // 读者向上翻阅后，新内容不再把阅读位置拽回底部。
+  await main.hover()
+  await page.mouse.wheel(0, -600)
+  await expect(jump).toBeVisible()
+  const reading = await main.evaluate((element) => element.scrollTop)
+  await emit(page, 0, {
+    type: 'response.output_text.delta',
+    delta: `\n\n${Array.from({ length: 20 }, (_, index) => `More streamed ${index + 1}.`).join('\n\n')}`,
+  })
+  await expect(page.getByText('More streamed 20.', { exact: true })).toHaveCount(0)
+  expect(await main.evaluate((element) => element.scrollTop)).toBeCloseTo(reading, 0)
+  await complete(page, 0, 'Done')
+})
+
 test('stops live output and refresh interrupts another turn without losing received content', async ({ page }) => {
   await prepareChat(page)
   await page.goto('/')

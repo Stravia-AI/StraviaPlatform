@@ -1,3 +1,10 @@
+<script module lang="ts">
+import { SvelteMap } from 'svelte/reactivity'
+
+// 聊天里的消息会随虚拟列表回收；人工展开或收起的结果要在行重新挂载后保留。
+const chatOpenChoices = new SvelteMap<string, boolean>()
+</script>
+
 <script lang="ts">
 import { untrack } from 'svelte'
 import BrainIcon from '@lucide/svelte/icons/brain'
@@ -21,7 +28,6 @@ let {
   expansionPolicy = 'manual',
   followed = false,
   minimumHeadingLevel = 1,
-  virtualized = false,
   revealed = false,
 }: {
   activity: ObservationActivity
@@ -31,8 +37,6 @@ let {
   /** 聊天策略：其后已开始正文或工具块。只有此信号变为 true 时才收起自动展开的思考。 */
   followed?: boolean
   minimumHeadingLevel?: 1 | 2
-  /** Observation conversation bodies can release offscreen Markdown while keeping disclosure controls mounted. */
-  virtualized?: boolean
   /** 外部要求展开（如凭据命中高亮）：只改本次会话的展开状态，不写入本地偏好。 */
   revealed?: boolean
 } = $props()
@@ -98,7 +102,7 @@ $effect(() => {
     if (observedIdentity !== id || observedPolicy !== policy) {
       observedIdentity = id
       observedPolicy = policy
-      if (policy === 'chat') open = activity.kind === 'thinking' && live && !after
+      if (policy === 'chat') open = chatOpenChoices.get(id) ?? (activity.kind === 'thinking' && live && !after)
       else {
         try {
           open = localStorage.getItem(storageKey) === 'true'
@@ -121,7 +125,10 @@ $effect(() => {
 
 function changeOpen(next: boolean): void {
   open = next
-  if (expansionPolicy === 'chat') return
+  if (expansionPolicy === 'chat') {
+    chatOpenChoices.set(activity.id, next)
+    return
+  }
   try {
     if (next) localStorage.setItem(storageKey, 'true')
     else localStorage.removeItem(storageKey)
@@ -182,7 +189,6 @@ function formatContent(content: unknown): string {
                 text={activity.text}
                 active={activity.live && liveActive && open}
                 {minimumHeadingLevel}
-                {virtualized}
                 snapshotKey={liveContentEpoch} />
             {:else}
               {#if activity.input !== undefined}

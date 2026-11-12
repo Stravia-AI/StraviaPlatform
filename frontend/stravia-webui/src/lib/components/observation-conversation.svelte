@@ -8,13 +8,21 @@ import {
   type ObservationChatMessage,
 } from '#lib/observation-conversation.js'
 import { observationConversationActivities } from '#lib/observation-activities.js'
-import { resolveCredentialHits, type CredentialHitHighlight } from '#lib/credential-hit-highlights.js'
+import {
+  estimateConversationRow,
+  observationConversationRows,
+  type ConversationRow,
+  type ConversationSectionCache,
+} from '#lib/observation-conversation-rows.js'
+import type { VirtualRow } from '#lib/virtual-list.js'
+import { resolveCredentialHits, type CredentialHitHighlight, type HitMark } from '#lib/credential-hit-highlights.js'
 import CredentialHitMark from '#lib/components/credential-hit-mark.svelte'
 import ObservationActivity from '#lib/components/observation-activity.svelte'
 import ConversationMessage from '#lib/components/conversation-message.svelte'
 import type { InteractionDetail, LiveContentBlock } from '#lib/types.js'
+import MarkdownContent from '#lib/components/markdown-content.svelte'
 import StreamingMarkdown from '#lib/components/streaming-markdown.svelte'
-import ObservationLogViewport from '#lib/components/observation-log-viewport.svelte'
+import VirtualLog from '#lib/components/virtual-log.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
@@ -66,6 +74,8 @@ const groups = $derived.by(() => {
 const durableActivities = $derived(observationConversationActivities(detail))
 const activities = $derived(observationConversationActivities(detail, liveBlocks, durableActivities))
 const responseBlocks = $derived(observationConversationBlocks(detail, liveBlocks, activities))
+const sectionCache: ConversationSectionCache = new Map()
+const rows = $derived(observationConversationRows(groups, responseBlocks, sectionCache, liveActive))
 
 const hits = $derived(
   credentialHits
@@ -97,18 +107,24 @@ $effect(() => {
   })
 })
 
-let shell = $state<HTMLElement>()
-let logViewport = $state<{ reveal(element: HTMLElement): void }>()
+/** 命中标记挂在哪一行：用户输入的首段、工具调用与结果所在的活动行。 */
+function rowMarks(row: ConversationRow): (HitMark | undefined)[] {
+  if (row.kind === 'section' && row.user && row.leading) return [hits?.userMessages.get(row.messageId)]
+  if (row.kind === 'activity' && row.block.kind === 'tool')
+    return [hits?.toolCalls.get(row.block.callId), hits?.toolResults.get(row.block.callId)]
+  return []
+}
+
+let logViewport = $state<{ reveal(key: string): boolean }>()
 let revealed = false
 $effect(() => {
   void hits
-  if (searching || revealed || !shell || !logViewport) return
-  const target =
-    shell.querySelector<HTMLElement>('[data-credential-hit="created"]') ??
-    shell.querySelector<HTMLElement>('[data-credential-hit]')
+  if (searching || revealed || !logViewport) return
+  const marked = rows.filter((row) => rowMarks(row).some((mark) => mark !== undefined))
+  const target = marked.find((row) => rowMarks(row).some((mark) => mark?.kind === 'created')) ?? marked[0]
   if (!target) return
   revealed = true
-  logViewport.reveal(target)
+  untrack(() => logViewport?.reveal(target.key))
 })
 // Refreshing an equal snapshot or mounting its offscreen DOM is not a new source revision.
 const activityKey = $derived(
@@ -116,7 +132,50 @@ const activityKey = $derived(
 )
 </script>
 
-<div class="conversation-shell" bind:this={shell}>
+{#snippet conversationRow(row: ConversationRow)}
+  <div class={['conversation-row', `space-${row.space}`, row.user && 'is-user', row.wide && 'is-wide']}>
+    {#if row.kind === 'section'}
+      <div class={['row-body', row.bubble && `bubble-${row.bubble}`]}>
+        <CredentialHitMark marks={rowMarks(row)} {ruleNames}>
+          <MarkdownContent text={row.section.source} deferred={row.section} allowImages={row.allowImages} />
+        </CredentialHitMark>
+      </div>
+    {:else if row.kind === 'live'}
+      <div class="row-body">
+        <StreamingMarkdown text={row.block.text} active snapshotKey={liveContentEpoch} allowImages />
+      </div>
+    {:else if row.kind === 'activity'}
+      {@const marks = rowMarks(row)}
+      <div class="row-body">
+        <CredentialHitMark {marks} {ruleNames}>
+          <ObservationActivity
+            activity={row.block}
+            {liveActive}
+            {liveContentEpoch}
+            revealed={marks.some((mark) => mark !== undefined)} />
+        </CredentialHitMark>
+      </div>
+    {:else}
+      <time class="row-meta font-technical" datetime={new Date(row.at).toISOString()}>{formatLogTime(row.at)}</time>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet conversationSegment(
+  _group: string,
+  parts: VirtualRow<ConversationRow>[],
+  measured: Snippet<[VirtualRow<ConversationRow>]>,
+)}
+  {@const first = parts[0].item}
+  <ConversationMessage
+    rows
+    user={first.user}
+    label={first.user ? m.observation_chat_you() : first.model || m.observation_chat_model()}>
+    {#each parts as part (part.key)}{@render measured(part)}{/each}
+  </ConversationMessage>
+{/snippet}
+
+<div class="conversation-shell">
   {#if credentialHits}
     <Alert.Root role="status" class="hit-banner">
       <div class="hit-banner-body">
@@ -147,63 +206,21 @@ const activityKey = $derived(
     </Alert.Root>
   {/if}
   <div class="conversation-viewport">
-    <ObservationLogViewport
+    <VirtualLog
       bind:this={logViewport}
       label={m.observation_conversation()}
+      {rows}
+      rowKey={(row: ConversationRow) => row.key}
+      estimateSize={estimateConversationRow}
+      row={conversationRow}
+      group={(row: ConversationRow) => row.group}
+      segment={conversationSegment}
       {activityKey}
       olderCursor={detail.older_events_cursor}
       {olderLoading}
-      {onolder}>
-      {#snippet children(older: Snippet)}
-        <div class="conversation-messages">
-          <!-- 更早事件插在用户预览之后；没有用户预览时加载行落在卷轴顶部。 -->
-          {#if groups[0]?.[0]?.role !== 'user'}{@render older()}{/if}
-          {#each groups as group, index (group[0].id)}
-            {@const user = group[0].role === 'user'}
-            {@const actor = user ? m.observation_chat_you() : group[0].model || m.observation_chat_model()}
-            <ConversationMessage {user} label={actor}>
-              {#each group as message (message.id)}
-                {#if user}
-                  <CredentialHitMark marks={[hits?.userMessages.get(message.id)]} {ruleNames}>
-                    <StreamingMarkdown text={message.text} active={false} snapshotKey={liveContentEpoch} virtualized />
-                  </CredentialHitMark>
-                {:else}
-                  {#each responseBlocks.get(message.id) ?? [] as block (block.id)}
-                    {#if block.kind === 'text'}
-                      <StreamingMarkdown
-                        text={block.text}
-                        active={block.live && liveActive}
-                        snapshotKey={liveContentEpoch}
-                        virtualized
-                        allowImages />
-                    {:else}
-                      {@const marks =
-                        block.kind === 'tool'
-                          ? [hits?.toolCalls.get(block.callId), hits?.toolResults.get(block.callId)]
-                          : []}
-                      <CredentialHitMark {marks} {ruleNames}>
-                        <ObservationActivity
-                          activity={block}
-                          {liveActive}
-                          {liveContentEpoch}
-                          virtualized
-                          revealed={marks.some((mark) => mark !== undefined)} />
-                      </CredentialHitMark>
-                    {/if}
-                  {/each}
-                {/if}
-              {/each}
-              {#snippet meta()}
-                <time class="font-technical" datetime={new Date(group[group.length - 1].at).toISOString()}>
-                  {formatLogTime(group[group.length - 1].at)}
-                </time>
-              {/snippet}
-            </ConversationMessage>
-            {#if index === 0 && user}{@render older()}{/if}
-          {/each}
-        </div>
-      {/snippet}
-    </ObservationLogViewport>
+      {onolder}
+      paddingStart={16}
+      class="conversation-log" />
   </div>
 </div>
 
@@ -241,12 +258,45 @@ const activityKey = $derived(
   flex-wrap: wrap;
   gap: 0.5rem;
 }
-.conversation-messages {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  padding: 1rem;
+.conversation-shell :global(.conversation-log) {
   /* 检查器可被拖宽，正文仍保持阅读宽度。 */
   max-width: calc(var(--reading-max-width) + 2rem);
+  padding-inline: 1rem;
+}
+/* 行距由行自己的内边距承担：虚拟化器只量得到行高，量不到行与行之间的外边距。 */
+.conversation-row.space-block {
+  padding-bottom: 0.75rem;
+}
+.conversation-row.is-user .row-body {
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+  background: var(--muted);
+  padding-inline: 1rem;
+}
+.conversation-row.is-user.is-wide .row-body {
+  width: 100%;
+}
+.conversation-row.is-user .row-body:is(.bubble-first, .bubble-only) {
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-lg);
+  padding-top: 0.75rem;
+}
+.conversation-row.is-user .row-body:is(.bubble-last, .bubble-only) {
+  border-bottom-left-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-lg);
+  padding-bottom: 0.75rem;
+}
+.row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  padding-block: 0.375rem 1.5rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.is-user .row-meta {
+  justify-content: flex-end;
 }
 </style>
