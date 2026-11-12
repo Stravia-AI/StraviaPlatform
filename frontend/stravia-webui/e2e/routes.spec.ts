@@ -1437,6 +1437,32 @@ const geometryProvider = (id: string, name: string) => ({
   updated_at: '2026-08-17T00:00:00Z',
 })
 
+test('Destination provider dropdown is not clipped by the dialog edge or a short viewport', async ({ page }) => {
+  const providers = Array.from({ length: 14 }, (_, index) => geometryProvider(`provider-${index}`, `Provider ${index}`))
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: providers } }))
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [] } }))
+
+  // 712：候选列表比矮对话框更高，会越过对话框下缘；420：视口比列表高度上限更矮。
+  for (const height of [712, 420]) {
+    await page.setViewportSize({ width: 1568, height })
+    await page.goto('/models/new')
+    await page.getByRole('button', { name: 'Add destination', exact: true }).click()
+    await page.getByRole('dialog').getByRole('combobox', { name: 'Destination 1 provider', exact: true }).click()
+    const options = page.getByRole('listbox')
+    await expect(options).toBeVisible()
+    // 列表整体落在视口内，且最底部一行能被命中，说明没有被对话框或视口裁掉。
+    await expect
+      .poll(() =>
+        options.evaluate((list) => {
+          const box = list.getBoundingClientRect()
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.bottom - 4)
+          return { fitsViewport: box.top >= 0 && box.bottom <= window.innerHeight, reachable: list.contains(hit) }
+        }),
+      )
+      .toEqual({ fitsViewport: true, reachable: true })
+  }
+})
+
 test('Models empty state is global, never names an arbitrary provider, and points at the provider model list', async ({
   page,
 }) => {

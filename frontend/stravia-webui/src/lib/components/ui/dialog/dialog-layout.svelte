@@ -22,8 +22,14 @@ let {
 } = $props()
 </script>
 
-<Content bind:ref class={cn('gap-0 overflow-hidden p-0', className)} {showCloseButton} {...restProps}>
-  <div data-slot="dialog-frame" class="flex max-h-[calc(100dvh-2rem)] min-w-0 flex-col overflow-hidden">
+<!--
+  圆角裁剪放在内层 frame，Content 保持 overflow: visible：Content 带 transform，是 fixed 浮层的包含块，
+  若它裁剪，内联渲染的下拉候选（如 SearchCombobox）会被对话框边缘截断。
+-->
+<Content bind:ref class={cn('gap-0 p-0', className)} {showCloseButton} {...restProps}>
+  <div
+    data-slot="dialog-frame"
+    class="flex max-h-[calc(100dvh-2rem)] min-w-0 flex-col overflow-hidden rounded-[inherit]">
     {#if header}
       <div
         data-slot="dialog-header"

@@ -179,6 +179,7 @@ function handleKeydown(event: KeyboardEvent): void {
     <Popover.Content
       customAnchor={group}
       portalProps={{ disabled: true }}
+      collisionPadding={8}
       align="start"
       class="w-(--bits-popover-anchor-width) p-0"
       trapFocus={false}
@@ -188,7 +189,11 @@ function handleKeydown(event: KeyboardEvent): void {
         if (event.target === input) event.preventDefault()
       }}
       onmousedown={(event: MouseEvent) => event.preventDefault()}>
-      <Command.List id={`${id}-options`} aria-label={ariaLabel}>
+      <!-- 候选列表随浮层可用空间收缩并内部滚动，窄视口或矮对话框里也不会被边缘截断。 -->
+      <Command.List
+        id={`${id}-options`}
+        aria-label={ariaLabel}
+        class="max-h-[min(18rem,var(--bits-popover-content-available-height))]">
         {#if filteredOptions.length === 0}
           <Command.Empty>{emptyText}</Command.Empty>
         {:else}
