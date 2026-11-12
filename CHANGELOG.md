@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.7.0] - 2026-11-12
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Added
 
 - Vendor plugin marketplace with signed release catalogs, explicit third-party source trust, source-bound update checks, bounded Zstd downloads and local `.wasm.zst` import. Installation still requires a credential and data-impact preview; changed keys and conflicting versions cannot silently replace installed code.
