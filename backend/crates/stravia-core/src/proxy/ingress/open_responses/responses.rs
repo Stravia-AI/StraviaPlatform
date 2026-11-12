@@ -97,21 +97,6 @@ pub async fn handler(
             );
         }
     };
-    if crate::proxy::dispatcher::is_websocket_delivery_deferred(&ctx)
-        && stravia_protocol_codec::codec::compaction::standalone_compaction_requested(&request)
-    {
-        return observation::reject(
-            observer,
-            "protocol",
-            "unsupported_feature",
-            protocol_error(
-                StatusCode::BAD_REQUEST,
-                "unsupported_feature",
-                Some("input"),
-                "Standalone compaction requires HTTP POST /v1/responses with stream: true; WebSocket response.create is not supported.",
-            ),
-        );
-    }
     if let Err((param, message)) =
         classify_standalone_compaction(&mut ctx, &request, OPEN_RESPONSES_2026_04_24)
     {

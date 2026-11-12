@@ -4,8 +4,8 @@
 //! Old ingress handlers (`openai_proxy`, `anthropic_proxy`, etc.) have been
 //! replaced by `proxy/ingress/*.rs` thin shells wired directly in `server.rs`.
 //!
-//! This file now contains only `models_list`, which is a read-only endpoint
-//! that does not go through the proxy pipeline.
+//! Read-only model discovery endpoints that do not go through the proxy pipeline:
+//! `models_list` (`/v1/models`) and `codex_models_list` (`/codex/models`).
 
 use std::collections::HashSet;
 
@@ -15,6 +15,10 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 
 use crate::Gateway;
+use crate::admin::routes::RouteModule;
+use crate::connect_client_apply::{ConnectClientModel, codex_catalog};
+use crate::db::models::RouteOutputModality;
+use crate::error::GatewayError;
 use crate::proxy::security::{ClientCredential, Security};
 
 // ── GET /v1/models ────────────────────────────────────────────────────────────
@@ -70,6 +74,55 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
         "data": data
     }))
     .into_response()
+}
+
+// ── GET /codex/models ─────────────────────────────────────────────────────────
+
+/// Codex `model_catalog_url` 端点：返回 `{"models": [ModelInfo, ...]}`，不是 `/v1/models` 的 `{"data": [...]}`。
+///
+/// 认证与可见范围同 `/v1/models`。Codex 只能用文本输出的 Route 做对话，其余 Route 不进入目录。
+/// 401/403 会让 Codex 清空目录，所以认证失败按原状态码返回，不降级为空目录。
+pub async fn codex_models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Response {
+    let credential = ClientCredential::from_inference_headers(&headers);
+    let access = match Security::new(gw.storage.auth())
+        .model_catalog_access(&credential)
+        .await
+    {
+        Ok(access) => access,
+        Err(error) => return error.render(None),
+    };
+
+    let mut routes = gw
+        .model_cache
+        .read()
+        .await
+        .models
+        .iter()
+        .filter(|route| {
+            route.output_modality == Some(RouteOutputModality::Text)
+                && !route.model_id.trim().is_empty()
+                && access.allows(&route.id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    // 缓存里的 Route 不带上下文窗口与图片输入能力，需按已启用 Target 的 Provider Model 投影。
+    if let Err(error) = RouteModule::new(&gw)
+        .project_client_capabilities(&mut routes)
+        .await
+    {
+        return GatewayError::internal(error).render(None);
+    }
+    routes.sort_by(|left, right| {
+        left.effective_display_name()
+            .cmp(right.effective_display_name())
+            .then_with(|| left.model_id.cmp(&right.model_id))
+    });
+
+    let models = routes
+        .iter()
+        .map(ConnectClientModel::from)
+        .collect::<Vec<_>>();
+    Json(codex_catalog(&models, access.media_understanding())).into_response()
 }
 
 #[cfg(test)]
@@ -399,6 +452,207 @@ mod tests {
         assert_eq!(
             response.status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    async fn codex_catalog_models(response: Response) -> Vec<serde_json::Value> {
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("Codex catalog body");
+        let catalog: serde_json::Value = serde_json::from_slice(&body).expect("Codex catalog JSON");
+        catalog["models"]
+            .as_array()
+            .expect("Codex catalog models")
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn codex_models_list_projects_the_keys_text_routes_with_provider_model_specs() {
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let config = crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let gateway = Gateway::new(config).await.expect("gateway init");
+        let provider = gateway
+            .admin()
+            .create_provider(CreateProvider {
+                name: Some("Codex catalog provider".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "custom".into(),
+                    channel: "default".into(),
+                    protocol: Some("openai-compatible".into()),
+                    base_url: "http://127.0.0.1:9/v1".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::ApiKey {
+                    value: "provider-secret".into(),
+                },
+                vendor_options: Default::default(),
+                use_proxy: false,
+            })
+            .await
+            .expect("provider");
+        for (upstream, context, input, output) in [
+            (
+                "vision-upstream",
+                200_000,
+                ["text", "image"].as_slice(),
+                "text",
+            ),
+            ("text-upstream", 64_000, ["text"].as_slice(), "text"),
+            ("image-upstream", 4_000, ["text"].as_slice(), "image"),
+        ] {
+            gateway
+                .admin()
+                .create_manual_provider_model(
+                    &provider.id,
+                    upstream,
+                    CreateManualProviderModel {
+                        metadata: serde_json::json!({
+                            "id": upstream,
+                            "name": upstream,
+                            "limit": {"context": context, "output": 8_000},
+                            "modalities": {"input": input, "output": [output]},
+                        }),
+                        template_id: None,
+                    },
+                )
+                .await
+                .expect("Provider Model");
+        }
+        let mut routes = std::collections::BTreeMap::new();
+        for (model_id, display_name, upstream, modality) in [
+            (
+                "vision-route",
+                Some("Vision"),
+                "vision-upstream",
+                crate::db::models::RouteOutputModality::Text,
+            ),
+            (
+                "text-route",
+                None,
+                "text-upstream",
+                crate::db::models::RouteOutputModality::Text,
+            ),
+            (
+                "image-route",
+                None,
+                "image-upstream",
+                crate::db::models::RouteOutputModality::Image,
+            ),
+            (
+                "unbound-route",
+                None,
+                "text-upstream",
+                crate::db::models::RouteOutputModality::Text,
+            ),
+        ] {
+            let route = gateway
+                .admin()
+                .create_model(CreateRoute {
+                    output_modality: modality,
+                    model_id: model_id.into(),
+                    display_name: display_name.map(ToOwned::to_owned),
+                    balance: Some("traffic_equalization".into()),
+                    targets: vec![CreateTarget {
+                        provider_id: provider.id.clone(),
+                        model: upstream.into(),
+                        enabled: true,
+                        priority: Some(1),
+                        first_token_timeout_ms: None,
+                        target_retry_budget: None,
+                        target_cooldown_ms: None,
+                        thinking_level_map: Vec::new(),
+                    }],
+                    default_thinking_level: None,
+                    billing: None,
+                })
+                .await
+                .expect("Route");
+            routes.insert(model_id, route);
+        }
+        let create_key = |name: &str, media_understanding: bool| crate::db::models::CreateApiKey {
+            key: None,
+            name: name.into(),
+            rpm_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: media_understanding,
+            transparent_injections: crate::db::models::TransparentInjectionSet::from_items(
+                media_understanding
+                    .then_some(crate::db::models::TransparentInjection::MediaUnderstanding),
+            ),
+            model_ids: ["vision-route", "text-route", "image-route"]
+                .map(|model_id| routes[model_id].id.clone().into())
+                .to_vec(),
+            spend_limit: None,
+        };
+        let plain_key = gateway
+            .admin()
+            .create_api_key(create_key("Codex plain key", false))
+            .await
+            .expect("plain API key");
+        let media_key = gateway
+            .admin()
+            .create_api_key(create_key("Codex media key", true))
+            .await
+            .expect("media API key");
+        let headers_for = |key: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {key}")).expect("auth header"),
+            );
+            headers
+        };
+
+        assert_eq!(
+            codex_models_list(State(gateway.clone()), HeaderMap::new())
+                .await
+                .status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            codex_models_list(State(gateway.clone()), headers_for("invalid"))
+                .await
+                .status(),
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        let models = codex_catalog_models(
+            codex_models_list(State(gateway.clone()), headers_for(&plain_key.token)).await,
+        )
+        .await;
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().expect("slug"))
+                .collect::<Vec<_>>(),
+            ["vision-route", "text-route"],
+            "only the key's text-output Routes, ordered by display name"
+        );
+        assert_eq!(models[0]["display_name"], "Vision");
+        assert_eq!(models[0]["priority"], 0);
+        assert_eq!(models[1]["priority"], 1);
+        assert_eq!(models[0]["context_window"], 200_000);
+        assert_eq!(models[1]["context_window"], 64_000);
+        assert_eq!(
+            models[0]["input_modalities"],
+            serde_json::json!(["text", "image"])
+        );
+        assert_eq!(models[1]["input_modalities"], serde_json::json!(["text"]));
+
+        let models = codex_catalog_models(
+            codex_models_list(State(gateway), headers_for(&media_key.token)).await,
+        )
+        .await;
+        assert_eq!(
+            models[1]["input_modalities"],
+            serde_json::json!(["text", "image"]),
+            "Media Understanding injection lets text-only Routes accept images"
         );
     }
 }

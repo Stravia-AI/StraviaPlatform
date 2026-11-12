@@ -238,6 +238,25 @@ impl RouteModule<'_> {
         &self,
         routes: &mut [RouteConfig],
     ) -> anyhow::Result<()> {
+        self.project_route_targets(routes, true).await
+    }
+
+    /// 只投影客户端模型目录需要的 `context_window` 与 `supports_image_input`。
+    ///
+    /// 原生压缩探测要准备 Vendor 执行，客户端目录轮询不应承担这个开销；
+    /// 因此 `supports_remote_compaction` 在此路径上不是有效投影，调用方不得读取。
+    pub(crate) async fn project_client_capabilities(
+        &self,
+        routes: &mut [RouteConfig],
+    ) -> anyhow::Result<()> {
+        self.project_route_targets(routes, false).await
+    }
+
+    async fn project_route_targets(
+        &self,
+        routes: &mut [RouteConfig],
+        probe_remote_compaction: bool,
+    ) -> anyhow::Result<()> {
         let mut projections = BTreeMap::<String, TargetModelProjection>::new();
         let image_route_id = crate::media_generation::config::load(self.gw)
             .await?
@@ -276,14 +295,15 @@ impl RouteModule<'_> {
                         .as_ref()
                         .and_then(|limit| limit.context);
                     let modalities = record.metadata.effective_modalities();
-                    let supports_remote_compaction = self
-                        .target_supports_remote_compaction(
-                            target.provider_id().as_str(),
-                            model,
-                            &record,
-                            &context,
-                        )
-                        .await;
+                    let supports_remote_compaction = probe_remote_compaction
+                        && self
+                            .target_supports_remote_compaction(
+                                target.provider_id().as_str(),
+                                model,
+                                &record,
+                                &context,
+                            )
+                            .await;
                     projections.insert(
                         key.clone(),
                         TargetModelProjection {

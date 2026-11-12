@@ -1165,7 +1165,6 @@ describe('Stravia desktop smoke', () => {
 
     await mkdir(codexHome, { recursive: true })
     const configPath = join(codexHome, 'config.toml')
-    const catalogPath = join(codexHome, 'stravia-models.json')
     await writeFile(
       configPath,
       [
@@ -1312,19 +1311,31 @@ describe('Stravia desktop smoke', () => {
         { timeout: 10_000, timeoutMsg: 'Codex configuration did not receive the Stravia provider' },
       )
 
+      const apiKeyValue = `sk-desktop-smoke-${fixtureSuffix}`
+      const catalogUrl = `http://127.0.0.1:${serverPort}/codex/models`
       expect(writtenConfig).toMatchObject({
         model: 'user-current-model',
         approval_policy: 'never',
         model_provider: 'stravia',
-        model_catalog_json: catalogPath,
         model_providers: {
           existing: { name: 'Existing provider', base_url: 'https://existing.invalid/v1' },
-          stravia: expect.any(Object),
+          stravia: {
+            model_catalog_url: catalogUrl,
+            supports_websockets: true,
+            experimental_bearer_token: apiKeyValue,
+          },
         },
         profiles: { personal: { model: 'profile-current-model' } },
       })
+      // 静态 `model_catalog_json` 优先于 `model_catalog_url`，Apply 必须不留下它，实时目录才会生效。
+      expect(writtenConfig).not.toHaveProperty('model_catalog_json')
 
-      const catalogPayload: unknown = JSON.parse(await readFile(catalogPath, 'utf8'))
+      // 用写入的地址和密钥拉取目录，等同 Codex 的实时发现请求。
+      const catalogResponse = await fetch(`${catalogUrl}?client_version=0.0.0`, {
+        headers: { Authorization: `Bearer ${apiKeyValue}` },
+      })
+      expect(catalogResponse.status).toBe(200)
+      const catalogPayload: unknown = await catalogResponse.json()
       if (typeof catalogPayload !== 'object' || catalogPayload === null || !('models' in catalogPayload)) {
         throw new Error('Codex model catalog did not contain a models collection')
       }

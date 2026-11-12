@@ -241,11 +241,12 @@ async fn api_not_found() -> StatusCode {
 
 #[cfg(all(feature = "embed-webui", not(debug_assertions)))]
 fn is_reserved_api_namespace(path: &str) -> bool {
-    matches!(path, "/api" | "/v1" | "/v1beta" | "/mcp")
+    matches!(path, "/api" | "/v1" | "/v1beta" | "/mcp" | "/codex")
         || path.starts_with("/mcp/")
         || path.starts_with("/api/")
         || path.starts_with("/v1/")
         || path.starts_with("/v1beta/")
+        || path.starts_with("/codex/")
 }
 
 #[cfg(all(feature = "embed-webui", not(debug_assertions)))]

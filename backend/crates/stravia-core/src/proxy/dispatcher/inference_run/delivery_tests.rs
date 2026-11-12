@@ -598,3 +598,133 @@ async fn standalone_sse_receipt_requires_the_complete_http_body() {
         assert_eq!(phases, [expected_phase]);
     }
 }
+
+/// WebSocket 与 HTTP 共用同一发布边界：独立压缩结果整体缓冲后交付，只有终态帧
+/// 确认发出才算发布；只发出 compaction 条目帧就断开，保持未确认。
+#[tokio::test]
+async fn standalone_websocket_receipt_requires_the_terminal_frame() {
+    for (terminal_sent, expected_phase) in [(true, "published"), (false, "delivery_unconfirmed")] {
+        let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let observation = InteractionObservation::new(
+            Some(pool.clone()),
+            None,
+            directory.path().to_path_buf(),
+            crate::history_retention::HistoryRetention::new(7),
+            false,
+            crate::generation_chain::test_chain().await,
+        )
+        .await;
+        let request = std::sync::Arc::new(AiRequest::new("model", Vec::new()));
+        let observer = observation
+            .observe_ingress(IngressStart {
+                id: "standalone-websocket".into(),
+                method: "WEBSOCKET".into(),
+                path: "/v1/responses".into(),
+                protocol: "open-responses/responses/2026-04-24".into(),
+            })
+            .admit(
+                RunStart {
+                    id: "standalone-websocket".into(),
+                    principal: "owner".into(),
+                    api_key_id: None,
+                    api_key_name: None,
+                    route_id: "local-route".into(),
+                    model_display_name: None,
+                    ingress_protocol: "open-responses/responses/2026-04-24".into(),
+                },
+                AdmissionFacts {
+                    client_request: (*request).clone().into(),
+                    has_new_user: true,
+                    has_matching_pending_tool_result: false,
+                    generation_root_id: None,
+                    generation_parent_id: None,
+                },
+            );
+        let wire = serde_json::json!({"type":"compaction","id":"standalone-ws-state","encrypted_content":"native-state"});
+        let item = stravia_protocol_codec::codec::open_responses::decoder::decode_input_item(&wire)
+            .unwrap()
+            .unwrap();
+        let compaction = Compaction::sqlite(pool);
+        let principal = stravia_runtime_contract::Principal::new("owner");
+        let record = compaction
+            .register(
+                &principal,
+                CompactionRegistration {
+                    logical_turn: None,
+                    source_history: None,
+                    source_window: None,
+                    user_prompt_metadata: None,
+                    atomic_checkpoint_id: None,
+                    source_generation_id: None,
+                    source_record_ids: Vec::new(),
+                    operation_id: "standalone-ws-operation".into(),
+                    target: CompactionTarget {
+                        target_key: "local-target".into(),
+                        namespace: "local-account".into(),
+                        model: "local-model".into(),
+                        protocol: "open-responses/responses/2026-04-24".into(),
+                    },
+                    window: vec![item.clone()],
+                    state_items: vec![item.clone()],
+                },
+            )
+            .await
+            .unwrap();
+        let publications = crate::model_turn::CompactionPublications::default();
+        publications.lock().push(CompactionPublication {
+            record_id: record.id,
+            operation_id: "standalone-ws-operation".into(),
+            model_turn_id: "turn".into(),
+            mode: CompactionMode::Standalone,
+            source_generation_id: None,
+            state: item,
+            receipt: CompactionReceipt::Pending,
+        });
+        let terminal =
+            RunTerminalContext::new(None, None, request, compaction, principal, publications);
+        let mut delivery = WebSocketRunDelivery {
+            root: tracing::Span::none(),
+            request_usage: None,
+            delivery_span: tracing::Span::none(),
+            observer,
+            connection: None,
+            terminal,
+            stream_completion: None,
+            delivery_completed_at: None,
+            committed: false,
+            finished: false,
+            decoder: stravia_protocol_codec::codec::open_responses::parser::ResponsesStreamParser::default(),
+        };
+        let mut frames = vec![serde_json::json!({
+            "type": "response.output_item.done", "output_index": 0, "item": wire
+        })];
+        if terminal_sent {
+            frames.push(serde_json::json!({
+                "type": "response.completed", "response": {"output": [wire]}
+            }));
+        }
+        for frame in frames {
+            delivery.sent_text(&frame.to_string());
+        }
+        if terminal_sent {
+            delivery.finish("delivered", None);
+        } else {
+            delivery.finish("delivery_failed", Some("client_disconnected".into()));
+        }
+        observation.flush().await.unwrap();
+        let forest = observation.query_forest(Default::default()).await.unwrap();
+        let detail = observation
+            .get_interaction(&forest.roots[0].interactions[0].id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let phases = detail.runs[0]
+            .events
+            .iter()
+            .filter(|event| event.kind == "compaction_operation")
+            .map(|event| event.payload["phase"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(phases, [expected_phase]);
+    }
+}

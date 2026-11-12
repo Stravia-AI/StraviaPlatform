@@ -46,6 +46,26 @@ pub struct ConnectClientModel {
     pub context_window: Option<u64>,
 }
 
+/// 与管理面 `defineClientModel` 保持同一映射：Route 投影为 Connect Client 的模型定义。
+impl From<&crate::db::models::RouteConfig> for ConnectClientModel {
+    fn from(route: &crate::db::models::RouteConfig) -> Self {
+        Self {
+            model_id: route.model_id.as_str().to_owned(),
+            display_name: route.effective_display_name().to_owned(),
+            output_modality: route.output_modality,
+            supported_thinking_levels: route
+                .supported_thinking_levels
+                .iter()
+                .map(|level| level.as_str().to_owned())
+                .collect(),
+            default_thinking_level: route.default_thinking_level.clone(),
+            supports_image_input: route.supports_image_input,
+            supports_remote_compaction: route.supports_remote_compaction,
+            context_window: route.context_window,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeModelMappings {
@@ -653,23 +673,19 @@ fn plan_codex(
     paths: &ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
-    let [config_path, catalog_path] = paths.resolve(
-        ["~/.codex/config.toml", "~/.codex/stravia-models.json"],
-        |environment| {
-            let root = configured_root(environment, "CODEX_HOME", ".codex")?;
-            Ok([root.join("config.toml"), root.join("stravia-models.json")])
-        },
-    )?;
+    let [config_path] = paths.resolve(["~/.codex/config.toml"], |environment| {
+        Ok([configured_root(environment, "CODEX_HOME", ".codex")?.join("config.toml")])
+    })?;
     let mut document = parse_toml(&config_path, existing_files.get(&config_path))?;
-    let catalog_pointer = catalog_path.display().to_string();
-    let provider = TomlValue::Table(TomlTable::from_iter([
+    let host = input.host.trim_end_matches('/');
+    let mut provider = TomlTable::from_iter([
         (
             "name".to_owned(),
             TomlValue::String("Stravia Gateway".to_owned()),
         ),
         (
             "base_url".to_owned(),
-            TomlValue::String(format!("{}/v1", input.host.trim_end_matches('/'))),
+            TomlValue::String(format!("{host}/v1")),
         ),
         (
             "wire_api".to_owned(),
@@ -679,7 +695,33 @@ fn plan_codex(
             "experimental_bearer_token".to_owned(),
             TomlValue::String(input.api_key.clone()),
         ),
-    ]));
+        // Codex 带同一个 Bearer 实时拉取目录；provider 已有认证时才会触发拉取。
+        (
+            "model_catalog_url".to_owned(),
+            TomlValue::String(format!("{host}/codex/models")),
+        ),
+        // WebSocket 传输同时让 Codex 用 `previous_response_id` 增量续写。
+        ("supports_websockets".to_owned(), TomlValue::Boolean(true)),
+    ]);
+    // Codex 只在 provider 级别声明远程压缩，无法按模型开关：仅当目录里的每个模型都
+    // 明确支持 V2 时才启用，避免 Codex 对不合格模型发出注定失败的压缩请求。
+    let mut codex_models = input
+        .models
+        .iter()
+        .filter(|model| {
+            model.output_modality != Some(crate::db::models::RouteOutputModality::Image)
+        })
+        .peekable();
+    if codex_models.peek().is_some() && codex_models.all(|model| model.supports_remote_compaction) {
+        provider.insert(
+            "capabilities".to_owned(),
+            TomlValue::Table(TomlTable::from_iter([(
+                "remote_compaction".to_owned(),
+                TomlValue::String("v2".to_owned()),
+            )])),
+        );
+    }
+    let provider = TomlValue::Table(provider);
 
     let table = document
         .as_table_mut()
@@ -688,27 +730,19 @@ fn plan_codex(
         "model_provider".to_owned(),
         TomlValue::String("stravia".to_owned()),
     );
-    table.insert(
-        "model_catalog_json".to_owned(),
-        TomlValue::String(catalog_pointer.clone()),
-    );
+    // 静态 `model_catalog_json` 优先于 `model_catalog_url`；保留它会让实时目录失效。
+    table.remove("model_catalog_json");
     let providers = ensure_toml_table(table, "model_providers")?;
     providers.insert("stravia".to_owned(), provider.clone());
 
     let config_bytes = toml::to_string_pretty(&document)
         .map_err(|cause| error("serialize_error", cause.to_string(), Some(&config_path)))?
         .into_bytes();
-    let catalog_bytes = serde_json::to_vec_pretty(&codex_catalog(input))
-        .map_err(|cause| error("serialize_error", cause.to_string(), Some(&catalog_path)))?;
 
     let preview_document = TomlValue::Table(TomlTable::from_iter([
         (
             "model_provider".to_owned(),
             TomlValue::String("stravia".to_owned()),
-        ),
-        (
-            "model_catalog_json".to_owned(),
-            TomlValue::String(catalog_pointer),
         ),
         (
             "model_providers".to_owned(),
@@ -717,34 +751,19 @@ fn plan_codex(
     ]));
     let preview_toml = toml::to_string_pretty(&preview_document)
         .map_err(|cause| error("serialize_error", cause.to_string(), Some(&config_path)))?;
-    let preview_catalog =
-        String::from_utf8(catalog_bytes.clone()).expect("serde_json always emits UTF-8");
-    let paths = vec![
-        config_path.display().to_string(),
-        catalog_path.display().to_string(),
-    ];
+    let paths = vec![config_path.display().to_string()];
     let root = config_path
         .parent()
         .expect("global config path has a parent")
         .display()
         .to_string();
     Ok(ConnectClientApplyPlan {
-        preview: format!(
-            "# {}\n{}\n# {}\n{}",
-            paths[0], preview_toml, paths[1], preview_catalog
-        ),
-        files: vec![
-            PlannedConnectClientFile {
-                path: paths[0].clone(),
-                bytes: config_bytes,
-                root: root.clone(),
-            },
-            PlannedConnectClientFile {
-                path: paths[1].clone(),
-                bytes: catalog_bytes,
-                root,
-            },
-        ],
+        preview: format!("# {}\n{}", paths[0], preview_toml),
+        files: vec![PlannedConnectClientFile {
+            path: paths[0].clone(),
+            bytes: config_bytes,
+            root,
+        }],
         paths,
     })
 }
@@ -1267,9 +1286,14 @@ fn ensure_toml_table<'a>(
         .ok_or_else(|| error("merge_error", format!("`{key}` must be a table"), None))
 }
 
-fn codex_catalog(input: &ConnectClientApplyInput) -> JsonValue {
-    let models = input
-        .models
+/// Codex `model_catalog_json` 与 `model_catalog_url` 响应共用的目录体（`{"models": [ModelInfo, ...]}`）。
+///
+/// `priority` 按 `models` 顺序递增，Codex 据此排序选择器。
+pub fn codex_catalog(
+    models: &[ConnectClientModel],
+    transparent_image_input_enabled: bool,
+) -> JsonValue {
+    let models = models
         .iter()
         .enumerate()
         .map(|(priority, model)| {
@@ -1317,10 +1341,7 @@ fn codex_catalog(input: &ConnectClientApplyInput) -> JsonValue {
                 ("experimental_supported_tools".to_owned(), json!([])),
                 (
                     "input_modalities".to_owned(),
-                    json!(input_modalities(
-                        model,
-                        input.transparent_image_input_enabled
-                    )),
+                    json!(input_modalities(model, transparent_image_input_enabled)),
                 ),
             ]);
             if let Some(context_window) = model.context_window {
@@ -1444,33 +1465,20 @@ name = "Other"
 
         let plan = plan_connect_client_apply(&input, &environment, &existing).expect("valid plan");
 
-        assert_eq!(
-            plan.paths,
-            vec![
-                config_path.display().to_string(),
-                codex_home.join("stravia-models.json").display().to_string(),
-            ]
-        );
+        assert_eq!(plan.paths, vec![config_path.display().to_string()]);
         let config = plan
             .files
             .iter()
             .find(|file| file.path == config_path.display().to_string())
             .expect("Codex config file");
+        assert_eq!(plan.files.len(), 1);
         let document =
             toml::from_str::<TomlValue>(std::str::from_utf8(&config.bytes).expect("UTF-8 TOML"))
                 .expect("valid TOML");
         assert_eq!(document["model"].as_str(), Some("existing-model"));
         assert_eq!(document["model_provider"].as_str(), Some("stravia"));
-        assert_eq!(
-            document["model_catalog_json"].as_str(),
-            Some(
-                codex_home
-                    .join("stravia-models.json")
-                    .display()
-                    .to_string()
-                    .as_str()
-            )
-        );
+        // 静态目录优先于 `model_catalog_url`，必须被移除，实时目录才会生效。
+        assert!(document.get("model_catalog_json").is_none());
         assert_eq!(
             document["history"]["persistence"].as_str(),
             Some("save-all")
@@ -1491,12 +1499,79 @@ name = "Other"
             Some("sk-client")
         );
         assert!(provider.get("env_key").is_none());
+        assert_eq!(
+            provider["model_catalog_url"].as_str(),
+            Some("http://127.0.0.1:5174/codex/models")
+        );
+        assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
+        // 目录里的模型没有全部支持远程压缩，provider 不声明该能力。
+        assert!(provider.get("capabilities").is_none());
         assert!(!plan.preview.contains("model ="));
         assert!(plan.preview.contains("model_provider = \"stravia\""));
         assert!(
             plan.preview
                 .contains("experimental_bearer_token = \"sk-client\"")
         );
+        assert!(
+            plan.preview
+                .contains("model_catalog_url = \"http://127.0.0.1:5174/codex/models\"")
+        );
+    }
+
+    /// Codex 只能在 provider 级声明远程压缩：目录里全部（文本）模型都支持才写 V2，
+    /// 任一不支持就整体不写；图片输出 Route 不会出现在 Codex 目录里，不参与判断。
+    #[test]
+    fn codex_declares_remote_compaction_only_when_every_catalog_model_supports_it() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let environment = environment(temporary.path());
+        let apply = |models: Vec<ConnectClientModel>| {
+            let input = ConnectClientApplyInput {
+                tool: ConnectClientId::CodexCli,
+                host: "http://127.0.0.1:5174/".to_owned(),
+                api_key: "sk-client".to_owned(),
+                models,
+                transparent_image_input_enabled: false,
+                mappings: None,
+            };
+            let plan = plan_connect_client_apply(&input, &environment, &BTreeMap::new())
+                .expect("valid plan");
+            let document = toml::from_str::<TomlValue>(
+                std::str::from_utf8(&plan.files[0].bytes).expect("UTF-8 TOML"),
+            )
+            .expect("valid TOML");
+            document["model_providers"]["stravia"].clone()
+        };
+        let capable = |id: &str| ConnectClientModel {
+            supports_remote_compaction: true,
+            ..model(id, id)
+        };
+
+        let all_capable = apply(vec![capable("a"), capable("b")]);
+        assert_eq!(
+            all_capable["capabilities"]["remote_compaction"].as_str(),
+            Some("v2")
+        );
+        // host 末尾的斜杠不会进入目录地址。
+        assert_eq!(
+            all_capable["model_catalog_url"].as_str(),
+            Some("http://127.0.0.1:5174/codex/models")
+        );
+
+        let mixed = apply(vec![capable("a"), model("b", "b")]);
+        assert!(mixed.get("capabilities").is_none());
+
+        let image_route = ConnectClientModel {
+            output_modality: Some(crate::db::models::RouteOutputModality::Image),
+            ..model("image", "image")
+        };
+        let with_image = apply(vec![capable("a"), image_route.clone()]);
+        assert_eq!(
+            with_image["capabilities"]["remote_compaction"].as_str(),
+            Some("v2")
+        );
+
+        // 目录里只有图片输出 Route（Codex 看不到任何模型）时不声明任何压缩能力。
+        assert!(apply(vec![image_route]).get("capabilities").is_none());
     }
 
     #[test]
@@ -1682,9 +1757,7 @@ name = "Other"
             toml::from_str(&planned_text(&plan, "config.toml")).expect("Codex TOML");
         assert_eq!(config["model"].as_str(), Some("other/current"));
         assert_eq!(config["model_reasoning_effort"].as_str(), Some("low"));
-        let catalog: serde_json::Value =
-            serde_json::from_str(&planned_text(&plan, "stravia-models.json"))
-                .expect("Codex catalog");
+        let catalog = super::codex_catalog(&input.models, false);
         for (model, (_, _, expected)) in catalog["models"]
             .as_array()
             .expect("models")
@@ -2293,24 +2366,23 @@ modelRoles:
     }
 
     #[test]
-    fn codex_preview_references_its_portable_catalog() {
+    fn codex_preview_points_at_the_live_catalog_url() {
         let input = standard_input(ConnectClientId::CodexCli);
         let plan = preview_connect_client_apply(&input).expect("portable preview");
-        let (config, catalog) = plan
+        let config = plan
             .preview
-            .split_once("# ~/.codex/stravia-models.json\n")
-            .expect("copyable catalog section");
+            .strip_prefix("# ~/.codex/config.toml\n")
+            .expect("single copyable config section");
         let config: TomlValue = toml::from_str(config).expect("Codex TOML");
-        let catalog: serde_json::Value = serde_json::from_str(catalog).expect("Codex catalog");
+        assert!(config.get("model_catalog_json").is_none());
+        let provider = &config["model_providers"]["stravia"];
         assert_eq!(
-            config["model_catalog_json"].as_str(),
-            Some("~/.codex/stravia-models.json")
+            provider["model_catalog_url"].as_str(),
+            Some(format!("{}/codex/models", input.host.trim_end_matches('/')).as_str())
         );
         assert_eq!(
-            config["model_providers"]["stravia"]["experimental_bearer_token"].as_str(),
+            provider["experimental_bearer_token"].as_str(),
             Some(input.api_key.as_str())
         );
-        assert_eq!(catalog["models"][0]["slug"], "route-one");
-        assert_eq!(catalog["models"][1]["slug"], "route-two");
     }
 }

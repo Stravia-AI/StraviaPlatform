@@ -122,10 +122,13 @@ async fn require_entry(
 ) -> Response {
     let path = request.uri().path();
     // These namespaces belong to independent protocol authentication, not management.
-    if matches!(path, "/healthz" | "/readyz" | "/v1" | "/v1beta" | "/mcp")
-        || path.starts_with("/v1/")
+    if matches!(
+        path,
+        "/healthz" | "/readyz" | "/v1" | "/v1beta" | "/mcp" | "/codex"
+    ) || path.starts_with("/v1/")
         || path.starts_with("/v1beta/")
         || path.starts_with("/mcp/")
+        || path.starts_with("/codex/")
     {
         return next.run(request).await;
     }

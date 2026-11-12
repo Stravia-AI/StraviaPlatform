@@ -583,7 +583,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
 }
 
 #[tokio::test]
-async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_without_generation() {
+async fn inbound_responses_websocket_runs_standalone_compaction_without_generation() {
     let directory = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.path().to_path_buf(),
@@ -597,7 +597,7 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
         let harness = Harness::start_with_gateway(
             "open-responses",
             Router::new()
-                .route("/v1/responses", post(responses).with_state(requests)),
+                .route("/v1/responses", post(v2_compaction_responses).with_state(requests)),
             gateway,
             directory,
         )
@@ -615,9 +615,8 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
             .unwrap();
         let history = json!({"type":"message","role":"user","content":[{"type":"input_text","text":"standalone source window"}]});
         let trigger = json!({"type":"compaction_trigger"});
-        stage.set("standalone trigger rejections");
+        stage.set("malformed trigger rejections");
         for input in [
-            json!([history.clone(), trigger.clone()]),
             json!([trigger.clone(), history.clone()]),
             json!([trigger.clone(), trigger.clone()]),
         ] {
@@ -634,21 +633,76 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
             let event: Value = serde_json::from_str(&text).unwrap();
             assert_eq!(event["type"], "error", "{event}");
             assert_eq!(event["status"], 400, "{event}");
-            assert_eq!(event["error"]["code"], "unsupported_feature", "{event}");
-            assert_eq!(event["error"]["type"], "invalid_request", "{event}");
-            assert!(
-                event["error"]["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("POST /v1/responses")),
-                "{event}"
-            );
+            assert_eq!(event["error"]["code"], "invalid_request", "{event}");
         }
         assert!(
             received.try_recv().is_err(),
-            "standalone compaction must not be dispatched to the upstream"
+            "malformed standalone compaction must not be dispatched to the upstream"
         );
 
-        // Rejections leave the connection usable for an ordinary inference.
+        stage.set("standalone compaction dispatch");
+        socket
+            .send(reqwest_websocket::Message::Text(
+                json!({"type":"response.create","model":"cross","input":[history, trigger]})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        let compact = tokio::select! {
+            request = received.recv() => request.expect("standalone compaction request"),
+            event = socket.next() => panic!("Gateway answered before reaching the upstream: {event:?}"),
+        };
+        assert_eq!(compact.body["stream"], true);
+        assert_eq!(
+            compact.body["input"].as_array().unwrap().last().unwrap()["type"],
+            "compaction_trigger"
+        );
+        let native = json!({"type":"compaction","id":"ws-standalone-state","encrypted_content":"ws-native-ciphertext"});
+        stage.set("standalone compaction delivery");
+        compact
+            .respond
+            .send(json!(v2_compaction_events("ws-standalone", &native)))
+            .unwrap();
+        let mut compaction_item = None;
+        let terminal = loop {
+            let message = socket.next().await.expect("compaction event").unwrap();
+            let reqwest_websocket::Message::Text(text) = message else {
+                continue;
+            };
+            let event: Value = serde_json::from_str(&text).unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            if event["type"] == "response.output_item.done" && event["item"]["type"] == "compaction" {
+                compaction_item = Some(event["item"].clone());
+            }
+            if event["type"] == "response.completed" {
+                break event;
+            }
+        };
+        assert_eq!(terminal["response"]["status"], "completed", "{terminal}");
+        assert_eq!(
+            terminal["response"]["output"].as_array().map(Vec::len),
+            Some(1),
+            "{terminal}"
+        );
+        let compaction_item = compaction_item.expect("native compaction item delivered over WebSocket");
+        let pair = stravia_protocol_codec::transform::ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+            .unwrap();
+        let decoded = pair
+            .decode_request(json!({"model":"cross","input":[compaction_item]}))
+            .unwrap();
+        assert!(
+            harness
+                .gateway
+                .compaction
+                .resolve(&harness.principal, &decoded.items)
+                .await
+                .unwrap()
+                .is_some(),
+            "delivered native state must resolve for later replay"
+        );
+
+        // The connection stays usable for an ordinary inference after compaction.
         stage.set("ordinary inference dispatch");
         socket
             .send(reqwest_websocket::Message::Text(
@@ -689,6 +743,28 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
             }
         };
         assert_eq!(terminal["response"]["status"], "completed", "{terminal}");
+
+        // The ordinary request is admitted only after the compaction run's delivery
+        // bookkeeping finishes, so its publication receipt is observable here.
+        stage.set("publication observation");
+        let admin = harness.gateway.admin();
+        admin.observation_flush().await.unwrap();
+        let forest = admin.observation_forest(ForestQuery::default()).await.unwrap();
+        let mut phases = Vec::new();
+        for interaction in forest.roots.iter().flat_map(|root| &root.interactions) {
+            let detail = admin
+                .observation_interaction(&interaction.id, ForestQuery::default())
+                .await
+                .unwrap()
+                .unwrap();
+            for run in &detail.runs {
+                for event in run.events.iter().filter(|event| event.kind == "compaction_operation") {
+                    phases.push(event.payload["phase"].as_str().unwrap_or_default().to_owned());
+                }
+            }
+        }
+        assert!(phases.iter().any(|phase| phase == "published"), "{phases:?}");
+        assert!(!phases.iter().any(|phase| phase == "delivery_unconfirmed"), "{phases:?}");
         stage.set("WebSocket close");
         socket
             .close(reqwest_websocket::CloseCode::Normal, None)
@@ -698,7 +774,7 @@ async fn inbound_responses_websocket_rejects_standalone_compaction_trigger_witho
         harness.finish().await;
     })
     .await
-    .unwrap_or_else(|_| panic!("WebSocket standalone compaction rejection timed out at {}", stage.get()));
+    .unwrap_or_else(|_| panic!("WebSocket standalone compaction timed out at {}", stage.get()));
 }
 
 // ── Cross-protocol Remote Compaction (ADR-0089) ─────────────────────────────────
