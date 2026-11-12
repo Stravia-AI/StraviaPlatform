@@ -112,7 +112,8 @@ rama-http-core = "=0.4.0"
 rama-http-types = "=0.4.0"
 rama-net = "=0.4.0"
 percent-encoding = "2"
-hyper-util = { version = "0.1.21", features = ["client-proxy"] }
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["client-proxy", "tokio"] }
 numbat = { version = "1.24.0", default-features = false, features = ["fetch-exchangerates"] }
 parking_lot = "0.12.5"
 # 避免碎片化主机上的透明大页缺页触发同步内存整理，不改系统 THP 配置。

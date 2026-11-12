@@ -1621,3 +1621,47 @@ async fn expired_mcp_credential_uses_canonical_unauthorized_status() {
     assert_eq!(body["error"]["code"], "api_key_expired");
     assert_eq!(body["error"]["message"], "API key is expired");
 }
+
+#[tokio::test]
+async fn compressed_mcp_requests_are_limited_after_decompression() {
+    use crate::proxy::server::PROXY_JSON_BODY_LIMIT_BYTES;
+    use async_compression::tokio::write::ZstdEncoder;
+    use tokio::io::AsyncWriteExt;
+
+    let app = test_app().await;
+    let chunk = vec![0_u8; 1024 * 1024];
+    let mut encoder = ZstdEncoder::new(Vec::new());
+    for _ in 0..=PROXY_JSON_BODY_LIMIT_BYTES / chunk.len() {
+        encoder
+            .write_all(&chunk)
+            .await
+            .expect("encode oversized body");
+    }
+    encoder.shutdown().await.expect("finish oversized body");
+    let oversized = encoder.into_inner();
+    assert!(oversized.len() < PROXY_JSON_BODY_LIMIT_BYTES / 100);
+
+    let http = reqwest::Client::new();
+    let post = |body: Vec<u8>| {
+        http.post(&app.endpoint)
+            .bearer_auth(&app.token)
+            .header("content-type", "application/json")
+            .header("content-encoding", "zstd")
+            .body(body)
+            .send()
+    };
+    assert_eq!(
+        post(oversized)
+            .await
+            .expect("oversized MCP request")
+            .status(),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        post(b"not a zstd stream".to_vec())
+            .await
+            .expect("corrupt MCP request")
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+}

@@ -25,6 +25,7 @@ use crate::Gateway;
 use crate::error::{AuthFailure, GatewayError};
 use crate::interaction_observation::{IngressStart, RejectedOutcome};
 use crate::proxy::security::{ClientCredential, Security};
+use crate::proxy::server::PROXY_JSON_BODY_LIMIT_BYTES;
 
 const SERVER_INFO_META: &str = "io.modelcontextprotocol/serverInfo";
 const ERROR_CODE_META: &str = "stravia/errorCode";
@@ -303,6 +304,18 @@ fn result_metadata(error_code: Option<&str>) -> MetaObject {
     meta
 }
 
+/// 超限返回 413；其它读取失败（如压缩数据损坏）属于客户端请求错误。
+fn exceeds_body_limit(error: &axum::Error) -> bool {
+    let mut cause = std::error::Error::source(error);
+    while let Some(current) = cause {
+        if current.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        cause = current.source();
+    }
+    false
+}
+
 fn is_mcp_tool_call(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body)
         .is_ok_and(|request| request.get("method").and_then(Value::as_str) == Some("tools/call"))
@@ -324,9 +337,12 @@ async fn authenticate_request(
 
     let (mut parts, body) = request.into_parts();
     if parts.method == Method::POST {
-        let body = match to_bytes(body, usize::MAX).await {
+        let body = match to_bytes(body, PROXY_JSON_BODY_LIMIT_BYTES).await {
             Ok(body) => body,
-            Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            Err(error) if exceeds_body_limit(&error) => {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            }
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         };
         let is_tool_call = is_mcp_tool_call(&body);
         parts.extensions.insert(AuthenticatedApiKey {

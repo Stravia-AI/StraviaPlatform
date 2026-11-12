@@ -1013,3 +1013,520 @@ async fn artifact_repeated_http_uploads_keep_one_identity_and_download() {
         .expect("downloaded bytes");
     assert_eq!(downloaded.as_ref(), bytes);
 }
+
+async fn compress_body(encoding: &str, bytes: &[u8]) -> Vec<u8> {
+    use async_compression::tokio::write::{BrotliEncoder, GzipEncoder, ZlibEncoder, ZstdEncoder};
+    use tokio::io::AsyncWriteExt;
+    macro_rules! encode {
+        ($encoder:ty) => {{
+            let mut encoder = <$encoder>::new(Vec::new());
+            encoder.write_all(bytes).await.expect("encode request body");
+            encoder.shutdown().await.expect("finish request body");
+            encoder.into_inner()
+        }};
+    }
+    match encoding {
+        "gzip" => encode!(GzipEncoder<Vec<u8>>),
+        // HTTP 的 deflate 是 zlib 封装，而不是裸 DEFLATE 流。
+        "deflate" => encode!(ZlibEncoder<Vec<u8>>),
+        "br" => encode!(BrotliEncoder<Vec<u8>>),
+        "zstd" => encode!(ZstdEncoder<Vec<u8>>),
+        other => panic!("unsupported test encoding {other}"),
+    }
+}
+
+/// 压缩后只有几 KiB、解压后刚好超过代理上限的 zstd 请求体。
+async fn zstd_body_just_over_the_limit() -> Vec<u8> {
+    use async_compression::tokio::write::ZstdEncoder;
+    use tokio::io::AsyncWriteExt;
+    let chunk = vec![0_u8; 1024 * 1024];
+    let mut encoder = ZstdEncoder::new(Vec::new());
+    for _ in 0..=PROXY_JSON_BODY_LIMIT_BYTES / chunk.len() {
+        encoder
+            .write_all(&chunk)
+            .await
+            .expect("encode oversized body");
+    }
+    encoder.shutdown().await.expect("finish oversized body");
+    let compressed = encoder.into_inner();
+    assert!(compressed.len() < PROXY_JSON_BODY_LIMIT_BYTES / 100);
+    compressed
+}
+
+async fn post_encoded(
+    router: &Router,
+    uri: &str,
+    content_type: &str,
+    encoding: &str,
+    authorization: Option<&str>,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    let mut request = Request::post(uri)
+        .header("content-type", content_type)
+        .header("content-encoding", encoding);
+    if let Some(authorization) = authorization {
+        request = request.header("authorization", authorization);
+    }
+    router
+        .clone()
+        .oneshot(request.body(Body::from(body)).expect("encoded request"))
+        .await
+        .expect("encoded response")
+}
+
+#[tokio::test]
+async fn compressed_artifact_uploads_store_the_decoded_file() {
+    let bytes: &'static [u8] = include_bytes!("../../../tests/fixtures/media/transparent.png");
+    let fixture = artifact_upload_fixture().await;
+    let plain = upload_ok(&fixture.router, &fixture.auth, "image/png", bytes.to_vec()).await;
+
+    for encoding in ["gzip", "deflate", "br", "zstd"] {
+        let response = post_encoded(
+            &fixture.router,
+            "/v1/artifacts",
+            "image/png",
+            encoding,
+            Some(&fixture.auth),
+            compress_body(encoding, bytes).await,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "{encoding}");
+        let body = response_json(response).await;
+        // 内容身份按解码后的完整字节计算，与未压缩上传得到同一个 Artifact。
+        assert_eq!(body["path"], plain["path"], "{encoding}");
+        assert_eq!(body["size"], serde_json::json!(bytes.len()), "{encoding}");
+    }
+}
+
+#[tokio::test]
+async fn compressed_json_requests_behave_like_identity_requests() {
+    let fixture = proxy_router().await;
+    let json = br#"{"model":"missing","input":"hello"}"#;
+    let plain = post_encoded(
+        &fixture.router,
+        "/v1/responses",
+        "application/json",
+        "identity",
+        None,
+        json.to_vec(),
+    )
+    .await;
+    let expected_status = plain.status();
+    let expected_body = response_json(plain).await;
+    assert_ne!(
+        expected_body["error"]["code"], "invalid_json",
+        "control request must reach the handler: {expected_body}"
+    );
+
+    for encoding in ["gzip", "deflate", "br", "zstd"] {
+        let response = post_encoded(
+            &fixture.router,
+            "/v1/responses",
+            "application/json",
+            encoding,
+            None,
+            compress_body(encoding, json).await,
+        )
+        .await;
+        assert_eq!(response.status(), expected_status, "{encoding}");
+        assert_eq!(response_json(response).await, expected_body, "{encoding}");
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn compressed_request_size_limit_applies_after_decompression() {
+    let fixture = proxy_router().await;
+    let response = post_encoded(
+        &fixture.router,
+        "/v1/responses",
+        "application/json",
+        "zstd",
+        None,
+        zstd_body_just_over_the_limit().await,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "request_too_large"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn unsupported_or_corrupt_request_encodings_are_client_errors() {
+    let fixture = artifact_upload_fixture().await;
+
+    let unsupported = post_encoded(
+        &fixture.router,
+        "/v1/artifacts",
+        "image/png",
+        "snappy",
+        Some(&fixture.auth),
+        b"png".to_vec(),
+    )
+    .await;
+    assert_eq!(unsupported.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    for encoding in ["gzip", "br", "zstd"] {
+        let corrupt = post_encoded(
+            &fixture.router,
+            "/v1/artifacts",
+            "image/png",
+            encoding,
+            Some(&fixture.auth),
+            b"this is not a compressed stream".to_vec(),
+        )
+        .await;
+        assert_eq!(corrupt.status(), StatusCode::BAD_REQUEST, "{encoding}");
+        assert!(
+            response_json(corrupt).await["error"]["message"].is_string(),
+            "{encoding}"
+        );
+    }
+}
+
+async fn decompress_body(encoding: &str, bytes: &[u8]) -> Vec<u8> {
+    use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
+    use tokio::io::AsyncReadExt;
+    macro_rules! decode {
+        ($decoder:ty) => {{
+            let mut decoded = Vec::new();
+            <$decoder>::new(bytes)
+                .read_to_end(&mut decoded)
+                .await
+                .expect("decode response body");
+            decoded
+        }};
+    }
+    match encoding {
+        "gzip" => decode!(GzipDecoder<&[u8]>),
+        "deflate" => decode!(ZlibDecoder<&[u8]>),
+        "br" => decode!(BrotliDecoder<&[u8]>),
+        "zstd" => decode!(ZstdDecoder<&[u8]>),
+        other => panic!("unsupported test encoding {other}"),
+    }
+}
+
+#[tokio::test]
+async fn responses_are_compressed_with_the_encoding_the_client_accepts() {
+    let fixture = proxy_router().await;
+    let get = |accept_encoding: Option<&'static str>| {
+        let mut request = Request::get("/v1/not-a-protocol-route");
+        if let Some(accept_encoding) = accept_encoding {
+            request = request.header("accept-encoding", accept_encoding);
+        }
+        fixture
+            .router
+            .clone()
+            .oneshot(request.body(Body::empty()).expect("request"))
+    };
+
+    let plain = get(None).await.expect("identity response");
+    assert!(plain.headers().get("content-encoding").is_none());
+    let plain_body = to_bytes(plain.into_body(), usize::MAX)
+        .await
+        .expect("identity body");
+
+    for encoding in ["gzip", "deflate", "br", "zstd"] {
+        let response = get(Some(encoding)).await.expect("compressed response");
+        assert_eq!(
+            response.headers()["content-encoding"],
+            encoding,
+            "{encoding}"
+        );
+        assert_eq!(response.headers()["vary"], "accept-encoding", "{encoding}");
+        assert!(response.headers().get("content-length").is_none());
+        let compressed = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("compressed body");
+        assert_eq!(
+            decompress_body(encoding, &compressed).await,
+            plain_body.as_ref(),
+            "{encoding}"
+        );
+    }
+
+    // Claude Code / Bun 同时声明四种编码，等权重时取 zstd。
+    let negotiated = get(Some("gzip, deflate, br, zstd"))
+        .await
+        .expect("negotiated response");
+    assert_eq!(negotiated.headers()["content-encoding"], "zstd");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn streaming_and_already_compressed_responses_stay_identity_encoded() {
+    use axum::http::header::CONTENT_TYPE;
+    let large = "x".repeat(4096);
+    let route = |content_type: &'static str| {
+        let body = large.clone();
+        get(move || async move { ([(CONTENT_TYPE, content_type)], body) })
+    };
+    let router = Router::new()
+        .route("/json", route("application/json"))
+        .route("/sse", route("text/event-stream"))
+        .route("/png", route("image/png"))
+        .route("/mp3", route("audio/mpeg"))
+        .route("/mp4", route("video/mp4"))
+        .layer(response_compression());
+
+    for (path, compressed) in [
+        ("/json", true),
+        ("/sse", false),
+        ("/png", false),
+        ("/mp3", false),
+        ("/mp4", false),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header("accept-encoding", "gzip, br, zstd")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.headers().contains_key("content-encoding"),
+            compressed,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn websocket_upgrade_is_not_encoded_when_the_client_accepts_compression() {
+    use reqwest_websocket::Upgrade as _;
+    let fixture = artifact_upload_fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy listener");
+    let address = listener.local_addr().expect("proxy address");
+    let router = fixture.router.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let upgrade = reqwest::Client::new()
+        .get(format!("http://{address}/v1/responses"))
+        .header("authorization", &fixture.auth)
+        .header("accept-encoding", "gzip, br, zstd")
+        .upgrade()
+        .send()
+        .await
+        .expect("upgrade response");
+    assert_eq!(upgrade.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert!(upgrade.headers().get("content-encoding").is_none());
+    upgrade.into_websocket().await.expect("WebSocket");
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn compressed_request_and_response_round_trip_through_the_inference_path() {
+    let upstream = serve_responses_upstream().await;
+    let (fixture, token) =
+        protected_responses_router_with_base_url(true, None, &upstream.base_url).await;
+    let request = br#"{"model":"auth-model","input":"hello"}"#;
+
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .header("content-encoding", "zstd")
+                .header("accept-encoding", "zstd")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(compress_body("zstd", request).await))
+                .expect("compressed Responses request"),
+        )
+        .await
+        .expect("Responses response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "zstd");
+    let compressed = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("compressed Responses body");
+    let body: serde_json::Value =
+        serde_json::from_slice(&decompress_body("zstd", &compressed).await)
+            .expect("Responses JSON");
+    assert_eq!(body["output"][0]["content"][0]["text"], "authenticated");
+    assert_eq!(
+        upstream.requests.lock()[0]["input"][0]["content"][0]["text"],
+        "hello"
+    );
+    fixture.close().await;
+    upstream.close().await;
+}
+
+async fn serve_on_loopback(router: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy listener");
+    let address = listener.local_addr().expect("proxy address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .await
+            .expect("serve proxy router");
+    });
+    (address, server)
+}
+
+/// 手写 Upgrade 请求并发送一条未压缩的非法事件，返回 101 响应头与服务端回复帧的首字节。
+/// RSV1 位（0x40）只在该帧经 permessage-deflate 压缩时置位。
+async fn raw_websocket_exchange(
+    address: std::net::SocketAddr,
+    authorization: &str,
+    extensions: Option<&str>,
+) -> (String, u8) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect to proxy");
+    let mut request = format!(
+        "GET /v1/responses HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: {authorization}\r\n"
+    );
+    if let Some(extensions) = extensions {
+        request.push_str(&format!("Sec-WebSocket-Extensions: {extensions}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("send upgrade request");
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.expect("handshake response"));
+    }
+
+    let payload = br#"{"type":"unknown.event"}"#;
+    let mask = [1_u8, 2, 3, 4];
+    let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .zip(mask.iter().cycle())
+            .map(|(byte, mask)| byte ^ mask),
+    );
+    stream.write_all(&frame).await.expect("send text frame");
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_u8())
+        .await
+        .expect("server frame timeout")
+        .expect("server frame");
+    (
+        String::from_utf8(head)
+            .expect("handshake response is ASCII")
+            .to_ascii_lowercase(),
+        first,
+    )
+}
+
+#[tokio::test]
+async fn websocket_frames_are_compressed_only_when_the_client_offers_permessage_deflate() {
+    let fixture = artifact_upload_fixture().await;
+    let (address, server) = serve_on_loopback(fixture.router.clone()).await;
+
+    let (head, first) = raw_websocket_exchange(address, &fixture.auth, None).await;
+    assert!(!head.contains("sec-websocket-extensions"), "{head}");
+    assert_eq!(first, 0x81, "uncompressed text frame");
+
+    let (head, first) = raw_websocket_exchange(
+        address,
+        &fixture.auth,
+        Some("permessage-deflate; client_max_window_bits"),
+    )
+    .await;
+    assert!(
+        head.contains("sec-websocket-extensions: permessage-deflate\r\n"),
+        "{head}"
+    );
+    assert_eq!(first, 0xC1, "text frame with RSV1 set");
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn permessage_deflate_client_keeps_context_across_messages_in_both_directions() {
+    use futures::{SinkExt as _, StreamExt as _};
+    use tungstenite_deflate::{
+        ClientRequestBuilder, Message, extensions::compression::deflate::DeflateConfig,
+        protocol::WebSocketConfig,
+    };
+
+    let fixture = artifact_upload_fixture().await;
+    let (address, server) = serve_on_loopback(fixture.router.clone()).await;
+    let mut config = WebSocketConfig::default();
+    config.extensions.permessage_deflate = Some(DeflateConfig::new());
+    let request = ClientRequestBuilder::new(
+        format!("ws://{address}/v1/responses")
+            .parse()
+            .expect("WebSocket URI"),
+    )
+    .with_header("authorization", fixture.auth.clone());
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect to proxy");
+    let (mut socket, response) =
+        tokio_tungstenite_deflate::client_async_with_config(request, stream, Some(config))
+            .await
+            .expect("WebSocket handshake");
+    assert_eq!(
+        response.headers()["sec-websocket-extensions"],
+        "permessage-deflate"
+    );
+
+    // 超过 deflate 窗口的重复载荷：解压必须沿用同一连接的上下文，而不是逐条独立。
+    let padding = "x".repeat(1024 * 1024);
+    for round in 0..3 {
+        let event =
+            serde_json::json!({"type": "unknown.event", "round": round, "padding": padding});
+        socket
+            .send(Message::text(event.to_string()))
+            .await
+            .expect("send compressed event");
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("reply timeout")
+            .expect("reply")
+            .expect("reply frame");
+        let Message::Text(reply) = reply else {
+            panic!("JSON text error event");
+        };
+        let body: serde_json::Value = serde_json::from_str(&reply).expect("error JSON");
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["status"], 400);
+        assert_eq!(
+            body["error"]["message"],
+            "WebSocket message type must be response.create."
+        );
+    }
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn plain_requests_to_the_websocket_endpoint_are_bad_requests() {
+    let fixture = artifact_upload_fixture().await;
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::get("/v1/responses")
+                .header("authorization", &fixture.auth)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

@@ -215,6 +215,8 @@ Content-Type: application/json[; parameters]
 - 接受 JSON media type 参数，例如 `application/json; charset=utf-8`。
 - form body 返回 415 `unsupported_media_type`。
 - HTTP body 上限沿用 100 MiB；超过后返回 413。
+- 请求体可带 `Content-Encoding: gzip | deflate | br | zstd`；代理先解压再解析，上述上限按解压后的字节计算。其它编码返回 415，压缩数据损坏返回 400。
+- 响应按客户端 `Accept-Encoding` 以 gzip / deflate / br / zstd 压缩（等权重时优先 zstd）。SSE、图片、音视频与小于 32 字节的响应不压缩；WebSocket 帧的压缩见 [7.2](#72-websocket)。
 - JSON parse、schema 和 semantic validation 在 dispatcher/provider call 前完成。
 
 根请求要求 `model` 和 `input`。带 `previous_response_id` 的 continuation 可以省略 `input` 并继承 parent model；显式值始终覆盖继承值。
@@ -296,7 +298,8 @@ WebSocket 复用 `/v1/responses` resource。客户端每轮发送标准 `respons
 | 并发 create | 返回 WS error，`status=409`、`code=response_in_progress`；当前 run 和连接继续 |
 | Auth | handshake 解析 Bearer；每轮重新检查 key enabled/expiry、Model binding 与 quota |
 | Origin | 有 Origin 时复用 proxy CORS allowlist；无 Origin 的 CLI/SDK 允许 |
-| 单消息上限 | 100 MiB |
+| 单消息上限 | 100 MiB；启用压缩时按解压后的字节计算 |
+| 压缩 | 客户端在握手中 offer `permessage-deflate`（RFC 7692）时协商启用，否则按原样传输；按 offer 遵守两个方向的 context takeover 与窗口位数限制，压缩取最快档 |
 | outgoing queue | 64；发送方等待背压，不丢事件 |
 | 连接寿命 | 60 分钟硬上限 |
 | 单 run deadline | 300 秒，服从更严格的现有 policy |

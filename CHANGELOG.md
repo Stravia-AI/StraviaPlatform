@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- The proxy accepts request bodies compressed with `Content-Encoding: gzip`, `deflate`, `br` or `zstd` on every inference, Artifact upload and MCP route, so clients that compress requests can connect directly. Bodies are decompressed before parsing and the existing size limits apply to the decompressed bytes. Unsupported encodings return 415 and corrupt compressed data returns 400.
+- The proxy compresses non-streaming responses with the encoding the client accepts in `Accept-Encoding` (`zstd`, `br`, `gzip` or `deflate`). Server-Sent Events, images, audio, video and responses under 32 bytes stay uncompressed, so streaming latency is unchanged.
+- The Responses WebSocket endpoint negotiates `permessage-deflate` (RFC 7692) when the client offers it, as Codex does, and honours the offered context-takeover and window-size limits. Clients that do not offer it are unaffected. The 100 MiB message limit applies to the decompressed size.
+
 ### Removed
 
 - Embeddings support is removed end to end. `POST /v1/embeddings` now returns the same 404 `not_found` protocol error as any other unknown path, and the `openai-compatible/embeddings/v1` protocol identity (with its `openai/embeddings/v1`, `openai-embeddings` and `embeddings` aliases) no longer resolves. A provider that still stores one of these identifiers as its protocol must be switched to `openai-compatible`.

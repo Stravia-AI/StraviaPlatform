@@ -7,6 +7,9 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::middleware;
 use axum::routing::{get, post};
 use futures::Stream;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+use tower_http::compression::{CompressionLayer, CompressionLevel};
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use axum::http::StatusCode;
@@ -21,7 +24,23 @@ pub use super::ingress::open_responses::websocket::AllowedWebSocketOrigins;
 use crate::Gateway;
 
 // 单文件限制按解码字节执行；JSON 入口须容纳对应 base64 与协议元数据。
-const PROXY_JSON_BODY_LIMIT_BYTES: usize = 140 * 1024 * 1024;
+// 压缩请求体先解压再计量，因此该上限同时约束解压后的大小。
+pub(crate) const PROXY_JSON_BODY_LIMIT_BYTES: usize = 140 * 1024 * 1024;
+
+/// 按客户端 `Accept-Encoding` 压缩响应体（gzip/deflate/br/zstd）。
+///
+/// - 默认谓词已跳过 SSE（压缩缓冲会延迟事件）、图片、gRPC 和小于 32 字节的响应；
+///   这里再跳过音视频，Artifact 下载多为已压缩媒体，重复压缩只耗 CPU。
+/// - 使用最快档：brotli 默认质量为 11，压缩速度远低于 gzip，会拖慢大 JSON 响应。
+fn response_compression() -> CompressionLayer<impl Predicate> {
+    CompressionLayer::new()
+        .quality(CompressionLevel::Fastest)
+        .compress_when(
+            DefaultPredicate::new()
+                .and(NotForContentType::new("audio/"))
+                .and(NotForContentType::new("video/")),
+        )
+}
 
 pub fn create_router(gateway: Gateway) -> Router {
     let mcp_router = crate::mcp::router(gateway.clone());
@@ -61,6 +80,11 @@ pub fn create_router(gateway: Gateway) -> Router {
             observation_gateway.clone(),
             observe_inference_ingress,
         ))
+        // 客户端可能以 gzip/deflate/br/zstd 压缩请求体。解压位于观测之外：
+        // Interaction Observation 与各入口看到的是解码后的字节，Content-Encoding / Content-Length
+        // 已被移除。不支持的编码由该层直接返回 415。
+        .layer(RequestDecompressionLayer::new())
+        .layer(response_compression())
         .layer(middleware::from_fn_with_state(observation_gateway, inject_context))
         .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::extract::Request| {
             let (uri, _) = crate::interaction_observation::redact_url(&request.uri().to_string());
