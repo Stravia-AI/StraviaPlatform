@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Provider and model dropdowns inside dialogs, such as the request destination editor, are no longer cut off at the dialog edge or the window edge; the candidate list now extends past the dialog and shrinks with a scrollbar when the window is short.
+
 ## [0.7.0] - 2026-11-12
 
 ### Verification
