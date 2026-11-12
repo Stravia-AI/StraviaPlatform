@@ -1,5 +1,7 @@
 //! 将索引事件区间映射为可读取的历史路径与安全摘要。
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 
 use stravia_runtime_contract::hook::PlatformToolError;
@@ -11,6 +13,7 @@ use super::{
     Recall, RecallInteraction, Transcript,
     page::ChunkMark,
     render,
+    search_store::SearchSegment,
     search_text::{self, ParsedQuery},
     storage,
 };
@@ -134,21 +137,8 @@ fn hit_after_first_page(text: &str, query: &ParsedQuery) -> bool {
     hit.start - line_start >= cut
 }
 
-/// 计算字节位置在正文中的行偏移；只用于按 LF 切行的渲染文本。
-fn line_offset(text: &str, byte: usize) -> u64 {
-    text.as_bytes()[..byte]
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count() as u64
-}
-
-/// 命中词所在的行范围；事件正文按 LF 切行，因此范围在转录追加事件后仍稳定。
-fn line_window(text: &str, start: usize, end: usize) -> (u64, u64) {
-    (
-        line_offset(text, start),
-        line_offset(text, end.saturating_sub(1)),
-    )
-}
+/// 每个 Interaction 最多列出的不同命中位置数。
+const HITS_PER_INTERACTION: usize = 3;
 
 #[derive(Clone)]
 pub(super) struct RenderedHit {
@@ -157,19 +147,34 @@ pub(super) struct RenderedHit {
     pub(super) after_first_page: bool,
 }
 
+/// 命中在可读文件中的位置；位置相同的命中摘要也相同，因此按位置去重。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum HitSpot {
+    /// 转录中的绝对行范围。
+    Transcript { first: u64, last: u64 },
+    /// 第 `number` 个工具文件中的行范围。
+    Tool { number: u32, first: u64, last: u64 },
+}
+
 impl Recall<'_> {
-    /// 一次遍历转录，按原始排序返回每个索引段的稳定行范围与摘要。
-    pub(super) async fn render_hits(
+    /// 一次遍历转录，按段的优先顺序返回前 [`HITS_PER_INTERACTION`] 个不同位置的命中及其所属段。
+    ///
+    /// 长单行跨多个索引段时，这些段换算到同一行范围，只列一次，名额留给下一个不同位置。
+    /// 工具文件只为入选的命中读取。
+    pub(super) async fn render_hits<'s>(
         &self,
         interaction: &RecallInteraction,
-        segments: &[super::search_store::SearchSegment],
+        segments: &'s [SearchSegment],
         query: &ParsedQuery,
-    ) -> Result<Vec<RenderedHit>, PlatformToolError> {
-        let mut results = vec![None; segments.len()];
+    ) -> Result<Vec<(&'s SearchSegment, RenderedHit)>, PlatformToolError> {
+        let mut spots = vec![None; segments.len()];
         let mut remaining = segments.len();
         if remaining == 0 {
             return Ok(Vec::new());
         }
+        let base = format!("{HISTORY_ROOT}{}/{}", interaction.root_id, interaction.id);
+        // 转录摘要只能在遍历到对应事件时生成，按位置缓存；工具文件在选定后再读取。
+        let mut transcript_hits: HashMap<HitSpot, RenderedHit> = HashMap::new();
         let transcript = Transcript::new(interaction, &self.secrets);
         let mut walker = self
             .walker(transcript, &interaction.id, &ChunkMark::header())
@@ -185,17 +190,7 @@ impl Recall<'_> {
                 continue;
             }
             let indexed = render::indexable_event_text(&event).ok_or_else(changed_during_search)?;
-            let text = &indexed.text;
-            let mut renderer = EventRenderer {
-                recall: self,
-                interaction,
-                event: &event,
-                chunk: &chunk,
-                text,
-                hits: matches(text, query),
-                query,
-                tool_lines: None,
-            };
+            let renderer = EventRenderer::new(&event, &chunk, &indexed.text, query);
             for (index, segment) in segments.iter().enumerate() {
                 if segment.event_sequence != event.sequence {
                     continue;
@@ -203,43 +198,130 @@ impl Recall<'_> {
                 let start =
                     usize::try_from(segment.byte_start).map_err(|_| changed_during_search())?;
                 let end = usize::try_from(segment.byte_end).map_err(|_| changed_during_search())?;
-                results[index] = Some(renderer.render(start, end).await?);
+                let spot = renderer.locate(start, end)?;
+                if let HitSpot::Transcript { first, last } = spot
+                    && !transcript_hits.contains_key(&spot)
+                {
+                    transcript_hits.insert(spot, renderer.transcript_hit(&base, first, last)?);
+                }
+                spots[index] = Some(spot);
                 remaining -= 1;
             }
             if remaining == 0 {
                 break;
             }
         }
-        results
-            .into_iter()
-            .map(|result| result.ok_or_else(changed_during_search))
-            .collect()
+        let mut selected: Vec<(&SearchSegment, HitSpot)> = Vec::with_capacity(HITS_PER_INTERACTION);
+        for (segment, spot) in segments.iter().zip(spots) {
+            let spot = spot.ok_or_else(changed_during_search)?;
+            if selected.len() < HITS_PER_INTERACTION
+                && !selected.iter().any(|(_, listed)| *listed == spot)
+            {
+                selected.push((segment, spot));
+            }
+        }
+        let mut tool_files: HashMap<u32, Vec<String>> = HashMap::new();
+        let mut hits = Vec::with_capacity(selected.len());
+        for (segment, spot) in selected {
+            let hit = match spot {
+                HitSpot::Transcript { .. } => transcript_hits
+                    .remove(&spot)
+                    .ok_or_else(changed_during_search)?,
+                HitSpot::Tool {
+                    number,
+                    first,
+                    last,
+                } => {
+                    let lines = match tool_files.entry(number) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => {
+                            let tool = self
+                                .observation
+                                .recall_tool(&interaction.id, number)
+                                .await
+                                .map_err(storage)?
+                                .ok_or_else(changed_during_search)?;
+                            entry.insert(render::tool_file(
+                                interaction,
+                                number,
+                                &tool,
+                                &self.secrets,
+                            ))
+                        }
+                    };
+                    let selected = lines
+                        .get((first - 1) as usize..last as usize)
+                        .ok_or_else(changed_during_search)?
+                        .join("\n");
+                    RenderedHit {
+                        location: format!("{base}/tools/{number}:{first}-{last}"),
+                        snippet: snippet(&selected, query),
+                        after_first_page: hit_after_first_page(&selected, query),
+                    }
+                }
+            };
+            hits.push((segment, hit));
+        }
+        Ok(hits)
     }
 }
 
-struct EventRenderer<'a, 'b> {
-    recall: &'a Recall<'b>,
-    interaction: &'a RecallInteraction,
-    event: &'a super::ObservationEvent,
+/// 把同一事件内的索引段换算为命中位置。
+struct EventRenderer<'a> {
     chunk: &'a super::Chunk,
     text: &'a str,
-    hits: Vec<Range<usize>>,
     query: &'a ParsedQuery,
-    tool_lines: Option<Vec<String>>,
+    hits: Vec<Range<usize>>,
+    /// `text` 中各 LF 的字节位置；一个事件可能有大量命中段，行号用二分换算。
+    newlines: Vec<usize>,
+    tool: bool,
+    argument_start: usize,
+    /// 该事件在转录中的标题行下标；只在需要时因缺失而报错。
+    heading: Option<usize>,
 }
 
-impl EventRenderer<'_, '_> {
-    async fn render(&mut self, start: usize, end: usize) -> Result<RenderedHit, PlatformToolError> {
-        let Self {
-            recall,
-            interaction,
-            event,
+impl<'a> EventRenderer<'a> {
+    fn new(
+        event: &super::ObservationEvent,
+        chunk: &'a super::Chunk,
+        text: &'a str,
+        query: &'a ParsedQuery,
+    ) -> Self {
+        let tool = matches!(
+            event.kind.as_str(),
+            "client_tool_handoff" | "platform_tool_started"
+        );
+        let heading = chunk.lines.iter().position(|line| {
+            if tool {
+                line.starts_with("### tool call ")
+            } else if event.kind == "user_input_recorded" {
+                line == "## user"
+            } else {
+                line == "## assistant"
+            }
+        });
+        Self {
             chunk,
             text,
-            hits,
             query,
-            tool_lines,
-        } = self;
+            hits: matches(text, query),
+            newlines: text.match_indices('\n').map(|(index, _)| index).collect(),
+            tool,
+            argument_start: text.find('\n').unwrap_or(text.len()).saturating_add(1),
+            heading,
+        }
+    }
+
+    /// 字节位置之前的 LF 数，即该位置在正文中的 0-based 行偏移；正文按 LF 切行，
+    /// 因此行范围在转录追加事件后仍稳定。
+    fn line_of(&self, byte: usize) -> u64 {
+        self.newlines.partition_point(|&newline| newline < byte) as u64
+    }
+
+    /// 段内首个命中的位置。工具名与参数命中同时存在时优先参数：参数一律映射到完整
+    /// 工具文件，工具名才映射到转录的 `### tool call` 行。
+    fn locate(&self, start: usize, end: usize) -> Result<HitSpot, PlatformToolError> {
+        let text = self.text;
         if start >= end
             || end > text.len()
             || !text.is_char_boundary(start)
@@ -247,92 +329,57 @@ impl EventRenderer<'_, '_> {
         {
             return Err(changed_during_search());
         }
-        let hit = hits
-            .iter()
-            .find(|range| range.start >= start && range.end <= end)
-            .cloned()
-            .unwrap_or(start..end);
-        let (segment_start, segment_end) = line_window(text, hit.start, hit.end);
-        let base = format!("{HISTORY_ROOT}{}/{}", interaction.root_id, interaction.id);
-        let tool = matches!(
-            event.kind.as_str(),
-            "client_tool_handoff" | "platform_tool_started"
-        );
-        let separator = text.find('\n').unwrap_or(text.len());
-        let argument_start = separator.saturating_add(1);
-        // 工具名与参数命中同时存在时优先参数：参数一律映射到完整工具文件，
-        // 工具名才映射到转录的 `### tool call` 行。
-        let argument_hit = hits
-            .iter()
-            .find(|range| range.end > argument_start && range.start >= start && range.end <= end);
-        if tool && let Some(argument) = argument_hit {
-            let number = chunk.mark.tools.saturating_add(1);
-            if tool_lines.is_none() {
-                let tool = recall
-                    .observation
-                    .recall_tool(&interaction.id, number)
-                    .await
-                    .map_err(storage)?
-                    .ok_or_else(changed_during_search)?;
-                *tool_lines = Some(render::tool_file(
-                    interaction,
-                    number,
-                    &tool,
-                    &recall.secrets,
-                ));
-            }
-            let lines = tool_lines.as_ref().ok_or_else(changed_during_search)?;
-            let arguments = text
-                .get(argument_start..)
-                .ok_or_else(changed_during_search)?;
-            let (first_line, last_line) = line_window(
-                arguments,
-                argument.start.max(argument_start) - argument_start,
-                argument.end - argument_start,
-            );
-            let start_line = render::TOOL_FILE_HEADER_LINES + 1 + first_line;
-            let end_line = render::TOOL_FILE_HEADER_LINES + 1 + last_line;
-            let selected = lines
-                .get((start_line - 1) as usize..end_line as usize)
-                .ok_or_else(changed_during_search)?
-                .join("\n");
-            return Ok(RenderedHit {
-                location: format!("{base}/tools/{number}:{start_line}-{end_line}"),
-                snippet: snippet(&selected, query),
-                after_first_page: hit_after_first_page(&selected, query),
+        let within = |range: &&Range<usize>| range.start >= start && range.end <= end;
+        let argument_start = self.argument_start;
+        if self.tool
+            && let Some(argument) = self
+                .hits
+                .iter()
+                .filter(within)
+                .find(|range| range.end > argument_start)
+        {
+            let base = self.line_of(argument_start);
+            let first_line = render::TOOL_FILE_HEADER_LINES + 1;
+            return Ok(HitSpot::Tool {
+                number: self.chunk.mark.tools.saturating_add(1),
+                first: first_line + self.line_of(argument.start.max(argument_start)) - base,
+                last: first_line + self.line_of(argument.end - 1) - base,
             });
         }
-        let heading = chunk
-            .lines
-            .iter()
-            .position(|line| {
-                if tool {
-                    line.starts_with("### tool call ")
-                } else if event.kind == "user_input_recorded" {
-                    line == "## user"
-                } else {
-                    line == "## assistant"
-                }
-            })
-            .ok_or_else(changed_during_search)?;
-        let (first, last) = if tool {
-            let line = chunk.mark.line + heading as u64;
-            (line, line)
-        } else {
-            let body = chunk.mark.line + heading as u64 + 1;
-            (body + segment_start, body + segment_end)
-        };
-        let first_index = (first - chunk.mark.line) as usize;
-        let last_index = (last - chunk.mark.line + 1) as usize;
-        let selected = chunk
+        let heading = self.chunk.mark.line + self.heading.ok_or_else(changed_during_search)? as u64;
+        if self.tool {
+            return Ok(HitSpot::Transcript {
+                first: heading,
+                last: heading,
+            });
+        }
+        let hit = self.hits.iter().find(within).cloned().unwrap_or(start..end);
+        let body = heading + 1;
+        Ok(HitSpot::Transcript {
+            first: body + self.line_of(hit.start),
+            last: body + self.line_of(hit.end.saturating_sub(1)),
+        })
+    }
+
+    /// 转录行范围的命中；摘要只取渲染后（已替换凭据）的行。
+    fn transcript_hit(
+        &self,
+        base: &str,
+        first: u64,
+        last: u64,
+    ) -> Result<RenderedHit, PlatformToolError> {
+        let first_index = (first - self.chunk.mark.line) as usize;
+        let last_index = (last - self.chunk.mark.line + 1) as usize;
+        let selected = self
+            .chunk
             .lines
             .get(first_index..last_index)
             .ok_or_else(changed_during_search)?
             .join("\n");
         Ok(RenderedHit {
             location: format!("{base}:{first}-{last}"),
-            snippet: snippet(&selected, query),
-            after_first_page: hit_after_first_page(&selected, query),
+            snippet: snippet(&selected, self.query),
+            after_first_page: hit_after_first_page(&selected, self.query),
         })
     }
 }

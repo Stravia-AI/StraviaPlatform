@@ -16,7 +16,6 @@ use crate::interaction_observation::{
 
 pub(super) const TERM_INTERACTION_LIMIT: i64 = 2_000;
 const SEARCH_PAGE: usize = 10;
-const SEGMENTS_PER_INTERACTION: usize = 3;
 
 /// 检索范围：根目录、一条链路或一轮转录。链路由调用方先校验归属。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +48,7 @@ pub(super) struct SearchInteraction {
     pub has_observation_gap: bool,
     pub score: i32,
     pub latest_hit_at: i64,
+    /// 全部命中段，按覆盖词项数、时间与段位置的优先顺序排列；渲染时再按命中位置去重截取。
     pub segments: Vec<SearchSegment>,
 }
 
@@ -481,7 +481,6 @@ pub(super) async fn search(
                     && left.byte_start == right.byte_start
                     && left.byte_end == right.byte_end
             });
-            segments.truncate(SEGMENTS_PER_INTERACTION);
             let has_observation_gap = gap_ids.contains(&id);
             SearchInteraction {
                 id,

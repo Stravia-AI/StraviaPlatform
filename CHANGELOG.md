@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- `StraviaRead` treats zero-value fields like omitted or `null` fields: a blank `question`, `"wait": 0`, and empty `attachments` or `allowed_domains` arrays are no longer rejected on paths that do not use them. Models that fill every schema field with placeholders, such as Gemini, can now list `stravia://history/` and read resources on the first call. `allowed_domains: []` now means unrestricted for a new search and inherits the parent policy for a continuation, instead of failing; searches and continuations with a blank `question` report the missing `question`.
+
+### Fixed
+
+- Interaction debug bundles now fill `parent_interaction_id`, `first_route_id` and `first_model_display_name` in `interaction.json`; they were always `null`.
+- History search no longer lists the same hit line more than once for an interaction when a long single line spans several indexed segments; the freed slots show the next distinct hit locations.
+
 ## [0.7.0] - 2026-11-12
 
 ### Verification

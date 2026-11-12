@@ -29,7 +29,7 @@
 - 工具调用按开始事件的先后编号，不使用客户端提供的 call id，因为 call id 可能含 `:` 或 `/`。
 - 选择器沿用 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md) 的语法。文件接受行范围（最多 16 段）或 `cursor=`；目录和检索结果只接受 `cursor=`。`raw` 与 `download` 被拒绝。
 - `question` 只在根目录、链路目录和交互转录上有效，表示在该路径范围内检索（第 5 节）。它与行范围互斥。`cursor` 自带检索条件，再传 `question` 视为冲突。工具文件不接受 `question`，因为工具结果不进入索引。
-- `wait`、`attachments`、`allowed_domains` 一律拒绝。
+- `wait`、`attachments`、`allowed_domains` 携带有内容的值时一律拒绝；`0`、`[]` 与 `null` 视为未传。空白 `question` 同样视为未传，即列出目录或读取文件。
 - 不存在、已清理和属于其他 Principal 的路径返回同一个错误：`History entry unavailable: it does not exist, has expired, or was cleared.`
 
 ## 3. 目录列表
@@ -165,7 +165,7 @@ test result: ok. 12 passed……
 1. 对每个词项，在范围内查询命中的 Interaction（按其最近命中时间倒序，最多 2,000 个），同时取得最高角色权重。权重为：用户输入 3，可见回答 2，工具调用 1。若某个词项达到上限，结果中注明查询过宽。
 2. 取各词项结果的交集，再排除发起本次检索的 Interaction。
 3. 得分为各词项最高角色权重之和。按得分降序、最近命中时间降序、Interaction id 升序排序。规则与后端无关，两个后端返回同一顺序。游标记录上一页最后一项的（得分, 时间, id）。
-4. 每页 10 个 Interaction。每个 Interaction 最多列 3 个命中段，优先覆盖更多词项、再取更新的段。命中位置通过渲染该 Interaction 的转录，把段的字节区间换算为行范围。
+4. 每页 10 个 Interaction。命中位置通过渲染该 Interaction 的转录，把段的字节区间换算为行范围。每个 Interaction 最多列 3 个不同的命中位置，优先覆盖更多词项、再取更新的段；长单行跨多个段时，换算到同一位置的段只列一次，空出的名额由下一个不同位置补上。
 
 ```text
 # Search results for "迁移 0041" in stravia://history/ · index current · retention 7 days

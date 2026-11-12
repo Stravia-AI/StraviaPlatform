@@ -20,8 +20,18 @@ pub(super) struct BundleRunRecord {
     pub trace: Option<TraceManifest>,
 }
 
-pub(super) struct BundleInteractionRecords {
+/// 导出摘要中 Interaction 的身份与首个 Route；这些列在创建时写入且不再更新，
+/// 因此不受截止水位影响。
+#[derive(FromRow)]
+pub(super) struct BundleInteractionHeader {
     pub root_id: String,
+    pub parent_interaction_id: Option<String>,
+    pub first_route_id: String,
+    pub first_model_display_name: Option<String>,
+}
+
+pub(super) struct BundleInteractionRecords {
+    pub header: BundleInteractionHeader,
     pub runs: Vec<BundleRunRecord>,
     pub events: Vec<ObservationEvent>,
 }
@@ -1866,21 +1876,21 @@ impl ObservationStore {
         id: &str,
         through: i64,
     ) -> anyhow::Result<Option<BundleInteractionRecords>> {
-        let root_id: Option<String> = match self {
+        let header: Option<BundleInteractionHeader> = match self {
             Self::Sqlite(pool, _) => {
-                sqlx::query_scalar("SELECT root_id FROM interaction_observations WHERE id=?")
+                sqlx::query_as("SELECT root_id,parent_interaction_id,first_route_id,first_model_display_name FROM interaction_observations WHERE id=?")
                     .bind(id)
                     .fetch_optional(pool)
                     .await?
             }
             Self::Postgres(pool, _) => {
-                sqlx::query_scalar("SELECT root_id FROM interaction_observations WHERE id=$1")
+                sqlx::query_as("SELECT root_id,parent_interaction_id,first_route_id,first_model_display_name FROM interaction_observations WHERE id=$1")
                     .bind(id)
                     .fetch_optional(pool)
                     .await?
             }
         };
-        let Some(root_id) = root_id else {
+        let Some(header) = header else {
             return Ok(None);
         };
         // 准入只决定截止水位前有哪些 Run；生命周期、用量和正文解释由导出模块拥有。
@@ -1921,7 +1931,7 @@ impl ObservationStore {
             })
             .collect();
         Ok(Some(BundleInteractionRecords {
-            root_id,
+            header,
             runs,
             events,
         }))

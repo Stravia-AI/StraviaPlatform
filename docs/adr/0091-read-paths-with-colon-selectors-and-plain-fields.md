@@ -41,7 +41,7 @@ pub struct ReadInput {
 }
 ```
 
-JSON 里的 `null` 与缺省含义相同。`question` 承载搜索文本、网页/媒体问题与续接追问；搜索轮与续接的 `question` 必须非空白，搜索轮不超过 `MAX_SEARCH_TEXT_BYTES`；`attachments`、`allowed_domains`、`wait` 可空。`allowed_domains` 沿用现有规则：原始条目 ≤ 20、每项非空白、经 `normalize_domains` 规范化去重、规范化后非空；显式空数组报错并说明“省略或 null 表示继承或不限制，非空列表表示替换”，不得静默变成不限制。`attachments` 的 `[]` 等同于缺省；每项必须是精确的 Artifact Reference（`stravia://artifacts/<55 lowercase>`）或公网 http(s) URL，按字面值处理，不剥离选择器，也不接受 `#stravia?`；重复项报错，数量上限由媒体执行侧负责。`wait` 只对 tool-executions path 有效，缺省为 0。
+JSON 里的 `null`、缺省与零值（空白 `question`、空数组、`wait: 0`）含义相同：解析入口先把零值归一为缺省，各 path 只校验有内容的字段，零值不会因“字段不适用于该 path”被拒绝，原因见“严格 schema 的可空写法”。`question` 承载搜索文本、网页/媒体问题与续接追问；搜索轮与续接必须带非空白的 `question`，空白按缺省报缺少字段，搜索轮不超过 `MAX_SEARCH_TEXT_BYTES`；`attachments`、`allowed_domains`、`wait` 可空。`allowed_domains` 沿用现有规则：原始条目 ≤ 20、每项非空白、经 `normalize_domains` 规范化去重、规范化后非空；空数组与省略、`null` 相同，新搜索不限制来源，续接继承父策略，非空列表表示替换。空数组本身没有可执行的独立含义（不能表示“禁止所有来源”，也不能清空续接继承的策略），因此不单独报错。`attachments` 的 `[]` 等同于缺省；每项必须是精确的 Artifact Reference（`stravia://artifacts/<55 lowercase>`）或公网 http(s) URL，按字面值处理，不剥离选择器，也不接受 `#stravia?`；重复项报错，数量上限由媒体执行侧负责。`wait` 只对 tool-executions path 有效，缺省为 0；其他 path 只拒绝正整数 `wait`。
 
 解析器不知道 Turn 的类型：`attachments` 只适用于媒体轮，`allowed_domains` 只适用于搜索轮，由 core 在查出 Turn 类型后校验。
 
@@ -71,7 +71,7 @@ JSON 里的 `null` 与缺省含义相同。`question` 承载搜索文本、网�
 
 模型侧声明采用“全部出现的字段都必填 + 可空”的严格形式：`model_input_schema(scope)` 把所有出现的字段列入 `required`，可选字段类型写成 `[T, "null"]`（数组字段写 `"type": ["array", "null"]` 并带 `items`），`additionalProperties: false`，`strict_schema()` 保持 true。MCP 使用可选形式：`input_schema(scope)` 只有 `path` 必填，`additionalProperties: false`。
 
-原因是暴露工具时还不知道目标协议，跨协议改写 strict 会改变客户端看到的工具声明；既有 web-search 平台工具已采用“全部必填 + 可空”的写法（`stravia-web-search/src/platform.rs`），各编码器都能处理。模型仍可传 `null` 表示不设置，语义与省略一致。
+原因是暴露工具时还不知道目标协议，跨协议改写 strict 会改变客户端看到的工具声明；既有 web-search 平台工具已采用“全部必填 + 可空”的写法（`stravia-web-search/src/platform.rs`），各编码器都能处理。模型仍可传 `null` 表示不设置，语义与省略一致。部分模型不传 `null`，而用空字符串、空数组或 `0` 填满必填字段（已观测到 Gemini 对历史路径传 `"question":""` 与 `"wait":0`），所以零值同样按省略处理；否则同一调用会因不适用字段的占位值反复失败。
 
 ## Considered options
 

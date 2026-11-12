@@ -277,7 +277,7 @@ impl Recall<'_> {
             let rendered = self
                 .render_hits(&interaction, &hit.segments, &query)
                 .await?;
-            for (segment, rendered_hit) in hit.segments.iter().zip(rendered) {
+            for (segment, rendered_hit) in rendered {
                 oversized_line |= rendered_hit.after_first_page;
                 let role = render::role_name(segment.role_weight);
                 content.push_str(&format!(

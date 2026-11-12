@@ -24,7 +24,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 }
 ```
 
-所有读取入口只接受一个 `path`，自由文本放在 `question`，其余字段按暴露范围出现，未知字段明确拒绝。`allowed_domains` 原始列表最多 20 项、每项非空白，规范化后去重；显式空数组报错，省略或 `null` 表示继承或不限制。搜索文本必须非空白且不超过 `MAX_SEARCH_TEXT_BYTES`。续接直接把上一份报告的 `stravia://turns/<turn-id>` 作为 `path`，`question` 是后续问题，不再有独立的续接参数；续接省略允许域名则继承父策略，显式非空列表替换。仍不支持用空列表清空允许域名，改为启动新根。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。旧 URL scheme 与旧 query／fragment 选项给出可执行的报错，不保留别名。
+所有读取入口只接受一个 `path`，自由文本放在 `question`，其余字段按暴露范围出现，未知字段明确拒绝。`allowed_domains` 原始列表最多 20 项、每项非空白，规范化后去重；空数组、省略或 `null` 都表示继承或不限制。搜索文本必须非空白且不超过 `MAX_SEARCH_TEXT_BYTES`，空白按未传处理并报缺少 `question`。续接直接把上一份报告的 `stravia://turns/<turn-id>` 作为 `path`，`question` 是后续问题，不再有独立的续接参数；续接省略允许域名或传空列表则继承父策略，显式非空列表替换。不能用空列表清空允许域名，需要时启动新根。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。旧 URL scheme 与旧 query／fragment 选项给出可执行的报错，不保留别名。
 
 `blocked_domains` 已从 Stravia 搜索输入、策略、Provider 执行和结果过滤中删除。新输入及原生转工具声明携带该字段时明确拒绝；历史 payload 不重写，读取时忽略旧黑名单，不恢复执行。普通 Provider 原生不透明 JSON 直通不做全局字段剥离。允许域名是来源约束，不是网络访问授权。
 

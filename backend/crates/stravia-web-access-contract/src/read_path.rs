@@ -262,20 +262,12 @@ pub enum ReadPathError {
         target: &'static str,
         hint: &'static str,
     },
-    /// `question` 为空或仅空白。
-    #[error("question must not be blank")]
-    BlankQuestion,
     /// `question` 超过 [`MAX_SEARCH_TEXT_BYTES`]。
     #[error("question must not exceed 65536 UTF-8 bytes")]
     QuestionTooLarge,
     /// `allowed_domains` 原始条目超过 [`MAX_ALLOWED_DOMAINS`] 项。
     #[error("allowed_domains accepts at most 20 entries before normalization")]
     TooManyAllowedDomains { count: usize },
-    /// `allowed_domains` 是显式空数组。
-    #[error(
-        "allowed_domains must not be an empty list; omit it or stravia null to inherit or leave sources unrestricted, or list domains to replace them"
-    )]
-    EmptyAllowedDomains,
     /// `allowed_domains` 含无效条目或规范化后无可保留条目。
     #[error("allowed_domains entries must be valid domain filters, for example `docs.rs`")]
     InvalidAllowedDomains,
@@ -448,7 +440,7 @@ fn wait_property(strict: bool) -> serde_json::Value {
     serde_json::json!({
         "type": kind,
         "minimum": 0,
-        "description": "Seconds to wait for a tool execution."
+        "description": "Seconds to wait on a `stravia://tool-executions/` path; 0 or null returns immediately."
     })
 }
 
@@ -484,7 +476,8 @@ pub fn pagination_schema() -> serde_json::Value {
 
 /// 解析 [`ReadInput`] 为读取目标。
 ///
-/// 每种 path 形式只接受表中列出的字段；其余字段报错，不做静默忽略。
+/// 每种 path 形式只接受表中列出的字段；其余字段报错，不做静默忽略。零值字段先按
+/// [`PresentFields`] 归一为缺省，不参与这一校验。
 pub fn parse_read_input(input: &ReadInput) -> Result<ReadTarget, ReadPathError> {
     let path = input.path.as_str();
     if path.trim().is_empty() {
@@ -493,8 +486,9 @@ pub fn parse_read_input(input: &ReadInput) -> Result<ReadTarget, ReadPathError> 
     if path.starts_with("search://") || path.starts_with("query://") {
         return Err(ReadPathError::LegacySearchScheme);
     }
+    let fields = PresentFields::of(input);
     if path == SEARCH_PATH {
-        return parse_search(input);
+        return parse_search(&fields);
     }
     if path.starts_with(SEARCH_PATH) {
         return Err(ReadPathError::UnexpectedSuffix {
@@ -503,26 +497,57 @@ pub fn parse_read_input(input: &ReadInput) -> Result<ReadTarget, ReadPathError> 
         });
     }
     if path.starts_with(TURN_REFERENCE_PREFIX) {
-        return parse_continuation(input, path);
+        return parse_continuation(&fields, path);
     }
     if path.starts_with(TOOL_EXECUTION_PREFIX) {
-        return parse_tool_execution(input, path);
+        return parse_tool_execution(&fields, path);
     }
     if path.starts_with(ARTIFACT_REFERENCE_PREFIX) {
-        return parse_artifact(input, path);
+        return parse_artifact(&fields, path);
     }
     if is_history_path(path) {
-        return parse_history(input, path);
+        return parse_history(&fields, path);
     }
     if path.starts_with(READ_SCHEME_PREFIX) {
         return Err(ReadPathError::InvalidScheme);
     }
-    parse_http_resource(input, path)
+    parse_http_resource(&fields, path)
 }
 
-fn parse_search(input: &ReadInput) -> Result<ReadTarget, ReadPathError> {
+/// 去掉零值后真正携带的可选字段。
+///
+/// 模型侧 schema 要求每个字段都出现，部分模型不传 `null` 而用零值占位；空白
+/// `question`、`wait: 0` 与空数组因此都等同于缺省，各 path 只校验有内容的值。
+struct PresentFields<'a> {
+    question: Option<&'a str>,
+    attachments: Option<&'a [String]>,
+    allowed_domains: Option<&'a [String]>,
+    wait: Option<u64>,
+}
+
+impl<'a> PresentFields<'a> {
+    fn of(input: &'a ReadInput) -> Self {
+        Self {
+            question: input
+                .question
+                .as_deref()
+                .filter(|text| !text.trim().is_empty()),
+            attachments: input
+                .attachments
+                .as_deref()
+                .filter(|values| !values.is_empty()),
+            allowed_domains: input
+                .allowed_domains
+                .as_deref()
+                .filter(|values| !values.is_empty()),
+            wait: input.wait.filter(|&seconds| seconds != 0),
+        }
+    }
+}
+
+fn parse_search(fields: &PresentFields) -> Result<ReadTarget, ReadPathError> {
     let query = required_question(
-        input,
+        fields,
         "`stravia://search`",
         "set question to the plain-text search text",
     )?;
@@ -530,42 +555,42 @@ fn parse_search(input: &ReadInput) -> Result<ReadTarget, ReadPathError> {
         return Err(ReadPathError::QuestionTooLarge);
     }
     reject_field(
-        non_empty(input.attachments.as_ref()),
+        fields.attachments,
         "attachments",
         SEARCH_TARGET,
         "attachments only apply to media turn continuations",
     )?;
     reject_field(
-        input.wait.as_ref(),
+        fields.wait,
         "wait",
         SEARCH_TARGET,
         "a search returns its report directly",
     )?;
-    let allowed_domains = parse_allowed_domains(input.allowed_domains.as_ref())?;
+    let allowed_domains = parse_allowed_domains(fields.allowed_domains)?;
     Ok(ReadTarget::Search(SearchTarget {
         query,
         allowed_domains,
     }))
 }
 
-fn parse_continuation(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+fn parse_continuation(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadPathError> {
     let id = &path[TURN_REFERENCE_PREFIX.len()..];
     if !is_stable_id(id) {
         return Err(ReadPathError::InvalidTurnReference);
     }
     let question = required_question(
-        input,
+        fields,
         "a `stravia://turns/<turn-id>` continuation",
         "set question to the follow-up text",
     )?;
-    let attachments = parse_attachments(input.attachments.as_ref())?;
+    let attachments = parse_attachments(fields.attachments)?;
     reject_field(
-        input.wait.as_ref(),
+        fields.wait,
         "wait",
         CONTINUATION_TARGET,
         "a turn continuation completes inline",
     )?;
-    let allowed_domains = parse_allowed_domains(input.allowed_domains.as_ref())?;
+    let allowed_domains = parse_allowed_domains(fields.allowed_domains)?;
     Ok(ReadTarget::Continuation(ContinuationTarget {
         turn_path: path.to_owned(),
         question,
@@ -574,7 +599,7 @@ fn parse_continuation(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadP
     }))
 }
 
-fn parse_tool_execution(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+fn parse_tool_execution(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadPathError> {
     let rest = &path[TOOL_EXECUTION_PREFIX.len()..];
     if let Some((_, parameters)) = rest.split_once('?') {
         if parameters.starts_with("wait") {
@@ -588,30 +613,30 @@ fn parse_tool_execution(input: &ReadInput, path: &str) -> Result<ReadTarget, Rea
         return Err(ReadPathError::InvalidToolExecutionReference);
     }
     reject_field(
-        input.question.as_ref(),
+        fields.question,
         "question",
         TOOL_EXECUTION_TARGET,
         "read it with wait for status and the original result",
     )?;
     reject_field(
-        non_empty(input.attachments.as_ref()),
+        fields.attachments,
         "attachments",
         TOOL_EXECUTION_TARGET,
         "attachments only apply to media turn continuations",
     )?;
     reject_field(
-        input.allowed_domains.as_ref(),
+        fields.allowed_domains,
         "allowed_domains",
         TOOL_EXECUTION_TARGET,
         "allowed_domains only applies to search and turn continuations",
     )?;
     Ok(ReadTarget::ToolExecution(ToolExecutionPath {
         id: id.to_owned(),
-        wait_seconds: input.wait.unwrap_or(0),
+        wait_seconds: fields.wait.unwrap_or(0),
     }))
 }
 
-fn parse_artifact(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+fn parse_artifact(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadPathError> {
     if path.contains('?') || path.contains('#') {
         return Err(ReadPathError::LegacyOptionsSyntax);
     }
@@ -622,12 +647,12 @@ fn parse_artifact(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathE
             reason: "identity must be exactly 55 lowercase ASCII letters after `stravia://artifacts/`; append options as `:` selectors such as :raw, :download or :1-50",
         });
     }
-    reject_resource_fields(input)?;
-    let options = finish_resource_options(input, selectors, true)?;
+    reject_resource_fields(fields)?;
+    let options = finish_resource_options(fields, selectors, true)?;
     Ok(ReadTarget::Resource(ResourcePath { url, options }))
 }
 
-fn parse_http_resource(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+fn parse_http_resource(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadPathError> {
     let (url, selectors) = split_selectors(path, http_authority_floor(path))?;
     if url
         .split_once('#')
@@ -636,8 +661,8 @@ fn parse_http_resource(input: &ReadInput, path: &str) -> Result<ReadTarget, Read
         return Err(ReadPathError::LegacyOptionsSyntax);
     }
     validate_http_url(&url)?;
-    reject_resource_fields(input)?;
-    let options = finish_resource_options(input, selectors, false)?;
+    reject_resource_fields(fields)?;
+    let options = finish_resource_options(fields, selectors, false)?;
     Ok(ReadTarget::Resource(ResourcePath { url, options }))
 }
 
@@ -657,7 +682,7 @@ fn history_error(reason: &'static str) -> ReadPathError {
     ReadPathError::InvalidHistoryPath { reason }
 }
 
-fn parse_history(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathError> {
+fn parse_history(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadPathError> {
     let (address, selectors) = split_selectors(path, Some(HISTORY_ROOT.len()))?;
     let Some(rest) = address.strip_prefix(HISTORY_ROOT) else {
         return Err(history_error(
@@ -724,9 +749,8 @@ fn parse_history(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathEr
             reason: "cursor cannot be combined with other options",
         });
     }
-    let question = match input.question.as_deref() {
+    let question = match fields.question {
         None => None,
-        Some(text) if text.trim().is_empty() => return Err(ReadPathError::BlankQuestion),
         Some(text) if text.len() > MAX_SEARCH_TEXT_BYTES => {
             return Err(ReadPathError::QuestionTooLarge);
         }
@@ -752,19 +776,19 @@ fn parse_history(input: &ReadInput, path: &str) -> Result<ReadTarget, ReadPathEr
         }
     }
     reject_field(
-        non_empty(input.attachments.as_ref()),
+        fields.attachments,
         "attachments",
         HISTORY_TARGET,
         "attachments only apply to media turn continuations",
     )?;
     reject_field(
-        input.allowed_domains.as_ref(),
+        fields.allowed_domains,
         "allowed_domains",
         HISTORY_TARGET,
         "allowed_domains only applies to search and turn continuations",
     )?;
     reject_field(
-        input.wait.as_ref(),
+        fields.wait,
         "wait",
         HISTORY_TARGET,
         "history reads return immediately",
@@ -805,22 +829,22 @@ fn tool_index(segment: &str) -> Result<u32, ReadPathError> {
     segment.parse().map_err(|_| invalid())
 }
 
-/// 资源 path 不接受的字段；`attachments: []` 视为缺省，不会触发。
-fn reject_resource_fields(input: &ReadInput) -> Result<(), ReadPathError> {
+/// 资源 path 不接受的字段。
+fn reject_resource_fields(fields: &PresentFields) -> Result<(), ReadPathError> {
     reject_field(
-        non_empty(input.attachments.as_ref()),
+        fields.attachments,
         "attachments",
         RESOURCE_TARGET,
         "attachments only apply to media turn continuations",
     )?;
     reject_field(
-        input.allowed_domains.as_ref(),
+        fields.allowed_domains,
         "allowed_domains",
         RESOURCE_TARGET,
         "allowed_domains only applies to search and turn continuations",
     )?;
     reject_field(
-        input.wait.as_ref(),
+        fields.wait,
         "wait",
         RESOURCE_TARGET,
         "use a `stravia://tool-executions/<id>` path with wait for status",
@@ -828,7 +852,7 @@ fn reject_resource_fields(input: &ReadInput) -> Result<(), ReadPathError> {
 }
 
 fn finish_resource_options(
-    input: &ReadInput,
+    fields: &PresentFields,
     selectors: SelectorSet,
     is_artifact: bool,
 ) -> Result<ReadOptions, ReadPathError> {
@@ -837,11 +861,7 @@ fn finish_resource_options(
             reason: "cursor is only valid on an Artifact Reference",
         });
     }
-    let question = match input.question.as_deref() {
-        Some(text) if text.trim().is_empty() => return Err(ReadPathError::BlankQuestion),
-        Some(text) => Some(text.to_owned()),
-        None => None,
-    };
+    let question = fields.question.map(str::to_owned);
     if selectors.raw && question.is_some() {
         return Err(ReadPathError::ConflictingOptions {
             reason: "raw cannot be combined with question",
@@ -879,24 +899,23 @@ const TOOL_EXECUTION_TARGET: &str = "a `stravia://tool-executions/<id>` path";
 const RESOURCE_TARGET: &str = "a resource path";
 
 fn required_question(
-    input: &ReadInput,
+    fields: &PresentFields,
     target: &'static str,
     hint: &'static str,
 ) -> Result<String, ReadPathError> {
-    match input.question.as_deref() {
-        None => Err(ReadPathError::MissingField {
+    fields
+        .question
+        .map(str::to_owned)
+        .ok_or(ReadPathError::MissingField {
             field: "question",
             target,
             hint,
-        }),
-        Some(text) if text.trim().is_empty() => Err(ReadPathError::BlankQuestion),
-        Some(text) => Ok(text.to_owned()),
-    }
+        })
 }
 
-/// 字段存在且有效时报错；`attachments: []` 先归一为缺省。
+/// 有内容的字段出现在不接受它的 path 上时报错。
 fn reject_field<T>(
-    field_value: Option<&T>,
+    field_value: Option<T>,
     field: &'static str,
     target: &'static str,
     hint: &'static str,
@@ -911,33 +930,24 @@ fn reject_field<T>(
     }
 }
 
-fn non_empty(values: Option<&Vec<String>>) -> Option<&Vec<String>> {
-    values.filter(|values| !values.is_empty())
-}
-
-fn parse_allowed_domains(
-    domains: Option<&Vec<String>>,
-) -> Result<Option<Vec<String>>, ReadPathError> {
+fn parse_allowed_domains(domains: Option<&[String]>) -> Result<Option<Vec<String>>, ReadPathError> {
     let Some(domains) = domains else {
         return Ok(None);
     };
-    if domains.is_empty() {
-        return Err(ReadPathError::EmptyAllowedDomains);
-    }
     if domains.len() > MAX_ALLOWED_DOMAINS {
         return Err(ReadPathError::TooManyAllowedDomains {
             count: domains.len(),
         });
     }
     let normalized =
-        normalize_domains(domains.clone()).map_err(|_| ReadPathError::InvalidAllowedDomains)?;
+        normalize_domains(domains.to_vec()).map_err(|_| ReadPathError::InvalidAllowedDomains)?;
     if normalized.is_empty() {
         return Err(ReadPathError::InvalidAllowedDomains);
     }
     Ok(Some(normalized))
 }
 
-fn parse_attachments(attachments: Option<&Vec<String>>) -> Result<Vec<String>, ReadPathError> {
+fn parse_attachments(attachments: Option<&[String]>) -> Result<Vec<String>, ReadPathError> {
     let Some(attachments) = attachments else {
         return Ok(Vec::new());
     };
@@ -950,7 +960,7 @@ fn parse_attachments(attachments: Option<&Vec<String>>) -> Result<Vec<String>, R
             return Err(ReadPathError::DuplicateAttachment);
         }
     }
-    Ok(attachments.clone())
+    Ok(attachments.to_vec())
 }
 
 fn is_attachment(attachment: &str) -> bool {
@@ -1266,10 +1276,6 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(
-            parse_read_input(&with_question(SEARCH_PATH, " \t ")).unwrap_err(),
-            ReadPathError::BlankQuestion
-        );
         assert!(parse_read_input(&with_question(
             SEARCH_PATH,
             &"a".repeat(MAX_SEARCH_TEXT_BYTES)
@@ -1296,11 +1302,6 @@ mod tests {
                 query: "q".into(),
                 allowed_domains: Some(vec!["docs.rs".into(), "example.com".into()]),
             })
-        );
-        domains.allowed_domains = Some(Vec::new());
-        assert_eq!(
-            parse_read_input(&domains).unwrap_err(),
-            ReadPathError::EmptyAllowedDomains
         );
         domains.allowed_domains = Some(vec!["docs.rs/path".into()]);
         assert_eq!(
@@ -1340,6 +1341,48 @@ mod tests {
         assert!(parse_read_input(&input).is_ok());
     }
 
+    /// 严格 schema 要求字段全部出现；不传 `null` 的模型用零值占位，零值必须等同缺省。
+    #[test]
+    fn zero_value_fields_equal_absent_fields() {
+        let zeroed = |path: &str| ReadInput {
+            path: path.to_owned(),
+            question: Some(" \t ".into()),
+            attachments: Some(Vec::new()),
+            allowed_domains: Some(Vec::new()),
+            wait: Some(0),
+        };
+        for path in [
+            "stravia://history/".to_owned(),
+            "stravia://history/r/i/tools/1".to_owned(),
+            tool_execution_path(),
+            format!("{}:raw", artifact_path()),
+            "https://example.com/a:raw".to_owned(),
+        ] {
+            assert_eq!(parse_read_input(&zeroed(&path)), parse(&path), "{path}");
+        }
+        for path in [SEARCH_PATH.to_owned(), turn_path()] {
+            assert!(
+                matches!(
+                    parse_read_input(&zeroed(&path)).unwrap_err(),
+                    ReadPathError::MissingField {
+                        field: "question",
+                        ..
+                    }
+                ),
+                "{path}"
+            );
+            let asked = ReadInput {
+                question: Some("q".into()),
+                ..zeroed(&path)
+            };
+            assert_eq!(
+                parse_read_input(&asked),
+                parse_read_input(&with_question(&path, "q")),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn continuation_requires_question_and_validates_attachments() {
         let path = turn_path();
@@ -1367,11 +1410,6 @@ mod tests {
                 allowed_domains: None,
             })
         );
-        empty.allowed_domains = Some(Vec::new());
-        assert_eq!(
-            parse_read_input(&empty).unwrap_err(),
-            ReadPathError::EmptyAllowedDomains
-        );
 
         assert!(matches!(
             parse(&path).unwrap_err(),
@@ -1380,10 +1418,6 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(
-            parse_read_input(&with_question(&path, "  ")).unwrap_err(),
-            ReadPathError::BlankQuestion
-        );
 
         let digest = "a".repeat(ARTIFACT_DIGEST_LEN);
         for attachment in [
@@ -1815,13 +1849,6 @@ mod tests {
         lines.question = Some("q".into());
         assert!(parse_read_input(&lines).is_ok());
         assert!(parse(&format!("{http}:raw:1-5")).is_ok());
-
-        for path in [&base, &http.to_owned()] {
-            assert_eq!(
-                parse_read_input(&with_question(path, " ")).unwrap_err(),
-                ReadPathError::BlankQuestion
-            );
-        }
     }
 
     #[test]
@@ -2184,11 +2211,7 @@ mod tests {
     }
 
     #[test]
-    fn history_question_schema_requires_nonblank_plain_text() {
-        assert_eq!(
-            parse_read_input(&with_question("stravia://history/", " \t ")).unwrap_err(),
-            ReadPathError::BlankQuestion
-        );
+    fn history_question_rejects_oversized_text() {
         assert_eq!(
             parse_read_input(&with_question(
                 "stravia://history/",
@@ -2341,7 +2364,7 @@ mod tests {
     fn history_paths_reject_unrelated_fields() {
         type Setter = fn(&mut ReadInput);
         let setters: [(Setter, &str); 3] = [
-            (|input| input.wait = Some(0), "wait"),
+            (|input| input.wait = Some(1), "wait"),
             (
                 |input| input.allowed_domains = Some(vec!["docs.rs".into()]),
                 "allowed_domains",
@@ -2369,11 +2392,6 @@ mod tests {
                     "{path} {field}: {error:?}"
                 );
             }
-            let input = ReadInput {
-                attachments: Some(Vec::new()),
-                ..read_input(path)
-            };
-            assert!(parse_read_input(&input).is_ok(), "{path}");
         }
     }
 

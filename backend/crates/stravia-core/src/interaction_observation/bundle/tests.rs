@@ -76,6 +76,110 @@ async fn ticket(observation: &InteractionObservation) -> anyhow::Result<Download
         .await
 }
 
+/// 带新用户输入、生成父节点为 `generation_parent` 的请求。
+fn admit_user_turn(
+    observation: &InteractionObservation,
+    id: &str,
+    route_id: &str,
+    model_display_name: Option<&str>,
+    generation_parent: &str,
+) -> RunObserver {
+    observation
+        .observe_ingress(IngressStart {
+            id: id.into(),
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            protocol: "responses".into(),
+        })
+        .admit(
+            RunStart {
+                id: id.into(),
+                principal: "bundle-owner".into(),
+                api_key_id: None,
+                api_key_name: None,
+                route_id: route_id.into(),
+                model_display_name: model_display_name.map(str::to_owned),
+                ingress_protocol: "responses".into(),
+            },
+            AdmissionFacts {
+                client_request: stravia_runtime_contract::protocol::ir::AiRequest::new(
+                    "model",
+                    Vec::new(),
+                )
+                .into(),
+                has_new_user: true,
+                has_matching_pending_tool_result: false,
+                generation_root_id: Some("root-generation".into()),
+                generation_parent_id: Some(generation_parent.into()),
+            },
+        )
+}
+
+#[tokio::test]
+async fn bundle_summary_reports_parent_and_first_route_of_the_interaction() -> anyhow::Result<()> {
+    let (_directory, pool, observation) = fixture().await?;
+    let parent = admit(&observation, "parent", None);
+    finish(&parent, "completed", Some("root-generation"));
+    observation.flush().await?;
+    // 同一生成节点的首次续写在交付后 2 秒内仍属于原交互；再次从该节点出发的新输入才分出子交互。
+    let resend = admit_user_turn(&observation, "resend", "route", None, "root-generation");
+    finish(&resend, "completed", Some("resend-generation"));
+    observation.flush().await?;
+    let branch = admit_user_turn(
+        &observation,
+        "branch",
+        "branch-route",
+        Some("Fast"),
+        "root-generation",
+    );
+    finish(&branch, "completed", Some("branch-generation"));
+    observation.flush().await?;
+
+    let forest = observation.query_forest(ForestQuery::default()).await?;
+    let interactions: Vec<_> = forest
+        .roots
+        .iter()
+        .flat_map(|root| &root.interactions)
+        .collect();
+    let child = interactions
+        .iter()
+        .find(|interaction| interaction.first_route_id == "branch-route")
+        .expect("branch interaction");
+    let parent_id = child
+        .parent_interaction_id
+        .clone()
+        .expect("branch links its parent interaction");
+    let ticket = observation
+        .issue_bundle_ticket(BundleRequest {
+            kind: BundleResourceKind::Interaction,
+            resource_id: child.id.clone(),
+            through_sequence: Some(forest.snapshot_sequence),
+        })
+        .await?;
+    let (_, summary) = download(&observation, &ticket).await?;
+    assert_eq!(summary["interaction_id"], child.id.as_str());
+    assert_eq!(summary["parent_interaction_id"], parent_id.as_str());
+    assert_eq!(summary["first_route_id"], "branch-route");
+    assert_eq!(summary["first_model_display_name"], "Fast");
+
+    let root_ticket = observation
+        .issue_bundle_ticket(BundleRequest {
+            kind: BundleResourceKind::Interaction,
+            resource_id: parent_id,
+            through_sequence: Some(forest.snapshot_sequence),
+        })
+        .await?;
+    let (_, root) = download(&observation, &root_ticket).await?;
+    assert_eq!(root["parent_interaction_id"], Value::Null);
+    assert_eq!(root["first_route_id"], "route");
+    assert_eq!(root["first_model_display_name"], Value::Null);
+
+    drop((parent, resend, branch));
+    observation.shutdown().await;
+    pool.close().await;
+    Ok(())
+}
+
 async fn download(
     observation: &InteractionObservation,
     ticket: &DownloadTicket,

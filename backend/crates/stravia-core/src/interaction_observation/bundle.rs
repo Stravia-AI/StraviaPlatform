@@ -133,7 +133,7 @@ impl BundleExport {
                 }
                 let summary = projection.summary(
                     &request.resource_id,
-                    &records.root_id,
+                    &records.header,
                     through,
                     records.events,
                 );
@@ -496,7 +496,7 @@ impl BundleProjection {
     fn summary(
         &self,
         interaction_id: &str,
-        root_id: &str,
+        header: &super::query::BundleInteractionHeader,
         through: i64,
         events: Vec<ObservationEvent>,
     ) -> Value {
@@ -509,10 +509,10 @@ impl BundleProjection {
         serde_json::json!({
             "schema_version": 1,
             "interaction_id": interaction_id,
-            "root_id": root_id,
-            "parent_interaction_id": admission.and_then(|event| event.payload.get("parent_interaction_id")),
-            "first_route_id": admission.and_then(|event| event.payload.get("route_id")),
-            "first_model_display_name": admission.and_then(|event| event.payload.get("model_display_name")),
+            "root_id": header.root_id,
+            "parent_interaction_id": header.parent_interaction_id,
+            "first_route_id": header.first_route_id,
+            "first_model_display_name": header.first_model_display_name,
             "started_at": admission.map(|event| event.occurred_at),
             "last_active_at": events.last().map(|event| event.occurred_at),
             "through_event_sequence": through,

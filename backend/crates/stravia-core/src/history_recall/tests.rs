@@ -825,6 +825,39 @@ async fn history_search_hit_beyond_long_line_page_cut_remains_readable() -> anyh
 }
 
 #[tokio::test]
+async fn history_search_lists_each_hit_location_once() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    // 单行回答跨多个索引段，每段都命中；它们映射到同一行，只能占一个命中名额。
+    let answer = format!("zebraneedle {}", "pad ".repeat(300)).repeat(4);
+    let observer = admit(
+        &fixture.observation,
+        "one-line",
+        OWNER,
+        vec![user("zebraneedle question")],
+        None,
+    );
+    observer.record(visible("one-line-answer", answer.trim_end(), true));
+    finish(&observer, "completed", now(), None);
+    fixture.observation.flush().await?;
+    index_all_sqlite(&fixture).await?;
+
+    let recall = fixture.recall(OWNER).await;
+    let page = search(&recall, OWNER, "stravia://history/", "zebraneedle").await;
+    let hits = search_hits(&page);
+    assert_eq!(hits.len(), 1, "{}", content(&page));
+    let locations = &hits[0].1;
+    let unique: std::collections::BTreeSet<_> = locations.iter().collect();
+    assert_eq!(unique.len(), locations.len(), "{}", content(&page));
+    // 去重后空出的名额由用户输入那一行补上。
+    assert_eq!(locations.len(), 2, "{}", content(&page));
+    let user_hit = format!("stravia://history/{}", locations[1]);
+    assert!(content(&read(&recall, OWNER, &user_hit).await?).contains("zebraneedle question"));
+    drop(recall);
+    fixture.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn history_search_foreign_segments_cannot_starve_owner() -> anyhow::Result<()> {
     let fixture = Fixture::new().await?;
     let owner = admit(
