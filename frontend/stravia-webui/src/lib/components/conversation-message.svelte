@@ -6,14 +6,26 @@ let {
   label,
   children,
   meta,
-}: { user?: boolean; label: string; children: Snippet; meta?: Snippet } = $props()
+  rows = false,
+}: {
+  user?: boolean
+  label: string
+  children: Snippet
+  meta?: Snippet
+  /** 虚拟列表把一条消息切成多行：`children` 直接是各行，气泡与间距由行自己绘制。 */
+  rows?: boolean
+} = $props()
 </script>
 
 <article class={['message', user && 'message-user']} aria-label={label}>
-  <div class="message-body">
-    <div class={['message-content', user && 'user-bubble']}>{@render children()}</div>
-    {#if meta}<div class="message-meta">{@render meta()}</div>{/if}
-  </div>
+  {#if rows}
+    <div class="message-rows">{@render children()}</div>
+  {:else}
+    <div class="message-body">
+      <div class={['message-content', user && 'user-bubble']}>{@render children()}</div>
+      {#if meta}<div class="message-meta">{@render meta()}</div>{/if}
+    </div>
+  {/if}
 </article>
 
 <style>
@@ -36,6 +48,15 @@ let {
 }
 .message-user .message-body {
   align-items: flex-end;
+}
+.message-rows {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  font-size: 0.8125rem;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
 }
 .message-content {
   display: flex;

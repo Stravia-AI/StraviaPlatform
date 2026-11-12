@@ -37,8 +37,8 @@ function renderBlock(element: HTMLDivElement) {
 }
 </script>
 
-<div class="markdown-rendered-block" data-markdown-dialog-open={openedImage ? '' : undefined} {@attach renderBlock}>
-</div>
+<!-- 打开的图片对话框属于这一行：虚拟列表不能在对话框打开期间回收它。 -->
+<div class="markdown-rendered-block" data-keep-mounted={openedImage ? '' : undefined} {@attach renderBlock}></div>
 {#if openedImage}
   {@const image = openedImage}
   <Dialog.Root

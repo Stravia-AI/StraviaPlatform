@@ -5,6 +5,8 @@
 ### Changed
 
 - `StraviaRead` treats zero-value fields like omitted or `null` fields: a blank `question`, `"wait": 0`, and empty `attachments` or `allowed_domains` arrays are no longer rejected on paths that do not use them. Models that fill every schema field with placeholders, such as Gemini, can now list `stravia://history/` and read resources on the first call. `allowed_domains: []` now means unrestricted for a new search and inherits the parent policy for a continuation, instead of failing; searches and continuations with a blank `question` report the missing `question`.
+- Request history conversations, request diagnostics and the Console chat now render long histories through a virtualized list: only the rows near the viewport are mounted, so opening, scrolling and loading earlier events stay smooth however long the conversation is. A conversation opens at the latest content and keeps following new output only while you stay at the bottom; expanded thinking, tool and diagnostic details survive scrolling away and back. Browser find and full-page copy only cover the rows currently mounted.
+- Request history conversations no longer show the first user input while earlier events are still unloaded; it appears at the top once the earlier history has been read.
 
 ### Fixed
 

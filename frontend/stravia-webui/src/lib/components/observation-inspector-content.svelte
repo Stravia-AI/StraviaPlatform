@@ -1,5 +1,6 @@
 <script lang="ts">
 import { tick, type Snippet } from 'svelte'
+import { SvelteSet } from 'svelte/reactivity'
 import * as m from '#lib/paraglide/messages.js'
 import DownloadIcon from '@lucide/svelte/icons/download'
 import XIcon from '@lucide/svelte/icons/x'
@@ -8,7 +9,8 @@ import ChevronRightIcon from '@lucide/svelte/icons/chevron-right'
 import type { CredentialHitHighlight } from '#lib/credential-hit-highlights.js'
 import { formatDuration, formatLogTime, formatNumber, formatTps } from '#lib/format.js'
 import ObservationConversation from '#lib/components/observation-conversation.svelte'
-import ObservationLogViewport from '#lib/components/observation-log-viewport.svelte'
+import VirtualLog from '#lib/components/virtual-log.svelte'
+import type { VirtualRow } from '#lib/virtual-list.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import TechnicalValue from '#lib/components/technical-value.svelte'
 import {
@@ -91,7 +93,29 @@ let {
   onlatest,
 }: Props = $props()
 
+// 折叠的 Run 摘要加行间距的大致高度，只用于尚未测量的行。
+const DIAGNOSTIC_RUN_HEIGHT = 72
+
 const timeline = $derived(deriveTimeline(interaction, clientError))
+// 行滚出虚拟列表窗口会被回收，展开状态不能留在行里；按所属对象分区，切换对象不会串用。
+const openRows = new SvelteSet<string>()
+const disclosureScope = $derived(
+  upstreamError
+    ? `upstream:${upstreamError.error.id}`
+    : interaction
+      ? `interaction:${interaction.interaction.id}`
+      : 'client',
+)
+function rowDisclosure(kind: 'run' | 'group' | 'event', id: string) {
+  const key = `${disclosureScope}\u0000${kind}\u0000${id}`
+  return {
+    open: openRows.has(key),
+    onOpenChange: (open: boolean) => {
+      if (open) openRows.add(key)
+      else openRows.delete(key)
+    },
+  }
+}
 const upstreamItems = $derived(upstreamError ? deriveEventItems(upstreamError.events) : [])
 const title = $derived(
   upstreamError
@@ -101,9 +125,9 @@ const title = $derived(
 
 let flashRun = $state<string | null>(null)
 let flashTimer: ReturnType<typeof setTimeout> | undefined
+let diagnosticsLog = $state<{ reveal(key: string): boolean }>()
 function jumpToRun(runId: string | null) {
-  if (!runId) return
-  document.getElementById(`obs-run-${runId}`)?.scrollIntoView({ block: 'nearest' })
+  if (!runId || !diagnosticsLog?.reveal(runId)) return
   flashRun = runId
   clearTimeout(flashTimer)
   flashTimer = setTimeout(() => {
@@ -113,6 +137,7 @@ function jumpToRun(runId: string | null) {
 
 async function showRunInDiagnostics(runId: string) {
   activeTab = 'diagnostics'
+  // 诊断列表在切换页签后才挂载；等它出现再登记跳转目标。
   await tick()
   jumpToRun(runId)
 }
@@ -123,7 +148,7 @@ async function showRunInDiagnostics(runId: string) {
   <!-- 原始详情展示存储的事件：合并事件拆出的尝试行与轮次行都指向同一条存储记录。 -->
   {@const stored = event.stored ?? event}
   <li class="stream-item">
-    <Collapsible.Root>
+    <Collapsible.Root {...rowDisclosure('event', eventKey(event))}>
       <Collapsible.Trigger
         class="stream-row"
         data-tone={summary.tone}
@@ -179,7 +204,7 @@ async function showRunInDiagnostics(runId: string) {
   {:else}
     {@const group = item.type === 'process' ? processGroup(events) : null}
     <li class="stream-item stream-group" data-group={item.type}>
-      <Collapsible.Root>
+      <Collapsible.Root {...rowDisclosure('group', itemKey(item))}>
         <Collapsible.Trigger class="stream-row" data-tone="neutral" data-group={item.type}>
           <span class="stream-text">
             <strong
@@ -219,8 +244,8 @@ async function showRunInDiagnostics(runId: string) {
   <!-- 父 Run 仍在未加载的更早区间时只显示编号，不提供跳转。 -->
   {@const parentShown = parentIndex !== null && parentIndex > timeline.orderedRuns.length - timeline.visibleRuns.length}
   {@const metrics = timeline.metrics.get(run.id)}
-  <li class="stream-run" id="obs-run-{run.id}" data-flash={flashRun === run.id || null}>
-    <Collapsible.Root>
+  <div class="stream-run" id="obs-run-{run.id}" data-flash={flashRun === run.id || null}>
+    <Collapsible.Root {...rowDisclosure('run', run.id)}>
       <div class="run-band">
         <Collapsible.Trigger
           class="stream-row run-head"
@@ -329,7 +354,7 @@ async function showRunInDiagnostics(runId: string) {
         {/snippet}
       </Collapsible.Content>
     </Collapsible.Root>
-  </li>
+  </div>
 {/snippet}
 
 {#snippet runMetric(label: string, value: string)}
@@ -368,6 +393,18 @@ async function showRunInDiagnostics(runId: string) {
 {#if error && (interaction || clientError || upstreamError)}
   <RequestFailure message={error} retry={onretry} />
 {/if}
+{#snippet diagnosticRun(run: RunDetail, index: number)}
+  {@const gap = index > 0 ? timeline.gapLabel(timeline.visibleRuns[index - 1], run) : null}
+  {#if gap}<div class="stream-gap" role="separator" aria-label={gap}><span>{gap}</span></div>{/if}
+  {@render runBlock(run)}
+{/snippet}
+
+{#snippet diagnosticRuns(_group: string, parts: VirtualRow<RunDetail>[], measured: Snippet<[VirtualRow<RunDetail>]>)}
+  <ol class="stream">
+    {#each parts as part (part.key)}{@render measured(part)}{/each}
+  </ol>
+{/snippet}
+
 {#if loading && !interaction && !clientError && !upstreamError}
   <div class="grid flex-1 place-items-center">
     <p class="text-sm text-muted-foreground">{m.observation_loading_details()}</p>
@@ -614,26 +651,22 @@ async function showRunInDiagnostics(runId: string) {
           </dl>
           {#key interaction.interaction.id}
             <div class="min-h-0 flex-1">
-              <ObservationLogViewport
+              <VirtualLog
+                bind:this={diagnosticsLog}
                 label={m.observation_diagnostics()}
+                rows={timeline.visibleRuns}
+                rowKey={(run: RunDetail) => run.id}
+                estimateSize={() => DIAGNOSTIC_RUN_HEIGHT}
+                row={diagnosticRun}
+                rowTag="li"
+                group={() => 'runs'}
+                segment={diagnosticRuns}
                 olderCursor={interaction.older_events_cursor}
                 {olderLoading}
-                {onolder}>
-                {#snippet children(older: Snippet)}
-                  <div class="diagnostic-log">
-                    {@render older()}
-                    <ol class="stream">
-                      {#each timeline.visibleRuns as run, index (run.id)}
-                        {#if index > 0}
-                          {@const gap = timeline.gapLabel(timeline.visibleRuns[index - 1], run)}
-                          {#if gap}<li class="stream-gap" role="separator" aria-label={gap}><span>{gap}</span></li>{/if}
-                        {/if}
-                        {@render runBlock(run)}
-                      {/each}
-                    </ol>
-                  </div>
-                {/snippet}
-              </ObservationLogViewport>
+                {onolder}
+                paddingStart={16}
+                paddingEnd={16}
+                class="diagnostic-log" />
             </div>
           {/key}
         </div>
@@ -652,8 +685,8 @@ async function showRunInDiagnostics(runId: string) {
   padding: 1rem;
   font-size: 0.8125rem;
 }
-.diagnostic-log {
-  padding: 1rem;
+:global(.diagnostic-log) {
+  padding-inline: 1rem;
 }
 .diagnostic-overview dd {
   min-width: 0;
@@ -670,9 +703,6 @@ async function showRunInDiagnostics(runId: string) {
   padding: 0;
   padding-inline-start: 1rem;
   list-style: none;
-}
-.stream {
-  gap: 0.9rem;
 }
 .branch {
   gap: 0.15rem;
@@ -692,11 +722,16 @@ async function showRunInDiagnostics(runId: string) {
 .stream-run {
   min-width: 0;
 }
+/* 行间距由行内边距承担：虚拟化器只量得到行高，量不到外边距。 */
+.stream-run {
+  padding-bottom: 0.9rem;
+}
 /* 相邻请求之间的等待间隔 */
 .stream-gap {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+  margin-bottom: 0.9rem;
   color: var(--muted-foreground);
   font-family: var(--font-technical);
   font-size: 0.72rem;

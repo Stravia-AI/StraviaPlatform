@@ -208,7 +208,9 @@ describe('observation conversation', () => {
 
   test('a bounded latest page never substitutes the full interaction tail', () => {
     const current = { ...detail([run('latest', 2, [])], 'Unloaded historical output'), older_events_cursor: 50 }
-    expect(observationConversationMessages(current)[1].text).toBe('')
+    expect(observationConversationMessages(current).map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'assistant', text: '' },
+    ])
   })
 
   test('selected live memory excludes other interactions and keeps the newest received content bounded', () => {
@@ -290,18 +292,21 @@ describe('observation conversation', () => {
     expect(replayed.every((message, index) => message === messages[index])).toBe(true)
   })
 
-  test('keeps the root preview while its paged event is outside the loaded window', () => {
-    const current = {
-      ...detail([
-        run('root-run', 1, [event('root-run', 3, 'client_visible_content', { text: 'First response' })]),
-        run('follow-up', 2, [
-          event('follow-up', 4, 'user_input_recorded', { kind: 'user_input_recorded', text: 'Visible follow-up' }),
-          event('follow-up', 5, 'client_visible_content', { text: 'Follow-up response' }),
-        ]),
+  test('hides the first input until the older events it precedes are loaded', () => {
+    const loaded = detail([
+      run('root-run', 1, [event('root-run', 3, 'client_visible_content', { text: 'First response' })]),
+      run('follow-up', 2, [
+        event('follow-up', 4, 'user_input_recorded', { kind: 'user_input_recorded', text: 'Visible follow-up' }),
+        event('follow-up', 5, 'client_visible_content', { text: 'Follow-up response' }),
       ]),
-      older_events_cursor: 3,
-    }
-    expect(observationConversationMessages(current).map(({ role, text }) => ({ role, text }))).toEqual([
+    ])
+    const paged = { ...loaded, older_events_cursor: 3 }
+    expect(observationConversationMessages(paged).map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'assistant', text: 'First response' },
+      { role: 'user', text: 'Visible follow-up' },
+      { role: 'assistant', text: 'Follow-up response' },
+    ])
+    expect(observationConversationMessages(loaded).map(({ role, text }) => ({ role, text }))).toEqual([
       { role: 'user', text: 'Actual user question' },
       { role: 'assistant', text: 'First response' },
       { role: 'user', text: 'Visible follow-up' },
