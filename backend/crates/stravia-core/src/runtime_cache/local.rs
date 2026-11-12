@@ -150,10 +150,10 @@ impl LocalCache {
             return;
         }
         let mut prospective = ledger.usage;
-        if old.is_some() {
-            if let Some(meta) = ledger.entries.get(&(index, hash)) {
-                prospective[index] -= meta.weight;
-            }
+        if old.is_some()
+            && let Some(meta) = ledger.entries.get(&(index, hash))
+        {
+            prospective[index] -= meta.weight;
         }
         if !policy::can_admit(capacity, &prospective, class, weight) {
             return;

@@ -64,7 +64,7 @@ impl RuntimeCache {
     fn admission_weight<T>(&self, domain: &str, key: &str, value_bytes: usize) -> Option<usize> {
         match &self.backend {
             Backend::Local(cache) => cache.admission_weight::<T>(domain, key, value_bytes),
-            Backend::Redis(cache) => cache.admission_weight::<T>(domain, key, value_bytes),
+            Backend::Redis(cache) => cache.admission_weight(domain, key, value_bytes),
         }
     }
 

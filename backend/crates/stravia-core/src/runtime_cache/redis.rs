@@ -74,7 +74,7 @@ impl RedisCache {
         })
     }
 
-    pub(super) fn admission_weight<T>(
+    pub(super) fn admission_weight(
         &self,
         domain: &str,
         key: &str,
@@ -135,7 +135,7 @@ impl RedisCache {
     ) {
         if ttl.is_zero()
             || self
-                .admission_weight::<T>(domain, key, estimated_bytes)
+                .admission_weight(domain, key, estimated_bytes)
                 .is_none()
         {
             return;
@@ -157,8 +157,7 @@ impl RedisCache {
                 return;
             }
         };
-        let Some(weight) =
-            self.admission_weight::<T>(domain, key, payload.len().max(estimated_bytes))
+        let Some(weight) = self.admission_weight(domain, key, payload.len().max(estimated_bytes))
         else {
             return;
         };

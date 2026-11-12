@@ -15,7 +15,9 @@ import pytest
 
 from tests.common.helpers import http_request, stop_stravia_server
 from tests.e2e.admin.test_observation_failures import _start_initialized
-from tests.e2e.admin.test_observations import _create_route, _detail, _forest, _proxy, _route_interactions, _wait_for
+from tests.e2e.admin.test_observations import (
+    _create_route, _detail, _finished_route_interactions, _forest, _proxy, _route_interactions, _wait_for,
+)
 from tests.e2e.admin.test_reversible_redaction import SECRET, REFERENCE, echo_provider, mapping_sql, set_enabled
 
 
@@ -434,18 +436,43 @@ def test_known_credentials_are_attributed_by_the_rules_stored_with_their_mapping
             locators = [locator for discovery in events[0]["payload"]["discoveries"] for locator in discovery["locators"]]
             assert {locator["rule_id"] for locator in locators} == set(rules)
 
-            # 创建时没有记下规则的映射（升级前创建）照常保护，但不能编造归因，也就不产生复用记录。
-            mapping_sql(env, "UPDATE reversible_redaction_mappings SET rule_ids = '[]' WHERE secret = ?", bare)
-            status, body = _proxy(env, key, model, [{"role": "user", "content": f"again {bare}"}])
-            assert status == 200, body
-            sent = received[-1]["body"]["messages"][-1]["content"]
-            assert bare not in sent and REFERENCE.search(sent)
-            # 换一类来源再提交一次：它的事件写入后，上一次请求若会产生记录也早已写完。
-            mapping_sql(env, "UPDATE reversible_redaction_mappings SET rule_ids = ? WHERE secret = ?", stored, bare)
             status, body = _proxy(env, key, model, [{"role": "system", "content": f"note {bare}"}, {"role": "user", "content": "hi"}])
             assert status == 200, body
             _wait_for("reuse in instructions", lambda: reuse_events("system_or_history") or None)
             assert len(reuse_events("user_message")) == 1
+        finally:
+            set_enabled(env, False)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
+def test_legacy_mappings_protect_without_fabricating_rule_attribution(admin_env: dict[str, Any]) -> None:
+    bare = "Q8n4Vk7sT2p9X5a3Lc6D0h1R"
+    reference = f"<!--sr:{'l' * 28}-->"
+    with echo_provider() as (url, received):
+        env = {**admin_env, "mock": url}
+        model = "credential-legacy-rules"
+        route, key = _create_route(env, model)
+        now = int(time.time() * 1000)
+        # 升级前的无归因映射在该主体首次读取前预置，不改写已经进入运行时缓存的映射。
+        mapping_sql(env, """
+            INSERT INTO reversible_redaction_mappings
+                (reference, principal, secret, published_at, created_at, last_used_at, rule_ids)
+            SELECT ?, 'api-key:' || id, ?, ?, ?, ?, '[]' FROM api_keys WHERE name = ?
+        """, reference, bare, now, now, now, f"{model}-key")
+        set_enabled(env, True)
+        try:
+            assert detect_text(env, bare) == []
+            status, body = _proxy(env, key, model, [{"role": "user", "content": f"again {bare}"}])
+            assert status == 200, body
+            sent = received[-1]["body"]["messages"][-1]["content"]
+            assert bare not in sent and reference in sent
+            assert body["choices"][0]["message"]["content"] == f"again {bare}"
+            interactions = _wait_for(
+                "finished legacy mapping request",
+                lambda: _finished_route_interactions(env, route) or None,
+            )
+            assert all(not hit_events(env, interaction["id"]) for interaction in interactions)
         finally:
             set_enabled(env, False)
 

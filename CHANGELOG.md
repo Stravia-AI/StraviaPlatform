@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- CI regressions now synchronize SQLite worker completion before checking cancelled-request span lifetimes and seed legacy credential mappings before their first cached read, preserving cancellation and credential-attribution assertions without timing or cache assumptions. Strict cache Clippy errors and desktop smoke-test formatting are also corrected; runtime behavior is unchanged.
 - Interaction debug bundles now fill `parent_interaction_id`, `first_route_id` and `first_model_display_name` in `interaction.json`; they were always `null`.
 - History search no longer lists the same hit line more than once for an interaction when a long single line spans several indexed segments; the freed slots show the next distinct hit locations.
 - Provider and model dropdowns inside dialogs, such as the request destination editor, are no longer cut off at the dialog edge or the window edge; the candidate list now extends past the dialog and shrinks with a scrollbar when the window is short.

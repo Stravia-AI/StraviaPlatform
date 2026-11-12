@@ -1319,11 +1319,7 @@ describe('Stravia desktop smoke', () => {
         model_provider: 'stravia',
         model_providers: {
           existing: { name: 'Existing provider', base_url: 'https://existing.invalid/v1' },
-          stravia: {
-            model_catalog_url: catalogUrl,
-            supports_websockets: true,
-            experimental_bearer_token: apiKeyValue,
-          },
+          stravia: { model_catalog_url: catalogUrl, supports_websockets: true, experimental_bearer_token: apiKeyValue },
         },
         profiles: { personal: { model: 'profile-current-model' } },
       })

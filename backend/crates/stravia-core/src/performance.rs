@@ -1946,11 +1946,14 @@ mod tests {
             set_debug(&debug, true);
             let request = tracing::info_span!(target: "stravia::perf", "proxy.inference_run",
                 status = tracing::field::Empty);
-            let tx = pool
+            let mut tx = pool
                 .begin_write()
                 .instrument(request.clone())
                 .await
                 .unwrap();
+            // BEGIN 的应答早于 worker 释放其捕获的请求 span；在请求 span 外用同连接
+            // FIFO 屏障排空它，确保下方只检验后台清理是否延长请求，而非 worker 调度。
+            tx.ping().await.unwrap();
             request.record("status", "cancelled");
             drop(request);
             drop(tx);
