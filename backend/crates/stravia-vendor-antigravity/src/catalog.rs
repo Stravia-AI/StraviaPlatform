@@ -79,8 +79,14 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
     }
     let mut models = Vec::with_capacity(families.len());
     for (family, variants) in families {
+        // CLI DefaultEffortForBase：同家族目录默认优先，否则选 medium，再回退首档。
         let selected = default
             .and_then(|id| variants.iter().find(|variant| variant.id == id))
+            .or_else(|| {
+                variants
+                    .iter()
+                    .find(|variant| variant.effort.as_deref() == Some("medium"))
+            })
             .unwrap_or(&variants[0]);
         let selected_id = selected.id.clone();
         let mut metadata = selected.metadata.clone();
@@ -263,6 +269,15 @@ fn model_metadata(details: &serde_json::Map<String, Value>) -> Option<BTreeMap<S
             metadata.insert("limit".into(), json!({"context": number}));
         }
     }
+    if let Some(value) = details.get("maxOutputTokens") {
+        let number = value.as_i64().and_then(|value| i32::try_from(value).ok())?;
+        if number < 0 {
+            return None;
+        }
+        if number > 0 {
+            metadata.insert("maxOutputTokens".into(), json!(number));
+        }
+    }
     // 标量预算不能证明 low/medium/high 等离散 effort，保持上游声明而不编造范围。
     if let Some(thinking) = details.get("supportsThinking") {
         metadata.insert("supportsThinking".into(), thinking.clone());
@@ -311,6 +326,38 @@ mod tests {
         ] {
             assert!(parse(&payload).is_none());
         }
+    }
+
+    #[test]
+    fn family_default_prefers_medium_without_overriding_the_catalog_default() {
+        let mut payload = json!({
+            "defaultAgentModelId": "gemini-4-argon-medium",
+            "agentModelSorts": [{"groups": [{"modelIds": [
+                "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low"
+            ]}]}],
+            "models": {
+                "gemini-4-hydrogen-high": {}, "gemini-4-hydrogen-xhigh": {},
+                "gemini-4-hydrogen-medium": {}, "gemini-4-hydrogen-low": {}
+            }
+        });
+        assert_eq!(
+            parse(&payload).unwrap().models[0].selector.as_deref(),
+            Some("gemini-4-hydrogen-medium")
+        );
+        payload["defaultAgentModelId"] = json!("gemini-4-hydrogen-low");
+        assert_eq!(
+            parse(&payload).unwrap().models[0].selector.as_deref(),
+            Some("gemini-4-hydrogen-low")
+        );
+        payload["defaultAgentModelId"] = json!("gemini-4-argon-medium");
+        payload["models"]
+            .as_object_mut()
+            .unwrap()
+            .remove("gemini-4-hydrogen-medium");
+        assert_eq!(
+            parse(&payload).unwrap().models[0].selector.as_deref(),
+            Some("gemini-4-hydrogen-high")
+        );
     }
 
     #[test]

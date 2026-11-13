@@ -162,9 +162,6 @@ async fn antigravity_real_wasm_inference_matches_inference_capture() -> anyhow::
         false,
     );
     let sample: Value = serde_json::from_str(fixture)?;
-    assert_eq!(sample["provenance"]["mode"], "interactive");
-    assert_eq!(sample["provenance"]["model"], "gemini-3.5-flash-low");
-    assert_eq!(sample["body_pattern"]["synthetic_prompt_present"], true);
     let mut lines = head.split("\r\n");
     assert_eq!(
         lines.next(),

@@ -1,5 +1,5 @@
 //! Anthropic `GET /v1/models` 返回的型号能力：发现阶段翻译成 Stravia 的模型元数据，
-//! 推理阶段按同一份数据约束请求。接口只覆盖思考类型、effort 档位与
+//! 推理阶段按同一份数据约束请求。接口覆盖模态、思考类型、effort 档位与
 //! 上下文管理策略；其余型号规则见 `thinking.rs` 的静态回退。
 
 use std::collections::BTreeMap;
@@ -127,6 +127,23 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
     if id.is_empty() {
         return None;
     }
+    // Messages 模型的文本输出不依赖共享目录是否已经收录新型号；可选输入只认原生能力。
+    let image = entry
+        .pointer("/capabilities/image_input/supported")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let pdf = entry
+        .pointer("/capabilities/pdf_input/supported")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let mut input = Vec::with_capacity(1 + usize::from(image) + usize::from(pdf));
+    input.push("text");
+    if image {
+        input.push("image");
+    }
+    if pdf {
+        input.push("pdf");
+    }
     let mut model = DiscoveredModel {
         id: id.to_owned(),
         display_name: entry
@@ -137,7 +154,10 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
         family: None,
         selector: None,
         capabilities: Vec::new(),
-        metadata: BTreeMap::new(),
+        metadata: BTreeMap::from([(
+            "modalities".into(),
+            json!({"input": input, "output": ["text"]}),
+        )]),
     };
     let max_input = entry.get("max_input_tokens").and_then(Value::as_u64);
     if max_input.is_some() {
@@ -289,6 +309,32 @@ mod tests {
     }
 
     #[test]
+    fn discovery_declares_message_modalities_without_a_shared_catalog_entry() {
+        for (capabilities, expected_input) in [
+            (Value::Null, json!(["text"])),
+            (
+                json!({"image_input":{"supported":false},"pdf_input":{"supported":false}}),
+                json!(["text"]),
+            ),
+            (
+                json!({"image_input":{"supported":true},"pdf_input":{"supported":true}}),
+                json!(["text", "image", "pdf"]),
+            ),
+        ] {
+            let model = discovered_model(&json!({
+                "id":"new-message-model", "capabilities": capabilities,
+            }))
+            .unwrap();
+            assert_eq!(
+                model.metadata.get("modalities"),
+                Some(&json!({
+                    "input": expected_input, "output": ["text"],
+                }))
+            );
+        }
+    }
+
+    #[test]
     fn discovery_keeps_only_positive_native_output_limits() {
         for (wire, expected) in [
             (json!(64_000), Some(64_000)),
@@ -333,9 +379,6 @@ mod tests {
         }))
         .unwrap();
         assert!(!plain.metadata.contains_key("reasoning_efforts"));
-
-        let bare = discovered_model(&json!({"id": "x", "capabilities": null})).unwrap();
-        assert!(bare.metadata.is_empty() && bare.capabilities.is_empty());
     }
 
     #[test]

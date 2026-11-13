@@ -1,12 +1,12 @@
 # Antigravity CLI OAuth 与模型协议调研
 
-调研日期：2026-10-04；请求头与工具附件实测更新：2026-11-06。对应实现：`backend/crates/stravia-vendor-antigravity/`。
+初始调研日期：2026-10-04；工具附件实测更新：2026-11-06；CLI 1.5.8 与 Hydrogen 请求更新：2026-11-13。对应实现：`backend/crates/stravia-vendor-antigravity/`。
 
 ## 结论与证据边界
 
 Stravia 使用独立 `antigravity` Vendor Plugin 提供 consumer Google OAuth、账号模型发现、Gemini 形态的模型推理及账号共享额度监控。默认构建仍只内嵌 `base`；管理员本地导入专属 Wasm 后才有此接入。
 
-**公开 CLI 仓库不是 CLI 网络层的开源源码。** [Antigravity CLI 仓库固定提交](https://github.com/google-antigravity/antigravity-cli/tree/65a3c69e388148c9327f307efe82ddb1c0c8d7d4) 提供 README、CHANGELOG、examples 和 demo，未提供所需的 OAuth、HTTP client 或序列化实现。本次先分析开源代理与监控源码，再静态分析实际 CLI 1.2.16 发布包：恢复 Go 函数名、反汇编 OAuth/请求头/序列化函数，解码内嵌 protobuf `FileDescriptorProto`。没有执行下载的 CLI，也没有读取本机 Antigravity 凭据；实现后的真实账号授权与 API 验证使用隔离 Stravia 实例，见第 6 节。本文不能替代未公开的官方 CLI 源码或原生 CLI 授权抓包。
+**公开 CLI 仓库不是 CLI 网络层的开源源码。** [Antigravity CLI 仓库固定提交](https://github.com/google-antigravity/antigravity-cli/tree/65a3c69e388148c9327f307efe82ddb1c0c8d7d4) 提供 README、CHANGELOG、examples 和 demo，未提供所需的 OAuth、HTTP client 或序列化实现。初次调研先分析开源代理与监控源码，再静态分析实际 CLI 1.2.16 发布包：恢复 Go 函数名、反汇编 OAuth/请求头/序列化函数，解码内嵌 protobuf `FileDescriptorProto`。初次静态调研没有执行下载的 CLI 或读取本机凭据；此后的经授权真实运行、隔离 Stravia 验证和证据边界分别记录于第 6 节及[模型映射调研](antigravity-model-mapping.md)。本文不能替代未公开的官方 CLI 源码或原生 CLI 授权抓包。
 
 证据分层：
 
@@ -109,20 +109,20 @@ openid
 
 ### 请求头
 
-模型、项目与额度 POST 采用 2026-11-06 实际捕获的 agy 1.5.1 Linux/amd64 profile，由插件固定构造身份与内容类型，宿主协商响应压缩：
+模型、项目与额度 POST 采用 2026-11-13 实际捕获的 agy 1.5.8 Linux/amd64 profile，由插件固定构造身份与内容类型，宿主协商响应压缩：
 
 ```text
 Authorization: Bearer <this connection's access token>
 Content-Type: application/json
-User-Agent: antigravity/cli/1.5.1 (aidev_client; os_type=linux; arch=amd64; cl=1014269460; auth_method=consumer)
+User-Agent: antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=amd64; cl=1020628950; auth_method=consumer)
 Accept-Encoding: gzip
 ```
 
-`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。早期最小差分验证表明仅补回 `/cli/` 即可恢复清单，见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。当前版本与构建号取自官方 1.5.1 实际请求，不从发布标签或其它平台的二进制推测。
+`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。早期最小差分验证表明仅补回 `/cli/` 即可恢复清单，见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。当前版本与构建号取自官方 1.5.8 实际请求，不从发布标签或其它平台的二进制推测。
 
-这里的模型后端指 agy 实际访问的 `daily-cloudcode-pa.googleapis.com`，不是另一种客户端。本插件的模型后端操作选择 HTTP/1.1；请求体不压缩，响应只声明 gzip 压缩，未压缩响应也可读取。推理声明唯一 `Transfer-Encoding: chunked` 作为宿主传输选项，由宿主实际分帧，不把已编码 JSON 字节伪装成分块正文。模型目录、项目、额度和生图使用定长 JSON。SSE 不额外声明 `Accept: text/event-stream`；宿主保留未修改 reqwest 自动添加的 `Accept: */*`，接受它与官方样本的差异。头名称大小写与顺序、JSON 排列及 TLS 指纹不宣称与 Go 逐字相同。
+这里的模型后端指 agy 实际访问的 `daily-cloudcode-pa.googleapis.com`，不是另一种客户端。本插件的模型后端操作选择 HTTP/1.1；请求体不压缩，响应只声明 gzip 压缩，未压缩响应也可读取。推理声明唯一 `Transfer-Encoding: chunked` 作为宿主传输选项，由宿主实际分帧，不把已编码 JSON 字节伪装成分块正文。模型目录、项目、额度和生图使用定长 JSON。当前宿主网络层不补 `Accept`，推理请求头顺序与同连接 ClientHello 由原生采集 fixture 校验；不是早期 reqwest 默认头路径。1.5.8 的 HTTP ClientHello 新增 `http/1.1` ALPN，内置 `antigravity` shape 升为 revision 2。JSON 排列、TCP 时序及未采集的平台不在一致性承诺内。
 
-OAuth 使用独立的 `oauth2.googleapis.com/token` profile：`Content-Type: application/x-www-form-urlencoded`、`User-Agent: Go-http-client/2.0`、`Accept-Encoding: gzip`，由传输层计算正文长度。官方样本没有 `Accept`，当前宿主仍会添加 `Accept: */*`。它不使用模型后端的 CLI UA 或 HTTP/1-only 选项；保持默认 HTTP 协商，本次官方刷新实际使用 HTTP/2。管理员的代理和强制 HTTP/1 配置仍按现有契约生效，不承诺这种非捕获配置下的协议／UA 组合与官方逐字一致。交换和刷新继续使用原有表单认证方式，不新增 Basic 探测或自动重试。
+OAuth 使用独立的 `oauth2.googleapis.com/token` profile：`Content-Type: application/x-www-form-urlencoded`、`User-Agent: Go-http-client/2.0`、`Accept-Encoding: gzip`，由传输层计算正文长度，当前宿主不补 `Accept`。它不使用模型后端的 CLI UA 或 HTTP/1-only 选项；保持默认 HTTP 协商，历史官方刷新样本使用 HTTP/2。2026-11-13 没有重新验证授权交换或刷新。管理员的代理和强制 HTTP/1 配置仍按现有契约生效，不承诺这种非捕获配置下的协议／UA 组合与官方逐字一致。交换和刷新继续使用原有表单认证方式，不新增 Basic 探测或自动重试。
 
 operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注入社区代理常见的 `X-Goog-Api-Client` 或 `Client-Metadata`；本插件也不注入它们。不读取或合并 ProviderSnapshot.client_headers，不允许下游替换 Bearer、User-Agent 或增加供应商自定义头。Host、Content-Length、HTTP/2 framing 等传输层必需信息由宿主 HTTP 实现负责，不宣称是完整 CLI transport fingerprint。
 
@@ -151,13 +151,13 @@ operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注�
 
 Schema 依据实际 `openapi.proto` 投影 type/format/title/description/nullable/default、数组与对象约束、enum、properties/propertyOrdering/required、数值与字符串约束、example、oneOf/anyOf/allOf/not、additionalProperties/additionalPropertiesSchema、ref/defs。properties/defs 的业务属性名保留，其 schema 值递归投影；type 规范化为 proto enum 名称，类型数组转换为原生组合约束，不把数组发送到 enum 字段。标准 JSON Schema 的 `$ref`/`$defs` 转换为 `ref`/`defs`，本地引用前缀转换为 `#/defs/`；int64 长度/数量约束按 protojson 转为字符串。枚举词汇与引用格式另对照 [Google Schema 官方文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/Schema)，该公开文档不等于私有 RPC 的实测证明。具体允许字段以 `wire.rs` 为实现来源。
 
-CLI 1.3.2（1.2.16 亦已核对）master 的 `thinkingLevel` 是 enum，不是 int32：`UNSPECIFIED=0`、`LOW=1`、`MEDIUM=2`、`HIGH=3`、`MINIMAL=4`、`EXTRA_HIGH=5`、`MAX=6`。投影接受这些符号或对应数字，非法显式值返回错误，不静默删除或猜测映射。`thinkingBudget` 保留真实 int32 预算（`-1` 表示上游动态预算），不从 Effort 硬编码预算。
+CLI 1.5.8 的 master 描述符声明 `thinkingLevel` enum：`THINKING_LEVEL_UNSPECIFIED=0`、`LOW=1`、`MEDIUM=2`、`HIGH=3`、`MINIMAL=4`、`EXTRA_HIGH=5`、`MAX=6`、`XHIGH=7`。已知数字按 protojson 写为符号，未知 int32 数值原样保留；不能将目录未知数值推测成某个已知符号。`thinkingBudget` 保留真实 int32 预算（`-1` 表示上游动态预算），不从 Effort 硬编码预算。
 
-family selector 用 Target Effort 选择实际请求 ID 和该 variant metadata 的强度控制：存在 `thinkingLevel` 时校验并使用目录中的数字 enum（`0..=6`），否则使用合法的 `thinkingBudget`。两者同时存在时优先 level；非法 level 不回退到 budget，请求只携带一种强度控制。显式 Effort 对应的两种控制均缺失或所选值无效时，在 HTTP 前返回错误；不从 `minThinkingBudget` 或 Effort 名称猜测预算。显式 Target Budget/Enabled/Disabled 仍优先于目录强度；无 Target 控制时，合法原始 level/budget 优先于缺省目录强度，默认请求 ID 仍取目录默认 selector。
+family selector 用 Target Effort 选择实际请求 ID 和该 variant metadata 的强度控制：存在 `thinkingLevel` 时校验并使用目录中的 int32 数字 enum，否则使用合法的 `thinkingBudget`。两者同时存在时优先 level；非法 level 不回退到 budget，请求只携带一种强度控制。显式 Effort 对应的两种控制均缺失或所选值无效时，在 HTTP 前返回错误；不从 `minThinkingBudget` 或 Effort 名称猜测预算。显式 Target Budget/Enabled/Disabled 仍优先于目录强度；无 Target 控制时，合法原始 level/budget 优先于缺省目录强度，默认请求 ID 仍取目录默认 selector。
 
 CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`/`-1`；2026-10-28 核对的本地账号目录快照则只有 High/Medium/Low 的 `thinkingLevel=3/2/1` 和 `minThinkingBudget=32`，没有 `thinkingBudget`。历史预算不能作为所有档位必须带预算的契约。[公开 Gemini 3.8 迁移指南](https://ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.8)要求使用 level，[CLI 1.3.4 发布说明](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.3.4)也记录了 ADC 路径同时发送 budget 与 level 的冲突修复；这些公开资料不等同于私有接口对旧预算的接受保证。
 
-`includeThoughts` 是独立的摘要意图，仍由现有 codec 编码进入内层 `generationConfig.thinkingConfig`，显式关闭摘要得到 `false`。没有显式抑制时请求摘要，不保证上游一定返回可读思考；不能为获得正文改变模型、预算或强度。private descriptor 另有 `includeRawThoughts`、`enableThinking`，此次不新增控制 API、不默认打开，也不扩展现有投影范围。
+`includeThoughts` 是独立的摘要意图，仍由现有 codec 编码进入内层 `generationConfig.thinkingConfig`，显式关闭摘要得到 `false`。没有显式抑制时请求摘要，不保证上游一定返回可读思考；不能为获得正文改变模型、预算或强度。private descriptor 另有 `includeRawThoughts`、`enableThinking`，此次不新增控制 API、不默认打开，也不扩展现有投影范围。2026-11-13 的 1.5.8 Hydrogen 实际目录、四档推理及重新同步要求见[模型映射记录](antigravity-model-mapping.md#2026-11-13cli-158-hydrogen-目录与推理)。
 
 `args`、工具 `response`、schema `default`/`example` 是业务 JSON，不把其中名为 seed、metadata 或其他任意业务键当成协议参数删除。真实 thoughtSignature 原样保留，绝不生成伪造签名。
 
