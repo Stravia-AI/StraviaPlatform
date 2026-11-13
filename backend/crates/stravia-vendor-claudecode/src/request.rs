@@ -18,7 +18,7 @@ use crate::thinking::{self, ModelProfile};
 use crate::xxhash::Xxh64;
 
 /// 未配置覆盖值时上报的 Claude Code CLI 正式发行版本。
-pub(crate) const DEFAULT_CLIENT_VERSION: &str = "2.1.319";
+pub(crate) const DEFAULT_CLIENT_VERSION: &str = "2.1.323";
 /// 与该 Claude Code 发布包内的 `@anthropic-ai/sdk` 身份保持一致。
 pub(crate) const SDK_VERSION: &str = "0.128.0";
 const RUNTIME_VERSION: &str = "v26.12.1";
@@ -343,6 +343,10 @@ pub(crate) fn inference_headers(
         ("anthropic-version".into(), "2023-06-01".into()),
         ("x-app".into(), "cli".into()),
     ];
+    // 2.1.323 emits this together with the existing request-class hint when
+    // gateway hint headers are enabled (first-party rollout flag / override).
+    // Our inference path represents the observed main-request profile.
+    headers.push(("x-claude-1p-request-class".into(), "main".into()));
     if !context.prompt_id.is_empty() {
         headers.push(("x-claude-code-prompt-id".into(), context.prompt_id.clone()));
     }
@@ -1869,6 +1873,7 @@ mod tests {
         assert_eq!(get("authorization"), Some("Bearer tok"));
         assert_eq!(get("x-claude-code-session-id"), Some(SESSION));
         assert_eq!(get("x-claude-code-prompt-id"), Some(PROMPT));
+        assert_eq!(get("x-claude-1p-request-class"), Some("main"));
         assert_eq!(get("x-claude-code-request-class"), Some("main"));
         assert_eq!(get("x-claude-code-sandy-plover"), Some("[]"));
         assert!(get("x-client-request-id").is_some_and(is_uuid));

@@ -150,6 +150,7 @@ impl<'a> ModelProfile<'a> {
             self.known,
             Some((Family::Opus | Family::Sonnet | Family::Haiku, [5, 5, 0]))
                 | Some((Family::Fable | Family::Mythos, [5, 1, 0]))
+                | Some((Family::Fable, [5, 2, 0]))
         ))
     }
 
@@ -160,6 +161,7 @@ impl<'a> ModelProfile<'a> {
                 Some((Family::Opus, [4, 8, 0] | [5, 0, 0] | [5, 5, 0]))
                     | Some((Family::Sonnet | Family::Haiku, [5, 5, 0]))
                     | Some((Family::Fable | Family::Mythos, [5, 0, 0] | [5, 1, 0]))
+                    | Some((Family::Fable, [5, 2, 0]))
             ))
     }
 
@@ -897,7 +899,12 @@ mod tests {
     #[test]
     fn switching_thinking_off_follows_each_model_generation() {
         let off = json!({"thinking": {"type": "disabled"}});
-        for model in ["claude-opus-5-5", "claude-fable-5", "claude-mythos-5-1"] {
+        for model in [
+            "claude-opus-5-5",
+            "claude-fable-5",
+            "claude-fable-5-2",
+            "claude-mythos-5-1",
+        ] {
             let body = run(model, off.clone());
             assert!(body.get("thinking").is_none(), "{model} cannot be disabled");
             assert_eq!(body["output_config"]["effort"], "low");

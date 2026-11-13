@@ -261,8 +261,8 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
     crate::plugin::network::shape::tests::assert_wire_matches_fixture(
         "claude-code",
         &wire,
-        // Both the gateway request and this default-interactive fixture use a cold handshake.
-        include_str!("../plugin/network/shape/fixtures/claude-code.json"),
+        // The inference connection used a cold handshake.
+        include_str!("../plugin/network/shape/fixtures/claude-code-fable-5-2.json"),
         false,
     );
     let mut lines = head.lines();
@@ -290,6 +290,7 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
         "anthropic-dangerous-direct-browser-access",
         "anthropic-version",
         "x-app",
+        "x-claude-1p-request-class",
         "x-claude-code-prompt-id",
         "x-claude-code-request-class",
         "x-claude-code-sandy-plover",
@@ -301,7 +302,7 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
     ];
     assert_eq!(names, expected, "actual head: {head}");
     let fixture: Value = serde_json::from_str(include_str!(
-        "../plugin/network/shape/fixtures/claude-code.json"
+        "../plugin/network/shape/fixtures/claude-code-fable-5-2.json"
     ))?;
     let captured: Vec<&str> = fixture["h1"]["headers"]
         .as_array()
@@ -326,8 +327,14 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
             .any(|(name, value)| *name == "Authorization" && *value == format!("Bearer {TOKEN}"))
     );
     assert!(fields.iter().any(|(name, value)| {
-        *name == "User-Agent" && *value == "claude-cli/2.1.319 (external, cli)"
+        *name == "User-Agent"
+            && Some(*value) == fixture["request"]["headers"]["User-Agent"].as_str()
     }));
+    assert!(
+        fields
+            .iter()
+            .any(|(name, value)| { *name == "x-claude-1p-request-class" && *value == "main" })
+    );
     assert!(fields.iter().any(|(name, value)| {
         *name == "Accept-Encoding" && *value == "gzip, deflate, br, zstd"
     }));

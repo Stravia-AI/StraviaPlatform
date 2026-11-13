@@ -1280,6 +1280,9 @@ async fn inference_defaults_follow_model_effort_and_beta_capabilities() {
         ("claude-opus-4-8", Some("medium"), false, true),
         ("claude-opus-5-5", Some("medium"), true, true),
         ("claude-fable-5", Some("medium"), false, true),
+        ("claude-fable-5-1", Some("medium"), true, true),
+        ("claude-fable-5-2", Some("medium"), true, true),
+        ("claude-fable-5-3", Some("medium"), false, false),
         ("claude-mythos-5-1", Some("medium"), true, true),
     ] {
         let services = Arc::new(MockServices {

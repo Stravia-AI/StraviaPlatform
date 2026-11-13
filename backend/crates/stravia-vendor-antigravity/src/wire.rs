@@ -61,7 +61,7 @@ pub(crate) fn infer(
         && (request.reasoning.mode.is_some()
             || request.reasoning.level.is_some()
             || request.reasoning.budget_tokens.is_some());
-    let selector_thinking = if let Some(table) = provider
+    let (selector_thinking, selector_max_output_tokens) = if let Some(table) = provider
         .model_metadata
         .as_ref()
         .and_then(|metadata| metadata.extensions.get(crate::selector::EXTENSION_KEY))
@@ -78,7 +78,7 @@ pub(crate) fn infer(
             request.reasoning.level = None;
             request.reasoning.budget_tokens = None;
         }
-        selection.thinking
+        (selection.thinking, selection.max_output_tokens)
     } else {
         if let Some(selector) = provider
             .model_metadata
@@ -87,7 +87,7 @@ pub(crate) fn infer(
         {
             request.model = selector.into();
         }
-        None
+        (None, None)
     };
     // 在跨协议校验前删除 CLI 没有承诺的控制；最后的递归投影仍是唯一出口。
     request.generation.seed = None;
@@ -142,7 +142,7 @@ pub(crate) fn infer(
         .as_object_mut()
         .ok_or_else(|| invalid("generationConfig must be an object"))?
         .entry("maxOutputTokens")
-        .or_insert_with(|| json!(65536));
+        .or_insert_with(|| json!(selector_max_output_tokens.unwrap_or(65536)));
     if let Some(level) = explicit_extended_level
         && let Some(thinking) = object
             .get_mut("generationConfig")
@@ -647,40 +647,45 @@ fn generation(value: &mut Value) -> Result<(), PluginError> {
             thinking,
             &["includeThoughts", "thinkingBudget", "thinkingLevel"],
         )?;
-        // CLI master enum numbers are catalog metadata; requests use symbolic names.
+        // Protojson names known master values and preserves unknown int32 values.
         if let Some(level) = thinking.get_mut("thinkingLevel") {
             let canonical = match &*level {
                 Value::String(value)
                     if matches!(
                         value.as_str(),
-                        "UNSPECIFIED"
+                        "THINKING_LEVEL_UNSPECIFIED"
                             | "LOW"
                             | "MEDIUM"
                             | "HIGH"
                             | "MINIMAL"
                             | "EXTRA_HIGH"
                             | "MAX"
+                            | "XHIGH"
                     ) =>
                 {
                     None
                 }
-                Value::Number(value) => Some(match value.as_i64() {
-                    Some(0) => "UNSPECIFIED",
-                    Some(1) => "LOW",
-                    Some(2) => "MEDIUM",
-                    Some(3) => "HIGH",
-                    Some(4) => "MINIMAL",
-                    Some(5) => "EXTRA_HIGH",
-                    Some(6) => "MAX",
-                    _ => {
-                        return Err(invalid(
-                            "Antigravity thinkingLevel must be a CLI ThinkingLevel enum",
-                        ));
+                Value::Number(value) => {
+                    match value.as_i64().and_then(|value| i32::try_from(value).ok()) {
+                        Some(0) => Some("THINKING_LEVEL_UNSPECIFIED"),
+                        Some(1) => Some("LOW"),
+                        Some(2) => Some("MEDIUM"),
+                        Some(3) => Some("HIGH"),
+                        Some(4) => Some("MINIMAL"),
+                        Some(5) => Some("EXTRA_HIGH"),
+                        Some(6) => Some("MAX"),
+                        Some(7) => Some("XHIGH"),
+                        Some(_) => None,
+                        None => {
+                            return Err(invalid(
+                                "Antigravity thinkingLevel must be an int32 or CLI ThinkingLevel enum",
+                            ));
+                        }
                     }
-                }),
+                }
                 _ => {
                     return Err(invalid(
-                        "Antigravity thinkingLevel must be a CLI ThinkingLevel enum",
+                        "Antigravity thinkingLevel must be an int32 or CLI ThinkingLevel enum",
                     ));
                 }
             };
@@ -994,20 +999,27 @@ mod tests {
     #[test]
     fn thinking_projection_accepts_cli_enum_and_rejects_invalid_explicit_controls() {
         for (level, expected) in [
-            (json!("UNSPECIFIED"), "UNSPECIFIED"),
-            (json!("LOW"), "LOW"),
-            (json!("MEDIUM"), "MEDIUM"),
-            (json!("HIGH"), "HIGH"),
-            (json!("MINIMAL"), "MINIMAL"),
-            (json!("EXTRA_HIGH"), "EXTRA_HIGH"),
-            (json!("MAX"), "MAX"),
-            (json!(0), "UNSPECIFIED"),
-            (json!(1), "LOW"),
-            (json!(2), "MEDIUM"),
-            (json!(3), "HIGH"),
-            (json!(4), "MINIMAL"),
-            (json!(5), "EXTRA_HIGH"),
-            (json!(6), "MAX"),
+            (
+                json!("THINKING_LEVEL_UNSPECIFIED"),
+                json!("THINKING_LEVEL_UNSPECIFIED"),
+            ),
+            (json!("LOW"), json!("LOW")),
+            (json!("MEDIUM"), json!("MEDIUM")),
+            (json!("HIGH"), json!("HIGH")),
+            (json!("MINIMAL"), json!("MINIMAL")),
+            (json!("EXTRA_HIGH"), json!("EXTRA_HIGH")),
+            (json!("MAX"), json!("MAX")),
+            (json!("XHIGH"), json!("XHIGH")),
+            (json!(0), json!("THINKING_LEVEL_UNSPECIFIED")),
+            (json!(1), json!("LOW")),
+            (json!(2), json!("MEDIUM")),
+            (json!(3), json!("HIGH")),
+            (json!(4), json!("MINIMAL")),
+            (json!(5), json!("EXTRA_HIGH")),
+            (json!(6), json!("MAX")),
+            (json!(7), json!("XHIGH")),
+            (json!(100), json!(100)),
+            (json!(-1), json!(-1)),
         ] {
             let mut body = json!({"generationConfig":{"thinkingConfig":{
                 "thinkingLevel":level, "includeThoughts":false
@@ -1024,9 +1036,8 @@ mod tests {
         }
         for level in [
             json!("TURBO"),
-            json!("XHIGH"),
-            json!(-1),
-            json!(7),
+            json!("UNSPECIFIED"),
+            json!(2147483648_i64),
             json!(1.5),
             json!(true),
         ] {

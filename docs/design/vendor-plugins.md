@@ -724,13 +724,13 @@ Qoder、WorkBuddy 的专属数据、脱敏 capture、采集维护说明及错误
 | 名称（未注明时 revision 为 1） | 数据来源标签与边界 |
 | --- | --- |
 | `default` | 通用配置；HTTP ALPN 为 h2、http/1.1，WS 为 http/1.1。 |
-| `claude-code` | Claude Code 2.1.319，Linux x86_64；HTTP／WS ALPN 为 http/1.1。 |
+| `claude-code` | Claude Code 2.1.319 的 Linux x86_64 基准；2.1.323 Fable 5.2 交互采集的完整 ClientHello 相同，无需更改连接修订。HTTP／WS ALPN 为 http/1.1。 |
 | `bun` | Bun 1.4.2，Linux x86_64；HTTP／WS ALPN 为 http/1.1。 |
 | `bun-1-3-14` | OpenCode Free 使用的 Bun 1.3.14；独立 HTTP／WS 采集，保留该版的组、扩展和 padding，不复用 1.4.2 指纹。 |
 | `command-code` | Command Code 1.82.1 真实交互入口，Node.js 24.21.0／OpenSSL Linux x86_64；不使用 Bun 指纹代替。 |
 | `devin` | Devin CLI 3000.11.3 真实交互入口，Linux x86_64；独立冷连接与 TLS 恢复样本，扩展顺序随机。 |
 | `grok` | Grok CLI 1.0.52 OAuth Responses 真实交互入口，Linux x86_64；独立核对 HTTP/2 SETTINGS 顺序、窗口更新及 ALPN。 |
-| `antigravity` | Antigravity CLI 1.5.2 consumer，Go Linux x86_64；ALPN 列表为空。 |
+| `antigravity`（revision 2） | Antigravity CLI 1.5.8 consumer print，Go Linux x86_64；HTTP ALPN 新增 http/1.1，扩展 16 位于 50 与 43 之间。未采集 WS，保留其空 ALPN。 |
 | `codex-http` | Codex 0.167.0 HTTP，Linux OpenSSL；ALPN 列表为空，不代表 macOS／Windows 指纹。 |
 | `codex-ws` | Codex 0.167.0 WS，Linux rustls；扩展顺序为随机，ALPN 列表为空。 |
 

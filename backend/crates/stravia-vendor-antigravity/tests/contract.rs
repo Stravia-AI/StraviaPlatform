@@ -144,7 +144,8 @@ async fn upstream(
                 "defaultAgentModelId": "gemini-3.8-flash-high",
                 "agentModelSorts":[{"groups":[{"modelIds":[
                     "account-model", "gemini-pro-agent", "gemini-3.1-pro-low",
-                    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"
+                    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+                    "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low"
                 ]}]}],
                 "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
                 "imageGenerationModelIds": ["gemini-3.1-flash-image", "account-image"],
@@ -157,6 +158,10 @@ async fn upstream(
                 "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true,"thinkingLevel":3,"minThinkingBudget":32},
                 "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true,"thinkingLevel":2,"minThinkingBudget":32},
                 "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true,"thinkingLevel":1,"minThinkingBudget":32},
+                "gemini-4-hydrogen-low":{"displayName":"Gemini 4 Hydrogen (Low)","supportsThinking":true,"thinkingLevel":1,"maxTokens":1048576,"maxOutputTokens":262144},
+                "gemini-4-hydrogen-medium":{"displayName":"Gemini 4 Hydrogen (Medium)","supportsThinking":true,"thinkingLevel":2,"maxTokens":1048576,"maxOutputTokens":262144},
+                "gemini-4-hydrogen-high":{"displayName":"Gemini 4 Hydrogen (High)","supportsThinking":true,"thinkingLevel":3,"maxTokens":1048576,"maxOutputTokens":262144},
+                "gemini-4-hydrogen-xhigh":{"displayName":"Gemini 4 Hydrogen (XHigh)","supportsThinking":true,"thinkingLevel":100,"maxTokens":1048576,"maxOutputTokens":262144},
                 "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
                 "account-image":{"displayName":"Account image","supportsImages":true},
                 "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
@@ -1311,6 +1316,31 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             false,
         ),
         ("gemini-3.8-flash", None, "gemini-3.8-flash-high", true),
+        (
+            "gemini-4-hydrogen",
+            Some("low"),
+            "gemini-4-hydrogen-low",
+            true,
+        ),
+        (
+            "gemini-4-hydrogen",
+            Some("medium"),
+            "gemini-4-hydrogen-medium",
+            true,
+        ),
+        (
+            "gemini-4-hydrogen",
+            Some("high"),
+            "gemini-4-hydrogen-high",
+            true,
+        ),
+        (
+            "gemini-4-hydrogen",
+            Some("xhigh"),
+            "gemini-4-hydrogen-xhigh",
+            true,
+        ),
+        ("gemini-4-hydrogen", None, "gemini-4-hydrogen-medium", true),
     ] {
         let model = catalog
             .models
@@ -1369,7 +1399,31 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             envelope.pointer("/request/generationConfig/thinkingConfig/includeThoughts"),
             Some(&serde_json::json!(summary))
         );
-        if family == "gemini-3.8-flash" {
+        if family == "gemini-4-hydrogen" {
+            assert_eq!(
+                model.metadata["reasoning_efforts"],
+                json!(["low", "medium", "high", "xhigh"])
+            );
+            assert_eq!(
+                envelope["request"]["generationConfig"]["maxOutputTokens"],
+                262144
+            );
+            assert_eq!(
+                envelope.pointer("/request/generationConfig/thinkingConfig/thinkingLevel"),
+                Some(&match effort {
+                    Some("low") => json!("LOW"),
+                    Some("high") => json!("HIGH"),
+                    Some("xhigh") => json!(100),
+                    Some("medium") | None => json!("MEDIUM"),
+                    _ => unreachable!(),
+                })
+            );
+            assert!(
+                envelope
+                    .pointer("/request/generationConfig/thinkingConfig/thinkingBudget")
+                    .is_none()
+            );
+        } else if family == "gemini-3.8-flash" {
             assert!(
                 envelope
                     .pointer("/request/generationConfig/thinkingConfig/thinkingBudget")
@@ -1399,6 +1453,104 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
                 }))
             );
         }
+    }
+    {
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == "gemini-4-hydrogen")
+            .unwrap();
+        let mut table = model.metadata["antigravity"].clone();
+        let xhigh = table["variants"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|variant| variant["effort"] == "xhigh")
+            .unwrap();
+        xhigh["metadata"]["maxOutputTokens"] = json!(12345);
+        let mut selected_provider = provider.clone();
+        selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            extensions: BTreeMap::from([("antigravity".into(), table)]),
+            ..Default::default()
+        });
+        let mut selected_request = request.clone();
+        selected_request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "xhigh".into(),
+            },
+        );
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: selected_provider,
+                request: selected_request,
+            },
+        )
+        .await
+        .unwrap();
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            envelope["request"]["generationConfig"]["maxOutputTokens"],
+            12345
+        );
+    }
+    for cap in [0, 128] {
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == "gemini-4-hydrogen")
+            .unwrap();
+        let mut selected_provider = provider.clone();
+        selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            extensions: BTreeMap::from([(
+                "antigravity".into(),
+                model.metadata["antigravity"].clone(),
+            )]),
+            ..Default::default()
+        });
+        let mut selected_request = request.clone();
+        selected_request.generation.max_tokens = Some(cap);
+        selected_request.reasoning.target_control =
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 2048 });
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: selected_provider,
+                request: selected_request,
+            },
+        )
+        .await
+        .unwrap();
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(
+            envelope["request"]["generationConfig"]["maxOutputTokens"],
+            cap
+        );
+        assert_eq!(
+            envelope["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            2048
+        );
+        assert!(
+            envelope
+                .pointer("/request/generationConfig/thinkingConfig/thinkingLevel")
+                .is_none()
+        );
     }
     for (level, budget, control, expected_level, expected_budget, summary) in [
         (
@@ -1506,13 +1658,16 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         );
     }
     for (number, name) in [
-        (0, "UNSPECIFIED"),
-        (1, "LOW"),
-        (2, "MEDIUM"),
-        (3, "HIGH"),
-        (4, "MINIMAL"),
-        (5, "EXTRA_HIGH"),
-        (6, "MAX"),
+        (0, json!("THINKING_LEVEL_UNSPECIFIED")),
+        (1, json!("LOW")),
+        (2, json!("MEDIUM")),
+        (3, json!("HIGH")),
+        (4, json!("MINIMAL")),
+        (5, json!("EXTRA_HIGH")),
+        (6, json!("MAX")),
+        (7, json!("XHIGH")),
+        (100, json!(100)),
+        (-1, json!(-1)),
     ] {
         let mut selected_provider = provider.clone();
         selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
@@ -1565,10 +1720,9 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         json!({"thinkingBudget":"4000"}),
         json!({"thinkingBudget":-2}),
         json!({"thinkingLevel":null}),
-        json!({"thinkingLevel":-1}),
-        json!({"thinkingLevel":7}),
+        json!({"thinkingLevel":2147483648_i64}),
         json!({"thinkingLevel":"MEDIUM"}),
-        json!({"thinkingLevel":7,"thinkingBudget":4000}),
+        json!({"thinkingLevel":2147483648_i64,"thinkingBudget":4000}),
     ] {
         let mut selected_provider = provider.clone();
         selected_provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {

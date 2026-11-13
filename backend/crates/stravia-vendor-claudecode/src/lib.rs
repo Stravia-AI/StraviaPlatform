@@ -1,7 +1,7 @@
 //! Claude 订阅（Claude Code OAuth）专用供应商插件。
 //!
 //! 使用 Claude Pro/Max 账号的 OAuth 令牌调用 Anthropic Messages API。请求以
-//! 官方 2.1.319 的第一方交互流量为基准，并保留自定义工具的 `_` 名称隔离
+//! 官方 2.1.319 与 2.1.323 的第一方交互流量为基准，并保留自定义工具的 `_` 名称隔离
 //! （见 [`request`]）；客户端仍使用原始工具名。
 
 mod allowance;

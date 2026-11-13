@@ -105,7 +105,7 @@ POST /providers/{id}/models/sync
 |Thinking 信息|保存 `supportsThinking` 与提供的 budget/level；不从 budget 编造离散 effort|
 |过滤|跳过 `disabled=true` 或 `isInternal=true`|
 
-插件当前不消费上述默认项、分组、用途清单和废弃重定向，也未读取 `maxOutputTokens`、`recommended` 等所有详情字段。尤其截图中的 Image 命名与文本输出图标并不矛盾：这是当前投影限制，不能证明该模型实际不支持图像生成。
+插件按所选 variant 保留 `maxOutputTokens` 用于无显式输出上限时的推理默认值；仍不消费上述默认项、分组、用途清单和废弃重定向之外的所有详情字段，例如 `recommended`。尤其截图中的 Image 命名与文本输出图标并不矛盾：这是当前投影限制，不能证明该模型实际不支持图像生成。
 
 宿主元数据模板优先级为 Provider Catalog scope、Canonical fallback、bare discovery；之后 discovery 同名字段覆盖模板，并强制保存原始发现 ID。Canonical 只补规格，不改写上游调用 ID。依据：[provider_model_records.rs](../../backend/crates/stravia-core/src/admin/routes/provider_model_records.rs)，619–687、736–803 行；[provider_catalog/mod.rs](../../backend/crates/stravia-core/src/provider_catalog/mod.rs)，678–709 行。
 
@@ -258,7 +258,19 @@ gpt-oss-120b-medium
 
 CLI 1.3.2 曾记录 Gemini 3.8 Flash Medium/High 的目录预算 `4000`/`-1`，但当前目录已可仅声明 `thinkingLevel`。2026-10-28 的真实 Wasm + loopback HTTP 回归以 Flash 的 level-only 三档和 Pro 的 budget 目录（缺省/Low/High 请求）覆盖两种目录形态，并校验默认 ID、显式控制优先级、独立摘要、level/budget 互斥及非法元数据在 HTTP 前拒绝；未调用真实上游。
 
-实际验证：
+### 2026-11-13：CLI 1.5.8 Hydrogen 目录与推理
+
+经授权的 consumer 账号使用 Linux/amd64 官方 [agy 1.5.8](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.5.8)，经本机捕获桥访问真实 daily 端点。发布包按官方 manifest 的 SHA-512 核验后执行。私有采集覆盖真实目录与 Low/Medium/High/XHigh 请求，脱敏同连接证据保存在 [inference fixture](../../backend/crates/stravia-core/src/plugin/network/shape/fixtures/antigravity-inference.json)及 [XHigh fixture](../../backend/crates/stravia-core/src/plugin/network/shape/fixtures/antigravity-inference.repeat.json)；不提交凭据、账号响应或私有原文。该次目录四档均声明 `maxTokens=1048576`、`maxOutputTokens=262144`，Low/Medium/High/XHigh 的 `thinkingLevel` 分别是 1/2/3/100。实际推理请求分别写 `LOW`、`MEDIUM`、`HIGH`、数字 `100`，均请求 `includeThoughts=true`。XHigh 的 100 不是 master enum 的 7，不能按 effort 名猜测转换。账号目录和调用仅证明该时点该账号行为，不保证其他账号或未来版本一致。
+
+目录所选 variant 的输出上限作为无显式下游上限时的默认值；客户端显式值（包括 0）优先，目录缺失时保留旧默认 65536。上线需部署更新后的 vendor Wasm 并重新同步模型，使保存的 selector 元数据包含每档输出上限和新 enum 值；仅更换插件不会自动更新已有目录快照。
+
+原生 `agy --model gemini-4-hydrogen --print "Reply OK"` 在全新 HOME、未指定 effort 时实际选择 Medium 并返回 200，即使 `agentModelSorts` 的 Hydrogen 顺序为 High、XHigh、Medium、Low。1.5.8 二进制 `backend.DefaultEffortForBase` 的分支确认：目录默认型号属于当前家族时保留其档位，否则优先已有 Medium，再回退首档；不是把展示排序首项一律当默认，也不是按 Hydrogen 名称特判。选择器发现阶段同步采用此优先级，客户端显式 Effort 仍独立覆盖。默认选择回归先失败后通过；最终 Gateway 省略 reasoning 的真实请求同样选择 Medium，发送 262144 上限、MEDIUM 与 includeThoughts=true，并返回 HTTP 200、`OK`。
+
+本轮隔离 Gateway 实测从全新 SQLite 和实际 Wasm 开始，经 `/v1/responses`、宿主 TLS 与捕获桥访问真实 Google；Target retry budget 为 0，不修改生产数据或复制刷新令牌。修复前的 Wasm 在前三档返回 200，但输出上限为 65536；XHigh 在发出推理前返回 400。重建后四档均返回 HTTP 200 和 `OK`，模型 ID、完整 generationConfig、请求头名称顺序与非动态值均匹配原生捕获。ClientHello 的 JA3/JA4、算法和扩展顺序匹配；扩展细节唯一差异是 SNI 长度：原生覆盖端点为 localhost，Gateway 保留 Google hostname。未复制 CLI 的 system prompt、内置工具或操作树 labels，也不声称完整正文逐字一致。
+
+本轮首轮执行两个插件的库测试，119 项通过；补充默认选择和新型号模态回归后分别重跑，Antigravity 29 项、Claude 92 项通过。Antigravity 实际 Wasm/HTTP contract 5 项、Claude contract 19 项、Core shape 11 项及两个 Gateway TLS/header 验收用例通过，共 158 项非 live 用例。`cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors -- --all` 重建八个组件，两个插件的 all-target Clippy（`-D warnings`）、`cargo check --locked -p stravia-core` 及格式检查通过。真实调用由一次性 Gateway smoke 入口完成，不将本地合成 contract 等同于上游证明。临时入口、捕获服务、凭据副本与原始私有流量在验证后删除；仓库仅保留脱敏原生 fixture。未运行完整仓库、UI 或 Tauri 测试矩阵。
+
+以下为本节早期家族合并实现的历史验证，不代表 1.5.8 新断言已执行：
 
 - `cargo test --locked -p stravia-vendor-antigravity --lib`：15 passed。覆盖 Agent 引用筛选、其他用途排除、默认档位、重复引用、同名身份分离、真实重定向与循环拒绝、规格交集及未登记 Effort 拒绝。
 - `task build:vendors:all`：增量重建 Antigravity，生成八个自包含组件。

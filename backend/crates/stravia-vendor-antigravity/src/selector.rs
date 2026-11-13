@@ -31,6 +31,7 @@ pub(crate) enum ThinkingControl {
 pub(crate) struct Selection<'a> {
     pub id: &'a str,
     pub thinking: Option<ThinkingControl>,
+    pub max_output_tokens: Option<i32>,
 }
 
 pub(crate) fn user_facing_slug(id: &str) -> &str {
@@ -112,7 +113,6 @@ pub(crate) fn resolve<'a>(
                 level
                     .as_i64()
                     .and_then(|level| i32::try_from(level).ok())
-                    .filter(|level| (0..=6).contains(level))
                     .ok_or_else(invalid_table)?,
             ))
         } else if let Some(budget) = metadata.and_then(|metadata| metadata.get("thinkingBudget")) {
@@ -134,7 +134,22 @@ pub(crate) fn resolve<'a>(
     } else {
         None
     };
-    Ok(Selection { id, thinking })
+    let max_output_tokens = variant
+        .get("metadata")
+        .and_then(|metadata| metadata.get("maxOutputTokens"))
+        .map(|value| {
+            value
+                .as_i64()
+                .and_then(|value| i32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(invalid_table)
+        })
+        .transpose()?;
+    Ok(Selection {
+        id,
+        thinking,
+        max_output_tokens,
+    })
 }
 
 #[cfg(test)]

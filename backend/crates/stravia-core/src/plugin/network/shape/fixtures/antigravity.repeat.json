@@ -1,6 +1,22 @@
 {
+  "provenance": {
+    "client": "official Antigravity CLI",
+    "version": "1.5.8",
+    "os": "linux",
+    "arch": "amd64",
+    "mode": "print",
+    "captured_at": "2026-11-13T07:15:01.896976+00:00",
+    "invocation": "agy --model gemini-4-hydrogen-xhigh --print \"Reply OK\"",
+    "capture": "独立 HOME/XDG、空工作区及 user/mount namespace；仅当前进程信任 loopback TLS bridge 的临时 CA；经用户授权使用只读提取的 consumer access token，不复制或刷新 refresh token。bridge 转发真实 Google HTTPS，ClientHello 来自承载该请求的同一连接。",
+    "operation": "loadCodeAssist",
+    "status": 200,
+    "normalization": "ClientHello 随机数、会话、keyshare 材料和未知扩展经独立 decoder 去除；Host、Authorization、动态长度脱敏。正文只保留结构键、合成提示存在与生成控制；不保存账号、会话、签名或系统提示。",
+    "limitations": "仅 Linux amd64 consumer print 模式；TLS 样本为客户端到 loopback bridge 的握手，不是 bridge 到 Google 的握手。未验证 OAuth 交换、其他平台、TCP 时序或 WS。"
+  },
   "clienthello": {
-    "alpn": [],
+    "alpn": [
+      "http/1.1"
+    ],
     "cipher_suites": [
       49195,
       49199,
@@ -233,6 +249,25 @@
       },
       {
         "body": [
+          0,
+          9,
+          8,
+          104,
+          116,
+          116,
+          112,
+          47,
+          49,
+          46,
+          49
+        ],
+        "decoded": null,
+        "length": 11,
+        "payload_omitted": null,
+        "type": 16
+      },
+      {
+        "body": [
           4,
           3,
           4,
@@ -272,12 +307,13 @@
       10,
       13,
       50,
+      16,
       43,
       51
     ],
-    "ja3": "771,49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-4865-4866-4867,0-11-65281-23-18-5-10-13-50-43-51,4588-4587-4589-29-23-24-25,0",
-    "ja3_hash": "9b7dcdf3f997f1fb7b4409c94cb7ef36",
-    "ja4": "t13d131100_f57a46bbacb6_f50d94e863eb",
+    "ja3": "771,49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-4865-4866-4867,0-11-65281-23-18-5-10-13-50-16-43-51,4588-4587-4589-29-23-24-25,0",
+    "ja3_hash": "03117a8ed39ef02427ebbc39f121275c",
+    "ja4": "t13d1312h1_f57a46bbacb6_f50d94e863eb",
     "key_share_groups": [
       4588,
       29
@@ -315,6 +351,9 @@
     ]
   },
   "h1": {
+    "method": "POST",
+    "path": "/v1internal:loadCodeAssist",
+    "version": "HTTP/1.1",
     "headers": [
       {
         "name": "Host",
@@ -322,7 +361,7 @@
       },
       {
         "name": "User-Agent",
-        "value": "antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)"
+        "value": "antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=amd64; cl=1020628950; auth_method=consumer)"
       },
       {
         "name": "Content-Length",
@@ -341,38 +380,6 @@
         "value": "gzip"
       }
     ],
-    "method": "POST",
-    "normalizations": [
-      {
-        "header_index": 0,
-        "reason": "unclassified"
-      },
-      {
-        "header_index": 2,
-        "reason": "unclassified"
-      },
-      {
-        "header_index": 3,
-        "reason": "credential_or_dynamic"
-      }
-    ],
-    "raw_head": "POST <redacted> HTTP/1.1\r\nHost: <redacted>\r\nUser-Agent: antigravity/cli/1.5.2 (aidev_client; os_type=linux; arch=amd64; cl=1015175089; auth_method=consumer)\r\nContent-Length: <redacted>\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n",
-    "target": "<redacted>",
-    "version": "HTTP/1.1"
-  },
-  "provenance": {
-    "arch": "x86_64",
-    "captured_at": "2026-11-07T05:33:32.065390433+00:00",
-    "client": "agy",
-    "os": "linux",
-    "version": "1.5.2",
-    "capture_round": 2,
-    "network_isolation": "Linux user, mount and network namespaces; loopback only; host nscd socket hidden, fake D-Bus address and isolated HOME; browser and xdg-open disabled",
-    "target": "https://localhost:<ephemeral-port>",
-    "capture_tool": "stravia-tools capture-client module, standalone harness",
-    "invocation": "agy --log-file <temporary log> --print-timeout 15s --print \"Reply OK\"",
-    "configuration": "CLOUD_CODE_URL=local target; temporary HOME with synthetic consumer token, never real login; SSL_CERT_FILE=temporary capture CA",
-    "trust": "SSL_CERT_FILE",
-    "operation": "consumer Cloud Code POST /v1internal:loadCodeAssist bootstrap, local 401; not an inference request"
+    "raw_head": "POST /v1internal:loadCodeAssist HTTP/1.1\r\nHost: <redacted>\r\nUser-Agent: antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=amd64; cl=1020628950; auth_method=consumer)\r\nContent-Length: <redacted>\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n"
   }
 }
