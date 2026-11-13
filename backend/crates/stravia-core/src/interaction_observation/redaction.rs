@@ -1338,11 +1338,13 @@ mod tests {
                 reference: "first".into(),
                 secret: "private\"mapped\nvalue".into(),
                 rule_ids: Default::default(),
+                last_detected_at: 0,
             },
             Mapping {
                 reference: "second".into(),
                 secret: "pass".into(),
                 rule_ids: Default::default(),
+                last_detected_at: 0,
             },
         ]);
         let protected = ProtectedSecrets::from_snapshot(mappings, &RuleScope::default());

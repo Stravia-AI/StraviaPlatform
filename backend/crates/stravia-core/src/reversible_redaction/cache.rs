@@ -203,10 +203,11 @@ impl MappingStore for CachedMappingStore {
         };
         let result = self.inner.intern(principal, secrets).await;
         if let Ok(interned) = &result {
-            if !interned.created.is_empty() {
+            // 快照携带检出时间，决定替换资格；新建或推进后旧快照会让刚被检出的秘密在
+            // 缓存期内仍按旧时间判断。推进每个映射每小时最多一次，不会抵消跨请求缓存。
+            if !interned.created.is_empty() || interned.renewed {
                 self.generation.fetch_add(1, Ordering::AcqRel);
             }
-            // 已有映射的字段不变；每次规则命中都失效会抵消跨请求缓存。
             mutation.armed = false;
         }
         result

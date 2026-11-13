@@ -129,7 +129,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=52
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53
     ) {
         return false;
     }
@@ -391,6 +391,26 @@ pub async fn run_sqlite_migrator(
             .await?;
         }
     }
+    if runner.version_exists(53) {
+        runner
+            .run_direct(Some(52), pinned.connection(), false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=53 AND success)",
+        )
+        .fetch_one(pinned.connection())
+        .await?;
+        if !finalized {
+            // 更早的重建可能关闭了外键；删除映射时必须让 GC 队列外键级联。
+            ensure_sqlite_foreign_keys(pinned.connection()).await?;
+            crate::credential_mapping_upgrade::run_sqlite(pinned.connection()).await?;
+            if requires_rebuild {
+                sqlx::query("PRAGMA foreign_keys=OFF")
+                    .execute(pinned.connection())
+                    .await?;
+            }
+        }
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -622,6 +642,17 @@ pub async fn run_postgres_migrator(
             );
             crate::interaction_observation::upgrade_normalize::normalize_postgres(&mut connection)
                 .await?;
+        }
+    }
+    if runner.version_exists(53) {
+        runner.run_direct(Some(52), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=53 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            crate::credential_mapping_upgrade::run_postgres(&mut connection).await?;
         }
     }
     report(
@@ -1536,6 +1567,182 @@ mod tests {
             .execute(&admin)
             .await
             .unwrap();
+        admin.close().await;
+    }
+
+    macro_rules! credential_expiry_upgrade_fixture {
+        ($name:ident, $pool:ty, $migrate:ident, $setup:expr, $trigger:expr, $drop:expr) => {
+            async fn $name(pool: &$pool, retention_days: i64) {
+                const DAY: i64 = 86_400_000;
+                let now = chrono::Utc::now().timestamp_millis();
+                sqlx::query("INSERT INTO settings(name, value) VALUES ('log_retention_days', $1) ON CONFLICT(name) DO UPDATE SET value = excluded.value")
+                    .bind(retention_days.to_string()).execute(pool).await.unwrap();
+                sqlx::query("UPDATE history_retention_watermarks SET position = 12345 WHERE name = 'reversible_redaction_mappings.last_used_at'")
+                    .execute(pool).await.unwrap();
+                // Old use timestamps may have been renewed independently of detection.
+                for (reference, age, published, pending) in [
+                    ("expired", 8 * DAY, true, None),
+                    ("referenced", 8 * DAY, true, None),
+                    ("variable", 3 * DAY, true, None),
+                    ("grace", retention_days * DAY + 30 * 60_000, true, None),
+                    ("fresh", DAY / 2, true, None),
+                    ("unpublished-expired", 8 * DAY, false, Some(now - DAY)),
+                    ("unpublished-referenced", 8 * DAY, false, Some(now - DAY)),
+                    ("unpublished-pending", DAY / 2, false, Some(now + DAY)),
+                ] {
+                    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,last_used_at) VALUES($1,'api-key:alice','secret',$2,$3,$4,$5)")
+                        .bind(reference).bind(published.then_some(now - age)).bind(pending)
+                        .bind(now - age).bind(now - 1_000).execute(pool).await.unwrap();
+                }
+                let scope: i64 = sqlx::query_scalar("INSERT INTO content_scopes(principal) VALUES('api-key:alice') RETURNING id")
+                    .fetch_one(pool).await.unwrap();
+                let node: i64 = sqlx::query_scalar("INSERT INTO turn_nodes(id,scope_id,kind,payload_version,created_at) VALUES('credential-node',$1,'response',6,1) RETURNING node_pk")
+                    .bind(scope).fetch_one(pool).await.unwrap();
+                for reference in ["referenced", "unpublished-referenced"] {
+                    sqlx::query("INSERT INTO turn_node_redaction_mappings(node_pk,reference) VALUES($1,$2)")
+                        .bind(node).bind(reference).execute(pool).await.unwrap();
+                }
+                for reference in ["expired", "referenced"] {
+                    sqlx::query("INSERT INTO redaction_mapping_gc(reference) VALUES($1)")
+                        .bind(reference).execute(pool).await.unwrap();
+                }
+                for n in 0..1025 {
+                    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,created_at,last_used_at) VALUES($1,'api-key:alice','secret',$2,$2,$3)")
+                        .bind(format!("batch-{n:04}")).bind(now - 8 * DAY).bind(now)
+                        .execute(pool).await.unwrap();
+                }
+                sqlx::query($setup).execute(pool).await.unwrap();
+                sqlx::query($trigger).execute(pool).await.unwrap();
+                let interrupted = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let observed = interrupted.clone();
+                assert!(crate::startup_progress::observe_startup(
+                    move |event| observed.lock().unwrap().push(event), $migrate(pool, None),
+                ).await.is_err());
+                let first_progress: Vec<_> = interrupted.lock().unwrap().iter().copied()
+                    .filter(|event| event.phase == "credential_expiry").collect();
+                let total = if retention_days == 2 { 1028 } else { 1027 };
+                assert_eq!(first_progress.last().map(|event| (event.completed, event.total)), Some((512, Some(total))));
+                let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reversible_redaction_mappings WHERE reference LIKE 'batch-%'")
+                    .fetch_one(pool).await.unwrap();
+                assert_eq!(remaining, 513);
+                let finalized: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=53 AND success)")
+                    .fetch_one(pool).await.unwrap();
+                assert!(!finalized);
+                sqlx::query($drop).execute(pool).await.unwrap();
+                let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let observed = events.clone();
+                crate::startup_progress::observe_startup(
+                    move |event| observed.lock().unwrap().push(event),
+                    $migrate(pool, None),
+                ).await.unwrap();
+                let progress: Vec<_> = events.lock().unwrap().iter().copied().filter(|event| event.phase == "credential_expiry").collect();
+                let deleted = if retention_days == 2 { 516 } else { 515 };
+                assert_eq!(progress.first().map(|event| (event.completed, event.total)), Some((0, None)));
+                assert!(progress.iter().any(|event| event.completed == 0 && event.total == Some(deleted)));
+                assert_eq!(progress.last().map(|event| (event.completed, event.total)), Some((deleted, Some(deleted))));
+                let rows: Vec<(String, i64, i64)> = sqlx::query_as("SELECT reference,created_at,last_detected_at FROM reversible_redaction_mappings ORDER BY reference")
+                    .fetch_all(pool).await.unwrap();
+                let names: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+                let mut expected = vec!["fresh", "grace", "referenced", "unpublished-pending", "unpublished-referenced"];
+                if retention_days == 7 { expected.push("variable"); }
+                assert_eq!(names, expected);
+                assert!(rows.iter().all(|(_, created, detected)| created == detected));
+                let queued: Vec<String> = sqlx::query_scalar("SELECT reference FROM redaction_mapping_gc ORDER BY reference")
+                    .fetch_all(pool).await.unwrap();
+                assert_eq!(queued, ["referenced"]);
+                assert!(sqlx::query("DELETE FROM reversible_redaction_mappings WHERE reference = 'referenced'")
+                    .execute(pool).await.is_err());
+                // A normal restart must not reset detection timestamps or repeat cleanup.
+                sqlx::query("UPDATE reversible_redaction_mappings SET last_detected_at = $1 WHERE reference = 'fresh'")
+                    .bind(now).execute(pool).await.unwrap();
+                let before: Vec<(String, i64, i64)> = sqlx::query_as("SELECT reference,created_at,last_detected_at FROM reversible_redaction_mappings ORDER BY reference").fetch_all(pool).await.unwrap();
+                let history: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version").fetch_all(pool).await.unwrap();
+                assert!(history.iter().any(|(version, _)| *version == 53));
+                let rerun_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let observed = rerun_events.clone();
+                crate::startup_progress::observe_startup(move |event| observed.lock().unwrap().push(event), $migrate(pool, None)).await.unwrap();
+                let after: Vec<(String, i64, i64)> = sqlx::query_as("SELECT reference,created_at,last_detected_at FROM reversible_redaction_mappings ORDER BY reference").fetch_all(pool).await.unwrap();
+                assert_eq!(after, before);
+                let after_history: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT version,checksum FROM _sqlx_migrations ORDER BY version").fetch_all(pool).await.unwrap();
+                assert_eq!(after_history, history);
+                assert!(!rerun_events.lock().unwrap().iter().any(|event| event.phase == "credential_expiry"));
+            }
+        };
+    }
+
+    credential_expiry_upgrade_fixture!(
+        sqlite_credential_expiry_fixture,
+        sqlx::SqlitePool,
+        migrate_sqlite,
+        "SELECT 1",
+        "CREATE TRIGGER fail_credential_delete BEFORE DELETE ON reversible_redaction_mappings WHEN OLD.reference = 'batch-0512' BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
+        "DROP TRIGGER fail_credential_delete"
+    );
+    credential_expiry_upgrade_fixture!(
+        postgres_credential_expiry_fixture,
+        sqlx::PgPool,
+        migrate_postgres,
+        "CREATE FUNCTION fail_credential_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.reference = 'batch-0512' THEN RAISE EXCEPTION 'interrupted'; END IF; RETURN OLD; END $$",
+        "CREATE TRIGGER fail_credential_delete BEFORE DELETE ON reversible_redaction_mappings FOR EACH ROW EXECUTE FUNCTION fail_credential_delete()",
+        "DROP TRIGGER fail_credential_delete ON reversible_redaction_mappings"
+    );
+
+    #[tokio::test]
+    async fn sqlite_credential_expiry_upgrade_preserves_live_mappings() {
+        for days in [2, 7] {
+            // 失败的迁移会丢弃连接；用文件库验证已提交批次在重连后仍然存在。
+            let directory = tempfile::tempdir().unwrap();
+            let pool = sqlite_file_pool(directory.path()).await;
+            let prefix = Migrator::with_migrations(
+                SQLITE_MIGRATOR
+                    .iter()
+                    .filter(|m| m.version <= 52)
+                    .cloned()
+                    .collect(),
+            );
+            super::run_sqlite_migrator(&pool, &prefix, None)
+                .await
+                .unwrap();
+            sqlite_credential_expiry_fixture(&pool, days).await;
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_credential_expiry_upgrade_preserves_live_mappings_when_configured() {
+        let Ok(url) = std::env::var("STRAVIA_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        for days in [2, 7] {
+            let schema = format!("credential_expiry_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+                .execute(&admin)
+                .await
+                .unwrap();
+            let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect_with(options.options([("search_path", schema.as_str())]))
+                .await
+                .unwrap();
+            let prefix = Migrator::with_migrations(
+                super::POSTGRES_MIGRATOR
+                    .iter()
+                    .filter(|m| m.version <= 52)
+                    .cloned()
+                    .collect(),
+            );
+            super::run_postgres_migrator(&pool, &prefix, None)
+                .await
+                .unwrap();
+            postgres_credential_expiry_fixture(&pool, days).await;
+            pool.close().await;
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                .execute(&admin)
+                .await
+                .unwrap();
+        }
         admin.close().await;
     }
 

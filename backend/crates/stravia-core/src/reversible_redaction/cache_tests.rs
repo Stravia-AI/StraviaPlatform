@@ -115,6 +115,7 @@ impl MappingStore for MemoryStore {
                         reference: format!("test-reference-{}", state.next_reference),
                         secret: secret.secret.clone(),
                         rule_ids: secret.rule_ids.clone().into(),
+                        last_detected_at: 0,
                     };
                     state
                         .mappings
@@ -130,7 +131,11 @@ impl MappingStore for MemoryStore {
                 return Err(RedactionError::Storage);
             }
             (
-                InternedMappings { mappings, created },
+                InternedMappings {
+                    mappings,
+                    created,
+                    renewed: false,
+                },
                 state.mutation_gate.take(),
             )
         };

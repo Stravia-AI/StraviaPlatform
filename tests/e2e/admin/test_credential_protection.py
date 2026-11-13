@@ -457,7 +457,7 @@ def test_legacy_mappings_protect_without_fabricating_rule_attribution(admin_env:
         # 升级前的无归因映射在该主体首次读取前预置，不改写已经进入运行时缓存的映射。
         mapping_sql(env, """
             INSERT INTO reversible_redaction_mappings
-                (reference, principal, secret, published_at, created_at, last_used_at, rule_ids)
+                (reference, principal, secret, published_at, created_at, last_detected_at, rule_ids)
             SELECT ?, 'api-key:' || id, ?, ?, ?, ?, '[]' FROM api_keys WHERE name = ?
         """, reference, bare, now, now, now, f"{model}-key")
         set_enabled(env, True)

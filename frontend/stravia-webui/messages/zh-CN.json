@@ -559,6 +559,7 @@
   "startup_phase_usage_backfill": "正在更新用量记录",
   "startup_phase_model_pinning": "正在转换已编辑的供应商模型快照",
   "startup_phase_credential_cleanup": "正在移除已停用的凭据规则",
+  "startup_phase_credential_expiry": "正在移除过期凭据",
   "startup_phase_content_store": "正在转换共享内容存储",
   "startup_phase_retention_data": "正在转换依赖保留数据",
   "startup_phase_schema_migrations": "正在应用数据库更新",

@@ -48,6 +48,7 @@ impl MappingStore for OwnerMappings {
                 reference: reference(),
                 secret: SECRET.to_owned(),
                 rule_ids: Default::default(),
+                last_detected_at: 0,
             }]
         } else {
             Vec::new()

@@ -1,9 +1,10 @@
 //! 凭据保护的运行策略：总开关、被禁用的内置规则，以及由此得出「哪些已记住的凭据仍参与出站替换」。
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::custom::ID_PREFIX;
-use super::store::Mapping;
+use super::store::{Mapping, expiry_cutoff};
 use stravia_runtime_contract::redaction::RedactionError;
 
 /// 保存被禁用内置规则 ID 的设置键，值为 JSON 字符串数组；缺省表示全部启用。
@@ -21,10 +22,21 @@ pub enum DisabledRulesError {
 }
 
 /// 每个请求读取一次的运行策略。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RedactionPolicy {
     pub enabled: bool,
     pub disabled_rules: Arc<BTreeSet<String>>,
+    /// 映射的保留时长 N（`log_retention_days`）：规则超过它没有再检出的映射停止出站替换。
+    pub retention: Duration,
+}
+
+impl RedactionPolicy {
+    /// 本请求的替换与遮罩范围。`custom_enabled` 是当前存在且已启用的自定义规则 ID；
+    /// 过期边界在此刻固定，同一请求内的判断一致。
+    pub fn rule_scope(&self, custom_enabled: impl IntoIterator<Item = String>) -> RuleScope {
+        RuleScope::new(Arc::clone(&self.disabled_rules), custom_enabled)
+            .expiring_after(self.retention)
+    }
 }
 
 /// 解析设置值；无法解释时失败关闭，由宿主按保护失败处理，不退回「全部启用」以外的任何猜测。
@@ -48,18 +60,21 @@ pub trait RuleScopeSource: Send + Sync {
     async fn rule_scope(&self) -> Result<RuleScope, RedactionError>;
 }
 
-/// 某一时刻哪些规则处于启用状态。
+/// 某一时刻哪些映射仍参与出站替换与管理端遮罩。
 ///
 /// 内置规则：不在禁用集即启用。自定义规则：必须存在且已启用，
 /// 因此被停用或删除的自定义规则同样视为未启用。
+/// 另外，规则超过保留期没有再检出的映射视为过期（见 [`Self::expiring_after`]）。
 #[derive(Default)]
 pub struct RuleScope {
     disabled: Arc<BTreeSet<String>>,
     custom_enabled: HashSet<String>,
+    /// 检出时间不晚于它的映射已过期；`None` 表示不按时间过滤。
+    expiry_cutoff: Option<i64>,
 }
 
 impl RuleScope {
-    /// `custom_enabled` 是当前存在且已启用的自定义规则 ID。
+    /// `custom_enabled` 是当前存在且已启用的自定义规则 ID。不按时间过滤，需要时接 [`Self::expiring_after`]。
     pub fn new(
         disabled: Arc<BTreeSet<String>>,
         custom_enabled: impl IntoIterator<Item = String>,
@@ -67,7 +82,17 @@ impl RuleScope {
         Self {
             disabled,
             custom_enabled: custom_enabled.into_iter().collect(),
+            expiry_cutoff: None,
         }
+    }
+
+    /// 以当前时刻与保留期 `retention` 固定过期边界，与回收共用 [`expiry_cutoff`]。
+    pub fn expiring_after(mut self, retention: Duration) -> Self {
+        self.expiry_cutoff = Some(expiry_cutoff(
+            chrono::Utc::now().timestamp_millis(),
+            retention,
+        ));
+        self
     }
 
     pub fn rule_enabled(&self, rule_id: &str) -> bool {
@@ -78,12 +103,19 @@ impl RuleScope {
         }
     }
 
-    /// 映射是否仍参与出站替换与管理端遮罩：创建它的规则至少有一条仍启用。
+    /// 规则超过保留期没有再检出该秘密。过期映射只用于还原旧占位符。
+    pub fn expired(&self, mapping: &Mapping) -> bool {
+        self.expiry_cutoff
+            .is_some_and(|cutoff| mapping.last_detected_at <= cutoff)
+    }
+
+    /// 映射是否仍参与出站替换与管理端遮罩：未过期，且创建它的规则至少有一条仍启用。
     /// 另一条启用的规则本来就会重新检出同一个秘密，所以用「至少一条」而不是「没有被禁用的」。
-    /// 没有归因的映射（归因记录出现之前创建）无法判断，保持启用。
+    /// 没有归因的映射（归因记录出现之前创建）无法判断规则，保持启用，但仍受过期约束。
     pub fn allows(&self, mapping: &Mapping) -> bool {
         let rule_ids = mapping.rule_ids.as_slice();
-        rule_ids.is_empty() || rule_ids.iter().any(|rule_id| self.rule_enabled(rule_id))
+        !self.expired(mapping)
+            && (rule_ids.is_empty() || rule_ids.iter().any(|rule_id| self.rule_enabled(rule_id)))
     }
 }
 
@@ -109,6 +141,7 @@ mod tests {
                     .map(|id| (*id).to_owned())
                     .collect::<Vec<_>>(),
             ),
+            last_detected_at: 0,
         }
     }
 
@@ -131,6 +164,27 @@ mod tests {
     #[test]
     fn unattributed_mappings_cannot_be_judged_and_stay_active() {
         assert!(scope(&["github-pat"], &[]).allows(&mapping(&[])));
+    }
+
+    fn detected(rule_ids: &[&str], last_detected_at: i64) -> Mapping {
+        Mapping {
+            last_detected_at,
+            ..mapping(rule_ids)
+        }
+    }
+
+    #[test]
+    fn a_mapping_stops_replacing_once_no_rule_has_detected_it_within_the_retention_window() {
+        let cutoff = expiry_cutoff(10 * 86_400_000, Duration::from_secs(7 * 86_400));
+        let mut scope = scope(&[], &[]);
+        scope.expiry_cutoff = Some(cutoff);
+        assert!(scope.allows(&detected(&["generic-api-key"], cutoff + 1)));
+        let stale = detected(&["generic-api-key"], cutoff);
+        assert!(scope.expired(&stale));
+        assert!(!scope.allows(&stale));
+        // 没有归因的存量映射同样受过期约束：这是旧映射误杀的出口。
+        assert!(!scope.allows(&detected(&[], cutoff)));
+        assert!(scope.allows(&detected(&[], cutoff + 1)));
     }
 
     #[test]

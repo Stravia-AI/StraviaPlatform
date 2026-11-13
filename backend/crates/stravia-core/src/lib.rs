@@ -7,6 +7,7 @@ pub mod config;
 pub mod connect_client_apply;
 mod content_store;
 mod content_upgrade;
+mod credential_mapping_upgrade;
 pub mod data_paths;
 pub mod db;
 pub mod error;

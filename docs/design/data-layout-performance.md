@@ -541,17 +541,19 @@ foyer 的恢复打开耗时在各场景中位数约 17.6–23.5 ms，TinyUFO 新
 
 **启动期引用回填。** 0039 与 0040 之间的 `retention_data` 钩子先按节点主键读取至多 64 个薄元数据，再按 descriptor 的编码/解码长度和引用正文长度选择不超过 8 MiB 逻辑源字节的连续前缀；首个不可拆节点可超过预算，这不是 RSS 硬上限。按 scope 合并、去重正文读取，解压、摘要校验、JSON 解析和节点恢复在至多 `min(available_parallelism, 8)` 个 blocking worker 上执行；数据库仍使用持迁移锁的单个连接，不增加 SQLite writer。Marker 与原生压缩引用按最多 200 行一条 SQL 插入，同一节点批的全部引用在一个事务里提交，提交后才上报真实 `completed / total`。失败回滚当前引用批；重启从头核验并幂等补齐已提交引用，不持久化新的进度游标，也不改变迁移 SQL、校验和、内容格式、保留期或同步耐久性。Server 与 Desktop 共用这些进度事件，WebUI 根据阶段码显示中英文，未知总量不生成百分比。
 
-**保留规则。** 全部历史共用内存中的天数 N（`log_retention_days`，默认 7，最小 1）。根对象分别以 Interaction 的 `last_active_at`、拒绝请求的 `occurred_at`、Turn 节点的 `created_at` 计时；凭据映射另以最近使用时间计时。Marker、可逆脱敏映射和原生压缩登记（依赖）不再有 `expires_at`：被 `turn_node_markers` / `turn_node_redaction_mappings` / `turn_node_compactions` 引用时不回收；失去引用后，未发布或未确认的行按固定 1 小时的 `pending_until` 回收，已发布的 History Marker 与原生压缩登记按首次 `published_at` / `confirmed_at` + N 回收；已发布的映射按 `last_used_at + N + G` 回收（G 为 1 小时续期节流粒度），且仍受 Turn 节点引用保护。提交只写新节点自己的行与引用行，不再更新祖先，也不再有三个独立的续期事务。节点子树中只要还有未到期的叶子，到该叶子路径上的每个节点都有子节点而不被回收，所以祖先实际保留到子树最晚的 `created_at + N`，结果与 0032/0033 的祖先续期相同，写入量不同。
+**保留规则。** 全部历史共用内存中的天数 N（`log_retention_days`，默认 7，最小 1）。根对象分别以 Interaction 的 `last_active_at`、拒绝请求的 `occurred_at`、Turn 节点的 `created_at` 计时；凭据映射另以最近规则检出时间计时。Marker、可逆脱敏映射和原生压缩登记（依赖）不再有 `expires_at`：被 `turn_node_markers` / `turn_node_redaction_mappings` / `turn_node_compactions` 引用时不回收；失去引用后，未发布或未确认的行按固定 1 小时的 `pending_until` 回收，已发布的 History Marker 与原生压缩登记按首次 `published_at` / `confirmed_at` + N 回收；已发布的映射按 `last_detected_at + N + G` 回收（G 为 1 小时检出续期节流粒度），且仍受 Turn 节点引用保护。提交只写新节点自己的行与引用行，不再更新祖先，也不再有三个独立的续期事务。节点子树中只要还有未到期的叶子，到该叶子路径上的每个节点都有子节点而不被回收，所以祖先实际保留到子树最晚的 `created_at + N`，结果与 0032/0033 的祖先续期相同，写入量不同。
 
-**读取与删除。** 读取不带时间条件（Turn 只排除 `deleting`）；扫描 `HistoryMaintenance::sweep_history` 是唯一的删除方，顺序为 Observation → Turn 节点 → Marker → 映射 → 原生压缩登记 → 正文，每小时一次，保存设置后立即执行一次。其中 Turn 节点、Marker、映射与原生登记四步重复执行到某一轮没有删除任何行（释放链在同一次扫描内收完），正文回收按批（512 行 / 8 MiB）提交并排空队列；每一步都会被尝试，某一步失败只记录告警，其余步骤照常执行，最后合并错误返回。物化缓存的有效期按头节点 `created_at` + 命中时的 N 计算。无引用映射保证“最近使用后至少保留 N 天，至多约 N 天 + G + 一个扫描周期”；其他记录保证“至少保留 N 天；不再使用的记录到期后在一个扫描周期内删除”，到期但尚未被删除的记录仍可读、可续接、可被新节点引用。
+**读取与删除。** Turn 读取不带时间条件（只排除 `deleting`）；运行期扫描 `HistoryMaintenance::sweep_history` 是唯一的删除方，顺序为 Observation → Turn 节点 → Marker → 映射 → 原生压缩登记 → 正文，每小时一次，保存设置后立即执行一次。其中 Turn 节点、Marker、映射与原生登记四步重复执行到某一轮没有删除任何行（释放链在同一次扫描内收完），正文回收按批（512 行 / 8 MiB）提交并排空队列；每一步都会被尝试，某一步失败只记录告警，其余步骤照常执行，最后合并错误返回。物化缓存的有效期按头节点 `created_at` + 命中时的 N 计算。无引用的已发布映射在最近真实检出后至少保留 N 天；过期即停止替换，不等待删除，有引用时只保留占位符还原。Turn 节点到期但尚未被删除时仍可读、可续接、可被新节点引用。其他记录保证“至少保留 N 天；不再使用的记录到期后在一个扫描周期内删除”。
 
 **扫描成本模型。** 每个期限列有一个持久化水位 `W`（表 `history_retention_watermarks`，共七行）：每轮只扫期限落在 `(W, T]` 的行，没有引用的入队，并在同一事务把 `W` 设为 `T`；Turn 节点使用 `turn_nodes_created_at_idx(created_at, node_pk)`。`AFTER DELETE` 触发器在最后一条引用消失时入队（子节点删除时入队父节点，三张节点引用表、`native_compaction_sources`、原生登记指向的来源节点、Platform Tool Execution 指向的 Marker 同理），外键级联删除同样触发。回收步骤领取候选，加锁重检“已过下限窗口且无引用”。一行在“过了下限窗口”与“失去最后一个引用”中较晚发生的那一刻入队，所以不滑动的记录一生只被检查常数次，每轮成本取决于本轮到期或刚失去引用的行数，不随保留的历史增长。`T < W`（N 变大或时钟回拨）只把 `W` 退回 `T`；多实例并发时从读到的 `W` 开始，最多重扫，不会遗漏。修改 N 不重写任何行。
 
-**映射的空闲过期（[ADR-0090](../adr/0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md)，迁移 0045）。** SQLite/PostgreSQL 把 `reversible_redaction_mappings.updated_at` 改名为 `last_used_at`（已发布行置为 `published_at`，存量映射的到期时刻保持升级前的 `published_at + N`），`published_at` 保留且仅表示已发布过；回收索引由 `reversible_redaction_mappings_published_at_idx` 换成 `reversible_redaction_mappings_last_used_at_idx`，水位 `reversible_redaction_mappings.published_at` 改名为 `reversible_redaction_mappings.last_used_at` 并重置为最小值，水位表仍为七行。创建算使用；后续使用以占位符出现在成功完成的模型回合共享 trace 为准（出站替换、客户端重放历史、模型响应还原），回合末 `publish` 登记，管理端查看与观测遮罩不续期。N 仍复用 `log_retention_days`，未发布行仍按一小时 `pending_until`。
+**映射的规则检出过期（[ADR-0090](../adr/0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md)，迁移 0053）。** N 复用 `HistoryRetention` 的 `log_retention_days`（默认 7 天、最小 1 天），G 为一小时。新建映射记录 `last_detected_at`，只有真实规则检出并经 `intern` 登记能推进它；替换、还原、历史引用、`publish`、管理端查看和观测遮罩不续期。G 内重复检出不推进时间，额外 G 补偿节流偏差，保证已发布映射在真实检出后至少保留 N 天；未发布行仍按一小时 `pending_until` 回收。
 
-续期搭 `publish` 已有 UPDATE 的便车，不新增独立事务；写入条件为 `published_at IS NULL OR last_used_at < now - G`，G 内重复使用只读不写。写前先只读查询挑出需要首次发布或续期的引用，没有则不开写事务，避免 SQLite 为无需更新的引用抢唯一写锁并同步 WAL。G 内的最后一次真实使用可能晚于记录的 `last_used_at`，因此回收下限额外加 G，保证实际最近使用后至少保留 N 天；无引用时至多约 N 天 + G + 一个扫描周期。读取 `active()` 不比较时间，到期未被删除的映射仍可读可用。
+替换和回收共用 `cutoff = now - N - G`，`last_detected_at <= cutoff` 即过期并立即停止出站替换和管理端观测遮罩，无须等待扫描。无历史引用的过期已发布映射由后台自动回收；有 Turn 节点引用的映射不回收，仍可还原旧占位符，但不参加替换。规则再次检出同一秘密时，尚未回收的映射复用原占位符，已回收则新建；如果规则不再识别纯裸值，过期后会明文发往上游。
 
-映射继续使用水位范围扫描，已发布行的扫描视界为 `T = now - N - G`：续期写入的新值总大于当前视界，移到未来扫描范围，不会被水位漏掉；已经入队又续期的行在领取时按新时间重检后保留。成本取决于本轮到期或释放引用的行数，不每轮重扫全部映射。续期、只读预检与滑动水位的性能尚未实测，不从 10.4 的 Observation/Turn Chain 数字推导数量级。代价是过期后同一凭据被规则重新检出会生成新映射与新占位符，规则认不出的裸出现则原样发往上游。
+SQLite/PostgreSQL 的 0045 曾将 `updated_at` 改名为 `last_used_at`，以 `published_at` 初始化已发布行；这一历史契约被 0053 取代，旧使用时间不证明规则检出。0053 前置 hook 根据当前 N、G 和 `created_at` 清理过期无引用映射并保留有引用行；随后 SQL 将 `last_used_at` 重命名为 `last_detected_at`、以 `created_at` 保守初始化、重建索引并重置水位。映射快照包含检出时间，新建或推进续期会使缓存失效；未推进的 G 内重复检出不失效。
+
+映射继续使用水位范围扫描，已发布行的扫描视界为 `T = now - N - G`：续期写入的新值总大于当前视界，移到未来扫描范围，不会被水位漏掉；已经入队又续期的行在领取时按新时间重检后保留。成本取决于本轮到期或释放引用的行数，不每轮重扫全部映射。检出续期与滑动水位的性能尚未实测，不从 10.4 的 Observation/Turn Chain 数字推导数量级。
 
 **为什么不是每轮重扫。** ADR-0089 评估过“每轮按下限窗口重扫、反连接排除仍被引用的行”：实现最简单，但已过期限却仍被引用的行每轮都要重新检查，长期活跃的会话越多成本越高，而现有种子扫描在写事务内执行。ADR 按 1,000 个连续活跃 30 天、每天提交 200 次的会话、N = 7 **推断**每轮约重扫 460 万行（即 (30 − 7) 天 × 200 次 × 1,000 个会话；这是 ADR 的推断，不是测量，实施后也没有对该备选方案做实测）。开发库中这类行只有个位数到十几行，但链都很短，所以开发库不能证明这个风险不存在。维护叶子集合或引用计数则需要每次提交写父节点或依赖行，重新引入提交期的写入和热点行争用，也被否决。
 
@@ -597,3 +599,18 @@ foyer 的恢复打开耗时在各场景中位数约 17.6–23.5 ms，TinyUFO 新
 | 三次运行中位数 | 1,919.488 ms | 34.700 ms |
 
 这个小夹具的中位数约加速 55 倍，主要对应消除逐引用提交和重复正文读取，不能解释为多核本身的收益，也不代表完整升级或生产库的提速比例。未锁频、清 OS 缓存或隔离其他开发负载；没有在生产数据上比较。另用真实 Server 对放大的录制夹具做完整启动升级（665 个 Turn 节点、9,986 个 Observation 事件）：该引用回填阶段从 `0 / 665` 持续上报到 `665 / 665`，约 0.135 秒完成，最终迁移版本为 42，SQLite integrity 与外键检查通过。临时计时探针已移除，保留跨批进度、失败批回滚、幂等重跑、跨 scope 与损坏正文的回归覆盖。
+
+### 10.6 凭据映射检出过期升级实测
+
+2026-11-13，在本机 Linux x64、btrfs 临时目录中使用当前 debug Server，对隔离的 SQLite 与 PostgreSQL 16.15 各执行一次 0052 → 0053 启动升级。每端有 50,002 条合成映射：50,000 条已过期且无引用，另 2 条由真实 HTTP 请求生成的 Turn 节点引用保护，其中 1 条也已过期。旧 `last_used_at` 均为最近时刻，验证它不能代替规则检出；升级后保留行的检出时间回到 `created_at`。SQLite 使用 WAL 与锁定 SQLx 的默认同步设置（FULL，未覆盖），PostgreSQL 的 `fsync`、`synchronous_commit` 均为 `on`；PostgreSQL 的派生缓存使用独立 loopback Valkey 9.1.2。未访问或修改生产库。
+
+| 指标 | SQLite | PostgreSQL |
+|---|---:|---:|
+| 前置清理阶段耗时 | 0.136 s | 0.408 s |
+| 从启动进程到认证状态 HTTP 可用 | 0.636 s | 0.644 s |
+| 启动阶段采样到的 Server 峰值 RSS | 152,344 KiB | 141,316 KiB |
+| 删除 / 引用保护保留 | 50,000 / 2 | 50,000 / 2 |
+
+清理耗时来自 `credential_expiry` 首条日志到后续 `schema_migrations` 日志，不含之后的 DDL；就绪时间包含 300 ms 间隔的 HTTP 就绪探测误差。RSS 每 20 ms 采样一次，仅覆盖 Server，不含 PostgreSQL、Valkey 和 OS 页面缓存，不是精确峰值或内存上限。没有锁频、清 OS 缓存或做重复统计，不外推生产数据、其他硬件或完整历史升级的吞吐。
+
+双端各产生 100 条清理阶段日志：未知总量开始，随后为 `0 / 50000`，每个最多 512 行的事务提交后递增，最终 `50000 / 50000`。另通过真实 HTTP 验证：缩短保留期立即停止已缓存映射的替换；有引用的旧占位符仍可还原且不续期；真实规则再次检出后复用原占位符，撤下检测规则后也不会读回过期缓存。浏览器独立回放未知总量及连续提交计数，在 320 px 宽度核对英文、中文阶段文字、不定进度和百分比，无横向溢出。临时探针不作为生产工具保留；跨批中断、失败批回滚、幂等重跑与完成后不重置检出时间由 `migrations::tests::*credential_expiry*` 保护。
