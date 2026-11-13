@@ -797,13 +797,15 @@ fn open_responses_models(input: &ConnectClientApplyInput) -> JsonValue {
                 }),
             ),
         ]);
-        if let Some(default_level) = model.default_thinking_level.as_deref() {
-            let effort = if default_level == "off" {
-                "none"
-            } else {
-                default_level
-            };
-            value.insert("options".to_owned(), json!({ "reasoningEffort": effort }));
+        if let Some(default_level) = model
+            .default_thinking_level
+            .as_deref()
+            .filter(|level| *level != "off")
+        {
+            value.insert(
+                "options".to_owned(),
+                json!({ "reasoningEffort": default_level }),
+            );
         }
         if let Some(context) = model.context_window {
             value.insert("limit".to_owned(), json!({ "context": context }));
@@ -850,7 +852,11 @@ fn responses_provider(input: &ConnectClientApplyInput, base_url_key: &str) -> Js
                     ("mode".to_owned(), json!("effort")),
                     ("efforts".to_owned(), json!(levels)),
                 ]);
-                if let Some(default_level) = &model.default_thinking_level {
+                if let Some(default_level) = model
+                    .default_thinking_level
+                    .as_deref()
+                    .filter(|level| *level != "off")
+                {
                     thinking.insert("defaultLevel".to_owned(), json!(default_level));
                 }
                 value.insert("thinking".to_owned(), JsonValue::Object(thinking));
@@ -1311,7 +1317,7 @@ pub fn codex_catalog(
             let default_level = model
                 .default_thinking_level
                 .as_deref()
-                .map(|level| if level == "off" { "none" } else { level });
+                .filter(|level| *level != "off");
             let mut entry = JsonMap::from_iter([
                 ("slug".to_owned(), json!(model.model_id)),
                 ("display_name".to_owned(), json!(model.display_name)),
@@ -1715,8 +1721,11 @@ name = "Other"
             .zip(defaults)
         {
             assert_eq!(
-                model["thinking"]["defaultLevel"].as_str(),
-                expected,
+                model["thinking"].get("defaultLevel"),
+                expected
+                    .filter(|level| *level != "off")
+                    .map(serde_json::Value::from)
+                    .as_ref(),
                 "model {}",
                 model["id"],
             );
@@ -1728,7 +1737,7 @@ name = "Other"
         let cases = [
             (Some("high"), vec!["medium", "high"], Some("high")),
             (Some("xhigh"), vec!["medium", "xhigh"], Some("xhigh")),
-            (Some("off"), vec!["off", "medium"], Some("none")),
+            (Some("off"), vec!["off", "medium"], None),
             (None, vec!["medium", "high"], None),
             (None, vec!["low", "high"], None),
             (Some("high"), vec!["low"], Some("high")),
@@ -1764,27 +1773,30 @@ name = "Other"
             .iter()
             .zip(cases)
         {
-            assert_eq!(model["default_reasoning_level"].as_str(), expected);
+            assert_eq!(
+                model.get("default_reasoning_level"),
+                Some(&serde_json::json!(expected)),
+            );
         }
     }
 
     #[test]
     fn opencode_uses_model_defaults_without_changing_effort_variants() {
         let defaults = [
-            Some("off"),
-            Some("minimal"),
-            Some("low"),
-            Some("medium"),
-            Some("high"),
-            Some("xhigh"),
-            Some("max"),
-            None,
+            (Some("off"), None),
+            (Some("minimal"), Some("minimal")),
+            (Some("low"), Some("low")),
+            (Some("medium"), Some("medium")),
+            (Some("high"), Some("high")),
+            (Some("xhigh"), Some("xhigh")),
+            (Some("max"), Some("max")),
+            (None, None),
         ];
         let mut input = standard_input(ConnectClientId::Opencode);
         input.models = defaults
             .iter()
             .enumerate()
-            .map(|(index, default)| {
+            .map(|(index, (default, _))| {
                 let mut model = model(&format!("route-{index}"), "Route");
                 model.default_thinking_level = default.map(str::to_owned);
                 model.supported_thinking_levels =
@@ -1795,12 +1807,12 @@ name = "Other"
         let plan = preview_connect_client_apply(&input).expect("OpenCode preview");
         let (_, preview) = plan.preview.split_once('\n').expect("config path header");
         let document: serde_json::Value = serde_json::from_str(preview).expect("OpenCode JSON");
-        for (index, default) in defaults.into_iter().enumerate() {
+        for (index, (_, expected)) in defaults.into_iter().enumerate() {
             let model = &document["provider"]["stravia"]["models"][format!("route-{index}")];
-            assert_eq!(
-                model["options"]["reasoningEffort"].as_str(),
-                default.map(|level| if level == "off" { "none" } else { level }),
-            );
+            match expected {
+                Some(level) => assert_eq!(model["options"]["reasoningEffort"], level),
+                None => assert!(model.get("options").is_none()),
+            }
             assert_eq!(
                 model["variants"],
                 serde_json::json!({
