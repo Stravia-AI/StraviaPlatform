@@ -94,7 +94,6 @@ impl HistoryRetention {
         i64::from(self.days()) * DAY_MILLIS
     }
 
-    #[cfg(test)]
     pub(crate) fn window(&self) -> Duration {
         Duration::from_millis(u64::try_from(self.window_millis()).unwrap_or(u64::MAX))
     }

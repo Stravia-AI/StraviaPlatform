@@ -120,6 +120,7 @@ async fn committed_discovery_survives_dropped_protection_before_intern_acknowled
     });
     gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
         gateway.storage.clone(),
+        gateway.retention.clone(),
         store.clone(),
         gateway.redaction.custom_rules.clone(),
         gateway.runtime_cache.clone(),
@@ -414,6 +415,7 @@ async fn committed_discovery_survives_replacement_failure_but_failed_intern_crea
     });
     gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
         gateway.storage.clone(),
+        gateway.retention.clone(),
         store.clone(),
         gateway.redaction.custom_rules.clone(),
         gateway.runtime_cache.clone(),
@@ -577,6 +579,7 @@ async fn held_publication_turn(
     });
     gateway.redaction = crate::reversible_redaction::ReversibleRedaction::new(
         gateway.storage.clone(),
+        gateway.retention.clone(),
         store.clone(),
         gateway.redaction.custom_rules.clone(),
         gateway.runtime_cache.clone(),
@@ -909,7 +912,7 @@ async fn credential_hit_detail_prefers_mapping_secret_then_falls_back_to_rule() 
         .execute(&mut *connection)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,last_used_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,NULL,?,?,'[\"github-pat\"]')")
+    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,last_detected_at,rule_ids) VALUES ('m-secret','api-key:hit',?,?,NULL,?,?,'[\"github-pat\"]')")
         .bind(secret)
         .bind(now)
         .bind(now)

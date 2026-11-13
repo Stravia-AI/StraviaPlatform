@@ -565,6 +565,7 @@
   "startup_phase_usage_backfill": "Updating usage records",
   "startup_phase_model_pinning": "Converting edited provider model snapshots",
   "startup_phase_credential_cleanup": "Removing retired credential rules",
+  "startup_phase_credential_expiry": "Removing expired credentials",
   "startup_phase_content_store": "Converting shared content storage",
   "startup_phase_retention_data": "Converting dependency retention",
   "startup_phase_schema_migrations": "Applying database updates",

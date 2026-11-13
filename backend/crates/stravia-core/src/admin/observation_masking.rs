@@ -555,6 +555,7 @@ mod tests {
                         reference: format!("ref-{secret}"),
                         secret: secret.clone(),
                         rule_ids: self.attributed_to.clone().into(),
+                        last_detected_at: 0,
                     })
                     .collect(),
             ))
@@ -1136,7 +1137,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         let mut connection = pool.begin_write().await?;
         sqlx::query(
-            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,last_used_at,pending_until) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,last_detected_at,pending_until) VALUES (?,?,?,?,?,?)",
         )
         .bind("ref-owner")
         .bind("api-key:owner")

@@ -1326,6 +1326,7 @@ mod tests {
             ),
             secret: secret.into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         }
     }
 
@@ -1407,11 +1408,13 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "密钥-long".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let second = Mapping {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "密钥".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let mappings = [second, first];
         let mut used = BTreeSet::new();
@@ -1447,6 +1450,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN)),
             secret: "not-present".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         }];
         for original in [
             " { \"key\" : \"前缀\\u003c-no-reference\", \"number\": 1.00e+02 } ",
@@ -1469,6 +1473,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: identifier.into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let mut used = BTreeSet::new();
         let input = format!("{reference} {identifier}");
@@ -1495,6 +1500,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let mut payload = serde_json::json!([
             {"type": "text", "text": mapping.secret},
@@ -1535,6 +1541,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let payload = serde_json::json!([
             {"type": "text", "text": mapping.secret},
@@ -1582,6 +1589,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "Q8n4Vk7sT2p9X5a3Lc6D0h1R".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let payload = serde_json::json!([{"type": "image", "value": mapping.secret}]).to_string();
         let item = AiItem::function_call_output("call-json", Value::String(payload.clone()));
@@ -1608,6 +1616,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let malformed = format!("{{\"key\":\"{}\"", mapping.secret);
 
@@ -1652,6 +1661,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let malformed = "{\"k\":\"sk\\u002dlive\\u002d7f3a9c\",\"t\":".to_string();
         let mut request = AiRequest::new(
@@ -1690,6 +1700,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "c".repeat(IDENTIFIER_LEN)),
             secret: "a\"b".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let malformed = "{\"k\":\"a\\\"b\",\"t\":".to_string();
         let mut item = AiItem::function_call(stravia_runtime_contract::protocol::ir::ToolCall {
@@ -1712,6 +1723,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "d".repeat(IDENTIFIER_LEN)),
             secret: "sk-native-prompt-secret".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let mut request = AiRequest::new("model", Vec::new());
         request.parameters.session.id = Some(mapping.secret.clone());
@@ -1779,6 +1791,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "b".repeat(IDENTIFIER_LEN)),
             secret: "sk-live-7f3a9c".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         for malformed in ["{\"k\":\"sk\\live", "{\"k\":\"a\\qb\",\"t\":"] {
             let request = |malformed: &str| {
@@ -1831,6 +1844,7 @@ mod tests {
                 .map(|rule| (*rule).to_owned())
                 .collect::<Vec<_>>()
                 .into(),
+            last_detected_at: 0,
         }
     }
 
@@ -2063,6 +2077,7 @@ mod tests {
             reference: format!("{PREFIX}{}{SUFFIX}", "a".repeat(IDENTIFIER_LEN - 1)),
             secret: "synthetic snapshot secret".into(),
             rule_ids: Default::default(),
+            last_detected_at: 0,
         };
         let mut request = AiRequest::new("model", Vec::new());
         request.instructions = Some(mapping.secret.clone());

@@ -39,6 +39,8 @@ export function startupPhaseLabel(progress: StartupProgress): string {
       return m.startup_phase_model_pinning()
     case 'credential_cleanup':
       return m.startup_phase_credential_cleanup()
+    case 'credential_expiry':
+      return m.startup_phase_credential_expiry()
     case 'content_store':
       return m.startup_phase_content_store()
     case 'retention_data':

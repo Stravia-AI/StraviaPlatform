@@ -16,9 +16,18 @@ pub const PG_GC_LOCK_SHARED: &str = "SELECT pg_advisory_xact_lock_shared(8900089
 
 const PENDING_RETENTION: Duration = Duration::from_secs(60 * 60);
 
-/// 空闲过期起点的最小推进间隔。映射在一个回合里每被使用一次都写库代价过高，
-/// 所以该时间内的重复使用只读不写；回收时再把这段时间加回保留期，保证实际空闲不少于保留期。
+/// 最近检出时间的最小推进间隔。同一秘密在长对话里每个请求都会被规则再次检出，
+/// 每次都写库代价过高，所以该时间内的重复检出只读不写；替换与回收都把这段时间加回保留期，
+/// 保证从最近一次真实检出起算，映射至少保留 N 天。
 pub const RENEWAL_GRANULARITY: Duration = Duration::from_secs(60 * 60);
+
+/// 检出时间不晚于返回值的映射已过期：停止出站替换，无历史引用时由回收删除。
+/// 替换资格（[`crate::policy::RuleScope`]）与回收（[`MappingStore::sweep`]）共用这一个边界，
+/// 物理删除仍等待维护扫描，并受历史引用保护。
+pub fn expiry_cutoff(now: i64, retention: Duration) -> i64 {
+    now.saturating_sub(millis(retention))
+        .saturating_sub(millis(RENEWAL_GRANULARITY))
+}
 
 // Intentionally no Debug: mapping plaintext must never enter diagnostics.
 #[derive(Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -28,6 +37,9 @@ pub struct Mapping {
     /// 创建映射时检测出它的规则；创建之前的映射为空，无法归因。
     #[sqlx(try_from = "String")]
     pub rule_ids: RuleIds,
+    /// 规则最近一次检出该秘密的时刻（毫秒）。只有检出推进它：出站替换、占位符还原、
+    /// 历史引用与 `publish` 都不会，所以替换不能让映射自我续命。
+    pub last_detected_at: i64,
 }
 
 /// 同一主体的不可变映射快照；读取与流式还原共享秘密原文，不逐请求深拷贝。
@@ -77,16 +89,23 @@ impl From<&str> for DetectedSecret {
 pub struct InternedMappings {
     pub mappings: Vec<Mapping>,
     pub created: Vec<usize>,
+    /// 已有映射的检出时间是否被推进。缓存的快照携带该时间，推进后必须失效。
+    pub renewed: bool,
 }
 
 #[async_trait]
 pub trait MappingStore: Send + Sync {
+    /// 主体的全部映射，含已过期但尚未回收的。是否仍参与出站替换由 `RuleScope::allows` 判断；
+    /// 占位符还原不看过期，所以这里不过滤。
     async fn active(&self, principal: &Principal) -> Result<MappingSnapshot, RedactionError>;
-    /// 实例内是否存在映射（映射不再有过期时间，回收前都有效）。没有映射时读取路径直接返回原响应，不做主体解析与载荷遍历。
+    /// 实例内是否存在映射，含已过期但尚未回收的映射：它们仍用于还原旧占位符。
+    /// 没有映射时读取路径直接返回原响应，不做主体解析与载荷遍历。
     /// 默认返回 `true`，让未知实现保持保守行为。
     async fn any_active(&self) -> Result<bool, RedactionError> {
         Ok(true)
     }
+    /// 登记规则本次检出的秘密：新秘密建立映射；已有映射（含已过期但尚未回收的）复用原占位符，
+    /// 并把检出时间推进到当前，这是唯一让映射续期的路径。
     async fn intern(
         &self,
         principal: &Principal,
@@ -98,7 +117,7 @@ pub trait MappingStore: Send + Sync {
         principal: &Principal,
         references: &[String],
     ) -> Result<(), RedactionError>;
-    /// 期限扫描入队后由回收步骤删除；`retention` 是当前统一天数。
+    /// 期限扫描入队后由回收步骤删除；`retention` 是当前统一天数，边界见 [`expiry_cutoff`]。
     async fn sweep(&self, now: i64, retention: Duration) -> Result<u64, RedactionError>;
     /// 按占位符读取映射明文。占位符是映射的唯一标识，观察事件的 principal
     /// 只保存 API Key ID，与映射表的 `api-key:<id>` 存储键并不相同。
@@ -136,11 +155,10 @@ impl SqlMappingStore {
         RedactionError::Storage
     }
 
-    /// 登记映射在一个成功回合里被使用：首次使用时发布，之后推进空闲过期的起点。
+    /// 登记映射在一个成功回合里被使用：首次使用时发布，已发布的映射不再写库。
     ///
-    /// 同一映射在 [`RENEWAL_GRANULARITY`] 内重复使用不再写库；因此记录的时刻最多落后真实使用
-    /// 这么久，回收时把这段宽限加回去（见 `sweep`），保证空闲时长不会被少算。
-    /// 先用只读查询挑出确实需要写的引用，全部无需续期时不开写事务：
+    /// 使用（出站替换、客户端重放历史、模型响应还原）不延长映射寿命，只有规则再次检出才续期
+    /// （见 `intern`）。先用只读查询挑出尚未发布的引用，全部已发布时不开写事务：
     /// SQLite 的写事务独占唯一写锁并同步 WAL，热路径上每个回合都付这个代价没有必要。
     async fn publish(
         &self,
@@ -155,7 +173,6 @@ impl SqlMappingStore {
         references.dedup();
         let principal = principal.continuation_key();
         let timestamp = now();
-        let renew_before = timestamp.saturating_sub(millis(RENEWAL_GRANULARITY));
         match self {
             Self::Sqlite(pool) => {
                 let mut due = Vec::new();
@@ -165,9 +182,7 @@ impl SqlMappingStore {
                     );
                     query
                         .push_bind(&principal)
-                        .push(" AND (published_at IS NULL OR last_used_at < ")
-                        .push_bind(renew_before)
-                        .push(") AND reference IN (");
+                        .push(" AND published_at IS NULL AND reference IN (");
                     let mut list = query.separated(", ");
                     for reference in references {
                         list.push_bind(*reference);
@@ -190,17 +205,13 @@ impl SqlMappingStore {
                     .map_err(|error| self.storage(error))?;
                 for references in due.chunks(400) {
                     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                        "UPDATE reversible_redaction_mappings SET published_at = COALESCE(published_at, ",
+                        "UPDATE reversible_redaction_mappings SET pending_until = NULL, published_at = ",
                     );
                     query
                         .push_bind(timestamp)
-                        .push("), pending_until = NULL, last_used_at = ")
-                        .push_bind(timestamp)
                         .push(" WHERE principal = ")
                         .push_bind(&principal)
-                        .push(" AND (published_at IS NULL OR last_used_at < ")
-                        .push_bind(renew_before)
-                        .push(") AND reference IN (");
+                        .push(" AND published_at IS NULL AND reference IN (");
                     let mut list = query.separated(", ");
                     for reference in references {
                         list.push_bind(reference.as_str());
@@ -225,9 +236,7 @@ impl SqlMappingStore {
                     );
                     query
                         .push_bind(&principal)
-                        .push(" AND (published_at IS NULL OR last_used_at < ")
-                        .push_bind(renew_before)
-                        .push(") AND reference IN (");
+                        .push(" AND published_at IS NULL AND reference IN (");
                     let mut list = query.separated(", ");
                     for reference in references {
                         list.push_bind(*reference);
@@ -244,7 +253,7 @@ impl SqlMappingStore {
                 if due.is_empty() {
                     return Ok(());
                 }
-                // 按引用排序，使并发批量续期以同一顺序锁行。
+                // 按引用排序，使并发批量发布以同一顺序锁行。
                 due.sort_unstable();
                 let mut transaction = pool.begin().await.map_err(|error| self.storage(error))?;
                 // 批量发布按调用方顺序锁映射行，与历史回收触发器的取锁顺序无关；
@@ -261,17 +270,13 @@ impl SqlMappingStore {
                     .map_err(|error| self.storage(error))?;
                 for references in due.chunks(400) {
                     let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                        "UPDATE reversible_redaction_mappings SET published_at = COALESCE(published_at, ",
+                        "UPDATE reversible_redaction_mappings SET pending_until = NULL, published_at = ",
                     );
                     query
                         .push_bind(timestamp)
-                        .push("), pending_until = NULL, last_used_at = ")
-                        .push_bind(timestamp)
                         .push(" WHERE principal = ")
                         .push_bind(&principal)
-                        .push(" AND (published_at IS NULL OR last_used_at < ")
-                        .push_bind(renew_before)
-                        .push(") AND reference IN (");
+                        .push(" AND published_at IS NULL AND reference IN (");
                     let mut list = query.separated(", ");
                     for reference in references {
                         list.push_bind(reference.as_str());
@@ -299,7 +304,7 @@ impl MappingStore for SqlMappingStore {
         let principal = principal.continuation_key();
         match self {
             Self::Sqlite(pool) => sqlx::query_as::<_, Mapping>(
-                "SELECT reference, secret, rule_ids FROM reversible_redaction_mappings \
+                "SELECT reference, secret, rule_ids, last_detected_at FROM reversible_redaction_mappings \
                  WHERE principal = ? ORDER BY reference",
             )
             .bind(principal)
@@ -308,7 +313,7 @@ impl MappingStore for SqlMappingStore {
             .map(Arc::new)
             .map_err(|error| self.storage(error)),
             Self::Postgres(pool) => sqlx::query_as::<_, Mapping>(
-                "SELECT reference, secret, rule_ids FROM reversible_redaction_mappings \
+                "SELECT reference, secret, rule_ids, last_detected_at FROM reversible_redaction_mappings \
                  WHERE principal = $1 ORDER BY reference",
             )
             .bind(principal)
@@ -347,11 +352,13 @@ impl MappingStore for SqlMappingStore {
             return Ok(InternedMappings {
                 mappings: Vec::new(),
                 created: Vec::new(),
+                renewed: false,
             });
         }
         let principal = principal.continuation_key();
         let mut mappings = Vec::with_capacity(secrets.len());
         let mut created = Vec::new();
+        let mut renewed = false;
         // Serialize lookup-and-insert across processes, not just this store instance.
         // Secrets can be arbitrarily long (e.g. private keys), so do not B-tree index them.
         match self {
@@ -361,9 +368,10 @@ impl MappingStore for SqlMappingStore {
                     .await
                     .map_err(|error| self.storage(error))?;
                 let now = now();
+                let renew_before = now.saturating_sub(millis(RENEWAL_GRANULARITY));
                 for secret in secrets {
                     let existing = sqlx::query_as::<_, Mapping>(
-                        "SELECT reference, secret, rule_ids FROM reversible_redaction_mappings \
+                        "SELECT reference, secret, rule_ids, last_detected_at FROM reversible_redaction_mappings \
                          WHERE principal = ? AND secret = ?",
                     )
                     .bind(&principal)
@@ -371,6 +379,29 @@ impl MappingStore for SqlMappingStore {
                     .fetch_optional(&mut *transaction)
                     .await
                     .map_err(|error| self.storage(error))?;
+                    // 已过期但尚未回收的映射也在这里续期并复用原占位符；检出时间在节流间隔内不重复写。
+                    let existing = match existing {
+                        Some(mut mapping) if mapping.last_detected_at < renew_before => {
+                            let updated = sqlx::query(
+                                "UPDATE reversible_redaction_mappings \
+                                 SET last_detected_at = MAX(last_detected_at, ?) WHERE reference = ?",
+                            )
+                            .bind(now)
+                            .bind(&mapping.reference)
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(|error| self.storage(error))?
+                            .rows_affected();
+                            if updated == 0 {
+                                None
+                            } else {
+                                mapping.last_detected_at = mapping.last_detected_at.max(now);
+                                renewed = true;
+                                Some(mapping)
+                            }
+                        }
+                        other => other,
+                    };
                     let mapping = match existing {
                         Some(mapping) => mapping,
                         None => {
@@ -380,7 +411,7 @@ impl MappingStore for SqlMappingStore {
                                 .map_err(|_| RedactionError::Storage)?;
                             sqlx::query(
                                 "INSERT INTO reversible_redaction_mappings \
-                                 (reference, principal, secret, rule_ids, created_at, last_used_at, pending_until) \
+                                 (reference, principal, secret, rule_ids, created_at, last_detected_at, pending_until) \
                                  VALUES (?, ?, ?, ?, ?, ?, ?)",
                             ).bind(&reference).bind(&principal).bind(&secret.secret).bind(&rule_ids).bind(now).bind(now)
                                 .bind(after(now, PENDING_RETENTION))
@@ -389,6 +420,7 @@ impl MappingStore for SqlMappingStore {
                                 reference,
                                 secret: secret.secret.clone(),
                                 rule_ids: secret.rule_ids.clone().into(),
+                                last_detected_at: now,
                             }
                         }
                     };
@@ -407,9 +439,10 @@ impl MappingStore for SqlMappingStore {
                     .await
                     .map_err(|error| self.storage(error))?;
                 let now = now();
+                let renew_before = now.saturating_sub(millis(RENEWAL_GRANULARITY));
                 for secret in secrets {
                     let existing = sqlx::query_as::<_, Mapping>(
-                        "SELECT reference, secret, rule_ids FROM reversible_redaction_mappings \
+                        "SELECT reference, secret, rule_ids, last_detected_at FROM reversible_redaction_mappings \
                          WHERE principal = $1 AND secret = $2",
                     )
                     .bind(&principal)
@@ -417,6 +450,31 @@ impl MappingStore for SqlMappingStore {
                     .fetch_optional(&mut *transaction)
                     .await
                     .map_err(|error| self.storage(error))?;
+                    // 已过期但尚未回收的映射也在这里续期并复用原占位符；检出时间在节流间隔内不重复写。
+                    // 回收事务可能在上面的读取之后删除该行（它只靠行锁与本事务排队）；
+                    // UPDATE 等到行锁释放后发现行已不在，就按新秘密重建，不能返回一个已被删除的占位符。
+                    let existing = match existing {
+                        Some(mut mapping) if mapping.last_detected_at < renew_before => {
+                            let updated = sqlx::query(
+                                "UPDATE reversible_redaction_mappings \
+                                 SET last_detected_at = GREATEST(last_detected_at, $1) WHERE reference = $2",
+                            )
+                            .bind(now)
+                            .bind(&mapping.reference)
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(|error| self.storage(error))?
+                            .rows_affected();
+                            if updated == 0 {
+                                None
+                            } else {
+                                mapping.last_detected_at = mapping.last_detected_at.max(now);
+                                renewed = true;
+                                Some(mapping)
+                            }
+                        }
+                        other => other,
+                    };
                     let mapping = match existing {
                         Some(mapping) => mapping,
                         None => {
@@ -426,7 +484,7 @@ impl MappingStore for SqlMappingStore {
                                 .map_err(|_| RedactionError::Storage)?;
                             sqlx::query(
                                 "INSERT INTO reversible_redaction_mappings \
-                                 (reference, principal, secret, rule_ids, created_at, last_used_at, pending_until) \
+                                 (reference, principal, secret, rule_ids, created_at, last_detected_at, pending_until) \
                                  VALUES ($1, $2, $3, $4, $5, $5, $6)",
                             ).bind(&reference).bind(&principal).bind(&secret.secret).bind(&rule_ids).bind(now)
                                 .bind(after(now, PENDING_RETENTION))
@@ -435,6 +493,7 @@ impl MappingStore for SqlMappingStore {
                                 reference,
                                 secret: secret.secret.clone(),
                                 rule_ids: secret.rule_ids.clone().into(),
+                                last_detected_at: now,
                             }
                         }
                     };
@@ -446,7 +505,11 @@ impl MappingStore for SqlMappingStore {
                     .map_err(|error| self.storage(error))?;
             }
         }
-        Ok(InternedMappings { mappings, created })
+        Ok(InternedMappings {
+            mappings,
+            created,
+            renewed,
+        })
     }
 
     async fn publish(
@@ -480,16 +543,15 @@ impl MappingStore for SqlMappingStore {
 
     /// 期限扫描负责入队，队列回收是唯一删除方；返回本轮删除的映射数。
     ///
-    /// 已发布的映射在最近一次使用起超过 `retention`（再加续期粒度）后回收；
+    /// 已发布的映射在 `last_detected_at` 不晚于 [`expiry_cutoff`] 且没有历史引用时回收；
+    /// 仍被引用的过期映射保留给还原，最后一个引用释放时由触发器入队，领取时再复查。
     /// 未发布的映射按 `pending_until`。
     ///
-    /// `last_used_at` 会被续期推后，但扫描水位仍然安全：续期写入的总是当前时间，
+    /// `last_detected_at` 会被再次检出推后，但扫描水位仍然安全：续期写入的总是当前时间，
     /// 大于任何已扫描过的视界，所以被续期的行只会在之后的扫描里重新进入范围；
-    /// 已入队的行被续期后，领取时按最新的 `last_used_at` 复查并移出队列。
+    /// 已入队的行被续期后，领取时按最新的 `last_detected_at` 复查并移出队列。
     async fn sweep(&self, now: i64, retention: Duration) -> Result<u64, RedactionError> {
-        let threshold = now
-            .saturating_sub(millis(retention))
-            .saturating_sub(millis(RENEWAL_GRANULARITY));
+        let threshold = expiry_cutoff(now, retention);
         macro_rules! sweep {
             ($store:expr, $pool:expr, $skip_locked:literal) => {{
                 let store = $store;
@@ -501,8 +563,8 @@ impl MappingStore for SqlMappingStore {
                         .map_err(|error| store.storage(error))?;
                     for (name, column, horizon, filter) in [
                         (WATERMARK_PENDING, "pending_until", now, ""),
-                        // 未发布的行 `last_used_at` 只是创建时刻，由 `pending_until` 负责。
-                        (WATERMARK_LAST_USED, "last_used_at", threshold, " AND m.published_at IS NOT NULL"),
+                        // 未发布的行 `last_detected_at` 只是创建时刻，由 `pending_until` 负责。
+                        (WATERMARK_LAST_DETECTED, "last_detected_at", threshold, " AND m.published_at IS NOT NULL"),
                     ] {
                         let watermark: i64 = sqlx::query_scalar(
                             "SELECT position FROM history_retention_watermarks WHERE name = $1",
@@ -549,7 +611,7 @@ impl MappingStore for SqlMappingStore {
                         let deleted = sqlx::query(
                             "DELETE FROM reversible_redaction_mappings WHERE reference = $1 \
                              AND ((published_at IS NULL AND pending_until <= $2) \
-                                  OR (published_at IS NOT NULL AND last_used_at <= $3)) \
+                                  OR (published_at IS NOT NULL AND last_detected_at <= $3)) \
                              AND NOT EXISTS(SELECT 1 FROM turn_node_redaction_mappings r WHERE r.reference=reversible_redaction_mappings.reference)",
                         )
                         .bind(reference).bind(now).bind(threshold)
@@ -575,4 +637,4 @@ impl MappingStore for SqlMappingStore {
 
 const SWEEP_BATCH: i64 = 512;
 const WATERMARK_PENDING: &str = "reversible_redaction_mappings.pending_until";
-const WATERMARK_LAST_USED: &str = "reversible_redaction_mappings.last_used_at";
+const WATERMARK_LAST_DETECTED: &str = "reversible_redaction_mappings.last_detected_at";

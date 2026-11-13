@@ -489,6 +489,7 @@ impl Gateway {
         });
         let redaction = crate::reversible_redaction::ReversibleRedaction::new(
             Arc::clone(&storage),
+            retention.clone(),
             mappings,
             custom_rules,
             runtime_cache.clone(),

@@ -3,6 +3,7 @@ mod cache;
 
 use std::sync::Arc;
 
+use crate::history_retention::HistoryRetention;
 use crate::interaction_observation::{RunObserver, RunPublicationGuard};
 use crate::storage::DynStorage;
 use stravia_credential_protection::policy::{
@@ -17,11 +18,18 @@ use stravia_runtime_contract::model_turn::CanonicalEventStream;
 use stravia_runtime_contract::protocol::ir::AiRequest;
 use stravia_runtime_contract::redaction::{RedactionError, RedactionTrace};
 
-struct SettingsHost(DynStorage);
+struct SettingsHost {
+    storage: DynStorage,
+    retention: HistoryRetention,
+}
 
 /// 读取总开关与被禁用的内置规则。任一设置无法解释时失败关闭：
 /// 不能在读不懂配置时猜测「全部启用」或「全部关闭」。
-pub(crate) async fn read_policy(storage: &DynStorage) -> Result<RedactionPolicy, RedactionError> {
+/// 映射保留期取内存中的统一历史保留天数，与回收扫描读同一个句柄。
+pub(crate) async fn read_policy(
+    storage: &DynStorage,
+    retention: &HistoryRetention,
+) -> Result<RedactionPolicy, RedactionError> {
     let settings = storage.settings();
     let enabled = match settings
         .get(stravia_credential_protection::SETTING_KEY)
@@ -39,13 +47,14 @@ pub(crate) async fn read_policy(storage: &DynStorage) -> Result<RedactionPolicy,
     Ok(RedactionPolicy {
         enabled,
         disabled_rules: Arc::new(policy::parse_disabled_rules(disabled.as_deref())?),
+        retention: retention.window(),
     })
 }
 
 #[async_trait::async_trait]
 impl RedactionHost for SettingsHost {
     async fn policy(&self) -> Result<RedactionPolicy, RedactionError> {
-        read_policy(&self.0).await
+        read_policy(&self.storage, &self.retention).await
     }
 }
 
@@ -111,6 +120,7 @@ pub(crate) struct ReversibleRedaction {
 impl ReversibleRedaction {
     pub(crate) fn new(
         storage: DynStorage,
+        retention: HistoryRetention,
         mappings: Arc<dyn MappingStore>,
         custom_rules: Arc<SqlCustomRuleStore>,
         runtime_cache: crate::runtime_cache::RuntimeCache,
@@ -119,7 +129,7 @@ impl ReversibleRedaction {
             Arc::new(cache::CachedMappingStore::new(mappings, runtime_cache));
         Self {
             capability: stravia_credential_protection::ReversibleRedaction::new(
-                Arc::new(SettingsHost(storage)),
+                Arc::new(SettingsHost { storage, retention }),
                 mappings.clone(),
                 custom_rules.clone(),
             ),
@@ -189,5 +199,7 @@ mod cache_tests;
 mod custom_rule_tests;
 #[cfg(test)]
 mod disabled_rule_tests;
+#[cfg(test)]
+mod expiry_tests;
 #[cfg(test)]
 mod mapping_tests;

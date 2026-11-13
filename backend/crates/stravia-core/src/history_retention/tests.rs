@@ -399,14 +399,14 @@ impl Fixture {
             .publish(&self.owner, &[reference.to_owned()])
             .await
             .expect("publish mapping");
-        // 映射的下限是最近一次使用 + N + 续期粒度（见 `MappingStore::sweep`）。把使用时刻前移
-        // 一个粒度，让映射与 Marker 在同一刻到期，这里的用例才能继续只验证依赖回收的先后；
-        // 粒度本身的保留语义由 `reversible_redaction::mapping_tests` 覆盖。
+        // 把检出时刻前移一个续期粒度，消除 G 宽限，让这些用例分别验证映射的检出起点和
+        // Marker 的发布起点；晚发布不能改变映射的检出起点。粒度本身的保留语义由
+        // `reversible_redaction::mapping_tests` 覆盖。
         let shift = stravia_credential_protection::store::RENEWAL_GRANULARITY.as_millis() as i64;
         match &self.db {
             Db::Sqlite(pool) => {
                 let mut connection = pool.begin_write().await.expect("begin write transaction");
-                sqlx::query("UPDATE reversible_redaction_mappings SET last_used_at = last_used_at - ? WHERE reference = ?")
+                sqlx::query("UPDATE reversible_redaction_mappings SET last_detected_at = last_detected_at - ? WHERE reference = ?")
                     .bind(shift)
                     .bind(reference)
                     .execute(&mut *connection)
@@ -415,7 +415,7 @@ impl Fixture {
                 connection.commit().await
             }
             Db::Postgres(pool) => {
-                sqlx::query("UPDATE reversible_redaction_mappings SET last_used_at = last_used_at - $1 WHERE reference = $2")
+                sqlx::query("UPDATE reversible_redaction_mappings SET last_detected_at = last_detected_at - $1 WHERE reference = $2")
                     .bind(shift)
                     .bind(reference)
                     .execute(pool)
@@ -1359,7 +1359,7 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
         )
         .await;
     let t_early = fx.tick().await;
-    // 晚依赖：提交时未发布，节点之后才发布 / 确认，下限比节点期限更晚。
+    // 晚依赖：提交时未发布，节点之后才发布 / 确认；仅 Marker 的下限因此晚于节点。
     let late_marker = fx.thinking_marker("late dependency body", false).await;
     let late_mapping = fx.mapping(false).await;
     let late_compaction = fx.native_compaction(None, &[], false).await;
@@ -1409,13 +1409,13 @@ async fn dependencies_are_reclaimed_after_their_floor_window(fx: Fixture) {
     assert!(fx.mapping_readable(&late_mapping).await);
     assert!(fx.compaction_readable(&late_compaction.state).await);
 
-    // 晚节点到期：依赖已不被引用，但下限（发布时刻 + N）未到，仍可读。
+    // 晚节点到期：Marker 的发布下限未到，仍可读；映射只有检出续期，不因晚发布延寿。
     fx.sweep(t_late + n).await;
     assert!(!fx.turn_readable(&late_node).await);
     assert!(fx.marker_readable(&late_marker).await);
-    assert!(fx.mapping_readable(&late_mapping).await);
+    assert!(!fx.mapping_readable(&late_mapping).await);
     // 原生压缩登记在提交解析它时即被确认（回传解析即确认），下限随提交起算，
-    // 与节点同一轮删除；它不像 Marker / 映射那样等到之后的发布。
+    // 与节点同一轮删除；之后显式确认不会再次推进它的下限。
     assert!(!fx.compaction_readable(&late_compaction.state).await);
 
     // 下限窗口过去后的那一轮删除。
@@ -1430,8 +1430,8 @@ both_backends!(
     dependencies_are_reclaimed_after_their_floor_window
 );
 
-/// 下限窗口：未发布依赖按 `pending_until` 回收，与 N 无关；已发布但无人引用的依赖
-/// 在发布后 N 天内被新提交引用即保留，之后随引用方删除。
+/// 下限窗口：未发布依赖按 `pending_until` 回收，与 N 无关；已发布且被节点引用的依赖保留。
+/// 释放引用后，Marker 按发布起点、映射按检出起点判断窗口，超过窗口才回收。
 async fn floor_windows_are_independent_of_the_retention_days(fx: Fixture) {
     let n = fx.window();
     assert_eq!(n, 7 * DAY);
@@ -2408,6 +2408,7 @@ async fn publication_does_not_wait_for_node_reclaim_blocked_on_a_commit(fx: Fixt
         })
         .await
         .expect("publication must not queue behind a node reclaim that waits for a commit");
+        assert!(fx.mapping_readable(&mapping).await);
         commit.commit().await.expect("finish commit");
     };
     let (swept, ()) = tokio::time::timeout(Duration::from_secs(30), async {
@@ -2417,7 +2418,8 @@ async fn publication_does_not_wait_for_node_reclaim_blocked_on_a_commit(fx: Fixt
     .expect("node reclaim resumes once the commit ends");
     swept.expect("sweep_history");
     assert!(fx.marker_readable(&marker).await);
-    assert!(fx.mapping_readable(&mapping).await);
+    // 发布已完成但没有规则重新检出；回收恢复后，映射仍按原检出时间到期。
+    assert!(!fx.mapping_readable(&mapping).await);
     assert!(fx.compaction_readable(&pending.state).await);
 }
 #[tokio::test(flavor = "multi_thread")]

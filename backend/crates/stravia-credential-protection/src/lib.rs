@@ -179,10 +179,7 @@ impl RuleScopeSource for ReversibleRedaction {
     async fn rule_scope(&self) -> Result<RuleScope, RedactionError> {
         let policy = self.host.policy().await?;
         let custom = self.custom_rules.compiled().await?;
-        Ok(RuleScope::new(
-            policy.disabled_rules,
-            custom.ids().map(str::to_owned),
-        ))
+        Ok(policy.rule_scope(custom.ids().map(str::to_owned)))
     }
 }
 
@@ -244,10 +241,7 @@ impl ReversibleRedaction {
         if enabled {
             let (texts, origins) = text::request_text_origins(request, true)?;
             let custom = self.custom_rules.compiled().await?;
-            let scope = RuleScope::new(
-                policy.disabled_rules.clone(),
-                custom.ids().map(str::to_owned),
-            );
+            let scope = policy.rule_scope(custom.ids().map(str::to_owned));
             let rules = detection::Rules {
                 custom,
                 disabled: policy.disabled_rules,
@@ -286,7 +280,8 @@ impl ReversibleRedaction {
                 let store = self.mappings.clone();
                 let principal = principal.clone();
                 // 提交与发现投递属于同一任务；调用方取消只放弃等待，不能中断提交确认。
-                // 任务只完成待发布预留，沿用原保留期；不执行 Provider 调用或发布。
+                // 任务完成映射登记：新秘密建立待发布映射，已有映射推进检出时间（唯一的续期路径）；
+                // 不执行 Provider 调用或发布。
                 let discovered = tokio::spawn(async move {
                     let discovered = store.intern(&principal, &secrets).await?;
                     // 创建归属由映射事务裁决；后续替换失败也不能抹去已提交的发现。
@@ -522,6 +517,7 @@ mod tests {
                     .map(|rule| (*rule).to_owned())
                     .collect::<Vec<_>>(),
             ),
+            last_detected_at: 0,
         }
     }
 

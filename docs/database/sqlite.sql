@@ -651,7 +651,7 @@ CREATE TABLE "reversible_redaction_mappings" (
     published_at INTEGER,
     pending_until INTEGER,
     created_at INTEGER NOT NULL,
-    last_used_at INTEGER NOT NULL,
+    last_detected_at INTEGER NOT NULL,
     rule_ids TEXT NOT NULL DEFAULT '[]'
         CHECK (json_valid(rule_ids) AND json_type(rule_ids) = 'array'),
     CHECK (published_at IS NULL OR pending_until IS NULL)
@@ -1133,8 +1133,8 @@ CREATE INDEX rejected_requests_client_error_window_idx
 
 CREATE INDEX rejected_requests_window_idx ON rejected_request_observations(occurred_at DESC, id);
 
-CREATE INDEX reversible_redaction_mappings_last_used_at_idx
-    ON reversible_redaction_mappings(last_used_at);
+CREATE INDEX reversible_redaction_mappings_last_detected_at_idx
+    ON reversible_redaction_mappings(last_detected_at);
 
 CREATE INDEX reversible_redaction_mappings_pending_until_idx
     ON reversible_redaction_mappings(pending_until);
