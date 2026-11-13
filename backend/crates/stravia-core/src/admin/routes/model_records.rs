@@ -416,12 +416,7 @@ impl RouteModule<'_> {
             Ok::<_, anyhow::Error>(
                 stravia_protocol_codec::registry::ProtocolRegistry::global()
                     .resolve_alias(prepared.protocol())
-                    .is_some_and(|endpoint| {
-                        matches!(
-                            endpoint.protocol,
-                            Protocol::OpenResponses | Protocol::AnthropicMessages
-                        )
-                    }),
+                    .is_some_and(|endpoint| endpoint.protocol == Protocol::OpenResponses),
             )
         }
         .await;

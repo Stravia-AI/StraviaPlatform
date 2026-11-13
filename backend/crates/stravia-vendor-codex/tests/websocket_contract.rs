@@ -451,7 +451,7 @@ async fn http_case(case: &'static str) {
             if case == "compact-explicit" {
                 assert_eq!(
                     base_instructions["content"][0]["text"],
-                    "session instructions\n\nCompaction instructions:\nexplicit summary rules"
+                    "explicit summary rules"
                 );
             } else if case == "compact" {
                 assert_eq!(
@@ -640,11 +640,10 @@ async fn http_case(case: &'static str) {
         inference.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
     }
     if case == "compact-explicit" {
-        inference.instructions = Some("session instructions".into());
+        inference.instructions = Some("explicit summary rules".into());
         inference.parameters.compaction =
             Some(stravia_runtime_contract::protocol::ir::CompactionControl {
                 threshold_tokens: Some(4096),
-                instructions: Some("explicit summary rules".into()),
             });
     }
     if case == "logprobs" {

@@ -817,6 +817,13 @@ mod tests {
 
     #[test]
     fn generic_profiles_declare_native_compaction_only_when_open_responses_is_selectable() {
+        let anthropic = crate::provider_descriptor("anthropic").unwrap();
+        assert!(!anthropic.capabilities.contains(&Capability::Compact));
+        assert!(
+            !anthropic.channels[0]
+                .capabilities
+                .contains(&Capability::Compact)
+        );
         let descriptor = crate::provider_descriptor("custom").unwrap();
         assert!(descriptor.capabilities.contains(&Capability::Compact));
         assert!(

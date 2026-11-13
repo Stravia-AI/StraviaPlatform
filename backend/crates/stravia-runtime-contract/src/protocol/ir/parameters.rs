@@ -87,9 +87,6 @@ pub struct AudioOutput {
 pub struct CompactionControl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold_tokens: Option<u32>,
-    /// 摘要专用指令，与会话级 `AiRequest.instructions` 分离。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -583,10 +580,7 @@ impl RequestParameters {
         if let Some(presence) = fields.remove("response_presence") {
             self.import_presence(&presence);
         }
-        if let Some(context) = fields
-            .remove("context_management")
-            .or_else(|| fields.remove("__anthropic_context_management"))
-        {
+        if let Some(context) = fields.remove("context_management") {
             self.import_compaction(&context);
         }
         if let Some(cache) = fields.remove("anthropic_cache_control") {
@@ -609,27 +603,22 @@ impl RequestParameters {
         }
     }
     fn import_compaction(&mut self, value: &Value) {
-        let entries = value
-            .as_array()
-            .or_else(|| value.get("edits").and_then(Value::as_array));
-        if let Some(entries) = entries {
+        if let Some(entries) = value.as_array() {
             for entry in entries {
                 if entry
                     .get("type")
                     .and_then(Value::as_str)
-                    .is_some_and(|s| s == "compaction" || s.starts_with("compact_"))
+                    .is_some_and(|s| s == "compaction")
                 {
                     let threshold = entry
                         .get("compact_threshold")
                         .or_else(|| entry.get("threshold_tokens"))
-                        .or_else(|| entry.pointer("/trigger/value"))
                         .and_then(Value::as_u64)
                         .and_then(|n| u32::try_from(n).ok());
                     prefer(
                         &mut self.compaction,
                         Some(CompactionControl {
                             threshold_tokens: threshold,
-                            instructions: None,
                         }),
                     );
                 }

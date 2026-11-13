@@ -226,6 +226,18 @@ fn stream_formatter_preserves_raw_tool_arguments_and_same_batch_completion() {
 // ── AnthropicResponseParser ──
 
 #[test]
+fn upstream_compaction_is_rejected_in_unary_and_stream() {
+    let body = serde_json::json!({"content": [{"type": "compaction", "content": "summary", "signature": "sig"}], "stop_reason": "compaction"});
+    assert!(AnthropicResponseParser.parse_response(body).is_err());
+    let mut parser = AnthropicStreamParser::new();
+    let event = make_sse_block(
+        "content_block_start",
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"compaction","signature":"sig"}}"#,
+    );
+    assert!(parser.parse_chunk(&event).is_err());
+}
+
+#[test]
 fn test_parse_response_text_only() {
     let resp = serde_json::json!({
         "id": "msg_1",

@@ -251,37 +251,27 @@ fn native_search_is_typed_and_function_vendor_controls_are_dropped() {
 }
 
 #[test]
-fn unified_reasoning_cache_container_and_compaction_roundtrip() {
+fn unified_reasoning_cache_and_container_roundtrip() {
     for (display, summary) in [
         ("summarized", ReasoningSummary::Auto),
         ("omitted", ReasoningSummary::None),
     ] {
-        let request = AnthropicDecoder.decode_request(request_with(serde_json::json!({
-            "thinking": {"type": "adaptive", "display": display},
-            "cache_control": {"type": "ephemeral", "ttl": "5m"},
-            "tools": [{"type": "code_execution_20250825", "name": "code_execution"}],
-            "container": {"id": "container_1", "skills": [{"private": true}]},
-            "context_management": {"edits": [
-                {"type": "clear_tool_uses_20250919", "trigger": {"type": "input_tokens", "value": 100}},
-                {"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 120000}, "instructions": "private"}
-            ]},
-            "service_tier": "standard_only",
-            "metadata": {"user_id": "user_1", "private": "ignored"}
-        }))).unwrap();
+        let request = AnthropicDecoder
+            .decode_request(request_with(serde_json::json!({
+                "thinking": {"type": "adaptive", "display": display},
+                "cache_control": {"type": "ephemeral", "ttl": "5m"},
+                "tools": [{"type": "code_execution_20250825", "name": "code_execution"}],
+                "container": {"id": "container_1", "skills": [{"private": true}]},
+                "service_tier": "standard_only",
+                "metadata": {"user_id": "user_1", "private": "ignored"}
+            })))
+            .unwrap();
         assert_eq!(request.reasoning.summary, Some(summary));
         assert_eq!(
             request.parameters.cache.retention,
             Some(CacheRetention::Default)
         );
-        assert_eq!(
-            request
-                .parameters
-                .compaction
-                .as_ref()
-                .unwrap()
-                .threshold_tokens,
-            Some(120000)
-        );
+        assert!(request.parameters.compaction.is_none());
         assert_eq!(request.parameters.service_tier, Some(ServiceTier::Default));
         let NativeTool::CodeExecution(tool) = &request.parameters.native_tools[0] else {
             panic!("expected code execution");
@@ -294,12 +284,6 @@ fn unified_reasoning_cache_container_and_compaction_roundtrip() {
         assert_eq!(body["container"], "container_1");
         assert_eq!(body["tools"][0]["type"], "code_execution_20260120");
         assert!(body["tools"][0].get("container").is_none());
-        assert_eq!(
-            body["context_management"],
-            serde_json::json!({"edits": [{
-                "type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 120000}
-            }]})
-        );
         assert_eq!(body["metadata"], serde_json::json!({"user_id": "user_1"}));
     }
 }
@@ -424,96 +408,20 @@ fn nested_null_controls_reset_without_emitting_nulls() {
 }
 
 #[test]
-fn compaction_control_enters_ir_and_null_does_not_request_compaction() {
-    let request = AnthropicDecoder
-        .decode_request(request_with(serde_json::json!({
-            "compaction": {"type": "summarize", "instructions": "Be brief"}
-        })))
-        .unwrap();
-    assert_eq!(
-        serde_json::to_value(&request.parameters.compaction).unwrap(),
-        serde_json::json!({"instructions": "Be brief"})
-    );
-    assert!(request.items.last().unwrap().is_compaction_trigger());
-    let request = AnthropicDecoder
-        .decode_request(request_with(serde_json::json!({"compaction": null})))
-        .unwrap();
-    assert!(request.parameters.compaction.is_none());
-    assert!(
-        !request
-            .items
-            .iter()
-            .any(|item| item.is_compaction_trigger())
-    );
+fn anthropic_compaction_controls_are_rejected() {
+    for extra in [
+        serde_json::json!({"compaction": {"type": "summarize"}}),
+        serde_json::json!({"context_management": {"edits": [{"type": "compact_20260112"}]}}),
+    ] {
+        assert!(
+            AnthropicDecoder
+                .decode_request(request_with(extra))
+                .is_err()
+        );
+    }
 }
 
 #[test]
-fn native_compaction_block_decodes_to_the_same_state_the_upstream_registered() {
-    use stravia_runtime_contract::protocol::ir::canonical::native_compaction_item;
-    let upstream = serde_json::json!({
-        "type": "message",
-        "content": [{"type": "compaction", "content": "Summary", "signature": "sig-1"}],
-        "stop_reason": "compaction",
-        "usage": {"input_tokens": 0, "output_tokens": 0}
-    });
-    let registered =
-        crate::codec::compaction::parse_anthropic_compaction(upstream.clone()).unwrap();
-    let request = AnthropicDecoder
-        .decode_request(request_with(serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": upstream["content"].clone()},
-                {"role": "user", "content": "go on"}
-            ]
-        })))
-        .unwrap();
-    let replayed = request
-        .items
-        .iter()
-        .find(|item| item.is_compaction())
-        .unwrap();
-    assert_eq!(
-        native_compaction_item(replayed),
-        native_compaction_item(&registered.items[0])
-    );
-}
-
-#[test]
-fn compaction_block_without_a_signature_is_rejected() {
-    let error = AnthropicDecoder
-        .decode_request(request_with(serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [{"type": "compaction", "content": "Summary"}]},
-                {"role": "user", "content": "go on"}
-            ]
-        })))
-        .unwrap_err();
-    assert!(error.to_string().contains("signature"), "{error}");
-}
-
-#[test]
-fn responses_window_sealed_in_a_block_expands_to_its_items() {
-    let output = vec![
-        serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "earlier question"}]}),
-        serde_json::json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "enc"}),
-    ];
-    let signature = crate::codec::compaction::seal_responses(&output);
-    let request = AnthropicDecoder
-        .decode_request(request_with(serde_json::json!({
-            "messages": [
-                {"role": "assistant", "content": [{
-                    "type": "compaction",
-                    "content": crate::codec::compaction::ENVELOPE_PLACEHOLDER_CONTENT,
-                    "signature": signature
-                }]},
-                {"role": "user", "content": "go on"}
-            ]
-        })))
-        .unwrap();
-    assert_eq!(request.items.len(), 3);
-    assert!(request.items[1].is_compaction());
-    let replayed = stravia_runtime_contract::protocol::ir::canonical::native_compaction_item(
-        &request.items[1],
-    )
-    .unwrap();
-    assert_eq!(replayed["encrypted_content"], "enc");
+fn native_compaction_block_is_rejected() {
+    assert!(AnthropicDecoder.decode_request(request_with(serde_json::json!({"messages": [{"role": "assistant", "content": [{"type": "compaction", "content": "summary", "signature": "sig"}]}]}))).is_err());
 }

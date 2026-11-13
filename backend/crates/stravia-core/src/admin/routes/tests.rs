@@ -74,7 +74,7 @@ async fn route_fixture() -> anyhow::Result<(tempfile::TempDir, Gateway, Provider
 async fn remote_compaction_requires_a_native_protocol() -> anyhow::Result<()> {
     for (protocol, expected) in [
         ("open-responses", true),
-        ("anthropic-messages", true),
+        ("anthropic-messages", false),
         ("openai-compatible", false),
     ] {
         let (_dir, gateway, provider) = route_fixture_with_protocol(protocol).await?;
@@ -101,7 +101,7 @@ async fn remote_compaction_requires_every_configured_target() -> anyhow::Result<
     let (_dir, gateway, provider) = route_fixture_with_protocol("open-responses").await?;
     let admin = gateway.admin();
     let mut targets = vec![json!({"provider_id":provider.id,"model":"upstream-model"})];
-    for (protocol, native) in [("anthropic-messages", true), ("openai-compatible", false)] {
+    for (protocol, native) in [("open-responses", true), ("anthropic-messages", false)] {
         let other = admin
             .create_provider(CreateProvider {
                 name: Some(protocol.into()),

@@ -179,21 +179,9 @@ fn native_compaction_item(item: &stravia_runtime_contract::protocol::ir::AiItem)
         return None;
     };
     let (kind, encrypted_content) = match blocks.as_slice() {
-        [
-            ContentBlock::Compaction {
-                encrypted_content,
-                summary,
-            },
-        ] => (
-            "compaction",
-            Some(if summary.is_some() {
-                crate::codec::compaction::seal_anthropic(
-                    &crate::codec::compaction::anthropic_compaction_block(item)?,
-                )
-            } else {
-                encrypted_content.clone()
-            }),
-        ),
+        [ContentBlock::Compaction { encrypted_content }] => {
+            ("compaction", Some(encrypted_content.clone()))
+        }
         [ContentBlock::CompactionTrigger {}] => ("compaction_trigger", None),
         _ => return None,
     };

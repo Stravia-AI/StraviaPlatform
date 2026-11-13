@@ -12,6 +12,7 @@
 
 ### Removed
 
+- Anthropic remote compaction is removed end to end, including Claude Code and custom Anthropic connections, signed compaction blocks, threshold controls and cross-protocol envelopes. Explicit requests and old state replay are rejected rather than summarized locally. Responses/Codex V2 compaction and ordinary Claude inference remain supported. Rebuild and re-import the Claude Code plugin, then re-apply client configuration to remove stale remote-compaction flags from affected models.
 - Embeddings support is removed end to end. `POST /v1/embeddings` now returns the same 404 `not_found` protocol error as any other unknown path, and the `openai-compatible/embeddings/v1` protocol identity (with its `openai/embeddings/v1`, `openai-embeddings` and `embeddings` aliases) no longer resolves. A provider that still stores one of these identifiers as its protocol must be switched to `openai-compatible`.
 
 ### Changed

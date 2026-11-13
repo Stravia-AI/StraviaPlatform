@@ -982,28 +982,21 @@ mod tests {
         use stravia_runtime_contract::protocol::ir::CompactionControl;
 
         let mut explicit = AiRequest::new("gpt-6-astra", Vec::new());
-        explicit.instructions = Some("session rules".into());
+        explicit.instructions = Some("summary rules".into());
         explicit.parameters.compaction = Some(CompactionControl {
             threshold_tokens: Some(4096),
-            instructions: Some("summary rules".into()),
         });
         stravia_protocol_codec::codec::compaction::prepare_responses_compaction_request(
             &mut explicit,
         );
-        assert_eq!(
-            explicit.instructions.as_deref(),
-            Some("session rules\n\nCompaction instructions:\nsummary rules")
-        );
+        assert_eq!(explicit.instructions.as_deref(), Some("summary rules"));
         assert!(explicit.parameters.compaction.is_none());
         assert!(explicit.items.last().unwrap().is_compaction_trigger());
         let encoded =
             common::encode_inference_request(&OPEN_RESPONSES_2026_04_24.to_string(), explicit)
                 .unwrap()
                 .body;
-        assert_eq!(
-            encoded["instructions"],
-            json!("session rules\n\nCompaction instructions:\nsummary rules")
-        );
+        assert_eq!(encoded["instructions"], json!("summary rules"));
         assert_eq!(
             encoded["input"].as_array().unwrap().last().unwrap(),
             &json!({"type": "compaction_trigger"})

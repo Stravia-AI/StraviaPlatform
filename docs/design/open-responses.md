@@ -515,11 +515,11 @@ Open Responses `2026-04-24` 定义 canonical baseline；Ingress 可以接受其 
 
 独立压缩使用 `POST /v1/responses`、`stream: true`，并在 `input` 末尾放置恰好一个 `compaction_trigger`。入口在既有认证与协议解码后，按 typed IR 分类为独立压缩，沿正常 Route 选择当前 Target，不创建 Generation、不运行 Agent 循环。旧 `POST /v1/responses/compact` 路由已删除并返回 404，不保留 V1 回退。平台不决定压缩时机、触发阈值或保留窗口。
 
-Responses 出口使用普通 `/responses` 流式请求，固定 `stream=true`、`store=false`，保留正常编码支持的 tools、reasoning 与其他控制；Anthropic 出口转换为原生 `compaction` 控制。客户端未提供指令时，独立压缩使用结构化交接摘要提示词，明确不继续任务、不调用工具；会话指令与摘要任务指令分别进入 IR，显式指令不被默认值覆盖。转换及原生用量规则见 [ADR-0089](../adr/0089-carry-native-compaction-across-anthropic-and-responses.md)。
+Responses 出口使用普通 `/responses` 流式请求，固定 `stream=true`、`store=false`，保留正常编码支持的 tools、reasoning 与其他控制。客户端未提供 `instructions` 时，独立压缩使用结构化交接摘要提示词，明确不继续任务、不调用工具；显式指令不被默认值覆盖。Anthropic 与 Claude Code 远程压缩、签名块回放及跨协议信封已完全删除，不提供文本摘要替代，见 [ADR-0098](../adr/0098-remove-anthropic-remote-compaction.md)。
 
 独立压缩在 Target 协议无法承载时返回 `compaction_unsupported`，不改成普通生成或本地摘要。协议可承载但能力未知时仍由上游裁决，不为寻找能力跳过当前 Target，不因失败重试或切换 Target。Responses 客户端收到普通 Response SSE、唯一原生 compaction item 和成功终态，自行构造保留窗口；服务端不再合成 `response.compaction` 资源。后续回放继续遵守 Principal 隔离、状态来源与 Target 绑定约束。WebSocket 与 HTTP 共用同一条独立压缩路径：`response.create` 的 `input` 末尾放置恰好一个 `compaction_trigger` 即触发压缩，事件帧与 HTTP SSE 相同，终态 `response.completed` 帧写入连接后才确认发布；触发器位置或数量不合法时返回 `invalid_request` 且不派发上游，压缩后同一连接可继续普通请求。
 
-普通 Responses 推理中的 inline `context_management` 遵循 [ADR-0006](../adr/0006-own-protocol-conversion-behind-canonical-stages.md) 的兼容性优先策略：目标协议无法表达时省略，保留可表达的业务输入并正常推理，不伪造原生状态，也不保证压缩意图执行。这不放宽已登记状态的来源、Principal、有效期或 Target 绑定校验；显式 `compaction_trigger` 属于独立压缩，不适用该降级。
+向 Anthropic 投影压缩控制或不透明压缩状态返回错误，不静默执行普通推理。其他协议的普通 inline `context_management` 仍遵循 [ADR-0006](../adr/0006-own-protocol-conversion-behind-canonical-stages.md) 的兼容性优先策略：目标协议无法表达时省略，保留可表达的业务输入并正常推理，不伪造原生状态，也不保证压缩意图执行。这不放宽已登记状态的来源、Principal、有效期或 Target 绑定校验；显式 `compaction_trigger` 属于独立压缩，不适用该降级。
 
 流式压缩以 `response.output_item.done` 的完整原生条目作为已完成状态。Codex V2 的终态 `response.completed.output` 可以不重复该条目，Stravia 保留此前完成的状态用于交付和回放；若终态在同一 output index 显式提供条目，则必须与已完成条目一致。未完成的 item/content part 仍阻止成功终态，不完整或被改写的密文不能借此通过校验。
 

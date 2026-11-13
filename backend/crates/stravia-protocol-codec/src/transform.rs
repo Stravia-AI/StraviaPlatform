@@ -148,6 +148,7 @@ impl ProtocolTransform {
         mut canonical: AiRequest,
     ) -> Result<EncodedRequest, TransformError> {
         let endpoint = adapter.id();
+        reject_anthropic_request(endpoint, &canonical)?;
         Self::prune_request_for(endpoint, adapter.capabilities(), &mut canonical);
         let path = adapter.request_path(&canonical.model, canonical.stream.enabled);
         let (body, headers) =
@@ -266,6 +267,7 @@ impl ProtocolPair {
         self,
         mut canonical: AiRequest,
     ) -> Result<EncodedRequest, TransformError> {
+        reject_anthropic_request(self.egress, &canonical)?;
         let target = adapter(self.egress)?;
         prune_request(self, &mut canonical, target.capabilities(), None);
         let path = target.request_path(&canonical.model, canonical.stream.enabled);
@@ -297,6 +299,15 @@ impl ProtocolPair {
     }
 
     pub fn encode_response(self, canonical: &AiResponse) -> Result<Value, TransformError> {
+        if self.ingress.protocol == Protocol::AnthropicMessages
+            && (canonical.stop_reason.as_deref() == Some("compaction")
+                || canonical.items.iter().any(has_compaction))
+        {
+            return Err(anthropic_compaction_error(
+                self.ingress,
+                TransformDirection::ClientResponse,
+            ));
+        }
         let target = adapter(self.ingress)?;
         let response = prune_response(self, canonical);
         Ok(target.encode_response(response.as_ref()))
@@ -425,6 +436,9 @@ impl StreamEncodeStage {
                 self.pair.ingress,
                 TransformDirection::ClientResponse,
             ));
+        }
+        if self.pair.ingress.protocol == Protocol::AnthropicMessages && deltas.iter().any(|delta| matches!(delta, AiStreamDelta::ItemDone { item, .. } if has_compaction(item)) || matches!(delta, AiStreamDelta::Done { stop_reason } if stop_reason == "compaction")) {
+            return Err(anthropic_compaction_error(self.pair.ingress, TransformDirection::ClientResponse));
         }
         if self.pair.ingress == self.pair.egress {
             return Ok(self.encoder.format_deltas(deltas));
@@ -721,6 +735,37 @@ fn stream_closed(endpoint: ProtocolEndpoint, direction: TransformDirection) -> T
     }
 }
 
+fn has_compaction(item: &stravia_runtime_contract::protocol::ir::AiItem) -> bool {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
+    matches!(&item.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Compaction { .. } | ContentBlock::CompactionTrigger {})))
+}
+
+fn anthropic_compaction_error(
+    endpoint: ProtocolEndpoint,
+    direction: TransformDirection,
+) -> TransformError {
+    TransformError::Wire {
+        endpoint,
+        direction: direction.as_str(),
+        source: anyhow::anyhow!("Anthropic compaction is unsupported"),
+    }
+}
+
+fn reject_anthropic_request(
+    endpoint: ProtocolEndpoint,
+    request: &AiRequest,
+) -> Result<(), TransformError> {
+    if endpoint.protocol == Protocol::AnthropicMessages
+        && (request.parameters.compaction.is_some() || request.items.iter().any(has_compaction))
+    {
+        return Err(anthropic_compaction_error(
+            endpoint,
+            TransformDirection::ClientRequest,
+        ));
+    }
+    Ok(())
+}
+
 fn prune_request(
     pair: ProtocolPair,
     request: &mut AiRequest,
@@ -785,11 +830,6 @@ fn prune_request(
     {
         request.tool_choice = None;
     }
-    if pair.egress.protocol != Protocol::AnthropicMessages {
-        // Only Anthropic can replay an Anthropic compaction block; elsewhere its readable
-        // summary is the only part of the state that still means anything.
-        downgrade_compaction_summaries(request);
-    }
     if pair.ingress != pair.egress {
         if !request.parameters.native_tools.is_empty()
             && !request.parameters.native_tools.iter().any(|tool| {
@@ -815,11 +855,10 @@ fn prune_request(
             let original_index = index;
             index += 1;
             let keep = item.unknown_ref().is_none()
-                && (pair.egress.protocol == Protocol::OpenResponses
-                    || (!item.is_compaction_trigger()
-                        && (!item.is_compaction()
-                            || pair.egress.protocol == Protocol::AnthropicMessages
-                                && compaction_summary(item).is_some())));
+                && (matches!(
+                    pair.egress.protocol,
+                    Protocol::OpenResponses | Protocol::AnthropicMessages
+                ) || (!item.is_compaction_trigger() && !item.is_compaction()));
             if !keep && let Some(removed) = removed.as_deref_mut() {
                 removed.push(original_index);
             }
@@ -857,68 +896,6 @@ fn prune_request(
             pair.ingress == pair.egress,
         );
     }
-}
-
-/// The readable summary of an Anthropic-origin compaction state, if `item` is one.
-fn compaction_summary(item: &stravia_runtime_contract::protocol::ir::AiItem) -> Option<&str> {
-    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
-    match &item.content {
-        MessageContent::Blocks(blocks) => match blocks.as_slice() {
-            [
-                ContentBlock::Compaction {
-                    summary: Some(summary),
-                    ..
-                },
-            ] => Some(summary),
-            _ => None,
-        },
-        MessageContent::Text(_) => None,
-    }
-}
-
-/// Replace every Anthropic-origin compaction state with its summary as ordinary user
-/// context. The signature cannot be verified outside the Target that issued it, but the
-/// summary is the upstream-generated record of the history it replaced, so keeping it
-/// preserves context without inventing anything. Returns how many states were replaced.
-fn downgrade_compaction_summaries(request: &mut AiRequest) -> usize {
-    use stravia_runtime_contract::protocol::ir::{AiItem, MessageContent, Role};
-    let mut replaced = 0;
-    for item in &mut request.items {
-        let Some(summary) = compaction_summary(item) else {
-            continue;
-        };
-        *item = AiItem {
-            role: Role::User,
-            content: MessageContent::Text(
-                format!(
-                    "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{summary}\n</summary>"
-                )
-                .into(),
-            ),
-            tool_calls: None,
-            tool_call_id: None,
-            meta: None,
-        };
-        replaced += 1;
-    }
-    replaced
-}
-
-/// Target-mismatch fallback: if every compaction state in `request` carries a readable
-/// summary (Anthropic-origin), turn them all into plain summary context and return `true`.
-/// Otherwise leave the request untouched and return `false`, because opaque Responses state
-/// has no content that survives outside the Target that issued it.
-pub fn downgrade_foreign_compaction(request: &mut AiRequest) -> bool {
-    if !request
-        .items
-        .iter()
-        .filter(|item| item.is_compaction())
-        .all(|item| compaction_summary(item).is_some())
-    {
-        return false;
-    }
-    downgrade_compaction_summaries(request);
-    true
 }
 
 /// 对象入参无法表达的调用和它关联的结果必须一起省略；绝不补空对象。
@@ -982,11 +959,12 @@ fn prune_item(
 ) {
     use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent};
     {
-        if target == Protocol::OpenResponses
-            && (item.is_compaction()
-                || item.is_compaction_trigger()
-                || item.unknown_ref().is_some()
-                || item.function_call_output_ref().is_some())
+        if (target == Protocol::AnthropicMessages && has_compaction(item))
+            || target == Protocol::OpenResponses
+                && (item.is_compaction()
+                    || item.is_compaction_trigger()
+                    || item.unknown_ref().is_some()
+                    || item.function_call_output_ref().is_some())
         {
             return;
         }
@@ -1173,9 +1151,6 @@ fn item_block_representable(
         _ => {
             request_block_representable(target, block)
                 || output
-                    && target == Protocol::AnthropicMessages
-                    && matches!(block, ContentBlock::Compaction { .. })
-                || output
                     && matches!(
                         target,
                         Protocol::OpenResponses
@@ -1286,10 +1261,7 @@ fn request_block_representable(
             ContentBlock::Text { .. }
             | ContentBlock::Document { .. }
             | ContentBlock::ToolUse { .. }
-            | ContentBlock::ToolResult { .. }
-            | ContentBlock::Compaction {
-                summary: Some(_), ..
-            } => true,
+            | ContentBlock::ToolResult { .. } => true,
             ContentBlock::Image { source, .. } => match source {
                 MediaSource::Url(_) | MediaSource::FileId { .. } => true,
                 MediaSource::Base64 { media_type, .. } => {
@@ -1491,8 +1463,6 @@ fn response_item_representable(
 ) -> bool {
     if target == Protocol::OpenResponses {
         open_responses_output_item_representable(item)
-    } else if target == Protocol::AnthropicMessages && item.is_compaction() {
-        true
     } else {
         !item.is_compaction() && !item.is_compaction_trigger() && item.unknown_ref().is_none()
     }

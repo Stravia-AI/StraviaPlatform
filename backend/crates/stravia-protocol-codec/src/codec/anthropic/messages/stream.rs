@@ -34,6 +34,18 @@ pub struct AnthropicResponseParser;
 
 impl AnthropicResponseParser {
     pub(crate) fn parse_response(&self, resp: Value) -> Result<AiResponse> {
+        anyhow::ensure!(
+            resp.get("stop_reason").and_then(Value::as_str) != Some("compaction")
+                && !resp
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| blocks
+                        .iter()
+                        .any(
+                            |block| block.get("type").and_then(Value::as_str) == Some("compaction")
+                        )),
+            "Anthropic compaction is unsupported"
+        );
         let id = resp
             .get("id")
             .and_then(|v| v.as_str())
@@ -222,13 +234,12 @@ pub fn normalize_client_history_item(item: &mut AiItem) {
 
 impl AnthropicResponseFormatter {
     pub(crate) fn format_response(&self, resp: &AiResponse) -> Value {
+        if resp.stop_reason.as_deref() == Some("compaction") || resp.items.iter().any(|item| item.is_compaction() || item.is_compaction_trigger() || matches!(&item.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Compaction { .. } | ContentBlock::CompactionTrigger {})))) {
+            return serde_json::json!({"type": "error", "error": {"type": "invalid_request_error", "message": "Anthropic compaction is unsupported"}});
+        }
         let mut content = Vec::new();
 
         for item in &resp.items {
-            if let Some(block) = crate::codec::compaction::anthropic_compaction_block(item) {
-                content.push(block);
-                continue;
-            }
             if let MessageContent::Blocks(blocks) = &item.content {
                 for block in blocks {
                     match block {
@@ -317,14 +328,6 @@ impl AnthropicResponseFormatter {
             "output_tokens": resp.usage.completion_tokens,
         });
         extend_usage_json(&mut usage, &resp.usage);
-        if resp.stop_reason.as_deref() == Some("compaction") {
-            usage = if let Some(native) = resp.vendor.egress.get("__anthropic_compaction_usage") {
-                native.clone()
-            } else {
-                usage["type"] = "compaction".into();
-                serde_json::json!({"input_tokens": 0, "output_tokens": 0, "iterations": [usage]})
-            };
-        }
 
         serde_json::json!({
             "id": resp.id,
@@ -424,6 +427,20 @@ impl AnthropicStreamParser {
             if let Some(data) = data_str
                 && let Ok(json) = serde_json::from_str::<Value>(data)
             {
+                anyhow::ensure!(
+                    json.pointer("/content_block/type").and_then(Value::as_str)
+                        != Some("compaction")
+                        && json.pointer("/delta/stop_reason").and_then(Value::as_str)
+                            != Some("compaction")
+                        && !json
+                            .pointer("/message/content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|blocks| blocks
+                                .iter()
+                                .any(|block| block.get("type").and_then(Value::as_str)
+                                    == Some("compaction"))),
+                    "Anthropic compaction is unsupported"
+                );
                 parse_anthropic_event(event_type, &json, &mut self.usage, &mut deltas);
             }
             Ok(())
@@ -682,6 +699,9 @@ impl AnthropicStreamFormatter {
 
 impl AnthropicStreamFormatter {
     pub(crate) fn format_deltas(&mut self, deltas: &[AiStreamDelta]) -> Vec<SseEvent> {
+        if deltas.iter().any(|delta| matches!(delta, AiStreamDelta::ItemDone { item, .. } if item.is_compaction() || item.is_compaction_trigger() || matches!(&item.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Compaction { .. } | ContentBlock::CompactionTrigger {})))) || matches!(delta, AiStreamDelta::Done { stop_reason } if stop_reason == "compaction")) {
+            return vec![SseEvent::new(Some("error"), serde_json::json!({"type": "error", "error": {"type": "invalid_request_error", "message": "Anthropic compaction is unsupported"}}).to_string())];
+        }
         let mut events = Vec::new();
 
         for delta in deltas {

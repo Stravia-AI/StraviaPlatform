@@ -49,8 +49,6 @@ pub struct AnthropicRequest {
     pub service_tier: Option<String>,
     pub metadata: Option<Value>,
     pub stop_sequences: Option<Vec<String>>,
-    /// On-demand standalone compaction request (`compact-2026-09-04`).
-    pub compaction: Option<Value>,
 }
 
 fn present_value<'de, D: serde::Deserializer<'de>>(
@@ -158,16 +156,6 @@ pub enum AnthropicContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
-    /// On-demand compaction state (`compact-2026-09-04`). The API accepts the block only
-    /// byte-for-byte as returned, so unknown fields are kept. `content: null` marks a
-    /// failed compaction that the server treats as a no-op.
-    #[serde(rename = "compaction")]
-    Compaction {
-        content: Option<String>,
-        signature: Option<String>,
-        #[serde(flatten)]
-        extra: serde_json::Map<String, Value>,
-    },
 }
 
 impl AnthropicContentBlock {
@@ -180,7 +168,7 @@ impl AnthropicContentBlock {
             | Self::ToolResult { cache_control, .. }
             | Self::Document { cache_control, .. }
             | Self::InputAudio { cache_control, .. } => cache_control.as_ref(),
-            Self::RedactedThinking { .. } | Self::Compaction { .. } => None,
+            Self::RedactedThinking { .. } => None,
         }
     }
 

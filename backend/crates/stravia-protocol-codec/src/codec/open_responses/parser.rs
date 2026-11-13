@@ -361,9 +361,6 @@ fn strip_provider_function_output_schemas(tools: &mut Value) {
 }
 
 /// Decode a compact `output` window into provider-authored canonical items.
-///
-/// Shared by the upstream parser and by ingress decoders that unseal a window carried
-/// inside another protocol, so registration and replay always see identical items.
 pub fn decode_compaction_window(output: &[Value]) -> Result<Vec<AiItem>> {
     let mut items = Vec::with_capacity(output.len());
     for wire in output {

@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # 跨 Anthropic 与 Responses 承载原生压缩
+
+> 本文为历史设计，已被 [ADR-0098：删除 Anthropic 远程压缩](0098-remove-anthropic-remote-compaction.md) 取代。Anthropic 压缩、跨协议信封与可读摘要降级已删除；当前只支持 Responses 原生压缩。
 
 Remote Compaction Request 由当前选中 Target 的上游执行，结果经过规范 IR，再编码为客户端协议。Stravia 不生成本地摘要，不为完成压缩重试或切换 Target。上游机制与覆盖范围见 [研究报告](../research/upstream-remote-compaction.md)；厂商仍提供的旧压缩端点不等于 Stravia 继续提供该入口。
 
