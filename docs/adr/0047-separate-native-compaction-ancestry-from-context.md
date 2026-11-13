@@ -19,6 +19,6 @@ status: accepted
 - 原生状态绑定已知 Target、账号/配置 generation、模型与协议；它不适用 [ADR-0028](0028-persist-hidden-history-behind-markers.md) 的历史推理降级，也不能通过省略绕过来源、Principal、有效期或 Target 绑定校验。通过校验后的普通推理投影遵循 [ADR-0006](0006-own-protocol-conversion-behind-canonical-stages.md)：目标不能表达的 inline 控制与条目省略，不伪造压缩状态；独立 compact 操作不改成普通推理，协议无法承载时仍返回不支持。原生 compact ID、upstream response ID、Generation ID 不互换。Target Continuation 失效时，允许重放的完整上下文仍是当前压缩窗口。
 - Route 策略默认关闭，仅在客户端原生控制缺省时注入；实际阈值由支持原生 server-side compaction 的 Target 判断，不使用累计 usage、字节估算或平台摘要回路。`context_management` 决定本次执行策略，不改变已经交付的历史身份；调整或取消阈值后仍可发现完整的压缩后继。请求与 Target Continuation 的语义指纹继续区分该控制的缺省、null 和空集合，不能复用不兼容的上游状态。
 - Retained Tail Association 只保存诊断元数据。其敏感内容索引可丢失；重启后存在未索引保留候选、索引容量不足或搜索不完整时，返回 unavailable/resource-limit，不宣称唯一。已有持久关系仍可查询，清理后的卡片不从核心历史复活。
-- Anthropic 来源的状态带上游生成的可读摘要，是上述“不降级”约束的有意例外：目标不同或协议无法承载时保留摘要为普通上下文，见 [ADR-0089](0089-carry-native-compaction-across-anthropic-and-responses.md)。
+- [ADR-0098](0098-remove-anthropic-remote-compaction.md) 已删除 Anthropic 压缩及其可读摘要降级例外；当前仅支持 Responses 原生状态，不能跨 Target 回放或降级为普通文本。
 
 不采用静默本地摘要、放宽 unknown item、单独复制 compact HTTP 发送路径或把原生 state 包成 History Marker。它们分别改变客户端意图、掩盖有损转换、复制执行语义或混淆独立身份。

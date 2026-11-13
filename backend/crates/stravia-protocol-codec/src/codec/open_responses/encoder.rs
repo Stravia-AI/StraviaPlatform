@@ -612,36 +612,7 @@ fn take_native_compaction_item(
         unreachable!("native compaction content was checked above");
     };
     match blocks.remove(0) {
-        ContentBlock::Compaction {
-            encrypted_content,
-            summary,
-        } => {
-            // Anthropic-origin state is foreign to the Responses wire: carry the whole
-            // signed block in the opaque field instead of exposing a bare signature.
-            let encrypted_content = match summary {
-                Some(summary) => {
-                    let mut block = item
-                        .meta
-                        .as_mut()
-                        .and_then(|meta| {
-                            meta.remove_extension(
-                                crate::codec::compaction::ANTHROPIC_COMPACTION_BLOCK_META,
-                            )
-                            .ok()
-                            .flatten()
-                        })
-                        .and_then(|block| match block {
-                            Value::Object(block) => Some(block),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    block.insert("type".into(), "compaction".into());
-                    block.insert("content".into(), summary.into());
-                    block.insert("signature".into(), encrypted_content.into());
-                    crate::codec::compaction::seal_anthropic(&Value::Object(block))
-                }
-                None => encrypted_content,
-            };
+        ContentBlock::Compaction { encrypted_content } => {
             wire.insert("type".into(), Value::String("compaction".into()));
             wire.insert("encrypted_content".into(), Value::String(encrypted_content));
         }

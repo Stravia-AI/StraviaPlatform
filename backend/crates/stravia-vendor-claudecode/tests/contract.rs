@@ -306,91 +306,6 @@ const SSE_TOOL_USE: &str = concat!(
     "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 );
 
-fn sse(event: &str, data: Value) -> String {
-    format!("event: {event}\ndata: {data}\n\n")
-}
-
-fn signed_compaction_block() -> Value {
-    json!({
-        "type": "compaction",
-        "content": "Signed summary of the work",
-        "signature": "sig-stream",
-        "tool_changes": [{"name": "read", "opaque": ["unchanged"]}],
-        "opaque_future": {"keep": true}
-    })
-}
-
-fn native_compaction_stream(stop_reason: &str, usage: Value) -> String {
-    [
-        sse(
-            "message_start",
-            json!({
-                "type": "message_start",
-                "message": {
-                    "id": "msg_compact",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": "claude-sonnet-4-5",
-                    "content": [],
-                    "stop_reason": null,
-                    "usage": {"input_tokens": 0, "output_tokens": 0}
-                }
-            }),
-        ),
-        sse(
-            "content_block_start",
-            json!({
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": signed_compaction_block()
-            }),
-        ),
-        sse(
-            "content_block_stop",
-            json!({"type": "content_block_stop", "index": 0}),
-        ),
-        sse(
-            "message_delta",
-            json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": usage
-            }),
-        ),
-        sse("message_stop", json!({"type": "message_stop"})),
-    ]
-    .concat()
-}
-
-fn native_compaction_usage() -> Value {
-    json!({
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "iterations": [
-            {
-                "type": "compaction",
-                "input_tokens": 64,
-                "output_tokens": 2002,
-                "cache_creation_input_tokens": 80082
-            },
-            {"type": "message", "input_tokens": 5, "output_tokens": 1}
-        ]
-    })
-}
-
-/// 以 Anthropic 客户端入口构造独立原生压缩请求，摘要控制与触发器进入 IR。
-fn native_compaction_request() -> AiRequest {
-    anthropic_client_request(json!({
-        "model": "claude-sonnet-4-5",
-        "max_tokens": 4096,
-        "system": [{"type": "text", "text": "stable system"}],
-        "tools": [{"name": "read", "input_schema": {"type": "object"}}],
-        "thinking": {"type": "enabled", "budget_tokens": 1024},
-        "messages": [{"role": "user", "content": "history"}],
-        "compaction": {"type": "summarize", "instructions": "Only file names"}
-    }))
-}
-
 fn provider(credentials: BTreeMap<String, Value>) -> ProviderSnapshot {
     ProviderSnapshot {
         provider_id: "claude-code".into(),
@@ -521,299 +436,28 @@ async fn run(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn native_compaction_stream_keeps_signed_state_and_iteration_usage() {
+async fn compact_is_unsupported_without_upstream_request() {
     let (runtime, plugin) = load_plugin().await;
-    let services = Arc::new(MockServices {
-        routes: vec![(
-            UPSTREAM,
-            200,
-            "text/event-stream",
-            native_compaction_stream("compaction", native_compaction_usage()),
-        )],
-        ..MockServices::default()
-    });
-    let output = run(
+    let services = Arc::new(MockServices::default());
+    let error = run(
         &runtime,
         &plugin,
         &services,
         OperationInput::Compact {
             provider: signed_in(),
-            request: native_compaction_request(),
+            request: AiRequest::new("claude-sonnet-4-5", Vec::new()),
         },
     )
     .await
-    .expect("native compaction stream is accepted");
-    {
-        let requests = services.requests.lock();
-        assert_eq!(requests.len(), 1);
-        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert_eq!(
-            body["stream"],
-            json!(true),
-            "native compaction must request an SSE envelope"
-        );
-        assert_eq!(
-            body["compaction"],
-            json!({"type": "summarize", "instructions": "Only file names"})
-        );
-        assert!(body.get("thread").is_none() && body.get("diagnostics").is_none());
-        assert_eq!(body["system"].as_array().unwrap().len(), 3);
-        assert_eq!(body["tools"][0]["name"], "_read");
-        assert_eq!(body["thinking"]["type"], "enabled");
-        let betas = wire_header(&requests[0], "anthropic-beta");
-        let betas: Vec<&str> = betas.split(',').map(str::trim).collect();
-        assert!(
-            betas.contains(&"compact-2026-09-04"),
-            "{}",
-            wire_header(&requests[0], "anthropic-beta")
-        );
-        assert!(!betas.contains(&"message-threads-2026-08-12"));
-    }
-    let OperationOutput::Compact(response) = output else {
-        panic!("compact operation must not become a generation response");
-    };
-    assert_eq!(response.wire["stop_reason"], "compaction");
-    assert_eq!(
-        response.wire["content"],
-        json!([signed_compaction_block()]),
-        "signature and unknown block fields must survive the SSE fold"
-    );
-    assert_eq!(
-        response.wire["usage"]["iterations"],
-        native_compaction_usage()["iterations"]
-    );
-    let usage = response.usage.expect("compaction usage");
-    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (64, 2002));
-    assert!(response.items[0].is_compaction());
-
-    let mut request = native_compaction_request();
-    request.instructions = None;
-    request.parameters.compaction.as_mut().unwrap().instructions = None;
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Compact {
-            provider: signed_in(),
-            request,
-        },
-    )
-    .await
-    .expect("omitted instructions use the local summary prompt");
-    let requests = services.requests.lock();
-    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
-    let default = stravia_protocol_codec::codec::compaction::DEFAULT_COMPACTION_INSTRUCTIONS;
-    assert_eq!(body["compaction"]["instructions"], default);
-    assert!(
-        body["system"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block.get("text").and_then(Value::as_str) == Some(default))
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn native_compaction_stream_truncation_and_errors_are_not_summaries() {
-    let (runtime, plugin) = load_plugin().await;
-    let complete = native_compaction_stream("compaction", native_compaction_usage());
-    let truncated = complete
-        .split("event: message_stop")
-        .next()
-        .expect("fixture has a message_stop")
-        .to_owned();
-    for (body, expected) in [
-        (truncated.clone(), "message_stop"),
-        (
-            format!(
-                "{truncated}{}",
-                sse(
-                    "error",
-                    json!({
-                        "type": "error",
-                        "error": {"type": "overloaded_error", "message": "Overloaded"}
-                    }),
-                ),
-            ),
-            "Overloaded",
-        ),
-        (
-            native_compaction_stream("end_turn", native_compaction_usage()),
-            "end_turn",
-        ),
-        (
-            native_compaction_stream("refusal", native_compaction_usage()),
-            "refusal",
-        ),
-    ] {
-        let services = Arc::new(MockServices {
-            routes: vec![(UPSTREAM, 200, "text/event-stream", body)],
-            ..MockServices::default()
-        });
-        let error = run(
-            &runtime,
-            &plugin,
-            &services,
-            OperationInput::Compact {
-                provider: signed_in(),
-                request: native_compaction_request(),
-            },
-        )
-        .await
-        .expect_err("an incomplete compaction stream cannot succeed");
-        let diagnostic = match error {
-            RuntimeError::Plugin {
-                diagnostic_message, ..
-            } => diagnostic_message,
-            other => panic!("expected a plugin upstream error, got {other:?}"),
-        };
-        assert!(
-            diagnostic.contains(expected),
-            "expected {expected:?} in {diagnostic:?}"
-        );
-        if expected == "Overloaded" {
-            let deltas = services.deltas.lock();
-            let error = deltas
-                .iter()
-                .find_map(|delta| match delta {
-                    AiStreamDelta::StreamError { error } => Some(error),
-                    _ => None,
-                })
-                .expect("the upstream SSE error must remain available for client relay");
-            assert_eq!(
-                error.raw,
-                Some(json!({
-                    "type": "error",
-                    "error": {"type": "overloaded_error", "message": "Overloaded"}
-                }))
-            );
+    .expect_err("compact is unsupported");
+    assert!(matches!(
+        error,
+        RuntimeError::Plugin {
+            kind: ErrorKind::Unsupported,
+            ..
         }
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn native_compaction_replay_preserves_retained_history() {
-    let (runtime, plugin) = load_plugin().await;
-    let services = Arc::new(MockServices {
-        script: Mutex::new(VecDeque::from([
-            (
-                200,
-                "application/json",
-                message_reply(
-                    "msg_011111111111111111111110",
-                    json!([{"type":"text","text":"Ready"}]),
-                    "end_turn",
-                ),
-                Some("req_before_compaction".into()),
-            ),
-            (
-                200,
-                "application/json",
-                message_reply(
-                    "msg_011111111111111111111111",
-                    json!([{"type":"text","text":"Still ready"}]),
-                    "end_turn",
-                ),
-                Some("req_before_replay".into()),
-            ),
-            (
-                200,
-                "application/json",
-                message_reply(
-                    "msg_011111111111111111111112",
-                    json!([{"type":"text","text":"Continued"}]),
-                    "end_turn",
-                ),
-                Some("req_after_compaction".into()),
-            ),
-        ])),
-        ..MockServices::default()
-    });
-    let mut provider = signed_in();
-    provider.operation_metadata.insert(
-        "transport_affinity".into(),
-        json!("native-compaction-replay"),
-    );
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider: provider.clone(),
-            request: history_request(&[json!({"role":"user","content":"Remember the task."})]),
-        },
-    )
-    .await
-    .expect("the original turn succeeds");
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer {
-            provider: provider.clone(),
-            request: history_request(&[
-                json!({"role":"user","content":"Remember the task."}),
-                json!({"role":"assistant","content":[{"type":"text","text":"Ready"}]}),
-                json!({"role":"user","content":"Keep going."}),
-            ]),
-        },
-    )
-    .await
-    .expect("ordinary full-history continuation succeeds");
-
-    let block = signed_compaction_block();
-    let request = anthropic_client_request(json!({
-        "model":"claude-sonnet-4-5",
-        "max_tokens":4096,
-        "thinking":{"type":"enabled","budget_tokens":1024},
-        "tools":[{"name":"read","input_schema":{"type":"object"}}],
-        "messages":[
-            {"role":"assistant","content":[block.clone()]},
-            {"role":"assistant","content":[
-                {"type":"thinking","thinking":"Read the retained file.","signature":"sig-retained-thinking"},
-                {"type":"tool_use","id":"toolu_retained","name":"read","input":{"path":"a"}}
-            ]},
-            {"role":"user","content":[
-                {"type":"tool_result","tool_use_id":"toolu_retained","content":"a contents"}
-            ]}
-        ]
-    }));
-    run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer { provider, request },
-    )
-    .await
-    .expect("the compacted tool continuation succeeds without thread recovery");
-
-    let requests = services.requests.lock();
-    let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert!(first.get("thread").is_none());
-    assert_eq!(first["diagnostics"]["previous_message_id"], Value::Null);
-    let ordinary: Value = serde_json::from_slice(&requests[1].body).unwrap();
-    assert!(ordinary.get("thread").is_none());
-    assert_eq!(ordinary["messages"].as_array().unwrap().len(), 3);
-    assert_eq!(
-        ordinary["diagnostics"]["previous_message_id"],
-        "msg_011111111111111111111110"
-    );
-    let replay: Value = serde_json::from_slice(&requests[2].body).unwrap();
-    assert!(replay.get("thread").is_none() && replay.get("diagnostics").is_none());
-    assert!(!wire_header(&requests[2], "anthropic-beta").contains("message-threads"));
-    assert_eq!(replay["messages"].as_array().unwrap().len(), 2);
-    let content = replay["messages"][0]["content"].as_array().unwrap();
-    assert_eq!(content[0], block);
-    assert_eq!(content[1]["signature"], "sig-retained-thinking");
-    assert_eq!(content[2]["id"], "toolu_retained");
-    assert_eq!(
-        replay["messages"][1]["content"][0]["tool_use_id"],
-        "toolu_retained"
-    );
-    assert_eq!(
-        *services.wire_log.lock(),
-        ["start", "request", "start", "request", "start", "request"]
-    );
+    ));
+    assert!(services.requests.lock().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1347,14 +991,14 @@ async fn inference_defaults_follow_model_effort_and_beta_capabilities() {
 #[tokio::test(flavor = "current_thread")]
 async fn explicit_inference_controls_override_cli_defaults() {
     let (runtime, plugin) = load_plugin().await;
-    let compact_context = json!({"edits": [{
-        "type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 100000}
+    let clear_context = json!({"edits": [{
+        "type": "clear_tool_uses_20250919", "trigger": {"type": "input_tokens", "value": 100000}
     }]});
     for (controls, effort, context) in [
         (
-            json!({"output_config": {"effort": "high"}, "context_management": compact_context}),
+            json!({"output_config": {"effort": "high"}, "context_management": clear_context}),
             "high",
-            compact_context.clone(),
+            clear_context.clone(),
         ),
         (
             json!({"thinking": {"type": "enabled", "budget_tokens": 16000}}),

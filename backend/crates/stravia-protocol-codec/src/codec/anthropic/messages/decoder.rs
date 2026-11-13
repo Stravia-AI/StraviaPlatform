@@ -23,8 +23,8 @@ use stravia_runtime_contract::protocol::ir::ToolCall;
 use stravia_runtime_contract::protocol::ir::ToolChoice;
 use stravia_runtime_contract::protocol::ir::ToolSpec;
 use stravia_runtime_contract::protocol::ir::{
-    CacheRetention, CompactionControl, NativeTool, NativeToolKind, ParameterReset,
-    ReasoningSummary, ServiceTier, native_tool_from_anthropic,
+    CacheRetention, NativeTool, NativeToolKind, ParameterReset, ReasoningSummary, ServiceTier,
+    native_tool_from_anthropic,
 };
 
 use super::types::{
@@ -32,8 +32,6 @@ use super::types::{
     AnthropicRequest, AnthropicSystem, CacheControl as WireCacheControl,
     DocumentSource as WireDocumentSource,
 };
-use crate::codec::compaction::{self, Envelope};
-use crate::codec::open_responses::parser as open_responses_parser;
 
 pub struct AnthropicDecoder;
 
@@ -105,6 +103,34 @@ impl AnthropicDecoder {
         {
             resets.push(ParameterReset::ParallelToolCalls);
         }
+        anyhow::ensure!(
+            body.get("compaction").is_none(),
+            "Anthropic compaction is unsupported"
+        );
+        anyhow::ensure!(
+            !body
+                .pointer("/context_management/edits")
+                .and_then(Value::as_array)
+                .is_some_and(|edits| edits.iter().any(|edit| edit
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.starts_with("compact_")))),
+            "Anthropic compaction edits are unsupported"
+        );
+        anyhow::ensure!(
+            !body
+                .get("messages")
+                .and_then(Value::as_array)
+                .is_some_and(|messages| messages.iter().any(|message| message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| blocks
+                        .iter()
+                        .any(
+                            |block| block.get("type").and_then(Value::as_str) == Some("compaction")
+                        )))),
+            "Anthropic compaction blocks are unsupported"
+        );
         let req: AnthropicRequest = serde_json::from_value(body)?;
 
         // ── Cache-control / exotic-block detection (for raw preservation) ──────
@@ -124,11 +150,6 @@ impl AnthropicDecoder {
             } else {
                 false
             }
-        }) && !req.messages.iter().any(|m| {
-            // A compaction block may need re-sealing for the selected Target, which the
-            // raw wire snapshot would bypass.
-            matches!(&m.content, AnthropicContent::Blocks(blocks)
-                if blocks.iter().any(|b| matches!(b, AnthropicContentBlock::Compaction { .. })))
         });
 
         let needs_raw_system = match &req.system {
@@ -301,6 +322,9 @@ impl AnthropicDecoder {
 
         // ── Raw snapshots, never request-control aliases ─────────────────────
         let mut ingress = std::collections::HashMap::new();
+        if let Some(value) = req.context_management.filter(|value| !value.is_null()) {
+            ingress.insert("__anthropic_context_edits".into(), value);
+        }
 
         if let Some(v) = raw_messages {
             ingress.insert("__anthropic_raw_messages".into(), v);
@@ -344,57 +368,6 @@ impl AnthropicDecoder {
                 tool.container = container.map(str::to_owned);
             }
         }
-        ai_req.parameters.compaction = req
-            .context_management
-            .as_ref()
-            .and_then(|value| value.get("edits"))
-            .and_then(Value::as_array)
-            .and_then(|edits| {
-                edits.iter().find(|edit| {
-                    edit.get("type").and_then(Value::as_str) == Some("compact_20260112")
-                })
-            })
-            .map(|edit| CompactionControl {
-                threshold_tokens: edit
-                    .get("trigger")
-                    .filter(|trigger| {
-                        trigger.get("type").and_then(Value::as_str) == Some("input_tokens")
-                    })
-                    .and_then(|trigger| trigger.get("value"))
-                    .and_then(Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok()),
-                instructions: None,
-            });
-        if let Some(control) = req.compaction.filter(|control| !control.is_null()) {
-            anyhow::ensure!(
-                control.is_object(),
-                "Anthropic `compaction` must be an object"
-            );
-            anyhow::ensure!(
-                control.get("type").and_then(Value::as_str) == Some("summarize"),
-                "Anthropic `compaction.type` must be summarize"
-            );
-            let instructions = match control.get("instructions") {
-                Some(Value::String(instructions)) => Some(instructions.clone()),
-                None | Some(Value::Null) => None,
-                Some(_) => anyhow::bail!("Anthropic `compaction.instructions` must be a string"),
-            };
-            anyhow::ensure!(
-                ai_req.parameters.compaction.is_none(),
-                "Anthropic `compaction` cannot be combined with inline compaction"
-            );
-            ai_req.parameters.compaction = Some(CompactionControl {
-                threshold_tokens: None,
-                instructions,
-            });
-            ai_req.items.push(AiItem {
-                role: Role::User,
-                content: MessageContent::Blocks(vec![ContentBlock::CompactionTrigger {}]),
-                tool_calls: None,
-                tool_call_id: None,
-                meta: None,
-            });
-        }
         ai_req.parameters.cache.retention = req
             .cache_control
             .as_ref()
@@ -430,41 +403,6 @@ impl AnthropicDecoder {
 // ── Message decoding helpers ──────────────────────────────────────────────────
 
 fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
-    let msg = match msg.content {
-        AnthropicContent::Blocks(blocks)
-            if blocks
-                .iter()
-                .any(|block| matches!(block, AnthropicContentBlock::Compaction { .. })) =>
-        {
-            // A compaction block replaces everything before it, so it leads its message;
-            // it expands to the state (and, for a Responses window, the retained items)
-            // and the remaining blocks keep their own message.
-            let mut items = Vec::new();
-            let mut rest = Vec::new();
-            for block in blocks {
-                match block {
-                    AnthropicContentBlock::Compaction {
-                        content,
-                        signature,
-                        extra,
-                    } => items.extend(decode_compaction_block(content, signature, extra)?),
-                    other => rest.push(other),
-                }
-            }
-            if rest.is_empty() {
-                return Ok(items);
-            }
-            items.extend(decode_message(AnthropicMessage {
-                role: msg.role,
-                content: AnthropicContent::Blocks(rest),
-            })?);
-            return Ok(items);
-        }
-        content => AnthropicMessage {
-            role: msg.role,
-            content,
-        },
-    };
     let role = match msg.role.as_str() {
         "user" => Role::User,
         "assistant" => Role::Assistant,
@@ -590,9 +528,6 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
                             },
                         });
                     }
-                    AnthropicContentBlock::Compaction { .. } => {
-                        anyhow::bail!("compaction blocks are expanded before role decoding")
-                    }
                 }
             }
 
@@ -629,35 +564,6 @@ fn decode_message(msg: AnthropicMessage) -> Result<Vec<AiItem>> {
         tool_call_id,
         meta: None,
     }])
-}
-
-/// Native Anthropic state is routed through the Responses compact-window decoder as a
-/// sealed item, so it is byte-identical to the state a Responses client replays and to
-/// what the upstream parser registered.
-fn decode_compaction_block(
-    content: Option<String>,
-    signature: Option<String>,
-    extra: serde_json::Map<String, Value>,
-) -> Result<Vec<AiItem>> {
-    let Some(signature) = signature.filter(|signature| !signature.is_empty()) else {
-        anyhow::bail!("compaction block requires a signature");
-    };
-    if let Some(Envelope::Responses { output }) = compaction::open(&signature) {
-        return open_responses_parser::decode_compaction_window(&output);
-    }
-    // `content: null` is a failed compaction the API treats as a no-op.
-    let Some(content) = content else {
-        return Ok(Vec::new());
-    };
-    let mut block = extra;
-    block.insert("type".into(), "compaction".into());
-    block.insert("content".into(), content.into());
-    block.insert("signature".into(), signature.clone().into());
-    open_responses_parser::decode_compaction_window(&[serde_json::json!({
-        "type": "compaction",
-        "id": compaction::anthropic_state_id(&signature),
-        "encrypted_content": compaction::seal_anthropic(&Value::Object(block)),
-    })])
 }
 
 /// Build `meta = {"reasoning_content": ...}` so the OpenAI-compat encoder can
@@ -794,9 +700,6 @@ fn decode_user_blocks(blocks: Vec<AnthropicContentBlock>) -> Result<Vec<AiItem>>
                         data: source.data,
                     },
                 });
-            }
-            AnthropicContentBlock::Compaction { .. } => {
-                anyhow::bail!("compaction blocks are expanded before role decoding")
             }
         }
     }

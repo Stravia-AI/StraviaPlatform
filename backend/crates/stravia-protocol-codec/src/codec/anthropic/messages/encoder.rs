@@ -23,6 +23,7 @@ pub struct AnthropicEncoder;
 impl AnthropicEncoder {
     pub(crate) fn encode_request(&self, mut req: AiRequest) -> Result<(Value, HeaderMap)> {
         req.normalize_parameters();
+        anyhow::ensure!(req.parameters.compaction.is_none() && !req.items.iter().any(|item| item.is_compaction() || item.is_compaction_trigger() || matches!(&item.content, MessageContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Compaction { .. } | ContentBlock::CompactionTrigger {})))), "Anthropic compaction is unsupported");
         let strict_budget_exceeded = strict_budget_exceeded(&req);
         let ingress = &mut req.meta.vendor.ingress;
         let supplied_tool_ids = if ingress.contains_key("__anthropic_raw_messages") {
@@ -63,13 +64,8 @@ impl AnthropicEncoder {
         } else {
             let mut generated_tool_id_seq = 0;
             let mut raw_messages = Vec::new();
-            // 原生压缩状态替换此前整个消息窗口，不能把已摘要消息再次发给上游。
-            let last_compaction = req.items.iter().rposition(AiItem::is_compaction);
-            for (index, msg) in req.items.into_iter().enumerate() {
+            for msg in req.items.into_iter() {
                 if matches!(msg.role, Role::System | Role::Developer) {
-                    continue;
-                }
-                if last_compaction.is_some_and(|boundary| index < boundary) {
                     continue;
                 }
                 raw_messages.push(encode_message(
@@ -78,23 +74,8 @@ impl AnthropicEncoder {
                     &supplied_tool_ids,
                 )?);
             }
-            Value::Array(normalize_anthropic_messages(
-                raw_messages,
-                last_compaction.is_some(),
-            ))
+            Value::Array(normalize_anthropic_messages(raw_messages))
         };
-        let compaction_replayed = messages_val.as_array().is_some_and(|messages| {
-            messages.iter().any(|message| {
-                message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|blocks| {
-                        blocks.iter().any(|block| {
-                            block.get("type").and_then(Value::as_str) == Some("compaction")
-                        })
-                    })
-            })
-        });
 
         // Messages 必须携带 max_tokens；已知型号上限由目标适配层填入，
         // 未知时沿用 omp 的 64,000 回退，不把上下文窗口当作输出上限。
@@ -238,15 +219,21 @@ impl AnthropicEncoder {
                 serde_json::json!({"type": "ephemeral", "ttl": ttl}),
             );
         }
-        if let Some(compaction) = req.parameters.compaction {
-            let mut edit = serde_json::json!({"type": "compact_20260112"});
-            if let Some(threshold) = compaction.threshold_tokens {
-                edit["trigger"] = serde_json::json!({"type": "input_tokens", "value": threshold});
-            }
-            obj.insert(
-                "context_management".into(),
-                serde_json::json!({"edits": [edit]}),
+        if req.meta.source_protocol
+            == Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01)
+            && let Some(context) = req.meta.vendor.ingress.remove("__anthropic_context_edits")
+        {
+            anyhow::ensure!(
+                !context
+                    .get("edits")
+                    .and_then(Value::as_array)
+                    .is_some_and(|edits| edits.iter().any(|edit| edit
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind.starts_with("compact_")))),
+                "Anthropic compaction edits are unsupported"
             );
+            obj.insert("context_management".into(), context);
         }
         if let Some(tier) = req.parameters.service_tier.and_then(|tier| match tier {
             ServiceTier::Auto => Some("auto"),
@@ -270,12 +257,6 @@ impl AnthropicEncoder {
 
         let mut headers = HeaderMap::new();
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        if compaction_replayed {
-            headers.insert(
-                "anthropic-beta",
-                HeaderValue::from_static(crate::codec::compaction::ANTHROPIC_COMPACTION_BETA),
-            );
-        }
 
         Ok((body, headers))
     }
@@ -531,7 +512,6 @@ const ALLOWED_BLOCK_TYPES: &[&str] = &[
     "bash_code_execution_tool_result",
     "text_editor_code_execution_tool_result",
     "tool_search_tool_result",
-    "compaction",
 ];
 
 fn validate_anthropic_payload(body: &Value) -> Result<()> {
@@ -635,55 +615,11 @@ fn validate_anthropic_payload(body: &Value) -> Result<()> {
 
 // ── Message encoding helpers ──────────────────────────────────────────────────
 
-/// Native Anthropic state replays as the original block, byte-for-byte (the API
-/// rejects edits). State without a readable summary is another protocol's and has
-/// no Anthropic form, so the message is left empty and normalization drops it.
-fn encode_compaction_message(mut msg: AiItem) -> Value {
-    let summary_state = match &msg.content {
-        MessageContent::Blocks(blocks) => match blocks.as_slice() {
-            [
-                ContentBlock::Compaction {
-                    encrypted_content,
-                    summary: Some(summary),
-                },
-            ] => Some((encrypted_content.clone(), summary.clone())),
-            _ => None,
-        },
-        MessageContent::Text(_) => None,
-    };
-    let content = summary_state
-        .map(|(signature, summary)| {
-            msg.meta
-                .as_mut()
-                .and_then(|meta| {
-                    meta.remove_extension(crate::codec::compaction::ANTHROPIC_COMPACTION_BLOCK_META)
-                        .ok()
-                        .flatten()
-                })
-                .unwrap_or_else(|| {
-                    serde_json::json!({
-                        "type": "compaction",
-                        "content": summary,
-                        "signature": signature,
-                    })
-                })
-        })
-        .into_iter()
-        .collect();
-    object([
-        ("role", Value::String("assistant".into())),
-        ("content", Value::Array(content)),
-    ])
-}
-
 fn encode_message(
     mut msg: AiItem,
     generated_tool_id_seq: &mut usize,
     supplied_tool_ids: &HashSet<String>,
 ) -> Result<Value> {
-    if msg.is_compaction() {
-        return Ok(encode_compaction_message(msg));
-    }
     if let MessageContent::Blocks(blocks) = &mut msg.content {
         prepare_anthropic_media(blocks)?;
     }
@@ -1437,10 +1373,7 @@ fn normalized_anthropic_tool_id(
     }
 }
 
-fn normalize_anthropic_messages(
-    messages: Vec<Value>,
-    preserve_assistant_order: bool,
-) -> Vec<Value> {
+fn normalize_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut normalized: Vec<Value> = Vec::new();
     for mut msg in messages {
         let Some(obj) = msg.as_object_mut() else {
@@ -1468,11 +1401,6 @@ fn normalize_anthropic_messages(
             ("role", Value::String(role)),
             ("content", Value::Array(blocks)),
         ]));
-    }
-
-    // compaction 必须领先；其后所有保留轮次也属于签名上下文，不能套用兼容上游的重排。
-    if preserve_assistant_order {
-        return normalized;
     }
 
     // DeepSeek's Anthropic-compatible endpoint requires assistant tool_use

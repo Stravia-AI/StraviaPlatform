@@ -63,20 +63,10 @@ pub(crate) fn execute(
         } if operation == Operation::Compact => {
             check_channel(vendor_id, channel, &provider)?;
             let protocol = protocol_for(vendor_id, &provider)?;
-            if protocol == ANTHROPIC_PROTOCOL {
-                return execute_inference(
-                    vendor_id,
-                    host,
-                    &provider,
-                    request,
-                    &protocol,
-                    Operation::Compact,
-                );
-            }
             if protocol != OPEN_RESPONSES_PROTOCOL {
                 return Err(common::plugin_error(
                     ErrorKind::Unsupported,
-                    "native compaction requires the Open Responses or Anthropic Messages protocol",
+                    "native compaction requires the Open Responses protocol",
                 ));
             }
             provider.protocol = protocol;
@@ -130,9 +120,6 @@ pub(crate) fn execute_inference(
         .filter(|model| !model.is_empty())
         .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "inference requires a model"))?;
     request.model = model.to_owned();
-    let compaction_control = (operation == Operation::Compact).then(|| {
-        stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(&mut request)
-    });
     if !matches!(protocol, COHERE_PROTOCOL | GATEWAY_PROTOCOL) {
         thinking::apply(
             vendor_id,
@@ -155,20 +142,6 @@ pub(crate) fn execute_inference(
     set_header(&mut headers, "content-type", "application/json".into());
     apply_auth_headers(vendor_id, provider, protocol, &mut headers)?;
     append_official_session_headers(vendor_id, provider, &mut headers);
-    if operation == Operation::Compact {
-        stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
-            &mut encoded.body,
-            compaction_control,
-        )
-        .map_err(|error| common::plugin_error(ErrorKind::Invalid, error.to_string()))?;
-        crate::add_anthropic_compaction_beta(&mut headers);
-        // 共享 helper 强制 stream:true，上游会以 SSE 交付完整签名块。
-        set_header(
-            &mut headers,
-            "accept",
-            "text/event-stream, application/json".into(),
-        );
-    }
     let url = inference_url(vendor_id, provider, protocol, &encoded.path)?;
     if vendor_id == "custom"
         && protocol == OPEN_RESPONSES_PROTOCOL
@@ -235,10 +208,6 @@ pub(crate) fn execute_inference(
         },
         &crate::net_options(),
     )?;
-    if operation == Operation::Compact {
-        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
-            .map(OperationOutput::Compact);
-    }
     if protocol == OPEN_RESPONSES_PROTOCOL {
         let decoded = if preserve_upstream_errors {
             stravia_vendor_common::common::decode_ai_response_preserving_upstream_errors(

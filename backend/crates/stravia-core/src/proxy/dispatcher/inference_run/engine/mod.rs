@@ -57,7 +57,6 @@ use crate::proxy::context::RequestContext;
 use crate::proxy::security::{ClientCredential, Security};
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_protocol_codec::codec::compaction;
-use stravia_protocol_codec::transform::ProtocolTransform;
 use stravia_runtime_contract::model_turn::CanonicalEvent;
 use stravia_runtime_contract::protocol::ids::ProtocolId;
 use stravia_runtime_contract::protocol::ir::AiRequest;
@@ -140,43 +139,6 @@ fn compaction_response(
             );
         }
     };
-    if ingress == stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01 {
-        let pair = match ProtocolTransform::global().bind(ingress, ingress) {
-            Ok(pair) => pair,
-            Err(error) => {
-                return coded_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid_compaction_response",
-                    &error.to_string(),
-                );
-            }
-        };
-        let encoded = match pair.encode_response(&canonical) {
-            Ok(encoded) => encoded,
-            Err(error) => {
-                return coded_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "invalid_compaction_response",
-                    &error.to_string(),
-                );
-            }
-        };
-        if !request.stream.enabled {
-            return axum::Json(encoded).into_response();
-        }
-        let body: String = compaction::anthropic_compaction_events(&encoded)
-            .into_iter()
-            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
-            .collect();
-        return (
-            [
-                (axum::http::header::CONTENT_TYPE, "text/event-stream"),
-                (axum::http::header::CACHE_CONTROL, "no-cache"),
-            ],
-            body,
-        )
-            .into_response();
-    }
     let mut delivery = DeliveryAdapter::buffered_stream(ingress, Some(ingress));
     delivery.set_response_profile(request, None);
     delivery

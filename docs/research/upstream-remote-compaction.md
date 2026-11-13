@@ -7,6 +7,8 @@
 | 总结 | 具备**可转发的服务端原生压缩契约**的只有三家：Anthropic（`compaction` / `context_management` 两套 beta）、OpenAI（`context_management`、`compaction_trigger`、`POST /responses/compact` 三种形态）、xAI（`POST /v1/responses/compact`，OpenAI 兼容形状）。Google Gemini 只在 **Managed Agents（Interactions API 的 `agent`）** 内有自动压缩（约 135k tokens），`generateContent`/模型级 Interactions 没有压缩参数，Live API 的 `contextWindowCompression` 只作用于实时会话，因此没有可被外部 compact 请求驱动的契约。Bedrock 的 Claude 走 InvokeModel/`/anthropic` 可用，Converse 明确不支持；Vertex AI 的 Claude（Google managed）可用，Vertex 上的 Gemini 不可用。其余上游（OpenRouter、DeepSeek、Mistral、Qwen、Kimi、GLM）官方文档未发现任何原生压缩端点或参数。 |
 | Stravia 判断 | 远端压缩必须**原样转发**：上游返回的不透明/签名结果不可本地重建，也不可跨 Target 重放。对没有原生能力的上游，Stravia 只能返回 `compaction_unsupported`，不得本地合成摘要；对已绑定到某 Target 的压缩状态，跨 Target 使用时返回 `compaction_target_mismatch`（现有代码语义，见第 8 节）。 |
 
+> 当前产品范围：Stravia 已按 [ADR-0098](../adr/0098-remove-anthropic-remote-compaction.md) 完全删除 Anthropic 远程压缩，仅保留 Responses 原生压缩。本文保留厂商事实与历史实现分析，不把厂商 API 支持等同于当前 Stravia 支持。
+
 ## 1. 判定口径
 
 本文把“压缩”拆成四种互不等价的能力，避免把缓存或截断误判为 compaction：

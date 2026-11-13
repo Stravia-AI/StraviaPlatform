@@ -26,7 +26,6 @@ fn native_generation_controls_inherit_without_inheriting_resets() {
     parent.truncation = Some(Truncation::Auto);
     parent.compaction = Some(CompactionControl {
         threshold_tokens: Some(2000),
-        ..Default::default()
     });
     parent.metadata = Some(std::collections::BTreeMap::from([(
         "key".into(),

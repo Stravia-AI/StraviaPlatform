@@ -173,24 +173,10 @@ fn container(request: &AiRequest) -> Option<&str> {
 
 struct CompactionView<'a> {
     control: &'a ir::CompactionControl,
-    family: Option<Protocol>,
 }
 
 impl Serialize for CompactionView<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Trigger {
-            #[serde(rename = "type")]
-            kind: &'static str,
-            value: u32,
-        }
-        #[derive(Serialize)]
-        struct Edit {
-            #[serde(rename = "type")]
-            kind: &'static str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            trigger: Option<Trigger>,
-        }
         #[derive(Serialize)]
         struct Compaction {
             #[serde(rename = "type")]
@@ -198,28 +184,11 @@ impl Serialize for CompactionView<'_> {
             #[serde(skip_serializing_if = "Option::is_none")]
             compact_threshold: Option<u32>,
         }
-        if self.family == Some(Protocol::AnthropicMessages) {
-            #[derive(Serialize)]
-            struct Context {
-                edits: [Edit; 1],
-            }
-            Context {
-                edits: [Edit {
-                    kind: "compact_20260112",
-                    trigger: self.control.threshold_tokens.map(|value| Trigger {
-                        kind: "input_tokens",
-                        value,
-                    }),
-                }],
-            }
-            .serialize(serializer)
-        } else {
-            [Compaction {
-                kind: "compaction",
-                compact_threshold: self.control.threshold_tokens,
-            }]
-            .serialize(serializer)
-        }
+        [Compaction {
+            kind: "compaction",
+            compact_threshold: self.control.threshold_tokens,
+        }]
+        .serialize(serializer)
     }
 }
 
@@ -363,14 +332,10 @@ impl Serialize for ParametersView<'_> {
             end_user_id,
             service_tier
         );
-        if let Some(control) = &p.compaction {
-            map.serialize_entry(
-                "context_management",
-                &CompactionView {
-                    control,
-                    family: self.family,
-                },
-            )?;
+        if self.family == Some(Protocol::OpenResponses)
+            && let Some(control) = &p.compaction
+        {
+            map.serialize_entry("context_management", &CompactionView { control })?;
         }
         if !p.native_tools.is_empty() {
             map.serialize_entry("native_tools", &p.native_tools)?;
@@ -710,7 +675,7 @@ fn projection(
             if let Some(control) = &p.compaction {
                 body.insert(
                     "context_management",
-                    Field::Compaction(CompactionView { control, family }),
+                    Field::Compaction(CompactionView { control }),
                 );
             }
             optional!(body, "generate", p.generate, Bool);
@@ -797,12 +762,6 @@ fn projection(
                 p.service_tier.map(|v| tier(v, family)),
                 String
             );
-            if let Some(control) = &p.compaction {
-                ingress.insert(
-                    "__anthropic_context_management",
-                    Field::Compaction(CompactionView { control, family }),
-                );
-            }
             if let Some(user) = &p.end_user_id {
                 ingress.insert(
                     "__anthropic_metadata",
@@ -1024,10 +983,7 @@ mod tests {
     fn installed_plugins_receive_native_compaction_controls() {
         let mut request = AiRequest::new("model", Vec::new());
         for threshold_tokens in [None, Some(2000)] {
-            request.parameters.compaction = Some(ir::CompactionControl {
-                threshold_tokens,
-                instructions: None,
-            });
+            request.parameters.compaction = Some(ir::CompactionControl { threshold_tokens });
             let responses = value(&request, "open-responses");
             let expected = if threshold_tokens.is_some() {
                 json!([{"type": "compaction", "compact_threshold": 2000}])
@@ -1039,22 +995,9 @@ mod tests {
                 responses["ext"]["OpenResponses"]["passthrough_body"]["context_management"],
                 expected
             );
-            let anthropic = value(&request, "anthropic");
-            let expected = if threshold_tokens.is_some() {
-                json!({"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 2000}}]})
-            } else {
-                json!({"edits": [{"type": "compact_20260112"}]})
-            };
-            assert_eq!(anthropic["parameters"]["context_management"], expected);
-            assert_eq!(
-                anthropic["meta"]["vendor"]["ingress"]["__anthropic_context_management"],
-                expected
-            );
-            for projected in [responses, anthropic] {
-                let mut decoded: AiRequest = serde_json::from_value(projected).unwrap();
-                decoded.normalize_parameters();
-                assert_eq!(decoded.parameters.compaction, request.parameters.compaction);
-            }
+            let mut decoded: AiRequest = serde_json::from_value(responses).unwrap();
+            decoded.normalize_parameters();
+            assert_eq!(decoded.parameters.compaction, request.parameters.compaction);
         }
     }
 
@@ -1098,7 +1041,6 @@ mod tests {
         p.truncation = Some(ir::Truncation::Auto);
         p.compaction = Some(ir::CompactionControl {
             threshold_tokens: Some(4096),
-            instructions: None,
         });
         p.metadata = Some([("key".into(), "value".into())].into());
         p.end_user_id = Some("user".into());

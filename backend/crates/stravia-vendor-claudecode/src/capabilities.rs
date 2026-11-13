@@ -14,11 +14,7 @@ use crate::thinking;
 pub(crate) const METADATA_KEY: &str = "anthropic_capabilities";
 
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-const CONTEXT_EDIT_KEYS: [&str; 3] = [
-    "clear_thinking_20251015",
-    "clear_tool_uses_20250919",
-    "compact_20260112",
-];
+const CONTEXT_EDIT_KEYS: [&str; 2] = ["clear_thinking_20251015", "clear_tool_uses_20250919"];
 
 /// 已知字段为 `None` 表示上游没有给出，调用方回退到静态规则。
 #[derive(Clone, Debug, Default, PartialEq)]

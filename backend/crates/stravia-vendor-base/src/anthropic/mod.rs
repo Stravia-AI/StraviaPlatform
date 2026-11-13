@@ -26,7 +26,6 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
 fn anthropic_descriptor() -> ProviderDescriptor {
     let capabilities = BTreeSet::from([
         Capability::Infer,
-        Capability::Compact,
         Capability::ModelDiscovery,
         Capability::ConfigValidation,
     ]);
@@ -96,10 +95,7 @@ pub(crate) fn execute(
     }
     match (channel, input) {
         (DEFAULT_CHANNEL, OperationInput::Infer { provider, request }) => {
-            infer(host, provider, request, Operation::Infer)
-        }
-        (DEFAULT_CHANNEL, OperationInput::Compact { provider, request }) => {
-            infer(host, provider, request, Operation::Compact)
+            infer(host, provider, request)
         }
         (DEFAULT_CHANNEL, OperationInput::Discover { provider, request }) => {
             discover(host, provider, request)
@@ -127,7 +123,6 @@ fn infer(
     host: &GuestHost,
     provider: ProviderSnapshot,
     mut request: stravia_runtime_contract::protocol::ir::AiRequest,
-    operation: Operation,
 ) -> Result<OperationOutput, PluginError> {
     let model = required_model(&provider)?;
     request.model = model.into();
@@ -160,9 +155,6 @@ fn infer(
         Some(_) => Some("summarized"),
         None => None,
     };
-    let compaction_control = (operation == Operation::Compact).then(|| {
-        stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(&mut request)
-    });
     let encoded = crate::parameters::encode(
         &provider,
         &ANTHROPIC_MESSAGES_2023_06_01.to_string(),
@@ -180,21 +172,12 @@ fn infer(
     let mut headers = common::header_pairs(&codec_headers)?;
 
     set_header(&mut headers, "content-type", "application/json".into());
-    // 原生压缩现在也强制流式；统一声明 SSE 并兼容 unary 代理。
     set_header(
         &mut headers,
         "accept",
         "text/event-stream, application/json".into(),
     );
     set_header(&mut headers, "anthropic-version", "2023-06-01".into());
-    if operation == Operation::Compact {
-        stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
-            &mut body,
-            compaction_control,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        crate::add_anthropic_compaction_beta(&mut headers);
-    }
     headers.remove("x-api-key");
     if let Some(api_key) = credential(&provider, "apiKey") {
         headers.append("x-api-key", api_key.as_bytes());
@@ -210,10 +193,6 @@ fn infer(
         },
         &crate::net_options(),
     )?;
-    if operation == Operation::Compact {
-        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
-            .map(OperationOutput::Compact);
-    }
     ensure_success(
         &response,
         "Anthropic inference",

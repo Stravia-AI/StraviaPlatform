@@ -72,22 +72,6 @@ pub async fn handler(
             );
         }
     };
-    // Native Anthropic on-demand compaction is typed IR: a trailing
-    // compaction_trigger marks the standalone request.
-    if let Err((param, message)) =
-        crate::proxy::ingress::open_responses::responses::classify_standalone_compaction(
-            &mut ctx,
-            &request,
-            ANTHROPIC_MESSAGES_2023_06_01,
-        )
-    {
-        return observation::reject(
-            observer,
-            "protocol",
-            "invalid_request",
-            crate::proxy::dispatcher::decode_error_response(format!("invalid {param}: {message}")),
-        );
-    }
     dispatch_pipeline(
         gw,
         observer,

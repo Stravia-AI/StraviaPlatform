@@ -16,14 +16,12 @@ use serde_json::{Map, Value, json};
 const LONG_CACHE_TTL: &str = "1h";
 
 /// 上游拒绝在这些块上携带 `cache_control`（生成的推理内容、回退边界、工具增删控制）。
-const UNCACHEABLE_BLOCK_TYPES: [&str; 6] = [
+const UNCACHEABLE_BLOCK_TYPES: [&str; 5] = [
     "thinking",
     "redacted_thinking",
     "fallback",
     "tool_addition",
     "tool_removal",
-    // 压缩块必须逐字节回放，附加 `cache_control` 会使上游拒绝其签名。
-    "compaction",
 ];
 
 fn breakpoint() -> Value {
@@ -243,7 +241,7 @@ mod tests {
 
         let (_, tail) = anchor_tail(&[json!({"role": "assistant", "content": [
             {"type": "tool_use", "id": "t", "name": "n", "input": {}},
-            {"type": "compaction", "content": "c", "signature": "s"}
+            {"type": "thinking", "thinking": "private"}
         ]})])
         .unwrap();
         assert!(marked(&tail["content"][0]) && !marked(&tail["content"][1]));

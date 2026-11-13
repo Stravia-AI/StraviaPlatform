@@ -181,7 +181,6 @@ const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([
         Capability::Infer,
-        Capability::Compact,
         Capability::AuthOauth,
         Capability::ModelDiscovery,
         Capability::Allowance,
@@ -287,12 +286,17 @@ pub fn descriptor() -> VendorDescriptor {
 }
 
 pub fn select_protocol(
-    _operation: Operation,
+    operation: Operation,
     channel: &str,
     provider: &ProviderSnapshot,
     _request: &AiRequest,
 ) -> Result<String, PluginError> {
     require_route(channel, provider)?;
+    if operation == Operation::Compact {
+        return Err(unsupported(
+            "Claude Code does not support native compaction",
+        ));
+    }
     Ok(ANTHROPIC_MESSAGES_2023_06_01.to_string())
 }
 
@@ -316,12 +320,7 @@ pub fn execute(
     }
     require_route(channel, input.provider())?;
     match input {
-        OperationInput::Infer { provider, request } => {
-            infer(host, &provider, request, Operation::Infer)
-        }
-        OperationInput::Compact { provider, request } => {
-            infer(host, &provider, request, Operation::Compact)
-        }
+        OperationInput::Infer { provider, request } => infer(host, &provider, request),
         OperationInput::Auth { provider, request } => {
             auth::execute(host, &provider, request).map(OperationOutput::Auth)
         }
@@ -359,7 +358,6 @@ fn infer(
     host: &GuestHost,
     provider: &ProviderSnapshot,
     mut request: AiRequest,
-    operation: Operation,
 ) -> Result<OperationOutput, PluginError> {
     request.model = required_model(provider)?.to_owned();
     // `max_tokens` 是 Anthropic Messages 的必填线上字段。先归一化参数，区分客户端
@@ -374,9 +372,6 @@ fn infer(
         .summary
         .as_ref()
         .map(thinking::summary_display);
-    let compaction_control = (operation == Operation::Compact).then(|| {
-        stravia_protocol_codec::codec::compaction::take_anthropic_compaction_control(&mut request)
-    });
     let mut encoded = common::encode_inference_request(&protocol, request)?;
     // 通用 Anthropic 编码器不输出 `thinking.display`（部分兼容上游不认该字段）；
     // 本插件的上游是 Anthropic 本身，将统一的摘要意图映射为官方展示控制。
@@ -409,16 +404,7 @@ fn infer(
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
     thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display);
-    let compact = operation == Operation::Compact;
-    if compact {
-        stravia_protocol_codec::codec::compaction::prepare_anthropic_compaction_body(
-            &mut encoded.body,
-            compaction_control,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-    }
-    let body =
-        request::prepare(encoded.body, &caps, auto_output_limit, compact).map_err(invalid)?;
+    let body = request::prepare(encoded.body, &caps, auto_output_limit).map_err(invalid)?;
     let session_id = fallback_session_id(provider);
     let scope = diagnostics_scope(provider, &session_id);
     let cell = stravia_vendor_sdk::state::open(
@@ -465,15 +451,8 @@ fn infer(
         "{}?beta=true",
         common::endpoint_url(&provider.base_url, &encoded.path)?
     );
-    let shaped = request::encode(
-        &body,
-        client_version,
-        &identity,
-        &plan.context,
-        &caps,
-        compact,
-    )
-    .map_err(invalid)?;
+    let shaped =
+        request::encode(&body, client_version, &identity, &plan.context, &caps).map_err(invalid)?;
     let tool_cell = tool_ledger::open()?;
     let tools_used = tool_ledger::seed(&tool_cell, &body)?;
     let headers = request::inference_headers(
@@ -489,10 +468,6 @@ fn infer(
         net_request("POST", url, headers, shaped.body),
         &net_options(),
     )?;
-    if compact {
-        return common::decode_anthropic_compaction_preserving_upstream_errors(host, response)
-            .map(OperationOutput::Compact);
-    }
     let status = response.status()?;
     let response_headers = response.headers()?;
     if !(200..300).contains(&status) {
@@ -775,7 +750,18 @@ mod tests {
 
     #[test]
     fn descriptor_passes_sdk_validation() {
-        descriptor().validate().expect("valid descriptor");
+        let descriptor = descriptor();
+        descriptor.validate().expect("valid descriptor");
+        assert!(
+            !descriptor.providers[0]
+                .capabilities
+                .contains(&Capability::Compact)
+        );
+        assert!(
+            !descriptor.providers[0].channels[0]
+                .capabilities
+                .contains(&Capability::Compact)
+        );
     }
 
     #[test]
@@ -823,7 +809,6 @@ mod tests {
             }),
             &capabilities::ModelCapabilities::default(),
             false,
-            false,
         ).unwrap();
         let plan = SessionStore::from_bytes(None)
             .unwrap()
@@ -839,7 +824,6 @@ mod tests {
             },
             &plan.context,
             &capabilities::ModelCapabilities::default(),
-            false,
         )
         .unwrap();
         let body: Value = serde_json::from_slice(&shaped.body).unwrap();

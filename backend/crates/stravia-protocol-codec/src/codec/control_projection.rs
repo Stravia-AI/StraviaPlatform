@@ -106,7 +106,14 @@ fn project(value: &mut Value, shape: &str) {
         "search_filters" => &[("allowed_domains", "")],
         "custom_format" => &[("type", ""), ("syntax", ""), ("definition", "")],
         "context" => &[("edits", "edit")],
-        "edit" => &[("type", ""), ("trigger", "threshold")],
+        "edit" => &[
+            ("type", ""),
+            ("trigger", "threshold"),
+            ("keep", "threshold"),
+            ("clear_at_least", "threshold"),
+            ("clear_tool_inputs", ""),
+            ("exclude_tools", ""),
+        ],
         "threshold" => &[("type", ""), ("value", "")],
         "anthropic_tool" => &[
             ("type", ""),

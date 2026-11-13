@@ -1735,43 +1735,27 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
     let scenarios = [
         (
             "signature-only+tool",
-            vec![empty_thinking.clone(), tool_use.clone()],
+            vec![empty_thinking, tool_use.clone()],
             "tool_use",
-            false,
-        ),
-        (
-            "compaction+signature-only+tool",
-            vec![empty_thinking.clone(), tool_use.clone()],
-            "tool_use",
-            true,
-        ),
-        (
-            "text+signature-only+tool",
-            vec![text.clone(), empty_thinking, tool_use.clone()],
-            "tool_use",
-            true,
         ),
         (
             "thinking+redacted+tool",
             vec![thinking.clone(), redacted.clone(), tool_use.clone()],
             "tool_use",
-            false,
         ),
         (
             "redacted+thinking+tool",
             vec![redacted.clone(), thinking.clone(), tool_use.clone()],
             "tool_use",
-            false,
         ),
         (
             "redacted+text",
             vec![redacted.clone(), text.clone()],
             "end_turn",
-            false,
         ),
     ];
 
-    for (name, content, stop_reason, compacted) in scenarios {
+    for (name, content, stop_reason) in scenarios {
         for (stream, replay) in [
             (true, "echo"),
             (false, "echo"),
@@ -1811,12 +1795,7 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
             let router = crate::proxy::server::create_router(gateway.clone());
             let tools = json!([{"type": "function", "name": "read",
                 "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}]);
-            let compaction = json!({"type": "compaction", "content": "Earlier context", "signature": "SIG-COMPACTION"});
             let mut input = Vec::new();
-            if compacted {
-                input.push(json!({"type": "compaction", "encrypted_content":
-                    stravia_protocol_codec::codec::compaction::seal_anthropic(&compaction)}));
-            }
             input.push(json!({"role": "user", "content": "question"}));
             for turn in 0..2 {
                 let response = router
@@ -1970,13 +1949,6 @@ async fn anthropic_redacted_thinking_replays_through_responses_downstream() {
             }
             let requests = requests.lock().clone();
             assert_eq!(requests.len(), 2, "{name} stream={stream}");
-            if compacted {
-                assert_eq!(
-                    requests[1]["messages"][0]["content"],
-                    json!([compaction]),
-                    "{name}: native compaction must remain first and unchanged"
-                );
-            }
             let assistant = requests[1]["messages"]
                 .as_array()
                 .unwrap()

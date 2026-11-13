@@ -145,9 +145,7 @@ pub(crate) struct ShapedRequest {
 ///   metadata、diagnostics 和缓存断点由 [`encode`] 重建）；
 /// - `system` 归一为客户端自有的块数组，剔除过期计费头和重复的身份块；
 /// - 思考、effort、采样、prefill、上下文编辑按型号能力约束；
-/// - 自定义工具声明、选择、排除列表及历史调用／引用统一加一层 `_` 前缀；
-/// - `compact` 为真时保留 `compaction` 控制；与其他推理一样强制流式，原生压缩的
-///   完整签名块和 `usage.iterations` 由 SSE 信封一次性交付。
+/// - 自定义工具声明、选择、排除列表及历史调用／引用统一加一层 `_` 前缀。
 ///
 /// `auto_output_limit` 表示 `max_tokens` 来自发现数据或编码器的必填回退，此时思考
 /// 预算需让位于该上限。工具 ID、参数、schema 与 `tool_result.is_error` 保持原值。
@@ -155,28 +153,13 @@ pub(crate) fn prepare(
     mut body: Value,
     caps: &ModelCapabilities,
     auto_output_limit: bool,
-    compact: bool,
 ) -> Result<Value, String> {
     let object = body
         .as_object_mut()
         .ok_or("Anthropic request body must be a JSON object")?;
-    // `compaction` 不在 Claude Code 的闭合字段集内；字段限制期间暂存，随后原样放回。
-    let compaction = if compact {
-        Some(
-            object
-                .remove("compaction")
-                .ok_or("compaction request is missing its compaction control")?,
-        )
-    } else {
-        None
-    };
-    // 与 OMP 的原生压缩一致走流式，避免非流式请求的长输出时限。
     object.insert("stream".into(), Value::Bool(true));
     restrict_to_claude_code_fields(object);
-    if let Some(compaction) = compaction {
-        object.insert("compaction".into(), compaction);
-    }
-    // CLI 的自动策略先于 caller extra body；显式策略整体优先，原生压缩不混入编辑。
+    // CLI 的自动策略先于 caller extra body；显式策略整体优先。
     if !object.contains_key("context_management")
         && caps.context_management != Some(false)
         && caps.thinking != Some(false)
@@ -195,7 +178,6 @@ pub(crate) fn prepare(
             .and_then(|config| config.get("effort"))
             .and_then(Value::as_str)
             != Some("none")
-        && !carries_compaction(object)
     {
         object.insert(
             "context_management".into(),
@@ -236,15 +218,13 @@ pub(crate) fn prepare(
 
 /// 把 [`prepare`] 产出的完整请求序列化为最终线上字节（已写入 `cch`）。
 ///
-/// 全量发送历史和工具；普通请求携带上一次消息 ID 的诊断信息，压缩
-/// 不携带诊断信息。缓存断点只复制承载它的那一条消息。
+/// 全量发送历史和工具，携带上一次消息 ID 的诊断信息。缓存断点只复制承载它的那一条消息。
 pub(crate) fn encode(
     body: &Value,
     client_version: &str,
     identity: &AccountIdentity<'_>,
     context: &WireContext,
     caps: &ModelCapabilities,
-    suppress_diagnostics: bool,
 ) -> Result<ShapedRequest, String> {
     let object = body
         .as_object()
@@ -292,14 +272,12 @@ pub(crate) fn encode(
         "metadata",
         Slot::Owned(json!({ "user_id": metadata_user_id(&context.session_id, identity) })),
     ));
-    if !suppress_diagnostics && !carries_compaction(object) {
-        entries.push((
-            "diagnostics",
-            Slot::Owned(json!({
-                "previous_message_id": context.previous_message_id.as_deref(),
-            })),
-        ));
-    }
+    entries.push((
+        "diagnostics",
+        Slot::Owned(json!({
+            "previous_message_id": context.previous_message_id.as_deref(),
+        })),
+    ));
 
     let betas = beta_header(object, caps);
     let mut bytes = Vec::new();
@@ -441,9 +419,6 @@ fn restrict_to_claude_code_fields(object: &mut Map<String, Value>) {
                         "keep",
                         "trigger",
                     ],
-                    Some("compact_20260112") => {
-                        &["type", "instructions", "pause_after_compaction", "trigger"]
-                    }
                     _ => return false,
                 };
                 edit.retain(|key, _| fields.contains(&key.as_str()));
@@ -932,37 +907,12 @@ fn beta_header(object: &Map<String, Value>, caps: &ModelCapabilities) -> String 
                 "server-side-fallback-2026-06-01"
             },
         ),
-        // 压缩请求参数与回放的压缩块都要求该 beta，缺失时上游把 `compaction`
-        // 当作未知内容块类型并以 400 拒绝。
-        (
-            carries_compaction(object),
-            stravia_protocol_codec::codec::compaction::ANTHROPIC_COMPACTION_BETA,
-        ),
     ] {
         if present && !betas.contains(&beta) {
             betas.push(beta);
         }
     }
     betas.join(",")
-}
-
-pub(crate) fn carries_compaction(object: &Map<String, Value>) -> bool {
-    object.contains_key("compaction")
-        || object
-            .get("messages")
-            .and_then(Value::as_array)
-            .is_some_and(|messages| {
-                messages.iter().any(|message| {
-                    message
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .is_some_and(|blocks| {
-                            blocks.iter().any(|block| {
-                                block.get("type").and_then(Value::as_str) == Some("compaction")
-                            })
-                        })
-                })
-            })
 }
 
 /// 顶层字段的来源：借用 prepare 的结果、本函数新建的小块，或只在尾部消息上带
@@ -1254,7 +1204,7 @@ mod tests {
     }
 
     fn prep_with(body: Value, caps: &ModelCapabilities, auto: bool) -> Value {
-        prepare(body, caps, auto, false).expect("request prepares")
+        prepare(body, caps, auto).expect("request prepares")
     }
 
     fn prep(body: Value) -> Value {
@@ -1268,7 +1218,6 @@ mod tests {
             &identity(),
             context,
             &ModelCapabilities::default(),
-            false,
         )
         .expect("request encodes");
         (
@@ -1361,7 +1310,6 @@ mod tests {
         let error = prepare(
             json!({"model": "m", "system": 7, "messages": []}),
             &ModelCapabilities::default(),
-            false,
             false,
         )
         .unwrap_err();
@@ -1476,25 +1424,6 @@ mod tests {
     fn no_previous_message_still_sends_diagnostics() {
         let (body, _) = wire(&prep(user_turns()), &context());
         assert_eq!(body["diagnostics"], json!({"previous_message_id": null}));
-    }
-
-    #[test]
-    fn recovery_suppresses_diagnostics_without_slicing() {
-        let prepared = prep(user_turns());
-        let shaped = encode(
-            &prepared,
-            DEFAULT_CLIENT_VERSION,
-            &identity(),
-            &prior_context(),
-            &ModelCapabilities::default(),
-            true,
-        )
-        .unwrap();
-        let body: Value = serde_json::from_slice(&shaped.body).unwrap();
-        assert!(body.get("diagnostics").is_none());
-        assert!(body.get("thread").is_none());
-        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
-        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -1914,78 +1843,6 @@ mod tests {
             bare["system"][1]["cache_control"],
             json!({"type": "ephemeral", "ttl": "1h"}),
             "the identity block is the only system anchor without client system"
-        );
-    }
-
-    #[test]
-    fn compaction_history_cannot_be_sliced_or_threaded() {
-        let prepared = prep(json!({
-            "model": "claude-sonnet-4-5",
-            "max_tokens": 1024,
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "compaction", "content": "Summary", "signature": "sig-1"}
-                ]},
-                {"role": "user", "content": "What was the codeword?"}
-            ]
-        }));
-        // 即使持久化计划认为可以续接，压缩块回放也必须全量、无线程控制。
-        let (body, shaped) = wire(&prepared, &prior_context());
-        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
-        assert_eq!(body["messages"][0]["content"][0]["signature"], "sig-1");
-        assert!(body.get("thread").is_none() && body.get("diagnostics").is_none());
-        assert!(!betas_of(&shaped).contains(&"message-threads-2026-08-12"));
-        assert!(betas_of(&shaped).contains(&"compact-2026-09-04"));
-    }
-
-    #[test]
-    fn replayed_compaction_block_declares_its_beta_and_stays_byte_faithful() {
-        let block = json!({"type": "compaction", "content": "Summary", "signature": "sig-1"});
-        let (body, shaped) = created(json!({
-            "model": "claude-sonnet-4-5",
-            "max_tokens": 1024,
-            "messages": [
-                {"role": "assistant", "content": [block.clone()]},
-                {"role": "user", "content": "What was the codeword?"}
-            ]
-        }));
-        assert!(
-            betas_of(&shaped).contains(&"compact-2026-09-04"),
-            "{}",
-            shaped.betas
-        );
-        // 压缩块须逐字节回放：缓存断点或任何附加字段都会使上游拒绝签名。
-        assert_eq!(body["messages"][0]["content"][0], block);
-        assert!(
-            body.get("thread").is_none() && body.get("diagnostics").is_none(),
-            "signed compaction replay cannot be combined with a message thread"
-        );
-        assert!(!betas_of(&shaped).contains(&"message-threads-2026-08-12"));
-    }
-
-    #[test]
-    fn inference_never_gains_the_compaction_beta_or_field() {
-        let (body, shaped) = created(json!({
-            "model": "claude-sonnet-4-5",
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": "hi"}],
-            "compaction": {"type": "summarize"}
-        }));
-        assert!(body.get("compaction").is_none());
-        assert_eq!(body["stream"], json!(true));
-        assert!(!betas_of(&shaped).contains(&"compact-2026-09-04"));
-    }
-
-    #[test]
-    fn compaction_without_a_control_is_rejected_instead_of_sent_as_inference() {
-        assert!(
-            prepare(
-                json!({"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}),
-                &ModelCapabilities::default(),
-                false,
-                true,
-            )
-            .is_err()
         );
     }
 

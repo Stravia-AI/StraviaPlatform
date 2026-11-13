@@ -1129,7 +1129,6 @@ fn replay_drops_only_empty_thinking_and_retains_tools_and_hard_fields() {
     };
     blocks.push(ContentBlock::Compaction {
         encrypted_content: "compaction-secret".into(),
-        summary: None,
     });
     assert!(!super::prepare_thinking_replay(&mut request, |_, _| false));
     let body = pair.encode_request(request).unwrap().body;
@@ -1557,99 +1556,58 @@ fn native_compaction_state_is_dropped_from_requests_responses_and_streams() {
 }
 
 #[test]
-fn anthropic_compaction_summary_survives_as_text_on_targets_without_the_block() {
-    let anthropic_history = json!({
-        "model": "claude",
-        "max_tokens": 1024,
-        "messages": [
-            {"role": "assistant", "content": [{"type": "compaction", "content": "Refactored the parser", "signature": "sig-secret"}]},
-            {"role": "user", "content": "keep going"}
-        ]
-    });
-    for egress in [
-        OPEN_RESPONSES_2026_04_24,
-        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-    ] {
-        let pair = ProtocolTransform::global()
-            .bind(ANTHROPIC_MESSAGES_2023_06_01, egress)
-            .unwrap();
-        let request = pair.decode_request(anthropic_history.clone()).unwrap();
-        let text = pair.encode_request(request).unwrap().body.to_string();
-        assert!(text.contains("Refactored the parser"), "{egress}: {text}");
-        assert!(text.contains("keep going"), "{egress}: {text}");
-        assert!(!text.contains("sig-secret"), "{egress}: {text}");
-        assert!(!text.contains("compaction"), "{egress}: {text}");
-    }
-}
-
-#[test]
-fn anthropic_target_replays_an_anthropic_state_a_responses_client_carried() {
-    let state = json!({"type": "compaction", "id": crate::codec::compaction::anthropic_state_id("sig-1"),
-    "encrypted_content": crate::codec::compaction::seal_anthropic(&json!({
-        "type": "compaction", "content": "Refactored the parser", "signature": "sig-1",
-    }))});
-    let responses_history = json!({
-        "model": "claude",
-        "input": [state, {"role": "user", "content": "keep going"}]
-    });
-    let to_anthropic = ProtocolTransform::global()
-        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+fn anthropic_compaction_control_is_rejected() {
+    let pair = ProtocolTransform::global()
+        .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
         .unwrap();
-    let request = to_anthropic
-        .decode_request(responses_history.clone())
-        .unwrap();
-    let body = to_anthropic.encode_request(request).unwrap().body;
-    let block = &body["messages"][0]["content"][0];
-    assert_eq!(block["type"], "compaction");
-    assert_eq!(block["signature"], "sig-1");
-    assert_eq!(block["content"], "Refactored the parser");
-
-    let to_chat = ProtocolTransform::global()
-        .bind(
-            OPEN_RESPONSES_2026_04_24,
-            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
-        )
-        .unwrap();
-    let request = to_chat.decode_request(responses_history).unwrap();
-    let text = to_chat.encode_request(request).unwrap().body.to_string();
     assert!(
-        text.contains("Refactored the parser") && !text.contains("sig-1"),
-        "{text}"
+        pair.decode_request(
+            json!({"model": "claude", "messages": [], "compaction": {"type": "summarize"}})
+        )
+        .is_err()
     );
 }
 
 #[test]
-fn foreign_target_downgrade_applies_only_when_every_state_is_readable() {
+fn anthropic_target_rejects_responses_state() {
+    let pair = ProtocolTransform::global()
+        .bind(OPEN_RESPONSES_2026_04_24, ANTHROPIC_MESSAGES_2023_06_01)
+        .unwrap();
+    let request = pair.decode_request(json!({"model": "codex", "input": [{"type": "compaction", "encrypted_content": "cipher"}]})).unwrap();
+    assert!(pair.encode_request(request).is_err());
+}
+
+#[test]
+fn anthropic_delivery_rejects_compaction_state() {
+    let pair = ProtocolTransform::global()
+        .bind(ANTHROPIC_MESSAGES_2023_06_01, OPEN_RESPONSES_2026_04_24)
+        .unwrap();
+    let response = pair
+        .decode_response(dated_response(
+            "r",
+            "completed",
+            json!([{"type": "compaction", "encrypted_content": "cipher"}]),
+            Value::Null,
+        ))
+        .unwrap();
+    assert!(pair.encode_response(&response).is_err());
+    let (_, mut stream) = pair.stream().unwrap().into_parts();
+    assert!(
+        stream
+            .encode_deltas(&[AiStreamDelta::ItemDone {
+                index: 0,
+                item: response.items[0].clone()
+            }])
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_compaction_envelope_is_rejected() {
     let pair = ProtocolTransform::global()
         .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
         .unwrap();
-    let anthropic_state = json!({"type": "compaction", "id": crate::codec::compaction::anthropic_state_id("sig-1"),
-    "encrypted_content": crate::codec::compaction::seal_anthropic(&json!({
-        "type": "compaction", "content": "Summary", "signature": "sig-1",
-    }))});
-    let responses_state =
-        json!({"type": "compaction", "id": "cmp_r", "encrypted_content": "opaque"});
-
-    let mut mixed = pair
-        .decode_request(json!({"model": "m", "input": [anthropic_state.clone(), responses_state, {"role": "user", "content": "hi"}]}))
-        .unwrap();
-    assert!(!super::downgrade_foreign_compaction(&mut mixed));
-    assert_eq!(
-        mixed
-            .items
-            .iter()
-            .filter(|item| item.is_compaction())
-            .count(),
-        2
-    );
-
-    let mut readable = pair
-        .decode_request(
-            json!({"model": "m", "input": [anthropic_state, {"role": "user", "content": "hi"}]}),
-        )
-        .unwrap();
-    assert!(super::downgrade_foreign_compaction(&mut readable));
-    assert!(readable.items.iter().all(|item| !item.is_compaction()));
+    assert!(pair.decode_request(json!({"model": "codex", "input": [{"type": "compaction", "encrypted_content": "stravia.compaction.v1.abc"}]})).is_err());
 }
 
 #[test]
