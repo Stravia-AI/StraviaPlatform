@@ -225,6 +225,7 @@ tasks:
       - backend/**/*.rs
       - backend/**/*.toml
       - backend/**/*.json
+      - backend/**/assets/*.pub
       - backend/**/*.wit
       - backend/**/migrations/**/*.sql
       - backend/apps/stravia-desktop/icons/**/*
@@ -285,7 +286,7 @@ tasks:
     deps: [install:web, build:vendors]
     dir: "{{.DESKTOP_DIR}}"
     cmds:
-      - bunx --bun @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build {{if .BUNDLES}}--bundles {{.BUNDLES}}{{end}} {{if .RUST_TARGET}}--target {{.RUST_TARGET}}{{end}} -- --locked
+      - bunx --bun @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build {{if .CONFIG}}--config {{.CONFIG}}{{end}} {{if .BUNDLES}}--bundles {{.BUNDLES}}{{end}} {{if .RUST_TARGET}}--target {{.RUST_TARGET}}{{end}} -- --locked
 
   build:desktop:installer:
     desc: Build the Windows NSIS desktop installer for production.

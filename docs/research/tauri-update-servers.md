@@ -64,7 +64,7 @@ Endpoint 可以使用 `{{current_version}}`、`{{target}}`、`{{arch}}`。有更
 - Core 的 `updates.rs` 固定查询 `Stravia-AI/StraviaPlatform/releases`，按版本与 prerelease 规则选择 Release，再读取名为 `stravia-updater.json` 的 asset。
 - 清单生成器为四个平台写入精确版本的 GitHub asset URL、内联签名和 `release_notes_url`。
 - Core 校验清单版本与选中 Release 一致、Release notes URL 一致、四个平台完整且没有额外平台，并要求 HTTPS 与非空签名。
-- Desktop 从 `STRAVIA_UPDATER_PUBLIC_KEY` 编译期注入公钥，在运行时设置选中清单的 endpoint；不是依赖 `tauri.conf.json` 中空的 `pubkey`。
+- Desktop 使用仓库 `tauri.conf.json` 中内置的 `plugins.updater.pubkey`，在运行时设置选中清单的 endpoint；不再依赖编译期环境变量注入公钥（2026-11-14 修订，构建与签名流程见 [发布说明](../releasing.md)）。
 - Desktop 再确认 updater 返回的版本与用户选中版本一致，然后执行带验签的下载与安装流程。
 
 因此，**换 SaaS 不是仅修改 `plugins.updater.endpoints`。** 当前发现层与清单校验契约也需要一起迁移；通用动态响应只有单个平台的 `url`/`signature`，不能不改 Core 就替换现有四平台清单。[R1][R2]

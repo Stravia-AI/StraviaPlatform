@@ -157,15 +157,9 @@ impl PluginMarketplace {
         let id = OFFICIAL_ID.to_string();
         let existing = self.store.get_source(&id).await.map_err(storage_error)?;
         let expected = existing.clone();
-        let key = option_env!("STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY")
-            .unwrap_or("")
-            .trim();
-        let fingerprint = if key.is_empty() {
-            String::new()
-        } else {
-            distribution::public_key_fingerprint(key)
-                .map_err(|e| MarketError::new("signature_invalid", e.to_string()))?
-        };
+        let key = include_str!("../../../assets/stravia-plugin-catalog.pub").trim();
+        let fingerprint = distribution::public_key_fingerprint(key)
+            .map_err(|e| MarketError::new("signature_invalid", e.to_string()))?;
         let mut source = existing.unwrap_or(PluginSourceSummary {
             id,
             repository_id: OFFICIAL_ID,
@@ -184,11 +178,10 @@ impl PluginMarketplace {
         });
         if expected.is_some() && source.fingerprint != fingerprint {
             source.trust_revision += 1;
-            if !fingerprint.is_empty()
-                && source
-                    .error
-                    .as_ref()
-                    .is_some_and(|error| error.code == "key_changed")
+            if source
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "key_changed")
             {
                 source.error = None;
             }
@@ -196,13 +189,7 @@ impl PluginMarketplace {
         source.official = true;
         source.public_key = key.to_string();
         source.fingerprint = fingerprint;
-        if key.is_empty() {
-            source.enabled = false;
-            source.error = Some(MarketError::new(
-                "source_not_configured",
-                "Official plugin catalog public key is not configured",
-            ));
-        } else if source
+        if source
             .error
             .as_ref()
             .is_some_and(|e| e.code == "source_not_configured")

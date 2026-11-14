@@ -46,6 +46,12 @@ let
       version = "0.4.0"
       source = "registry+https://github.com/rust-lang/crates.io-index"
       checksum = "5b09c027c4580a73643571953aa662429d8dab848aac6c45425f3f82b4a8eaa5"
+
+      [[package]]
+      name = "TinyUFO"
+      version = "0.9.0"
+      source = "registry+https://github.com/rust-lang/crates.io-index"
+      checksum = "ec216270884504fd1df6bd4fb1cbf5086813883f1de411c4ed0b1df9a791b27b"
     '';
   };
 
@@ -216,8 +222,8 @@ stdenv.mkDerivation {
     mkdir -p "$CARGO_HOME" frontend/stravia-webui/dist
     cp -r ${webui}/. frontend/stravia-webui/dist/
     cargo patch-crate --force
-    cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors
-    cargo build --locked --offline --release -p stravia-server --bin stravia-server
+    cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors -- --all
+    cargo build --locked --offline --release -p stravia-server --bin stravia-server --features bundled-vendors
     runHook postBuild
   '';
   installPhase = ''
@@ -227,7 +233,7 @@ stdenv.mkDerivation {
     runHook postInstall
   '';
   meta = {
-    description = "Stravia Server with embedded production WebUI and base Wasm vendor";
+    description = "Stravia Server with embedded production WebUI and official Wasm vendors";
     homepage = "https://github.com/Stravia-AI/StraviaPlatform";
     license = lib.licenses.agpl3Only;
     mainProgram = "stravia-server";

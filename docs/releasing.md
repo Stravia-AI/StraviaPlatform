@@ -28,7 +28,10 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 - `TAURI_SIGNING_PRIVATE_KEY`：私钥文件内容。
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：私钥密码；发布流程不接受空值。
-- `STRAVIA_UPDATER_PUBLIC_KEY`：对应公钥文件的完整内容、以 `RW` 开头的 key payload，或公钥文件的 base64 编码；workflow 会规范化为 Tauri 所需的 base64 编码 Minisign 公钥文件。公钥不是秘密，但以 secret 注入可让 workflow 在构建前统一检查配置完整性。
+
+对应公钥以 Tauri 所需的 base64 编码 Minisign 公钥文本固定在 `backend/apps/stravia-desktop/tauri.conf.json` 的 `plugins.updater.pubkey`，打包与运行时验签共用这一来源，不再从环境变量或 Actions secret 注入。当前公钥取自 [v0.7.0 的已发布 Desktop 程序](https://github.com/Stravia-AI/StraviaPlatform/releases/download/v0.7.0/stravia-desktop-v0.7.0-darwin-aarch64.app.tar.gz)，并已核对同版更新归档的签名；不得用临时生成的密钥替换。
+
+本地 `task build:desktop` 仍使用 release 优化，但默认不生成需要生产私钥的 updater 产物；Linux 可指定 `BUNDLES=deb` 或 `BUNDLES=appimage`，Windows 可使用 `task build:desktop:installer`。正式发布必须使用 `task build:desktop CONFIG=tauri.release.conf.json`（按平台指定 `BUNDLES`），显式开启更新产物及签名；Release 工作流已使用此覆盖配置。`.github/scripts/configure_updater_signing.py` 只检查私钥、密码及仓库公钥，不重写源码配置。两种构建的更新安装都强制验签，区别仅在于是否生成可发布的签名更新包。
 
 至少保留一份与 GitHub 分离的离线加密私钥备份，并把密码存放在独立的受控凭据系统中。记录备份责任人、创建日期和恢复演练日期；不得把私钥、密码或其未脱敏命令输出写入仓库、日志、Actions artifact 或 Release。
 
@@ -40,11 +43,12 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 | 类型 | 名称 | 内容 |
 | --- | --- | --- |
-| Repository variable | `STRAVIA_PLUGIN_CATALOG_PUBLIC_KEY` | 完整 Minisign 公钥文本；构建时内嵌 Server/Desktop，并作为 Release 的 `stravia-plugin-catalog.pub` |
-| Secret | `STRAVIA_PLUGIN_CATALOG_SIGNING_KEY` | 与该公钥配对的加密 Minisign 私钥文本，仅用于签名步骤的临时文件 |
+| Secret | `STRAVIA_PLUGIN_CATALOG_SIGNING_KEY` | 与仓库公钥配对的加密 Minisign 私钥文本，仅用于签名步骤的临时文件 |
 | Secret | `STRAVIA_PLUGIN_CATALOG_SIGNING_PASSWORD` | 私钥的解密密码 |
 
-缺少配置或签名不能由固定公钥验证时，Release 工作流失败。Docker 构建只接收公钥 build arg，私钥和密码不进入应用或镜像。未配置公钥的开发构建停用官方源并显示 `source_not_configured`，不自动创建替代信任根。
+官方公钥保存在 `backend/crates/stravia-core/assets/stravia-plugin-catalog.pub`，来自 [v0.7.0 的公开公钥资产](https://github.com/Stravia-AI/StraviaPlatform/releases/download/v0.7.0/stravia-plugin-catalog.pub)，并已核对同版目录签名。Core 在 debug/release 构建中直接内嵌该文件；Release 发布同一文件，Docker 随源码构建，不再需要公钥环境变量、Repository variable 或 build arg。此前因缺少公钥停用的官方来源会在下次启动恢复，管理员主动禁用的来源保持禁用。
+
+缺少签名私钥、密码或签名不能由仓库固定公钥验证时，Release 工作流仍然失败。私钥和密码不进入应用或镜像；轮换官方公钥必须修改仓库并随宿主更新发布，不自动创建替代信任根。
 
 第三方使用同一 `stravia-tools plugin-catalog` 命令，不必复制官方工作流。准备 JSON 数组作为输入；以下为格式示例，路径、版本和展示名称必须替换为最终组件 descriptor 的真实值：
 

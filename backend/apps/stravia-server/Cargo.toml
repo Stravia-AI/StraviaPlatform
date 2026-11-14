@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = ["embed-webui"]
 embed-webui = ["dep:rust-embed"]
+bundled-vendors = ["stravia-core/bundled-vendors"]
 test-harness = ["dep:reqwest", "stravia-core/test-support"]
 
 [[bin]]

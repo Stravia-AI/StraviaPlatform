@@ -222,9 +222,6 @@ async fn download_verified_update(
     version: &str,
     manifest_url: &str,
 ) -> Result<(Update, Vec<u8>, u64, Option<u64>), String> {
-    let public_key = option_env!("STRAVIA_UPDATER_PUBLIC_KEY")
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "This Desktop build has no embedded updater public key".to_string())?;
     let endpoint = url::Url::parse(manifest_url).map_err(|error| error.to_string())?;
     if endpoint.scheme() != "https" {
         return Err("Updater manifests must use HTTPS".to_string());
@@ -232,7 +229,6 @@ async fn download_verified_update(
 
     let mut builder = app
         .updater_builder()
-        .pubkey(public_key)
         .endpoints(vec![endpoint])
         .map_err(|error| error.to_string())?
         .timeout(Duration::from_secs(300));

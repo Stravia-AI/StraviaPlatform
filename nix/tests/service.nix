@@ -78,7 +78,14 @@ let
     assert request("GET", "/api/v1/status")[0] == 200
     status, vendors = request("GET", "/api/v1/vendor-plugins")
     assert status == 200, vendors
-    assert any(v["vendor_id"] == "base" and v["status"] == "ready" for v in vendors["data"]), vendors
+    expected_vendors = {
+        "base", "openai-codex", "xai-grok", "command-code", "devin",
+        "opencode-free", "claude-code", "antigravity",
+    }
+    bundled = [v for v in vendors["data"] if v["vendor_id"] in expected_vendors]
+    assert len(bundled) == len(expected_vendors), vendors
+    assert {v["vendor_id"] for v in bundled} == expected_vendors, vendors
+    assert all(v["source"] == "builtin" and v["status"] == "ready" for v in bundled), vendors
   '';
   common = { ... }: {
     imports = [ (import ../nixos-module.nix { inherit self; }) ];

@@ -237,7 +237,11 @@ PostgreSQL 16 通过 `devenv up postgres` 启动，只监听本地 Unix socket�
 
 ### Nix Server 与 NixOS 服务
 
-根 `flake.nix` 只打包 Linux Server，提供 `x86_64-linux`、`aarch64-linux` 的 `packages.<system>.stravia-server` 和同一包的 `default`。生产 WebUI、i18n 和基础 Wasm Vendor 均从同次源码生成并嵌入，不读取工作区已有的 `dist`、`node_modules` 或 `target`。不提供 Desktop、开发 shell、Home Manager 或 overlay；上面的 devenv 工作流保持独立。
+根 `flake.nix` 只打包 Linux Server，提供 `x86_64-linux`、`aarch64-linux` 的 `packages.<system>.stravia-server` 和同一包的 `default`。生产 WebUI、i18n 和全部随包官方 Wasm Vendor 均从同次源码生成并嵌入，不读取工作区已有的 `dist`、`node_modules` 或 `target`。默认非 Nix 包仍只内嵌 `base`。不提供 Desktop、开发 shell、Home Manager 或 overlay；上面的 devenv 工作流保持独立。
+
+Nix Server 在首次设置完成和已有实例启动时自动同步内嵌官方插件，升级 Nix 包后重启服务即可使用随包更新，无需额外的导入 hook 或配置。已安装且可用的组件摘要相同则不重复安装，摘要变化即使版本相同也会更新；手动导入或从市场安装的覆盖版本不会被随包版本替换，也不会自动降级。非 `base` 插件的数据不兼容更新会保留现有版本和数据并告警；从随包清单删除的条目不会自动卸载。仍在包内的插件若从管理页面卸载，下次启动仍会尝试重新安装，并遵守上述数据兼容保护。市场插件的下载和安装规则不变。
+
+全量内嵌会增加二进制体积与首次组件准入成本，继续复用实例内的 Wasmtime 编译镜像和准入缓存。一次网络隔离的 `x86_64-linux` Nix 包冒烟使用 SQLite、一个管理员、零连接和八个内嵌插件：首次启动、完成设置并查询插件共 6.84 秒，重启到插件查询成功 4.38 秒，Server 峰值 RSS 958.9 MiB。这是该运行环境的功能验证观测，不是其他机器、数据规模或架构的容量承诺。
 
 需启用 Nix 的 `nix-command` 与 `flakes` 特性，无需安装 devenv。从 Git checkout 的仓库根目录运行：
 
