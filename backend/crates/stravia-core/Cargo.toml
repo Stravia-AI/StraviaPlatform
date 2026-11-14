@@ -10,6 +10,7 @@ description = "Core library for Stravia Agent infra — model access, tool execu
 workspace = true
 
 [features]
+bundled-vendors = []
 test-support = ["sqlx/sqlite-deserialize"]
 
 [dependencies]

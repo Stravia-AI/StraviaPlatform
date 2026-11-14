@@ -31,18 +31,29 @@ fn main() -> anyhow::Result<()> {
         .ancestors()
         .nth(3)
         .context("Core is outside the workspace layout")?;
-    let directory = root.join("target/vendor-plugins");
+    let bundle_all = cfg!(feature = "bundled-vendors");
+    let directory = root.join(if bundle_all {
+        "target/vendor-plugins-all"
+    } else {
+        "target/vendor-plugins"
+    });
     let manifest = directory.join("manifest.json");
     println!("cargo:rerun-if-changed={}", manifest.display());
-    let records: Vec<ComponentRecord> = serde_json::from_slice(&fs::read(&manifest).context(
-        "builtin components are missing; run `task build:vendors` before invoking Cargo directly",
-    )?)?;
+    let records: Vec<ComponentRecord> =
+        serde_json::from_slice(&fs::read(&manifest).with_context(|| {
+            let task = if bundle_all {
+                "task build:vendors:all"
+            } else {
+                "task build:vendors"
+            };
+            format!("builtin components are missing; run `{task}` before invoking Cargo directly")
+        })?)?;
     let mut seen = BTreeSet::new();
     let mut source = String::from("pub(crate) const COMPONENTS: &[(&str, &[u8])] = &[\n");
-    // 即使旧构建清单仍含其他组件，程序也只随附基础包。
+    // 普通发行版只随附基础包；声明式部署可把整组官方插件作为宿主的一部分管理。
     for record in records
         .into_iter()
-        .filter(|record| record.vendor_id == "base")
+        .filter(|record| bundle_all || record.vendor_id == "base")
     {
         ensure!(
             seen.insert(record.vendor_id.clone()),

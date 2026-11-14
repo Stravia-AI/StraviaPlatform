@@ -1126,6 +1126,12 @@ impl VendorPlugins {
                         "bundled plugin upgrade reset incompatible provider data"
                     );
                 }
+            } else {
+                tracing::warn!(
+                    vendor_id = %vendor_id,
+                    discarded_data = ?preview.discarded_data,
+                    "bundled plugin update skipped; explicitly confirm incompatible data discard in Vendor Plugins"
+                );
             }
         }
         Ok(())
@@ -1685,6 +1691,74 @@ async fn binding_impacts(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(feature = "bundled-vendors")]
+    #[tokio::test]
+    async fn bundled_vendor_reconciles_changed_bytes_and_preserves_local_override()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let gw = Gateway::new(crate::config::GatewayConfig {
+            data_dir: directory.path().to_owned(),
+            update_source_url: Some("https://127.0.0.1:1".into()),
+            ..Default::default()
+        })
+        .await?;
+        let plugins = &gw.vendor_plugins;
+        let vendor = "openai-codex";
+        let bundled = plugins.store.get(vendor).await?.unwrap();
+        assert_eq!(bundled.source, PluginSource::Builtin.as_str());
+        assert!(plugins.acquire_package(vendor).is_ok());
+
+        // 自定义段模拟同一版本的旧构建，组件行为与数据格式保持不变。
+        let mut previous = plugins.bundled.plugins[vendor].component.to_vec();
+        previous.extend_from_slice(&[0, 2, 1, b'x']);
+        let previous = Bytes::from(previous);
+        let preview = plugins
+            .preview(&gw, previous.clone(), PluginSource::Builtin, Some(vendor))
+            .await?;
+        plugins
+            .confirm(
+                &gw,
+                ConfirmPluginUpdate {
+                    preview_id: preview.id,
+                    allow_data_discard: false,
+                },
+            )
+            .await?;
+        let old = plugins.store.get(vendor).await?.unwrap();
+        assert_ne!(old.digest, bundled.digest);
+        plugins.reconcile_bundled(&gw).await?;
+        let updated = plugins.store.get(vendor).await?.unwrap();
+        assert_eq!(updated.version, old.version);
+        assert_eq!(updated.digest, bundled.digest);
+        assert!(updated.revision > old.revision);
+        plugins.reconcile_bundled(&gw).await?;
+        assert_eq!(
+            plugins.store.get(vendor).await?.unwrap().revision,
+            updated.revision
+        );
+
+        let preview = plugins
+            .preview(&gw, previous, PluginSource::Local, Some(vendor))
+            .await?;
+        plugins
+            .confirm(
+                &gw,
+                ConfirmPluginUpdate {
+                    preview_id: preview.id,
+                    allow_data_discard: false,
+                },
+            )
+            .await?;
+        let manual = plugins.store.get(vendor).await?.unwrap();
+        plugins.reconcile_bundled(&gw).await?;
+        let retained = plugins.store.get(vendor).await?.unwrap();
+        assert_eq!(retained.source, PluginSource::Local.as_str());
+        assert_eq!(retained.digest, manual.digest);
+        assert_eq!(retained.revision, manual.revision);
+        gw.shutdown().await;
+        Ok(())
+    }
 
     fn profile(
         provider_id: &str,
