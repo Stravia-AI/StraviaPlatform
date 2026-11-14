@@ -48,6 +48,7 @@ import AllowanceSuspension from '#lib/components/allowance-suspension.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
+import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Checkbox } from '#lib/components/ui/checkbox/index.js'
 import {
   DataTable,
@@ -91,6 +92,7 @@ let query = $state('')
 const changesSheet = getModelChanges()
 let deleteTarget = $state<Provider>()
 let deleteOpen = $state(false)
+let deleting = $state(false)
 let copyTarget = $state<Provider>()
 let copyOpen = $state(false)
 let appendTargets = $state(false)
@@ -258,6 +260,7 @@ function providerSaved(provider: Provider): void {
 }
 
 function askDelete(provider: Provider): void {
+  if (deleting || actingProviderId === provider.id) return
   deleteTarget = provider
   deleteOpen = true
 }
@@ -339,10 +342,12 @@ async function testProvider(provider: Provider): Promise<void> {
 }
 
 async function deleteProvider(): Promise<void> {
-  if (!deleteTarget) return
-  actingProviderId = deleteTarget.id
+  if (!deleteTarget || deleting) return
+  const providerId = deleteTarget.id
+  deleting = true
+  actingProviderId = providerId
   try {
-    await admin.providers.delete(deleteTarget.id)
+    await admin.providers.delete(providerId)
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['providers'] }),
       queryClient.invalidateQueries({ queryKey: ['models'] }),
@@ -354,6 +359,7 @@ async function deleteProvider(): Promise<void> {
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
+    deleting = false
     actingProviderId = undefined
   }
 }
@@ -426,8 +432,10 @@ async function copyProvider(): Promise<void> {
       </DropdownMenu.Group>
       <DropdownMenu.Separator />
       <DropdownMenu.Group>
-        <DropdownMenu.Item variant="destructive" onSelect={() => askDelete(provider)}
-          >{m.providers_delete_service()}</DropdownMenu.Item>
+        <DropdownMenu.Item
+          variant="destructive"
+          disabled={deleting || actingProviderId === provider.id}
+          onSelect={() => askDelete(provider)}>{m.providers_delete_service()}</DropdownMenu.Item>
       </DropdownMenu.Group>
     </DropdownMenu.Content>
   </DropdownMenu.Root>
@@ -769,9 +777,15 @@ async function copyProvider(): Promise<void> {
   </Dialog.Content>
 </Dialog.Root>
 
-<AlertDialog.Root bind:open={deleteOpen}>
+<AlertDialog.Root
+  bind:open={
+    () => deleteOpen,
+    (open: boolean) => {
+      if (!deleting) deleteOpen = open
+    }
+  }>
   {@const references = deleteTarget ? providerReferences(deleteTarget) : []}
-  <AlertDialog.Content>
+  <AlertDialog.Content onEscapeKeydown={(event: KeyboardEvent) => deleting && event.preventDefault()}>
     <AlertDialog.Header>
       <AlertDialog.Title>
         {deleteTarget && providerDependenciesUnavailable
@@ -806,7 +820,7 @@ async function copyProvider(): Promise<void> {
       </div>
     {/if}
     <AlertDialog.Footer>
-      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Cancel disabled={deleting}>{m.common_cancel()}</AlertDialog.Cancel>
       {#if deleteTarget && references.length > 0 && deleteTarget.is_enabled}
         <Button variant="outline" onclick={() => deleteTarget && void toggleProvider(deleteTarget)}>
           {m.providers_disable_service_instead()}
@@ -814,8 +828,15 @@ async function copyProvider(): Promise<void> {
       {/if}
       <AlertDialog.Action
         variant="destructive"
-        disabled={providerDependenciesUnavailable || references.length > 0}
-        onclick={() => void deleteProvider()}>{m.providers_delete_service_label()}</AlertDialog.Action>
+        disabled={deleting || providerDependenciesUnavailable || references.length > 0}
+        aria-busy={deleting}
+        onclick={(event: MouseEvent) => {
+          event.preventDefault()
+          void deleteProvider()
+        }}>
+        {#if deleting}<Spinner data-icon="inline-start" />{/if}
+        {m.providers_delete_service_label()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

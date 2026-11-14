@@ -447,6 +447,92 @@ async fn scenario(db: Database) -> anyhow::Result<()> {
         0,
         "unreferenced journal content must eventually be reclaimed"
     );
+
+    Box::pin(provider_deletion_scenario(
+        &db, &reopened, &provider, new_fence,
+    ))
+    .await
+}
+
+async fn provider_deletion_scenario(
+    db: &Database,
+    storage: &DynStorage,
+    provider: &str,
+    fence: i64,
+) -> anyhow::Result<()> {
+    let store = storage.vendor_plugins();
+    let other_provider = create_provider(storage, "surviving journal provider").await?;
+    let other_fence = store
+        .open_atomic_provider_fence(VENDOR, &other_provider, 1)
+        .await?;
+    const DELETE_LEASE: &str = "00000000-0000-4000-8000-000000000009";
+    store
+        .fork_atomic_state("alice", "provider-deletion", None, DELETE_LEASE)
+        .await?;
+    let deleted_cell = scope(
+        provider,
+        fence,
+        "provider-deletion",
+        DELETE_LEASE,
+        "journal",
+    );
+    let other_cell = scope(
+        &other_provider,
+        other_fence,
+        "provider-deletion",
+        DELETE_LEASE,
+        "journal",
+    );
+    let deleted_head = store
+        .journal_append(&deleted_cell, "deleted provider body".into(), None)
+        .await?;
+    let other_head = store
+        .journal_append(&other_cell, "surviving provider body".into(), None)
+        .await?;
+    assert!(
+        store
+            .journal_compare_exchange(&deleted_cell, 0, None, Some(&deleted_head))
+            .await?
+    );
+    assert!(
+        store
+            .journal_compare_exchange(&other_cell, 0, None, Some(&other_head))
+            .await?
+    );
+
+    storage.providers().delete(provider).await?;
+    assert!(matches!(
+        store.journal_load(&deleted_cell).await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert!(matches!(
+        store.journal_read(&deleted_cell, &deleted_head).await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert!(matches!(
+        store
+            .journal_append(&deleted_cell, "late".into(), None)
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert!(matches!(
+        store
+            .journal_compare_exchange(&deleted_cell, 1, None, Some(&deleted_head))
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert_eq!(
+        store.journal_read(&other_cell, &other_head).await?.0,
+        "surviving provider body"
+    );
+
+    while store.sweep_atomic_journal().await? > 0 {}
+    db.sweep_content().await?;
+    assert_eq!(db.content_count().await?, 1);
+    assert_eq!(
+        store.journal_read(&other_cell, &other_head).await?.0,
+        "surviving provider body"
+    );
     Ok(())
 }
 
@@ -927,7 +1013,7 @@ async fn postgres_journal_persistence() -> anyhow::Result<()> {
     let task_pool = pool.clone();
     let result = tokio::spawn(async move {
         crate::migrations::migrate_postgres(&task_pool, None).await?;
-        scenario(Database::Postgres(task_pool)).await
+        Box::pin(scenario(Database::Postgres(task_pool))).await
     })
     .await;
     pool.close().await;

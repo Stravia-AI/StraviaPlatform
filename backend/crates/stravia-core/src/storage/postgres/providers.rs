@@ -221,9 +221,6 @@ impl ProviderStore for PostgresProviderStore {
         if let Some(guard) = guard {
             guard.invalidate_provider_id(id).await;
         }
-        if let Err(error) = self.plugin_store.sweep_atomic_journal().await {
-            tracing::warn!(%error, "failed to sweep atomic journal after provider deletion");
-        }
         Ok(())
     }
 

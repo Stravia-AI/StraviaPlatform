@@ -535,9 +535,6 @@ impl ProviderStore for MemoryStorage {
         drop(provider_models);
         drop(routes);
         drop(providers);
-        if self.plugin_store.sweep_atomic_journal().await.is_err() {
-            tracing::warn!("atomic journal cleanup deferred");
-        }
         Ok(())
     }
 

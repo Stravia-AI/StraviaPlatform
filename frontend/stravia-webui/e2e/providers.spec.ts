@@ -2405,6 +2405,84 @@ test('Provider detail separates connection, inventory, references, and guarded m
   await expect(page.getByRole('button', { name: 'Remove from list' })).toBeDisabled()
 })
 
+test('Provider deletion prevents duplicate requests and dismissal until deletion and refresh settle', async ({
+  page,
+}) => {
+  const provider = detailProvider('delete-provider', { name: 'Delete Provider' })
+  const failedDelete = Promise.withResolvers<void>()
+  const successfulDelete = Promise.withResolvers<void>()
+  const refresh = Promise.withResolvers<void>()
+  let deletes = 0
+  let deleted = false
+  let refreshing = false
+
+  await page.route('**/api/v1/providers', async (route) => {
+    if (deleted) {
+      refreshing = true
+      await refresh.promise
+    }
+    await route.fulfill({ json: { data: deleted ? [] : [provider] } })
+  })
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route(`**/api/v1/providers/${provider.id}`, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    const attempt = ++deletes
+    await (attempt === 1 ? failedDelete.promise : successfulDelete.promise)
+    if (attempt === 1) {
+      await route.fulfill({ status: 500, json: { error: 'Fixture delete rejected' } })
+    } else {
+      deleted = true
+      await route.fulfill({ json: { data: null } })
+    }
+  })
+
+  try {
+    await page.goto('/providers')
+    await page.getByRole('button', { name: `More actions for ${provider.name}` }).click()
+    await page.getByRole('menuitem', { name: 'Delete provider…' }).click()
+    const dialog = page.getByRole('alertdialog', { name: `Delete ${provider.name}?` })
+    const confirm = dialog.getByRole('button', { name: /Delete provider/ })
+    await expect(confirm).toBeEnabled()
+    // 同一事件轮次里的第二次点击早于 DOM 禁用更新，必须由提交守卫挡住。
+    await confirm.evaluate((button: HTMLButtonElement) => {
+      button.click()
+      button.click()
+    })
+    await expect.poll(() => deletes).toBe(1)
+    await expect(confirm).toBeDisabled()
+    await expect(confirm).toHaveAttribute('aria-busy', 'true')
+    await expect(confirm.getByRole('status')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await page.mouse.click(5, 400)
+    await expect(dialog).toBeVisible()
+    await page.screenshot({ path: test.info().outputPath('provider-delete-pending.png') })
+
+    failedDelete.resolve()
+    await expect(page.getByText(/Fixture delete rejected/)).toBeVisible()
+    await expect(confirm).toBeEnabled()
+    await expect(dialog).toBeVisible()
+    await confirm.evaluate((button: HTMLButtonElement) => {
+      button.click()
+      button.click()
+    })
+    await expect.poll(() => deletes).toBe(2)
+    successfulDelete.resolve()
+    await expect.poll(() => refreshing).toBe(true)
+    await expect(confirm).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeVisible()
+    refresh.resolve()
+    await expect(dialog).toBeHidden()
+    await expect(page.getByRole('row').filter({ hasText: provider.name })).toHaveCount(0)
+    expect(deletes).toBe(2)
+  } finally {
+    failedDelete.resolve()
+    successfulDelete.resolve()
+    refresh.resolve()
+  }
+})
+
 test('dependency previews block referenced Provider deletion and explain Route deletion effects', async ({ page }) => {
   const provider = {
     id: 'provider-used',

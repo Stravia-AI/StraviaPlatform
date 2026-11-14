@@ -435,6 +435,7 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 - Candidate 的证明绑定 Generation Chain 最终持久化的 canonical 视图，而非临时 Provider 请求：按原始 writer 恢复 client-shaped marker，复用相同的 exposed-tools 清理与 stage reasoning 更新规则。内容或 controls 改变时，即使 item 数量和 gap 不变也重新计算证明；保留 `id`、`window_id`、`source_admission_id`。原生续接裁切后缀不改变完整持久历史的证明。
 - 读取旧版跨视图 fact 时，仅在当前 Principal 的真实父链上验证原 admission、controls 与前缀证明。stage 已解析的 Target controls 不能代替原 controls；仅当完整 controls 指纹与旧 fact 一致时，当前请求才可作为原配置来源。随后用生产 marker／受保护 reasoning 变换核对已保存 effective 历史和当前前缀，确认 gap 后恢复。选择性保留载荷及空 reasoning 删除同样核验，不依赖热 rejection cache；来源缺失、跨分支、篡改或映射歧义明确拒绝，不跳过 retained facts、不重置窗口或清理历史。
 - checkpoint、fork、原生压缩与失败 admission 继承确定的状态快照。历史清理通过持久 epoch 使旧操作失效，GC 保留仍被活跃租约、Generation、compaction 或 checkpoint 引用的内容；不会因为清理一次查询记录便删除仍可恢复的历史。SQLite、PostgreSQL 与内存适配器遵守同一行为契约。已有 Provider fence 的读取不获取写事务；首次创建时才串行重检。
+- 删除 Provider 时，连接及关联 Target／空 Route 的事务删除、运行状态失效和当前实例路由缓存切换仍同步完成；删除请求不再执行全局 journal GC。失去有效引用的 journal 节点与正文由既有 `HistoryMaintenance::sweep_history` 分批回收，因此物理释放可能晚于删除成功；不新增后台队列或改变保留期。
 - `volatile.open` 使用相同 key／payload／CAS 契约，但仅存在于进程内，并按持久安装身份、Vendor、Provider、数据 epoch 与 fence 隔离。进程重启后为空；同一进程内重建 Gateway 不重置仍有效的值。本进程的 reset／删除／卸载使旧 handle 失效；跨进程更新在下一次 fence 校验被观察到，不承诺立即擦除另一进程已持有的内存。网络 I/O 不持有数据库事务。
 
 Devin 的 native step 与 cascade assignment 是有效上游会话绑定，不按固定项数清空或猜测过期。它们保存在 Provider CAS cell；仅从未发布过的 cell 首次导入旧 private state，初始化冲突后读取已发布值，之后不再读取或写入旧业务来源。旧 private blob 与 OAuth 共用且不支持 CAS，因此不为清理业务字段覆盖它。没有稳定 affinity 的请求使用一次性身份，不持久化无法复用的绑定；有 affinity 的并发更新合并，达到 cell 容量时显式失败并保留既有绑定，不重放外部请求。

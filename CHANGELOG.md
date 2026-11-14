@@ -8,6 +8,7 @@
 - Responses JSON and terminal SSE now emit `usage: null` when required usage details are unknown, instead of null integer fields that made Codex reject a completed response and reconnect. Explicit zero counts remain zero; internal usage and billing are unchanged.
 - Responses `generate:false` warmup now completes locally without invoking a model or tool. Its response ID retains input for continuation, including `store:false`, and the first real generation still runs request hooks on the retained input. Authentication, model access and delivery-confirmed history publication remain enforced.
 - Codex connection guidance and TOML previews now explain search prerequisites, the otherwise possible 403, and the top-level `web_search = "disabled"` option. Applying a connection does not overwrite the user's global search preference or bypass Stravia's search authorization.
+- Provider deletion no longer waits for a global journal garbage-collection pass; connection removal, state invalidation and route-cache updates still complete before success, while existing background maintenance reclaims unreferenced state later. The confirmation dialog now stays open with a busy indicator, blocks duplicate submissions and dismissal until deletion and refresh finish, and permits retry after failure.
 
 ## [0.7.1] - 2026-11-14
 
