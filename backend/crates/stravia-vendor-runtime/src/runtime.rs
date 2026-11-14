@@ -1343,7 +1343,11 @@ impl net_http::HostResponse for StoreState {
             return Ok(Err(to_net_failure(error)));
         }
         let response = self.table.get(&response)?.0.clone();
-        Ok(response.read_body().await.map_err(to_net_failure))
+        let result = response.read_body().await;
+        if matches!(&result, Ok(Some(bytes)) if !bytes.is_empty()) {
+            self.deadline.upstream_activity();
+        }
+        Ok(result.map_err(to_net_failure))
     }
 
     async fn drop(&mut self, response: Resource<HttpResponseResource>) -> wasmtime::Result<()> {
@@ -1412,9 +1416,11 @@ impl net_ws::HostConnection for StoreState {
             return Ok(Err(to_net_failure(error)));
         }
         let socket = self.table.get(&socket)?.0.clone();
-        Ok(socket
-            .next()
-            .await
+        let result = socket.next().await;
+        if matches!(&result, Ok(Some(_))) {
+            self.deadline.upstream_activity();
+        }
+        Ok(result
             .map(|message| message.map(convert_ws_to_wit))
             .map_err(to_net_failure))
     }

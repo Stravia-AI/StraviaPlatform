@@ -743,13 +743,20 @@ async fn execute_distinguishes_cancellation_from_deadline() {
     assert_eq!(deadline.code, "deadline_exceeded");
 }
 
-async fn first_token_timeout_fixture() -> (
+async fn first_token_timeout_fixture(
+    heartbeat: bool,
+    timeout_ms: i64,
+) -> (
     tempfile::TempDir,
     Gateway,
     Principal,
     AiRequest,
     tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::mpsc::UnboundedSender<bool>,
 ) {
+    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let upstream = tokio::spawn(async move {
@@ -761,7 +768,40 @@ async fn first_token_timeout_fixture() -> (
             )
             .await
             .unwrap();
-        let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+        let _ = connected_tx.send(());
+        if heartbeat {
+            while command_rx.recv().await == Some(true) {
+                if socket.write_all(b": upstream heartbeat\n\n").await.is_err() {
+                    return;
+                }
+            }
+            let created = stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                "resp-heartbeat",
+                "upstream-model",
+                "in_progress",
+                Vec::new(),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            );
+            let completed = stravia_protocol_codec::codec::open_responses::formatter::response_resource_snapshot(
+                "resp-heartbeat",
+                "upstream-model",
+                "completed",
+                Vec::new(),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            );
+            let body = format!(
+                "event: response.created\ndata: {}\n\nevent: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
+                serde_json::json!({"type": "response.created", "sequence_number": 0, "response": created}),
+                serde_json::json!({"type": "response.completed", "sequence_number": 1, "response": completed})
+            );
+            let _ = socket.write_all(body.as_bytes()).await;
+        } else {
+            let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+        }
     });
     let directory = tempfile::tempdir().unwrap();
     let gateway = Gateway::new(GatewayConfig {
@@ -802,7 +842,7 @@ async fn first_token_timeout_fixture() -> (
                 provider_id: provider.id,
                 model: "upstream-model".into(),
                 priority: None,
-                first_token_timeout_ms: Some(1000),
+                first_token_timeout_ms: Some(timeout_ms),
                 target_retry_budget: Some(0),
                 target_cooldown_ms: None,
                 thinking_level_map: Vec::new(),
@@ -832,7 +872,15 @@ async fn first_token_timeout_fixture() -> (
         .unwrap()
         .decode_request(serde_json::json!({"model": "timeout-model", "input": "wait for output"}))
         .unwrap();
-    (directory, gateway, principal, request, upstream)
+    (
+        directory,
+        gateway,
+        principal,
+        request,
+        upstream,
+        connected_rx,
+        command_tx,
+    )
 }
 
 #[tokio::test]
@@ -842,8 +890,8 @@ async fn unary_and_standalone_compaction_use_the_shared_deadline() {
         (ModelTurnPurpose::Compact, false),
         (ModelTurnPurpose::Compact, true),
     ] {
-        let (_directory, gateway, principal, mut request, upstream) =
-            first_token_timeout_fixture().await;
+        let (_directory, gateway, principal, mut request, upstream, _connected, _commands) =
+            first_token_timeout_fixture(false, 1000).await;
         request.stream.enabled = stream;
         let mut input = TurnInput::new(principal, request).with_execution(
             CancellationToken::new(),
@@ -860,10 +908,130 @@ async fn unary_and_standalone_compaction_use_the_shared_deadline() {
     }
 }
 
+struct FirstOutputClock(tokio::task::JoinHandle<()>);
+
+impl FirstOutputClock {
+    fn pause() -> Self {
+        tokio::time::pause();
+        // Network and database I/O must not cause Tokio to auto-advance time.
+        Self(tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        }))
+    }
+}
+
+impl Drop for FirstOutputClock {
+    fn drop(&mut self) {
+        self.0.abort();
+        tokio::time::resume();
+    }
+}
+
+async fn wait_for_upstream_read(
+    deadline: &Deadline,
+    before: Instant,
+    turn: &tokio::task::JoinHandle<Result<ModelTurn, ModelTurnError>>,
+) {
+    let watchdog = Instant::now() + Duration::from_secs(20);
+    while deadline.at() <= before {
+        assert!(
+            !turn.is_finished(),
+            "active attempt ended before reading the heartbeat"
+        );
+        assert!(Instant::now() < watchdog, "upstream heartbeat was not read");
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn first_token_idle_timeout_tracks_only_this_attempts_upstream_activity() {
+    let (
+        _active_dir,
+        active,
+        active_principal,
+        mut active_request,
+        active_upstream,
+        active_connected,
+        commands,
+    ) = first_token_timeout_fixture(true, 1000).await;
+    let (
+        _silent_dir,
+        silent,
+        silent_principal,
+        mut silent_request,
+        silent_upstream,
+        silent_connected,
+        _commands,
+    ) = first_token_timeout_fixture(false, 1000).await;
+    active_request.stream.enabled = true;
+    silent_request.stream.enabled = true;
+    let active_deadline = Deadline::from_now(Duration::from_secs(10));
+    let silent_deadline = Deadline::from_now(Duration::from_secs(10));
+    let _clock = FirstOutputClock::pause();
+    let active_input = TurnInput::new(active_principal, active_request)
+        .with_execution(CancellationToken::new(), active_deadline.clone());
+    let silent_input = TurnInput::new(silent_principal, silent_request)
+        .with_execution(CancellationToken::new(), silent_deadline);
+    let active_turn = tokio::spawn(async move { active.model_turn.execute(active_input).await });
+    let silent_turn = tokio::spawn(async move { silent.model_turn.execute(silent_input).await });
+    active_connected.await.unwrap();
+    silent_connected.await.unwrap();
+
+    // Each host read is followed by another guest-host call, which renews the
+    // active attempt's deadline. Observe it before advancing the clock again.
+    for _ in 0..6 {
+        let before = active_deadline.at();
+        commands.send(true).unwrap();
+        wait_for_upstream_read(&active_deadline, before, &active_turn).await;
+    }
+    tokio::time::advance(Duration::from_millis(600)).await;
+    let before = active_deadline.at();
+    commands.send(true).unwrap();
+    wait_for_upstream_read(&active_deadline, before, &active_turn).await;
+    tokio::time::advance(Duration::from_millis(600)).await;
+    let silent_result = silent_turn.await.unwrap();
+    assert!(
+        matches!(silent_result, Err(ModelTurnError { ref code, .. }) if code == "first_token_timeout")
+    );
+    commands.send(false).unwrap();
+    assert!(
+        active_turn.await.unwrap().is_ok(),
+        "upstream heartbeats must keep the active attempt alive"
+    );
+    active_upstream.abort();
+    silent_upstream.abort();
+}
+
+#[tokio::test]
+async fn zero_first_token_timeout_leaves_silent_stream_to_cancellation() {
+    let (_directory, gateway, principal, mut request, upstream, connected, _commands) =
+        first_token_timeout_fixture(false, 0).await;
+    request.stream.enabled = true;
+    let cancellation = CancellationToken::new();
+    let input = TurnInput::new(principal, request).with_execution(
+        cancellation.clone(),
+        Deadline::from_now(Duration::from_secs(10)),
+    );
+    let _clock = FirstOutputClock::pause();
+    let turn = tokio::spawn(async move { gateway.model_turn.execute(input).await });
+    connected.await.unwrap();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert!(
+        !turn.is_finished(),
+        "zero disables the first-output timeout"
+    );
+    cancellation.cancel();
+    let result = turn.await.unwrap();
+    assert!(matches!(result, Err(ModelTurnError { ref code, .. }) if code == "cancelled"));
+    upstream.abort();
+}
+
 #[tokio::test]
 async fn first_token_timeout_records_one_precise_attempt_terminal_without_usage() {
-    let (_directory, gateway, principal, mut request, upstream) =
-        first_token_timeout_fixture().await;
+    let (_directory, gateway, principal, mut request, upstream, _connected, _commands) =
+        first_token_timeout_fixture(false, 1000).await;
     let observer = credential_observer(&gateway, &principal);
     request.stream.enabled = true;
     let result = gateway

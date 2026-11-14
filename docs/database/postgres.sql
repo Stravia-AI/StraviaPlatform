@@ -1660,7 +1660,7 @@ CREATE TABLE public.model_backends (
     priority integer DEFAULT 0,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     thinking_level_map jsonb DEFAULT '[{"level": "off", "source": "generated", "control": {"type": "hidden"}}, {"level": "minimal", "source": "generated", "control": {"type": "hidden"}}, {"level": "low", "source": "generated", "control": {"type": "hidden"}}, {"level": "medium", "source": "generated", "control": {"type": "hidden"}}, {"level": "high", "source": "generated", "control": {"type": "hidden"}}, {"level": "xhigh", "source": "generated", "control": {"type": "hidden"}}, {"level": "max", "source": "generated", "control": {"type": "hidden"}}]'::jsonb NOT NULL,
-    first_token_timeout_ms bigint DEFAULT 60000 NOT NULL,
+    first_token_timeout_ms bigint DEFAULT 120000 NOT NULL,
     target_retry_budget integer DEFAULT 5 NOT NULL,
     target_cooldown_ms bigint DEFAULT 120000 NOT NULL,
     enabled boolean DEFAULT true NOT NULL,

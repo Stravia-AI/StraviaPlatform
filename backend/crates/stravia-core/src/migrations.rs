@@ -2054,7 +2054,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO model_backends (id, model_id, provider_id, model, priority, target_retry_budget) VALUES ('t', 'r', 'p', 'm', -3, 3)")
+        sqlx::query("INSERT INTO model_backends (id, model_id, provider_id, model, priority, target_retry_budget, first_token_timeout_ms, target_cooldown_ms, enabled) VALUES ('t', 'r', 'p', 'm', -3, 3, 90000, 91000, 0)")
             .execute(&pool).await.unwrap();
         let expires_at = chrono::Utc::now().timestamp_millis() + 60_000;
         for (id, parent, payload, format) in [
@@ -2115,6 +2115,20 @@ mod tests {
 
         migrate_sqlite(&pool, None).await.unwrap();
         migrate_sqlite(&pool, None).await.unwrap();
+        let target: (i64, i32, i64, i32, i32) = sqlx::query_as(
+            "SELECT first_token_timeout_ms, target_retry_budget, target_cooldown_ms, priority, enabled FROM model_backends WHERE id = 't'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(target, (90_000, 3, 91_000, -3, 0));
+        let default_timeout: i64 = sqlx::query_scalar(
+            "INSERT INTO model_backends (id, model_id, provider_id, model) VALUES ('t-default', 'r', 'p', 'new-model') RETURNING first_token_timeout_ms",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(default_timeout, 120_000);
         let (snapshot, metadata): (String, String) = sqlx::query_as("SELECT snapshot_state, metadata_json FROM provider_models WHERE provider_id='p' AND model_id='upstream'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(snapshot, "{\"type\":\"edited\",\"source\":null}");

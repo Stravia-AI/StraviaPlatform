@@ -435,7 +435,7 @@ impl Serialize for RouteConfig {
 }
 
 pub const DEFAULT_TARGET_PRIORITY: i32 = 0;
-pub const DEFAULT_FIRST_TOKEN_TIMEOUT_MS: i64 = 60_000;
+pub const DEFAULT_FIRST_TOKEN_TIMEOUT_MS: i64 = 120_000;
 pub const DEFAULT_TARGET_RETRY_BUDGET: i32 = 5;
 pub const DEFAULT_TARGET_COOLDOWN_MS: i64 = 120_000;
 

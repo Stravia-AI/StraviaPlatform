@@ -2243,16 +2243,22 @@ async fn begin_attempt(
     let ready_result = if first_token_timeout_ms == 0 {
         ready_rx.await
     } else {
-        let window = Duration::from_millis(first_token_timeout_ms as u64);
-        let expiry = tokio::time::sleep(window);
+        let window = || {
+            let percent = 95 + rand::random::<u64>() % 11;
+            let nanos = first_token_timeout_ms as u128 * 1_000_000 * percent as u128 / 100;
+            Duration::new(
+                (nanos / 1_000_000_000) as u64,
+                (nanos % 1_000_000_000) as u32,
+            )
+        };
+        let expiry = tokio::time::sleep(window());
         tokio::pin!(expiry);
         loop {
             tokio::select! {
                 result = &mut ready_rx => break result,
-                // 剥离受保护推理后的重放是一次新的上游请求，获得完整首 token 窗口；
-                // 被拒请求的耗时不应挤占它。
+                // 真实上游数据和重放都重新获得独立抖动的空闲窗口。
                 _ = first_token_window.notified() => {
-                    expiry.as_mut().reset(tokio::time::Instant::now() + window);
+                    expiry.as_mut().reset(tokio::time::Instant::now() + window());
                 }
                 _ = &mut expiry => {
                     if let Some(signal) = timeout_signal {
@@ -2338,6 +2344,7 @@ async fn drive_vendor_attempt(
         &parent_cancellation,
         &operation_cancellation,
         &deadline,
+        &first_token_window,
         &policy,
         &target,
         &output,
