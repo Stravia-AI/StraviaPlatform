@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- The compact provider deletion dialog can immediately delete individual model destinations while keeping the model and its other destinations. Destination actions stay beside their names, with shorter usage and deletion hints. The last destination cannot be deleted here; replace its provider or add another destination first.
+
 ## [0.7.1] - 2026-11-14
 
 ### Verification
