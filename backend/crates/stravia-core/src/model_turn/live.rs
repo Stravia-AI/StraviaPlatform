@@ -756,13 +756,18 @@ fn execute_inner(
     // 在构造边界装箱，避免把准备、重试和派发状态逐层嵌入外层 select 的栈帧。
     Box::pin(async move {
         let gateway = &executor.gateway;
-        let route = gateway
-            .model_cache
-            .read()
-            .await
-            .resolve(&input.request.model)
+        let route = {
+            let cache = gateway.model_cache.read().await;
+            match input.authorization {
+                ModelTurnAuthorization::RouteBinding => cache.resolve(&input.request.model),
+                ModelTurnAuthorization::CapabilityGrant => cache
+                    .models
+                    .iter()
+                    .find(|route| route.id.as_str() == input.request.model.as_str()),
+            }
             .cloned()
-            .ok_or_else(|| ModelTurnError::new("model_not_found", "Model is unavailable"))?;
+        }
+        .ok_or_else(|| ModelTurnError::new("model_not_found", "Model is unavailable"))?;
 
         if input.authorization == ModelTurnAuthorization::CapabilityGrant
             && stravia_media::contains_images(&input.request)

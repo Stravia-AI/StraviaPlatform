@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) async fn configure_gateway_extensions(
     gateway: &mut Gateway,
     mut hooks: Vec<Arc<dyn Hook>>,
@@ -187,17 +190,23 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
             .authorize_principal_capability(principal)
             .await
             .map_err(|_| web_search_authorization_error())?;
-        let route_id = match binding {
-            stravia_web_search::ResolvedWebSearchBackend::Local { model_id } => model_id,
-            stravia_web_search::ResolvedWebSearchBackend::External { route_id } => route_id,
+        // Local 绑定内部记录键，External 仍绑定公开模型名。
+        let routes = self.gateway.storage.routes();
+        let route = match binding {
+            stravia_web_search::ResolvedWebSearchBackend::Local { model_id } => {
+                routes.list_active().await.map(|routes| {
+                    routes
+                        .into_iter()
+                        .find(|route| route.id.as_str() == model_id.as_str())
+                })
+            }
+            stravia_web_search::ResolvedWebSearchBackend::External { route_id } => {
+                routes.get(route_id).await
+            }
         };
         // 能力准入由固定版本的 Vendor 操作负责；兼容更新后的能力变化不能撤销旧调用。
         // Principal 权限与 Route 启用状态仍在执行期间持续重验。
-        self.gateway
-            .storage
-            .routes()
-            .get(route_id)
-            .await
+        route
             .map_err(|_| web_search_authorization_error())?
             .filter(|route| route.is_enabled)
             .ok_or_else(web_search_authorization_error)?;
