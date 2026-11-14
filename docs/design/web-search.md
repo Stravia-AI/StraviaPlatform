@@ -55,7 +55,8 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 - answer 以 `[stravia://turns/<turn-id>/sources/<ordinal>]` 引用 source，且 marker 与 sources 一一对应；
 - URL 是规范化后的公网 HTTP(S) URL；
 - source 满足本次研究已解析的允许域名策略，越界报 `source_outside_allowed_domains`，不删来源后伪装完整报告；
-- source 必须来自当前或祖先 Turn 的已验证 evidence；
+- Local 的 source URL 必须来自当前或祖先 Turn 的已验证 evidence；展示标题采用证据标题，缺失或超过标题大小上限时省略，不要求模型生成的标题与证据相同；
+- External 采用供应商返回的来源和标题，不执行 Local 工具证据匹配或标题一致性检查；上述报告结构、公网地址、DNS 与允许域名检查仍适用；
 - partial 结果必须说明预算或超时限制。
 
 `SearchTurn` 是 principal-scoped、不可变的报告记录。Local 根 Turn 固定 backend、binding、配置 revision 和 Local budget snapshot；子 Turn 可继续或从任一可访问父节点分支。外部搜索目标契约仅保留报告、引用与历史身份，不保存跨请求研究会话，不因返回报告 ID 就承诺续接。当前持久化 identity 为 `kind = "web_search"`；ID 使用平台统一的 28 位小写字母裸格式，不带类型前缀。
@@ -120,7 +121,7 @@ Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`�
 - Web Access 设置提供 Local search/fetch Provider 与优先级；
 - `max_turns` 和 `total_time_seconds` 作为 `LocalSearchLimits` 传入；
 - deadline 取调用方 request deadline 与 Local total time 的较早值；
-- `SearchReportValidator` 用本次运行收集的 evidence 校验最终报告。
+- `SearchReportValidator` 对最终报告保留 URL 证据溯源，但不因模型改写或补写标题拒绝已验证的 URL。展示标题只取工具证据中的有界标题，没有则省略。
 
 Local 配置的 `backend.model_id` 保存逻辑模型的内部记录键 `models.id`，不是客户端请求使用的公开名称 `models.model_id`，也不是上游模型名。鉴权及每次能力推理均按内部键精确解析，不使用公开名称优先的回退查询。更改公开名称不改变已保存配置或 Local 续接的绑定；另一模型的公开名称即使等于该内部键，也不能接管搜索。所绑定模型停用或删除后仍拒绝执行。
 
@@ -133,7 +134,7 @@ Local 配置的 `backend.model_id` 保存逻辑模型的内部记录键 `models.
 - [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。正式接入必须提供可选择的真实 Provider Model；该服务是设计参考，不自动列入本期正式供应商交付清单。
 - 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。
 - 外部搜索沿用 Route 的选择、重试和 Target 切换策略；插件提供错误分类，宿主在结果提交前对明确可重试的上游错误决定重试或切换。取消、参数错误及权限错误不触发，结果提交后不重放；接受重复执行与重复消耗额度风险。
-- 插件归一答案和引用，宿主继续执行 Search Report 验证、来源策略、平台 Gate、Principal 隔离及交付。基础链接列表不能冒充完整报告，缺失用量不能伪造为零。
+- 插件归一答案和引用，宿主校验报告结构、引用、公网 URL、DNS 与允许域名策略，并继续执行平台 Gate、Principal 隔离及交付。External 不构造本地 evidence，也不要求来源 URL 或标题匹配 Local 工具记录；来源可靠性由供应商负责。基础链接列表不能冒充完整报告，缺失用量不能伪造为零。
 
 所有外部后端仍受调用方 cancellation、外层 request deadline、Target 能力资格、连接凭据、传输和响应大小限制及完整结果校验约束；流式接入还须验证其完成状态。不把供应商扩展权限视为平台工具注册权限。
 
