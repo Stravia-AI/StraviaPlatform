@@ -294,6 +294,47 @@ async fn round_trip(socket: Arc<dyn HostWebSocket>, text: &str) {
 }
 
 #[tokio::test]
+async fn transient_cookie_checks_share_redirects_but_not_other_scopes() -> anyhow::Result<()> {
+    let mut f = fixture().await?;
+    get(&f.network, &format!("{}/after", f.base), fields()).await;
+    assert_eq!(header(&captured(&mut f).await, "cookie"), None);
+
+    let first = f.network.clone().with_transient_cookies();
+    get(&first, &format!("{}/redirect", f.base), fields()).await;
+    assert_eq!(header(&captured(&mut f).await, "cookie"), None);
+    assert_eq!(
+        header(&captured(&mut f).await, "cookie"),
+        Some("sid=redirect")
+    );
+    let ws = format!("{}/socket", f.base.replacen("https:", "wss:", 1));
+    let socket = first
+        .ws_connect(net::ConnectRequest::new(&ws).fields(fields()), options())
+        .await
+        .unwrap();
+    assert!(socket.is_fresh_handshake());
+    assert_eq!(header(&captured(&mut f).await, "cookie"), Some("sid=http"));
+    round_trip(socket, "first-draft").await;
+
+    let second = f.network.clone().with_transient_cookies();
+    let socket = second
+        .ws_connect(net::ConnectRequest::new(&ws).fields(fields()), options())
+        .await
+        .unwrap();
+    assert!(socket.is_fresh_handshake());
+    assert_eq!(header(&captured(&mut f).await, "cookie"), None);
+    round_trip(socket, "second-draft").await;
+
+    get(&first, &format!("{}/refresh", f.base), fields()).await;
+    assert_eq!(
+        header(&captured(&mut f).await, "cookie"),
+        Some("sid=handshake")
+    );
+    get(&f.network, &format!("{}/after", f.base), fields()).await;
+    assert_eq!(header(&captured(&mut f).await, "cookie"), Some("sid=http"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn cookies_share_http_redirects_rejected_upgrades_and_only_fresh_handshakes()
 -> anyhow::Result<()> {
     let mut f = fixture().await?;

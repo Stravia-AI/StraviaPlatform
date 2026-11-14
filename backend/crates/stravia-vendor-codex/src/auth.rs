@@ -184,21 +184,27 @@ fn inherit_id_token(values: &mut BTreeMap<String, Value>, previous: &BTreeMap<St
 }
 
 fn token_request(host: &GuestHost, form: String) -> Result<TokenResponse, PluginError> {
+    // 授权域不使用 ChatGPT 的 Provider Cookie Jar；新连接尚无 Provider scope。
+    let mut options = stravia_vendor_sdk::net::Options::new();
+    options
+        .shape("codex-http")
+        .map_err(|e| invalid(e.to_string()))?;
     let response = host.http_start(
         stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: TOKEN_URL.into(),
-            headers: crate::codex::http_fields(vec![
+            headers: crate::codex::fields(vec![
                 (
                     "content-type".into(),
                     "application/x-www-form-urlencoded".into(),
                 ),
                 ("accept".into(), "application/json".into()),
                 ("user-agent".into(), crate::codex::user_agent()),
+                ("accept-encoding".into(), "identity".into()),
             ]),
             body: form.into_bytes(),
         },
-        &crate::codex::http_options()?,
+        &options,
     )?;
     let status = response.status()?;
     let headers = response.headers()?;

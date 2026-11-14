@@ -709,7 +709,11 @@ Host、Content-Length 和 Transfer-Encoding 是宿主处理的槽位：Host／�
 
 `cookies.domains` 只匹配精确的小写 ASCII／punycode 主机名，不隐含子域授权；`names` 与 `prefixes` 区分大小写。策略最多 16 KiB，每组最多 64 项，未知 JSON 字段拒绝。策略只选择 cookie，不扩大既有 origin 权限；cookie 自身的 Domain、Path、Secure、有效期与删除规则由 `cookie_store` 处理。
 
+Codex 的 OAuth 授权码兑换与刷新保留 `codex-http` 出站形态，但不声明仅适用于 ChatGPT 域的 Cookie 策略或空 Cookie 槽位；未保存连接的授权不依赖 Provider Cookie Jar。
+
 Jar 按安装、Vendor、Provider、数据 epoch 与 fence 隔离，HTTP 和 WS 共用，字节不进入数据库或磁盘，重启即清空。每个 jar 最多 256 个 cookie、编码总量 256 KiB；同一响应越界时原子回滚本次修改，不清空已有 jar 或截断值。修改仅保存受影响条目的有界回滚信息，不复制整个 jar。
+
+草稿 `ConnectionCheck` 使用单次操作独占的内存 Jar，允许同次检查的 HTTP 重定向与 WS 握手共享 Cookie，但不继承已保存 Provider 或其他草稿的 Cookie，也不将 Cookie 写回认证会话或已保存连接。操作结束后释放 Jar，WS 不跨操作保留；origin、策略筛选、容量与取消校验不变。`Auth` 和 `ConfigValidation` 不获得此临时 Cookie scope，原子状态与 volatile state 的 Provider 准入规则不变。
 
 接收的 cookie 在保留前规范化，库忽略的未知属性及原始 Set-Cookie backing string 不进入 jar，预算与实际保留的编码表示一致。非法或不匹配 cookie 的忽略规则不变；HTTP/1 和 HTTP/2 的既有响应头限制约束解析期间的临时分配。
 

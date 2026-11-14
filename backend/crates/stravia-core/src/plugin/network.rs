@@ -279,12 +279,15 @@ pub(crate) struct VendorNetwork {
     cookie_scope: Option<Arc<CookieScope>>,
 }
 
-struct CookieScope {
-    store: super::PluginStore,
-    vendor_id: String,
-    provider_id: String,
-    data_epoch: i64,
-    provider_fence: i64,
+enum CookieScope {
+    Provider {
+        store: super::PluginStore,
+        vendor_id: String,
+        provider_id: String,
+        data_epoch: i64,
+        provider_fence: i64,
+    },
+    Transient(cookies::CookieJar),
 }
 
 struct NetworkRoute {
@@ -346,7 +349,7 @@ impl VendorNetwork {
         data_epoch: i64,
         provider_fence: i64,
     ) -> Self {
-        self.cookie_scope = Some(Arc::new(CookieScope {
+        self.cookie_scope = Some(Arc::new(CookieScope::Provider {
             store,
             vendor_id,
             provider_id,
@@ -356,56 +359,76 @@ impl VendorNetwork {
         self
     }
 
+    pub(crate) fn with_transient_cookies(mut self) -> Self {
+        self.cookie_scope = Some(Arc::new(CookieScope::Transient(
+            cookies::CookieJar::default(),
+        )));
+        // 草稿检查不保留跨操作的握手，避免连接池绕过临时 Jar 的隔离。
+        self.websocket_affinity = None;
+        self
+    }
+
     async fn with_cookie_jar<R>(
         &self,
         action: impl FnOnce(&cookies::CookieJar) -> R,
     ) -> Result<R, HostFailure> {
-        let scope = self.cookie_scope.as_ref().ok_or_else(|| {
+        let scope = self.cookie_scope.as_deref().ok_or_else(|| {
             HostFailure::new(
                 ErrorKind::Unsupported,
                 "cookies require an admitted provider",
             )
         })?;
-        let registry = scope.store.volatile_store().ok_or_else(|| {
-            HostFailure::new(
-                ErrorKind::Unsupported,
-                "volatile provider state is unavailable",
-            )
-        })?;
-        let guard = registry.read().await;
-        self.ensure_current()?;
-        scope
-            .store
-            .validate_atomic_provider_fence(
-                &scope.vendor_id,
-                &scope.provider_id,
-                scope.data_epoch,
-                scope.provider_fence,
-            )
-            .await
-            .map_err(|error| match error {
-                super::store::PluginStorageError::StaleOperation
-                | super::store::PluginStorageError::MissingLineage => cancelled(),
-                _ => HostFailure::new(ErrorKind::Trapped, "cookie state storage is unavailable"),
-            })?;
-        let jar = guard
-            .cookies(
-                &scope.vendor_id,
-                &scope.provider_id,
-                scope.data_epoch,
-                scope.provider_fence,
-            )
-            .map_err(|error| {
-                if error.code == "cancelled" {
-                    cancelled()
-                } else {
-                    HostFailure::new(ErrorKind::Trapped, "cookie state is unavailable")
-                }
-            })?;
-        let result = action(&jar);
-        drop(jar);
-        drop(guard);
-        Ok(result)
+        match scope {
+            CookieScope::Transient(jar) => {
+                self.ensure_current()?;
+                Ok(action(jar))
+            }
+            CookieScope::Provider {
+                store,
+                vendor_id,
+                provider_id,
+                data_epoch,
+                provider_fence,
+            } => {
+                let registry = store.volatile_store().ok_or_else(|| {
+                    HostFailure::new(
+                        ErrorKind::Unsupported,
+                        "volatile provider state is unavailable",
+                    )
+                })?;
+                let guard = registry.read().await;
+                self.ensure_current()?;
+                store
+                    .validate_atomic_provider_fence(
+                        vendor_id,
+                        provider_id,
+                        *data_epoch,
+                        *provider_fence,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        super::store::PluginStorageError::StaleOperation
+                        | super::store::PluginStorageError::MissingLineage => cancelled(),
+                        _ => HostFailure::new(
+                            ErrorKind::Trapped,
+                            "cookie state storage is unavailable",
+                        ),
+                    })?;
+                let jar = guard
+                    .cookies(vendor_id, provider_id, *data_epoch, *provider_fence)
+                    .map_err(|error| {
+                        if error.code == "cancelled" {
+                            cancelled()
+                        } else {
+                            HostFailure::new(ErrorKind::Trapped, "cookie state is unavailable")
+                        }
+                    })?;
+                let result = action(&jar);
+                drop(jar);
+                drop(guard);
+                Ok(result)
+            }
+        }
     }
 
     async fn apply_cookies(
@@ -975,9 +998,14 @@ impl VendorNetwork {
         let cookie_policy = option(&options, net::keys::COOKIES).unwrap_or("");
         partition_hash.update((cookie_policy.len() as u64).to_be_bytes());
         partition_hash.update(cookie_policy.as_bytes());
-        if let Some(scope) = &self.cookie_scope {
-            partition_hash.update(scope.data_epoch.to_be_bytes());
-            partition_hash.update(scope.provider_fence.to_be_bytes());
+        if let Some(CookieScope::Provider {
+            data_epoch,
+            provider_fence,
+            ..
+        }) = self.cookie_scope.as_deref()
+        {
+            partition_hash.update(data_epoch.to_be_bytes());
+            partition_hash.update(provider_fence.to_be_bytes());
         }
         let partition: [u8; 32] = partition_hash.finalize().into();
         let mut url = self.url(&request.url, true)?;

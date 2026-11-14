@@ -1033,6 +1033,9 @@ impl Gateway {
                 data_epoch,
                 fence,
             ),
+            (None, None) if request.operation() == Operation::ConnectionCheck => {
+                network.with_transient_cookies()
+            }
             _ => network,
         };
         let secrets = context

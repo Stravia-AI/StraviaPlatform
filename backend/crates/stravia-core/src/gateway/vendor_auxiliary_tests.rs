@@ -1093,6 +1093,172 @@ async fn deepseek_allowance_uses_real_tls_get_and_preserves_multi_currency_unkno
     Ok(())
 }
 
+#[tokio::test]
+async fn codex_unsaved_connection_authorizes_and_checks_credentials() -> anyhow::Result<()> {
+    let server = local_tls_server(2, |request| {
+        LocalResponse::json(if request.path == "/oauth/token" {
+            json!({
+                "access_token": "synthetic-new-access",
+                "refresh_token": "synthetic-refresh",
+                "expires_in": 3600
+            })
+        } else {
+            json!({"rate_limit": {}})
+        })
+    })
+    .await?;
+    let (_directory, gateway) = gateway_for(&server, &["openai-codex"]).await?;
+    let redirect_uri = "http://localhost:1457/auth/callback";
+    let session = gateway
+        .admin()
+        .init_oauth_session(
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: None,
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: None,
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            OAuthSessionStartOptions {
+                callback_mode: OAuthCallbackMode::Manual,
+                redirect_uri: redirect_uri.into(),
+                listener_port: None,
+                fallback_reason: None,
+            },
+        )
+        .await?;
+    let auth_url = session
+        .auth_url
+        .as_deref()
+        .context("Codex authorization URL")?;
+    let state = query_parameter(auth_url, "state")?;
+    let status = with_real_time_limit(gateway.admin().complete_oauth_session(
+        &session.session_id,
+        AuthCompletionInput {
+            input: AuthCompletionValue::CallbackUrl {
+                value: format!("{redirect_uri}?code=synthetic-code&state={state}"),
+            },
+        },
+    ))
+    .await??;
+    assert!(matches!(status, AuthSessionStatusData::Ready { .. }));
+
+    let check = with_real_time_limit(gateway.admin().test_provider(
+        "draft",
+        crate::admin::ProviderConnectionCheckInput {
+            configuration: Some(crate::admin::ProviderConfigurationPreviewInput {
+                provider_id: None,
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                protocol: Some("open-responses".into()),
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                options: BTreeMap::new(),
+                credentials: BTreeMap::new(),
+            }),
+            use_proxy: Some(false),
+            authorization_id: Some(session.session_id),
+        },
+    ))
+    .await??;
+    assert!(
+        matches!(
+            check,
+            crate::db::models::ProviderConnectionCheckResult::Passed {
+                verified: stravia_vendor_sdk::ConnectionCheckVerification::Credentials,
+                ..
+            }
+        ),
+        "{check:?}"
+    );
+    assert!(gateway.admin().list_providers().await?.is_empty());
+
+    let observed = with_real_time_limit(server.task).await???;
+    let usage = &observed[1];
+    assert_eq!(usage.method, "GET");
+    assert_eq!(usage.path, "/backend-api/wham/usage");
+    assert_eq!(
+        usage.headers.get("authorization").map(String::as_str),
+        Some("Bearer synthetic-new-access")
+    );
+    assert!(!usage.headers.contains_key("cookie"));
+    let exchange = &observed[0];
+    assert_eq!(exchange.method, "POST");
+    assert_eq!(exchange.path, "/oauth/token");
+    assert_eq!(
+        exchange.headers.get("host").map(String::as_str),
+        Some("auth.openai.com")
+    );
+    assert!(!exchange.headers.contains_key("cookie"));
+    let form: BTreeMap<_, _> = url::form_urlencoded::parse(&exchange.body)
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("grant_type").map(String::as_str),
+        Some("authorization_code")
+    );
+    assert_eq!(form.get("code").map(String::as_str), Some("synthetic-code"));
+    assert_eq!(
+        form.get("redirect_uri").map(String::as_str),
+        Some(redirect_uri)
+    );
+    let verifier = form.get("code_verifier").context("PKCE verifier")?;
+    assert_eq!(
+        query_parameter(auth_url, "code_challenge")?,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier.as_bytes()))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_edited_draft_checks_saved_credentials_without_updating_provider()
+-> anyhow::Result<()> {
+    let server = local_tls_server(1, |_| LocalResponse::json(json!({"rate_limit": {}}))).await?;
+    let (_directory, gateway) = gateway_for(&server, &["openai-codex"]).await?;
+    let provider = synthetic_oauth_provider(&gateway, "openai-codex", false).await?;
+    let check = with_real_time_limit(gateway.admin().test_provider(
+        &provider.id,
+        crate::admin::ProviderConnectionCheckInput {
+            configuration: Some(crate::admin::ProviderConfigurationPreviewInput {
+                provider_id: Some(provider.id.clone()),
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                protocol: Some("open-responses".into()),
+                base_url: "https://chatgpt.com/backend-api/codex/edited".into(),
+                options: BTreeMap::new(),
+                credentials: BTreeMap::new(),
+            }),
+            use_proxy: Some(false),
+            authorization_id: None,
+        },
+    ))
+    .await??;
+    assert!(
+        matches!(
+            check,
+            crate::db::models::ProviderConnectionCheckResult::Passed {
+                verified: stravia_vendor_sdk::ConnectionCheckVerification::Credentials,
+                ..
+            }
+        ),
+        "{check:?}"
+    );
+    let stored = gateway.admin().get_provider(&provider.id).await?;
+    assert_eq!(stored.base_url, provider.base_url);
+    assert_eq!(stored.last_test_success, provider.last_test_success);
+    assert_eq!(stored.last_test_at, provider.last_test_at);
+    let observed = with_real_time_limit(server.task).await???;
+    assert_eq!(observed[0].path, "/backend-api/wham/usage");
+    assert_eq!(
+        observed[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer synthetic-old-access")
+    );
+    Ok(())
+}
+
 async fn codex_auxiliary_refresh_case(
     discover: bool,
     expired: bool,
