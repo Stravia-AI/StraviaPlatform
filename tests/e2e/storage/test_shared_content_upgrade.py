@@ -9,8 +9,9 @@ Observation 事件，外加少量由真实行克隆的“未发布 / 续期 / �
 
 保留期的验证方式（HTTP 没有“指定时间点清扫”的钩子）：升级后保存一次 ``log_retention_days``
 会立即触发保留清扫（见 ``test_retention_*``），以真实时钟执行；fixture 里的续期依赖在旧库中
-还有几天才过期，所以清扫发生在旧 ``expires_at`` 之前，续期依赖必须仍可解析，而旧库里已过期的
-依赖必须不可解析、也不会被复活。
+还有几天才过期，所以清扫发生在旧 ``expires_at`` 之前，续期 Marker 必须仍可解析，
+已过期 Marker 不可解析。凭据映射则遵循 0053：已发布映射按创建时间初始化最近检出时间，
+旧 ``expires_at`` 不再决定其寿命；未发布映射仍受 pending 期限约束。
 """
 
 from __future__ import annotations
@@ -217,10 +218,11 @@ def assert_turn_content_and_markers(env: dict[str, Any], fixture: dict[str, Any]
 
 
 def assert_dependency_resolution(env: dict[str, Any], fixture: dict[str, Any]) -> None:
-    """合成依赖：旧库里可解析的升级后仍可解析，旧库里已过期 / 未发布的 Marker 不会被复活。"""
+    """映射按 0053 的创建时间初始化检出时间；Marker 仍按其发布状态与保留期回收。"""
     expectations = fixture["expectations"]
     synthetic = expectations["synthetic"]
-    resolvable = {"pending_live": True, "pending_expired": False, "renewed": True, "lapsed": False}
+    # 四个映射均在录制前五分钟创建；旧 expires_at 已不再决定已发布映射的寿命。
+    resolvable = {"pending_live": True, "pending_expired": False, "renewed": True, "lapsed": True}
     redaction = expectations["redaction"]
     for variant, expected in resolvable.items():
         mapping = synthetic["mappings"][variant]
@@ -437,7 +439,7 @@ def test_upgrade_does_not_shorten_dependency_expiry_across_retention_sweep(
     stravia_binary: Path, storage_runtime: dict[str, Any], tmp_path: Path, backend: str,
     fixture: dict[str, Any],
 ) -> None:
-    """续期过的依赖在旧库里还有几天寿命：升级后立即清扫不得提前删掉它们（也不得复活已过期的）。"""
+    """清扫保留续期 Marker，回收过期 Marker，并遵循 0053 的映射寿命。"""
     with upgraded_server(stravia_binary, storage_runtime, tmp_path, backend, fixture) as env:
         status, body = http_request(
             "PUT", f"{env['admin']}/api/v1/settings/log_retention_days",

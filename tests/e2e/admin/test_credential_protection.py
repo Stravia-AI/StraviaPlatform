@@ -522,7 +522,8 @@ def test_failed_upstream_request_keeps_its_hits(admin_env: dict[str, Any]) -> No
     with echo_provider(reject=True) as (url, received):
         env = {**admin_env, "mock": url}
         model = "credential-hit-failed"
-        _, key = _create_route(env, model)
+        # 本例验证失败请求的命中持久化，不让路由重试退避超过 HTTP 看门狗。
+        _, key = _create_route(env, model, retry_budget=0)
         set_enabled(env, True)
         try:
             status, _ = _proxy(env, key, model, [{"role": "user", "content": SECRET}])

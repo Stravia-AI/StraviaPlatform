@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- CI upgrade fixtures now preserve contiguous migration histories, verify rejection of existing foreign-key violations without deleting orphan data, and follow the current credential-mapping restoration contract. The failed-upstream credential test explicitly uses one attempt instead of waiting through production retry backoff. Model Turn acquisition uses a named borrowed input to pass strict Clippy checks; production migration, expiry and retry policies are unchanged.
+- Windows desktop smoke now extracts the Microsoft Edge WebDriver ZIP through the .NET Framework two-argument API, avoiding an `Expand-Archive` overload unavailable in Windows PowerShell. Driver version verification and private-cache isolation remain enforced.
+
 ## [0.7.1] - 2026-11-14
 
 ### Verification
