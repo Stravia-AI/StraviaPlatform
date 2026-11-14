@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.7.1] - 2026-11-14
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Added
 
 - `GET /codex/models` serves a Codex-format model catalog (`{"models": [...]}`) for the same API Keys and model visibility as `GET /v1/models`, so a Codex provider can point `model_catalog_url` at the Gateway and read live context windows, image input and thinking levels. It lists only text-output Routes the Key may use.
