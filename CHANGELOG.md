@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Provider deletion no longer waits for a global journal garbage-collection pass; connection removal, state invalidation and route-cache updates still complete before success, while existing background maintenance reclaims unreferenced state later. The confirmation dialog now stays open with a busy indicator, blocks duplicate submissions and dismissal until deletion and refresh finish, and permits retry after failure.
+
 ## [0.7.1] - 2026-11-14
 
 ### Verification
