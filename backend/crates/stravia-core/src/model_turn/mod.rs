@@ -137,9 +137,10 @@ impl HistoryBoundaryMap {
     fn retain_suffix(&mut self, start: usize) {
         let current_boundary_id = &self.current_boundary_id;
         self.boundaries
-            .retain(|boundary| &boundary.id == current_boundary_id && boundary.item_index >= start);
+            .retain(|boundary| &boundary.id == current_boundary_id);
         for boundary in &mut self.boundaries {
-            boundary.item_index -= start;
+            // 原生续接已持有省略的前缀，前缀内的边界投影为后缀起点。
+            boundary.item_index = boundary.item_index.saturating_sub(start);
         }
         if !self
             .boundaries
@@ -182,7 +183,12 @@ pub struct TurnInput {
     pub(crate) generation_root_id: Option<String>,
     /// Source before hooks and the proven source-gap to request-gap projection.
     pub(crate) history_boundary_source: Option<Arc<AiRequest>>,
+    /// Hook 可改写证明来源；最终持久化仍按原始 writer 的 marker 恢复。
+    pub(crate) history_boundary_writer_source: Option<Arc<AiRequest>>,
     pub(crate) history_boundary_gaps: Option<Vec<usize>>,
+    /// Resolved Generation Chain parent, used only to recover legacy proofs.
+    pub(crate) history_boundary_parent_id: Option<String>,
+    pub(crate) history_boundary_exposed_tools: Vec<String>,
     /// Host-owned source proof; never reconstructed from guest metadata.
     pub(crate) history_boundary_candidate:
         Option<crate::generation_chain::HistoryBoundaryCandidate>,
@@ -224,7 +230,10 @@ impl TurnInput {
             compaction_source_generation_id: None,
             generation_root_id: None,
             history_boundary_source: None,
+            history_boundary_writer_source: None,
             history_boundary_gaps: None,
+            history_boundary_parent_id: None,
+            history_boundary_exposed_tools: Vec::new(),
             history_boundary_candidate: None,
             user_prompt_index: None,
             user_turn_index: None,

@@ -245,6 +245,7 @@ pub(super) async fn acquire_followup_model_turn(
         ));
     }
     enter_phase(phase, Phase::Selecting).map_err(|response| buffered_response(*response))?;
+    let exposed_tools = inference_run.exposed_tool_names().collect::<Vec<_>>();
     let turn = acquire_turn(
         executor,
         headers,
@@ -253,6 +254,7 @@ pub(super) async fn acquire_followup_model_turn(
         ledger,
         generation,
         history_boundary,
+        &exposed_tools,
     )
     .await?;
     inference_run.set_route(turn.route.clone());

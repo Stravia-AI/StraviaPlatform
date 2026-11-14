@@ -664,6 +664,7 @@ impl AgentRunner {
                                 turn_input = turn_input.with_observer(observer.for_agent_turn());
                             }
                             turn_input.history_boundary_source = boundary_gaps.as_ref().map(|_| Arc::clone(&source_request));
+                            turn_input.history_boundary_writer_source = turn_input.history_boundary_source.clone();
                             turn_input.history_boundary_gaps = boundary_gaps;
                             turn_input.history_boundary_candidate = candidate;
                             turn_input.atomic_conversation = atomic_conversation.clone();

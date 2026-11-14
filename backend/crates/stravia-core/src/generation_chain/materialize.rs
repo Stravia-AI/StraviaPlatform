@@ -98,6 +98,164 @@ fn fold_client_history_view(
     input_end
 }
 
+fn exact_legacy_items_equal<L: serde::Serialize, R: serde::Serialize>(
+    left: &[L],
+    right: &[R],
+) -> bool {
+    use sha2::{Digest, Sha256};
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut a = HashWriter(Sha256::new());
+    let mut b = HashWriter(Sha256::new());
+    serde_json::to_writer(&mut a, left).is_ok()
+        && serde_json::to_writer(&mut b, right).is_ok()
+        && a.0.finalize() == b.0.finalize()
+}
+
+async fn replay_legacy_boundary_source(
+    chain: &GenerationChain,
+    principal: &Principal,
+    source: &AiRequest,
+    preserved: &std::collections::HashSet<[u8; 32]>,
+) -> Option<AiRequest> {
+    let mut replay = source.clone();
+    if crate::history_marker::request_needs_marker_resolution(&replay) {
+        let markers = chain.history_markers.as_ref()?;
+        crate::history_marker::resolve_request_markers(markers.as_ref(), principal, &mut replay)
+            .await
+            .ok()?;
+    }
+    stravia_protocol_codec::transform::prepare_thinking_replay(&mut replay, |_, block| {
+        crate::history_marker::protected_payload_digest(block)
+            .is_some_and(|digest| preserved.contains(&digest))
+    });
+    Some(Arc::unwrap_or_clone(
+        crate::history_marker::client_shaped_request(Arc::new(replay), source),
+    ))
+}
+
+impl GenerationChain {
+    /// Recover old checkpoint facts only from the admitted generation ancestry.
+    /// Neither a matching admission ID nor an equal item count proves a gap:
+    /// the original controls and prefix must match, and replay must reproduce
+    /// the exact persisted effective input and a stable transformed prefix.
+    pub(crate) async fn recover_legacy_history_boundaries(
+        &self,
+        principal: &Principal,
+        parent_id: &str,
+        current: &AiRequest,
+        retained: &[HistoryBoundaryCandidate],
+    ) -> Option<Vec<HistoryBoundaryCandidate>> {
+        let chain = self
+            .store
+            .load_generation_chain(principal, &TurnNodeId::new(parent_id))
+            .await
+            .ok()?;
+        let current_controls_hash =
+            stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                current,
+            );
+        let mut history = Vec::new();
+        let mut recovered = retained.to_vec();
+        for node in chain.nodes {
+            let (id, mut node) = decode_response_node(node).ok()?;
+            let persisted_config = node.effective_request.as_ref()?;
+            let admission = node
+                .effective_state
+                .prompt_admission_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok());
+            let source_history = recovered
+                .iter()
+                .any(|fact| admission == Some(fact.source_admission_id))
+                .then(|| history.clone());
+            let (replace, input) = owned_mutation(node.effective_history_mutation.take())
+                .unwrap_or_else(|| (false, Cow::Borrowed(node.client_delta.messages.as_ref())));
+            apply_history_input(&mut history, replace, input);
+            let input_end = history.len();
+            for fact in &mut recovered {
+                if admission != Some(fact.source_admission_id) {
+                    continue;
+                }
+                // 旧版 stage 保存已解析的 Target controls；仅完整指纹相同的当前
+                // controls 才能还原原证明，不能把最终配置当作原始来源。
+                let config = if current_controls_hash == fact.source_controls_hash {
+                    EffectiveRequestConfig::from_request(current)
+                } else {
+                    persisted_config.clone()
+                };
+                let mut items = owned_items(source_history.as_ref()?);
+                items.extend(owned_items(node.client_delta.messages.as_ref()));
+                let original = AiRequest {
+                    model: config.model,
+                    items,
+                    instructions: config.instructions,
+                    generation: config.generation,
+                    stream: current.stream.clone(),
+                    tools: config.tools,
+                    tool_choice: config.tool_choice,
+                    parallel_tool_calls: config.parallel_tool_calls,
+                    reasoning: config.reasoning,
+                    response_format: config.response_format,
+                    parameters: config.parameters,
+                    meta: current.meta.clone(),
+                };
+                if project_history_boundaries(&original, fact, &[]).is_none() {
+                    continue;
+                }
+                let preserved = history
+                    .iter()
+                    .flat_map(|item| match &item.content {
+                        MessageContent::Blocks(blocks) => blocks.as_slice(),
+                        _ => &[],
+                    })
+                    .filter_map(crate::history_marker::protected_payload_digest)
+                    .collect::<std::collections::HashSet<_>>();
+                let replay =
+                    replay_legacy_boundary_source(self, principal, &original, &preserved).await?;
+                if !exact_legacy_items_equal(&history, &replay.items)
+                    || current.items.len() < input_end
+                    || !exact_legacy_items_equal(&history, &current.items[..input_end])
+                {
+                    continue;
+                }
+                let gap = usize::try_from(fact.source_item_gap).ok()?;
+                let mut prefix = original;
+                prefix.items.truncate(gap);
+                let prefix =
+                    replay_legacy_boundary_source(self, principal, &prefix, &preserved).await?;
+                if prefix.items.len() > replay.items.len()
+                    || !exact_legacy_items_equal(&prefix.items, &replay.items[..prefix.items.len()])
+                {
+                    continue;
+                }
+                *fact = fact.at_projected_gap(current, prefix.items.len())?;
+            }
+            history.extend(node.effective_output.take_items());
+            crate::model_turn::support::restore_response_history(
+                &mut history,
+                input_end,
+                &id.to_string(),
+                node.effective_output.vendor().ingress.get(
+                    stravia_runtime_contract::protocol::ir::vendor_ext::CHAT_REASONING_FIELD_META,
+                ),
+            );
+        }
+        Some(recovered)
+    }
+}
+
 pub(super) fn materialize_generation_nodes(
     nodes: Vec<stravia_runtime_contract::turn_chain::TurnNode>,
     expires_at: std::time::Instant,

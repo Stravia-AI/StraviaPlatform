@@ -1104,7 +1104,7 @@ impl GenerationChainStore {
         })
     }
 
-    async fn load_generation_chain(
+    pub(super) async fn load_generation_chain(
         &self,
         principal: &Principal,
         id: &TurnNodeId,

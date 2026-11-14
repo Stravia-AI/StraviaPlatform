@@ -1311,6 +1311,7 @@ async fn acquire_turn(
     ledger: &RunLedger,
     generation: &mut GenerationChainRun,
     history_boundary: Option<HistoryBoundaryInput>,
+    exposed_tools: &[String],
 ) -> Result<ModelTurn, RoundOutcome> {
     let make_input = |effective_request: Arc<AiRequest>| {
         let mut input = TurnInput::new(generation.principal.clone(), effective_request)
@@ -1327,8 +1328,17 @@ async fn acquire_turn(
             .with_extra_headers(forwarded_client_headers(headers));
         if let Some(boundary) = &history_boundary {
             input.history_boundary_source = Some(Arc::clone(&boundary.source));
+            input.history_boundary_writer_source = generation
+                .write
+                .as_ref()
+                .map(|write| write.request_snapshot());
             input.history_boundary_gaps = Some(boundary.gaps.clone());
             input.history_boundary_candidate = Some(boundary.candidate.clone());
+            input.history_boundary_parent_id = generation
+                .write
+                .as_ref()
+                .and_then(|write| write.parent_id().map(str::to_owned));
+            input.history_boundary_exposed_tools = exposed_tools.to_vec();
         }
         input.compaction_records = ledger.compaction_records.clone();
         input.root_request = request_context
@@ -1421,6 +1431,11 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         ledger,
         history_boundary,
     } = input;
+    let exposed_tools = inference_run
+        .as_ref()
+        .expect("Inference Run before Model Turn")
+        .exposed_tool_names()
+        .collect::<Vec<_>>();
     let turn = match acquire_turn(
         executor.as_ref(),
         headers,
@@ -1429,6 +1444,7 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         ledger,
         &mut generation,
         history_boundary,
+        &exposed_tools,
     )
     .await
     {

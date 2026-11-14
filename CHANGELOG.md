@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- Codex Lite tool continuations no longer fail locally with HTTP 400 `vendor_request_invalid` because history boundary proofs used a different view from persisted history. Proofs now follow the final client-shaped writer snapshot, including temporary-tool removal and reasoning controls; verifiable legacy proofs recover after restart without clearing history, checking original pre-stage controls rather than assuming the persisted Target controls. Tampered, unrelated or ambiguous proofs remain rejected. Native continuations preserve a current boundary inside the reused prefix.
 - Claude Code model discovery now declares text output and advertised image/PDF inputs independently of the shared model catalog. Newly listed models such as Fable 5.2 can be bound to text Routes immediately; syncing models also supplies their native output-token limit instead of the unknown-model fallback.
 - CI regressions now synchronize SQLite worker completion before checking cancelled-request span lifetimes and seed legacy credential mappings before their first cached read, preserving cancellation and credential-attribution assertions without timing or cache assumptions. Strict cache Clippy errors and desktop smoke-test formatting are also corrected; runtime behavior is unchanged.
 - Interaction debug bundles now fill `parent_interaction_id`, `first_route_id` and `first_model_display_name` in `interaction.json`; they were always `null`.

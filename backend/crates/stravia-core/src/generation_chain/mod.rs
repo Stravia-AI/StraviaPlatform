@@ -43,6 +43,7 @@ pub(crate) use window::{
     SourceHistoryProof, VirtualWindow, history_boundary_candidate, project_history_boundaries,
     source_history_proof,
 };
+pub(crate) use write::apply_provider_reasoning;
 
 use materialize::*;
 pub(crate) use pending::GenerationCommitFence;
