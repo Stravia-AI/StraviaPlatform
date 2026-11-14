@@ -186,7 +186,11 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
     ensure!(
         matches!(
             fixture,
-            "retained" | "empty" | "cost-and-billing" | "shared-content-history"
+            "retained"
+                | "empty"
+                | "cost-and-billing"
+                | "shared-content-history"
+                | "legacy-credential-mappings"
         ),
         "invalid upgrade fixture"
     );
@@ -195,6 +199,7 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
     let last_migration = match fixture {
         "cost-and-billing" => 29,
         "shared-content-history" => 36,
+        "legacy-credential-mappings" => 54,
         _ => 17,
     };
     let backend = env::var("STRAVIA_STORAGE_BACKEND").context("STRAVIA_STORAGE_BACKEND")?;
@@ -218,8 +223,11 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
                     .cloned()
                     .collect(),
             );
-            if fixture == "shared-content-history" {
-                // 0033 之前的 Turn 历史转换由宿主迁移器的钩子完成；只有经由它安装的 0036 才是真实旧库形态。
+            if matches!(
+                fixture,
+                "shared-content-history" | "legacy-credential-mappings"
+            ) {
+                // 历史转换依赖宿主钩子，不能只执行 schema SQL 来构造旧库。
                 stravia_core::migrations::run_sqlite_migrator(&pool, &prefix, None).await?;
             } else {
                 prefix.run(pool.migration_pool()).await?;
@@ -243,7 +251,10 @@ async fn prepare_usage_upgrade_fixture(fixture: &str) -> anyhow::Result<()> {
                     .cloned()
                     .collect(),
             );
-            if fixture == "shared-content-history" {
+            if matches!(
+                fixture,
+                "shared-content-history" | "legacy-credential-mappings"
+            ) {
                 stravia_core::migrations::run_postgres_migrator(&pool, &prefix, None).await?;
             } else {
                 prefix.run(pool.migration_pool()).await?;

@@ -16,7 +16,7 @@ status: accepted
 
 - 设置键 `reversible_redaction_disabled_rules` 保存内置规则 ID 的 JSON 字符串数组，缺省或空数组表示全部启用；非法值失败关闭。只接受内置目录 ID，`custom.*` 不属于此集合，自定义规则仍用各自的 `enabled`。通用设置接口不能写此键。
 - 禁用的内置规则不再产生新命中，但仍可作为其他规则的组件提供前置证据，只是不再上报自身秘密。父规则由自身开关独立控制。
-- 映射创建时的 `rule_ids` 保持不变。出站字符串替换有效当且仅当该集合为空（迁移前无法归因），或其中至少一条规则当前启用：内置规则不在禁用集，自定义规则必须存在且 `enabled`。因此停用或删除自定义规则也级联影响旧映射。本次被启用规则重新检出的秘密仍照常替换，即使旧映射的归因只含已禁用规则。
+- 出站字符串替换要求映射至少有一条创建归因规则当前启用：内置规则不在禁用集，自定义规则必须存在且 `enabled`；空归因不再放行。迁移 0055 会过滤存量映射中的退役归因，保留至少一条现行归因的映射。因此停用或删除自定义规则也级联影响旧映射。本次被启用规则重新检出的秘密仍照常替换，即使旧映射的归因只含已禁用规则。
 - 禁用、停用或删除只停止相应映射的出站替换与管理端观测遮罩，不删除映射，不阻止模型回答、客户端工具参数与平台工具参数中的旧占位符还原。命中位置回看（`locate_text`）不受禁用影响。
 - 规则状态改变出站视图：同一段历史在禁用前后发往 Provider 的文本不同。Provider 侧续接只复用与当前 Provider 可见历史相等的前缀，规则状态变化后自然退回完整历史重发，不需要额外的失效机制；Provider 已缓存的旧前缀不再命中。
 - `GET /api/v1/reversible-redaction/rules` 的 `data.rules[]` 增加 `enabled`。`PUT /api/v1/reversible-redaction/disabled-rules` 接受 `{ rule_ids: string[] }` 幂等替换整集合，返回 `{ data: { rule_ids: string[] } }`，去重并排序。未知 ID（含 `custom.*`）返回 400 `credential_rule_unknown`，带 `params.rule_id`；不可用返回 503 `credential_disabled_rules_unavailable`。自定义规则接口不变。
@@ -33,9 +33,21 @@ N 复用 `HistoryRetention` 的 `log_retention_days`（默认 7 天，最小 1 �
 
 SQLite/PostgreSQL 迁移 0045 曾将 `updated_at` 改为 `last_used_at` 并以 `published_at` 初始化已发布行；这一历史契约由 0053 取代。0053 前置 hook 按 `created_at` 和当前 N、G 删除已过期且没有 Turn 节点引用的存量映射；有引用的行保留。随后 SQL 将 `last_used_at` 改名为 `last_detected_at`，以 `created_at` 保守初始化存量行，重建索引并重置扫描水位；旧使用时间并不能证明规则检出。
 
+0055 一次性按当前内置规则目录及所有现存自定义规则 ID 清理旧归因，禁用的内置规则和存在但禁用的自定义规则仍属现行规则。混合归因只移除退役 ID，至少保留一条现行归因的映射不因本次清理删除；空归因或仅有退役归因的映射则不论年龄、是否在用或是否被 Turn 节点引用，一律先解除节点引用和 `mapping_reuses` 再删除。这是对 0053 按引用保留的明确例外，不改变日常过期回收的引用保护。事件的 discoveries、locators、source_types 和禁用规则设置也清理退役 ID。清理复用 `credential_cleanup` 启动阶段，每批提交后按实际处理条数推进进度，正常重启已完成的 0055 不再执行。
+
+删除映射会使历史 marker 永久失去还原原值的能力；未知 marker 按既有契约原样透传。现行规则之后仍可能重新检出同一原值并创建新的 marker；通用 `generic-credential-uri` 现行规则造成的工具名误遮罩不属于此次清理范围。
+
 替换与回收共用 `cutoff = now - N - G`：`last_detected_at <= cutoff` 即过期，立即停止出站替换及管理端观测遮罩，不等待后台扫描。已发布且无 `turn_node_redaction_mappings` 引用的过期映射由统一历史维护自动回收；未发布映射仍按一小时 `pending_until`。有历史引用时保留映射供旧占位符还原，但不再用于替换。引用由 RESTRICT 外键保护。规则再次检出时，尚未回收的映射复用原占位符并续期；已回收则新建映射与占位符。
 
 回收继续使用持久化水位范围扫描，视界为 `T = now - N - G`；续期写入的新值总大于当前视界，留待未来范围扫描，已入队又续期的行在领取时按新值重检后保留。每轮成本取决于本轮到期或释放引用的行数，不每轮重扫全部映射。该路径的性能尚未实测，不用既有 Observation 或 Turn Chain 测量外推数量级。
+
+## 0055 验证与测量
+
+在 Rust debug 测试构建、SQLite 临时文件库和本机隔离 PostgreSQL 16.15 上，夹具包含 1,033 条映射、50,008 条节点引用及最初 3 条命中事件。注入映射删除失败后，引用与复用登记随 SQL 事务回滚；移除故障再升级，保留现行、已禁用内置、现存但停用的自定义规则映射，删除无归因及仅退役归因映射。恢复阶段耗时：SQLite 59.8 ms，PostgreSQL 18.68 s。该数字不含夹具准备、首次目录初始化及第一次失败的工作，不代表完整冷启动耗时；未采集 CPU / RSS 峰值。
+
+钩子每批处理至多 512 条映射元数据；事件先读固定尾部，按解码后 8 MiB 选择批次，首个超大事件独占一批。每批提交后才推进处理数量。0055 SQL 中解除引用、删除复用登记和映射在同一事务完成，期间使用 schema migration 的不定进度；其写入成本随旧映射引用量增长。已完成升级的正常启动不再执行本次扫描。
+
+真实服务端的 SQLite / PostgreSQL HTTP 回归从 0054 前缀库启动，验证 0055 成功、被引用旧映射删除、健康与就绪端点通过，并验证已删除的旧凭据标记原样透传、现行映射仍替换和还原。测试入口为 `credential_mapping_upgrade::tests` 和 `tests/e2e/storage/test_legacy_credential_upgrade.py`；没有在生产库上执行清理。
 
 ## 取舍
 
@@ -51,6 +63,6 @@ SQLite/PostgreSQL 迁移 0045 曾将 `updated_at` 改为 `last_used_at` 并以 `
 - [ADR-0042](0042-keep-reversible-redaction-detection-local.md) 的本地检测边界不变；规则目录增加启用状态，组件证据仍完整求值。
 - [ADR-0043](0043-scope-redaction-mappings-to-api-keys.md) 的 Principal 隔离、同 Key 复用身份与本地存储安全边界不变；出站复用增加规则开关条件，已发布映射首次发布加 N 的回收约定被本决定局部取代。
 - [ADR-0046](0046-complete-model-turn-after-redaction-publication.md) 的成功终态 gate 与取消裁决不变，`publish` 只记录首次发布并清空 pending 期限，不再续期。
-- [ADR-0083](0083-record-credential-hits-with-reuse-and-block-locators.md) 的创建归因 `rule_ids` 与块级定位不改写；当前规则状态另外参与出站替换裁决，历史归因不等于永远启用。
+- [ADR-0083](0083-record-credential-hits-with-reuse-and-block-locators.md) 的创建归因 `rule_ids` 与块级定位保留，但 0055 一次性清理退役规则归因；当前规则状态另外参与出站替换裁决，历史归因不等于永远启用。
 - [ADR-0088](0088-mask-credentials-at-admin-boundary-and-page-reuses.md) 的后端遮罩、显式显示明文与复用分页契约不变；观测遮罩增加规则、过期过滤及强弱边界，映射保留依据改为最近规则检出。
-- [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 中「已发布依赖按首次发布或确认 + N」仅对凭据映射局部被取代，映射水位与索引随之替换；History Marker、原生压缩登记、Turn 引用保留、共享正文及扫描作为唯一删除方的规则不变。
+- [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 中「已发布依赖按首次发布或确认 + N」仅对凭据映射局部被取代，映射水位与索引随之替换；History Marker、原生压缩登记与共享正文不变。日常回收仍按 Turn 引用保留并由扫描删除，但 0055 一次性清理空归因或仅退役归因映射不受引用保护。
