@@ -229,6 +229,10 @@ jobs:
           Path("plugin-input.json").write_text(json.dumps(declarations))
           PY
 
+      - name: Prepare builtin components for catalog tool
+        if: steps.select.outputs.has_plugins == 'true'
+        run: task build:vendors
+
       - name: Generate catalog and compressed assets
         if: steps.select.outputs.has_plugins == 'true'
         env:

@@ -52,6 +52,8 @@ bunx --bun tauri signer generate -- -w /secure/offline/stravia-updater.key
 
 专属插件按变更发布，目录只包含本次实际构建的插件；未变更插件继续从历史 Release 的签名目录发现，不复制旧记录或跨 Release 引用资产。变更检测比较插件及其锁定依赖闭包、相关共享 crate、引用的图标、构建配置与工具链；单独更新宿主版本不会触发插件发布。每个组件独立构建以避免选中集合改变 Cargo feature 并集。没有插件变更时不生成目录和插件资产，宿主正常发布。
 
+每次从源码构建 `stravia-tools` 前，先运行 `task build:vendors`，为其 Core 依赖准备 `target/vendor-plugins/manifest.json` 及内置组件。专属插件的选择性构建写入 `target/vendor-plugins-all/`，不能替代此前置步骤，也不会因此把 `base` 加入公开插件目录。
+
 每个新 Release 包含普通资产 `stravia-plugin-selection-v1.json`，作为该 Release 已运行此选择规则的标记，而非插件目录或签名信任根。选择器查找已公开且为当前提交祖先的最近 Release；只有该 Release 带标记才使用其 Git 提交作为比较基线，否则全量发布。草稿和失败或跳过的 tag 不作为基线；GitHub API 读取失败会中止发布。标记和基线依赖仓库 Release 与 tag 的写权限，插件分发仍严格验证签名与摘要。初次切换没有合格标记时发布全部专属插件；删除最近 Release 的标记也会触发全量发布。
 
 选择规则定向测试：`python3 -m unittest discover -s .github/scripts -p 'test_select_vendor_plugins.py'`。
