@@ -119,6 +119,7 @@ async function mockMarketplace(page: Page, plugins: PluginSummary[] = [], update
   await prepareApp(page)
   await page.route('**/api/v1/vendor-plugins', (route) => route.fulfill({ json: { data: plugins } }))
   await page.route('**/api/v1/plugin-marketplace', (route) => route.fulfill({ json: { data: view(update) } }))
+  await page.route('**/api/v1/plugin-marketplace/refresh', (route) => route.fulfill({ json: { data: view(update) } }))
 }
 
 test('marketplace browsing, search and installed filters use the cached catalog', async ({ page }) => {
@@ -140,10 +141,56 @@ test('marketplace browsing, search and installed filters use the cached catalog'
   await expect(page.getByText('WorkBuddy')).toHaveCount(0)
 })
 
+test('automatically refreshes and keeps cached plugins on refresh failure', async ({ page }) => {
+  await mockMarketplace(page, [installed])
+  let checks = 0
+  let reads = 0
+  const { promise: pending, resolve: finishRefresh } = Promise.withResolvers<void>()
+  await page.route('**/api/v1/plugin-marketplace', (route) => {
+    reads++
+    return route.fulfill({ json: { data: view() } })
+  })
+  await page.route('**/api/v1/plugin-marketplace/refresh', async (route) => {
+    checks++
+    await pending
+    return route.fulfill({ status: 500, json: { message: 'Refresh failed' } })
+  })
+  await page.goto('/vendor-plugins')
+  await expect.poll(() => checks).toBe(1)
+  await expect(page.getByText('WorkBuddy').first()).toBeVisible()
+  finishRefresh()
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(2)
+  await expect(page.getByText('WorkBuddy').first()).toBeVisible()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+test('preparation shows a cancellable bottom-right notification', async ({ page }) => {
+  await mockMarketplace(page)
+  const { promise: pending, resolve: releaseRequest } = Promise.withResolvers<void>()
+  await page.route('**/api/v1/plugin-marketplace/preview-install', async (route) => {
+    await pending
+    await route
+      .fulfill({ contentType: 'text/event-stream', body: `event: preview\ndata: ${JSON.stringify(preview)}\n\n` })
+      .catch(() => {})
+  })
+  await page.goto('/vendor-plugins')
+  await page.getByRole('button', { name: 'Install', exact: true }).first().click()
+  const notification = page.locator('[data-sonner-toast]').filter({ hasText: 'WorkBuddy' })
+  await expect(notification).toContainText('Preparing')
+  await expect(page.locator('[data-sonner-toaster][data-y-position="bottom"][data-x-position="right"]')).toContainText(
+    'WorkBuddy',
+  )
+  await notification.getByRole('button', { name: 'Cancel' }).click()
+  releaseRequest()
+  await expect(notification).toHaveCount(0)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
 test('install prepares the selected release and requires confirmation', async ({ page }) => {
   await mockMarketplace(page)
   let prepared = false
   let confirmed = false
+  const { promise: confirmPending, resolve: finishConfirm } = Promise.withResolvers<void>()
   await page.route('**/api/v1/plugin-marketplace/preview-install', (route) => {
     expect(route.request().postDataJSON()).toMatchObject({
       source_id: source.id,
@@ -158,9 +205,10 @@ test('install prepares the selected release and requires confirmation', async ({
       body: `event: preview\ndata: ${JSON.stringify(preview)}\n\n`,
     })
   })
-  await page.route('**/api/v1/vendor-plugins/confirm', (route) => {
+  await page.route('**/api/v1/vendor-plugins/confirm', async (route) => {
     expect(route.request().postDataJSON().preview_id).toBe(preview.id)
     confirmed = true
+    await confirmPending
     return route.fulfill({ json: { data: { ...installed, version: '2.0.0' } } })
   })
   await page.goto('/vendor-plugins')
@@ -174,6 +222,11 @@ test('install prepares the selected release and requires confirmation', async ({
     .last()
     .click()
   await expect.poll(() => confirmed).toBe(true)
+  const notification = page.locator('[data-sonner-toast]').filter({ hasText: 'WorkBuddy' })
+  await expect(notification).toContainText('Applying')
+  await expect(notification).not.toContainText('%')
+  finishConfirm()
+  await expect(notification).toHaveCount(0)
 })
 
 test('an update opens a review and is never applied before confirmation', async ({ page }) => {

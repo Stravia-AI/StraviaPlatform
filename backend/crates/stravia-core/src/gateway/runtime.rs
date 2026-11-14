@@ -787,6 +787,13 @@ impl Gateway {
                         _ = cancellation.cancelled() => return,
                         _ = interval.tick() => {}
                     }
+                    let check = tokio::select! {
+                        _ = cancellation.cancelled() => return,
+                        result = gw_refresh.update_service.check(crate::admin::updates::UpdateCheckMode::Automatic) => result,
+                    };
+                    if let Err(error) = check {
+                        tracing::warn!(error = ?error, "background product update check failed");
+                    }
                     let refresh = tokio::select! {
                         _ = cancellation.cancelled() => return,
                         result = gw_refresh.marketplace.refresh_due(&gw_refresh) => result,

@@ -145,11 +145,31 @@ jobs:
     name: Standalone vendor plugins
     needs: prepare
     runs-on: ubuntu-24.04
+    outputs:
+      has_plugins: ${{ steps.select.outputs.has_plugins }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Select changed plugins
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ needs.prepare.outputs.publish }}
+        run: python3 .github/scripts/select_vendor_plugins.py
+
+      - name: Upload selection marker
+        uses: actions/upload-artifact@v7
+        with:
+          name: vendor-plugin-selection
+          path: stravia-plugin-selection-v1.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Setup Rust
+        if: steps.select.outputs.has_plugins == 'true'
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -157,24 +177,32 @@ jobs:
           cache: 'false'
 
       - name: Setup Task
+        if: steps.select.outputs.has_plugins == 'true'
         uses: go-task/setup-task@v2
         with:
           version: ${{ env.TASK_VERSION }}
 
       - name: Install native build dependencies
+        if: steps.select.outputs.has_plugins == 'true'
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake clang libclang-dev python3 pkg-config minisign
 
       - name: Prepare patched crates
+        if: steps.select.outputs.has_plugins == 'true'
         run: task prepare:crates
 
       - name: Build standalone plugins
-        run: task build:vendors:all
+        if: steps.select.outputs.has_plugins == 'true'
+        env:
+          SELECTED: ${{ steps.select.outputs.selected }}
+        run: cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors -- "--only=${SELECTED}"
 
       - name: Prepare plugin declarations
+        if: steps.select.outputs.has_plugins == 'true'
         env:
+          SELECTED: ${{ steps.select.outputs.selected }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           python3 <<'PY'
@@ -187,8 +215,9 @@ jobs:
           records = json.loads((directory / "manifest.json").read_text())
           names = {"openai-codex": "OpenAI Codex", "xai-grok": "xAI Grok", "command-code": "Command Code", "devin": "Devin", "opencode-free": "OpenCode Zen Free", "claude-code": "Claude Code", "antigravity": "Antigravity"}
           dedicated = [record for record in records if record["vendor_id"] != "base"]
-          if len(dedicated) != len(names) or {record["vendor_id"] for record in dedicated} != set(names):
-              raise SystemExit("Dedicated plugin release inventory is incomplete")
+          selected = set(os.environ["SELECTED"].split(","))
+          if not selected <= set(names) or len(dedicated) != len(selected) or {record["vendor_id"] for record in dedicated} != selected:
+              raise SystemExit("Selected plugin release inventory is incomplete")
           declarations = []
           for record in dedicated:
               if record["version"] != os.environ["RELEASE_VERSION"]:
@@ -201,6 +230,7 @@ jobs:
           PY
 
       - name: Generate catalog and compressed assets
+        if: steps.select.outputs.has_plugins == 'true'
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -212,6 +242,7 @@ jobs:
             --input plugin-input.json --output dist
 
       - name: Sign and verify catalog against pinned identity
+        if: steps.select.outputs.has_plugins == 'true'
         env:
           SIGNING_KEY: ${{ secrets.STRAVIA_PLUGIN_CATALOG_SIGNING_KEY }}
           SIGNING_PASSWORD: ${{ secrets.STRAVIA_PLUGIN_CATALOG_SIGNING_PASSWORD }}
@@ -228,6 +259,7 @@ jobs:
           minisign -V -p dist/stravia-plugin-catalog.pub -m dist/stravia-plugin-catalog.json -x dist/stravia-plugin-catalog.json.minisig
 
       - name: Upload dedicated plugin assets
+        if: steps.select.outputs.has_plugins == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: vendor-plugins
@@ -669,7 +701,14 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Download selection marker
+        uses: actions/download-artifact@v8
+        with:
+          name: vendor-plugin-selection
+          path: release-assets
+
       - name: Download dedicated plugin assets
+        if: needs.build-vendor-plugins.outputs.has_plugins == 'true'
         uses: actions/download-artifact@v8
         with:
           name: vendor-plugins
@@ -789,6 +828,13 @@ jobs:
             fi
             gh release create "${args[@]}"
           fi
+          # A retried draft may have selected a different subset, or none at all.
+          gh release view "${TAG_NAME}" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
+            case "${asset}" in
+              stravia-plugin-catalog.json|stravia-plugin-catalog.json.minisig|stravia-plugin-catalog.pub|stravia-vendor-*.wasm.zst)
+                gh release delete-asset "${TAG_NAME}" "${asset}" --yes ;;
+            esac
+          done
           gh release upload "${TAG_NAME}" release-assets/* --clobber
           gh release view "${TAG_NAME}" --json assets > "${RUNNER_TEMP}/draft-assets.json"
           python3 <<'PY'
