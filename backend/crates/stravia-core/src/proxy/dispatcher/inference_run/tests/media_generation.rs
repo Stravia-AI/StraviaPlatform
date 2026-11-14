@@ -54,6 +54,7 @@ fn response_resource(id: &str, output: Vec<Value>) -> Value {
 enum ImageUsage {
     Unknown,
     RequiredOnly,
+    MissingCacheWrite,
     Complete,
 }
 
@@ -93,7 +94,7 @@ fn image_generation_sse(image_usage: ImageUsage) -> String {
                 });
                 if matches!(image_usage, ImageUsage::Complete) {
                     usage["input_tokens_details"]["cache_write_tokens"] = json!(0);
-                } else {
+                } else if matches!(image_usage, ImageUsage::RequiredOnly) {
                     usage["input_tokens_details"] = json!({});
                     usage["output_tokens_details"] = json!({});
                 }
@@ -513,7 +514,16 @@ fn generated_tools(request: &Value) -> Vec<&Value> {
 
 #[tokio::test]
 async fn response_usage_includes_confirmed_image_generation_and_both_parent_rounds() {
-    let fixture = generation_http_fixture(true, true, false, false).await;
+    let fixture = generation_http_fixture_with_usage(
+        true,
+        true,
+        false,
+        false,
+        1,
+        false,
+        ImageUsage::Complete,
+    )
+    .await;
     let (status, response) = post_responses(
         &fixture,
         json!({
@@ -545,21 +555,14 @@ async fn response_usage_includes_confirmed_image_generation_and_both_parent_roun
 
 #[tokio::test]
 async fn response_usage_counts_parallel_image_calls_after_retry_without_inventing_unknown() {
-    for unknown in [false, true] {
-        let fixture = generation_http_fixture_with_usage(
-            true,
-            true,
-            false,
-            false,
-            2,
-            true,
-            if unknown {
-                ImageUsage::Unknown
-            } else {
-                ImageUsage::RequiredOnly
-            },
-        )
-        .await;
+    for image_usage in [
+        ImageUsage::Complete,
+        ImageUsage::RequiredOnly,
+        ImageUsage::Unknown,
+    ] {
+        let fixture =
+            generation_http_fixture_with_usage(true, true, false, false, 2, true, image_usage)
+                .await;
         let (status, response) = post_responses(
             &fixture,
             json!({
@@ -573,7 +576,7 @@ async fn response_usage_counts_parallel_image_calls_after_retry_without_inventin
         assert_eq!(status, StatusCode::OK, "{response}");
         assert_eq!(fixture.parent_requests.lock().len(), 2);
         assert_eq!(fixture.generation_requests.lock().len(), 3);
-        if unknown {
+        if !matches!(image_usage, ImageUsage::Complete) {
             assert!(response["usage"].is_null(), "{response}");
         } else {
             assert_eq!(response["usage"]["input_tokens"], 2137, "{response}");
@@ -585,21 +588,14 @@ async fn response_usage_counts_parallel_image_calls_after_retry_without_inventin
 
 #[tokio::test]
 async fn response_usage_preserves_unknown_cache_creation_across_internal_calls() {
-    for optional_components_known in [false, true] {
-        let fixture = generation_http_fixture_with_usage(
-            true,
-            true,
-            false,
-            false,
-            2,
-            true,
-            if optional_components_known {
-                ImageUsage::Complete
-            } else {
-                ImageUsage::RequiredOnly
-            },
-        )
-        .await;
+    for image_usage in [
+        ImageUsage::RequiredOnly,
+        ImageUsage::MissingCacheWrite,
+        ImageUsage::Complete,
+    ] {
+        let fixture =
+            generation_http_fixture_with_usage(true, true, false, false, 2, true, image_usage)
+                .await;
         let (status, response) = post_responses(
             &fixture,
             json!({
@@ -614,12 +610,21 @@ async fn response_usage_preserves_unknown_cache_creation_across_internal_calls()
         assert_eq!(status, StatusCode::OK, "{response}");
         assert_eq!(fixture.parent_requests.lock().len(), 2);
         assert_eq!(fixture.generation_requests.lock().len(), 3);
-        assert_eq!(response["usage"]["input_tokens"], 2137, "{response}");
-        assert_eq!(response["usage"]["output_tokens"], 5004, "{response}");
-        assert_eq!(response["usage"]["total_tokens"], 7141, "{response}");
-        let cache_creation = &response["usage"]["input_tokens_details"]["cache_write_tokens"];
-        if optional_components_known {
-            assert_eq!(cache_creation, &json!(14), "{response}");
+        if !matches!(image_usage, ImageUsage::RequiredOnly) {
+            assert_eq!(response["usage"]["input_tokens"], 2137, "{response}");
+            assert_eq!(response["usage"]["output_tokens"], 5004, "{response}");
+            assert_eq!(response["usage"]["total_tokens"], 7141, "{response}");
+            if matches!(image_usage, ImageUsage::Complete) {
+                assert_eq!(
+                    response["usage"]["input_tokens_details"]["cache_write_tokens"], 14,
+                    "{response}"
+                );
+            } else {
+                assert!(
+                    response["usage"]["input_tokens_details"]["cache_write_tokens"].is_null(),
+                    "{response}"
+                );
+            }
             assert_eq!(
                 response["usage"]["input_tokens_details"]["cached_tokens"], 6,
                 "{response}"
@@ -629,15 +634,7 @@ async fn response_usage_preserves_unknown_cache_creation_across_internal_calls()
                 "{response}"
             );
         } else {
-            assert!(cache_creation.is_null(), "{response}");
-            assert!(
-                response["usage"]["input_tokens_details"]["cached_tokens"].is_null(),
-                "{response}"
-            );
-            assert!(
-                response["usage"]["output_tokens_details"]["reasoning_tokens"].is_null(),
-                "{response}"
-            );
+            assert!(response["usage"].is_null(), "{response}");
         }
 
         let (status, next) = post_responses(

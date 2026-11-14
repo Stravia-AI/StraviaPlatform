@@ -446,7 +446,7 @@ def test_known_credentials_are_attributed_by_the_rules_stored_with_their_mapping
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_legacy_mappings_protect_without_fabricating_rule_attribution(admin_env: dict[str, Any]) -> None:
+def test_unattributed_mappings_do_not_replace_or_fabricate_rule_attribution(admin_env: dict[str, Any]) -> None:
     bare = "Q8n4Vk7sT2p9X5a3Lc6D0h1R"
     reference = f"<!--sr:{'l' * 28}-->"
     with echo_provider() as (url, received):
@@ -454,7 +454,8 @@ def test_legacy_mappings_protect_without_fabricating_rule_attribution(admin_env:
         model = "credential-legacy-rules"
         route, key = _create_route(env, model)
         now = int(time.time() * 1000)
-        # 升级前的无归因映射在该主体首次读取前预置，不改写已经进入运行时缓存的映射。
+        # 模拟升级后新出现的无归因映射；0055 会清理升级时已有的无归因映射。
+        # 在该主体首次读取前预置，避免改写已经进入运行时缓存的映射。
         mapping_sql(env, """
             INSERT INTO reversible_redaction_mappings
                 (reference, principal, secret, published_at, created_at, last_detected_at, rule_ids)
@@ -466,7 +467,8 @@ def test_legacy_mappings_protect_without_fabricating_rule_attribution(admin_env:
             status, body = _proxy(env, key, model, [{"role": "user", "content": f"again {bare}"}])
             assert status == 200, body
             sent = received[-1]["body"]["messages"][-1]["content"]
-            assert bare not in sent and reference in sent
+            assert sent == f"again {bare}"
+            assert reference not in sent
             assert body["choices"][0]["message"]["content"] == f"again {bare}"
             interactions = _wait_for(
                 "finished legacy mapping request",

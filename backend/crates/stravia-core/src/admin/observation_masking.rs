@@ -500,7 +500,7 @@ mod tests {
         existence_calls: AtomicUsize,
         any_active: bool,
         fail: bool,
-        /// 所有映射的创建规则；默认为空，即创建之前的无归因映射。
+        /// 所有映射的创建规则；默认值表示无归因映射。
         attributed_to: Vec<String>,
     }
 
@@ -512,6 +512,7 @@ mod tests {
                     secrets.iter().map(|secret| (*secret).to_owned()).collect(),
                 )])),
                 any_active: true,
+                attributed_to: vec!["github-pat".into()],
                 ..Default::default()
             }
         }
@@ -555,7 +556,7 @@ mod tests {
                         reference: format!("ref-{secret}"),
                         secret: secret.clone(),
                         rule_ids: self.attributed_to.clone().into(),
-                        last_detected_at: 0,
+                        last_detected_at: chrono::Utc::now().timestamp_millis(),
                     })
                     .collect(),
             ))
@@ -853,6 +854,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unattributed_mappings_do_not_mask_observations_or_live_content() -> anyhow::Result<()>
+    {
+        let mappings = Arc::new(CountingMappings {
+            attributed_to: Vec::new(),
+            ..CountingMappings::with(&[PLAINTEXT])
+        });
+        let masker =
+            CredentialMasker::load(&*mappings, &AllRules, ["interaction".to_owned()], async {
+                Ok(HashMap::from([(
+                    "interaction".to_owned(),
+                    "owner".to_owned(),
+                )]))
+            })
+            .await?;
+        let mut events = vec![event(Some("interaction"), PLAINTEXT)];
+        masker.mask_events(&mut events, Some("interaction"));
+        assert_eq!(events[0].payload["error"]["message"], json!(PLAINTEXT));
+
+        let (_directory, _pool, observation) = test_observation().await?;
+        let live_masker = LiveCredentialMasker::load(
+            mappings as Arc<dyn MappingStore>,
+            Arc::new(AllRules),
+            observation,
+            "interaction".into(),
+        )
+        .await?;
+        let mut block = live_block(PLAINTEXT);
+        live_masker.mask_block(&mut block);
+        assert_eq!(block.text, PLAINTEXT);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn mappings_whose_only_rule_is_disabled_are_no_longer_masked() -> anyhow::Result<()> {
         let mappings = CountingMappings {
             attributed_to: vec!["github-pat".into()],
@@ -1137,7 +1171,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         let mut connection = pool.begin_write().await?;
         sqlx::query(
-            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,last_detected_at,pending_until) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO reversible_redaction_mappings (reference,principal,secret,created_at,last_detected_at,pending_until,rule_ids) VALUES (?,?,?,?,?,?,?)",
         )
         .bind("ref-owner")
         .bind("api-key:owner")
@@ -1145,6 +1179,7 @@ mod tests {
         .bind(now)
         .bind(now)
         .bind(now + 60_000)
+        .bind(r#"["github-pat"]"#)
         .execute(&mut *connection)
         .await?;
         connection.commit().await?;

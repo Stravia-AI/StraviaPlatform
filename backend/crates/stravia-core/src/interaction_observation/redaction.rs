@@ -1333,30 +1333,39 @@ mod tests {
     fn snapshot_masking_preserves_escaped_and_weak_secret_behavior() {
         use stravia_credential_protection::{policy::RuleScope, store::Mapping};
 
+        let now = chrono::Utc::now().timestamp_millis();
         let mappings = std::sync::Arc::new(vec![
             Mapping {
                 reference: "first".into(),
                 secret: "private\"mapped\nvalue".into(),
-                rule_ids: Default::default(),
-                last_detected_at: 0,
+                rule_ids: vec!["github-pat".into()].into(),
+                last_detected_at: now,
             },
             Mapping {
                 reference: "second".into(),
                 secret: "pass".into(),
+                rule_ids: vec!["github-pat".into()].into(),
+                last_detected_at: now,
+            },
+            Mapping {
+                reference: "unattributed".into(),
+                secret: "unattributed-value".into(),
                 rule_ids: Default::default(),
-                last_detected_at: 0,
+                last_detected_at: now,
             },
         ]);
         let protected = ProtectedSecrets::from_snapshot(mappings, &RuleScope::default());
         let mut payload = serde_json::json!({
             "arguments": "{\"value\":\"before private\\u0022mapped\\nvalue after\"}",
-            "text": "pass password"
+            "text": "pass password",
+            "unattributed": "unattributed-value"
         });
         protected.value(&mut payload);
         let arguments: Value =
             serde_json::from_str(payload["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(arguments["value"], "before *** after");
         assert_eq!(payload["text"], "*** password");
+        assert_eq!(payload["unattributed"], "unattributed-value");
     }
 
     #[test]

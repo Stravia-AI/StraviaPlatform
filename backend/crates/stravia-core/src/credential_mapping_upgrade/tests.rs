@@ -87,12 +87,13 @@ macro_rules! cleanup_fixture {
             let started = std::time::Instant::now();
             crate::startup_progress::observe_startup(move |event| observed.lock().unwrap().push(event), $migrate(pool, None)).await?;
             eprintln!("{} legacy cleanup: 1,033 mappings, 50,008 references, 3 events; resumed upgrade {:?}", stringify!($pool), started.elapsed());
-            let events = progress.lock().unwrap();
-            let cleanup: Vec<_> = events.iter().filter(|event| event.phase == "credential_cleanup").collect();
-            assert!(cleanup.first().is_some_and(|event| event.total.is_none()));
-            assert!(cleanup.last().is_some_and(|event| event.total == Some(event.completed)));
-            assert!(cleanup.windows(2).all(|pair| pair[0].completed <= pair[1].completed));
-            drop(events);
+            {
+                let events = progress.lock().unwrap();
+                let cleanup: Vec<_> = events.iter().filter(|event| event.phase == "credential_cleanup").collect();
+                assert!(cleanup.first().is_some_and(|event| event.total.is_none()));
+                assert!(cleanup.last().is_some_and(|event| event.total == Some(event.completed)));
+                assert!(cleanup.windows(2).all(|pair| pair[0].completed <= pair[1].completed));
+            }
             let mappings: Vec<(String, String)> = sqlx::query_as("SELECT reference,rule_ids FROM reversible_redaction_mappings ORDER BY reference")
                 .fetch_all(pool).await?;
             assert_eq!(mappings.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), ["current", "custom", "disabled", "mixed"]);

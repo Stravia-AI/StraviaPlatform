@@ -211,7 +211,13 @@ mod tests {
         let mappings = gateway
             .redaction
             .mappings
-            .intern(&owner, &[SECRET.into()])
+            .intern(
+                &owner,
+                &[stravia_credential_protection::store::DetectedSecret {
+                    secret: SECRET.into(),
+                    rule_ids: vec!["github-pat".into()],
+                }],
+            )
             .await
             .unwrap()
             .mappings;

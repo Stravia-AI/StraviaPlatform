@@ -100,6 +100,8 @@ impl crate::model_turn::ModelTurnExecutor for MidStreamFailureExecutor {
                         completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,
                         required_components_known: true,
+                        cache_read_tokens: Some(0),
+                        reasoning_tokens: Some(0),
                         ..Default::default()
                     },
                 ))),
@@ -231,6 +233,13 @@ async fn mid_stream_failures_preserve_public_retry_classification() {
             .position(|event| event["type"] == "response.failed")
             .expect("failed terminal event");
         let failed = &events[failed_index]["response"];
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["type"] == "response.failed")
+                .count(),
+            1
+        );
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["error"]["type"], expected_code);
         assert_eq!(failed["error"]["code"], expected_code);

@@ -158,20 +158,21 @@ async fn responses_warmup_never_generates_and_continues_with_retained_input() {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(request_hooks.load(Ordering::SeqCst), 1);
         assert!(completed.to_string().contains("real answer"), "{completed}");
-        let captured = requests.lock();
-        let body: Value =
-            serde_json::from_str(captured[0].split_once("\r\n\r\n").unwrap().1).unwrap();
-        let messages = body["messages"].to_string();
-        assert!(messages.contains("actual user request"), "{messages}");
-        assert!(messages.contains("retained instructions"), "{messages}");
-        assert_eq!(
-            messages.contains("processed warmup context"),
-            !empty,
-            "{messages}"
-        );
-        assert!(!messages.contains("retained warmup context"), "{messages}");
-        assert!(body.get("generate").is_none());
-        drop(captured);
+        {
+            let captured = requests.lock();
+            let body: Value =
+                serde_json::from_str(captured[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+            let messages = body["messages"].to_string();
+            assert!(messages.contains("actual user request"), "{messages}");
+            assert!(messages.contains("retained instructions"), "{messages}");
+            assert_eq!(
+                messages.contains("processed warmup context"),
+                !empty,
+                "{messages}"
+            );
+            assert!(!messages.contains("retained warmup context"), "{messages}");
+            assert!(body.get("generate").is_none());
+        }
         drop(socket);
         server.abort();
         close_test_gateway(gateway, dir).await;
@@ -208,7 +209,7 @@ async fn responses_warmup_preserves_authentication_model_grants_and_parent_valid
     .build()
     .await
     .unwrap();
-    configure_route(&gateway, "warmup-allowed", &[upstream.clone()]).await;
+    configure_route(&gateway, "warmup-allowed", std::slice::from_ref(&upstream)).await;
     let headers = authorized_headers(&gateway).await;
     configure_route(&gateway, "warmup-forbidden", &[upstream]).await;
     let body = json!({"model":"warmup-allowed", "generate":false});

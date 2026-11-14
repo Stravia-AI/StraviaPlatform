@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## [0.7.2] - 2026-11-14
+## [0.7.2] - 2026-11-15
 
 This release also includes the changes listed under [0.7.1](#071---2026-11-14), whose publication was cancelled.
 
@@ -28,6 +28,7 @@ This release also includes the changes listed under [0.7.1](#071---2026-11-14), 
 - Codex connection guidance and TOML previews now explain search prerequisites, the otherwise possible 403, and the top-level `web_search = "disabled"` option. Applying a connection does not overwrite the user's global search preference or bypass Stravia's search authorization.
 - Provider deletion no longer waits for a global journal garbage-collection pass; connection removal, state invalidation and route-cache updates still complete before success, while existing background maintenance reclaims unreferenced state later. The confirmation dialog now stays open with a busy indicator, blocks duplicate submissions and dismissal until deletion and refresh finish, and permits retry after failure.
 - CI upgrade fixtures now preserve contiguous migration histories, verify rejection of existing foreign-key violations without deleting orphan data, and follow the current credential-mapping restoration contract. The failed-upstream credential test explicitly uses one attempt instead of waiting through production retry backoff. Model Turn acquisition uses a named borrowed input to pass strict Clippy checks; production migration, expiry and retry policies are unchanged.
+- Release regression fixtures now use current credential-rule attribution, preserve registered custom rules through upgrades, and cover migration 0055 in both database backends. Responses tests distinguish protocol-visible `usage: null` from internal usage accounting when required token details are unknown. Test mutex guards are released before asynchronous work; production security, migration and billing policies are unchanged.
 - WebUI E2E specs and the provider deletion dialog now follow the repository's Prettier format, without changing test coverage or runtime behavior.
 - Windows desktop smoke now extracts the Microsoft Edge WebDriver ZIP through the .NET Framework two-argument API, avoiding an `Expand-Archive` overload unavailable in Windows PowerShell. Driver version verification and private-cache isolation remain enforced.
 

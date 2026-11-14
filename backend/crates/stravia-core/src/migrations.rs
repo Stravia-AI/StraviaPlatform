@@ -1283,6 +1283,12 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
+        // 0055 保留仍存在的自定义规则；否则该发现会作为退役归因整体删除。
+        sqlx::query("INSERT INTO credential_custom_rules(id,name,description,enabled,spec,created_at,updated_at) VALUES('custom.kept','Fixture','',0,?,1,1)")
+            .bind(serde_json::json!({"mode":"simple","text":"IsolatedFixture9!"}).to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
         let payload = serde_json::json!({
             "kind": "credential_mappings_created",
             "discoveries": [{

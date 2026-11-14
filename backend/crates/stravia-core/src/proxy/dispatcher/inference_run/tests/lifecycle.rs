@@ -2,25 +2,27 @@ use super::*;
 
 #[tokio::test]
 async fn responses_failed_stream_retains_confirmed_hidden_round_usage() {
-    for (current_usage, expected_usage) in [
+    for (current_usage, complete_hidden, expected_input) in [
+        (
+            Some(serde_json::json!({
+                "prompt_tokens": 22, "completion_tokens": 2, "total_tokens": 24,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 0}
+            })),
+            true,
+            Some(33),
+        ),
+        (None, true, Some(11)),
         (
             Some(serde_json::json!({
                 "prompt_tokens": 22, "completion_tokens": 2, "total_tokens": 24
             })),
-            serde_json::json!({"input_tokens": 33, "output_tokens": 3, "total_tokens": 36}),
-        ),
-        (
+            false,
             None,
-            serde_json::json!({"input_tokens": 11, "output_tokens": 1, "total_tokens": 12}),
         ),
-        (
-            Some(serde_json::json!({"prompt_tokens": 22})),
-            serde_json::Value::Null,
-        ),
-        (
-            Some(serde_json::json!({"prompt_tokens": 0})),
-            serde_json::Value::Null,
-        ),
+        (None, false, None),
+        (Some(serde_json::json!({"prompt_tokens": 22})), false, None),
+        (Some(serde_json::json!({"prompt_tokens": 0})), false, None),
     ] {
         let mut failing_leg = format!(
             "data: {}\n\n",
@@ -48,8 +50,14 @@ async fn responses_failed_stream_retains_confirmed_hidden_round_usage() {
                 "error": {"message": "later leg failed", "type": "server_error", "code": "server_error"}
             })
         ));
-        let (base_url, provider_calls) =
-            serve_sse_sequence(vec![openai_sse_platform_tool_call(), failing_leg]).await;
+        let mut hidden_leg = openai_sse_platform_tool_call();
+        if complete_hidden {
+            hidden_leg = hidden_leg.replace(
+                "\"total_tokens\":12",
+                "\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0},\"completion_tokens_details\":{\"reasoning_tokens\":0}",
+            );
+        }
+        let (base_url, provider_calls) = serve_sse_sequence(vec![hidden_leg, failing_leg]).await;
         let directory = tempfile::tempdir().expect("temporary data directory");
         let (hook, _) = ExposeOrderedToolHook::counting();
         let tool_calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -92,12 +100,14 @@ async fn responses_failed_stream_retains_confirmed_hidden_round_usage() {
         assert_eq!(failures.len(), 1, "{body}");
         let failed = &failures[0]["response"];
         assert_eq!(failed["status"], "failed", "{body}");
-        if expected_usage.is_null() {
-            assert!(failed["usage"].is_null(), "{body}");
+        if let Some(input) = expected_input {
+            let output = if input == 33 { 3 } else { 1 };
+            assert_eq!(failed["usage"]["input_tokens"], input, "{body}");
+            assert_eq!(failed["usage"]["output_tokens"], output, "{body}");
+            assert_eq!(failed["usage"]["total_tokens"], input + output, "{body}");
         } else {
-            for key in ["input_tokens", "output_tokens", "total_tokens"] {
-                assert_eq!(failed["usage"][key], expected_usage[key], "{body}");
-            }
+            // The confirmed rounds omit required Responses detail fields.
+            assert!(failed["usage"].is_null(), "{body}");
         }
         assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
         assert_eq!(*tool_calls.lock(), vec![1]);
@@ -127,10 +137,11 @@ async fn responses_preserve_usage_certainty_without_hidden_rounds() {
     .await
     .expect("gateway init");
     let headers = authorized_headers(&gateway).await;
-    for (stream, known, input, output) in [
-        (true, true, 73_379, 211),
-        (false, true, 0, 0),
-        (true, false, 490, 0),
+    for (stream, known, details_known, input, output) in [
+        (true, true, true, 73_379, 211),
+        (false, true, true, 0, 0),
+        (true, true, false, 490, 7),
+        (true, false, true, 490, 0),
     ] {
         let mut model_response = AiResponse::new("usage-response", "in-memory-model");
         model_response.push_output_text("finished");
@@ -140,6 +151,8 @@ async fn responses_preserve_usage_certainty_without_hidden_rounds() {
             completion_tokens: output,
             total_tokens: input + output,
             required_components_known: known,
+            cache_read_tokens: details_known.then_some(0),
+            reasoning_tokens: details_known.then_some(0),
             ..Usage::default()
         };
         let mut request = AiRequest::new("in-memory-model", Vec::new());
@@ -180,10 +193,18 @@ async fn responses_preserve_usage_certainty_without_hidden_rounds() {
         } else {
             serde_json::from_slice(&bytes).expect("response JSON")
         };
-        if known {
+        if known && details_known {
             assert_eq!(resource["usage"]["input_tokens"], input);
             assert_eq!(resource["usage"]["output_tokens"], output);
             assert_eq!(resource["usage"]["total_tokens"], input + output);
+            assert_eq!(
+                resource["usage"]["input_tokens_details"]["cached_tokens"],
+                0
+            );
+            assert_eq!(
+                resource["usage"]["output_tokens_details"]["reasoning_tokens"],
+                0
+            );
         } else {
             assert!(resource["usage"].is_null(), "{resource}");
         }

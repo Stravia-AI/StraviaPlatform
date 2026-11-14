@@ -26,15 +26,21 @@ async fn expiry_stops_cached_replacement_but_preserves_restoration_until_redetec
     let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
     let store = Arc::new(SqlMappingStore::sqlite(pool.clone()));
     let owner = Principal::new("expiry-owner");
-    // 无归因存量误收录的裸词不会再次被内置规则检出。
+    // 历史上在 api_key 上下文检出的裸值，本身不会被内置规则再次检出。
     let mapping = store
-        .intern(&owner, &[DetectedSecret::from("stravia")])
+        .intern(
+            &owner,
+            &[DetectedSecret {
+                secret: "stravia".to_owned(),
+                rule_ids: vec!["generic-api-key".to_owned()],
+            }],
+        )
         .await
         .unwrap()
         .mappings
         .remove(0);
     store
-        .publish(&owner, &[mapping.reference.clone()])
+        .publish(&owner, std::slice::from_ref(&mapping.reference))
         .await
         .unwrap();
     let stale = chrono::Utc::now().timestamp_millis() - 2 * 86_400_000;
