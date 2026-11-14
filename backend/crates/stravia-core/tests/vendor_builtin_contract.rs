@@ -2997,13 +2997,16 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "completed");
     assert_eq!(body["output"][0]["content"][0]["text"], "devin answer");
-    assert_eq!(body["usage"]["input_tokens"], 13);
-    assert_eq!(body["usage"]["output_tokens"], 5);
+    // Metadata provides token counts but no UsageStats breakdown; Responses
+    // cannot represent its required cached and reasoning details as known.
+    assert_eq!(body.get("usage"), Some(&Value::Null));
     let (status, response) = chat(gateway.clone(), &key.token, request).await?;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["choices"][0]["message"]["content"], "devin answer");
-    assert_eq!(response["usage"]["prompt_tokens"], 13);
-    assert_eq!(response["usage"]["completion_tokens"], 5);
+    assert_eq!(
+        response["usage"],
+        json!({"prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18})
+    );
 
     let response = stravia_core::proxy::server::create_router(gateway)
         .oneshot(
@@ -3033,6 +3036,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
         serde_json::from_slice(&to_bytes(response.into_body(), 16 * 1024 * 1024).await?)?;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["output"][0]["content"][0]["text"], "devin answer");
+    assert_eq!(body.get("usage"), Some(&Value::Null));
 
     let requests = server.await??;
     assert_eq!(

@@ -87,14 +87,14 @@ test('Connect selects the sole eligible key, excluding disabled, expired and ina
     await expect(page.getByRole('option', { name: new RegExp(name) })).toHaveCount(0)
   }
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Copy configuration', exact: true })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Write configuration', exact: true })).toHaveCount(0)
 })
 
 test('Connect keeps an explicit key and client selection after managing credentials', async ({ page }) => {
   await setup(page, [key('Personal'), key('Separate')])
   await page.goto('/connect')
-  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Copy configuration', exact: true })).toBeDisabled()
   await page.locator('#cli-key').click()
   await page.getByRole('option', { name: /Separate/ }).click()
   await page.locator('#cli-tool').click()

@@ -1122,23 +1122,7 @@ describe('Stravia desktop smoke', () => {
       available_update: { version: '9.9.9', download_available: true },
     })
     await openSettingsGroup('general')
-    try {
-      await expect($('button=Download update')).toBeDisplayed()
-    } catch (cause) {
-      const pageState = await browser.execute(() => ({
-        updates: document.getElementById('updates')?.innerText ?? null,
-        buttons: Array.from(document.querySelectorAll('button'))
-          .filter((button) => /Download update|Retry download/.test(button.innerText))
-          .map((button) => ({
-            text: button.innerText,
-            display: getComputedStyle(button).display,
-            visibility: getComputedStyle(button).visibility,
-            bounds: button.getBoundingClientRect().toJSON(),
-          })),
-      }))
-      const nativeState = await browser.tauri.execute(({ core }) => core.invoke('get_desktop_update_state'))
-      throw new Error(`[DEBUG-release-update] ${JSON.stringify({ pageState, nativeState })}`, { cause })
-    }
+    await expect($('button=Download update')).toBeDisplayed()
     await $('button=Download update').click()
     await expect($('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '50')
     await expect($('button=Pause')).not.toExist()

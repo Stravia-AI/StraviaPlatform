@@ -498,6 +498,12 @@ async fn initialize_desktop(
         let gateway_ref = gateway
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("gateway initialization state is missing"))?;
+        // 首次后台检查可能仍持有空状态；先加入该检查，避免它在夹具写入后覆盖候选。
+        #[cfg(feature = "desktop-e2e")]
+        gateway_ref
+            .admin()
+            .check_for_updates(stravia_core::admin::updates::UpdateCheckMode::Automatic)
+            .await?;
         #[cfg(feature = "desktop-e2e")]
         gateway_ref.storage.settings().set(
             "product_update_state",

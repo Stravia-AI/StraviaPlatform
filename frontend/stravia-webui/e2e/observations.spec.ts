@@ -262,7 +262,12 @@ function collectIncrements(viewport: Locator): Promise<{ seen: number[]; duplica
 }
 
 // 向上滚到加载行出现，并每帧记录锚点相对视口的位置；加载前、加载中与加载后都不允许位移。
-async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, text?: string): Promise<void> {
+async function revealLoaderTrackingAnchor(
+  viewport: Locator,
+  selector: string,
+  text?: string,
+  waitForStableAnchor = false,
+): Promise<void> {
   // 加载行铺在列表顶端的起始内边距里：先滚到顶端，它才进入视口。
   await viewport.evaluate((element) => {
     element.scrollTop = 0
@@ -283,12 +288,27 @@ async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, t
     )
     .toBe(true)
   await viewport.evaluate(
-    (element, { selector, text }) => {
+    async (element, { selector, text, waitForStableAnchor }) => {
       const offset = () => {
         const anchor = [...element.querySelectorAll(selector)].find(
           (candidate) => text === undefined || candidate.textContent === text,
         )
         return anchor ? anchor.getBoundingClientRect().top - element.getBoundingClientRect().top : Number.NaN
+      }
+      if (waitForStableAnchor) {
+        // 等新挂载的虚拟行完成测量补偿；请求仍被拦住，不丢失释放后的任何帧。
+        const { promise, resolve } = Promise.withResolvers<void>()
+        let previous = Number.NaN
+        let stableFrames = 0
+        const check = () => {
+          const current = offset()
+          stableFrames = Number.isFinite(current) && current === previous ? stableFrames + 1 : 0
+          previous = current
+          if (stableFrames === 2) resolve()
+          else requestAnimationFrame(check)
+        }
+        requestAnimationFrame(check)
+        await promise
       }
       const samples: number[] = []
       const tracker = { samples, frame: 0 }
@@ -299,7 +319,7 @@ async function revealLoaderTrackingAnchor(viewport: Locator, selector: string, t
       sample()
       Object.assign(window, { anchorTracker: tracker })
     },
-    { selector, text },
+    { selector, text, waitForStableAnchor },
   )
 }
 
@@ -1286,7 +1306,7 @@ test.describe('Interaction Observation canvas', () => {
 
     const loader = diagnostics.getByRole('status', { name: 'Loading earlier events', exact: true })
     const release = fixture.holdNextRead('interaction-cinder')
-    await revealLoaderTrackingAnchor(diagnostics, 'button[data-run="run-page-27"]')
+    await revealLoaderTrackingAnchor(diagnostics, 'button[data-run="run-page-27"]', undefined, true)
     await expect(loader).toBeInViewport()
     // 最新事件页（401–600）之前的 Run 尚未加载：续接关系只保留编号。
     await expect(runRow(26)).toHaveCount(0)

@@ -32,6 +32,7 @@ This release also includes the changes listed under [0.7.1](#071---2026-11-14), 
 - Release regression fixtures now use current credential-rule attribution, preserve registered custom rules through upgrades, and cover migration 0055 in both database backends. Responses tests distinguish protocol-visible `usage: null` from internal usage accounting when required token details are unknown. Test mutex guards are released before asynchronous work; production security, migration and billing policies are unchanged.
 - WebUI E2E specs and the provider deletion dialog now follow the repository's Prettier format, without changing test coverage or runtime behavior.
 - Windows desktop smoke now extracts the Microsoft Edge WebDriver ZIP through the .NET Framework two-argument API, avoiding an `Expand-Archive` overload unavailable in Windows PowerShell. Driver version verification and private-cache isolation remain enforced.
+- Desktop smoke synchronizes the startup update check before seeding its cached candidate, so an in-flight empty snapshot cannot erase it. Connect regression checks use the explicit configuration-copy action, Devin integration checks preserve unknown Responses usage, and history-loading checks establish a stable reading position before measuring every frame of pagination.
 
 ## [0.7.1] - 2026-11-14
 
