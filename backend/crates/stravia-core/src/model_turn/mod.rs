@@ -185,6 +185,8 @@ pub struct TurnInput {
     pub(crate) history_boundary_source: Option<Arc<AiRequest>>,
     /// Hook 可改写证明来源；最终持久化仍按原始 writer 的 marker 恢复。
     pub(crate) history_boundary_writer_source: Option<Arc<AiRequest>>,
+    /// 持久化视图取自脱敏前的执行输入，不能复用发给 Provider 的副本。
+    pub(crate) history_boundary_effective_source: Option<Arc<AiRequest>>,
     pub(crate) history_boundary_gaps: Option<Vec<usize>>,
     /// Resolved Generation Chain parent, used only to recover legacy proofs.
     pub(crate) history_boundary_parent_id: Option<String>,
@@ -231,6 +233,7 @@ impl TurnInput {
             generation_root_id: None,
             history_boundary_source: None,
             history_boundary_writer_source: None,
+            history_boundary_effective_source: None,
             history_boundary_gaps: None,
             history_boundary_parent_id: None,
             history_boundary_exposed_tools: Vec::new(),

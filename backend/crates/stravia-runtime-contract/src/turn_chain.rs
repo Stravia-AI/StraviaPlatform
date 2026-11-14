@@ -454,6 +454,14 @@ pub enum TurnCommitError {
 
 #[async_trait]
 pub trait TurnChainStore: Send + Sync {
+    /// Returns only the redaction references attached to this visible node.
+    /// Missing, deleting, or differently scoped nodes are unavailable.
+    async fn redaction_references(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<Vec<String>, TurnUnavailable>;
+
     async fn materialize(
         &self,
         principal: &Principal,

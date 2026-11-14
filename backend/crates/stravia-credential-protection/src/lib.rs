@@ -35,6 +35,37 @@ pub const SETTING_KEY: &str = "reversible_redaction_enabled";
 const MARKER_INSTRUCTION: &str =
     "Preserve Stravia redaction markers verbatim when used; Stravia restores their values.";
 
+fn append_marker_instruction(request: &mut AiRequest) {
+    let instructions = request.instructions.get_or_insert_with(String::new);
+    if !instructions.lines().any(|line| line == MARKER_INSTRUCTION) {
+        if !instructions.is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(MARKER_INSTRUCTION);
+    }
+}
+
+/// Reconstruct the redacted request using only the supplied historical mappings.
+/// Expiry is deliberately ignored; this does not update mappings or redaction tracking.
+pub fn replay_request_redaction(
+    request: &mut AiRequest,
+    mappings: &[Mapping],
+    include: impl Fn(&Mapping) -> bool,
+) -> Result<(), RedactionError> {
+    text::redact_request(request, mappings, &include)?;
+    if !mappings.is_empty() {
+        let texts = text::request_texts(request, true)?;
+        if mappings.iter().any(|mapping| {
+            include(mapping)
+                && text::active(mapping)
+                && texts.iter().any(|text| text.contains(&mapping.reference))
+        }) {
+            append_marker_instruction(request);
+        }
+    }
+    Ok(())
+}
+
 /// Runtime settings boundary. Invalid or unavailable settings fail closed in the host.
 #[async_trait::async_trait]
 pub trait RedactionHost: Send + Sync {
@@ -361,13 +392,7 @@ impl ReversibleRedaction {
                 let request = Arc::make_mut(request);
                 request.meta.redaction.record(references)?;
                 // 只影响当前模型请求；无引用的请求与客户端历史不携带平台说明。
-                let instructions = request.instructions.get_or_insert_with(String::new);
-                if !instructions.lines().any(|line| line == MARKER_INSTRUCTION) {
-                    if !instructions.is_empty() {
-                        instructions.push_str("\n\n");
-                    }
-                    instructions.push_str(MARKER_INSTRUCTION);
-                }
+                append_marker_instruction(request);
             }
         }
         request.meta.redaction.set_tracking(!mappings.is_empty())?;
@@ -519,6 +544,86 @@ mod tests {
             ),
             last_detected_at: 0,
         }
+    }
+
+    #[test]
+    fn replay_redacts_request_surfaces_without_changing_opaque_fields() {
+        use stravia_runtime_contract::protocol::ir::{AiItem, ToolCall};
+
+        let credential = mapping(&[]);
+        let mut request = AiRequest::new(
+            "model",
+            vec![AiItem::function_call(ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: format!("{{\"query\":\"{}\"}}", credential.secret),
+            })],
+        );
+        request.instructions = Some(format!("Use {}", credential.secret));
+        request.parameters.session.id = Some(credential.secret.clone());
+        request.parameters.native_tools = serde_json::from_value(serde_json::json!([
+            {"type": "tool_search", "parameters": {"type": "object", "description": credential.secret}}
+        ])).unwrap();
+
+        replay_request_redaction(&mut request, std::slice::from_ref(&credential), |_| true)
+            .unwrap();
+        assert_eq!(
+            request.instructions.as_deref(),
+            Some(format!("Use {}\n\n{}", credential.reference, MARKER_INSTRUCTION).as_str())
+        );
+        assert!(
+            request.items[0].tool_calls.as_ref().unwrap()[0]
+                .arguments
+                .contains(&credential.reference)
+        );
+        let tools = serde_json::to_value(&request.parameters.native_tools).unwrap();
+        assert_eq!(tools[0]["parameters"]["description"], credential.reference);
+        assert_eq!(
+            request.parameters.session.id.as_deref(),
+            Some(credential.secret.as_str())
+        );
+    }
+
+    #[test]
+    fn replay_respects_filter_and_preserves_marker_atoms_and_note() {
+        let included = mapping(&[]);
+        let mut excluded = mapping(&[]);
+        excluded.reference = format!(
+            "{}{}{}",
+            marker::PREFIX,
+            "h".repeat(marker::IDENTIFIER_LEN),
+            marker::SUFFIX
+        );
+        excluded.secret = "g".repeat(marker::IDENTIFIER_LEN);
+        let mappings = [included, excluded];
+        let mut request = AiRequest::new("model", Vec::new());
+        request.instructions = Some(format!("{} {}", mappings[0].reference, mappings[1].secret));
+        replay_request_redaction(&mut request, &mappings, |m| {
+            m.reference == mappings[0].reference
+        })
+        .unwrap();
+        let expected = format!(
+            "{} {}\n\n{}",
+            mappings[0].reference, mappings[1].secret, MARKER_INSTRUCTION
+        );
+        assert_eq!(request.instructions.as_deref(), Some(expected.as_str()));
+        replay_request_redaction(&mut request, &mappings, |_| true).unwrap();
+        let expected = format!(
+            "{} {}\n\n{}",
+            mappings[0].reference, mappings[1].reference, MARKER_INSTRUCTION
+        );
+        assert_eq!(request.instructions.as_deref(), Some(expected.as_str()));
+
+        let mut no_reference = AiRequest::new("model", Vec::new());
+        no_reference.instructions = Some(mappings[1].secret.clone());
+        replay_request_redaction(&mut no_reference, &mappings, |m| {
+            m.reference == mappings[0].reference
+        })
+        .unwrap();
+        assert_eq!(
+            no_reference.instructions.as_deref(),
+            Some(mappings[1].secret.as_str())
+        );
     }
 
     #[tokio::test]

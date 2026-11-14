@@ -1104,6 +1104,17 @@ impl GenerationChainStore {
         })
     }
 
+    pub(super) async fn redaction_references(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<Vec<String>, String> {
+        self.turn_chain
+            .redaction_references(principal, id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub(super) async fn load_generation_chain(
         &self,
         principal: &Principal,

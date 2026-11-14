@@ -78,6 +78,14 @@ struct ImmediatelyExpiredTurnChainStore {
 
 #[async_trait::async_trait]
 impl TurnChainStore for ImmediatelyExpiredTurnChainStore {
+    async fn redaction_references(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<Vec<String>, stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.redaction_references(principal, id).await
+    }
+
     async fn materialize(
         &self,
         principal: &Principal,
@@ -177,6 +185,14 @@ impl CommitBarrierTurnChainStore {
 
 #[async_trait::async_trait]
 impl TurnChainStore for CommitBarrierTurnChainStore {
+    async fn redaction_references(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<Vec<String>, stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.redaction_references(principal, id).await
+    }
+
     async fn materialize(
         &self,
         principal: &Principal,

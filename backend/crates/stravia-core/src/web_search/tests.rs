@@ -922,6 +922,14 @@ struct BlockingCommitStore {
 
 #[async_trait]
 impl TurnChainStore for BlockingCommitStore {
+    async fn redaction_references(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<Vec<String>, TurnUnavailable> {
+        self.inner.redaction_references(principal, id).await
+    }
+
     async fn materialize(
         &self,
         principal: &Principal,

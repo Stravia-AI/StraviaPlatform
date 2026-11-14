@@ -145,6 +145,27 @@ async fn replay_legacy_boundary_source(
     ))
 }
 
+fn legacy_boundary_request(
+    config: EffectiveRequestConfig,
+    items: Vec<AiItem>,
+    current: &AiRequest,
+) -> AiRequest {
+    AiRequest {
+        model: config.model,
+        items,
+        instructions: config.instructions,
+        generation: config.generation,
+        stream: current.stream.clone(),
+        tools: config.tools,
+        tool_choice: config.tool_choice,
+        parallel_tool_calls: config.parallel_tool_calls,
+        reasoning: config.reasoning,
+        response_format: config.response_format,
+        parameters: config.parameters,
+        meta: current.meta.clone(),
+    }
+}
+
 impl GenerationChain {
     /// Recover old checkpoint facts only from the admitted generation ancestry.
     /// Neither a matching admission ID nor an equal item count proves a gap:
@@ -156,6 +177,7 @@ impl GenerationChain {
         parent_id: &str,
         current: &AiRequest,
         retained: &[HistoryBoundaryCandidate],
+        mappings: &dyn stravia_credential_protection::store::MappingStore,
     ) -> Option<Vec<HistoryBoundaryCandidate>> {
         let chain = self
             .store
@@ -197,22 +219,61 @@ impl GenerationChain {
                 };
                 let mut items = owned_items(source_history.as_ref()?);
                 items.extend(owned_items(node.client_delta.messages.as_ref()));
-                let original = AiRequest {
-                    model: config.model,
-                    items,
-                    instructions: config.instructions,
-                    generation: config.generation,
-                    stream: current.stream.clone(),
-                    tools: config.tools,
-                    tool_choice: config.tool_choice,
-                    parallel_tool_calls: config.parallel_tool_calls,
-                    reasoning: config.reasoning,
-                    response_format: config.response_format,
-                    parameters: config.parameters,
-                    meta: current.meta.clone(),
-                };
+                let mut original = legacy_boundary_request(config, items, current);
                 if project_history_boundaries(&original, fact, &[]).is_none() {
-                    continue;
+                    let references = self.store.redaction_references(principal, &id).await.ok()?;
+                    if references.is_empty() {
+                        continue;
+                    }
+                    let snapshot = mappings.active(principal).await.ok()?;
+                    if references.iter().any(|reference| {
+                        snapshot
+                            .iter()
+                            .filter(|mapping| &mapping.reference == reference)
+                            .count()
+                            != 1
+                    }) {
+                        return None;
+                    }
+                    let proves_redacted = |request: &AiRequest| {
+                        let mut protected = request.clone();
+                        stravia_credential_protection::replay_request_redaction(
+                            &mut protected,
+                            &snapshot,
+                            |mapping| references.contains(&mapping.reference),
+                        )
+                        .ok()?;
+                        Some(project_history_boundaries(&protected, fact, &[]).is_some())
+                    };
+                    // The previous writer-view fix still hashed the protected
+                    // copy. Its exact persisted input needs no replay guesses.
+                    if current.items.len() >= input_end
+                        && exact_legacy_items_equal(&history, &current.items[..input_end])
+                        && proves_redacted(&legacy_boundary_request(
+                            persisted_config.clone(),
+                            owned_items(&history),
+                            current,
+                        ))?
+                    {
+                        *fact = fact.at_projected_gap(
+                            current,
+                            usize::try_from(fact.source_item_gap).ok()?,
+                        )?;
+                        continue;
+                    }
+                    // Older facts preceded thinking replay as well as redaction.
+                    // Controls may come from the unchanged client input or stage;
+                    // only a complete historical proof selects either source.
+                    if !proves_redacted(&original)? {
+                        original = legacy_boundary_request(
+                            EffectiveRequestConfig::from_request(current),
+                            original.items,
+                            current,
+                        );
+                        if !proves_redacted(&original)? {
+                            continue;
+                        }
+                    }
                 }
                 let preserved = history
                     .iter()
