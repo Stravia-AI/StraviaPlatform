@@ -274,7 +274,7 @@ impl AgentOutputValidator for LocalSearchOutputValidator {
                 completion,
                 partial_cause,
                 report,
-                &evidence,
+                Some(&evidence),
                 &policy.allowed_domains,
             )
             .await

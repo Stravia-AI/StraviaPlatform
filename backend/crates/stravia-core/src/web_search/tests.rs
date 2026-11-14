@@ -48,13 +48,63 @@ async fn report_rejects_a_source_without_verified_evidence() {
             SearchCompletion::Complete,
             None,
             report,
-            &evidence,
+            Some(&evidence),
             &[],
         )
         .await
         .expect_err("invented URL must be rejected");
 
     assert_eq!(error.code, "unverified_source");
+}
+
+#[tokio::test]
+async fn report_uses_evidence_titles_without_rejecting_model_title_differences() {
+    let turn_id = SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab");
+    let oversized_title = "x".repeat(2 * 1024 + 1);
+    for (model_title, evidence_title, expected_title) in [
+        (
+            Some("Model-generated title"),
+            Some("Tool-provided title"),
+            Some("Tool-provided title"),
+        ),
+        (Some("Model-generated title"), None, None),
+        (
+            None,
+            Some("Tool-provided title"),
+            Some("Tool-provided title"),
+        ),
+        (
+            Some("Model-generated title"),
+            Some(oversized_title.as_str()),
+            None,
+        ),
+    ] {
+        let report = SearchReport {
+            answer: "A claim [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1]".into(),
+            sources: vec![SearchSource {
+                path: "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1".into(),
+                url: "https://8.8.8.8/verified".into(),
+                title: model_title.map(str::to_owned),
+            }],
+            limitations: Vec::new(),
+        };
+        let evidence = SearchEvidenceSet::from_evidence([SearchEvidence {
+            url: "https://8.8.8.8/verified".into(),
+            title: evidence_title.map(str::to_owned),
+        }]);
+        let validated = SearchReportValidator
+            .validate(
+                &turn_id,
+                SearchCompletion::Complete,
+                None,
+                report,
+                Some(&evidence),
+                &[],
+            )
+            .await
+            .expect("a verified URL is not rejected for a model-generated title");
+        assert_eq!(validated.sources[0].title.as_deref(), expected_title);
+    }
 }
 
 #[tokio::test]
@@ -99,7 +149,7 @@ async fn report_rejects_foreign_malformed_and_legacy_source_references() {
                 SearchCompletion::Complete,
                 None,
                 report,
-                &evidence,
+                Some(&evidence),
                 &[],
             )
             .await
@@ -139,7 +189,7 @@ async fn partial_report_accepts_a_localized_limitation() {
             SearchCompletion::Partial,
             Some(stravia_web_search::SearchPartialCause::WorkingBudgetExhausted),
             report,
-            &evidence,
+            Some(&evidence),
             &[],
         )
         .await
@@ -171,7 +221,7 @@ async fn report_rejects_an_oversized_source_title() {
             SearchCompletion::Complete,
             None,
             report,
-            &evidence,
+            Some(&evidence),
             &[],
         )
         .await
@@ -197,19 +247,20 @@ async fn report_rejects_a_verified_source_outside_the_allowed_domains() {
         title: Some("Verified".into()),
     }]);
 
-    let error = SearchReportValidator
-        .validate(
-            &turn_id,
-            SearchCompletion::Complete,
-            None,
-            report,
-            &evidence,
-            &["8.8.4.4".to_owned()],
-        )
-        .await
-        .expect_err("a verified but out-of-policy source must be rejected");
-
-    assert_eq!(error.code, "source_outside_allowed_domains");
+    for evidence in [Some(&evidence), None] {
+        let error = SearchReportValidator
+            .validate(
+                &turn_id,
+                SearchCompletion::Complete,
+                None,
+                report.clone(),
+                evidence,
+                &["8.8.4.4".to_owned()],
+            )
+            .await
+            .expect_err("Local and External sources must respect allowed domains");
+        assert_eq!(error.code, "source_outside_allowed_domains");
+    }
 }
 
 #[tokio::test]
@@ -235,7 +286,7 @@ async fn report_accepts_verified_sources_matching_the_allowed_domains() {
             SearchCompletion::Complete,
             None,
             report,
-            &evidence,
+            Some(&evidence),
             &["8.8.8.8".to_owned()],
         )
         .await
@@ -298,6 +349,14 @@ impl SearchBackend for CountingBackend {
             Some(domain) => format!("https://{domain}/search"),
             None => "https://8.8.8.8/search".to_owned(),
         };
+        let evidence = if self.kind == WebSearchBackendKind::Local {
+            SearchEvidenceSet::from_evidence([SearchEvidence {
+                url: source_url.clone(),
+                title: Some("Verified".into()),
+            }])
+        } else {
+            SearchEvidenceSet::default()
+        };
         Ok(BackendOutput {
             completion: SearchCompletion::Complete,
             partial_cause: None,
@@ -305,15 +364,12 @@ impl SearchBackend for CountingBackend {
                 answer: format!("Verified claim [{path}]"),
                 sources: vec![SearchSource {
                     path,
-                    url: source_url.clone(),
+                    url: source_url,
                     title: Some("Verified".into()),
                 }],
                 limitations: vec![],
             },
-            evidence: SearchEvidenceSet::from_evidence([SearchEvidence {
-                url: source_url,
-                title: Some("Verified".into()),
-            }]),
+            evidence,
             usage: Some(Default::default()),
             model_turns: 1,
             tool_calls: 2,
@@ -445,6 +501,46 @@ async fn runner_emits_one_terminal_result_and_commits_the_search_turn() {
         .expect("committed Search Turn");
     assert_eq!(chain.len(), 1);
     assert_eq!(chain[0].payload["query"], "Search a verified claim");
+}
+
+#[tokio::test]
+async fn external_report_does_not_require_local_tool_evidence() {
+    let config = WebSearchConfig {
+        backend: Some(WebSearchBackendDraft::External {
+            route_id: Some("external-search".into()),
+        }),
+        ..enabled_local_config()
+    };
+    let runner = WebSearchRunner::new(
+        Arc::new(MemoryWebSearchConfigStore::new(config)),
+        Arc::new(crate::turn_chain::test_store().await),
+        Arc::new(CountingBackend::local()),
+        Arc::new(CountingBackend::external()),
+        Arc::new(SearchReportValidator),
+        Arc::new(stravia_web_search::AllowSearchRun),
+    );
+    let events = runner
+        .run(WebSearchInput {
+            principal: Principal::new("owner"),
+            query: "Verify a claim".into(),
+            previous_turn_id: None,
+            policy: None,
+            cancellation: CancellationToken::new(),
+            deadline: Instant::now() + Duration::from_secs(30),
+        })
+        .collect::<Vec<_>>()
+        .await;
+    let Some(WebSearchEvent::Completed(result)) = events.last() else {
+        panic!("an External report must not require Local tool evidence: {events:?}");
+    };
+    assert_eq!(result.report.sources[0].url, "https://8.8.8.8/search");
+    assert_eq!(result.report.sources[0].title.as_deref(), Some("Verified"));
+    assert!(
+        result
+            .report
+            .answer
+            .contains(&format!("[{}/sources/1]", result.turn_id.reference()))
+    );
 }
 
 #[tokio::test]

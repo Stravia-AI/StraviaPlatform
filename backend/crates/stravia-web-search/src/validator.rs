@@ -18,13 +18,15 @@ const MAX_REPORT_BYTES: usize = 256 * 1024;
 pub struct SearchReportValidator;
 
 impl SearchReportValidator {
+    /// 校验报告结构、来源地址及域名策略；Local 传入工具证据，External 传 None。
+    /// Local 标题采用有界证据标题，External 保留供应商提供的标题。
     pub async fn validate(
         &self,
         turn_id: &SearchTurnId,
         completion: SearchCompletion,
         partial_cause: Option<SearchPartialCause>,
         mut report: SearchReport,
-        evidence: &SearchEvidenceSet,
+        evidence: Option<&SearchEvidenceSet>,
         allowed_domains: &[String],
     ) -> Result<SearchReport, WebSearchError> {
         if (completion == SearchCompletion::Partial) != partial_cause.is_some() {
@@ -63,17 +65,6 @@ impl SearchReportValidator {
                 "A partial Search Report must state its budget or timeout limitation",
             ));
         }
-        if serde_json::to_vec(&report)
-            .map_err(|_| WebSearchError::new("invalid_report", "Search Report is invalid"))?
-            .len()
-            > MAX_REPORT_BYTES
-        {
-            return Err(WebSearchError::new(
-                "invalid_report",
-                "Search Report exceeds the 256 KiB encoded size limit",
-            ));
-        }
-
         let expected_prefix = format!("{}/sources/", turn_id.reference());
         let mut sources = HashMap::with_capacity(report.sources.len());
         for source in &mut report.sources {
@@ -113,19 +104,23 @@ impl SearchReportValidator {
                     "Search Source is outside the allowed domains",
                 ));
             }
-            let Some(verified_title) = evidence.by_url.get(&normalized) else {
-                return Err(WebSearchError::new(
-                    "unverified_source",
-                    "Search Source URL is not present in verified evidence",
-                ));
-            };
-            if let Some(title) = source.title.as_ref()
-                && verified_title.as_deref() != Some(title.as_str())
-            {
-                return Err(WebSearchError::new(
-                    "unverified_source",
-                    "Search Source title is not present in verified evidence",
-                ));
+            if let Some(evidence) = evidence {
+                let Some(verified_title) = evidence.by_url.get(&normalized) else {
+                    return Err(WebSearchError::new(
+                        "unverified_source",
+                        "Search Source URL is not present in verified evidence",
+                    ));
+                };
+                // 标题只作展示；模型改写标题不改变 URL 的取证结果。
+                let title = verified_title
+                    .as_ref()
+                    .filter(|title| title.len() <= MAX_SOURCE_TITLE_BYTES);
+                if source.title.as_ref() != title {
+                    match title {
+                        Some(title) => source.title.get_or_insert_default().clone_from(title),
+                        None => source.title = None,
+                    }
+                }
             }
             source.url = normalized;
             if sources
@@ -137,6 +132,17 @@ impl SearchReportValidator {
                     "Search Source paths must be unique",
                 ));
             }
+        }
+
+        if serde_json::to_vec(&report)
+            .map_err(|_| WebSearchError::new("invalid_report", "Search Report is invalid"))?
+            .len()
+            > MAX_REPORT_BYTES
+        {
+            return Err(WebSearchError::new(
+                "invalid_report",
+                "Search Report exceeds the 256 KiB encoded size limit",
+            ));
         }
 
         let markers = answer_markers(&report.answer)?;

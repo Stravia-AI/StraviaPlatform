@@ -553,14 +553,19 @@ impl WebSearchRunner {
         audit.provider_id = provider_id;
         audit.model_id = upstream_model;
 
-        let mut evidence =
-            SearchEvidenceSet::from_evidence(ancestors.iter().flat_map(|ancestor| {
-                ancestor.report.sources.iter().map(|source| SearchEvidence {
-                    url: source.url.clone(),
-                    title: source.title.clone(),
-                })
-            }));
-        evidence.extend(output_evidence.iter());
+        let evidence = if snapshot.backend.kind() == WebSearchBackendKind::Local {
+            let mut evidence =
+                SearchEvidenceSet::from_evidence(ancestors.iter().flat_map(|ancestor| {
+                    ancestor.report.sources.iter().map(|source| SearchEvidence {
+                        url: source.url.clone(),
+                        title: source.title.clone(),
+                    })
+                }));
+            evidence.extend(output_evidence.iter());
+            Some(evidence)
+        } else {
+            None
+        };
         let report = self
             .await_stage(
                 &input,
@@ -572,7 +577,7 @@ impl WebSearchRunner {
                     completion,
                     partial_cause,
                     unvalidated_report,
-                    &evidence,
+                    evidence.as_ref(),
                     &policy.allowed_domains,
                 ),
                 |error| error,

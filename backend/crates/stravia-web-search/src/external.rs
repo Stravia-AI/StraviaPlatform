@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{
-    BackendOutput, SearchBackend, SearchBackendInput, SearchCompletion, SearchEvidence,
-    SearchEvidenceSet, SearchReport, SearchSource, WebSearchBackendKind, WebSearchError,
+    BackendOutput, SearchBackend, SearchBackendInput, SearchCompletion, SearchEvidenceSet,
+    SearchReport, SearchSource, WebSearchBackendKind, WebSearchError,
 };
 use crate::host::ExternalSearchHost;
 
@@ -56,13 +56,13 @@ impl SearchBackend for ExternalSearchBackend {
                 input.deadline,
             )
             .await?;
-        let (report, evidence) = normalize_response(&input.turn_id, &execution.response)?;
+        let report = normalize_response(&input.turn_id, &execution.response)?;
 
         Ok(BackendOutput {
             completion: SearchCompletion::Complete,
             partial_cause: None,
             report,
-            evidence,
+            evidence: SearchEvidenceSet::default(),
             usage: execution.response.usage,
             model_turns: 0,
             tool_calls: 0,
@@ -77,7 +77,7 @@ impl SearchBackend for ExternalSearchBackend {
 fn normalize_response(
     turn_id: &super::SearchTurnId,
     response: &stravia_vendor_sdk::SearchResponse,
-) -> Result<(SearchReport, SearchEvidenceSet), WebSearchError> {
+) -> Result<SearchReport, WebSearchError> {
     if response.sources.is_empty() {
         return Err(external_error(
             "invalid_report",
@@ -88,7 +88,6 @@ fn normalize_response(
     let mut ids = HashSet::new();
     let mut replacements = HashMap::new();
     let mut sources = Vec::with_capacity(response.sources.len());
-    let mut evidence = Vec::with_capacity(response.sources.len());
     for (index, source) in response.sources.iter().enumerate() {
         let source_id = source.id.trim();
         if source_id.is_empty() || !ids.insert(source_id.to_owned()) {
@@ -104,10 +103,6 @@ fn normalize_response(
             url: source.url.clone(),
             title: source.title.clone(),
         });
-        evidence.push(SearchEvidence {
-            url: source.url.clone(),
-            title: source.title.clone(),
-        });
     }
 
     let mut answer = response.answer.clone();
@@ -115,14 +110,11 @@ fn normalize_response(
         answer = answer.replace(&marker, &replacement);
     }
 
-    Ok((
-        SearchReport {
-            answer,
-            sources,
-            limitations: response.limitations.clone(),
-        },
-        SearchEvidenceSet::from_evidence(evidence),
-    ))
+    Ok(SearchReport {
+        answer,
+        sources,
+        limitations: response.limitations.clone(),
+    })
 }
 
 fn external_error(code: &'static str, message: &'static str) -> WebSearchError {
@@ -148,7 +140,7 @@ mod tests {
             usage: None,
         };
 
-        let (report, _) = normalize_response(
+        let report = normalize_response(
             &super::super::SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab"),
             &response,
         )
