@@ -84,7 +84,7 @@ describe('route targets form', () => {
     expect(added).toMatchObject({
       enabled: false,
       priority: 0,
-      firstTokenTimeoutSeconds: 60,
+      firstTokenTimeoutSeconds: 120,
       targetRetryBudget: 5,
       targetCooldownSeconds: 120,
     })

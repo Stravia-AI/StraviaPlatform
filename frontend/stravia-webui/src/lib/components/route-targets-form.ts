@@ -80,7 +80,7 @@ export function createRouteTarget(targets: RouteTargetForm[], values: Partial<Ro
     model: '',
     enabled: false,
     priority: 0,
-    firstTokenTimeoutSeconds: 60,
+    firstTokenTimeoutSeconds: 120,
     targetRetryBudget: 5,
     targetCooldownSeconds: 120,
     inventory: [],

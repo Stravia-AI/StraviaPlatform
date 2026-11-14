@@ -1362,7 +1362,7 @@ CREATE TABLE model_backends (
     enabled                INTEGER NOT NULL DEFAULT 1,
     priority               INTEGER NOT NULL DEFAULT 0,
     thinking_level_map     TEXT NOT NULL,
-    first_token_timeout_ms INTEGER NOT NULL DEFAULT 60000,
+    first_token_timeout_ms INTEGER NOT NULL DEFAULT 120000,
     target_retry_budget    INTEGER NOT NULL DEFAULT 5,
     target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000
 );
@@ -1582,13 +1582,15 @@ tests/stream/
 
 ### 12.8 Router 故障策略
 
-首 Token 等待计时只用于普通流式推理（`ModelTurnPurpose::Generation` 且 canonical `stream.enabled=true`）。非流式推理与独立远程压缩统一沿用请求的共享空闲 deadline，默认 300 秒；上游边界活动继续续期，取消与客户端断开继续生效，不新增压缩专用超时。独立压缩即使向客户端返回 SSE，或 Vendor 内部使用流式请求，也不套用 Target First Token Timeout。以下使用该配置判断 `Retry-After` 的重试与冷却规则不变。
+首 Token 等待计时只用于普通流式推理（`ModelTurnPurpose::Generation` 且 canonical `stream.enabled=true`）。它是首个有效输出前的上游空闲窗口，而非请求总时长：默认 120 秒，每次窗口在配置值的 95%–105% 内随机浮动，收到本 attempt 的上游数据或心跳后重新计时。首个有效输出（含 Thinking、工具调用）解除此计时；本地下游保活、其他并行操作和单纯续期共享 deadline 不会重置它。窗口为 0 时关闭。持续有上游心跳却没有输出的连接可能长期等待，保留取消与断开控制，不另加固定总时限。非流式推理与独立远程压缩统一沿用请求的共享空闲 deadline，默认 300 秒；上游边界活动继续续期，取消与客户端断开继续生效，不新增压缩专用超时。独立压缩即使向客户端返回 SSE，或 Vendor 内部使用流式请求，也不套用 Target First Token Timeout。以下使用配置基准值（不含随机浮动）判断 `Retry-After` 的重试与冷却规则不变。
+
+新建 Target 的前后端与数据库默认值统一为 120 秒；已保存的自定义值（含 0）不会改写。SQLite/PostgreSQL 增量 migration `0054_first_token_idle_timeout` 只更新新记录的默认值：PostgreSQL 更新列元数据，SQLite 因不支持修改列默认值而重建 Target 配置表并原样复制配置、恢复索引与约束，不读取或转换历史正文。SQLite 工作量随 Target 数增长，事务提交前失败仍回滚；正常再次启动不会重复重建。升级复用既有 schema 阶段与不定进度，不增加阶段码。本地合成 Target 表夹具各含 10,000 条自定义配置：SQLite 内存库重建 19.16 ms，约束、外键与旧值均保留；进程 RSS 高水位迁移前后均为 591,568 KiB，不能据此归因迁移内存开销。PostgreSQL 16 的列默认值变更为 0.462 ms（事务提交另为 0.416 ms），旧值未变；这是局部迁移测量，不代表文件型 SQLite、生产数据或完整启动耗时。
 
 显式 `Retry-After` 不大于 Target First Token Timeout 时，推理和独立能力执行在 Stravia 内部完整等待后重发同 Target，不提前向客户端返回该次限流；等待不按 `target_cooldown_ms` 截短。First Token Timeout 为 0 时关闭此时长上限。同 Target 重试仍受共享失败预算、半开／冷却额外尝试的单次限制、Client Output Commit、取消和总 deadline 约束。等待大于或等于当前请求剩余 deadline 时，跳过该 Target 并尝试其余合格目标；没有备用时立即返回原上游错误，不以等待耗尽后的 `deadline_exceeded` 覆盖它，也不截短等待后提前重发。
 
 显式 `Retry-After` 大于已启用的 Target First Token Timeout 时，立即进入 `min(target_cooldown_ms, Retry-After)` 的共享冷却并切换其他合格 Target，不在当前请求里等待，也不要求先耗尽 Target Retry Budget。共享 Retry-After 门禁采用同一个有效冷却截止时间，不能在冷却到期后继续阻塞到原始 Retry-After。冷却为 0 时不建立共享等待，但本次请求仍跳过该 Target。每次上游失败只累计一次，不重复扣除预算。
 
-`RouteAttemptPolicy` 统一 Target 分层选择、同 Target full-jitter 重试、QuotaExceeded 换 Target、First Token Timeout 与进程内 Target Cooldown。普通状态下，每个 `provider_id:model` 只有一份共享连续失败计数：同 Target 内部重试与跨请求终态上游失败都递增，完整成功清零。除上述显式长 Retry-After 外，Target Retry Budget 为 N 表示第 N+1 次连续失败才触发冷却；缺省 5，即第 6 次失败后冷却 120 秒。瞬时失败是否在同 Target 重试仍由错误分类决定；QuotaExceeded 带有首 Token 时限内的显式 Retry-After 时可完整等待后重试，否则与 Authentication / Authorization、InvalidRequest、Unknown 等非瞬时上游错误一样计数并直接换 Target。ContextLength、ContentFiltered 与明确的请求级证据仍终止请求，不因计数改成同 Target 重试。用户取消、消费者断开以及本地准备、Hook、存储错误不计数。Client Output Commit 后仍禁止换 Target，只终止当前请求；Commit 本身不计数也不单独触发冷却，其后的真实上游失败仍计数。冷却为 0 时仅关闭冷却调度门禁；共享失败仍计数，达到阈值后仍按错误分类更换或停止 Target，完整成功仍清零。
+`RouteAttemptPolicy` 统一 Target 分层选择、同 Target 指数退避重试（3 秒起、×2，附加 0–5% 向后抖动，最终等待封顶 60 秒）、QuotaExceeded 换 Target、First Token Timeout 与进程内 Target Cooldown。普通状态下，每个 `provider_id:model` 只有一份共享连续失败计数：同 Target 内部重试与跨请求终态上游失败都递增，完整成功清零。除上述显式长 Retry-After 外，Target Retry Budget 为 N 表示第 N+1 次连续失败才触发冷却；缺省 5，即第 6 次失败后冷却 120 秒。瞬时失败是否在同 Target 重试仍由错误分类决定；QuotaExceeded 带有首 Token 时限内的显式 Retry-After 时可完整等待后重试，否则与 Authentication / Authorization、InvalidRequest、Unknown 等非瞬时上游错误一样计数并直接换 Target。ContextLength、ContentFiltered 与明确的请求级证据仍终止请求，不因计数改成同 Target 重试。用户取消、消费者断开以及本地准备、Hook、存储错误不计数。Client Output Commit 后仍禁止换 Target，只终止当前请求；Commit 本身不计数也不单独触发冷却，其后的真实上游失败仍计数。冷却为 0 时仅关闭冷却调度门禁；共享失败仍计数，达到阈值后仍按错误分类更换或停止 Target，完整成功仍清零。
 
 冷却结束进入半开，只在满足现有路由条件并实际选中时原子领取一个探测名额；探测期间其他请求跳过该 Target。半开只有一个 Target attempt，同时关闭同 Target 预算重试与 ProviderCall 内部重试和回退；已确认未执行的续接可按上文契约在该 attempt 内完整重放一次，不另领探测名额。完整成功清零并恢复正常，健康相关的上游探测失败（含已发出上游请求后的超时）立即重新冷却，显式长 Retry-After 仍使用上述有界时长。用户取消、消费者断开和本地准备失败只释放探测名额，不伪造成功或失败。
 

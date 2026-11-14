@@ -33,6 +33,7 @@ pub(super) struct OutputLifecycle<'a> {
     parent_cancellation: &'a stravia_runtime_contract::CancellationToken,
     operation_cancellation: &'a stravia_runtime_contract::CancellationToken,
     deadline: &'a Deadline,
+    first_token_window: &'a Arc<tokio::sync::Notify>,
     policy: &'a AttemptRoutePolicy,
     target: &'a SelectedTarget,
     output: &'a tokio::sync::mpsc::Sender<VendorPublishedResult>,
@@ -51,6 +52,7 @@ impl<'a> OutputLifecycle<'a> {
         parent_cancellation: &'a stravia_runtime_contract::CancellationToken,
         operation_cancellation: &'a stravia_runtime_contract::CancellationToken,
         deadline: &'a Deadline,
+        first_token_window: &'a Arc<tokio::sync::Notify>,
         policy: &'a AttemptRoutePolicy,
         target: &'a SelectedTarget,
         output: &'a tokio::sync::mpsc::Sender<VendorPublishedResult>,
@@ -62,6 +64,7 @@ impl<'a> OutputLifecycle<'a> {
             parent_cancellation,
             operation_cancellation,
             deadline,
+            first_token_window,
             policy,
             target,
             output,
@@ -217,7 +220,10 @@ impl Operation<'_, '_> {
             .upstream_state
             .store(UPSTREAM_NOT_STARTED, Ordering::Release);
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
-        let mut context = VendorCallContext::new(operation_cancellation.clone(), deadline.clone());
+        let mut context = VendorCallContext::new(
+            operation_cancellation.clone(),
+            deadline.with_upstream_activity(self.lifecycle.first_token_window.clone()),
+        );
         let send_admission = crate::rpm::SendAdmission {
             admission: gateway.rpm_admission.clone(),
             root: prepared.root_request.clone(),

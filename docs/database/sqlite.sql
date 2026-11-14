@@ -279,7 +279,7 @@ CREATE TABLE "model_backends" (
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     thinking_level_map     TEXT NOT NULL DEFAULT '[{"level":"off","control":{"type":"hidden"},"source":"generated"},{"level":"minimal","control":{"type":"hidden"},"source":"generated"},{"level":"low","control":{"type":"hidden"},"source":"generated"},{"level":"medium","control":{"type":"hidden"},"source":"generated"},{"level":"high","control":{"type":"hidden"},"source":"generated"},{"level":"xhigh","control":{"type":"hidden"},"source":"generated"},{"level":"max","control":{"type":"hidden"},"source":"generated"}]'
         CHECK (json_valid(thinking_level_map)),
-    first_token_timeout_ms INTEGER NOT NULL DEFAULT 60000,
+    first_token_timeout_ms INTEGER NOT NULL DEFAULT 120000,
     target_retry_budget    INTEGER NOT NULL DEFAULT 5,
     target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000,
     enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))

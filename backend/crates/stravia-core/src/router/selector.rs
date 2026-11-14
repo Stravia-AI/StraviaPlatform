@@ -994,10 +994,10 @@ impl RouteAttemptPolicy {
             && failures <= target.target_retry_budget.max(0) as u32
             && (retry_after_wait.is_some() || self.retry_current())
         {
-            let cap_ms = 500_u64
-                .saturating_mul(1_u64 << (failures - 1).min(4))
-                .min(8_000);
-            let delay = retry_after_wait.unwrap_or_else(|| jitter(cap_ms, jitter_sample));
+            let base_ms = 3_000_u64
+                .saturating_mul(1_u64 << (failures - 1).min(5))
+                .min(60_000);
+            let delay = retry_after_wait.unwrap_or_else(|| jitter(base_ms, jitter_sample));
             return AttemptFailureDisposition::RetrySame { delay };
         }
         self.skip_current();
@@ -1131,8 +1131,9 @@ fn transient_failure(kind: &AiErrorKind) -> bool {
     )
 }
 
-fn jitter(cap_ms: u64, sample: f64) -> Duration {
-    Duration::from_secs_f64((cap_ms as f64 / 1_000.0) * sample.clamp(0.0, 1.0))
+fn jitter(base_ms: u64, sample: f64) -> Duration {
+    Duration::from_secs_f64((base_ms as f64 / 1_000.0) * (1.0 + 0.05 * sample.clamp(0.0, 1.0)))
+        .min(Duration::from_secs(60))
 }
 
 fn retry_after_policy(
@@ -1797,7 +1798,7 @@ mod tests {
                 },
             ),
             AttemptFailureDisposition::RetrySame {
-                delay: Duration::from_millis(500)
+                delay: Duration::from_millis(3_150)
             }
         );
         assert_eq!(
@@ -1835,7 +1836,7 @@ mod tests {
     }
 
     #[test]
-    fn default_retry_budget_uses_capped_exponential_full_jitter() {
+    fn default_retry_budget_uses_capped_exponential_backoff() {
         let state = RoutePolicyState::default();
         let targets = vec![target("flaky", 0), target("fallback", 0)];
         let mut policy = RouteAttemptPolicy::new(
@@ -1846,7 +1847,7 @@ mod tests {
             state,
         );
         let flaky = policy.next_healthy().expect("first Target");
-        for cap_ms in [500, 1_000, 2_000, 4_000, 8_000] {
+        for delay_ms in [3_150, 6_300, 12_600, 25_200, 50_400] {
             assert_eq!(
                 policy.record_failure(
                     &flaky,
@@ -1859,7 +1860,7 @@ mod tests {
                     },
                 ),
                 AttemptFailureDisposition::RetrySame {
-                    delay: Duration::from_millis(cap_ms),
+                    delay: Duration::from_millis(delay_ms),
                 }
             );
         }
@@ -1876,6 +1877,39 @@ mod tests {
             ),
             AttemptFailureDisposition::TryNextTarget
         );
+    }
+
+    #[test]
+    fn retry_backoff_jitter_stays_within_bounds_and_caps_at_sixty_seconds() {
+        for (sample, expected_ms) in [
+            (-1.0, [3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000]),
+            (0.0, [3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000]),
+            (0.5, [3_075, 6_150, 12_300, 24_600, 49_200, 60_000, 60_000]),
+            (1.0, [3_150, 6_300, 12_600, 25_200, 50_400, 60_000, 60_000]),
+            (2.0, [3_150, 6_300, 12_600, 25_200, 50_400, 60_000, 60_000]),
+        ] {
+            let mut configured = target("flaky", 0);
+            configured.target_retry_budget = 7;
+            let targets = [configured];
+            let state = RoutePolicyState::default();
+            let mut policy = policy_at(&state, &targets, 0);
+            let flaky = policy.next_healthy().expect("first Target");
+            for delay_ms in expected_ms {
+                assert_eq!(
+                    policy.record_failure(
+                        &flaky,
+                        AttemptFailureSignal {
+                            jitter_sample: sample,
+                            ..failure_at(AiErrorKind::ServerError, 0)
+                        },
+                    ),
+                    AttemptFailureDisposition::RetrySame {
+                        delay: Duration::from_millis(delay_ms),
+                    },
+                    "jitter sample {sample}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -2220,12 +2254,10 @@ mod tests {
         let selected = request.next_healthy().expect("target");
         assert_eq!(selected.provider_id().as_str(), "recovering");
         for _ in 0..2 {
-            assert_eq!(
+            assert!(matches!(
                 request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
-                AttemptFailureDisposition::RetrySame {
-                    delay: Duration::ZERO
-                }
-            );
+                AttemptFailureDisposition::RetrySame { .. }
+            ));
         }
         assert_eq!(
             request.record_failure(&selected, failure_at(AiErrorKind::Timeout, 0)),
@@ -2506,12 +2538,10 @@ mod tests {
         let old_target = old.next_healthy().expect("old request");
         let original_epoch = old.current_epoch();
         let selected = opener.next_healthy().expect("concurrent request");
-        assert_eq!(
+        assert!(matches!(
             old.record_failure(&old_target, failure_at(AiErrorKind::Timeout, 10_000)),
-            AttemptFailureDisposition::RetrySame {
-                delay: Duration::ZERO
-            }
-        );
+            AttemptFailureDisposition::RetrySame { .. }
+        ));
         assert_eq!(
             opener.record_failure(&selected, failure_at(AiErrorKind::QuotaExceeded, 10_000)),
             AttemptFailureDisposition::TryNextTarget

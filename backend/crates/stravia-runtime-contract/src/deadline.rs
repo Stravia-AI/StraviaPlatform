@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// A shareable hard deadline. Every clone observes the same instant, so a
+/// A shareable deadline. Every clone observes the same instant, so a
 /// renewal in one layer extends waiters in all layers. `renew` pushes the
 /// deadline out by the TTL it was created with; `fixed` deadlines have a zero
 /// TTL and never renew.
 #[derive(Clone, Debug)]
-pub struct Deadline(Arc<DeadlineState>);
+pub struct Deadline(Arc<DeadlineState>, Option<Arc<tokio::sync::Notify>>);
 
 #[derive(Debug)]
 struct DeadlineState {
@@ -19,25 +19,43 @@ impl Deadline {
     /// Create a renewable deadline `ttl` from now. Each `renew` re-arms it for
     /// another `ttl`, turning the deadline into an idle timeout.
     pub fn from_now(ttl: Duration) -> Self {
-        Self(Arc::new(DeadlineState {
-            at: Mutex::new(Instant::now() + ttl),
-            ttl,
-            notify: tokio::sync::Notify::new(),
-        }))
+        Self(
+            Arc::new(DeadlineState {
+                at: Mutex::new(Instant::now() + ttl),
+                ttl,
+                notify: tokio::sync::Notify::new(),
+            }),
+            None,
+        )
     }
 
     /// An absolute deadline that `renew` never extends.
     pub fn fixed(at: Instant) -> Self {
-        Self(Arc::new(DeadlineState {
-            at: Mutex::new(at),
-            ttl: Duration::ZERO,
-            notify: tokio::sync::Notify::new(),
-        }))
+        Self(
+            Arc::new(DeadlineState {
+                at: Mutex::new(at),
+                ttl: Duration::ZERO,
+                notify: tokio::sync::Notify::new(),
+            }),
+            None,
+        )
     }
 
     /// A deadline that never fires (useful for unit tests / health probes).
     pub fn never() -> Self {
         Self::from_now(Duration::from_secs(86400 * 365 * 100))
+    }
+
+    /// Attach an observer to this clone only; the shared deadline is unchanged.
+    pub fn with_upstream_activity(&self, activity: Arc<tokio::sync::Notify>) -> Self {
+        Self(self.0.clone(), Some(activity))
+    }
+
+    /// Signal receipt of upstream data, independently of deadline renewal.
+    pub fn upstream_activity(&self) {
+        if let Some(activity) = &self.1 {
+            activity.notify_one();
+        }
     }
 
     /// The absolute `Instant` the deadline currently fires at.
@@ -123,6 +141,32 @@ mod tests {
         deadline.renew();
         assert!(deadline.at() > original);
         assert!(deadline.at() >= earliest);
+    }
+
+    #[tokio::test]
+    async fn upstream_activity_is_scoped_to_the_observed_clone() {
+        let root = Deadline::from_now(Duration::from_secs(60));
+        let a = Arc::new(tokio::sync::Notify::new());
+        let b = Arc::new(tokio::sync::Notify::new());
+        let scoped_a = root.with_upstream_activity(a.clone());
+        let scoped_b = root.with_upstream_activity(b.clone());
+        let mut notified_a = std::pin::pin!(a.notified());
+        let mut notified_b = std::pin::pin!(b.notified());
+        assert!(futures::poll!(notified_a.as_mut()).is_pending());
+        assert!(futures::poll!(notified_b.as_mut()).is_pending());
+
+        root.renew();
+        root.upstream_activity();
+        scoped_a.renew();
+        scoped_b.renew();
+        assert!(futures::poll!(notified_a.as_mut()).is_pending());
+        assert!(futures::poll!(notified_b.as_mut()).is_pending());
+
+        scoped_a.clone().upstream_activity();
+        assert!(futures::poll!(notified_a.as_mut()).is_ready());
+        assert!(futures::poll!(notified_b.as_mut()).is_pending());
+        scoped_b.upstream_activity();
+        assert!(futures::poll!(notified_b.as_mut()).is_ready());
     }
 
     #[tokio::test]
