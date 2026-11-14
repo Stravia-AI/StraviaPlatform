@@ -1369,7 +1369,9 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_api_key_injections_migrate_all_combinations_and_enforce_contracts() {
-        let pool = sqlite_pool().await;
+        // 迁移失败会丢弃连接；文件库才能继续验证数据保全与修复后重试。
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
         let prefix = Migrator::with_migrations(
             SQLITE_MIGRATOR
                 .iter()
@@ -1399,7 +1401,14 @@ mod tests {
                 .bind(bits & 1 != 0)
                 .execute(&pool).await.unwrap();
         }
-        migrate_sqlite(&pool, None).await.unwrap();
+        let error = migrate_sqlite(&pool, None)
+            .await
+            .expect_err("migration must reject existing foreign key violations");
+        assert!(
+            error
+                .to_string()
+                .contains("database already has foreign key violations")
+        );
         let retained: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'missing-provider'",
         )
@@ -1407,6 +1416,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(retained, 1);
+        sqlx::query("DELETE FROM provider_models WHERE provider_id = 'missing-provider'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
         let error = sqlx::query("INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json) VALUES ('missing-provider','another-orphan','manual','present','{}')")
             .execute(&pool).await.expect_err("foreign keys remain enforced after migration");
         assert!(

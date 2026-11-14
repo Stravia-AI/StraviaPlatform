@@ -1343,16 +1343,28 @@ fn apply_user_prompt_metadata(
     input.client_conversation_created_at_ms = Some(metadata.client_conversation_created_at_ms);
 }
 
-async fn acquire_turn(
-    executor: &dyn ModelTurnExecutor,
-    headers: &HeaderMap,
-    request: &Arc<AiRequest>,
-    request_context: &RequestContext,
-    ledger: &RunLedger,
-    generation: &mut GenerationChainRun,
+struct AcquireTurnInput<'a> {
+    executor: &'a dyn ModelTurnExecutor,
+    headers: &'a HeaderMap,
+    request: &'a Arc<AiRequest>,
+    request_context: &'a RequestContext,
+    ledger: &'a RunLedger,
+    generation: &'a mut GenerationChainRun,
     history_boundary: Option<HistoryBoundaryInput>,
-    exposed_tools: &[String],
-) -> Result<ModelTurn, RoundOutcome> {
+    exposed_tools: &'a [String],
+}
+
+async fn acquire_turn(input: AcquireTurnInput<'_>) -> Result<ModelTurn, RoundOutcome> {
+    let AcquireTurnInput {
+        executor,
+        headers,
+        request,
+        request_context,
+        ledger,
+        generation,
+        history_boundary,
+        exposed_tools,
+    } = input;
     let make_input = |effective_request: Arc<AiRequest>| {
         let mut input = TurnInput::new(generation.principal.clone(), effective_request)
             .with_execution(
@@ -1476,16 +1488,16 @@ async fn execute_shared_model_turn(input: SharedModelTurnInput<'_>) -> RoundOutc
         .expect("Inference Run before Model Turn")
         .exposed_tool_names()
         .collect::<Vec<_>>();
-    let turn = match acquire_turn(
-        executor.as_ref(),
+    let turn = match acquire_turn(AcquireTurnInput {
+        executor: executor.as_ref(),
         headers,
         request,
         request_context,
         ledger,
-        &mut generation,
+        generation: &mut generation,
         history_boundary,
-        &exposed_tools,
-    )
+        exposed_tools: &exposed_tools,
+    })
     .await
     {
         Ok(turn) => turn,

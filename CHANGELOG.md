@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- The compact provider deletion dialog can immediately delete individual model destinations while keeping the model and its other destinations. Destination actions stay beside their names, with shorter usage and deletion hints. The last destination cannot be deleted here; replace its provider or add another destination first.
+
 ### Changed
 
 - SQLite/PostgreSQL 迁移 0055 一次性清理旧凭据规则归因：按当前内置目录及所有现存自定义规则 ID 过滤，禁用规则仍视为现行；混合归因仅移除退役 ID，有现行归因的映射不因本次清理删除。空归因或仅退役归因映射不论年龄、使用状态或 Turn 节点引用均解除引用并删除，与 0053 对有引用映射的保留不同；相关复用、事件归因和禁用规则设置中的退役 ID 也会清理。被删除映射的历史 marker 将永久无法还原原值，按未知 marker 原样透传；现行规则重新检出同值可创建新 marker。空归因映射不再用于出站替换或观测遮罩；现行 `generic-credential-uri` 规则造成的工具名误遮罩不在此次清理范围。迁移复用凭据清理启动阶段，按每批实际处理条数更新进度，完成后正常重启不再执行。
@@ -13,6 +17,8 @@
 - Responses `generate:false` warmup now completes locally without invoking a model or tool. Its response ID retains input for continuation, including `store:false`, and the first real generation still runs request hooks on the retained input. Authentication, model access and delivery-confirmed history publication remain enforced.
 - Codex connection guidance and TOML previews now explain search prerequisites, the otherwise possible 403, and the top-level `web_search = "disabled"` option. Applying a connection does not overwrite the user's global search preference or bypass Stravia's search authorization.
 - Provider deletion no longer waits for a global journal garbage-collection pass; connection removal, state invalidation and route-cache updates still complete before success, while existing background maintenance reclaims unreferenced state later. The confirmation dialog now stays open with a busy indicator, blocks duplicate submissions and dismissal until deletion and refresh finish, and permits retry after failure.
+- CI upgrade fixtures now preserve contiguous migration histories, verify rejection of existing foreign-key violations without deleting orphan data, and follow the current credential-mapping restoration contract. The failed-upstream credential test explicitly uses one attempt instead of waiting through production retry backoff. Model Turn acquisition uses a named borrowed input to pass strict Clippy checks; production migration, expiry and retry policies are unchanged.
+- Windows desktop smoke now extracts the Microsoft Edge WebDriver ZIP through the .NET Framework two-argument API, avoiding an `Expand-Archive` overload unavailable in Windows PowerShell. Driver version verification and private-cache isolation remain enforced.
 
 ## [0.7.1] - 2026-11-14
 

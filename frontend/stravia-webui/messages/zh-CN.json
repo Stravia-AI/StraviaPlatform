@@ -1304,6 +1304,11 @@
   "providers_back_model_services": "返回供应商",
   "providers_cannot_delete_value": "无法删除 {name}",
   "providers_change_service": "更换供应商",
+  "providers_delete_destination": "删除",
+  "providers_delete_destination_effect": "仅删除目标，立即生效且不可恢复。",
+  "providers_last_destination_required": "最后一个目标，需先添加其他目标。",
+  "providers_destination_changed": "目标已不存在，列表已刷新。",
+  "providers_destination_deleted": "目标已删除。",
   "providers_checking_service_latest_models_keep_using_page": "正在从此供应商获取最新模型；你可以继续使用此页面。",
   "providers_connect_ai_service_adding_model_apps": "连接供应商，然后添加客户端需要的模型。",
   "providers_connected_services": "已连接的供应商",
@@ -1315,7 +1320,7 @@
   "providers_delete_service": "删除供应商…",
   "providers_delete_service_label": "删除供应商",
   "providers_disable_service": "禁用供应商",
-  "providers_disable_service_instead": "改为禁用供应商",
+  "providers_disable_service_instead": "改为禁用",
   "providers_duplicate_model_service": "创建供应商副本？",
   "providers_duplicate_service_action": "创建供应商副本",
   "providers_duplicate_service_short_action": "创建副本",
@@ -1711,8 +1716,8 @@
       "declarations": ["input count", "local countPlural = count: plural"],
       "selectors": ["countPlural"],
       "match": {
-        "countPlural=one": "仍有 {count} 个模型请求目标使用此供应商。请为它们选择其他供应商，或改为禁用此供应商。",
-        "countPlural=other": "仍有 {count} 个模型请求目标使用此供应商。请为它们选择其他供应商，或改为禁用此供应商。"
+        "countPlural=one": "仍有 {count} 个目标使用此供应商。",
+        "countPlural=other": "仍有 {count} 个目标使用此供应商。"
       }
     }
   ],

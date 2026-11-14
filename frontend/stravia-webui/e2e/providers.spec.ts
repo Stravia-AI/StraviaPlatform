@@ -2483,6 +2483,118 @@ test('Provider deletion prevents duplicate requests and dismissal until deletion
   }
 })
 
+for (const locale of ['en-US', 'zh-CN']) {
+  test(`provider deletion removes individual destinations without losing model settings (${locale})`, async ({ page }) => {
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    if (locale === 'zh-CN') await page.setViewportSize({ width: 320, height: 850 })
+    const provider = {
+      id: 'shortcut-provider', name: 'Shortcut Provider', vendor: 'openai-compatible', channel: 'default',
+      protocol: 'openai-compatible', base_url: 'https://fixture.example/v1', use_proxy: false, is_enabled: true,
+      created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+    }
+    const destination = {
+      id: 'shortcut-first', model_id: 'shortcut-route', provider_id: provider.id, model: 'first-upstream',
+      enabled: true, priority: 3, first_token_timeout_ms: 42000, target_retry_budget: 4,
+      target_cooldown_ms: 9000, thinking_level_map: [{ level: 'high', control: { type: 'effort', value: 'high' } }],
+      created_at: provider.created_at,
+    }
+    const second = { ...destination, id: 'shortcut-second', model: 'second-upstream' }
+    const retained = { ...destination, id: 'shortcut-retained', provider_id: 'other-provider', model: 'retained-upstream' }
+    let model = {
+      id: 'shortcut-route', model_id: 'shortcut-model', display_name: 'Shortcut Model', balance: 'traffic_equalization',
+      target_provider: provider.id, target_model: destination.model, is_enabled: true,
+      created_at: provider.created_at, targets: [destination, second, retained],
+    }
+    let failDeletion = true
+    let providerDeletes = 0
+    const submittedTargets: unknown[] = []
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+    await page.route(`**/api/v1/providers/${provider.id}`, async (route) => {
+      expect(route.request().method()).toBe('DELETE')
+      providerDeletes += 1
+      await route.fulfill({ json: { data: null } })
+    })
+    await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [model] } }))
+    await page.route('**/api/v1/models/shortcut-model', async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({ json: { data: model } })
+        return
+      }
+      expect(route.request().method()).toBe('PUT')
+      const body = route.request().postDataJSON()
+      submittedTargets.push(body.targets)
+      if (failDeletion) {
+        failDeletion = false
+        await route.fulfill({ status: 409, json: { error: { message: 'Destination update rejected' } } })
+        return
+      }
+      model = { ...model, targets: model.targets.filter((target) => body.targets.some(
+        (remaining: { provider_id: string; model: string }) => remaining.provider_id === target.provider_id && remaining.model === target.model,
+      )) }
+      await route.fulfill({ json: { data: model } })
+    })
+    await page.goto('/providers')
+    await page.getByRole('button', { name: locale === 'en-US' ? 'More actions for Shortcut Provider' : 'Shortcut Provider 的更多操作' }).click()
+    await page.getByRole('menuitem', { name: locale === 'en-US' ? 'Delete provider…' : '删除供应商…' }).click()
+    const dialog = page.getByRole('alertdialog')
+    const removeLabel = locale === 'en-US' ? 'Delete' : '删除'
+    const providerDeleteLabel = locale === 'en-US' ? 'Delete provider' : '删除供应商'
+    const firstRow = dialog.getByRole('listitem').filter({ has: page.getByText(/Shortcut Model.*first-upstream/) })
+    await firstRow.getByRole('button', { name: removeLabel, exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Destination update rejected')
+    await expect(firstRow.getByRole('button', { name: removeLabel, exact: true })).toBeEnabled()
+    await expect(dialog.getByRole('button', { name: providerDeleteLabel, exact: true })).toBeDisabled()
+    await firstRow.getByRole('button', { name: removeLabel, exact: true }).click()
+    await expect(firstRow).toHaveCount(0)
+    await expect(dialog.getByRole('alert')).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: removeLabel, exact: true })).toHaveCount(1)
+    await dialog.getByRole('button', { name: removeLabel, exact: true }).click()
+    await expect(dialog.getByRole('button', { name: removeLabel, exact: true })).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: providerDeleteLabel, exact: true })).toBeEnabled()
+    expect(model.targets).toEqual([retained])
+    expect(submittedTargets[2]).toEqual([{
+      provider_id: retained.provider_id, model: retained.model, enabled: retained.enabled, priority: retained.priority,
+      first_token_timeout_ms: retained.first_token_timeout_ms, target_retry_budget: retained.target_retry_budget,
+      target_cooldown_ms: retained.target_cooldown_ms, thinking_level_map: retained.thinking_level_map,
+    }])
+    const bounds = (await dialog.boundingBox())!
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(locale === 'zh-CN' ? 320 : 1280)
+    await dialog.getByRole('button', { name: providerDeleteLabel, exact: true }).click()
+    await expect.poll(() => providerDeletes).toBe(1)
+  })
+}
+
+test('provider shortcut refreshes a stale destination count before deleting', async ({ page }) => {
+  const provider = {
+    id: 'stale-provider', name: 'Stale Provider', vendor: 'openai-compatible', channel: 'default',
+    protocol: 'openai-compatible', base_url: 'https://fixture.example/v1', use_proxy: false, is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+  }
+  const target = { id: 'stale-target', provider_id: provider.id, model: 'upstream', enabled: true }
+  const model = {
+    id: 'stale-route', model_id: 'stale-model', display_name: null, balance: 'traffic_equalization',
+    target_provider: provider.id, target_model: target.model, is_enabled: true, created_at: provider.created_at,
+    targets: [target, { ...target, id: 'removed-target', provider_id: 'other-provider' }],
+  }
+  let mutations = 0
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [model] } }))
+  await page.route('**/api/v1/models/stale-model', async (route) => {
+    if (route.request().method() !== 'GET') mutations += 1
+    await route.fulfill({ json: { data: { ...model, targets: [target] } } })
+  })
+  await page.goto('/providers')
+  await page.getByRole('button', { name: 'More actions for Stale Provider' }).click()
+  await page.getByRole('menuitem', { name: 'Delete provider…' }).click()
+  const dialog = page.getByRole('alertdialog')
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('alert')).toBeVisible()
+  await expect(dialog.getByRole('link', { name: /stale-model.*upstream/ })).toBeVisible()
+  expect(mutations).toBe(0)
+})
+
 test('dependency previews block referenced Provider deletion and explain Route deletion effects', async ({ page }) => {
   const provider = {
     id: 'provider-used',
@@ -2554,6 +2666,7 @@ test('dependency previews block referenced Provider deletion and explain Route d
   await page.getByRole('menuitem', { name: 'Delete provider…' }).click()
   await expect(page.getByRole('alertdialog', { name: `Cannot delete ${provider.name}` })).toBeVisible()
   await expect(page.getByRole('link', { name: /used-route.*upstream/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Delete provider' })).toBeDisabled()
   expect(providerDeletes).toBe(0)
   await page.getByRole('button', { name: 'Cancel' }).click()

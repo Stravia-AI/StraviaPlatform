@@ -85,7 +85,10 @@ try {
   $arch = if ([Environment]::Is64BitOperatingSystem) { 'win64' } else { 'win32' }
   $zip = Join-Path $staging 'driver.zip'
   Invoke-WebRequest -Uri "https://msedgedriver.microsoft.com/$version/edgedriver_$arch.zip" -OutFile $zip -UseBasicParsing -TimeoutSec 60
-  Expand-Archive -LiteralPath $zip -DestinationPath $staging
+  # Windows PowerShell may load an Archive module that calls a newer .NET overload.
+  # The two-argument framework API rejects path traversal and existing files.
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [IO.Compression.ZipFile]::ExtractToDirectory($zip, $staging)
   $downloaded = Join-Path $staging 'msedgedriver.exe'
   if (!(Compatible $downloaded)) { throw 'Downloaded Microsoft driver failed version verification' }
   $null = New-Item -ItemType Directory -Path $slot -Force
