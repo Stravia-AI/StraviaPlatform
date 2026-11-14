@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use stravia_credential_protection::store::DetectedSecret;
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 
@@ -106,7 +107,13 @@ impl AdminService {
         self.gw
             .redaction
             .mappings
-            .intern(&Principal::new(principal), &[secret.into()])
+            .intern(
+                &Principal::new(principal),
+                &[DetectedSecret {
+                    secret: secret.to_owned(),
+                    rule_ids: vec!["github-pat".into()],
+                }],
+            )
             .await?;
         Ok(())
     }
