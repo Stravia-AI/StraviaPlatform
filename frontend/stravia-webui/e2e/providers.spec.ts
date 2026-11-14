@@ -2484,26 +2484,53 @@ test('Provider deletion prevents duplicate requests and dismissal until deletion
 })
 
 for (const locale of ['en-US', 'zh-CN']) {
-  test(`provider deletion removes individual destinations without losing model settings (${locale})`, async ({ page }) => {
+  test(`provider deletion removes individual destinations without losing model settings (${locale})`, async ({
+    page,
+  }) => {
     await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
     if (locale === 'zh-CN') await page.setViewportSize({ width: 320, height: 850 })
     const provider = {
-      id: 'shortcut-provider', name: 'Shortcut Provider', vendor: 'openai-compatible', channel: 'default',
-      protocol: 'openai-compatible', base_url: 'https://fixture.example/v1', use_proxy: false, is_enabled: true,
-      created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+      id: 'shortcut-provider',
+      name: 'Shortcut Provider',
+      vendor: 'openai-compatible',
+      channel: 'default',
+      protocol: 'openai-compatible',
+      base_url: 'https://fixture.example/v1',
+      use_proxy: false,
+      is_enabled: true,
+      created_at: '2026-08-17T00:00:00Z',
+      updated_at: '2026-08-17T00:00:00Z',
     }
     const destination = {
-      id: 'shortcut-first', model_id: 'shortcut-route', provider_id: provider.id, model: 'first-upstream',
-      enabled: true, priority: 3, first_token_timeout_ms: 42000, target_retry_budget: 4,
-      target_cooldown_ms: 9000, thinking_level_map: [{ level: 'high', control: { type: 'effort', value: 'high' } }],
+      id: 'shortcut-first',
+      model_id: 'shortcut-route',
+      provider_id: provider.id,
+      model: 'first-upstream',
+      enabled: true,
+      priority: 3,
+      first_token_timeout_ms: 42000,
+      target_retry_budget: 4,
+      target_cooldown_ms: 9000,
+      thinking_level_map: [{ level: 'high', control: { type: 'effort', value: 'high' } }],
       created_at: provider.created_at,
     }
     const second = { ...destination, id: 'shortcut-second', model: 'second-upstream' }
-    const retained = { ...destination, id: 'shortcut-retained', provider_id: 'other-provider', model: 'retained-upstream' }
+    const retained = {
+      ...destination,
+      id: 'shortcut-retained',
+      provider_id: 'other-provider',
+      model: 'retained-upstream',
+    }
     let model = {
-      id: 'shortcut-route', model_id: 'shortcut-model', display_name: 'Shortcut Model', balance: 'traffic_equalization',
-      target_provider: provider.id, target_model: destination.model, is_enabled: true,
-      created_at: provider.created_at, targets: [destination, second, retained],
+      id: 'shortcut-route',
+      model_id: 'shortcut-model',
+      display_name: 'Shortcut Model',
+      balance: 'traffic_equalization',
+      target_provider: provider.id,
+      target_model: destination.model,
+      is_enabled: true,
+      created_at: provider.created_at,
+      targets: [destination, second, retained],
     }
     let failDeletion = true
     let providerDeletes = 0
@@ -2528,13 +2555,23 @@ for (const locale of ['en-US', 'zh-CN']) {
         await route.fulfill({ status: 409, json: { error: { message: 'Destination update rejected' } } })
         return
       }
-      model = { ...model, targets: model.targets.filter((target) => body.targets.some(
-        (remaining: { provider_id: string; model: string }) => remaining.provider_id === target.provider_id && remaining.model === target.model,
-      )) }
+      model = {
+        ...model,
+        targets: model.targets.filter((target) =>
+          body.targets.some(
+            (remaining: { provider_id: string; model: string }) =>
+              remaining.provider_id === target.provider_id && remaining.model === target.model,
+          ),
+        ),
+      }
       await route.fulfill({ json: { data: model } })
     })
     await page.goto('/providers')
-    await page.getByRole('button', { name: locale === 'en-US' ? 'More actions for Shortcut Provider' : 'Shortcut Provider 的更多操作' }).click()
+    await page
+      .getByRole('button', {
+        name: locale === 'en-US' ? 'More actions for Shortcut Provider' : 'Shortcut Provider 的更多操作',
+      })
+      .click()
     await page.getByRole('menuitem', { name: locale === 'en-US' ? 'Delete provider…' : '删除供应商…' }).click()
     const dialog = page.getByRole('alertdialog')
     const removeLabel = locale === 'en-US' ? 'Delete' : '删除'
@@ -2552,11 +2589,18 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(dialog.getByRole('button', { name: removeLabel, exact: true })).toHaveCount(0)
     await expect(dialog.getByRole('button', { name: providerDeleteLabel, exact: true })).toBeEnabled()
     expect(model.targets).toEqual([retained])
-    expect(submittedTargets[2]).toEqual([{
-      provider_id: retained.provider_id, model: retained.model, enabled: retained.enabled, priority: retained.priority,
-      first_token_timeout_ms: retained.first_token_timeout_ms, target_retry_budget: retained.target_retry_budget,
-      target_cooldown_ms: retained.target_cooldown_ms, thinking_level_map: retained.thinking_level_map,
-    }])
+    expect(submittedTargets[2]).toEqual([
+      {
+        provider_id: retained.provider_id,
+        model: retained.model,
+        enabled: retained.enabled,
+        priority: retained.priority,
+        first_token_timeout_ms: retained.first_token_timeout_ms,
+        target_retry_budget: retained.target_retry_budget,
+        target_cooldown_ms: retained.target_cooldown_ms,
+        thinking_level_map: retained.thinking_level_map,
+      },
+    ])
     const bounds = (await dialog.boundingBox())!
     expect(bounds.x).toBeGreaterThanOrEqual(0)
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(locale === 'zh-CN' ? 320 : 1280)
@@ -2567,14 +2611,27 @@ for (const locale of ['en-US', 'zh-CN']) {
 
 test('provider shortcut refreshes a stale destination count before deleting', async ({ page }) => {
   const provider = {
-    id: 'stale-provider', name: 'Stale Provider', vendor: 'openai-compatible', channel: 'default',
-    protocol: 'openai-compatible', base_url: 'https://fixture.example/v1', use_proxy: false, is_enabled: true,
-    created_at: '2026-08-17T00:00:00Z', updated_at: '2026-08-17T00:00:00Z',
+    id: 'stale-provider',
+    name: 'Stale Provider',
+    vendor: 'openai-compatible',
+    channel: 'default',
+    protocol: 'openai-compatible',
+    base_url: 'https://fixture.example/v1',
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '2026-08-17T00:00:00Z',
+    updated_at: '2026-08-17T00:00:00Z',
   }
   const target = { id: 'stale-target', provider_id: provider.id, model: 'upstream', enabled: true }
   const model = {
-    id: 'stale-route', model_id: 'stale-model', display_name: null, balance: 'traffic_equalization',
-    target_provider: provider.id, target_model: target.model, is_enabled: true, created_at: provider.created_at,
+    id: 'stale-route',
+    model_id: 'stale-model',
+    display_name: null,
+    balance: 'traffic_equalization',
+    target_provider: provider.id,
+    target_model: target.model,
+    is_enabled: true,
+    created_at: provider.created_at,
     targets: [target, { ...target, id: 'removed-target', provider_id: 'other-provider' }],
   }
   let mutations = 0

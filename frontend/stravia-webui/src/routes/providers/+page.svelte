@@ -832,7 +832,9 @@ async function copyProvider(): Promise<void> {
     }
   }>
   {@const references = deleteTarget ? providerReferences(deleteTarget) : []}
-  <AlertDialog.Content class="gap-3" onEscapeKeydown={(event: KeyboardEvent) => (deleting || !!removingTargetId) && event.preventDefault()}>
+  <AlertDialog.Content
+    class="gap-3"
+    onEscapeKeydown={(event: KeyboardEvent) => (deleting || !!removingTargetId) && event.preventDefault()}>
     <AlertDialog.Header>
       <AlertDialog.Title>
         {deleteTarget && providerDependenciesUnavailable
@@ -893,7 +895,10 @@ async function copyProvider(): Promise<void> {
     <AlertDialog.Footer>
       <AlertDialog.Cancel disabled={deleting || !!removingTargetId}>{m.common_cancel()}</AlertDialog.Cancel>
       {#if deleteTarget && references.length > 0 && deleteTarget.is_enabled}
-        <Button variant="outline" disabled={!!removingTargetId} onclick={() => deleteTarget && void toggleProvider(deleteTarget)}>
+        <Button
+          variant="outline"
+          disabled={!!removingTargetId}
+          onclick={() => deleteTarget && void toggleProvider(deleteTarget)}>
           {m.providers_disable_service_instead()}
         </Button>
       {/if}
