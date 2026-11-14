@@ -37,7 +37,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": ["app"],
     "macOS": {
       "hardenedRuntime": true,
@@ -55,7 +55,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkKUldUZTdjWTc5STVFU0p2bEg5dUpib3A2ZEhoemRFQklLb3VSeTNaMmNVZHl0bDRtZ2hJZ0habFYK",
       "windows": {
         "installMode": "passive"
       }

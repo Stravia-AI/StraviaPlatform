@@ -30,6 +30,53 @@ const SIG_42_V1: &str = "untrusted comment: fixture\nRUR0ZXN0LWtlebWm0tp4nFG2IYj
 const SIG_42_V2: &str = "untrusted comment: fixture\nRUR0ZXN0LWtleVJdxCN6khdOipL3OsbjG8ZuIO835iQzKwC2oCuDKlsjpOmi3tjCepgu4XGFtz6tpDOdEbm074F29nDq+qq5HAM=\ntrusted comment: test fixture\nAg5UgZCYsFeq+sfJ8mFXYmnQ/FfuiaTJELsj+9hy1L45QgAGcsuV53QunGX4w9B+fsWKpHQcbsURW2Fhb8VHDw==";
 const SIG_43_V1: &str = "untrusted comment: fixture\nRUR0ZXN0LWtleUMKBEQ9WmakufaORfg/+PxfiMJvbk6beFIqaN6TFQX5PjzJLpSSWKHQcSsxdj4RnxRzyhZQ9CcvPv3ETa7oswc=\ntrusted comment: test fixture\nuTInBOkyGlgKoJrUyH1jb3m9+hvG0amVDqsCpUJiz65KacqNoejSLxRh0bcwrZgZgy075CSUyaWlTsSLXUvbDQ==";
 
+#[tokio::test]
+async fn official_source_has_embedded_trust_and_recovers_missing_key() {
+    let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+    let origin = "http://127.0.0.1:1".to_string();
+    let client =
+        MarketClient::with_test_origins(storage.clone(), origin.clone(), origin.clone(), origin)
+            .unwrap();
+    let store = Arc::new(storage.vendor_plugins().clone());
+    let market = PluginMarketplace::new(store.clone(), client);
+    market.initialize_official().await.unwrap();
+    let source = market.list_sources().await.unwrap().pop().unwrap();
+    assert!(source.official && source.enabled);
+    assert!(source.error.is_none());
+    assert!(!source.public_key.is_empty());
+    assert_eq!(
+        source.fingerprint,
+        crate::plugin::distribution::public_key_fingerprint(&source.public_key).unwrap()
+    );
+
+    let mut unconfigured = source.clone();
+    unconfigured.public_key.clear();
+    unconfigured.fingerprint.clear();
+    unconfigured.enabled = false;
+    unconfigured.error = Some(super::MarketError::new(
+        "source_not_configured",
+        "Official plugin catalog public key is not configured",
+    ));
+    store
+        .put_source(&unconfigured, Some(&source))
+        .await
+        .unwrap();
+    market.initialize_official().await.unwrap();
+    let restored = market.list_sources().await.unwrap().pop().unwrap();
+    assert!(restored.enabled);
+    assert!(restored.error.is_none());
+    assert_eq!(restored.public_key, source.public_key);
+    assert_eq!(restored.fingerprint, source.fingerprint);
+    assert!(restored.trust_revision > unconfigured.trust_revision);
+
+    market
+        .patch_source(&source.id, Some(false), None)
+        .await
+        .unwrap();
+    market.initialize_official().await.unwrap();
+    assert!(!market.list_sources().await.unwrap().pop().unwrap().enabled);
+}
+
 #[derive(Default)]
 struct FixtureState {
     fail_one: AtomicBool,
