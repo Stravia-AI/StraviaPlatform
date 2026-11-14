@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- Local Web Search now authorizes and executes its saved model binding by stable internal ID. Renaming the public model no longer breaks the binding, and another model whose public name matches that ID cannot redirect the search or bypass a disabled binding. External Route bindings keep their public-name semantics.
+- Responses JSON and terminal SSE now emit `usage: null` when required usage details are unknown, instead of null integer fields that made Codex reject a completed response and reconnect. Explicit zero counts remain zero; internal usage and billing are unchanged.
+- Responses `generate:false` warmup now completes locally without invoking a model or tool. Its response ID retains input for continuation, including `store:false`, and the first real generation still runs request hooks on the retained input. Authentication, model access and delivery-confirmed history publication remain enforced.
+- Codex connection guidance and TOML previews now explain search prerequisites, the otherwise possible 403, and the top-level `web_search = "disabled"` option. Applying a connection does not overwrite the user's global search preference or bypass Stravia's search authorization.
+
 ## [0.7.1] - 2026-11-14
 
 ### Verification

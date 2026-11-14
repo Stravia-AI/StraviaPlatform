@@ -3527,9 +3527,11 @@ async fn route_default_thinking_level_is_dropped_when_no_level_is_supported() {
 }
 
 #[tokio::test]
-async fn execute_capability_grant_does_not_require_route_binding() {
+async fn execute_capability_grant_preserves_internal_binding_after_rename_and_collision() {
     let (_data_dir, gateway, captured, key) =
         gateway_with_captured_model("grant-model", false).await;
+    let admin = gateway.admin();
+    let model = admin.get_model("grant-model").await.expect("Model");
     let bound = gateway
         .model_turn
         .execute(TurnInput::new(
@@ -3542,20 +3544,70 @@ async fn execute_capability_grant_does_not_require_route_binding() {
         "RouteBinding must fail without a bound Model"
     );
 
+    admin
+        .update_model(
+            "grant-model",
+            crate::db::models::UpdateRoute {
+                model_id: Some("grant-model-renamed".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rename the bound Model");
+    let provider_id = model.targets[0].provider_id().as_str();
+    admin
+        .create_manual_provider_model(
+            provider_id,
+            "shadow-upstream",
+            CreateManualProviderModel {
+                metadata: serde_json::json!({
+                    "id": "shadow-upstream",
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                }),
+                template_id: None,
+            },
+        )
+        .await
+        .expect("shadow Provider Model");
+    admin
+        .create_model(CreateRoute {
+            output_modality: crate::db::models::RouteOutputModality::Text,
+            model_id: model.id.as_str().into(),
+            display_name: None,
+            balance: None,
+            targets: vec![CreateTarget {
+                provider_id: provider_id.into(),
+                model: "shadow-upstream".into(),
+                enabled: true,
+                priority: None,
+                first_token_timeout_ms: None,
+                target_retry_budget: Some(0),
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }],
+            default_thinking_level: None,
+            billing: None,
+        })
+        .await
+        .expect("a different Model whose public name matches the internal binding");
+
     let turn = gateway
         .model_turn
         .execute(
             TurnInput::new(
                 Principal::new(key.id),
-                AiRequest::new("grant-model", Vec::new()),
+                AiRequest::new(model.id.as_str(), Vec::new()),
             )
             .with_authorization(ModelTurnAuthorization::CapabilityGrant),
         )
         .await
         .expect("CapabilityGrant Model Turn");
-    let _ = turn.output.collect::<Vec<_>>().await;
-
-    assert!(!captured.lock().is_empty());
+    let events = turn.output.collect::<Vec<_>>().await;
+    assert!(matches!(
+        events.last(),
+        Some(Ok(CanonicalEvent::Completed(response))) if response.output_text() == "ok"
+    ));
+    assert_eq!(captured_http(&captured.lock()).1["model"], "upstream-model");
 }
 
 mod compaction;

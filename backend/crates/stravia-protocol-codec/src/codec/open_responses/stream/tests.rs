@@ -630,6 +630,8 @@ fn failed_terminal_preserves_content_and_known_or_unknown_usage() {
                 completion_tokens: 99,
                 total_tokens: 198,
                 required_components_known: true,
+                cache_read_tokens: Some(0),
+                reasoning_tokens: Some(0),
                 ..Usage::default()
             }));
             deltas.push(AiStreamDelta::Usage(Usage {
@@ -763,7 +765,75 @@ fn stream_events_have_matching_names_and_strict_sequence_numbers() {
 }
 #[test]
 fn terminal_usage_preserves_unknown_optional_counts_and_explicit_zero() {
-    for count in [None, Some(0)] {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TypedCompleted {
+        response: TypedResponse,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TypedResponse {
+        usage: Option<TypedUsage>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TypedUsage {
+        input_tokens: i64,
+        output_tokens: i64,
+        total_tokens: i64,
+        input_tokens_details: InputDetails,
+        output_tokens_details: OutputDetails,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct InputDetails {
+        cached_tokens: i64,
+        cache_write_tokens: Option<i64>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct OutputDetails {
+        reasoning_tokens: i64,
+    }
+
+    for (known, cached, reasoning, cache_write, expected) in [
+        (false, Some(4), Some(2), Some(5), serde_json::json!(null)),
+        (true, None, Some(2), Some(5), serde_json::json!(null)),
+        (true, Some(4), None, Some(5), serde_json::json!(null)),
+        (
+            true,
+            Some(0),
+            Some(0),
+            None,
+            serde_json::json!({
+                "input_tokens": 12, "output_tokens": 8, "total_tokens": 20,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }),
+        ),
+        (
+            true,
+            Some(0),
+            Some(0),
+            Some(0),
+            serde_json::json!({
+                "input_tokens": 12, "output_tokens": 8, "total_tokens": 20,
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }),
+        ),
+        (
+            true,
+            Some(4),
+            Some(2),
+            Some(5),
+            serde_json::json!({
+                "input_tokens": 12, "output_tokens": 8, "total_tokens": 20,
+                "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 2}
+            }),
+        ),
+    ] {
         let mut formatter = ResponsesStreamFormatter::new();
         let events = formatter.format_deltas(&[
             AiStreamDelta::MessageStart {
@@ -774,10 +844,10 @@ fn terminal_usage_preserves_unknown_optional_counts_and_explicit_zero() {
                 prompt_tokens: 12,
                 completion_tokens: 8,
                 total_tokens: 20,
-                cache_read_tokens: count,
-                cache_creation_tokens: count,
-                reasoning_tokens: count,
-                required_components_known: true,
+                cache_read_tokens: cached,
+                cache_creation_tokens: cache_write,
+                reasoning_tokens: reasoning,
+                required_components_known: known,
                 ..Usage::default()
             }),
             AiStreamDelta::Done {
@@ -789,21 +859,9 @@ fn terminal_usage_preserves_unknown_optional_counts_and_explicit_zero() {
             .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.data).ok())
             .find(|body| body["type"] == "response.completed")
             .expect("usage terminal");
-        let usage = &completed["response"]["usage"];
-        assert_eq!(usage["input_tokens"], 12);
-        assert_eq!(usage["output_tokens"], 8);
-        assert_eq!(usage["total_tokens"], 20);
-        let expected = if count.is_some() {
-            serde_json::json!(0)
-        } else {
-            serde_json::Value::Null
-        };
-        assert_eq!(usage["input_tokens_details"]["cached_tokens"], expected);
-        assert_eq!(
-            usage["input_tokens_details"]["cache_write_tokens"],
-            expected
-        );
-        assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], expected);
+        assert_eq!(completed["response"]["usage"], expected);
+        serde_json::from_value::<TypedCompleted>(completed)
+            .unwrap_or_else(|error| panic!("typed completed event must deserialize: {error}"));
     }
 }
 

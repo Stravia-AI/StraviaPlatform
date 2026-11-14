@@ -122,11 +122,13 @@ Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`�
 - deadline 取调用方 request deadline 与 Local total time 的较早值；
 - `SearchReportValidator` 用本次运行收集的 evidence 校验最终报告。
 
+Local 配置的 `backend.model_id` 保存逻辑模型的内部记录键 `models.id`，不是客户端请求使用的公开名称 `models.model_id`，也不是上游模型名。鉴权及每次能力推理均按内部键精确解析，不使用公开名称优先的回退查询。更改公开名称不改变已保存配置或 Local 续接的绑定；另一模型的公开名称即使等于该内部键，也不能接管搜索。所绑定模型停用或删除后仍拒绝执行。
+
 ### 5.2 外部完整搜索：Vendor Plugin 与 Route
 
 本节是已实施的插件化契约，取代原 Codex 固定 Provider/账号与 upstream Model 的接入方式。详见 [Vendor 插件设计](vendor-plugins.md)。
 
-- 管理员为外部完整搜索绑定 Route，由宿主选择具备完整搜索能力的 Target。Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
+- 管理员为外部完整搜索绑定 Route，`backend.route_id` 仍保存公开名称 `models.model_id`，不改为 Local 使用的内部记录键。由宿主选择具备完整搜索能力的 Target；Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
 - Target 必须绑定 Provider 与非空白的上游模型；所选 Provider Model 必须支持完整搜索，不能省略模型或使用虚假模型绕过能力校验。
 - [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。正式接入必须提供可选择的真实 Provider Model；该服务是设计参考，不自动列入本期正式供应商交付清单。
 - 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。

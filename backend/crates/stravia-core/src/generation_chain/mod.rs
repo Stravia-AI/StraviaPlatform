@@ -273,17 +273,20 @@ impl Clone for GenerationChainWrite {
     }
 }
 
+const RESPONSES_WARMUP_NAMESPACE: &str = "responses:warmup";
+
 #[derive(Clone)]
 pub(crate) enum GenerationSource {
     Target(crate::history_marker::ThinkingSource),
     Hook { protocol: ProtocolId },
+    Warmup,
 }
 
 impl GenerationSource {
     pub(crate) fn thinking_source(&self) -> Option<crate::history_marker::ThinkingSource> {
         match self {
             Self::Target(source) => Some(source.clone()),
-            Self::Hook { .. } => None,
+            Self::Hook { .. } | Self::Warmup => None,
         }
     }
 }

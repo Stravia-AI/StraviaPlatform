@@ -4257,6 +4257,8 @@ mod stream_commit;
 #[cfg(test)]
 mod upload_delivery;
 #[cfg(test)]
+mod warmup;
+#[cfg(test)]
 mod websocket;
 #[cfg(test)]
 mod websocket_continuation;

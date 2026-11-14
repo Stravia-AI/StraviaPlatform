@@ -399,8 +399,15 @@ fn materialize_generation_replay<'a>(
         }
         fold_client_history_view(&mut client_items, &mut persisted);
         let output_start = effective_items.len();
-        // 已执行的输入可直接复用；最后一个模型响应尚未经过下一轮 Request Hook。
-        processed_input_items = output_start;
+        // 预热只保存输入；首次真实生成仍须执行这些输入的 Request Hook。
+        if persisted.effective_state.target_namespace == RESPONSES_WARMUP_NAMESPACE {
+            if replace {
+                processed_input_items = 0;
+            }
+        } else {
+            // 已执行的输入可直接复用；最后一个模型响应尚未经过下一轮 Request Hook。
+            processed_input_items = output_start;
+        }
         match &mut persisted {
             Cow::Owned(node) => effective_items.extend(node.effective_output.take_items()),
             Cow::Borrowed(node) => {

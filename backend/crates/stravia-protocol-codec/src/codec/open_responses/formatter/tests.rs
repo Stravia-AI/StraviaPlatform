@@ -202,34 +202,81 @@ fn mixed_assistant_response_preserves_reasoning_text_and_all_unique_calls() {
 
 #[test]
 fn formats_optional_usage_as_unknown_or_explicit_zero() {
-    for count in [None, Some(0)] {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TypedUsage {
+        input_tokens: i64,
+        output_tokens: i64,
+        total_tokens: i64,
+        input_tokens_details: InputDetails,
+        output_tokens_details: OutputDetails,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct InputDetails {
+        cached_tokens: i64,
+        cache_write_tokens: Option<i64>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct OutputDetails {
+        reasoning_tokens: i64,
+    }
+
+    for (known, cached, reasoning, cache_write, expected) in [
+        (false, Some(4), Some(2), Some(5), serde_json::json!(null)),
+        (true, None, Some(2), Some(5), serde_json::json!(null)),
+        (true, Some(4), None, Some(5), serde_json::json!(null)),
+        (
+            true,
+            Some(0),
+            Some(0),
+            None,
+            serde_json::json!({
+                "input_tokens": 12, "output_tokens": 3, "total_tokens": 15,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }),
+        ),
+        (
+            true,
+            Some(0),
+            Some(0),
+            Some(0),
+            serde_json::json!({
+                "input_tokens": 12, "output_tokens": 3, "total_tokens": 15,
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }),
+        ),
+        (
+            true,
+            Some(4),
+            Some(2),
+            Some(5),
+            serde_json::json!({
+                "input_tokens": 12, "output_tokens": 3, "total_tokens": 15,
+                "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 2}
+            }),
+        ),
+    ] {
         let mut response = AiResponse::new("resp_optional_usage", "model");
         response.usage = Usage {
             prompt_tokens: 12,
             completion_tokens: 3,
             total_tokens: 15,
-            required_components_known: true,
-            cache_read_tokens: count,
-            cache_creation_tokens: count,
-            reasoning_tokens: count,
+            required_components_known: known,
+            cache_read_tokens: cached,
+            cache_creation_tokens: cache_write,
+            reasoning_tokens: reasoning,
             ..Usage::default()
         };
 
         let formatted = ResponsesResponseFormatter.format_response(&response);
-        let usage = &formatted["usage"];
-        assert_eq!(usage["input_tokens"], 12);
-        assert_eq!(usage["output_tokens"], 3);
-        let expected = if count.is_some() {
-            serde_json::json!(0)
-        } else {
-            Value::Null
-        };
-        assert_eq!(usage["input_tokens_details"]["cached_tokens"], expected);
-        assert_eq!(
-            usage["input_tokens_details"]["cache_write_tokens"],
-            expected
-        );
-        assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], expected);
+        assert_eq!(formatted["usage"], expected);
+        serde_json::from_value::<Option<TypedUsage>>(formatted["usage"].clone())
+            .expect("usage must deserialize with integer detail counts");
     }
 }
 
@@ -243,6 +290,7 @@ fn formats_cache_write_tokens_when_known() {
         required_components_known: true,
         cache_read_tokens: Some(4),
         cache_creation_tokens: Some(5),
+        reasoning_tokens: Some(2),
         ..Usage::default()
     };
 

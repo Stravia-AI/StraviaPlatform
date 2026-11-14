@@ -79,6 +79,7 @@ use stravia_runtime_contract::protocol::ir::{AiResponse, AiStreamDelta};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelTurnAuthorization {
     RouteBinding,
+    /// 平台能力绑定内部 RouteKey；request.model 不按公开模型名解析。
     CapabilityGrant,
 }
 
