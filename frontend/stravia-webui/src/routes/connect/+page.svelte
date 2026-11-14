@@ -25,7 +25,6 @@ import {
   defineClientModel,
   eligibleConnectKeys,
   maskApiKey,
-  protocolLabel,
   type ClaudeModelMappings,
   type CliToolId,
   type CodeLanguage,
@@ -326,44 +325,35 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
 
             <section class="flex min-h-0 min-w-0 flex-col" aria-labelledby="cli-output-title">
               <div class="mb-3.5 flex shrink-0 flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h2 id="cli-output-title" class="route-section-title">{selectedTool.name}</h2>
-                  <p class="route-section-description">
-                    {protocolLabel(selectedTool.protocol)} · <span class="font-technical">{host}</span>
-                  </p>
-                  {#if isTauri && connectPlanQuery.data}
-                    <div class="mt-2 flex flex-col gap-1">
-                      <p class="text-xs font-medium text-foreground">{m.connect_global_config_paths()}</p>
-                      {#each connectPlanQuery.data.paths as path (path)}
-                        <p class="font-technical break-all text-xs text-muted-foreground">{path}</p>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-                <div class="flex flex-wrap gap-2">
-                  {#if isTauri}
+                <h2 id="cli-output-title" class="route-section-title font-structural">
+                  {m.providers_connection_check_stage_configuration()}
+                </h2>
+                <div class="flex flex-col items-start gap-2">
+                  <div class="flex flex-wrap gap-2">
+                    {#if isTauri}
+                      <Button
+                        onclick={() => void applySelectedClient()}
+                        disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
+                        >{#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
+                            data-icon="inline-start" />{/if}{applyingClient
+                          ? m.connect_applying()
+                          : cliToolId === 'chatgpt'
+                            ? m.connect_apply_both()
+                            : m.connect_apply()}</Button>
+                    {/if}
                     <Button
-                      onclick={() => void applySelectedClient()}
-                      disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
-                      >{#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
-                          data-icon="inline-start" />{/if}{applyingClient
-                        ? m.connect_applying()
-                        : m.connect_apply()}</Button>
+                      variant={isTauri ? 'outline' : 'default'}
+                      onclick={() => void copyText(generatedCliConfig)}
+                      disabled={!generatedCliConfig}
+                      ><ClipboardCopyIcon data-icon="inline-start" />{cliToolId === 'chatgpt'
+                        ? m.connect_copy_both()
+                        : m.connect_copy_configuration()}</Button>
+                  </div>
+                  {#if cliToolId === 'chatgpt'}
+                    <p class="text-sm">{m.connect_chatgpt_shared_config()}</p>
                   {/if}
-                  <Button
-                    variant={isTauri ? 'outline' : 'default'}
-                    onclick={() => void copyText(generatedCliConfig)}
-                    disabled={!generatedCliConfig}
-                    ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
                 </div>
               </div>
-              {#if cliToolId === 'codex-cli'}
-                <div class="mb-3 shrink-0 space-y-1 text-sm">
-                  <p>{m.connect_codex_search_prerequisites()}</p>
-                  <p>{m.connect_codex_search_disable()} <code class="font-technical">web_search = "disabled"</code></p>
-                  <p>{m.connect_codex_search_preserved()}</p>
-                </div>
-              {/if}
               {#if connectPlanQuery.isError}
                 {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
                 <RequestFailure

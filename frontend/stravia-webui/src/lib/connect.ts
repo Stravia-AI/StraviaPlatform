@@ -6,6 +6,7 @@ export type CodeLanguage = 'python' | 'typescript' | 'curl'
 export type GatewayProtocol = 'openai-compatible' | 'open-responses' | 'anthropic-messages' | 'google-gemini'
 export type CliToolId =
   | 'codex-cli'
+  | 'chatgpt'
   | 'claude-code'
   | 'opencode'
   | 'openclaw'
@@ -58,6 +59,7 @@ export const CLI_TOOLS: ReadonlyArray<{
   description: () => string
 }> = [
   { id: 'codex-cli', name: 'Codex', protocol: 'open-responses', description: m.connect_tool_codex_description },
+  { id: 'chatgpt', name: 'ChatGPT', protocol: 'open-responses', description: m.connect_tool_chatgpt_description },
   {
     id: 'claude-code',
     name: 'Claude Code',

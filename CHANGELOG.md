@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Connect clients now includes a separate ChatGPT option using the local static model catalog from the 0.6.x setup. Web previews include separate TOML and JSON file sections, and Desktop Apply writes both files while preserving the current model and search preferences. Codex retains live model discovery. Setup guidance now lives in field help instead of persistent instructional paragraphs, with explicit copy/write actions and only the shared-configuration impact kept visible. Both options share `CODEX_HOME`; applying either switches the catalog mode, and ChatGPT snapshots must be reapplied after model or API Key capability changes.
+
 ## [0.7.2] - 2026-11-14
 
 This release also includes the changes listed under [0.7.1](#071---2026-11-14), whose publication was cancelled.
