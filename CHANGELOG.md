@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- The compact provider deletion dialog can immediately delete individual model destinations while keeping the model and its other destinations. Destination actions stay beside their names, with shorter usage and deletion hints. The last destination cannot be deleted here; replace its provider or add another destination first.
+
 ### Fixed
 
 - CI upgrade fixtures now preserve contiguous migration histories, verify rejection of existing foreign-key violations without deleting orphan data, and follow the current credential-mapping restoration contract. The failed-upstream credential test explicitly uses one attempt instead of waiting through production retry backoff. Model Turn acquisition uses a named borrowed input to pass strict Clippy checks; production migration, expiry and retry policies are unchanged.

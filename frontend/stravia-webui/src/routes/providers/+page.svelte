@@ -91,6 +91,8 @@ let query = $state('')
 const changesSheet = getModelChanges()
 let deleteTarget = $state<Provider>()
 let deleteOpen = $state(false)
+let removingTargetId = $state<string>()
+let targetDeletionError = $state('')
 let copyTarget = $state<Provider>()
 let copyOpen = $state(false)
 let appendTargets = $state(false)
@@ -259,7 +261,52 @@ function providerSaved(provider: Provider): void {
 
 function askDelete(provider: Provider): void {
   deleteTarget = provider
+  targetDeletionError = ''
   deleteOpen = true
+}
+
+async function deleteModelTarget(route: Route, targetId: string): Promise<void> {
+  if (removingTargetId || providerDependenciesUnavailable || route.targets.length <= 1) return
+  removingTargetId = targetId
+  targetDeletionError = ''
+  try {
+    const latest = await admin.models.get(route.model_id)
+    queryClient.setQueryData<Route[]>(['models'], (current) =>
+      current?.map((model) => (model.id === latest.id ? latest : model)),
+    )
+    if (!latest.targets.some((target) => target.id === targetId)) {
+      targetDeletionError = m.providers_destination_changed()
+      return
+    }
+    if (latest.targets.length <= 1) {
+      targetDeletionError = m.providers_last_destination_required()
+      return
+    }
+    // unbind 会在最后一个目标消失时删除模型；更新模型始终要求保留目标。
+    const updated = await admin.models.update(latest.model_id, {
+      targets: latest.targets
+        .filter((target) => target.id !== targetId)
+        .map((target) => ({
+          provider_id: target.provider_id,
+          model: target.model,
+          enabled: target.enabled,
+          priority: target.priority,
+          first_token_timeout_ms: target.first_token_timeout_ms,
+          target_retry_budget: target.target_retry_budget,
+          target_cooldown_ms: target.target_cooldown_ms,
+          thinking_level_map: target.thinking_level_map,
+        })),
+    })
+    queryClient.setQueryData<Route[]>(['models'], (current) =>
+      current?.map((model) => (model.id === updated.id ? updated : model)),
+    )
+    toast.success(m.providers_destination_deleted())
+    await queryClient.invalidateQueries({ queryKey: ['models'] })
+  } catch (error) {
+    targetDeletionError = localizeBackendErrorMessage(error)
+  } finally {
+    removingTargetId = undefined
+  }
 }
 
 function askCopy(provider: Provider): void {
@@ -769,9 +816,9 @@ async function copyProvider(): Promise<void> {
   </Dialog.Content>
 </Dialog.Root>
 
-<AlertDialog.Root bind:open={deleteOpen}>
+<AlertDialog.Root bind:open={() => deleteOpen, (open: boolean) => { if (!removingTargetId) deleteOpen = open }}>
   {@const references = deleteTarget ? providerReferences(deleteTarget) : []}
-  <AlertDialog.Content>
+  <AlertDialog.Content class="gap-3">
     <AlertDialog.Header>
       <AlertDialog.Title>
         {deleteTarget && providerDependenciesUnavailable
@@ -789,32 +836,56 @@ async function copyProvider(): Promise<void> {
       </AlertDialog.Description>
     </AlertDialog.Header>
     {#if references.length > 0}
-      <div class="flex flex-col gap-2 rounded-lg border p-3">
+      <ul class="max-h-80 divide-y overflow-y-auto border-y">
         {#each references as reference (reference.target.id)}
-          <a
-            class="flex items-center justify-between gap-3 rounded-md p-2 hover:bg-muted"
-            href={resolve('/models/[id]', { id: reference.route.model_id })}>
-            <span class="font-medium">
+          <li class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 py-2">
+            <p class="min-w-0 wrap-anywhere font-medium">
               {effectiveModelDisplayName(reference.route)}
               {#if logicalModelSecondaryId(reference.route)}
                 · {reference.route.model_id}{/if}
               · {reference.target.model}
-            </span>
-            <span class="text-xs text-muted-foreground">{m.providers_change_service()}</span>
-          </a>
+            </p>
+            <div class="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                class="px-2"
+                href={resolve('/models/[id]', { id: reference.route.model_id })}
+                disabled={!!removingTargetId}
+                aria-label={`${effectiveModelDisplayName(reference.route)} · ${reference.target.model} · ${m.providers_change_service()}`}>
+                {m.providers_change_service()}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                class="px-2"
+                disabled={providerDependenciesUnavailable || !!removingTargetId || reference.route.targets.length <= 1}
+                aria-busy={removingTargetId === reference.target.id}
+                onclick={() => void deleteModelTarget(reference.route, reference.target.id)}>
+                {m.providers_delete_destination()}
+              </Button>
+            </div>
+            {#if reference.route.targets.length <= 1}
+              <p class="col-span-2 text-xs text-muted-foreground">{m.providers_last_destination_required()}</p>
+            {/if}
+          </li>
         {/each}
-      </div>
+      </ul>
+      <p class="text-xs text-muted-foreground">{m.providers_delete_destination_effect()}</p>
+    {/if}
+    {#if targetDeletionError}
+      <p class="text-sm text-destructive" role="alert">{targetDeletionError}</p>
     {/if}
     <AlertDialog.Footer>
-      <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
+      <AlertDialog.Cancel disabled={!!removingTargetId}>{m.common_cancel()}</AlertDialog.Cancel>
       {#if deleteTarget && references.length > 0 && deleteTarget.is_enabled}
-        <Button variant="outline" onclick={() => deleteTarget && void toggleProvider(deleteTarget)}>
+        <Button variant="outline" disabled={!!removingTargetId} onclick={() => deleteTarget && void toggleProvider(deleteTarget)}>
           {m.providers_disable_service_instead()}
         </Button>
       {/if}
       <AlertDialog.Action
         variant="destructive"
-        disabled={providerDependenciesUnavailable || references.length > 0}
+        disabled={providerDependenciesUnavailable || !!removingTargetId || references.length > 0}
         onclick={() => void deleteProvider()}>{m.providers_delete_service_label()}</AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

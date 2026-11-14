@@ -1310,6 +1310,11 @@
   "providers_back_model_services": "Back to providers",
   "providers_cannot_delete_value": "Cannot delete {name}",
   "providers_change_service": "Change provider",
+  "providers_delete_destination": "Delete",
+  "providers_delete_destination_effect": "Deletes only the destination, immediately and permanently.",
+  "providers_last_destination_required": "Last destination. Add another first.",
+  "providers_destination_changed": "Destination no longer exists. List refreshed.",
+  "providers_destination_deleted": "Destination deleted.",
   "providers_checking_service_latest_models_keep_using_page": "Checking this provider for its latest models. You can keep using this page.",
   "providers_connect_ai_service_adding_model_apps": "Connect a provider, then add the models your clients need.",
   "providers_connected_services": "Connected providers",
@@ -1321,7 +1326,7 @@
   "providers_delete_service": "Delete provider…",
   "providers_delete_service_label": "Delete provider",
   "providers_disable_service": "Disable provider",
-  "providers_disable_service_instead": "Disable provider instead",
+  "providers_disable_service_instead": "Disable instead",
   "providers_duplicate_model_service": "Duplicate provider?",
   "providers_duplicate_service_action": "Duplicate provider",
   "providers_duplicate_service_short_action": "Duplicate",
@@ -1720,8 +1725,8 @@
       "declarations": ["input count", "local countPlural = count: plural"],
       "selectors": ["countPlural"],
       "match": {
-        "countPlural=one": "{count} model destination still uses this provider. Choose another provider for it, or disable this provider instead.",
-        "countPlural=other": "{count} model destinations still use this provider. Choose another provider for them, or disable this provider instead."
+        "countPlural=one": "{count} destination still uses this provider.",
+        "countPlural=other": "{count} destinations still use this provider."
       }
     }
   ],
