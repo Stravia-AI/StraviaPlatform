@@ -1,6 +1,8 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import type { ComponentProps } from 'svelte'
+import { onDestroy, onMount } from 'svelte'
+import PluginProgressNotification from './PluginProgressNotification.svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import CircleAlertIcon from '@lucide/svelte/icons/circle-alert'
@@ -105,6 +107,28 @@ let prepareError = $state<string>()
 let refreshError = $state<string>()
 let refreshing = $state(false)
 let abort: AbortController | undefined
+let destroyed = false
+const progressToastId = 'plugin-install-progress'
+
+onMount(() => {
+  void refreshMarket()
+})
+onDestroy(() => {
+  destroyed = true
+  abort?.abort()
+  toast.dismiss(progressToastId)
+})
+
+function showProgress(name: string, stage: string, bytes?: string, onCancel?: () => void): void {
+  if (destroyed) return
+  toast.custom(PluginProgressNotification, {
+    id: progressToastId,
+    style: 'pointer-events: auto;',
+    duration: Number.POSITIVE_INFINITY,
+    position: 'bottom-right',
+    componentProps: { name, stage, bytes, onCancel },
+  })
+}
 const plugins = $derived(pluginsQuery.data ?? [])
 const sources = $derived(marketQuery.data?.sources ?? [])
 const rows = $derived.by(() => {
@@ -190,15 +214,21 @@ function actionLabel(row: MarketRow): string {
   return m.market_replace_source()
 }
 async function refreshMarket(): Promise<void> {
+  if (refreshing) return
   refreshing = true
   refreshError = undefined
   try {
     await admin.pluginMarketplace.refresh({})
-    await queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] })
   } catch (error) {
     refreshError = localizeMarketplaceError(error)
   } finally {
-    refreshing = false
+    try {
+      await queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] })
+    } catch (error) {
+      refreshError ??= localizeMarketplaceError(error)
+    } finally {
+      refreshing = false
+    }
   }
 }
 async function prepare(row: MarketRow, release: MarketplaceRelease): Promise<void> {
@@ -209,6 +239,9 @@ async function prepare(row: MarketRow, release: MarketplaceRelease): Promise<voi
   prepareError = undefined
   progress = undefined
   abort = controller
+  const name = rowName(row)
+  const cancel = () => controller.abort()
+  showProgress(name, progressLabel(), undefined, cancel)
   try {
     const result = await admin.pluginMarketplace.prepareInstall(
       {
@@ -219,14 +252,25 @@ async function prepare(row: MarketRow, release: MarketplaceRelease): Promise<voi
         catalog_sha256: release.catalog_sha256,
       },
       (value) => {
+        if (controller.signal.aborted || destroyed) return
         progress = value
+        const bytes =
+          value.stage === 'download' && value.received !== undefined
+            ? value.total
+              ? `${formatSize(value.received)} / ${formatSize(value.total)}`
+              : formatSize(value.received)
+            : undefined
+        showProgress(name, progressLabel(), bytes, cancel)
       },
       controller.signal,
     )
-    showPreview(result)
+    if (!controller.signal.aborted && !destroyed) {
+      showPreview(result)
+    }
   } catch (error) {
-    if (!controller.signal.aborted) prepareError = localizeMarketplaceError(error)
+    if (!controller.signal.aborted && !destroyed) prepareError = localizeMarketplaceError(error)
   } finally {
+    if (!destroyed) toast.dismiss(progressToastId)
     preparing = false
     abort = undefined
   }
@@ -579,6 +623,7 @@ async function confirmPreview(): Promise<void> {
 
   confirming = true
   confirmError = undefined
+  showProgress(`${current.name} · ${current.new_version}`, m.vendor_plugins_preview_confirming())
   try {
     await admin.vendorPlugins.confirm({
       preview_id: current.id,
@@ -588,13 +633,16 @@ async function confirmPreview(): Promise<void> {
       queryClient.invalidateQueries({ queryKey: ['vendor-plugins'] }),
       queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] }),
     ])
-    previewOpen = false
-    preview = undefined
-    toast.success(m.vendor_plugins_update_applied())
-    advanceImportQueue()
+    if (!destroyed) {
+      previewOpen = false
+      preview = undefined
+      toast.success(m.vendor_plugins_update_applied())
+      advanceImportQueue()
+    }
   } catch (error) {
-    confirmError = localizeBackendErrorMessage(error)
+    if (!destroyed) confirmError = localizeBackendErrorMessage(error)
   } finally {
+    if (!destroyed) toast.dismiss(progressToastId)
     confirming = false
   }
 }
@@ -730,10 +778,6 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       ><CircleAlertIcon /><Alert.Description>{refreshError ?? importError ?? prepareError}</Alert.Description
       ></Alert.Root
     >{/if}
-  {#if preparing}<div class="flex items-center gap-3" role="status">
-      <Spinner />{progressLabel()}<Button size="sm" variant="outline" onclick={() => abort?.abort()}
-        >{m.common_cancel()}</Button>
-    </div>{/if}
   <section class="route-section vendor-plugins-workspace">
     <Tabs.Root bind:value={tab}>
       <Tabs.List aria-label={m.vendor_plugins_title()}>

@@ -28,12 +28,23 @@ struct ComponentRecord<'a> {
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let all = match args.next().as_deref() {
-        None => false,
-        Some("--all") => true,
-        Some(argument) => anyhow::bail!("unknown argument: {argument}; expected --all"),
+    let argument = args.next();
+    ensure!(args.next().is_none(), "expected at most one argument");
+    let only = match argument.as_deref() {
+        None | Some("--all") => None,
+        Some(value) if value.starts_with("--only=") => {
+            let names = &value[7..];
+            ensure!(
+                names
+                    .split(',')
+                    .all(|name| COMPONENTS[1..].iter().any(|(id, _)| *id == name)),
+                "invalid plugin selection"
+            );
+            Some(names)
+        }
+        Some(value) => anyhow::bail!("unknown argument: {value}"),
     };
-    ensure!(args.next().is_none(), "expected at most one --all argument");
+    let all = argument.is_some();
     let components = if all { COMPONENTS } else { &COMPONENTS[..1] };
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -49,9 +60,9 @@ fn main() -> anyhow::Result<()> {
     fs::create_dir_all(&output)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut records = Vec::with_capacity(components.len());
-    // base 单独构建并立即归档，避免专属插件的 feature 合并改变内嵌组件字节和来源。
-    for components in [&components[..1], &components[1..]] {
-        if components.is_empty() {
+    // 每个组件独立构建，避免选择集合改变依赖 feature 并集与组件内容。
+    for &(vendor_id, package) in components {
+        if only.is_some_and(|names| !names.split(',').any(|name| name == vendor_id)) {
             continue;
         }
         let mut command = Command::new(&cargo);
@@ -69,37 +80,33 @@ fn main() -> anyhow::Result<()> {
             .arg(&guest_target)
             .env_remove("RUSTFLAGS")
             .env_remove("CARGO_ENCODED_RUSTFLAGS");
-        for &(_, package) in components {
-            command.args(["--package", package]);
-        }
+        command.args(["--package", package]);
         let status = command
             .status()
             .context("cannot start vendor component build")?;
         ensure!(status.success(), "vendor component build failed");
 
-        for &(vendor_id, package) in components {
-            let source = guest_target
-                .join("wasm32-wasip2/release")
-                .join(format!("{}.wasm", package.replace('-', "_")));
-            let artifact_digest = digest(&source)?;
-            let filename = format!("{vendor_id}-{artifact_digest}.wasm");
-            let destination = output.join(&filename);
-            if !destination.exists() || digest(&destination)? != artifact_digest {
-                let pending = PendingFile::new(&output);
-                fs::copy(&source, &pending.path)?;
-                OpenOptions::new()
-                    .write(true)
-                    .open(&pending.path)?
-                    .sync_all()?;
-                fs::rename(&pending.path, &destination)?;
-            }
-            records.push(ComponentRecord {
-                vendor_id,
-                version: env!("CARGO_PKG_VERSION"),
-                file: filename,
-                sha256: artifact_digest,
-            });
+        let source = guest_target
+            .join("wasm32-wasip2/release")
+            .join(format!("{}.wasm", package.replace('-', "_")));
+        let artifact_digest = digest(&source)?;
+        let filename = format!("{vendor_id}-{artifact_digest}.wasm");
+        let destination = output.join(&filename);
+        if !destination.exists() || digest(&destination)? != artifact_digest {
+            let pending = PendingFile::new(&output);
+            fs::copy(&source, &pending.path)?;
+            OpenOptions::new()
+                .write(true)
+                .open(&pending.path)?
+                .sync_all()?;
+            fs::rename(&pending.path, &destination)?;
         }
+        records.push(ComponentRecord {
+            vendor_id,
+            version: env!("CARGO_PKG_VERSION"),
+            file: filename,
+            sha256: artifact_digest,
+        });
     }
     // 全部成功后才发布索引，旧索引始终指向完整、不可变的产物集合。
     let pending = PendingFile::new(&output);
