@@ -18,6 +18,7 @@ const OMP_IMAGE_COUNT_BUDGET: u64 = 20;
 #[serde(rename_all = "kebab-case")]
 pub enum ConnectClientId {
     CodexCli,
+    Chatgpt,
     ClaudeCode,
     Opencode,
     Openclaw,
@@ -164,7 +165,9 @@ fn plan_client_config(
     }
 
     match input.tool {
-        ConnectClientId::CodexCli => plan_codex(input, &paths, existing_files),
+        ConnectClientId::CodexCli | ConnectClientId::Chatgpt => {
+            plan_codex(input, &paths, existing_files)
+        }
         ConnectClientId::ClaudeCode => plan_claude(input, &paths, existing_files),
         ConnectClientId::Opencode => plan_opencode(input, &paths, existing_files),
         ConnectClientId::Openclaw => plan_openclaw(input, &paths, existing_files),
@@ -676,6 +679,8 @@ fn plan_codex(
     let [config_path] = paths.resolve(["~/.codex/config.toml"], |environment| {
         Ok([configured_root(environment, "CODEX_HOME", ".codex")?.join("config.toml")])
     })?;
+    let catalog_path = matches!(input.tool, ConnectClientId::Chatgpt)
+        .then(|| config_path.with_file_name("stravia-models.json"));
     let mut document = parse_toml(&config_path, existing_files.get(&config_path))?;
     let host = input.host.trim_end_matches('/');
     let mut provider = TomlTable::from_iter([
@@ -695,14 +700,16 @@ fn plan_codex(
             "experimental_bearer_token".to_owned(),
             TomlValue::String(input.api_key.clone()),
         ),
-        // Codex 带同一个 Bearer 实时拉取目录；provider 已有认证时才会触发拉取。
-        (
-            "model_catalog_url".to_owned(),
-            TomlValue::String(format!("{host}/codex/models")),
-        ),
         // WebSocket 传输同时让 Codex 用 `previous_response_id` 增量续写。
         ("supports_websockets".to_owned(), TomlValue::Boolean(true)),
     ]);
+    if catalog_path.is_none() {
+        // Codex 带同一个 Bearer 实时拉取目录；ChatGPT 桌面端改用本地快照。
+        provider.insert(
+            "model_catalog_url".to_owned(),
+            TomlValue::String(format!("{host}/codex/models")),
+        );
+    }
     // Codex 只在 provider 级别声明远程压缩，无法按模型开关：仅当目录里的每个模型都
     // 明确支持 V2 时才启用，避免 Codex 对不合格模型发出注定失败的压缩请求。
     let mut codex_models = input
@@ -730,8 +737,16 @@ fn plan_codex(
         "model_provider".to_owned(),
         TomlValue::String("stravia".to_owned()),
     );
-    // 静态 `model_catalog_json` 优先于 `model_catalog_url`；保留它会让实时目录失效。
-    table.remove("model_catalog_json");
+    if let Some(catalog_path) = &catalog_path {
+        // ChatGPT 的模型选择器需要显式的本地目录；与 Codex CLI 共用全局配置。
+        table.insert(
+            "model_catalog_json".to_owned(),
+            TomlValue::String(catalog_path.display().to_string()),
+        );
+    } else {
+        // 静态目录优先于 URL；切回 Codex CLI 时移除指针，恢复实时发现。
+        table.remove("model_catalog_json");
+    }
     let providers = ensure_toml_table(table, "model_providers")?;
     providers.insert("stravia".to_owned(), provider.clone());
 
@@ -739,7 +754,7 @@ fn plan_codex(
         .map_err(|cause| error("serialize_error", cause.to_string(), Some(&config_path)))?
         .into_bytes();
 
-    let preview_document = TomlValue::Table(TomlTable::from_iter([
+    let mut preview_table = TomlTable::from_iter([
         (
             "model_provider".to_owned(),
             TomlValue::String("stravia".to_owned()),
@@ -748,27 +763,53 @@ fn plan_codex(
             "model_providers".to_owned(),
             TomlValue::Table(TomlTable::from_iter([("stravia".to_owned(), provider)])),
         ),
-    ]));
+    ]);
+    if let Some(catalog_path) = &catalog_path {
+        preview_table.insert(
+            "model_catalog_json".to_owned(),
+            TomlValue::String(catalog_path.display().to_string()),
+        );
+    }
+    let preview_document = TomlValue::Table(preview_table);
     let preview_toml = toml::to_string_pretty(&preview_document)
         .map_err(|cause| error("serialize_error", cause.to_string(), Some(&config_path)))?;
-    let paths = vec![config_path.display().to_string()];
+    let file_count = if catalog_path.is_some() { 2 } else { 1 };
+    let mut paths = Vec::with_capacity(file_count);
+    paths.push(config_path.display().to_string());
     let root = config_path
         .parent()
         .expect("global config path has a parent")
         .display()
         .to_string();
-    Ok(ConnectClientApplyPlan {
-        preview: format!(
-            "# {}\n# Codex includes web_search by default. Search requires the Stravia web search capability\n# to be configured and enabled, and the API key must be authorized; otherwise even ordinary conversations may receive 403.\n# If you do not use search, set the following at the top level of config.toml, before any table:\n# web_search = \"disabled\"\n# This preview and Apply do not change your existing global web_search preference.\n{}",
-            paths[0], preview_toml
-        ),
-        files: vec![PlannedConnectClientFile {
-            path: paths[0].clone(),
-            bytes: config_bytes,
-            root,
-        }],
+    let mut files = Vec::with_capacity(file_count);
+    files.push(PlannedConnectClientFile {
+        path: paths[0].clone(),
+        bytes: config_bytes,
+        root,
+    });
+    let mut plan = ConnectClientApplyPlan {
+        preview: format!("# {}\n{}", paths[0], preview_toml),
+        files,
         paths,
-    })
+    };
+    if let Some(catalog_path) = catalog_path {
+        use std::fmt::Write as _;
+
+        let catalog = serde_json::to_string_pretty(&codex_catalog(
+            &input.models,
+            input.transparent_image_input_enabled,
+        ))
+        .map_err(|cause| error("serialize_error", cause.to_string(), Some(&catalog_path)))?;
+        let catalog_path = catalog_path.display().to_string();
+        let _ = write!(plan.preview, "\n# {catalog_path}\n{catalog}");
+        plan.files.push(PlannedConnectClientFile {
+            path: catalog_path.clone(),
+            bytes: catalog.into_bytes(),
+            root: plan.files[0].root.clone(),
+        });
+        plan.paths.push(catalog_path);
+    }
+    Ok(plan)
 }
 
 fn open_responses_models(input: &ConnectClientApplyInput) -> JsonValue {
@@ -1297,13 +1338,16 @@ fn ensure_toml_table<'a>(
 
 /// Codex `model_catalog_json` 与 `model_catalog_url` 响应共用的目录体（`{"models": [ModelInfo, ...]}`）。
 ///
-/// `priority` 按 `models` 顺序递增，Codex 据此排序选择器。
+/// 仅包含文字对话模型；`priority` 按过滤后的顺序递增，Codex 据此排序选择器。
 pub fn codex_catalog(
     models: &[ConnectClientModel],
     transparent_image_input_enabled: bool,
 ) -> JsonValue {
     let models = models
         .iter()
+        .filter(|model| {
+            model.output_modality != Some(crate::db::models::RouteOutputModality::Image)
+        })
         .enumerate()
         .map(|(priority, model)| {
             let levels = model
@@ -1517,15 +1561,6 @@ name = "Other"
         assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
         // 目录里的模型没有全部支持远程压缩，provider 不声明该能力。
         assert!(provider.get("capabilities").is_none());
-        assert!(
-            plan.preview
-                .contains("ordinary conversations may receive 403")
-        );
-        assert!(plan.preview.contains("# web_search = \"disabled\""));
-        assert!(
-            plan.preview
-                .contains("top level of config.toml, before any table")
-        );
         let preview: TomlValue = toml::from_str(&plan.preview).expect("preview is copyable TOML");
         assert!(preview.get("web_search").is_none());
         assert!(
@@ -1543,6 +1578,125 @@ name = "Other"
             plan.preview
                 .contains("model_catalog_url = \"http://127.0.0.1:5174/codex/models\"")
         );
+    }
+
+    #[test]
+    fn chatgpt_plan_preserves_preferences_and_switches_catalog_modes() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let codex_home = temporary.path().join("chatgpt-home");
+        let mut environment = environment(temporary.path());
+        environment.insert("CODEX_HOME".to_owned(), codex_home.display().to_string());
+        let config_path = codex_home.join("config.toml");
+        let catalog_path = codex_home.join("stravia-models.json");
+        let existing = BTreeMap::from([
+            (
+                config_path.clone(),
+                br#"model = "existing-model"
+model_reasoning_effort = "low"
+web_search = "disabled"
+model_catalog_json = "old-catalog.json"
+
+[history]
+persistence = "save-all"
+
+[model_providers.stravia]
+model_catalog_url = "https://old.example/catalog"
+
+[model_providers.other]
+name = "Other"
+"#
+                .to_vec(),
+            ),
+            (
+                catalog_path.clone(),
+                br#"{"models":[{"slug":"stale"}]}"#.to_vec(),
+            ),
+        ]);
+        let mut input = standard_input(ConnectClientId::Chatgpt);
+        input.transparent_image_input_enabled = true;
+        input.models[0].supported_thinking_levels = vec!["off".to_owned(), "high".to_owned()];
+        input.models[0].default_thinking_level = Some("high".to_owned());
+        input.models[1].supports_image_input = false;
+        let image = ConnectClientModel {
+            output_modality: Some(crate::db::models::RouteOutputModality::Image),
+            ..model("image-only", "Image only")
+        };
+        input.models.insert(0, image);
+
+        let plan =
+            plan_connect_client_apply(&input, &environment, &existing).expect("ChatGPT plan");
+        assert_eq!(
+            plan.paths,
+            [
+                config_path.display().to_string(),
+                catalog_path.display().to_string()
+            ]
+        );
+        let document: TomlValue =
+            toml::from_str(&planned_text(&plan, "config.toml")).expect("ChatGPT TOML");
+        assert_eq!(document["model"].as_str(), Some("existing-model"));
+        assert_eq!(document["model_reasoning_effort"].as_str(), Some("low"));
+        assert_eq!(document["web_search"].as_str(), Some("disabled"));
+        assert_eq!(
+            document["history"]["persistence"].as_str(),
+            Some("save-all")
+        );
+        assert_eq!(
+            document["model_providers"]["other"]["name"].as_str(),
+            Some("Other")
+        );
+        assert_eq!(
+            document["model_catalog_json"].as_str(),
+            Some(catalog_path.to_str().expect("catalog path"))
+        );
+        let provider = &document["model_providers"]["stravia"];
+        assert!(provider.get("model_catalog_url").is_none());
+        assert_eq!(
+            provider["base_url"].as_str(),
+            Some("http://127.0.0.1:7331/v1")
+        );
+        assert_eq!(
+            provider["experimental_bearer_token"].as_str(),
+            Some("sk-standard")
+        );
+        let catalog: serde_json::Value =
+            serde_json::from_str(&planned_text(&plan, "stravia-models.json"))
+                .expect("ChatGPT catalog");
+        let models = catalog["models"].as_array().expect("models");
+        assert_eq!(
+            models
+                .iter()
+                .map(|entry| entry["slug"].as_str().expect("slug"))
+                .collect::<Vec<_>>(),
+            ["route-one", "route-two"]
+        );
+        assert_eq!(models[0]["priority"], 0);
+        assert_eq!(models[1]["priority"], 1);
+        assert_eq!(models[0]["display_name"], "Route One");
+        assert_eq!(models[0]["default_reasoning_level"], "high");
+        assert_eq!(models[0]["supported_reasoning_levels"][0]["effort"], "none");
+        assert_eq!(models[0]["context_window"], 200_000);
+        assert_eq!(
+            models[1]["input_modalities"],
+            serde_json::json!(["text", "image"])
+        );
+
+        let saved = plan
+            .files
+            .into_iter()
+            .map(|file| (file.path.into(), file.bytes))
+            .collect();
+        input.tool = ConnectClientId::CodexCli;
+        let live = plan_connect_client_apply(&input, &environment, &saved).expect("Codex plan");
+        assert_eq!(live.paths, [config_path.display().to_string()]);
+        let document: TomlValue =
+            toml::from_str(&planned_text(&live, "config.toml")).expect("Codex TOML");
+        assert!(document.get("model_catalog_json").is_none());
+        assert_eq!(
+            document["model_providers"]["stravia"]["model_catalog_url"].as_str(),
+            Some("http://127.0.0.1:7331/codex/models")
+        );
+        assert_eq!(document["model"].as_str(), Some("existing-model"));
     }
 
     /// Codex 只能在 provider 级声明远程压缩：目录里全部（文本）模型都支持才写 V2，
@@ -2396,6 +2550,36 @@ modelRoles:
         let error = plan_connect_client_apply(&input, &BTreeMap::new(), &BTreeMap::new())
             .expect_err("Desktop writes still require a real home directory");
         assert_eq!(error.code, "global_path_unavailable");
+    }
+
+    #[test]
+    fn chatgpt_preview_includes_its_portable_static_catalog() {
+        let input = standard_input(ConnectClientId::Chatgpt);
+        let plan = preview_connect_client_apply(&input).expect("ChatGPT preview");
+        assert!(plan.files.is_empty());
+        assert_eq!(
+            plan.paths,
+            ["~/.codex/config.toml", "~/.codex/stravia-models.json"]
+        );
+        let (config, catalog) = plan
+            .preview
+            .split_once("\n# ~/.codex/stravia-models.json\n")
+            .expect("separate config and catalog sections");
+        let config: TomlValue = toml::from_str(config).expect("ChatGPT preview TOML");
+        assert_eq!(
+            config["model_catalog_json"].as_str(),
+            Some("~/.codex/stravia-models.json")
+        );
+        assert!(config.get("model").is_none());
+        assert!(
+            config["model_providers"]["stravia"]
+                .get("model_catalog_url")
+                .is_none()
+        );
+        let catalog: serde_json::Value =
+            serde_json::from_str(catalog).expect("ChatGPT preview JSON");
+        assert_eq!(catalog["models"][0]["slug"], "route-one");
+        assert_eq!(catalog["models"][1]["slug"], "route-two");
     }
 
     #[test]

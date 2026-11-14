@@ -1262,7 +1262,7 @@ describe('Stravia desktop smoke', () => {
       await expect($('#cli-key')).toHaveText(expect.stringContaining(keyName))
 
       const writeConfiguration = await $('button=Write configuration')
-      const copyConfiguration = await $('button=Copy')
+      const copyConfiguration = await $('button=Copy configuration')
       await expect(writeConfiguration).toBeDisplayed()
       await expect(writeConfiguration).toBeEnabled()
       await expect(copyConfiguration).toBeDisplayed()

@@ -12,6 +12,7 @@ This release also includes the changes listed under [0.7.1](#071---2026-11-14), 
 
 ### Added
 
+- Connect clients now includes a separate ChatGPT option using the local static model catalog from the 0.6.x setup. Web previews include separate TOML and JSON file sections, and Desktop Apply writes both files while preserving the current model and search preferences. Codex retains live model discovery. Setup guidance now lives in field help instead of persistent instructional paragraphs, with explicit copy/write actions and only the shared-configuration impact kept visible. Both options share `CODEX_HOME`; applying either switches the catalog mode, and ChatGPT snapshots must be reapplied after model or API Key capability changes.
 - The compact provider deletion dialog can immediately delete individual model destinations while keeping the model and its other destinations. Destination actions stay beside their names, with shorter usage and deletion hints. The last destination cannot be deleted here; replace its provider or add another destination first.
 
 ### Changed

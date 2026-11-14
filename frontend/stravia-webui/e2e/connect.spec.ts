@@ -45,20 +45,6 @@ async function setup(page: Page, keys: ApiKey[]): Promise<void> {
   )
 }
 
-test('Codex setup explains search prerequisites and how to disable it globally', async ({ page }) => {
-  await setup(page, [key('Personal')])
-  await page.goto('/connect')
-  await expect(page.getByText(/Codex includes web_search by default/)).toContainText(
-    'ordinary conversations may receive 403',
-  )
-  await expect(page.getByText(/top level of ~\/\.codex\/config\.toml/)).toContainText('not inside the provider table')
-  await expect(page.getByText('web_search = "disabled"', { exact: true })).toBeVisible()
-  await expect(page.getByText(/does not change your existing global web_search preference/)).toBeVisible()
-  await page.locator('#cli-tool').click()
-  await page.getByRole('option', { name: 'OpenCode', exact: true }).click()
-  await expect(page.getByText(/Codex includes web_search by default/)).toHaveCount(0)
-})
-
 test('Connect plans image input only for enabled media understanding selection', async ({ page }) => {
   await setup(page, [
     key('Media', { transparent_injection_enabled: true, transparent_injections: ['media_understanding'] }),
@@ -154,7 +140,7 @@ test('Copy failure never reports success and leaves the configuration available'
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('denied')) } })
   })
   await page.goto('/connect')
-  await page.getByRole('button', { name: 'Copy', exact: true }).click()
+  await page.getByRole('button', { name: 'Copy configuration', exact: true }).click()
   await expect(page.getByText('Could not copy to clipboard')).toBeVisible()
   await expect(page.getByText('Copied to clipboard', { exact: true })).toHaveCount(0)
   await expect(page.locator('pre')).toBeVisible()
@@ -221,12 +207,12 @@ test('Claude requires all four mappings while other clients do not ask for a def
   await page.locator('#cli-tool').click()
   await page.getByRole('option', { name: 'Claude Code', exact: true }).click()
   for (const id of ['cli-default-model', 'cli-haiku-model', 'cli-sonnet-model', 'cli-opus-model']) {
-    await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Copy configuration', exact: true })).toBeDisabled()
     await page.locator(`#${id}`).click()
     await page.getByRole('option', { name: /My model/ }).click()
     await expect(page.getByRole('listbox')).toHaveCount(0)
   }
-  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Copy configuration', exact: true })).toBeEnabled()
 })
 
 test('Wide workspace stacks labels over bounded controls sharing one column, including Claude mappings', async ({
@@ -306,14 +292,8 @@ test('Optional explanations live in help tooltips and no descriptive copy repeat
   await setup(page, [key('Personal')])
   await page.goto('/connect')
   await expect(page.locator('pre.route-code-plane')).toBeVisible()
-  for (const text of [
-    'OpenAI coding CLI tool',
-    'All models available to this API Key will be included in the client configuration.',
-  ]) {
-    await expect(page.getByText(text)).toHaveCount(0)
-  }
   await page.getByRole('button', { name: 'More about this field' }).first().focus()
-  await expect(page.locator('[data-slot="tooltip-content"]')).toContainText('OpenAI coding CLI tool')
+  await expect(page.locator('[data-slot="tooltip-content"]')).toBeVisible()
   // 已选可用密钥：不出现阻碍原因，创建仍是可达的次要入口。
   await expect(page.getByText('No eligible API Key')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Create an API Key', exact: true })).toBeVisible()
@@ -337,7 +317,7 @@ test('Choosing client and key is local view state and never sends a save request
   await page.getByRole('option', { name: /Separate/ }).click()
   await page.locator('#cli-tool').click()
   await page.getByRole('option', { name: 'OpenCode', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Copy configuration', exact: true })).toBeEnabled()
   await expect(page.getByRole('button', { name: /^(Save|Cancel)/ })).toHaveCount(0)
   expect(writes).toEqual([])
 })
