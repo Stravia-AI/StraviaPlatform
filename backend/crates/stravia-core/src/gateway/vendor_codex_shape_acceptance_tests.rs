@@ -609,6 +609,16 @@ async fn legacy_boundary_continuation(
     );
     let first: Value = serde_json::from_slice(&bytes)?;
     let root_id = first["id"].as_str().context("root response id")?;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {}", key.token).parse()?,
+    );
+    let credential = crate::proxy::security::ClientCredential::from_inference_headers(&headers);
+    let principal = crate::proxy::security::Security::new(gateway.storage.auth())
+        .authenticated_principal(&credential)
+        .await?
+        .principal;
     let parent_id = if redaction == BoundaryRedaction::Fresh {
         let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session",
             "previous_response_id":root_id,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"lookup now"}]}],
@@ -638,6 +648,43 @@ async fn legacy_boundary_continuation(
         let parent: Value = serde_json::from_slice(&bytes)?;
         assert_eq!(parent["output"][0]["call_id"], "call_1");
         let parent_id = parent["id"].as_str().context("fresh parent id")?.to_owned();
+        let mut probe_request = stravia_runtime_contract::protocol::ir::AiRequest::new(
+            ROUTE,
+            vec![
+                stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
+                    "call_1",
+                    json!("found"),
+                ),
+            ],
+        );
+        crate::router::stamp_previous_response_id(&mut probe_request, &parent_id);
+        let mut probe = gateway
+            .generation_chains
+            .begin(principal.clone(), probe_request)
+            .await?;
+        probe.admit_user_prompt().await?;
+        let atomic = probe
+            .atomic_conversation_context()
+            .context("fresh admission")?;
+        let boundaries = gateway
+            .vendor_plugins
+            .store
+            .history_boundary_candidates(
+                "openai-codex",
+                &provider.id,
+                &atomic.principal,
+                &atomic.admission_id.to_string(),
+                &atomic.atomic_lease_id.to_string(),
+            )
+            .await
+            .context("fresh published boundaries")?;
+        assert!(!boundaries.is_empty());
+        for boundary in &boundaries {
+            assert!(crate::generation_chain::project_history_boundaries(
+                probe.request(), boundary, &[],
+            ).is_some(), "new history must have a valid persisted proof without legacy recovery");
+        }
+        drop(probe);
         let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session",
             "previous_response_id":parent_id,"input":[{"type":"function_call_output","call_id":"call_1","output":"found"}],
             "tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]});
@@ -666,16 +713,6 @@ async fn legacy_boundary_continuation(
         assert_protected_continuation(&sent);
         parent_id
     } else {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            format!("Bearer {}", key.token).parse()?,
-        );
-        let credential = crate::proxy::security::ClientCredential::from_inference_headers(&headers);
-        let principal = crate::proxy::security::Security::new(gateway.storage.auth())
-            .authenticated_principal(&credential)
-            .await?
-            .principal;
         let mut request = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
               stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24).context("Responses codec")?
@@ -715,56 +752,16 @@ async fn legacy_boundary_continuation(
             .open_atomic_provider_fence("openai-codex", &provider.id, data_epoch)
             .await
             .context("opening provider fence")?;
-        let published_candidate = if redaction == BoundaryRedaction::Legacy {
-            let mut protected = source.clone();
-            gateway
-                .redaction
-                .protect(&principal, &mut protected, None)
-                .await?;
-            let protected_text = format!("{protected:?}");
-            assert!(!protected_text.contains(SYNTHETIC_USER_SECRET));
-            assert!(!protected_text.contains(SYNTHETIC_CONTROL_SECRET));
-            assert!(protected_text.contains("<!--sr:"));
-            let legacy = candidate
-                .at_projected_gap(&protected, usize::try_from(candidate.source_item_gap)?)
-                .context("redacted legacy boundary")?;
-            assert_ne!(legacy.source_prefix_hash, candidate.source_prefix_hash);
-            assert_ne!(legacy.source_controls_hash, candidate.source_controls_hash);
-            legacy
-        } else {
-            candidate.clone()
-        };
-        let scope = crate::plugin::JournalScope {
-            vendor_id: "openai-codex".into(),
-            provider_id: provider.id.clone(),
-            data_epoch,
-            provider_fence: fence,
-            principal: atomic.principal.clone(),
-            admission: atomic.admission_id.to_string(),
-            lease: atomic.atomic_lease_id.to_string(),
-            key: "legacy-proof-fixture".into(),
-            candidate: Some(published_candidate.clone()),
-        };
         let root_boundaries = store
             .history_boundary_candidates(
-                &scope.vendor_id,
-                &scope.provider_id,
-                &scope.principal,
-                &scope.admission,
-                &scope.lease,
+                "openai-codex",
+                &provider.id,
+                &atomic.principal,
+                &atomic.admission_id.to_string(),
+                &atomic.atomic_lease_id.to_string(),
             )
             .await
             .context("reading published root boundary")?;
-        let head = store
-            .journal_append(&scope, "legacy proof".into(), None)
-            .await
-            .context("appending legacy journal")?;
-        assert!(
-            store
-                .journal_compare_exchange(&scope, 0, None, Some(&head))
-                .await
-                .context("publishing legacy journal")?
-        );
         let mut effective = source.as_ref().clone();
         let mut removed = Vec::new();
         assert!(
@@ -835,6 +832,44 @@ async fn legacy_boundary_continuation(
                 parent.request()
             ),
             "fresh boundary must prove the final Target controls"
+        );
+        let published_candidate = if redaction == BoundaryRedaction::Legacy {
+            let mut protected = parent.request_snapshot();
+            gateway
+                .redaction
+                .protect(&principal, &mut protected, None)
+                .await?;
+            let gap = usize::try_from(candidate.source_item_gap)?;
+            let gap = gap - removed.iter().filter(|&&index| index < gap).count();
+            let legacy = candidate
+                .at_projected_gap(&protected, gap)
+                .context("redacted persisted boundary")?;
+            assert_ne!(legacy.source_prefix_hash, candidate.source_prefix_hash);
+            assert_ne!(legacy.source_controls_hash, candidate.source_controls_hash);
+            legacy
+        } else {
+            candidate.clone()
+        };
+        let scope = crate::plugin::JournalScope {
+            vendor_id: "openai-codex".into(),
+            provider_id: provider.id.clone(),
+            data_epoch,
+            provider_fence: fence,
+            principal: atomic.principal.clone(),
+            admission: atomic.admission_id.to_string(),
+            lease: atomic.atomic_lease_id.to_string(),
+            key: "legacy-proof-fixture".into(),
+            candidate: Some(published_candidate.clone()),
+        };
+        let head = store
+            .journal_append(&scope, "legacy proof".into(), None)
+            .await
+            .context("appending legacy journal")?;
+        assert!(
+            store
+                .journal_compare_exchange(&scope, 0, None, Some(&head))
+                .await
+                .context("publishing legacy journal")?
         );
         let parent_id = parent.id().to_owned();
         parent.persist().await?;
