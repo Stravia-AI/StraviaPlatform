@@ -362,6 +362,34 @@ fn reasoning_removal_projects_duplicate_boundary_gaps_without_collapsing_ids() {
 }
 
 #[test]
+fn stage_reasoning_change_preserves_boundary_identity_at_unchanged_gap() {
+    let source = Arc::new(AiRequest::new("model", vec![AiItem::output_text("answer")]));
+    let window = crate::generation_chain::VirtualWindow::root();
+    let original = crate::generation_chain::history_boundary_candidate(
+        uuid::Uuid::new_v4(),
+        window,
+        &source,
+        1,
+    )
+    .unwrap();
+    let mut reasoning = source.reasoning.clone();
+    reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
+    let mut effective = Arc::clone(&source);
+    crate::generation_chain::apply_provider_reasoning(&mut effective, &reasoning);
+    assert_eq!(effective.items.len(), source.items.len());
+    assert!(
+        crate::generation_chain::project_history_boundaries(&effective, &original, &[]).is_none()
+    );
+    let projected = original.at_projected_gap(&effective, 1).unwrap();
+    let map =
+        crate::generation_chain::project_history_boundaries(&effective, &projected, &[]).unwrap();
+    assert_eq!(map.current_boundary_id, original.id.to_string());
+    assert_eq!(map.window_id, original.window_id.to_string());
+    assert_eq!(map.boundaries[0].item_index, 1);
+    assert_eq!(projected.source_admission_id, original.source_admission_id);
+}
+
+#[test]
 fn continuation_suffix_projection_preserves_full_fallback_boundaries() {
     let full = crate::model_turn::HistoryBoundaryMap {
         version: 1,
@@ -376,16 +404,20 @@ fn continuation_suffix_projection_preserves_full_fallback_boundaries() {
             .collect(),
         current_boundary_id: "current".into(),
     };
-    let mut suffix = full.clone();
-    suffix.retain_suffix(2);
-    assert_eq!(
-        suffix
-            .boundaries
-            .iter()
-            .map(|entry| (entry.id.as_str(), entry.item_index))
-            .collect::<Vec<_>>(),
-        vec![("current", 2)]
-    );
+    for (start, expected_index) in [(2, 2), (4, 0), (5, 0)] {
+        let mut suffix = full.clone();
+        suffix.retain_suffix(start);
+        assert_eq!(
+            suffix
+                .boundaries
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.item_index))
+                .collect::<Vec<_>>(),
+            vec![("current", expected_index)],
+            "native prefix ending at {start} must preserve the current boundary",
+        );
+        assert_eq!(suffix.coverage, "complete");
+    }
     assert_eq!(
         full.boundaries
             .iter()

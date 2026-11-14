@@ -1584,7 +1584,32 @@ async fn prepare_attempt(
             && gaps.iter().all(|gap| *gap <= provider_request.items.len())
             && gaps.windows(2).all(|pair| pair[0] <= pair[1])
         {
-            crate::generation_chain::project_history_boundaries(source, candidate, &retained)
+            let mut projected =
+                crate::generation_chain::project_history_boundaries(source, candidate, &retained);
+            if projected.is_none()
+                && !retained.is_empty()
+                && let Some(parent_id) = input.history_boundary_parent_id.as_deref()
+                && let Some(recovered) = gateway
+                    .generation_chains
+                    .recover_legacy_history_boundaries(
+                        &input.principal,
+                        parent_id,
+                        source,
+                        &retained,
+                    )
+                    .await
+            {
+                projected = crate::generation_chain::project_history_boundaries(
+                    source, candidate, &recovered,
+                );
+            }
+            if projected.is_none() && !retained.is_empty() {
+                return Err(AttemptFailure::terminal(
+                    "history_boundary_unavailable",
+                    "Retained history boundary proof cannot be verified against the generation ancestry",
+                ));
+            }
+            projected
                 .filter(|map| map.valid_for(source.items.len()))
                 .map(|mut map| {
                     for boundary in &mut map.boundaries {
@@ -1603,6 +1628,90 @@ async fn prepare_attempt(
     } else {
         None
     };
+    // 持久化证明必须绑定 stage 将采用的最终 Target controls。
+    let resolved_thinking = requested_thinking_level.and_then(|requested| {
+        crate::thinking::resolve_runtime_thinking_level(
+            &target.thinking_level_map,
+            requested,
+            &canonical_model_metadata,
+            toggle_declared,
+            Some(&protocol_hint),
+        )
+    });
+    let resolved_level = resolved_thinking.map(|(level, _)| level);
+    if resolved_level != provider_request.reasoning.level || resolved_thinking.is_some() {
+        let reasoning = &mut Arc::make_mut(&mut provider_request).reasoning;
+        reasoning.level = resolved_level;
+        reasoning.target_control = resolved_thinking.map(|(_, control)| control.clone());
+    }
+    let mut persisted_candidate = input.history_boundary_candidate.clone();
+    if let (Some(candidate), Some(map)) =
+        (persisted_candidate.as_ref(), history_boundaries.as_ref())
+    {
+        let writer_source = input
+            .history_boundary_writer_source
+            .as_ref()
+            .ok_or_else(|| {
+                AttemptFailure::terminal(
+                    "history_boundary_unavailable",
+                    "The persisted history writer source is unavailable",
+                )
+            })?;
+        let current_id = candidate.id.to_string();
+        let rebased = map
+            .boundaries
+            .iter()
+            .find(|boundary| boundary.id == current_id)
+            .and_then(|boundary| {
+                let (full, gap) = crate::history_marker::client_shaped_request_with_boundary(
+                    Arc::clone(&input.request),
+                    writer_source,
+                    boundary.item_index,
+                )?;
+                let tools_change = full.tools.as_ref().is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        input
+                            .history_boundary_exposed_tools
+                            .iter()
+                            .any(|name| name == &tool.name)
+                    })
+                });
+                let reasoning_changes = full.reasoning.level != provider_request.reasoning.level
+                    || full.reasoning.target_control != provider_request.reasoning.target_control;
+                if !tools_change && !reasoning_changes {
+                    return candidate.at_projected_gap(&full, gap);
+                }
+                // Control fingerprints do not include history. Copy only the
+                // persisted control fields, never the potentially large items.
+                let mut controls = AiRequest::new(full.model.clone(), Vec::new());
+                controls.instructions.clone_from(&full.instructions);
+                controls.generation.clone_from(&full.generation);
+                controls.tools.clone_from(&full.tools);
+                controls.tool_choice.clone_from(&full.tool_choice);
+                controls.parallel_tool_calls = full.parallel_tool_calls;
+                controls.reasoning.clone_from(&full.reasoning);
+                controls.response_format.clone_from(&full.response_format);
+                controls.parameters.clone_from(&full.parameters);
+                if tools_change {
+                    crate::hook::InferenceRun::remove_named_exposed_tools(
+                        &mut controls,
+                        &input.history_boundary_exposed_tools,
+                    );
+                }
+                let mut controls = Arc::new(controls);
+                crate::generation_chain::apply_provider_reasoning(
+                    &mut controls,
+                    &provider_request.reasoning,
+                );
+                candidate.at_projected_gap_with_controls(&full, gap, &controls)
+            });
+        persisted_candidate = Some(rebased.ok_or_else(|| {
+            AttemptFailure::terminal(
+                "history_boundary_unavailable",
+                "The current history boundary cannot be projected into the persisted writer view",
+            )
+        })?);
+    }
     let mut removed_items = Vec::new();
     let thinking_replayed = has_thinking
         && stravia_protocol_codec::transform::prepare_thinking_replay_with_removals(
@@ -1648,21 +1757,6 @@ async fn prepare_attempt(
             "compaction_target_mismatch",
             "Native compaction state is not compatible with this Target binding",
         ));
-    }
-    let resolved_thinking = requested_thinking_level.and_then(|requested| {
-        crate::thinking::resolve_runtime_thinking_level(
-            &target.thinking_level_map,
-            requested,
-            &canonical_model_metadata,
-            toggle_declared,
-            Some(&protocol_hint),
-        )
-    });
-    let resolved_level = resolved_thinking.map(|(level, _)| level);
-    if resolved_level != provider_request.reasoning.level || resolved_thinking.is_some() {
-        let reasoning = &mut Arc::make_mut(&mut provider_request).reasoning;
-        reasoning.level = resolved_level;
-        reasoning.target_control = resolved_thinking.map(|(_, control)| control.clone());
     }
     // 准备期间保留逻辑模型；仅在交给 guest 的请求副本上改写派发模型。
     input
@@ -1888,7 +1982,7 @@ async fn prepare_attempt(
         request: provider_request,
         continuation_fallback,
         history_boundaries,
-        history_boundary_candidate: input.history_boundary_candidate.clone(),
+        history_boundary_candidate: persisted_candidate,
         fallback_history_boundaries,
         continuation_send_reset: false,
         dispatch_model: route.model_id.to_string(),

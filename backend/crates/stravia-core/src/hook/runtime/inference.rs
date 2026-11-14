@@ -476,10 +476,18 @@ impl InferenceRun {
     }
 
     pub(crate) fn remove_exposed_tools(&self, request: &mut AiRequest) {
+        Self::remove_tools_matching(request, |name| self.exposed_tools.contains_key(name));
+    }
+
+    pub(crate) fn remove_named_exposed_tools(request: &mut AiRequest, names: &[String]) {
+        Self::remove_tools_matching(request, |name| names.iter().any(|exposed| exposed == name));
+    }
+
+    fn remove_tools_matching(request: &mut AiRequest, exposed: impl Fn(&str) -> bool) {
         let Some(tools) = request.tools.as_mut() else {
             return;
         };
-        tools.retain(|tool| !self.exposed_tools.contains_key(&tool.name));
+        tools.retain(|tool| !exposed(&tool.name));
         if tools.is_empty() {
             request.tools = None;
         }

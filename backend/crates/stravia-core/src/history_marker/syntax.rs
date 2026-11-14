@@ -1048,9 +1048,29 @@ pub async fn resolve_request_markers(
 /// 输入历史的恢复项回到原 Marker；本 run 已投影到最终响应的轮次则只在
 /// output 中表达，不能同时作为 effective input 再落盘。
 pub(crate) fn client_shaped_request(
-    mut model: std::sync::Arc<AiRequest>,
+    model: std::sync::Arc<AiRequest>,
     client: &AiRequest,
 ) -> std::sync::Arc<AiRequest> {
+    project_client_shaped_request(model, client, None).0
+}
+
+pub(crate) fn client_shaped_request_with_boundary(
+    model: std::sync::Arc<AiRequest>,
+    client: &AiRequest,
+    item_gap: usize,
+) -> Option<(std::sync::Arc<AiRequest>, usize)> {
+    if item_gap > model.items.len() {
+        return None;
+    }
+    let (request, gap) = project_client_shaped_request(model, client, Some(item_gap));
+    Some((request, gap?))
+}
+
+fn project_client_shaped_request(
+    mut model: std::sync::Arc<AiRequest>,
+    client: &AiRequest,
+    item_gap: Option<usize>,
+) -> (std::sync::Arc<AiRequest>, Option<usize>) {
     let restored = |item: &AiItem| {
         item.meta
             .as_ref()
@@ -1065,6 +1085,12 @@ pub(crate) fn client_shaped_request(
             .and_then(serde_json::Value::as_bool)
             == Some(true)
     };
+    let mut gap = item_gap.map(|index| {
+        model.items[..index]
+            .iter()
+            .filter(|item| !restored(item) && !projected(item))
+            .count()
+    });
     let mut references = Vec::new();
     for (source_index, item) in client.items.iter().enumerate() {
         for reference in history_marker_references(std::slice::from_ref(item)) {
@@ -1082,45 +1108,69 @@ pub(crate) fn client_shaped_request(
             .iter()
             .any(|item| restored(item) || projected(item))
     {
-        return model;
+        return (model, gap);
     }
     let mut insertions = references
         .into_iter()
         .enumerate()
         .map(|(ordinal, (source_index, reference))| {
-            let index = model
-                .items
-                .iter()
-                .position(|item| {
-                    restored(item)
-                        && item
-                            .meta
-                            .as_ref()
-                            .and_then(|meta| meta.get("__stravia_history_marker_reference"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some(reference.as_str())
-                })
-                .map_or(source_index, |anchor| {
-                    model.items[..anchor]
-                        .iter()
-                        .filter(|item| !restored(item) && !projected(item))
-                        .count()
-                });
-            (index, ordinal, reference)
+            let matches = |item: &AiItem| {
+                restored(item)
+                    && item
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("__stravia_history_marker_reference"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(reference.as_str())
+            };
+            let anchor = model.items.iter().position(&matches);
+            let index = anchor.map_or(source_index, |anchor| {
+                model.items[..anchor]
+                    .iter()
+                    .filter(|item| !restored(item) && !projected(item))
+                    .count()
+            });
+            let before_gap = item_gap.and_then(|boundary| {
+                if let Some(anchor) = anchor {
+                    if anchor < boundary && model.items[boundary..].iter().any(matches) {
+                        // 一个引用恢复的多个 items 不能在持久化 marker 内重新划边界。
+                        return None;
+                    }
+                    Some(anchor < boundary)
+                } else {
+                    // 缺少恢复锚点时，不能猜测同一 gap 上新插入 marker 的归属。
+                    let boundary = gap?;
+                    (index != boundary).then_some(index < boundary)
+                }
+            });
+            if item_gap.is_some() && before_gap.is_none() {
+                gap = None;
+            }
+            (index, ordinal, reference, before_gap)
         })
         .collect::<Vec<_>>();
+    if let Some(gap) = &mut gap {
+        *gap += insertions
+            .iter()
+            .filter(|entry| entry.3 == Some(true))
+            .count();
+    }
     let request = std::sync::Arc::make_mut(&mut model);
     request
         .items
         .retain(|item| !restored(item) && !projected(item));
-    insertions.sort_by_key(|(index, ordinal, _)| (*index, *ordinal));
-    for (offset, (index, _, reference)) in insertions.into_iter().enumerate() {
+    insertions.sort_by_key(|(index, ordinal, _, _)| (*index, *ordinal));
+    for (offset, (index, _, reference, before_gap)) in insertions.into_iter().enumerate() {
+        let index = index.saturating_add(offset).min(request.items.len());
+        if gap.is_some_and(|gap| Some(index < gap) != before_gap) {
+            gap = None;
+        }
         request.items.insert(
-            index.saturating_add(offset).min(request.items.len()),
+            index,
             AiItem::thinking(render_history_marker_reference(&reference), None),
         );
     }
-    model
+    (model, gap)
 }
 
 pub(crate) fn mark_current_run_projected(items: &mut [AiItem]) {
@@ -1140,6 +1190,55 @@ mod tests {
     use super::*;
 
     const REFERENCE: &str = "abcdefghijklmnopqrstuvwxyzab";
+
+    #[test]
+    fn client_shape_boundary_preserves_hook_history_and_rejects_split_markers() {
+        let restore = |text: &str| {
+            let mut item = AiItem::thinking(text, None);
+            let meta = item.meta.get_or_insert_with(Default::default);
+            meta.insert_extension(
+                "__stravia_history_marker_restored",
+                serde_json::Value::Bool(true),
+            )
+            .unwrap();
+            meta.insert_extension(
+                "__stravia_history_marker_reference",
+                serde_json::Value::String(REFERENCE.into()),
+            )
+            .unwrap();
+            item
+        };
+        let marker = AiItem::thinking(render_history_marker_reference(REFERENCE), None);
+        let prefix = AiItem::output_text("hook summary");
+        let suffix = AiItem::output_text("new input");
+        let writer = AiRequest::new("model", vec![marker.clone(), suffix.clone()]);
+        let model = std::sync::Arc::new(AiRequest::new(
+            "model",
+            vec![
+                prefix.clone(),
+                restore("part one"),
+                restore("part two"),
+                suffix.clone(),
+            ],
+        ));
+        let expected = vec![prefix, marker, suffix];
+        for (model_gap, writer_gap) in [(0, 0), (1, 1), (3, 2), (4, 3)] {
+            let (view, gap) = client_shaped_request_with_boundary(
+                std::sync::Arc::clone(&model),
+                &writer,
+                model_gap,
+            )
+            .unwrap();
+            assert_eq!(gap, writer_gap);
+            assert!(
+                stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
+                    &view.items,
+                    &expected,
+                )
+            );
+        }
+        assert!(client_shaped_request_with_boundary(model, &writer, 2).is_none());
+    }
 
     #[test]
     fn generated_reference_uses_shared_identifier_contract() {

@@ -96,13 +96,22 @@ impl super::HistoryBoundaryCandidate {
         request: &stravia_runtime_contract::protocol::ir::AiRequest,
         item_gap: usize,
     ) -> Option<Self> {
+        self.at_projected_gap_with_controls(request, item_gap, request)
+    }
+
+    pub(crate) fn at_projected_gap_with_controls(
+        &self,
+        request: &stravia_runtime_contract::protocol::ir::AiRequest,
+        item_gap: usize,
+        controls: &stravia_runtime_contract::protocol::ir::AiRequest,
+    ) -> Option<Self> {
         let prefix = request.items.get(..item_gap)?;
         let (source_prefix_hash, units) = canonical::history_context_hash_with_count(prefix);
         Some(Self {
             source_item_gap: u64::try_from(item_gap).ok()?,
             source_unit_gap: u64::try_from(units).ok()?,
             source_prefix_hash,
-            source_controls_hash: canonical::history_request_controls_hash(request),
+            source_controls_hash: canonical::history_request_controls_hash(controls),
             ..self.clone()
         })
     }

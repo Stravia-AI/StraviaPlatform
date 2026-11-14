@@ -22,10 +22,11 @@ pub use syntax::{
     history_marker_references, render_history_marker, resolve_request_markers,
 };
 pub(crate) use syntax::{
-    client_shaped_request, history_marker_commit_references, history_marker_references_in_text,
-    is_history_marker_token, mark_current_run_projected, new_reference,
-    render_history_marker_token, render_preview_projection_end, render_preview_projection_span,
-    render_preview_projection_start, request_needs_marker_resolution, valid_reference,
+    client_shaped_request, client_shaped_request_with_boundary, history_marker_commit_references,
+    history_marker_references_in_text, is_history_marker_token, mark_current_run_projected,
+    new_reference, render_history_marker_token, render_preview_projection_end,
+    render_preview_projection_span, render_preview_projection_start,
+    request_needs_marker_resolution, valid_reference,
 };
 #[cfg(test)]
 pub(crate) use syntax::{render_history_marker_reference, render_text_projection_span};

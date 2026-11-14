@@ -431,6 +431,8 @@ Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string
 - State 错误码是开放字符串：非法 key 或跨操作 journal handle 为 `invalid`，没有获准作用域为 `unsupported`。SDK 将存储及其它未识别的本地状态失败映射为 `Trapped`，不伪装为上游响应解析错误；未处理的 CAS 冲突同样保留独立错误信息，不授权请求重放。
 - `journal` 仅供已准入的 conversation cell 使用。正文沿用 ContentStore，cell 原子关联 payload、revision 与不可变 journal head；checkpoint／fork 共享已存在的正文引用，不复制累计大正文。单条链、同一会话作用域发布的累计正文与单个操作暂存正文受 64 MiB 配额约束，超限失败而非截断历史。append 不表示发布；只有成功 CAS 使新 head 成为状态，失败分支的未引用内容由现有租约与 GC 回收。
 - 成功改变 journal head 的 CAS，在同一事务中关联宿主提供的 History Boundary Candidate。`owner_admission` 是当前发布者，canonical 来源可以是获准祖先；重复内部尝试不会把 head 回退到旧位置。该关联只证明投影位置，不证明请求已经发出或上游已接纳。重复文本、工具循环与同一 gap 的多个有序变更不以内容 hash 猜位置；codec 在一次编码中把 canonical gap 映射为实际 native input offset。
+- Candidate 的证明绑定 Generation Chain 最终持久化的 canonical 视图，而非临时 Provider 请求：按原始 writer 恢复 client-shaped marker，复用相同的 exposed-tools 清理与 stage reasoning 更新规则。内容或 controls 改变时，即使 item 数量和 gap 不变也重新计算证明；保留 `id`、`window_id`、`source_admission_id`。原生续接裁切后缀不改变完整持久历史的证明。
+- 读取旧版跨视图 fact 时，仅在当前 Principal 的真实父链上验证原 admission、controls 与前缀证明。stage 已解析的 Target controls 不能代替原 controls；仅当完整 controls 指纹与旧 fact 一致时，当前请求才可作为原配置来源。随后用生产 marker／受保护 reasoning 变换核对已保存 effective 历史和当前前缀，确认 gap 后恢复。选择性保留载荷及空 reasoning 删除同样核验，不依赖热 rejection cache；来源缺失、跨分支、篡改或映射歧义明确拒绝，不跳过 retained facts、不重置窗口或清理历史。
 - checkpoint、fork、原生压缩与失败 admission 继承确定的状态快照。历史清理通过持久 epoch 使旧操作失效，GC 保留仍被活跃租约、Generation、compaction 或 checkpoint 引用的内容；不会因为清理一次查询记录便删除仍可恢复的历史。SQLite、PostgreSQL 与内存适配器遵守同一行为契约。已有 Provider fence 的读取不获取写事务；首次创建时才串行重检。
 - `volatile.open` 使用相同 key／payload／CAS 契约，但仅存在于进程内，并按持久安装身份、Vendor、Provider、数据 epoch 与 fence 隔离。进程重启后为空；同一进程内重建 Gateway 不重置仍有效的值。本进程的 reset／删除／卸载使旧 handle 失效；跨进程更新在下一次 fence 校验被观察到，不承诺立即擦除另一进程已持有的内存。网络 I/O 不持有数据库事务。
 
@@ -448,7 +450,7 @@ Devin 的 native step 与 cascade assignment 是有效上游会话绑定，不�
 |`user_prompt_id`、`user_prompt_created_at_ms`|获准用户输入的独立身份与创建时间；纯工具结果和内部重试继承，新用户输入及并发分支分别分配，重启不重新生成。|
 |`logical_turn_id`、`logical_turn_started_at_ms`|本次逻辑用户轮的身份与起始时间；不以每次 HTTP 尝试或每次模型工具循环重新生成。|
 |`context_window_id`、`context_window_index`|有来源证明的上下文窗口及替换次数，与用户轮次不同；压缩安装新窗口后推进。|
-|`history_boundaries`|当前送入 guest 的 canonical 视图中的已保留 gap 身份和当前位置；删除 reasoning 等转换同步投影位置，不以转换后的内容重新认定身份。|
+|`history_boundaries`|当前送入 guest 的 canonical 视图中的已保留 gap 身份和当前位置；删除 reasoning 等转换同步投影位置，不以转换后的内容重新认定身份。原生续接只发送后缀时，已证明且落在复用前缀中的当前边界投影为后缀 gap 0，不因此降为不完整证明。|
 
 Generation Chain 的 `user_prompt_index` 统计含用户文本或媒体的用户项，排除纯工具结果；Claude 的 `user_turn_index`／`dialogue_prompt_index` 保留其独立的用户轮投影，混有工具结果的项不推进这两个计数。Agent 的用户轮由 Agent Turn 来源证明，不把每次 Model Turn 当作用户输入。已有旧历史没有所需证明时，要求该事实的插件明确报错；普通完整历史与有证明的续接路径不因此退化。
 

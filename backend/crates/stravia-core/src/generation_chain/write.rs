@@ -16,6 +16,17 @@ fn result_ids(item: &AiItem) -> impl Iterator<Item = &str> {
         }))
 }
 
+pub(crate) fn apply_provider_reasoning(
+    request: &mut Arc<AiRequest>,
+    reasoning: &stravia_runtime_contract::protocol::ir::ReasoningConfig,
+) {
+    if request.reasoning.level != reasoning.level
+        || request.reasoning.target_control != reasoning.target_control
+    {
+        Arc::make_mut(request).reasoning.clone_from(reasoning);
+    }
+}
+
 impl GenerationChainWrite {
     pub(crate) fn request(&self) -> &AiRequest {
         &self.request
@@ -190,14 +201,9 @@ impl GenerationChainWrite {
         if let Some(source) = source.thinking_source() {
             source.stamp_response(response);
         }
-        if let Some(context) = &self.provider_context
-            && (self.request.reasoning.level != context.reasoning.level
-                || self.request.reasoning.target_control != context.reasoning.target_control)
-        {
+        if let Some(context) = &self.provider_context {
             // 只采用 Target 映射出的控制；脱敏正文和平台说明不能成为本地历史。
-            Arc::make_mut(&mut self.request)
-                .reasoning
-                .clone_from(&context.reasoning);
+            apply_provider_reasoning(&mut self.request, &context.reasoning);
         }
         attach_persisted_profile(response, &self.request, self.parent.parent_id.as_deref());
         let context = self.provider_context.as_ref().map(|context| (context.hash, context.items)).unwrap_or_else(|| {

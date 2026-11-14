@@ -35,6 +35,8 @@ pub(crate) use lifecycle::VendorOperationTracker;
 pub(crate) use lifecycle::VendorPublicationFence;
 pub(crate) use store::PluginStorageError;
 pub use store::PluginStore;
+#[cfg(test)]
+pub(crate) use store::atomic_journal::JournalScope;
 pub use types::{
     ConfirmPluginUpdate, PluginBindingImpact, PluginDataDiscard, PluginInstallOrigin,
     PluginNetworkPermission, PluginPreview, PluginProvider, PluginSource, PluginSummary,
