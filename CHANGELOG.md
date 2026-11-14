@@ -29,6 +29,9 @@
 
 ### Fixed
 
+- Responses JSON and terminal SSE now emit `usage: null` when required usage details are unknown, instead of null integer fields that made Codex reject a completed response and reconnect. Explicit zero counts remain zero; internal usage and billing are unchanged.
+- Responses `generate:false` warmup now completes locally without invoking a model or tool. Its response ID retains input for continuation, including `store:false`, and the first real generation still runs request hooks on the retained input. Authentication, model access and delivery-confirmed history publication remain enforced.
+- Codex connection guidance and TOML previews now explain search prerequisites, the otherwise possible 403, and the top-level `web_search = "disabled"` option. Applying a connection does not overwrite the user's global search preference or bypass Stravia's search authorization.
 - Claude Code model discovery now declares text output and advertised image/PDF inputs independently of the shared model catalog. Newly listed models such as Fable 5.2 can be bound to text Routes immediately; syncing models also supplies their native output-token limit instead of the unknown-model fallback.
 - CI regressions now synchronize SQLite worker completion before checking cancelled-request span lifetimes and seed legacy credential mappings before their first cached read, preserving cancellation and credential-attribution assertions without timing or cache assumptions. Strict cache Clippy errors and desktop smoke-test formatting are also corrected; runtime behavior is unchanged.
 - Interaction debug bundles now fill `parent_interaction_id`, `first_route_id` and `first_model_display_name` in `interaction.json`; they were always `null`.

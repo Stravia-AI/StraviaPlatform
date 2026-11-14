@@ -45,6 +45,18 @@ async function setup(page: Page, keys: ApiKey[]): Promise<void> {
   )
 }
 
+test('Codex setup explains search prerequisites and how to disable it globally', async ({ page }) => {
+  await setup(page, [key('Personal')])
+  await page.goto('/connect')
+  await expect(page.getByText(/Codex includes web_search by default/)).toContainText('ordinary conversations may receive 403')
+  await expect(page.getByText(/top level of ~\/\.codex\/config\.toml/)).toContainText('not inside the provider table')
+  await expect(page.getByText('web_search = "disabled"', { exact: true })).toBeVisible()
+  await expect(page.getByText(/does not change your existing global web_search preference/)).toBeVisible()
+  await page.locator('#cli-tool').click()
+  await page.getByRole('option', { name: 'OpenCode', exact: true }).click()
+  await expect(page.getByText(/Codex includes web_search by default/)).toHaveCount(0)
+})
+
 test('Connect plans image input only for enabled media understanding selection', async ({ page }) => {
   await setup(page, [
     key('Media', { transparent_injection_enabled: true, transparent_injections: ['media_understanding'] }),

@@ -758,7 +758,10 @@ fn plan_codex(
         .display()
         .to_string();
     Ok(ConnectClientApplyPlan {
-        preview: format!("# {}\n{}", paths[0], preview_toml),
+        preview: format!(
+            "# {}\n# Codex includes web_search by default. Search requires the Stravia web search capability\n# to be configured and enabled, and the API key must be authorized; otherwise even ordinary conversations may receive 403.\n# If you do not use search, set the following at the top level of config.toml, before any table:\n# web_search = \"disabled\"\n# This preview and Apply do not change your existing global web_search preference.\n{}",
+            paths[0], preview_toml
+        ),
         files: vec![PlannedConnectClientFile {
             path: paths[0].clone(),
             bytes: config_bytes,
@@ -1441,6 +1444,7 @@ mod tests {
         let existing = BTreeMap::from([(
             config_path.clone(),
             br#"model = "existing-model"
+web_search = "live"
 model_catalog_json = "other-catalog.json"
 
 [history]
@@ -1476,6 +1480,7 @@ name = "Other"
             toml::from_str::<TomlValue>(std::str::from_utf8(&config.bytes).expect("UTF-8 TOML"))
                 .expect("valid TOML");
         assert_eq!(document["model"].as_str(), Some("existing-model"));
+        assert_eq!(document["web_search"].as_str(), Some("live"));
         assert_eq!(document["model_provider"].as_str(), Some("stravia"));
         // 静态目录优先于 `model_catalog_url`，必须被移除，实时目录才会生效。
         assert!(document.get("model_catalog_json").is_none());
@@ -1506,6 +1511,22 @@ name = "Other"
         assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
         // 目录里的模型没有全部支持远程压缩，provider 不声明该能力。
         assert!(provider.get("capabilities").is_none());
+        assert!(
+            plan.preview
+                .contains("ordinary conversations may receive 403")
+        );
+        assert!(plan.preview.contains("# web_search = \"disabled\""));
+        assert!(
+            plan.preview
+                .contains("top level of config.toml, before any table")
+        );
+        let preview: TomlValue = toml::from_str(&plan.preview).expect("preview is copyable TOML");
+        assert!(preview.get("web_search").is_none());
+        assert!(
+            preview["model_providers"]["stravia"]
+                .get("web_search")
+                .is_none()
+        );
         assert!(!plan.preview.contains("model ="));
         assert!(plan.preview.contains("model_provider = \"stravia\""));
         assert!(

@@ -220,6 +220,15 @@ impl GenerationChainWrite {
                 .with_selected_target_key(&source.target_id),
                 upstream_response_id,
             ),
+            GenerationSource::Warmup => (
+                GenerationChainState::from_request_with_context(
+                    &self.request,
+                    RESPONSES_WARMUP_NAMESPACE,
+                    Some(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24),
+                    context,
+                ),
+                None,
+            ),
             GenerationSource::Hook { protocol } => (
                 GenerationChainState::from_request_with_context(
                     &self.request,

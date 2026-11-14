@@ -22,6 +22,7 @@ mod stream;
 #[cfg(test)]
 pub(super) use stream::TerminalReceiptRecoveryGate;
 mod util;
+mod warmup;
 use self::completion::*;
 use self::delivery::{
     BufferedDeliveryProgress, DeliveryAdapter, DeliveryProgress, after_body_delivery,
@@ -466,6 +467,20 @@ pub(super) async fn orchestrate(
         label: Some(api_key_name.clone()),
     });
     let compact = compaction::standalone_compaction_requested(&request);
+    let warmup = ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+        && request.parameters.generate == Some(false);
+    if warmup && compact {
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "protocol",
+            "invalid_request",
+            coded_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Warmup cannot request standalone compaction",
+            ),
+        );
+    }
     let compact_history_epoch = if compact {
         match gw.storage.prompt_admissions().history_epoch().await {
             Ok(epoch) => Some(epoch),
@@ -542,6 +557,26 @@ pub(super) async fn orchestrate(
     } else {
         None
     };
+    if warmup {
+        let model = gw.model_cache.read().await.resolve(&request.model).cloned();
+        let authorization = match model {
+            Some(model) => Security::new(gw.storage.auth())
+                .authorize_principal_model(&principal, &model)
+                .await
+                .map(|_| ()),
+            None => Err(GatewayError::ModelNotFound {
+                model: request.model.clone(),
+            }),
+        };
+        if let Err(error) = authorization {
+            return reject_before_admission(
+                &mut Some(ingress_observer),
+                "authorization",
+                "warmup_model_unavailable",
+                inference_access_error_response(error),
+            );
+        }
+    }
     let (
         compact_parent_id,
         compact_root_id,
@@ -998,6 +1033,11 @@ pub(super) async fn orchestrate(
         vendor_publications: Vec::new(),
         initial_history_boundary,
     };
+    if warmup {
+        let response = warmup::complete(&gw, &request, &ctx, phase, &mut generation, &ledger).await;
+        phase.finish();
+        return response;
+    }
     let session_context = stravia_runtime_contract::hook::SessionContext {
         tools_fixed: false,
         request_id: ctx.request_id.clone(),

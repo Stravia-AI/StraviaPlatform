@@ -135,26 +135,7 @@ impl ResponsesResponseFormatter {
             resp.id.clone()
         };
         let output = self.format_output_items(&resp.items, &resp_id);
-        let usage_known = resp.usage.required_components_known;
-        let usage = if usage_known {
-            let mut input_tokens_details = serde_json::json!({
-                "cached_tokens": resp.usage.cache_read_tokens,
-            });
-            if let Some(cache_write_tokens) = resp.usage.cache_creation_tokens {
-                input_tokens_details["cache_write_tokens"] = cache_write_tokens.into();
-            }
-            serde_json::json!({
-                "input_tokens": resp.usage.prompt_tokens,
-                "output_tokens": resp.usage.completion_tokens,
-                "total_tokens": resp.usage.total_tokens,
-                "input_tokens_details": input_tokens_details,
-                "output_tokens_details": {
-                    "reasoning_tokens": resp.usage.reasoning_tokens,
-                },
-            })
-        } else {
-            Value::Null
-        };
+        let usage = format_usage(&resp.usage);
 
         let terminal = resp
             .vendor
@@ -506,6 +487,28 @@ pub fn response_id_from_gateway_item_id(item_id: &str) -> Option<String> {
     let (response_id, output_index) = remainder.rsplit_once('_')?;
     (!response_id.is_empty() && output_index.parse::<usize>().is_ok())
         .then(|| response_id.to_owned())
+}
+
+pub(super) fn format_usage(usage: &stravia_runtime_contract::protocol::ir::usage::Usage) -> Value {
+    let (Some(cached_tokens), Some(reasoning_tokens)) =
+        (usage.cache_read_tokens, usage.reasoning_tokens)
+    else {
+        return Value::Null;
+    };
+    if !usage.required_components_known {
+        return Value::Null;
+    }
+    let mut input_tokens_details = serde_json::json!({"cached_tokens": cached_tokens});
+    if let Some(cache_write_tokens) = usage.cache_creation_tokens {
+        input_tokens_details["cache_write_tokens"] = cache_write_tokens.into();
+    }
+    serde_json::json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "input_tokens_details": input_tokens_details,
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    })
 }
 
 pub fn response_resource_snapshot(

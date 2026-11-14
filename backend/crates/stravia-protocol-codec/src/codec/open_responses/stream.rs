@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use super::formatter::{gateway_item_id, response_resource_snapshot};
+use super::formatter::{format_usage, gateway_item_id, response_resource_snapshot};
 use crate::SseEvent;
 use stravia_runtime_contract::protocol::ir::AiItemStatus;
 use stravia_runtime_contract::protocol::ir::usage::Usage;
@@ -1490,25 +1490,7 @@ impl ResponsesStreamFormatter {
             })
             .collect::<Vec<_>>();
 
-        let usage = if !self.usage.required_components_known {
-            serde_json::Value::Null
-        } else {
-            let mut input_tokens_details = serde_json::json!({
-                "cached_tokens": self.usage.cache_read_tokens
-            });
-            if let Some(cache_write_tokens) = self.usage.cache_creation_tokens {
-                input_tokens_details["cache_write_tokens"] = cache_write_tokens.into();
-            }
-            serde_json::json!({
-                "input_tokens": self.usage.prompt_tokens,
-                "output_tokens": self.usage.completion_tokens,
-                "total_tokens": self.usage.total_tokens,
-                "input_tokens_details": input_tokens_details,
-                "output_tokens_details": {
-                    "reasoning_tokens": self.usage.reasoning_tokens
-                }
-            })
-        };
+        let usage = format_usage(&self.usage);
         let mut response = response_resource_snapshot(
             &self.resp_id,
             &self.model,

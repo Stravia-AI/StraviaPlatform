@@ -472,7 +472,9 @@ Model Turn Executor 的 private `live/lifecycle.rs` 集中事件与输出推进�
 
 `Operation` 在发布媒体 delta 前执行现有 normalization，precommit 保留每个事件的原 fence 与顺序，并沿用 16 MiB 占用估算和精确边界；committing delta 释放 buffer，不额外占用 pre-output 预算。runtime `Completed` / `Compacted` 通知不发布成功终态，typed return 仍为权威结果。无 plugin delta 时先规范化完整响应，再合成 canonical delta；typed terminal 使用同一输出 owner 发布。driver 保留 retry、认证恢复、Thinking Replay、Target Continuation、健康与最终策略 accounting，成功 accounting 后由输出 owner 完成 reservation 与 ready 通知。现有还原与映射发布 gate 保持独立；Executor 的 canonical 输出提交不等于 Client Output Commit，也不接管客户端 Delivery。
 
-管理面（`AdminService` / `/api/v1/*`）、健康探针、模型目录等非推理路由不进入 HookRuntime；推理请求会创建 `InferenceRun`。HTTP 管线始终经过 decoder、canonical pipeline 和 encoder，不暴露原始 wire body。
+管理面（`AdminService` / `/api/v1/*`）、健康探针、模型目录等非推理路由不进入 HookRuntime；普通推理请求会创建 `InferenceRun`。HTTP 管线始终经过 decoder、canonical pipeline 和 encoder，不暴露原始 wire body。
+
+Open Responses 的 `generate:false` 是本地预热：允许空或省略的 `input`，仍验证 Principal、父响应归属、模型绑定和既有消费／RPM 准入，但不创建 Hook 会话、Model Turn 或 Target Attempt，不调用模型或工具。返回空 `output` 的 completed Response，沿用 HTTP／WebSocket 的真实交付栅栏后才提交 Generation Chain；`store:false` 不禁用本地续写。预热节点以既有 `target_namespace` 的 `responses:warmup` 值标记，不提供上游续接锚点，也不把新输入标成已执行 Request Hook，确保首次真实生成仍处理这些输入。`generate` 不继承到后续请求；预热与独立 compaction 不能组合。
 
 `GET /codex/models` 是 Codex provider `model_catalog_url` 的目录端点，返回 `{"models": [ModelInfo, ...]}`（不是 `/v1/models` 的 `{"data": [...]}`），与 Connect Client Apply 写入的 Codex catalog 共用同一构造函数。认证与可见范围同 `/v1/models`；只列出 Key 可见且输出为文本的 Route，按展示名、模型 ID 排序并以序号作为 `priority`。上下文窗口与图片输入从已启用 Target 的 Provider Model 规格实时投影（该规格已含 Canonical Model 共享规格与 Provider 覆盖），不探测原生压缩；Key 启用 `media_understanding` 透明注入时，所有 Route 的 `input_modalities` 含 `image`。认证失败按原状态码返回，Codex 据此清空目录。该路径属于协议命名空间：Server 的 Admin Entry、启动期 503 与内嵌 WebUI fallback 都把 `/codex` 与 `/v1` 同等对待。
 
@@ -489,6 +491,8 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并计一次
 - `AiStreamDelta`（`ir/stream.rs`）：流式增量事件，支持 reasoning delta、text、tool_call
 - `Usage`（`ir/usage.rs`）：prompt_tokens / completion_tokens / total_tokens / cache_read_tokens
 
+Open Responses 的 JSON 与 `response.completed` 共用用量投影：只有协议要求的计数全部已知时才输出完整 `usage`，包括 `input_tokens_details.cached_tokens` 与 `output_tokens_details.reasoning_tokens`；否则整体输出 `usage:null`，不在整数位置输出 null，也不把未知明细补成 0。显式 0 保留，`cache_write_tokens` 仅在已知时附带。此规则只影响客户端 wire，不改变内部 Usage、计费或观测语义。
+
 **唯一请求控制契约：**
 
 `AiRequest.parameters`（`ir/parameters.rs`）是 session、cache、continuation 及其余 optional controls 的唯一运行时语义归属。已有 `generation`、`reasoning`、`stream`、`tools`、`tool_choice`、`parallel_tool_calls` 与 `response_format` 保持各自 canonical 归属，不在协议扩展中再维护第二份权威值。源协议的 `ext`、原生字段名和历史 vendor bag 别名只在 ingress 或私有 legacy 读取 DTO 中消费并归一；普通 `AiRequest` 序列化不输出 `ext` 或 `disable_parallel_tool_calls`。
@@ -499,7 +503,7 @@ Inference Run 在 Request Hook 前验证 API Key、建立 Principal 并计一次
 - `parameters.continuation` 是 `PreviousResponse(id)` 或 `Conversation(id)` 之一，前者是 Generation Chain／路由 continuation 的唯一父响应控制。同步执行会省略不支持的 background 控制，不承诺后台任务；`compaction.threshold_tokens` 是唯一服务端压缩触发控制。
 - `parameters.session` 只保存上游真正需要的身份：`id`（合并旧 affinity、thread、window 身份）、`request_id`、`parent_id`（合并 parent 与 parent thread）、`forked_from_id`、`context_window_id` 与 turn 系列 ID。Generation Chain 从 `session.id` 计算 session fingerprint；`request_id` 只是请求关联，不进入 retry 身份，也不能替代会话身份。
 - 原生工具只有 `parameters.native_tools` 中的 WebSearch、CodeExecution、ImageGeneration、ToolSearch、Custom 与 Namespace 六种；`tool_choice` 用 `Allowed{names, required}` 与 `Native(kind)` 表达受限选择，不保留原始 JSON 选择。统一变体之外的托管工具（如 `file_search`、`mcp`、`computer`、`web_fetch`）入口丢弃。
-- 各入口的原生搜索声明（包括 Gemini `googleSearch`）统一为 `WebSearch` 后，由平台搜索 Hook 接管并受联网搜索能力 Gate 约束；能力不可用时返回 `403 web_search_unavailable`，不因上游协议能表达原生搜索而绕过平台配置直接透传。业务工具 schema 与消息载体的保真不依赖启用搜索。
+- 各入口的原生搜索声明（包括 Gemini `googleSearch`）统一为 `WebSearch` 后，由平台搜索 Hook 接管并受联网搜索能力 Gate 约束；能力不可用时返回 `403 web_search_unavailable`，不因上游协议能表达原生搜索而绕过平台配置直接透传。业务工具 schema 与消息载体的保真不依赖启用搜索。Codex 接入页与 TOML 预览说明默认搜索的前提；无需搜索时，可在 `~/.codex/config.toml` 顶层、所有表之前手动设置 `web_search = "disabled"`，不能放进 provider 表。Apply 不更改已有的全局搜索偏好。
 - 显式 `false`、`0`、空数组／对象与省略不同，不能用 truthy/default 判断抹平。显式 null 或显式清空记为 `parameters.resets` 中的 `ParameterReset`，续接继承据此区分“沿用父请求”和“本轮清除”；出口从不发送显式 null。
 - 客户端未设置输出 Token 上限时，`generation.max_tokens` 保持缺省，目标标准协议的可选上限字段不补默认值。Anthropic Messages 的 `max_tokens` 为必填，普通 Anthropic 与 Claude Code 目标优先使用模型快照中上游原生 `max_tokens` 的正整数值（不超过 `u32::MAX`）；缺失或无效时由 codec 回退为 64,000。该值来自 [Anthropic ModelInfo](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/model_info.py) 的型号输出上限，不从上下文窗口推导；回退不是“无限”，也不保证未知型号接受。补值只作用于本次目标投影，不改写客户端控制或历史；Claude Code 在自动补值时收缩思考预算而不抬高输出上限，无法容纳合法预算时明确失败，显式上限沿用既有处理。
 - Command Code 与 Devin 是私有 CLI 协议，保留逆向得到的线上默认值：客户端未设置时分别发送 64,000／128,000，不套用标准协议的缺省透传规则。Command Code 的显式上限仍受既有 200,000 上界约束，Devin 的显式上限保持原值；显式 `0` 不等于缺省。

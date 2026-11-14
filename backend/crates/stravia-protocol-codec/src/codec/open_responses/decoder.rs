@@ -60,6 +60,7 @@ impl ResponsesDecoder {
             Some(Value::Null) | None => None,
             Some(_) => anyhow::bail!("'instructions' must be a string or null"),
         };
+        let warmup = obj.get("generate").and_then(Value::as_bool) == Some(false);
         let mut messages: Vec<AiItem> = Vec::new();
 
         // ── Input items ───────────────────────────────────────────────────────
@@ -114,10 +115,10 @@ impl ResponsesDecoder {
                 }
                 _ => anyhow::bail!("'input' must be a string or array"),
             }
-            if messages.is_empty() {
+            if messages.is_empty() && !warmup {
                 anyhow::bail!("no messages found in input");
             }
-        } else if previous_response_id.is_none() {
+        } else if previous_response_id.is_none() && !warmup {
             anyhow::bail!("missing 'input' field");
         }
 

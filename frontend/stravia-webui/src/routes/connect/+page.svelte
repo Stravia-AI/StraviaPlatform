@@ -357,6 +357,13 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                     ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
                 </div>
               </div>
+              {#if cliToolId === 'codex-cli'}
+                <div class="mb-3 shrink-0 space-y-1 text-sm">
+                  <p>{m.connect_codex_search_prerequisites()}</p>
+                  <p>{m.connect_codex_search_disable()} <code class="font-technical">web_search = "disabled"</code></p>
+                  <p>{m.connect_codex_search_preserved()}</p>
+                </div>
+              {/if}
               {#if connectPlanQuery.isError}
                 {@const planError = asConnectClientApplyError(connectPlanQuery.error)}
                 <RequestFailure
