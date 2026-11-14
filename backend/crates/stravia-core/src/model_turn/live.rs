@@ -245,6 +245,8 @@ impl ModelTurnExecutor for LiveModelTurnExecutor {
                     let incoming_states = input.request.items.iter().filter_map(stravia_runtime_contract::protocol::ir::canonical::native_compaction_item).collect::<Vec<_>>();
                     let source = self.gateway.compaction.resolve(&principal, &input.request.items).await
                         .map_err(|error| ModelTurnError::new(error.code(), error.to_string()))?;
+                    input.history_boundary_effective_source = input.history_boundary_candidate
+                        .as_ref().map(|_| Arc::clone(&input.request));
                     let mappings = self.gateway.redaction
                         .protect(&input.principal, &mut input.request, observer.as_ref()).await?;
                     if let Some(observer) = &observer {
@@ -1596,6 +1598,7 @@ async fn prepare_attempt(
                         parent_id,
                         source,
                         &retained,
+                        gateway.redaction.mappings.as_ref(),
                     )
                     .await
             {
@@ -1664,7 +1667,7 @@ async fn prepare_attempt(
             .find(|boundary| boundary.id == current_id)
             .and_then(|boundary| {
                 let (full, gap) = crate::history_marker::client_shaped_request_with_boundary(
-                    Arc::clone(&input.request),
+                    Arc::clone(input.history_boundary_effective_source.as_ref()?),
                     writer_source,
                     boundary.item_index,
                 )?;

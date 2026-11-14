@@ -407,10 +407,29 @@ impl stravia_runtime_contract::hook::PlatformTool for BoundaryTool {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoundaryRedaction {
+    None,
+    Legacy,
+    Fresh,
+}
+
+const SYNTHETIC_USER_SECRET: &str = "v7Q4jR9pM2xK6bN8wT3cL5zY1hF0dS4a";
+const SYNTHETIC_CONTROL_SECRET: &str = "q3Z8mW1fC5rV9nH2yJ6kP4sD7xB0tL5u";
+
+fn assert_protected_continuation(request: &Value) {
+    let wire = request.to_string();
+    assert!(!wire.contains(SYNTHETIC_USER_SECRET));
+    assert!(!wire.contains(SYNTHETIC_CONTROL_SECRET));
+    // Native continuation references the already protected prefix instead of resending it.
+    assert!(wire.contains("<!--sr:") || request["previous_response_id"].is_string());
+}
+
 async fn legacy_boundary_continuation(
     expose_tool: bool,
     mixed_reasoning: bool,
     remove_item: bool,
+    redaction: BoundaryRedaction,
 ) -> anyhow::Result<()> {
     let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["chatgpt.com".into()])?;
@@ -438,6 +457,13 @@ async fn legacy_boundary_continuation(
     let storage = Arc::new(crate::storage::SqliteStorage::from_pool(pool));
     let (_directory, mut gateway) =
         gateway_for_storage(&dummy, &["openai-codex"], storage.clone()).await?;
+    if redaction != BoundaryRedaction::None {
+        gateway
+            .storage
+            .settings()
+            .set("reversible_redaction_enabled", "true")
+            .await?;
+    }
     if expose_tool {
         crate::gateway::extensions::configure_gateway_extensions(
             &mut gateway,
@@ -482,8 +508,31 @@ async fn legacy_boundary_continuation(
                 .await;
                 while let Some(Ok(Message::Text(text))) = ws.next().await {
                     let body: Value = serde_json::from_str(&text)?;
+                    let make_tool_call = redaction == BoundaryRedaction::Fresh
+                        && body.to_string().contains("lookup now");
                     let _ = captured.send(body);
-                    for event in events() {
+                    let mut response_events = events();
+                    if make_tool_call {
+                        let item = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}","status":"completed"});
+                        response_events.retain(|event| {
+                            matches!(
+                                event["type"].as_str(),
+                                Some(
+                                    "response.created"
+                                        | "response.output_item.added"
+                                        | "response.output_item.done"
+                                        | "response.completed"
+                                )
+                            )
+                        });
+                        response_events[1]["item"] = item.clone();
+                        response_events[2]["item"] = item.clone();
+                        response_events[3]["response"]["output"] = json!([item]);
+                        for (index, event) in response_events.iter_mut().enumerate() {
+                            event["sequence_number"] = json!(index);
+                        }
+                    }
+                    for event in response_events {
                         ws.send(Message::Text(event.to_string().into())).await?;
                     }
                 }
@@ -493,8 +542,18 @@ async fn legacy_boundary_continuation(
         #[allow(unreachable_code)]
         anyhow::Ok(())
     });
+    let user_text = if redaction == BoundaryRedaction::None {
+        "previous".to_owned()
+    } else {
+        format!("previous api_key = \"{SYNTHETIC_USER_SECRET}\"")
+    };
+    let tool_description = if redaction == BoundaryRedaction::None {
+        "lookup".to_owned()
+    } else {
+        format!("lookup api_key = \"{SYNTHETIC_CONTROL_SECRET}\"")
+    };
     let mut input = json!([
-        {"type":"message","role":"user","content":[{"type":"input_text","text":"previous"}]},
+        {"type":"message","role":"user","content":[{"type":"input_text","text":user_text}]},
         {"type":"reasoning","id":"reason_1","summary":[{"type":"summary_text","text":"prior reasoning"}],"encrypted_content":"foreign-encrypted-reasoning"},
         {"type":"message","role":"user","content":[{"type":"input_text","text":"lookup"}]}
     ]);
@@ -506,7 +565,7 @@ async fn legacy_boundary_continuation(
             "summary":[{"type":"summary_text","text":"retained reasoning"}],"encrypted_content":"foreign-preserved-reasoning"}));
     }
     let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session","input":input.clone(),
-        "tools":[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}]});
+        "tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]});
     // 冷恢复 fixture 自身较大；像真实 HTTP 服务一样独立调度请求，避免叠加其 poll 栈。
     let response = tokio::time::timeout(
         Duration::from_secs(30),
@@ -529,6 +588,15 @@ async fn legacy_boundary_continuation(
         String::from_utf8_lossy(&bytes)
     );
     let root_request = requests.try_recv()?;
+    if redaction != BoundaryRedaction::None {
+        let wire = root_request.to_string();
+        assert!(!wire.contains(SYNTHETIC_USER_SECRET));
+        assert!(!wire.contains(SYNTHETIC_CONTROL_SECRET));
+        assert!(
+            wire.contains("<!--sr:"),
+            "expected redaction markers: {wire}"
+        );
+    }
     assert!(
         root_request
             .to_string()
@@ -551,200 +619,347 @@ async fn legacy_boundary_continuation(
         .authenticated_principal(&credential)
         .await?
         .principal;
-    let mut request = stravia_protocol_codec::transform::ProtocolTransform::global()
+    let parent_id = if redaction == BoundaryRedaction::Fresh {
+        let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session",
+            "previous_response_id":root_id,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"lookup now"}]}],
+            "tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]});
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::spawn(
+                crate::proxy::server::create_router(gateway.clone()).oneshot(
+                    Request::post("/v1/responses")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {}", key.token))
+                        .body(Body::from(body.to_string()))?,
+                ),
+            ),
+        )
+        .await???;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024).await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "fresh parent: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let sent = requests.try_recv()?;
+        assert_protected_continuation(&sent);
+        let parent: Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(parent["output"][0]["call_id"], "call_1");
+        let parent_id = parent["id"].as_str().context("fresh parent id")?.to_owned();
+        let mut probe_request = stravia_runtime_contract::protocol::ir::AiRequest::new(
+            ROUTE,
+            vec![
+                stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
+                    "call_1",
+                    json!("found"),
+                ),
+            ],
+        );
+        crate::router::stamp_previous_response_id(&mut probe_request, &parent_id);
+        let mut probe = gateway
+            .generation_chains
+            .begin(principal.clone(), probe_request)
+            .await?;
+        probe.admit_user_prompt().await?;
+        let atomic = probe
+            .atomic_conversation_context()
+            .context("fresh admission")?;
+        let boundaries = gateway
+            .vendor_plugins
+            .store
+            .history_boundary_candidates(
+                "openai-codex",
+                &provider.id,
+                &atomic.principal,
+                &atomic.admission_id.to_string(),
+                &atomic.atomic_lease_id.to_string(),
+            )
+            .await
+            .context("fresh published boundaries")?;
+        assert!(!boundaries.is_empty());
+        for boundary in &boundaries {
+            assert!(crate::generation_chain::project_history_boundaries(
+                probe.request(), boundary, &[],
+            ).is_some(), "new history must have a valid persisted proof without legacy recovery");
+        }
+        drop(probe);
+        let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session",
+            "previous_response_id":parent_id,"input":[{"type":"function_call_output","call_id":"call_1","output":"found"}],
+            "tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]});
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::spawn(
+                crate::proxy::server::create_router(gateway.clone()).oneshot(
+                    Request::post("/v1/responses")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {}", key.token))
+                        .body(Body::from(body.to_string()))?,
+                ),
+            ),
+        )
+        .await???;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024).await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "hot continuation: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let sent = requests.try_recv()?;
+        assert!(sent.to_string().contains("call_1"));
+        assert_protected_continuation(&sent);
+        parent_id
+    } else {
+        let mut request = stravia_protocol_codec::transform::ProtocolTransform::global()
         .bind(stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
               stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24).context("Responses codec")?
         .decode_request(json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},
             "prompt_cache_key":"original-session",
             "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"lookup now"}]}],
-            "tools":[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}]}))?;
-    crate::router::stamp_previous_response_id(&mut request, root_id);
-    let mut parent = gateway
-        .generation_chains
-        .begin(principal.clone(), request)
-        .await?;
-    parent.admit_user_prompt().await?;
-    let candidate = parent
-        .history_boundary_candidate()
-        .context("admitted boundary")?;
-    let source = parent.request_snapshot();
-    assert!(
-        source
-            .tools
-            .as_ref()
-            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "lookup"))
-    );
-    assert!(
-        !source
-            .tools
-            .as_ref()
-            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "boundary_tool"))
-    );
-    assert!(candidate.source_item_gap > 1);
-    let atomic = parent
-        .atomic_conversation_context()
-        .context("atomic admission")?;
-    let store = &gateway.vendor_plugins.store;
-    let (_plugin, _operation, data_epoch) = gateway.vendor_plugins.acquire("openai-codex")?;
-    let fence = store
-        .open_atomic_provider_fence("openai-codex", &provider.id, data_epoch)
-        .await
-        .context("opening provider fence")?;
-    let scope = crate::plugin::JournalScope {
-        vendor_id: "openai-codex".into(),
-        provider_id: provider.id.clone(),
-        data_epoch,
-        provider_fence: fence,
-        principal: atomic.principal.clone(),
-        admission: atomic.admission_id.to_string(),
-        lease: atomic.atomic_lease_id.to_string(),
-        key: "legacy-proof-fixture".into(),
-        candidate: Some(candidate.clone()),
-    };
-    let root_boundaries = store
-        .history_boundary_candidates(
-            &scope.vendor_id,
-            &scope.provider_id,
-            &scope.principal,
-            &scope.admission,
-            &scope.lease,
-        )
-        .await
-        .context("reading published root boundary")?;
-    let head = store
-        .journal_append(&scope, "legacy proof".into(), None)
-        .await
-        .context("appending legacy journal")?;
-    assert!(
-        store
-            .journal_compare_exchange(&scope, 0, None, Some(&head))
+            "tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]}))?;
+        crate::router::stamp_previous_response_id(&mut request, root_id);
+        let mut parent = gateway
+            .generation_chains
+            .begin(principal.clone(), request)
+            .await?;
+        parent.admit_user_prompt().await?;
+        let candidate = parent
+            .history_boundary_candidate()
+            .context("admitted boundary")?;
+        let source = parent.request_snapshot();
+        assert!(
+            source
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.name == "lookup"))
+        );
+        assert!(
+            !source
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.name == "boundary_tool"))
+        );
+        assert!(candidate.source_item_gap > 1);
+        let atomic = parent
+            .atomic_conversation_context()
+            .context("atomic admission")?;
+        let store = &gateway.vendor_plugins.store;
+        let (_plugin, _operation, data_epoch) = gateway.vendor_plugins.acquire("openai-codex")?;
+        let fence = store
+            .open_atomic_provider_fence("openai-codex", &provider.id, data_epoch)
             .await
-            .context("publishing legacy journal")?
-    );
-    let mut effective = source.as_ref().clone();
-    let mut removed = Vec::new();
-    assert!(
-        stravia_protocol_codec::transform::prepare_thinking_replay_with_removals(
-            &mut effective,
-            |_, block| matches!(block,
+            .context("opening provider fence")?;
+        let root_boundaries = store
+            .history_boundary_candidates(
+                "openai-codex",
+                &provider.id,
+                &atomic.principal,
+                &atomic.admission_id.to_string(),
+                &atomic.atomic_lease_id.to_string(),
+            )
+            .await
+            .context("reading published root boundary")?;
+        let mut effective = source.as_ref().clone();
+        let mut removed = Vec::new();
+        assert!(
+            stravia_protocol_codec::transform::prepare_thinking_replay_with_removals(
+                &mut effective,
+                |_, block| matches!(block,
             stravia_runtime_contract::protocol::ir::ContentBlock::Reasoning {
                 encrypted_content: Some(value), ..
             } if value == "foreign-preserved-reasoning"),
-            |index| removed.push(index)
-        )
-    );
-    if remove_item {
-        assert_eq!(removed, vec![1]);
-        assert_eq!(effective.items.len() + 1, source.items.len());
-    } else {
-        assert!(
-            removed.is_empty(),
-            "signature-only replay must preserve item coordinates"
+                |index| removed.push(index)
+            )
         );
-        assert_eq!(effective.items.len(), source.items.len());
-    }
-    assert!(
-        crate::generation_chain::project_history_boundaries(&source, &candidate, &[]).is_some()
-    );
-    assert!(
-        crate::generation_chain::project_history_boundaries(&effective, &candidate, &[]).is_none()
-    );
-    parent.observe_effective(effective);
-    let mut response = stravia_runtime_contract::protocol::ir::AiResponse::new("legacy", MODEL);
-    response.items.push(
-        stravia_runtime_contract::protocol::ir::AiItem::function_call(
-            stravia_runtime_contract::protocol::ir::ToolCall {
-                id: "call_1".into(),
-                name: "lookup".into(),
-                arguments: "{}".into(),
-            },
-        ),
-    );
-    let mut provider_request = parent.request_snapshot().as_ref().clone();
-    provider_request.reasoning.target_control = Some(
-        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
-            value: "xhigh".into(),
-        },
-    );
-    parent.observe_provider_response(&provider_request, &response);
-    assert!(parent.stage(
-        &mut response,
-        &crate::generation_chain::GenerationSource::Hook {
-            protocol: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
-        },
-        None
-    ));
-    assert_ne!(
-        stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
-            parent.request()
-        ),
-        candidate.source_controls_hash,
-        "legacy stage must differ from the controls proved before Target resolution"
-    );
-    assert_eq!(
-        root_boundaries
-            .first()
-            .context("published root boundary")?
-            .source_controls_hash,
-        stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
-            parent.request()
-        ),
-        "fresh boundary must prove the final Target controls"
-    );
-    let parent_id = parent.id().to_owned();
-    parent.persist().await?;
-    let mut probe_request = stravia_runtime_contract::protocol::ir::AiRequest::new(
-        ROUTE,
-        vec![
-            stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
-                "call_1",
-                json!("found"),
+        if remove_item {
+            assert_eq!(removed, vec![1]);
+            assert_eq!(effective.items.len() + 1, source.items.len());
+        } else {
+            assert!(
+                removed.is_empty(),
+                "signature-only replay must preserve item coordinates"
+            );
+            assert_eq!(effective.items.len(), source.items.len());
+        }
+        assert!(
+            crate::generation_chain::project_history_boundaries(&source, &candidate, &[]).is_some()
+        );
+        assert!(
+            crate::generation_chain::project_history_boundaries(&effective, &candidate, &[])
+                .is_none()
+        );
+        parent.observe_effective(effective);
+        let mut response = stravia_runtime_contract::protocol::ir::AiResponse::new("legacy", MODEL);
+        response.items.push(
+            stravia_runtime_contract::protocol::ir::AiItem::function_call(
+                stravia_runtime_contract::protocol::ir::ToolCall {
+                    id: "call_1".into(),
+                    name: "lookup".into(),
+                    arguments: "{}".into(),
+                },
             ),
-        ],
-    );
-    probe_request.reasoning = source.reasoning.clone();
-    crate::router::stamp_previous_response_id(&mut probe_request, &parent_id);
-    let mut probe = gateway
-        .generation_chains
-        .begin(principal.clone(), probe_request)
-        .await?;
-    probe.admit_user_prompt().await?;
-    let current = probe
-        .history_boundary_candidate()
-        .context("probe boundary")?;
-    let mut forged = candidate.clone();
-    forged.source_prefix_hash[0] ^= 1;
-    let recovered = gateway
-        .generation_chains
-        .recover_legacy_history_boundaries(
-            &principal,
-            &parent_id,
-            probe.request(),
-            std::slice::from_ref(&forged),
-        )
-        .await
-        .context("ancestor recovery")?;
-    assert!(
-        crate::generation_chain::project_history_boundaries(probe.request(), &current, &recovered)
+        );
+        let mut provider_request = parent.request_snapshot().as_ref().clone();
+        provider_request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "xhigh".into(),
+            },
+        );
+        parent.observe_provider_response(&provider_request, &response);
+        assert!(parent.stage(
+            &mut response,
+            &crate::generation_chain::GenerationSource::Hook {
+                protocol: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            },
+            None
+        ));
+        assert_ne!(
+            stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                parent.request()
+            ),
+            candidate.source_controls_hash,
+            "legacy stage must differ from the controls proved before Target resolution"
+        );
+        assert_eq!(
+            root_boundaries
+                .first()
+                .context("published root boundary")?
+                .source_controls_hash,
+            stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                parent.request()
+            ),
+            "fresh boundary must prove the final Target controls"
+        );
+        let published_candidate = if redaction == BoundaryRedaction::Legacy {
+            let mut protected = parent.request_snapshot();
+            gateway
+                .redaction
+                .protect(&principal, &mut protected, None)
+                .await?;
+            let gap = usize::try_from(candidate.source_item_gap)?;
+            let gap = gap - removed.iter().filter(|&&index| index < gap).count();
+            let legacy = candidate
+                .at_projected_gap(&protected, gap)
+                .context("redacted persisted boundary")?;
+            assert_ne!(legacy.source_prefix_hash, candidate.source_prefix_hash);
+            assert_ne!(legacy.source_controls_hash, candidate.source_controls_hash);
+            legacy
+        } else {
+            candidate.clone()
+        };
+        let scope = crate::plugin::JournalScope {
+            vendor_id: "openai-codex".into(),
+            provider_id: provider.id.clone(),
+            data_epoch,
+            provider_fence: fence,
+            principal: atomic.principal.clone(),
+            admission: atomic.admission_id.to_string(),
+            lease: atomic.atomic_lease_id.to_string(),
+            key: "legacy-proof-fixture".into(),
+            candidate: Some(published_candidate.clone()),
+        };
+        let head = store
+            .journal_append(&scope, "legacy proof".into(), None)
+            .await
+            .context("appending legacy journal")?;
+        assert!(
+            store
+                .journal_compare_exchange(&scope, 0, None, Some(&head))
+                .await
+                .context("publishing legacy journal")?
+        );
+        let parent_id = parent.id().to_owned();
+        parent.persist().await?;
+        let mut probe_request = stravia_runtime_contract::protocol::ir::AiRequest::new(
+            ROUTE,
+            vec![
+                stravia_runtime_contract::protocol::ir::AiItem::function_call_output(
+                    "call_1",
+                    json!("found"),
+                ),
+            ],
+        );
+        probe_request.reasoning = source.reasoning.clone();
+        crate::router::stamp_previous_response_id(&mut probe_request, &parent_id);
+        let mut probe = gateway
+            .generation_chains
+            .begin(principal.clone(), probe_request)
+            .await?;
+        probe.admit_user_prompt().await?;
+        let current = probe
+            .history_boundary_candidate()
+            .context("probe boundary")?;
+        let mut forged = published_candidate.clone();
+        forged.source_prefix_hash[0] ^= 1;
+        let recovered = gateway
+            .generation_chains
+            .recover_legacy_history_boundaries(
+                &principal,
+                &parent_id,
+                probe.request(),
+                std::slice::from_ref(&forged),
+                gateway.redaction.mappings.as_ref(),
+            )
+            .await
+            .context("ancestor recovery")?;
+        assert!(
+            crate::generation_chain::project_history_boundaries(
+                probe.request(),
+                &current,
+                &recovered
+            )
             .is_none()
-    );
-    let recovered = gateway
-        .generation_chains
-        .recover_legacy_history_boundaries(
-            &principal,
-            root_id,
-            probe.request(),
-            std::slice::from_ref(&candidate),
-        )
-        .await
-        .context("other branch")?;
-    assert!(
-        crate::generation_chain::project_history_boundaries(probe.request(), &current, &recovered)
+        );
+        if redaction == BoundaryRedaction::Legacy {
+            let mut forged = published_candidate.clone();
+            forged.source_controls_hash[0] ^= 1;
+            let recovered = gateway
+                .generation_chains
+                .recover_legacy_history_boundaries(
+                    &principal,
+                    &parent_id,
+                    probe.request(),
+                    std::slice::from_ref(&forged),
+                    gateway.redaction.mappings.as_ref(),
+                )
+                .await
+                .context("forged controls recovery")?;
+            assert!(
+                crate::generation_chain::project_history_boundaries(
+                    probe.request(),
+                    &current,
+                    &recovered
+                )
+                .is_none()
+            );
+        }
+        let recovered = gateway
+            .generation_chains
+            .recover_legacy_history_boundaries(
+                &principal,
+                root_id,
+                probe.request(),
+                std::slice::from_ref(&published_candidate),
+                gateway.redaction.mappings.as_ref(),
+            )
+            .await
+            .context("other branch")?;
+        assert!(
+            crate::generation_chain::project_history_boundaries(
+                probe.request(),
+                &current,
+                &recovered
+            )
             .is_none()
-    );
-    drop(probe);
-    drop(parent);
-    drop(_operation);
+        );
+        drop(probe);
+        drop(parent);
+        drop(_operation);
+        parent_id
+    };
     gateway.shutdown().await;
     let mut gateway = Gateway::from_storage_with_vendor_network(
         GatewayConfig {
@@ -768,7 +983,7 @@ async fn legacy_boundary_continuation(
     let result = json!([{"type":"function_call_output","call_id":"call_1","output":"found"}]);
     let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session",
         "previous_response_id":parent_id,"input":result,
-        "tools":[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}]});
+        "tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]});
     let response = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::spawn(
@@ -790,6 +1005,9 @@ async fn legacy_boundary_continuation(
         String::from_utf8_lossy(&bytes)
     );
     let continued_request = requests.try_recv()?;
+    if redaction != BoundaryRedaction::None {
+        assert_protected_continuation(&continued_request);
+    }
     assert!(continued_request.to_string().contains("call_1"));
     assert!(continued_request.to_string().contains("lookup"));
     assert_eq!(
@@ -802,7 +1020,7 @@ async fn legacy_boundary_continuation(
     full.push(json!({"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}));
     full.push(json!({"type":"function_call_output","call_id":"call_1","output":"found"}));
     let body = json!({"model":ROUTE,"store":false,"stream":false,"reasoning":{"effort":"xhigh","summary":"auto"},"prompt_cache_key":"original-session",
-        "input":full,"tools":[{"type":"function","name":"lookup","description":"lookup","parameters":{"type":"object","properties":{}}}]});
+        "input":full,"tools":[{"type":"function","name":"lookup","description":tool_description,"parameters":{"type":"object","properties":{}}}]});
     let response = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::spawn(
@@ -829,24 +1047,35 @@ async fn legacy_boundary_continuation(
 }
 
 #[tokio::test]
+async fn lite_tool_continuation_redacted_fresh_boundary_survives_restart() -> anyhow::Result<()> {
+    legacy_boundary_continuation(false, false, false, BoundaryRedaction::Fresh).await
+}
+
+#[tokio::test]
+async fn lite_tool_continuation_recovers_persisted_redacted_legacy_boundary() -> anyhow::Result<()>
+{
+    legacy_boundary_continuation(false, false, false, BoundaryRedaction::Legacy).await
+}
+
+#[tokio::test]
 async fn lite_tool_continuation_recovers_persisted_pre_replay_boundary() -> anyhow::Result<()> {
-    legacy_boundary_continuation(false, false, false).await
+    legacy_boundary_continuation(false, false, false, BoundaryRedaction::None).await
 }
 
 #[tokio::test]
 async fn lite_tool_continuation_recovers_removed_reasoning_item() -> anyhow::Result<()> {
-    legacy_boundary_continuation(false, false, true).await
+    legacy_boundary_continuation(false, false, true, BoundaryRedaction::None).await
 }
 
 #[tokio::test]
 async fn lite_tool_continuation_recovers_selectively_replayed_reasoning() -> anyhow::Result<()> {
-    legacy_boundary_continuation(false, true, false).await
+    legacy_boundary_continuation(false, true, false, BoundaryRedaction::None).await
 }
 
 #[tokio::test]
 async fn lite_tool_continuation_preserves_client_tools_with_exposed_platform_tool()
 -> anyhow::Result<()> {
-    legacy_boundary_continuation(true, false, false).await
+    legacy_boundary_continuation(true, false, false, BoundaryRedaction::None).await
 }
 
 #[tokio::test]

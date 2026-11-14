@@ -145,6 +145,27 @@ async fn replay_legacy_boundary_source(
     ))
 }
 
+fn legacy_boundary_request(
+    config: EffectiveRequestConfig,
+    items: Vec<AiItem>,
+    current: &AiRequest,
+) -> AiRequest {
+    AiRequest {
+        model: config.model,
+        items,
+        instructions: config.instructions,
+        generation: config.generation,
+        stream: current.stream.clone(),
+        tools: config.tools,
+        tool_choice: config.tool_choice,
+        parallel_tool_calls: config.parallel_tool_calls,
+        reasoning: config.reasoning,
+        response_format: config.response_format,
+        parameters: config.parameters,
+        meta: current.meta.clone(),
+    }
+}
+
 impl GenerationChain {
     /// Recover old checkpoint facts only from the admitted generation ancestry.
     /// Neither a matching admission ID nor an equal item count proves a gap:
@@ -156,6 +177,7 @@ impl GenerationChain {
         parent_id: &str,
         current: &AiRequest,
         retained: &[HistoryBoundaryCandidate],
+        mappings: &dyn stravia_credential_protection::store::MappingStore,
     ) -> Option<Vec<HistoryBoundaryCandidate>> {
         let chain = self
             .store
@@ -197,21 +219,45 @@ impl GenerationChain {
                 };
                 let mut items = owned_items(source_history.as_ref()?);
                 items.extend(owned_items(node.client_delta.messages.as_ref()));
-                let original = AiRequest {
-                    model: config.model,
-                    items,
-                    instructions: config.instructions,
-                    generation: config.generation,
-                    stream: current.stream.clone(),
-                    tools: config.tools,
-                    tool_choice: config.tool_choice,
-                    parallel_tool_calls: config.parallel_tool_calls,
-                    reasoning: config.reasoning,
-                    response_format: config.response_format,
-                    parameters: config.parameters,
-                    meta: current.meta.clone(),
-                };
+                let original = legacy_boundary_request(config, items, current);
                 if project_history_boundaries(&original, fact, &[]).is_none() {
+                    if current.items.len() < input_end
+                        || !exact_legacy_items_equal(&history, &current.items[..input_end])
+                    {
+                        continue;
+                    }
+                    let references = self.store.redaction_references(principal, &id).await.ok()?;
+                    if references.is_empty() {
+                        continue;
+                    }
+                    let snapshot = mappings.active(principal).await.ok()?;
+                    if references.iter().any(|reference| {
+                        snapshot
+                            .iter()
+                            .filter(|mapping| &mapping.reference == reference)
+                            .count()
+                            != 1
+                    }) {
+                        return None;
+                    }
+                    // Repair only proofs bound to the protected copy of this
+                    // ancestor's exact persisted input, without rerunning hooks.
+                    let mut protected = legacy_boundary_request(
+                        persisted_config.clone(),
+                        owned_items(&history),
+                        current,
+                    );
+                    stravia_credential_protection::replay_request_redaction(
+                        &mut protected,
+                        &snapshot,
+                        |mapping| references.contains(&mapping.reference),
+                    )
+                    .ok()?;
+                    if project_history_boundaries(&protected, fact, &[]).is_none() {
+                        continue;
+                    }
+                    *fact = fact
+                        .at_projected_gap(current, usize::try_from(fact.source_item_gap).ok()?)?;
                     continue;
                 }
                 let preserved = history

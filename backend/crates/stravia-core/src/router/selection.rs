@@ -1292,6 +1292,14 @@ mod tests {
 
         #[async_trait]
         impl TurnChainStore for UnknownExpiryStore {
+            async fn redaction_references(
+                &self,
+                principal: &Principal,
+                id: &TurnNodeId,
+            ) -> Result<Vec<String>, TurnUnavailable> {
+                self.0.redaction_references(principal, id).await
+            }
+
             async fn materialize(
                 &self,
                 principal: &Principal,

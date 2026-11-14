@@ -113,6 +113,14 @@ impl CommitBarrierStore {
 
 #[async_trait]
 impl stravia_runtime_contract::turn_chain::TurnChainStore for CommitBarrierStore {
+    async fn redaction_references(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        id: &stravia_runtime_contract::turn_chain::TurnNodeId,
+    ) -> Result<Vec<String>, stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.redaction_references(principal, id).await
+    }
+
     async fn materialize(
         &self,
         principal: &stravia_runtime_contract::Principal,
@@ -213,6 +221,14 @@ async fn failing_parent_discovery_store() -> FailingParentDiscoveryStore {
 
 #[async_trait]
 impl stravia_runtime_contract::turn_chain::TurnChainStore for FailingParentDiscoveryStore {
+    async fn redaction_references(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        id: &stravia_runtime_contract::turn_chain::TurnNodeId,
+    ) -> Result<Vec<String>, stravia_runtime_contract::turn_chain::TurnUnavailable> {
+        self.inner.redaction_references(principal, id).await
+    }
+
     async fn materialize(
         &self,
         principal: &stravia_runtime_contract::Principal,

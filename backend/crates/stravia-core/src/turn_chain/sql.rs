@@ -409,6 +409,42 @@ fn prefix_rebuild_order(nodes: &mut [PrefixRebuildNode]) -> Vec<usize> {
 
 #[async_trait]
 impl TurnChainStore for SqlTurnChainStore {
+    async fn redaction_references(
+        &self,
+        principal: &Principal,
+        id: &TurnNodeId,
+    ) -> Result<Vec<String>, TurnUnavailable> {
+        let principal = principal.continuation_key();
+        let query = "SELECT m.reference FROM turn_nodes n \
+                     JOIN content_scopes s ON s.id=n.scope_id \
+                     LEFT JOIN turn_node_redaction_mappings m ON m.node_pk=n.node_pk \
+                     WHERE n.id=$1 AND s.principal=$2 \
+                     AND NOT EXISTS(SELECT 1 FROM turn_node_retention r \
+                                    WHERE r.node_pk=n.node_pk AND r.deleting) \
+                     ORDER BY m.reference";
+        let rows: Vec<Option<String>> = match &self.backend {
+            Backend::Sqlite(pool) => {
+                sqlx::query_scalar(query)
+                    .bind(id.as_str())
+                    .bind(&principal)
+                    .fetch_all(pool)
+                    .await
+            }
+            Backend::Postgres(pool) => {
+                sqlx::query_scalar(query)
+                    .bind(id.as_str())
+                    .bind(&principal)
+                    .fetch_all(pool)
+                    .await
+            }
+        }
+        .map_err(storage)?;
+        if rows.is_empty() {
+            return Err(TurnUnavailable::Unavailable);
+        }
+        Ok(rows.into_iter().flatten().collect())
+    }
+
     async fn materialize(
         &self,
         principal: &Principal,

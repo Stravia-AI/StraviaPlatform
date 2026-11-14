@@ -199,8 +199,7 @@ pub(super) struct Candidates<'a> {
 impl<'a> Candidates<'a> {
     /// 出站：把 `include` 允许的映射的秘密换成占位符。
     ///
-    /// 使用已加载的快照，即使映射在遍历期间过期也照常替换；
-    /// `redact_request` 在发出前拒绝已过期却被用到的映射。
+    /// 使用已加载的快照；映射中的时间戳不影响替换。
     pub(super) fn outbound(mappings: &'a [Mapping], include: impl Fn(&Mapping) -> bool) -> Self {
         Self::build(mappings, false, include)
     }

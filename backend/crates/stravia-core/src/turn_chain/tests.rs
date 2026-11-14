@@ -305,6 +305,103 @@ async fn set_node_created_at(store: &SqlTurnChainStore, id: &TurnNodeId, created
     }
 }
 
+async fn assert_redaction_references_contract(store: &SqlTurnChainStore) {
+    let owner = principal("references-owner");
+    let foreign = principal("references-foreign");
+    let root = TurnNodeId::response();
+    let child = TurnNodeId::response();
+    let empty = TurnNodeId::response();
+    let first = format!("reference-first-{}", uuid::Uuid::new_v4());
+    let second = format!("reference-second-{}", uuid::Uuid::new_v4());
+    let insert = "INSERT INTO reversible_redaction_mappings \
+                  (reference,principal,secret,created_at,last_detected_at,pending_until) \
+                  VALUES ($1,$2,$3,$4,$4,$5)";
+    for reference in [&first, &second] {
+        let now = now_millis();
+        match &store.backend {
+            Backend::Sqlite(pool) => {
+                let mut writer = pool.begin_write().await.unwrap();
+                sqlx::query(insert)
+                    .bind(reference)
+                    .bind(owner.continuation_key())
+                    .bind("fixture")
+                    .bind(now)
+                    .bind(now + 60_000)
+                    .execute(&mut *writer)
+                    .await
+                    .unwrap();
+                writer.commit().await.unwrap();
+            }
+            Backend::Postgres(pool) => {
+                sqlx::query(insert)
+                    .bind(reference)
+                    .bind(owner.continuation_key())
+                    .bind("fixture")
+                    .bind(now)
+                    .bind(now + 60_000)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        };
+    }
+    for (id, parent_id, references) in [
+        (&root, None, vec![first.clone()]),
+        (&child, Some(root.clone()), vec![second.clone()]),
+        (&empty, Some(root.clone()), Vec::new()),
+    ] {
+        store
+            .commit(TurnCommit {
+                atomic_checkpoint_id: None,
+                id: id.clone(),
+                kind: TurnNodeKind::Response,
+                parent_id,
+                principal: owner.clone(),
+                payload_version: 1,
+                payload: serde_json::json!({"test": "references"}),
+                marker_references: Vec::new(),
+                redaction_references: references,
+                compaction_record_ids: Vec::new(),
+                reusable_prefix: None,
+            })
+            .await
+            .expect("commit reference fixture");
+    }
+    assert_eq!(
+        store.redaction_references(&owner, &root).await.unwrap(),
+        vec![first]
+    );
+    assert_eq!(
+        store.redaction_references(&owner, &child).await.unwrap(),
+        vec![second]
+    );
+    assert_eq!(
+        store.redaction_references(&owner, &empty).await.unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        store.redaction_references(&foreign, &root).await,
+        Err(TurnUnavailable::Unavailable)
+    );
+    assert_eq!(
+        store
+            .redaction_references(&owner, &TurnNodeId::response())
+            .await,
+        Err(TurnUnavailable::Unavailable)
+    );
+    mark_deleting(store, &child).await;
+    assert_eq!(
+        store.redaction_references(&owner, &child).await,
+        Err(TurnUnavailable::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn redaction_references_are_scoped_to_visible_nodes() {
+    let store = crate::turn_chain::test_store().await;
+    assert_redaction_references_contract(&store).await;
+}
+
 async fn assert_node_kind_contract(store: &SqlTurnChainStore) {
     let owner = principal("node-kind-owner");
     let foreign = principal("node-kind-foreign");
@@ -1730,6 +1827,7 @@ async fn postgres_reusable_prefix_store_contract_when_configured() {
     assert_postgres_concurrent_commits_and_gc(&store).await;
     assert_deleting_retention_contract(&store).await;
     assert_node_kind_contract(&store).await;
+    assert_redaction_references_contract(&store).await;
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
         .execute(&admin)
