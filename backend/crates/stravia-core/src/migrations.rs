@@ -129,7 +129,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55
     ) {
         return false;
     }
@@ -411,6 +411,21 @@ pub async fn run_sqlite_migrator(
             }
         }
     }
+    if runner.version_exists(55) {
+        runner
+            .run_direct(Some(54), pinned.connection(), false)
+            .await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=55 AND success)",
+        )
+        .fetch_one(pinned.connection())
+        .await?;
+        if !finalized {
+            // 前面的历史重建已完成，后续删除依赖 GC 外键级联。
+            ensure_sqlite_foreign_keys(pinned.connection()).await?;
+            crate::credential_mapping_upgrade::retire_sqlite(pinned.connection()).await?;
+        }
+    }
     report(
         "schema_migrations",
         "Applying database schema migrations",
@@ -653,6 +668,17 @@ pub async fn run_postgres_migrator(
         .await?;
         if !finalized {
             crate::credential_mapping_upgrade::run_postgres(&mut connection).await?;
+        }
+    }
+    if runner.version_exists(55) {
+        runner.run_direct(Some(54), &mut *connection, false).await?;
+        let finalized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=55 AND success)",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !finalized {
+            crate::credential_mapping_upgrade::retire_postgres(&mut connection).await?;
         }
     }
     report(
@@ -1590,7 +1616,7 @@ mod tests {
                     ("unpublished-referenced", 8 * DAY, false, Some(now - DAY)),
                     ("unpublished-pending", DAY / 2, false, Some(now + DAY)),
                 ] {
-                    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,last_used_at) VALUES($1,'api-key:alice','secret',$2,$3,$4,$5)")
+                    sqlx::query(r#"INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,pending_until,created_at,last_used_at,rule_ids) VALUES($1,'api-key:alice','secret',$2,$3,$4,$5,'["generic-api-key"]')"#)
                         .bind(reference).bind(published.then_some(now - age)).bind(pending)
                         .bind(now - age).bind(now - 1_000).execute(pool).await.unwrap();
                 }
@@ -1607,7 +1633,7 @@ mod tests {
                         .bind(reference).execute(pool).await.unwrap();
                 }
                 for n in 0..1025 {
-                    sqlx::query("INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,created_at,last_used_at) VALUES($1,'api-key:alice','secret',$2,$2,$3)")
+                    sqlx::query(r#"INSERT INTO reversible_redaction_mappings(reference,principal,secret,published_at,created_at,last_used_at,rule_ids) VALUES($1,'api-key:alice','secret',$2,$2,$3,'["generic-api-key"]')"#)
                         .bind(format!("batch-{n:04}")).bind(now - 8 * DAY).bind(now)
                         .execute(pool).await.unwrap();
                 }

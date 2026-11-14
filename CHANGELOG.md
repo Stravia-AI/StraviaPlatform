@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- SQLite/PostgreSQL 迁移 0055 一次性清理旧凭据规则归因：按当前内置目录及所有现存自定义规则 ID 过滤，禁用规则仍视为现行；混合归因仅移除退役 ID，有现行归因的映射不因本次清理删除。空归因或仅退役归因映射不论年龄、使用状态或 Turn 节点引用均解除引用并删除，与 0053 对有引用映射的保留不同；相关复用、事件归因和禁用规则设置中的退役 ID 也会清理。被删除映射的历史 marker 将永久无法还原原值，按未知 marker 原样透传；现行规则重新检出同值可创建新 marker。空归因映射不再用于出站替换或观测遮罩；现行 `generic-credential-uri` 规则造成的工具名误遮罩不在此次清理范围。迁移复用凭据清理启动阶段，按每批实际处理条数更新进度，完成后正常重启不再执行。
+
 ### Fixed
 
 - Local Web Search now authorizes and executes its saved model binding by stable internal ID. Renaming the public model no longer breaks the binding, and another model whose public name matches that ID cannot redirect the search or bypass a disabled binding. External Route bindings keep their public-name semantics.

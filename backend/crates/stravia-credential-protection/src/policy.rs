@@ -111,11 +111,14 @@ impl RuleScope {
 
     /// 映射是否仍参与出站替换与管理端遮罩：未过期，且创建它的规则至少有一条仍启用。
     /// 另一条启用的规则本来就会重新检出同一个秘密，所以用「至少一条」而不是「没有被禁用的」。
-    /// 没有归因的映射（归因记录出现之前创建）无法判断规则，保持启用，但仍受过期约束。
+    /// 无归因映射由升级清理，不再参与替换或观测遮罩。
     pub fn allows(&self, mapping: &Mapping) -> bool {
-        let rule_ids = mapping.rule_ids.as_slice();
         !self.expired(mapping)
-            && (rule_ids.is_empty() || rule_ids.iter().any(|rule_id| self.rule_enabled(rule_id)))
+            && mapping
+                .rule_ids
+                .as_slice()
+                .iter()
+                .any(|rule_id| self.rule_enabled(rule_id))
     }
 }
 
@@ -162,8 +165,9 @@ mod tests {
     }
 
     #[test]
-    fn unattributed_mappings_cannot_be_judged_and_stay_active() {
-        assert!(scope(&["github-pat"], &[]).allows(&mapping(&[])));
+    fn unattributed_mappings_do_not_replace_or_mask() {
+        assert!(!scope(&[], &[]).allows(&mapping(&[])));
+        assert!(!scope(&["github-pat"], &[]).allows(&mapping(&[])));
     }
 
     fn detected(rule_ids: &[&str], last_detected_at: i64) -> Mapping {
@@ -182,9 +186,9 @@ mod tests {
         let stale = detected(&["generic-api-key"], cutoff);
         assert!(scope.expired(&stale));
         assert!(!scope.allows(&stale));
-        // 没有归因的存量映射同样受过期约束：这是旧映射误杀的出口。
+        // 无归因映射即使刚检出也不重新获得替换资格。
         assert!(!scope.allows(&detected(&[], cutoff)));
-        assert!(scope.allows(&detected(&[], cutoff + 1)));
+        assert!(!scope.allows(&detected(&[], cutoff + 1)));
     }
 
     #[test]
