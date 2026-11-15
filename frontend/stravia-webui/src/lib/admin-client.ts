@@ -99,6 +99,8 @@ import type {
   ProviderAllowanceSnapshot,
   ProviderAllowanceGuardUpdate,
   ProviderAllowanceTarget,
+  ProviderAllowanceResetRequest,
+  ProviderAllowanceResetResult,
   ConfirmPluginUpdate,
   PluginPreview,
   PluginSummary,
@@ -154,15 +156,15 @@ function statsPath(path: string, window?: StatsWindow, bucket?: number, filter?:
   return `${path}${queryString({ ...window, bucket, ...ids })}`
 }
 
-async function request<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: HttpMethod, path: string, body?: unknown, retryOnUnauthorized = true): Promise<T> {
   const headers = new Headers()
   if (method !== 'GET') headers.set('X-Stravia-CSRF', '1')
   if (body !== undefined) headers.set('Content-Type', 'application/json')
-  const response = await authenticatedFetch(path, {
-    method,
-    headers,
-    body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
-  })
+  const response = await authenticatedFetch(
+    path,
+    { method, headers, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) },
+    retryOnUnauthorized,
+  )
   return decodeAdmin<T>(response)
 }
 
@@ -553,6 +555,13 @@ export const admin = {
       request<ProviderAllowanceSnapshot>('GET', `/provider-allowances/${encodeURIComponent(providerId)}`),
     refresh: (providerId: string) =>
       request<ProviderAllowanceSnapshot>('POST', `/provider-allowances/${providerId}/refresh`),
+    reset: (providerId: string, input: ProviderAllowanceResetRequest) =>
+      request<ProviderAllowanceResetResult>(
+        'POST',
+        `/provider-allowances/${encodeURIComponent(providerId)}/reset`,
+        input,
+        false,
+      ),
     replaceGuards: (providerId: string, keys: string[]) =>
       request<ProviderAllowanceGuardUpdate>('PUT', `/provider-allowances/${encodeURIComponent(providerId)}/guards`, {
         keys,

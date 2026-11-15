@@ -4,7 +4,11 @@ import type {
   ProviderAllowanceGuardUpdate,
   ProviderAllowanceSnapshot,
   ProviderAllowanceTarget,
+  ProviderAllowanceResetRequest,
+  ProviderAllowanceResetResult,
+  ProviderAllowanceResetOutcome,
 } from './types'
+import { createUuid } from './uuid'
 
 const REFRESH_INTERVAL = 180_000
 const CREDENTIAL_INVALID_MESSAGE = 'Credential invalid; allowance fetching is paused until the credential is updated.'
@@ -20,6 +24,7 @@ export interface ProviderAllowanceReadApi {
   get(id: string): Promise<ProviderAllowanceSnapshot>
   refresh(id: string): Promise<ProviderAllowanceSnapshot>
   replaceGuards(id: string, keys: string[]): Promise<ProviderAllowanceGuardUpdate>
+  reset(id: string, request: ProviderAllowanceResetRequest): Promise<ProviderAllowanceResetResult>
 }
 
 export interface ProviderAllowanceReadEntry {
@@ -35,6 +40,9 @@ export interface ProviderAllowanceReadEntry {
   guardError?: unknown
   refreshError?: unknown
   savingGuards: boolean
+  resetting: boolean
+  canReset: boolean
+  pendingResetGrantId?: string
 }
 
 export interface ProviderAllowanceReadSnapshot {
@@ -50,11 +58,18 @@ export interface ProviderAllowanceReadSnapshot {
 export type ProviderAllowanceRefreshOutcome =
   { status: 'refreshed' } | { status: 'failed'; error: unknown } | { status: 'ignored' }
 
+export type ProviderAllowanceResetControllerOutcome =
+  | { status: 'completed'; outcome: ProviderAllowanceResetOutcome; refreshError?: unknown }
+  | { status: 'failed'; error: unknown; refreshError?: unknown }
+  | { status: 'ignored' }
+
 interface ProviderAllowanceReadDeps {
   client: QueryClient
   api: ProviderAllowanceReadApi
   onSnapshot?: (snapshot: ProviderAllowanceReadSnapshot) => void
   now?: () => number
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+  randomUUID?: () => string
 }
 
 function invalidSnapshot(snapshot: ProviderAllowanceSnapshot | undefined): boolean {
@@ -75,6 +90,7 @@ export class ProviderAllowanceReadController {
   readonly #guardReadEpochs = new Map<string, number>()
   readonly #savingGuards = new Set<string>()
   readonly #refreshingProviders = new Set<string>()
+  readonly #resettingProviders = new Set<string>()
   readonly #guardErrors = new Map<string, unknown>()
   readonly #refreshErrors = new Map<string, unknown>()
   #metadataEpoch = 0
@@ -143,17 +159,26 @@ export class ProviderAllowanceReadController {
         refreshing,
         credentialInvalid: invalid,
         canRefresh:
-          !this.#disposed &&
-          !invalid &&
-          !providers.isPending &&
-          !refreshing &&
-          !this.#refreshingAll &&
-          !this.#savingGuards.has(id),
+          !this.#disposed && !invalid && !providers.isPending && !refreshing && !this.#refreshingAll && !this.#busy(id),
         canSaveGuards: !this.#disposed && !this.#busy(id),
-        canRetry: !this.#disposed && Boolean(result) && !invalid && !this.#savingGuards.has(id),
+        canRetry: !this.#disposed && Boolean(result) && !invalid && !this.#busy(id),
         guardError: this.#guardErrors.get(id),
         refreshError: this.#refreshErrors.get(id),
         savingGuards: this.#savingGuards.has(id),
+        resetting: this.#resettingProviders.has(id),
+        canReset:
+          !this.#disposed &&
+          !this.#credentialInvalid(id) &&
+          !this.#busy(id) &&
+          !refreshing &&
+          !this.#refreshingAll &&
+          !providers.isPending &&
+          snapshot?.status === 'fresh' &&
+          !snapshot.error &&
+          !result?.isError &&
+          snapshot.resets != null &&
+          !this.#refreshErrors.has(id),
+        pendingResetGrantId: this.#pendingResetGrantId(id),
       }
     })
     return {
@@ -196,7 +221,7 @@ export class ProviderAllowanceReadController {
   }
 
   async retryProvider(id: string): Promise<void> {
-    if (this.#disposed || this.#credentialInvalid(id) || this.#savingGuards.has(id)) return
+    if (this.#disposed || this.#credentialInvalid(id) || this.#busy(id)) return
     await this.#snapshots.get(id)?.refetch()
   }
 
@@ -215,6 +240,7 @@ export class ProviderAllowanceReadController {
     this.#changed()
     try {
       this.#publish(await this.#deps.api.refresh(id))
+      this.#refreshErrors.delete(id)
       await this.#refreshMetadata()
       return this.#disposed ? { status: 'ignored' } : { status: 'refreshed' }
     } catch (error) {
@@ -223,6 +249,74 @@ export class ProviderAllowanceReadController {
       this.#refreshingProviders.delete(id)
       this.#changed()
     }
+  }
+
+  async resetProvider(id: string, grantId: string): Promise<ProviderAllowanceResetControllerOutcome> {
+    const entry = this.snapshot.entries.find((item) => item.target.provider_id === id)
+    const grant = entry?.snapshot?.resets?.grants.find((item) => item.id === grantId)
+    const pendingRetry = entry?.pendingResetGrantId === grantId
+    if (
+      !this.#started ||
+      !entry?.canReset ||
+      (entry.pendingResetGrantId != null && !pendingRetry) ||
+      (!pendingRetry &&
+        (!grant?.usable || grant.remaining <= 0 || (grant.expires_at != null && grant.expires_at <= this.#now())))
+    )
+      return { status: 'ignored' }
+
+    this.#resettingProviders.add(id)
+    this.#readEpochs.set(id, (this.#readEpochs.get(id) ?? 0) + 1)
+    this.#changed()
+    let result: ProviderAllowanceResetControllerOutcome
+    let submitted = false
+    try {
+      const storage = this.#storage()
+      const key = this.#resetStorageKey(id)
+      const raw = storage.getItem(key)
+      const value: unknown = raw
+        ? JSON.parse(raw)
+        : { grant_id: grantId, request_id: (this.#deps.randomUUID ?? createUuid)() }
+      if (
+        value == null ||
+        typeof value !== 'object' ||
+        !('grant_id' in value) ||
+        !('request_id' in value) ||
+        typeof value.grant_id !== 'string' ||
+        typeof value.request_id !== 'string' ||
+        !value.request_id
+      )
+        throw new Error('Invalid pending allowance reset')
+      const pending: ProviderAllowanceResetRequest = { grant_id: value.grant_id, request_id: value.request_id }
+      if (pending.grant_id !== grantId) throw new Error('Another allowance reset is pending')
+      if (!raw) storage.setItem(key, JSON.stringify(pending))
+      await this.#deps.client.cancelQueries({ queryKey: snapshotKey(id) })
+      if (this.#disposed) throw new Error('Allowance controller disposed before reset')
+      submitted = true
+      const response = await this.#deps.api.reset(id, { ...pending, retry: Boolean(raw) })
+      // A definitive business outcome resolves the logical request, even if the following read fails.
+      result = { status: 'completed', outcome: response.outcome }
+      try {
+        storage.removeItem(key)
+      } catch {
+        /* Retaining the ID is safer than creating a new one. */
+      }
+    } catch (error) {
+      result = { status: 'failed', error }
+    }
+    try {
+      if (submitted) {
+        this.#publish(await this.#deps.api.refresh(id))
+        this.#refreshErrors.delete(id)
+        await this.#refreshMetadata()
+      }
+    } catch (refreshError) {
+      this.#refreshErrors.set(id, refreshError)
+      result = { ...result, refreshError }
+    } finally {
+      this.#resettingProviders.delete(id)
+      this.#changed()
+    }
+    return result
   }
 
   async refreshAll(): Promise<ProviderAllowanceRefreshOutcome> {
@@ -240,6 +334,7 @@ export class ProviderAllowanceReadController {
         pending.map(async (target) => {
           try {
             this.#publish(await this.#deps.api.refresh(target.provider_id))
+            this.#refreshErrors.delete(target.provider_id)
           } finally {
             this.#refreshingProviders.delete(target.provider_id)
             this.#changed()
@@ -341,12 +436,36 @@ export class ProviderAllowanceReadController {
     }
   }
 
+  #storage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> {
+    return this.#deps.storage ?? sessionStorage
+  }
+
+  #resetStorageKey(id: string): string {
+    return `provider-allowance-reset:${id}`
+  }
+
+  #pendingResetGrantId(id: string): string | undefined {
+    try {
+      const raw = this.#storage().getItem(this.#resetStorageKey(id))
+      if (!raw) return undefined
+      const pending: unknown = JSON.parse(raw)
+      return pending != null &&
+        typeof pending === 'object' &&
+        'grant_id' in pending &&
+        typeof pending.grant_id === 'string'
+        ? pending.grant_id
+        : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   #target(id: string): ProviderAllowanceTarget | undefined {
     return this.#targets.getCurrentResult().data?.find((target) => target.provider_id === id)
   }
 
   #busy(id: string): boolean {
-    return this.#savingGuards.has(id) || this.#refreshingProviders.has(id)
+    return this.#savingGuards.has(id) || this.#refreshingProviders.has(id) || this.#resettingProviders.has(id)
   }
 
   #now(): number {
@@ -392,7 +511,11 @@ export class ProviderAllowanceReadController {
       for (const target of targets) {
         const id = target.provider_id
         const invalid = this.#credentialInvalid(id)
-        const enabled = !this.#providers.getCurrentResult().isPending && !invalid && !this.#savingGuards.has(id)
+        const enabled =
+          !this.#providers.getCurrentResult().isPending &&
+          !invalid &&
+          !this.#savingGuards.has(id) &&
+          !this.#resettingProviders.has(id)
         const interval = invalid ? false : REFRESH_INTERVAL
         let observer = this.#snapshots.get(id)
         if (!observer) {

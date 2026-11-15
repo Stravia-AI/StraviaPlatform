@@ -1165,6 +1165,102 @@ test('uses wide workspace for more aligned quota tracks with a bounded rail', as
   expect(matrixBox.width).toBeGreaterThan(railBox.width * 2)
 })
 
+test('confirms a free reset explicitly and leaves ordinary reads non-consuming', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(crypto, 'randomUUID', { value: undefined }))
+  const snapshot = {
+    ...freshSnapshot,
+    resets: {
+      remaining: 2,
+      grants: [{ id: 'grant-1', label: 'Weekly reset', remaining: 2, expires_at: 1999999999000, usable: true }],
+    },
+  }
+  const posts = await mockAllowances(page, [snapshot])
+  const requests: unknown[] = []
+  await page.route('**/api/v1/provider-allowances/provider-alpha/reset', async (route) => {
+    requests.push(route.request().postDataJSON())
+    snapshot.resets.remaining -= 1
+    snapshot.resets.grants[0].remaining -= 1
+    await route.fulfill({ json: { data: { outcome: 'reset' } } })
+  })
+  await page.goto('/allowances')
+  const provider = page.getByTestId('allowance-provider-provider-alpha')
+  const resetCount = provider.getByTestId('allowance-reset-count-provider-alpha')
+  await expect(resetCount).toContainText('2')
+  expect(requests).toHaveLength(0)
+  await provider.getByRole('button', { name: 'Alpha account allowance details' }).click()
+  const resetDetails = provider.getByRole('button', { name: 'Reset entitlements', exact: true })
+  const resetTable = provider.getByRole('table', { name: 'Reset entitlements', exact: true })
+  await expect(resetDetails).toHaveAttribute('aria-expanded', 'false')
+  await expect(resetTable).toBeHidden()
+  await resetDetails.click()
+  await expect(resetTable).toBeVisible()
+  await expect(provider.getByText('Weekly reset')).toBeVisible()
+  await provider.getByRole('button', { name: 'Reset limits' }).click()
+  const dialog = page.getByRole('alertdialog')
+  await expect(dialog.getByText(/consumes one free reset entitlement and cannot be undone/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  expect(requests).toHaveLength(0)
+  await expect(resetCount).toContainText('2')
+  await provider.getByRole('button', { name: 'Reset limits' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Confirm reset' }).click()
+  await expect.poll(() => requests.length).toBe(1)
+  expect(requests[0]).toMatchObject({
+    grant_id: 'grant-1',
+    request_id: expect.stringMatching(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i),
+  })
+  await expect(page.getByText('Free reset applied.')).toBeVisible()
+  await expect(resetCount).toContainText('1')
+  expect(posts.every((path) => !path.endsWith('/reset'))).toBeTruthy()
+})
+
+test('retains an unresolved request when the server cannot recover its history', async ({ page }) => {
+  const snapshot = {
+    ...freshSnapshot,
+    resets: { remaining: 1, grants: [{ id: 'grant-1', label: 'Weekly reset', remaining: 1, usable: true }] },
+  }
+  await mockAllowances(page, [snapshot])
+  const requests: Array<{ request_id: string; retry: boolean }> = []
+  await page.route('**/api/v1/provider-allowances/provider-alpha/reset', async (route) => {
+    requests.push(route.request().postDataJSON())
+    if (requests.length === 1) await route.abort()
+    else
+      await route.fulfill({
+        status: 409,
+        json: { error: 'Unknown request', code: 'PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST' },
+      })
+  })
+  await page.goto('/allowances')
+  const provider = page.getByTestId('allowance-provider-provider-alpha')
+  await provider.getByRole('button', { name: 'Alpha account allowance details' }).click()
+  await provider.getByRole('button', { name: 'Reset entitlements', exact: true }).click()
+  await provider.getByRole('button', { name: 'Reset limits' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Confirm reset' }).click()
+  await expect(provider.getByRole('button', { name: 'Retry unresolved reset' })).toBeVisible()
+  await provider.getByRole('button', { name: 'Retry unresolved reset' }).click()
+  await expect(page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Retry unresolved reset' }).click()
+  await expect(page.getByText(/Check the provider's Usage before taking further action/)).toBeVisible()
+  expect(requests).toHaveLength(2)
+  expect(requests[0].retry).toBe(false)
+  expect(requests[1]).toMatchObject({ request_id: requests[0].request_id, retry: true })
+  await expect(provider.getByRole('button', { name: 'Retry unresolved reset' })).toBeVisible()
+})
+
+test('shows the stale reason and blocks reset entitlements', async ({ page }) => {
+  const snapshot = {
+    ...staleSnapshot,
+    resets: { remaining: 1, grants: [{ id: 'grant-stale', label: 'Stale grant', remaining: 1, usable: true }] },
+  }
+  await mockAllowances(page, [snapshot])
+  await page.goto('/allowances')
+  const provider = page.getByTestId('allowance-provider-provider-beta')
+  await provider.getByRole('button', { name: 'Beta account allowance details' }).click()
+  await expect(provider.getByText('Refresh this provider successfully before resetting.')).toBeVisible()
+  await provider.getByRole('button', { name: 'Reset entitlements', exact: true }).click()
+  await expect(provider.getByRole('button', { name: 'Reset limits' })).toBeDisabled()
+})
+
 test('keeps the matrix and side panels usable on a narrow Chinese viewport', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 760 })
   await page.addInitScript(() => localStorage.setItem('stravia-locale', 'zh-CN'))

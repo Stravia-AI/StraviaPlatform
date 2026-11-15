@@ -148,9 +148,13 @@ export async function restoreAuthentication(state: AuthState): Promise<AuthState
   return getAuthState()
 }
 
-export async function authenticatedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function authenticatedFetch(
+  path: string,
+  init: RequestInit = {},
+  retryOnUnauthorized = true,
+): Promise<Response> {
   let response = await rawFetch(path, init)
-  if (response.status !== 401) return response
+  if (response.status !== 401 || !retryOnUnauthorized) return response
   if (!(await renewAuthentication()) || (response = await rawFetch(path, init)).status === 401) {
     if (window.location.pathname !== '/login') authenticationRequired()
   }

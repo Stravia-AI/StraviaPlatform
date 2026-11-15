@@ -545,6 +545,36 @@ async fn provider_allowance_routes_share_the_core_contract() -> anyhow::Result<(
     Ok(())
 }
 
+#[tokio::test]
+async fn provider_allowance_reset_requires_admin_and_complete_request() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (_gateway, app, token) = contents_fixture(directory.path()).await?;
+    let path = "/api/v1/provider-allowances/missing/reset";
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"grant_id":"grant","request_id":"00000000-0000-4000-8000-000000000000"}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+    let incomplete = app
+        .oneshot(
+            Request::post(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"grant_id":"grant"}"#))?,
+        )
+        .await?;
+    assert_eq!(incomplete.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    Ok(())
+}
+
 async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;

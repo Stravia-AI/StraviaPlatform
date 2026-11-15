@@ -31,6 +31,9 @@ use stravia_vendor_sdk::ConnectionCheckVerification;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceExt;
 
+#[path = "vendor_management_lifecycle/reset.rs"]
+mod vendor_management_reset;
+
 const MANAGEMENT_VENDOR: &str = "fixture.management";
 const OTHER_VENDOR: &str = "fixture.management.other";
 const MODEL_ID: &str = "management-model";

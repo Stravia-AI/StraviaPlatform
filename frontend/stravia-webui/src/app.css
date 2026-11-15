@@ -51,8 +51,8 @@
   --sidebar-border: oklch(0.82 0.018 241);
   --sidebar-ring: oklch(0.4693 0.0775 244.17);
   --font-sans: 'IBM Plex Sans', 'Noto Sans SC Variable', 'Noto Sans SC', system-ui, sans-serif;
-  --font-structural: 'IBM Plex Sans Condensed', 'IBM Plex Sans', sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-structural: 'IBM Plex Sans Condensed', 'IBM Plex Sans', 'Noto Sans SC Variable', 'Noto Sans SC', sans-serif;
+  --font-mono: 'IBM Plex Mono', 'Noto Sans SC Variable', 'Noto Sans SC', ui-monospace, monospace;
   --font-technical: var(--font-mono);
   --radius: 0.5rem;
   --signal: oklch(0.58 0.132 48);

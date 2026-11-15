@@ -56,8 +56,20 @@ impl ProviderAllowanceState {
                 cache: runtime_cache,
                 started_at: Instant::now(),
                 inflight: Mutex::new(HashMap::new()),
+                operations: Mutex::new(HashMap::new()),
+                reset_requests: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    async fn operation_lock(&self, provider_id: &str) -> Arc<Mutex<()>> {
+        self.inner
+            .operations
+            .lock()
+            .await
+            .entry(provider_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     async fn cached(&self, identity: &str) -> Option<Arc<CacheEntry>> {
@@ -109,6 +121,7 @@ impl ProviderAllowanceState {
                 snapshot.plan_label = None;
                 snapshot.account_label = None;
                 snapshot.billing = None;
+                snapshot.resets = None;
                 snapshot.fetched_at = None;
                 snapshot.allowances.clear();
                 snapshot.models.clear();
@@ -155,6 +168,15 @@ struct ProviderAllowanceStateInner {
     cache: RuntimeCache,
     started_at: Instant,
     inflight: Mutex<HashMap<String, InflightAllowanceFetch>>,
+    operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    reset_requests: Mutex<HashMap<(String, String), ResetSubmission>>,
+}
+
+struct ResetSubmission {
+    identity: String,
+    component: String,
+    grant_id: String,
+    result: Option<super::ProviderAllowanceResetResult>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -194,6 +216,17 @@ impl CacheEntry {
                     .as_ref()
                     .map_or(0, |price| price.amount.len() + price.currency.len())
             })
+            + snapshot.resets.as_ref().map_or(0, |resets| {
+                resets
+                    .grants
+                    .iter()
+                    .map(|grant| {
+                        std::mem::size_of::<super::ProviderAllowanceResetGrant>()
+                            + grant.id.len()
+                            + grant.label.as_ref().map_or(0, String::len)
+                    })
+                    .sum::<usize>()
+            })
             + snapshot.fetched_at.as_ref().map_or(0, String::len)
             + snapshot
                 .error
@@ -217,6 +250,231 @@ impl CacheEntry {
 }
 
 impl AdminService {
+    /// Redeem exactly one explicitly selected grant. Reads and redemption use
+    /// the same pinned component and credential generation, without auth replay.
+    pub async fn reset_provider_allowance(
+        &self,
+        provider_id: &str,
+        request: super::ProviderAllowanceResetRequest,
+    ) -> anyhow::Result<super::ProviderAllowanceResetResult> {
+        anyhow::ensure!(
+            !request.grant_id.trim().is_empty() && request.grant_id.trim() == request.grant_id,
+            "invalid reset grant id"
+        );
+        uuid::Uuid::parse_str(&request.request_id)
+            .map_err(|_| anyhow::anyhow!("invalid reset request id"))?;
+        let state = &self.gw.provider_allowance_state;
+        let operation_lock = state.operation_lock(provider_id).await;
+        let _operation_guard = operation_lock.lock().await;
+        if request.retry
+            && !state
+                .inner
+                .reset_requests
+                .lock()
+                .await
+                .contains_key(&(provider_id.to_owned(), request.request_id.clone()))
+        {
+            return Err(super::ProviderAllowanceResetError::UnknownRequest.into());
+        }
+        let provider = self
+            .gw
+            .storage
+            .providers()
+            .get(provider_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("provider not found"))?;
+        anyhow::ensure!(
+            provider.is_enabled
+                && !provider.credential_invalid()
+                && eligible_allowance_provider(self, &provider),
+            "provider allowance is unavailable"
+        );
+        let fingerprint = provider_configuration_digest(self, &provider)?.finalize();
+        let context = VendorCallContext::new(
+            stravia_runtime_contract::CancellationToken::new(),
+            stravia_runtime_contract::Deadline::fixed(Instant::now() + REQUEST_TIMEOUT),
+        );
+        let prepared = self
+            .gw
+            .prepare_vendor_execution(
+                provider_id,
+                None,
+                stravia_vendor_sdk::Operation::Allowance,
+                &context,
+            )
+            .await?;
+        let key = (provider_id.to_owned(), request.request_id.clone());
+        if let Some(submission) = state.inner.reset_requests.lock().await.get(&key) {
+            if let Some(result) = &submission.result {
+                let latest = self
+                    .gw
+                    .storage
+                    .providers()
+                    .get(provider_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("provider changed during reset"))?;
+                let identity = successful_execution_identity(
+                    self,
+                    &latest,
+                    fingerprint.as_slice(),
+                    prepared.credential_version(),
+                    prepared.oauth_connection_id(),
+                )
+                .await?;
+                anyhow::ensure!(
+                    identity.as_deref() == Some(submission.identity.as_str())
+                        && submission.component == prepared.pinned_component().identity()
+                        && submission.grant_id == request.grant_id,
+                    "reset request identity changed"
+                );
+                return Ok(result.clone());
+            }
+        }
+        let read = self
+            .gw
+            .execute_prepared_vendor_once(
+                prepared.clone(),
+                VendorRequest::Allowance(stravia_vendor_sdk::AllowanceRequest::default()),
+                &context,
+            )
+            .await?;
+        let version = read
+            .credential_version
+            .ok_or_else(|| anyhow::anyhow!("allowance credential version missing"))?;
+        let _publication_guard = read.publication.write_fence().await?;
+        let latest = self
+            .gw
+            .storage
+            .providers()
+            .get(provider_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("provider changed during allowance read"))?;
+        anyhow::ensure!(
+            latest.is_enabled
+                && !latest.credential_invalid()
+                && eligible_allowance_provider(self, &latest),
+            "provider changed during allowance read"
+        );
+        let identity = successful_execution_identity(
+            self,
+            &latest,
+            fingerprint.as_slice(),
+            version,
+            read.oauth_connection_id.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("provider identity changed during allowance read"))?;
+        let response = match read.output {
+            stravia_vendor_sdk::OperationOutput::Allowance(response) => response,
+            _ => anyhow::bail!("vendor returned a non-allowance result"),
+        };
+        // Apply the same response validation as an ordinary fresh snapshot.
+        map_allowance_response(&latest, response.clone())?;
+        let resets = response
+            .resets
+            .ok_or_else(|| anyhow::anyhow!("provider does not support allowance resets"))?;
+        let key = (provider_id.to_owned(), request.request_id.clone());
+        let component = prepared.pinned_component().identity().to_owned();
+        let mut submissions = state.inner.reset_requests.lock().await;
+        let retry = if let Some(submission) = submissions.get(&key) {
+            anyhow::ensure!(
+                submission.identity == identity
+                    && submission.component == component
+                    && submission.grant_id == request.grant_id,
+                "reset request identity changed"
+            );
+            if let Some(result) = &submission.result {
+                return Ok(result.clone());
+            }
+            true
+        } else {
+            if request.retry {
+                return Err(super::ProviderAllowanceResetError::UnknownRequest.into());
+            }
+            anyhow::ensure!(
+                !submissions
+                    .iter()
+                    .any(|((provider, _), submission)| provider == provider_id
+                        && submission.identity == identity
+                        && submission.component == component
+                        && submission.result.is_none()),
+                "another reset request has an unknown outcome"
+            );
+            false
+        };
+        if !retry {
+            let grant = resets
+                .grants
+                .iter()
+                .find(|grant| grant.id == request.grant_id)
+                .ok_or_else(|| anyhow::anyhow!("reset grant is unavailable"))?;
+            anyhow::ensure!(
+                resets.remaining > 0
+                    && grant.remaining > 0
+                    && grant.usable
+                    && grant
+                        .expires_at_unix_ms
+                        .is_none_or(|expires| expires > chrono::Utc::now().timestamp_millis()),
+                "reset grant is unavailable"
+            );
+        }
+        read.publication.ensure_current()?;
+        drop(_publication_guard);
+        submissions
+            .entry(key.clone())
+            .or_insert_with(|| ResetSubmission {
+                identity: identity.clone(),
+                component,
+                grant_id: request.grant_id.clone(),
+                result: None,
+            });
+        drop(submissions);
+        // Remove the old snapshot before submission, including if this future
+        // is cancelled or the remote outcome is indeterminate.
+        state.inner.cache.remove(CACHE_DOMAIN, &identity).await;
+        state.notify_changed();
+        let result = self
+            .gw
+            .execute_prepared_vendor_once(
+                prepared,
+                VendorRequest::Allowance(stravia_vendor_sdk::AllowanceRequest {
+                    model: None,
+                    reset: Some(stravia_vendor_sdk::AllowanceResetRequest {
+                        grant_id: request.grant_id,
+                        request_id: request.request_id.clone(),
+                    }),
+                }),
+                &context,
+            )
+            .await;
+        state.inner.cache.remove(CACHE_DOMAIN, &identity).await;
+        state.notify_changed();
+        let execution = result?;
+        let response = match execution.output {
+            stravia_vendor_sdk::OperationOutput::Allowance(response) => response,
+            _ => anyhow::bail!("vendor returned a non-allowance result"),
+        };
+        let result = response
+            .reset_result
+            .filter(|result| result.request_id == request.request_id)
+            .ok_or_else(|| anyhow::anyhow!("vendor did not acknowledge the reset request"))?;
+        use super::ProviderAllowanceResetOutcome as D;
+        use stravia_vendor_sdk::AllowanceResetOutcome as S;
+        let outcome = match result.outcome {
+            S::Reset => D::Reset,
+            S::AlreadyUsed => D::AlreadyUsed,
+            S::NotLimited => D::NotLimited,
+            S::Cooldown => D::Cooldown,
+            S::Ineligible => D::Ineligible,
+            S::Unavailable => D::Unavailable,
+        };
+        let result = super::ProviderAllowanceResetResult { outcome };
+        if let Some(submission) = state.inner.reset_requests.lock().await.get_mut(&key) {
+            submission.result = Some(result.clone());
+        }
+        Ok(result)
+    }
+
     pub async fn get_provider_allowance_suspension(
         &self,
         provider_id: &str,
@@ -609,6 +867,8 @@ async fn register_allowance_fetch(
                 if let Some(barrier) = publication_barrier {
                     let _ = barrier.await;
                 }
+                let operation_lock = state.operation_lock(&provider_id).await;
+                let _operation_guard = operation_lock.lock().await;
                 let result: anyhow::Result<Option<ProviderAllowanceSnapshot>> = async {
                     let Some(current) = admin.gw.storage.providers().get(&provider_id).await?
                     else {
@@ -1049,6 +1309,36 @@ fn map_allowance_response(
         "allowance result is empty"
     );
     let billing = response.billing.map(map_billing).transpose()?;
+    let resets = response
+        .resets
+        .map(|resets| super::ProviderAllowanceResets {
+            remaining: resets.remaining,
+            grants: resets
+                .grants
+                .into_iter()
+                .map(|grant| super::ProviderAllowanceResetGrant {
+                    id: grant.id,
+                    label: grant.label,
+                    remaining: grant.remaining,
+                    expires_at: grant.expires_at_unix_ms,
+                    usable: grant.usable,
+                    unavailable_reason: grant.unavailable_reason.map(|reason| {
+                        use super::ProviderAllowanceResetUnavailableReason as D;
+                        use stravia_vendor_sdk::AllowanceResetUnavailableReason as S;
+                        match reason {
+                            S::Expired => D::Expired,
+                            S::NotStarted => D::NotStarted,
+                            S::Paused => D::Paused,
+                            S::NotLimited => D::NotLimited,
+                            S::Cooldown => D::Cooldown,
+                            S::Ineligible => D::Ineligible,
+                            S::Exhausted => D::Exhausted,
+                            S::Unavailable => D::Unavailable,
+                        }
+                    }),
+                })
+                .collect(),
+        });
     Ok(ProviderAllowanceSnapshot {
         guard_supported: true,
         missing_guarded_keys: Vec::new(),
@@ -1060,6 +1350,7 @@ fn map_allowance_response(
         plan_label: trimmed_label(response.plan_label),
         account_label: trimmed_label(response.account_label),
         billing,
+        resets,
         status: ProviderAllowanceStatus::Fresh,
         allowances,
         models,
@@ -1504,6 +1795,7 @@ fn error_snapshot(provider: &Provider, error: ProviderAllowanceError) -> Provide
         plan_label: None,
         account_label: None,
         billing: None,
+        resets: None,
         status: ProviderAllowanceStatus::Error,
         fetched_at: None,
         allowances: Vec::new(),
@@ -1531,6 +1823,7 @@ fn stale_or_error_snapshot(
         plan_label: previous.plan_label.clone(),
         account_label: previous.account_label.clone(),
         billing: previous.billing.clone(),
+        resets: previous.resets.clone(),
         status: ProviderAllowanceStatus::Stale,
         fetched_at: previous.fetched_at.clone(),
         allowances: previous.allowances.clone(),
@@ -1589,6 +1882,7 @@ mod tests {
             plan_label: None,
             account_label: None,
             billing: None,
+            resets: None,
             status,
             allowances: vec![map_allowance(sdk_item("USD")).expect("allowance")],
             models: Vec::new(),
@@ -1799,6 +2093,7 @@ mod tests {
             plan_label: None,
             account_label: None,
             billing: None,
+            resets: None,
             status: ProviderAllowanceStatus::Fresh,
             allowances: vec![map_allowance(item).expect("allowance")],
             models: Vec::new(),

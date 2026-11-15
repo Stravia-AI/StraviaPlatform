@@ -14,6 +14,7 @@ import * as Collapsible from '#lib/components/ui/collapsible/index.js'
 import * as Accordion from '#lib/components/ui/accordion/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Alert from '#lib/components/ui/alert/index.js'
+import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
@@ -47,7 +48,7 @@ import type {
 import PageHeader from '#lib/components/page-header.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import { Badge, type BadgeVariant } from '#lib/components/ui/badge/index.js'
-import { Button } from '#lib/components/ui/button/index.js'
+import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
@@ -269,6 +270,72 @@ async function refreshProvider(provider: VisibleProvider): Promise<void> {
   else if (outcome.status === 'refreshed') {
     toast.success(m.allowances_refreshed_provider({ provider: provider.target.provider_name }))
   }
+}
+
+function resetGrantReason(grant: {
+  id: string
+  remaining: number
+  usable: boolean
+  unavailable_reason?: string | null
+  expires_at?: number | null
+}): string | undefined {
+  if (grant.expires_at != null && grant.expires_at <= Date.now()) return m.allowances_grant_expired()
+  if (grant.remaining === 0) return m.allowances_grant_exhausted()
+  if (grant.usable) return undefined
+  switch (grant.unavailable_reason) {
+    case 'expired':
+      return m.allowances_grant_expired()
+    case 'not_started':
+      return m.allowances_grant_not_started()
+    case 'paused':
+      return m.allowances_grant_paused()
+    case 'not_limited':
+      return m.allowances_grant_not_limited()
+    case 'cooldown':
+      return m.allowances_grant_cooldown()
+    case 'ineligible':
+      return m.allowances_grant_ineligible()
+    case 'exhausted':
+      return m.allowances_grant_exhausted()
+    default:
+      return m.allowances_grant_unavailable()
+  }
+}
+
+async function resetGrant(provider: VisibleProvider, grantId: string): Promise<void> {
+  const result = await reading.resetProvider(provider.target.provider_id, grantId)
+  if (result.status === 'ignored') return
+  if (result.status === 'failed') {
+    const unknownRequest =
+      result.error != null &&
+      typeof result.error === 'object' &&
+      'code' in result.error &&
+      result.error.code === 'PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST'
+    toast.error(unknownRequest ? m.allowances_reset_unknown_request() : m.allowances_reset_uncertain())
+    if (result.refreshError) toast.warning(m.allowances_reset_uncertain_refresh_failed())
+    return
+  }
+  switch (result.outcome) {
+    case 'reset':
+      toast.success(m.allowances_reset_success())
+      break
+    case 'already_used':
+      toast.info(m.allowances_reset_already_used())
+      break
+    case 'not_limited':
+      toast.info(m.allowances_reset_not_limited())
+      break
+    case 'cooldown':
+      toast.info(m.allowances_reset_cooldown())
+      break
+    case 'ineligible':
+      toast.info(m.allowances_reset_ineligible())
+      break
+    case 'unavailable':
+      toast.info(m.allowances_reset_unavailable())
+      break
+  }
+  if (result.refreshError) toast.warning(m.allowances_reset_refresh_failed())
 }
 
 function statusPresentation(status: ProviderAllowanceStatus): { label: string; variant: BadgeVariant } {
@@ -642,7 +709,8 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
     <Table.Body>
       {#each provider.allowances as allowance (allowance.key)}
         {@const triggered = triggeredSuspension(provider, allowance)}
-        <Table.Row class={cn('last:border-b-0 hover:bg-muted/30', triggered && 'bg-warning/10 hover:bg-warning/15')}>
+        <Table.Row
+          class={cn('h-8 last:border-b-0 hover:bg-muted/30', triggered && 'bg-warning/10 hover:bg-warning/15')}>
           <Table.Cell class="ps-0 py-1 whitespace-normal">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
               <span class="min-w-0 break-words font-medium">{allowanceLabel(allowance)}</span>
@@ -721,6 +789,16 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               <span class="relative z-10 inline-flex"><AllowanceSuspension {suspension} /></span>
             {/if}
             {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
+            <span
+              class="text-xs text-muted-foreground tabular-nums"
+              data-testid={`allowance-reset-count-${providerId}`}
+              aria-label={snapshot?.resets != null
+                ? m.allowances_free_resets({ count: String(snapshot.resets.remaining) })
+                : m.allowances_free_resets_unknown()}>
+              {snapshot?.resets != null
+                ? m.allowances_free_resets_compact({ count: String(snapshot.resets.remaining) })
+                : m.allowances_free_resets_compact_unknown()}
+            </span>
           </div>
         </div>
         <div class="col-span-2 ps-[1.625rem] @2xl:col-span-1 @2xl:col-start-2 @2xl:row-start-1 @2xl:ps-0">
@@ -744,20 +822,147 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       <!-- Collapsible.Content 收起时仍保留隐藏 DOM；只在展开时渲染详情，避免每行常驻一份明细与开关 -->
       {#if expanded}
         <Collapsible.Content class="border-t bg-muted/10 px-2 pb-2 @md:ps-8">
-          {#if snapshot?.account_label || snapshot?.plan_label}
-            <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1 py-2 text-xs text-muted-foreground">
-              {#if snapshot.account_label}
-                <dl class="flex min-w-0 flex-wrap items-baseline gap-x-2">
-                  <dt>{m.allowances_detail_account()}</dt>
-                  <dd class="break-all" data-testid={`allowance-account-${providerId}`}>{snapshot.account_label}</dd>
-                </dl>
+          <Collapsible.Root>
+            {#if snapshot?.account_label || snapshot?.plan_label || snapshot?.resets?.grants.length}
+              <div class="flex min-h-10 min-w-0 items-center gap-2">
+                <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  {#if snapshot.account_label}
+                    <dl class="flex min-w-0 flex-wrap items-baseline gap-x-2">
+                      <dt class="sr-only">{m.allowances_detail_account()}</dt>
+                      <dd class="break-all" data-testid={`allowance-account-${providerId}`}>
+                        {snapshot.account_label}
+                      </dd>
+                    </dl>
+                  {/if}
+                  {#if snapshot.plan_label}
+                    <span
+                      data-testid={`allowance-plan-${providerId}`}
+                      aria-label={m.allowances_plan({ plan: snapshot.plan_label })}>{snapshot.plan_label}</span>
+                  {/if}
+                </div>
+                {#if snapshot?.resets && snapshot.resets.grants.length > 0}
+                  <!-- 保留 40px 命中区，不撑大按钮的可见高度与焦点轮廓。 -->
+                  <Collapsible.Trigger
+                    class="group relative inline-flex h-6 shrink-0 items-center gap-1 rounded-sm text-xs font-medium after:absolute after:inset-x-0 after:-inset-y-2 after:content-['']">
+                    <ChevronRightIcon class="size-3.5 shrink-0 group-data-[state=open]:rotate-90" aria-hidden="true" />
+                    {m.allowances_reset_grants()}
+                  </Collapsible.Trigger>
+                {/if}
+              </div>
+            {/if}
+            {#if provider.pendingResetGrantId && !provider.resetting}
+              {@const pendingGrantId = provider.pendingResetGrantId}
+              <div class="flex flex-wrap items-center gap-2 py-2" role="status">
+                <p>{m.allowances_grant_pending()}</p>
+                {#if !provider.canReset}<p>{m.allowances_grant_stale()}</p>{/if}
+                <AlertDialog.Root>
+                  <AlertDialog.Trigger
+                    disabled={!provider.canReset || provider.resetting}
+                    class={buttonVariants({ variant: 'outline', size: 'sm' })}
+                    >{m.allowances_grant_retry()}</AlertDialog.Trigger>
+                  <AlertDialog.Content
+                    onOpenAutoFocus={(event: Event) => {
+                      event.preventDefault()
+                      document.getElementById(`allowance-retry-cancel-${providerId}`)?.focus()
+                    }}>
+                    <AlertDialog.Header>
+                      <AlertDialog.Title
+                        >{m.allowances_grant_retry_title({
+                          provider: provider.target.provider_name,
+                        })}</AlertDialog.Title>
+                      <AlertDialog.Description>{m.allowances_grant_retry_description()}</AlertDialog.Description>
+                    </AlertDialog.Header>
+                    <AlertDialog.Footer>
+                      <AlertDialog.Cancel id={`allowance-retry-cancel-${providerId}`}
+                        >{m.allowances_grant_cancel()}</AlertDialog.Cancel>
+                      <AlertDialog.Action variant="destructive" onclick={() => resetGrant(provider, pendingGrantId)}
+                        >{m.allowances_grant_retry()}</AlertDialog.Action>
+                    </AlertDialog.Footer>
+                  </AlertDialog.Content>
+                </AlertDialog.Root>
+              </div>
+            {/if}
+            {#if snapshot?.resets && snapshot.resets.grants.length > 0}
+              {#if provider.resetting}
+                <p class="py-2 text-sm" role="status">{m.allowances_grant_busy()}</p>
+              {:else if !provider.canReset && !provider.pendingResetGrantId}
+                <p class="py-2 text-sm" role="status">{m.allowances_grant_stale()}</p>
               {/if}
-              {#if snapshot.plan_label}
-                <span data-testid={`allowance-plan-${providerId}`}
-                  >{m.allowances_plan({ plan: snapshot.plan_label })}</span>
-              {/if}
-            </div>
-          {/if}
+              <Collapsible.Content>
+                <Table.Root class="table-fixed" aria-label={m.allowances_reset_grants()}>
+                  <Table.Header>
+                    <Table.Row class="hover:bg-transparent">
+                      <Table.Head class="h-9 ps-0 text-xs font-medium text-muted-foreground"
+                        ><span class="sr-only">{m.allowances_reset_grants()}</span></Table.Head>
+                      <Table.Head class="h-9 w-24 text-xs font-medium text-muted-foreground @md:w-44"
+                        >{m.allowances_remaining()}</Table.Head>
+                      <Table.Head class="hidden h-9 w-44 text-xs font-medium text-muted-foreground @2xl:table-cell"
+                        >{m.allowances_grant_expiry()}</Table.Head>
+                      <Table.Head class="h-9 w-24 whitespace-normal text-xs font-medium text-muted-foreground @md:w-36"
+                        ><span class="sr-only">{m.allowances_grant_action()}</span></Table.Head>
+                    </Table.Row>
+                  </Table.Header>
+                  <Table.Body>
+                    {#each snapshot.resets.grants as grant (grant.id)}
+                      {@const reason = resetGrantReason(grant)}
+                      <Table.Row class="h-8 last:border-b-0 hover:bg-muted/30">
+                        <Table.Cell class="ps-0 py-1 whitespace-normal">
+                          <span class="break-words font-medium">{grant.label}</span>
+                          <p
+                            class="font-technical mt-0.5 break-words text-xs text-muted-foreground tabular-nums @2xl:hidden">
+                            {grant.expires_at != null
+                              ? m.allowances_grant_until({ time: formatLogTime(grant.expires_at, localeState.current) })
+                              : m.allowances_grant_no_expiry()}
+                          </p>
+                          {#if reason}<p class="mt-0.5 text-xs">{reason}</p>{/if}
+                        </Table.Cell>
+                        <Table.Cell class="font-technical py-1 tabular-nums">{grant.remaining}</Table.Cell>
+                        <Table.Cell
+                          class="font-technical hidden py-1 text-muted-foreground tabular-nums @2xl:table-cell">
+                          {grant.expires_at != null
+                            ? formatLogTime(grant.expires_at, localeState.current)
+                            : m.allowances_grant_no_expiry()}
+                        </Table.Cell>
+                        <Table.Cell class="py-0.5">
+                          <AlertDialog.Root>
+                            <AlertDialog.Trigger
+                              disabled={!provider.canReset ||
+                                provider.resetting ||
+                                Boolean(provider.pendingResetGrantId) ||
+                                reason != null}
+                              class={buttonVariants({ variant: 'outline', size: 'xs' })}>
+                              {m.allowances_grant_reset()}
+                            </AlertDialog.Trigger>
+                            <AlertDialog.Content
+                              onOpenAutoFocus={(event: Event) => {
+                                event.preventDefault()
+                                document.getElementById(`allowance-reset-cancel-${providerId}-${grant.id}`)?.focus()
+                              }}>
+                              <AlertDialog.Header>
+                                <AlertDialog.Title
+                                  >{m.allowances_grant_confirm_title({
+                                    provider: provider.target.provider_name,
+                                    grant: grant.label,
+                                  })}</AlertDialog.Title>
+                                <AlertDialog.Description
+                                  >{m.allowances_grant_confirm_description()}</AlertDialog.Description>
+                              </AlertDialog.Header>
+                              <AlertDialog.Footer>
+                                <AlertDialog.Cancel id={`allowance-reset-cancel-${providerId}-${grant.id}`}
+                                  >{m.allowances_grant_cancel()}</AlertDialog.Cancel>
+                                <AlertDialog.Action variant="destructive" onclick={() => resetGrant(provider, grant.id)}
+                                  >{m.allowances_grant_confirm()}</AlertDialog.Action>
+                              </AlertDialog.Footer>
+                            </AlertDialog.Content>
+                          </AlertDialog.Root>
+                        </Table.Cell>
+                      </Table.Row>
+                    {/each}
+                  </Table.Body>
+                </Table.Root>
+              </Collapsible.Content>
+            {/if}
+          </Collapsible.Root>
           {#if provider.allowances.length > 0}
             {@render allowanceDetailTable(provider)}
           {/if}

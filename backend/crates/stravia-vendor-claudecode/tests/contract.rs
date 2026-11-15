@@ -23,8 +23,8 @@ use stravia_vendor_runtime::{
 };
 use stravia_vendor_sdk::net::{ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{
-    AuthRequest, AuthResponse, AuthStep, DiscoverRequest, ErrorKind, OperationInput,
-    OperationOutput, ProviderSnapshot,
+    AllowanceRequest, AllowanceResetOutcome, AllowanceResetRequest, AuthRequest, AuthResponse,
+    AuthStep, DiscoverRequest, ErrorKind, OperationInput, OperationOutput, ProviderSnapshot,
 };
 
 const UPSTREAM: &str = "https://api.anthropic.com";
@@ -433,6 +433,205 @@ async fn run(
     runtime
         .execute(plugin, CHANNEL, operation, encoded, scope)
         .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn allowance_read_queries_reset_status_without_consuming() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices {
+        routes: vec![
+            (
+                "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1",
+                200,
+                "application/json",
+                json!({"cedar_ember": {"eligible": true, "at_limit": true, "grants": []}})
+                    .to_string(),
+            ),
+            (
+                "https://api.anthropic.com/api/oauth/usage",
+                200,
+                "application/json",
+                json!({"five_hour": {"utilization": 50}}).to_string(),
+            ),
+            (
+                "https://api.anthropic.com/api/oauth/profile",
+                200,
+                "application/json",
+                "{}".into(),
+            ),
+        ],
+        ..MockServices::default()
+    });
+    let output = run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Allowance {
+            provider: signed_in(),
+            request: AllowanceRequest::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let OperationOutput::Allowance(allowance) = output else {
+        panic!("expected allowance")
+    };
+    assert_eq!(allowance.resets.unwrap().remaining, 0);
+    let requests = services.requests.lock();
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| request.method == "GET"));
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.url.ends_with("?cedar_ember=1&skip_spend=1"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_reset_status_lookup_leaves_balance_unknown() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices {
+        routes: vec![
+            (
+                "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1",
+                503,
+                "application/json",
+                "{}".into(),
+            ),
+            (
+                "https://api.anthropic.com/api/oauth/usage",
+                200,
+                "application/json",
+                json!({"five_hour": {"utilization": 50}}).to_string(),
+            ),
+            (
+                "https://api.anthropic.com/api/oauth/profile",
+                200,
+                "application/json",
+                "{}".into(),
+            ),
+        ],
+        ..MockServices::default()
+    });
+    let output = run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Allowance {
+            provider: signed_in(),
+            request: AllowanceRequest::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let OperationOutput::Allowance(allowance) = output else {
+        panic!("expected allowance")
+    };
+    assert!(allowance.resets.is_none());
+    assert!(
+        services
+            .requests
+            .lock()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reset_posts_once_to_profile_organization_and_rejects_unknown_result() {
+    let (runtime, plugin) = load_plugin().await;
+    let organization = "00000000-0000-4000-8000-0000000000bb";
+    let request_id = "00000000-0000-4000-8000-0000000000cc";
+    for result in ["reset", "future_result"] {
+        let services = Arc::new(MockServices {
+            routes: vec![
+                (
+                    "https://api.anthropic.com/api/oauth/profile",
+                    200,
+                    "application/json",
+                    json!({"organization": {"uuid": organization}}).to_string(),
+                ),
+                (
+                    "https://api.anthropic.com/api/organizations/",
+                    200,
+                    "application/json",
+                    json!({"result": result}).to_string(),
+                ),
+            ],
+            ..MockServices::default()
+        });
+        let output = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Allowance {
+                provider: signed_in(),
+                request: AllowanceRequest {
+                    model: None,
+                    reset: Some(AllowanceResetRequest {
+                        grant_id: "grant-one".into(),
+                        request_id: request_id.into(),
+                    }),
+                },
+            },
+        )
+        .await;
+        if result == "reset" {
+            let OperationOutput::Allowance(allowance) = output.unwrap() else {
+                panic!("expected allowance")
+            };
+            let result = allowance.reset_result.unwrap();
+            assert_eq!(result.request_id, request_id);
+            assert_eq!(result.outcome, AllowanceResetOutcome::Reset);
+        } else {
+            assert!(output.is_err());
+        }
+        let requests = services.requests.lock();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(
+            requests[0].headers.get("authorization"),
+            Some(b"Bearer sk-ant-oat01-test".as_slice())
+        );
+        assert_eq!(
+            requests[1].headers.get("authorization"),
+            requests[0].headers.get("authorization")
+        );
+        assert_eq!(
+            requests[1].url,
+            format!("https://api.anthropic.com/api/organizations/{organization}/reset_rate_limits")
+        );
+        let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(
+            body,
+            json!({"program": "cedar_ember", "grant_id": "grant-one", "request_id": request_id})
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_reset_request_never_contacts_upstream() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices::default());
+    let result = run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Allowance {
+            provider: signed_in(),
+            request: AllowanceRequest {
+                model: None,
+                reset: Some(AllowanceResetRequest {
+                    grant_id: "grant-one".into(),
+                    request_id: "not-a-uuid".into(),
+                }),
+            },
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(services.requests.lock().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

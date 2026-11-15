@@ -8,6 +8,9 @@ use std::{
 
 use stravia_core::Gateway;
 use stravia_core::admin::identity::{AdminAuth, AuthError, SessionTokens};
+use stravia_core::admin::provider_allowance::{
+    ProviderAllowanceResetRequest, ProviderAllowanceResetResult,
+};
 use stravia_core::connect_client_apply::{
     ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
     PlannedConnectClientFile, plan_connect_client_apply,
@@ -118,6 +121,31 @@ pub async fn get_admin_session(
         .get()
         .await
         .map_err(|_| "failed to establish the native admin session".to_string())
+}
+
+#[tauri::command]
+pub async fn reset_provider_allowance(
+    webview: tauri::WebviewWindow,
+    gateway: State<'_, Gateway>,
+    session: State<'_, NativeAdminSession>,
+    provider_id: String,
+    request: ProviderAllowanceResetRequest,
+) -> Result<ProviderAllowanceResetResult, String> {
+    if webview.label() != "main" {
+        return Err("provider allowance resets are available only to the main WebView".to_string());
+    }
+    session
+        .get()
+        .await
+        .map_err(|_| "failed to establish the native admin session".to_string())?;
+    gateway
+        .admin()
+        .reset_provider_allowance(&provider_id, request)
+        .await
+        .map_err(|error| {
+            tracing::error!(provider_id, %error, "Failed to reset provider allowance");
+            "failed to reset provider allowance".to_string()
+        })
 }
 
 #[tauri::command]

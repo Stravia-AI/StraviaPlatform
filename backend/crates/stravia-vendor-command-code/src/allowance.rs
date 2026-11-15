@@ -200,6 +200,8 @@ fn parse_credits(body: &[u8]) -> Option<AllowanceResponse> {
         }
     }
     (!allowances.is_empty()).then_some(AllowanceResponse {
+        resets: None,
+        reset_result: None,
         allowances,
         models: Vec::new(),
         plan_label: None,
