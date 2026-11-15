@@ -8,14 +8,15 @@ use serde::Deserialize;
 use serde_json::Value;
 use stravia_vendor_sdk::{
     AiResponse, AiStreamDelta, AllowanceAmount, AllowanceBilling, AllowanceBillingKind,
-    AllowanceBillingPeriod, AllowanceBillingPrice, AllowanceItem, AllowanceResponse, AuthCallback,
-    AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse,
-    AuthStep, CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField,
-    ConfigFieldKind, ConfigGroup, ConnectionCheckResponse, ConnectionCheckVerification,
-    DataCompatibility, DiscoverResponse, DiscoveredModel, ErrorKind, Fields, GuestHost,
-    ModelAllowance, NetworkDeclaration, Operation, OperationInput, OperationOutput, Options,
-    PluginError, ProviderDescriptor, ProviderSnapshot, Request, VendorDescriptor, VendorGuest,
-    VendorKind, read_http_body,
+    AllowanceBillingPeriod, AllowanceBillingPrice, AllowanceItem, AllowanceRequest,
+    AllowanceResetResult, AllowanceResets, AllowanceResponse, AuthCallback, AuthCallbackPort,
+    AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, AuthResponse, AuthStep,
+    CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
+    ConfigGroup, ConnectionCheckResponse, ConnectionCheckVerification, DataCompatibility,
+    DiscoverResponse, DiscoveredModel, ErrorKind, Fields, GuestHost, ModelAllowance,
+    NetworkDeclaration, Operation, OperationInput, OperationOutput, Options, PluginError,
+    ProviderDescriptor, ProviderSnapshot, Request, VendorDescriptor, VendorGuest, VendorKind,
+    read_http_body,
 };
 
 struct ManagementContractVendor;
@@ -95,6 +96,8 @@ struct AllowanceWire {
     resets_at: Option<i64>,
     second_remaining: Option<String>,
     model_remaining: Option<String>,
+    resets: Option<AllowanceResets>,
+    reset_result: Option<AllowanceResetResult>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,8 +257,8 @@ impl VendorGuest for ManagementContractVendor {
             (Operation::Discover, OperationInput::Discover { provider, request }) => {
                 discover(host, &provider, request.cursor).map(OperationOutput::Discover)
             }
-            (Operation::Allowance, OperationInput::Allowance { provider, .. }) => {
-                allowance(host, &provider).map(OperationOutput::Allowance)
+            (Operation::Allowance, OperationInput::Allowance { provider, request }) => {
+                allowance(host, &provider, request).map(OperationOutput::Allowance)
             }
             (Operation::Infer, OperationInput::Infer { provider, request }) => {
                 infer(host, &provider, &request)
@@ -416,16 +419,14 @@ fn discover(
 fn allowance(
     host: &GuestHost,
     provider: &ProviderSnapshot,
+    request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
     require_connection(provider)?;
-    let wire: AllowanceWire = post_json(
-        host,
-        provider,
-        "allowance",
-        "/allowance",
-        serde_json::json!({}),
-        true,
-    )?;
+    let (path, body) = match request.reset {
+        Some(reset) => ("/reset", serde_json::to_value(reset).map_err(invalid)?),
+        None => ("/allowance", serde_json::json!({})),
+    };
+    let wire: AllowanceWire = post_json(host, provider, "allowance", path, body, true)?;
     advance_state(host)?;
     let mut allowances = Vec::new();
     for (key, remaining) in [
@@ -478,6 +479,8 @@ fn allowance(
         .into_iter()
         .collect();
     Ok(AllowanceResponse {
+        resets: wire.resets,
+        reset_result: wire.reset_result,
         allowances,
         models,
         plan_label: Some(format!("fixture-{}", Profile::current().version())),

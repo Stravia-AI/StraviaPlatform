@@ -58,7 +58,12 @@ function invalidAllowance(id: string): ProviderAllowanceSnapshot {
   }
 }
 
-function harness(ids: string[], overrides: Partial<ProviderAllowanceReadApi> = {}, staleTime = 0) {
+function harness(
+  ids: string[],
+  overrides: Partial<ProviderAllowanceReadApi> = {},
+  staleTime = 0,
+  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>,
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime } } })
   const calls = { reads: [] as string[], refreshes: [] as string[], guards: [] as { id: string; keys: string[] }[] }
   const deferreds: { finish(): void }[] = []
@@ -77,6 +82,7 @@ function harness(ids: string[], overrides: Partial<ProviderAllowanceReadApi> = {
   let notifications = 0
   const controller = new ProviderAllowanceReadController({
     client,
+    storage,
     now: () => 4_000_000_000_000,
     api: {
       providers: overrides.providers ?? (() => Promise.resolve(providers)),
@@ -90,6 +96,7 @@ function harness(ids: string[], overrides: Partial<ProviderAllowanceReadApi> = {
         if (calls.refreshes.length === ids.length) batchInvoked.resolve()
         return overrides.refresh?.(id) ?? Promise.resolve(allowance(id, 'refreshed'))
       },
+      reset: overrides.reset ?? (() => Promise.resolve({ outcome: 'reset' })),
       replaceGuards: (id, keys) => {
         calls.guards.push({ id, keys })
         guardInvoked.resolve()
@@ -146,6 +153,208 @@ function harness(ids: string[], overrides: Partial<ProviderAllowanceReadApi> = {
     notifications: () => notifications,
   }
 }
+
+describe('provider allowance reset', () => {
+  function resetAllowance(id: string): ProviderAllowanceSnapshot {
+    return {
+      ...allowance(id),
+      resets: {
+        remaining: 2,
+        grants: [
+          { id: 'grant', label: 'Grant', remaining: 1, usable: true, expires_at: null, unavailable_reason: null },
+          { id: 'other', label: 'Other', remaining: 1, usable: true, expires_at: null, unavailable_reason: null },
+        ],
+      },
+    }
+  }
+
+  function storage() {
+    const values = new Map<string, string>()
+    return {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value)
+      },
+      removeItem: (key: string) => {
+        values.delete(key)
+      },
+    }
+  }
+
+  test('blocks double submission and reports success separately from refresh failure', async () => {
+    const pending = Promise.withResolvers<{ outcome: 'reset' }>()
+    const invoked = Promise.withResolvers<void>()
+    const refreshError = new Error('refresh failed')
+    const requests: string[] = []
+    const h = harness(
+      ['one'],
+      {
+        get: (id) => Promise.resolve(resetAllowance(id)),
+        reset: async (_id, request) => {
+          requests.push(request.request_id)
+          invoked.resolve()
+          return pending.promise
+        },
+        refresh: () => Promise.reject(refreshError),
+      },
+      0,
+      storage(),
+    )
+    try {
+      await h.ready()
+      await h.waitFor(() => h.entry('one').canReset)
+      const first = h.controller.resetProvider('one', 'grant')
+      await invoked.promise
+      expect(h.entry('one').resetting).toBe(true)
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'ignored' })
+      pending.resolve({ outcome: 'reset' })
+      expect(await first).toEqual({ status: 'completed', outcome: 'reset', refreshError })
+      expect(requests).toHaveLength(1)
+      expect(h.calls.refreshes).toEqual(['one'])
+      expect(h.entry('one').canReset).toBe(false)
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test('does not submit stale, unsupported, unusable or unpersisted resets', async () => {
+    const requests: string[] = []
+    const h = harness(
+      ['one'],
+      {
+        get: (id) => Promise.resolve(resetAllowance(id)),
+        reset: (_id, request) => {
+          requests.push(request.request_id)
+          return Promise.resolve({ outcome: 'reset' })
+        },
+      },
+      0,
+      {
+        getItem: () => null,
+        setItem: () => {
+          throw new Error('storage unavailable')
+        },
+        removeItem: () => {},
+      },
+    )
+    try {
+      await h.ready()
+      await h.waitFor(() => h.entry('one').canReset)
+      const snapshot = resetAllowance('one')
+      h.client.setQueryData(['provider-allowance', 'one'], { ...snapshot, status: 'stale' })
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'ignored' })
+      h.client.setQueryData(['provider-allowance', 'one'], { ...snapshot, resets: undefined })
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'ignored' })
+      h.client.setQueryData(['provider-allowance', 'one'], {
+        ...snapshot,
+        resets: { remaining: 1, grants: [{ ...snapshot.resets!.grants[0], usable: false }] },
+      })
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'ignored' })
+      h.client.setQueryData(['provider-allowance', 'one'], snapshot)
+      const result = await h.controller.resetProvider('one', 'grant')
+      expect(result.status).toBe('failed')
+      expect(requests).toEqual([])
+      expect(h.calls.refreshes).toEqual([])
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test('keeps the pending request after an unknown retry and retries it in the same controller', async () => {
+    const saved = storage()
+    const requests: Array<{ grant_id: string; request_id: string; retry?: boolean }> = []
+    const timeout = new Error('timeout')
+    const unknown = Object.assign(new Error('unknown reset request'), {
+      code: 'PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST',
+    })
+    const h = harness(
+      ['one'],
+      {
+        get: (id) => Promise.resolve(resetAllowance(id)),
+        refresh: (id) => Promise.resolve(resetAllowance(id)),
+        reset: (_id, request) => {
+          requests.push(request)
+          return Promise.reject(requests.length === 1 ? timeout : unknown)
+        },
+      },
+      0,
+      saved,
+    )
+    try {
+      await h.ready()
+      await h.waitFor(() => h.entry('one').canReset)
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'failed', error: timeout })
+      const pending = saved.getItem('provider-allowance-reset:one')
+      expect(pending).not.toBeNull()
+      await h.waitFor(() => h.entry('one').canReset)
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'failed', error: unknown })
+      expect(saved.getItem('provider-allowance-reset:one')).toBe(pending)
+      expect(h.entry('one').pendingResetGrantId).toBe('grant')
+      await h.waitFor(() => h.entry('one').canReset)
+      expect(await h.controller.resetProvider('one', 'other')).toEqual({ status: 'ignored' })
+      expect(await h.controller.resetProvider('one', 'grant')).toEqual({ status: 'failed', error: unknown })
+      expect(saved.getItem('provider-allowance-reset:one')).toBe(pending)
+      expect(requests).toHaveLength(3)
+      expect(requests.map((request) => request.retry)).toEqual([false, true, true])
+      expect(requests.map((request) => request.request_id)).toEqual([
+        requests[0].request_id,
+        requests[0].request_id,
+        requests[0].request_id,
+      ])
+      expect(requests.map((request) => request.grant_id)).toEqual(['grant', 'grant', 'grant'])
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test('reuses an uncertain request across controller instances and blocks another grant', async () => {
+    const saved = storage()
+    const requests: Array<{ request_id: string; retry?: boolean }> = []
+    const error = new Error('timeout')
+    const api: Partial<ProviderAllowanceReadApi> = {
+      get: (id) => Promise.resolve(resetAllowance(id)),
+      refresh: (id) => Promise.resolve(resetAllowance(id)),
+      reset: (_id, request) => {
+        requests.push(request)
+        if (requests.length === 1) return Promise.reject(error)
+        return Promise.resolve({ outcome: 'already_used' })
+      },
+    }
+    const first = harness(['one'], api, 0, saved)
+    try {
+      await first.ready()
+      await first.waitFor(() => first.entry('one').canReset)
+      expect(await first.controller.resetProvider('one', 'grant')).toEqual({ status: 'failed', error })
+      expect(first.entry('one').pendingResetGrantId).toBe('grant')
+    } finally {
+      await first.cleanup()
+    }
+    const second = harness(
+      ['one'],
+      { ...api, get: (id) => Promise.resolve({ ...resetAllowance(id), resets: { remaining: 0, grants: [] } }) },
+      0,
+      saved,
+    )
+    try {
+      await second.ready()
+      await second.waitFor(() => second.entry('one').canReset)
+      expect(second.entry('one').pendingResetGrantId).toBe('grant')
+      expect(await second.controller.resetProvider('one', 'other')).toEqual({ status: 'ignored' })
+      expect(await second.controller.resetProvider('one', 'grant')).toEqual({
+        status: 'completed',
+        outcome: 'already_used',
+      })
+      expect(requests).toHaveLength(2)
+      expect(requests[0].retry).toBe(false)
+      expect(requests[1].retry).toBe(true)
+      expect(requests[1].request_id).toBe(requests[0].request_id)
+      expect(requests[0].request_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+      expect(second.entry('one').pendingResetGrantId).toBeUndefined()
+    } finally {
+      await second.cleanup()
+    }
+  })
+})
 
 describe('provider allowance reads', () => {
   test('invalid credentials pause only that provider and newer credential evidence resumes reads', async () => {

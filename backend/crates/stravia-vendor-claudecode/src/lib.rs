@@ -327,10 +327,9 @@ pub fn execute(
         OperationInput::Discover { provider, request } => {
             discover(host, &provider, request).map(OperationOutput::Discover)
         }
-        OperationInput::Allowance {
-            provider,
-            request: _,
-        } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
+        OperationInput::Allowance { provider, request } => {
+            allowance::execute(host, &provider, request).map(OperationOutput::Allowance)
+        }
         other => Err(common::unsupported(
             &format!("{:?}", other.operation()),
             VENDOR_ID,

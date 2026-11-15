@@ -205,6 +205,8 @@ fn parse_response(body: &[u8]) -> Result<AllowanceResponse, ()> {
     }
     let billing = billing_for_plan(plan_label.as_deref());
     Ok(AllowanceResponse {
+        resets: None,
+        reset_result: None,
         allowances,
         models: Vec::new(),
         plan_label,

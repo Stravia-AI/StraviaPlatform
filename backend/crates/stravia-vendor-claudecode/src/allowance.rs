@@ -13,7 +13,9 @@ use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::net::Request;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
-    AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
+    AllowanceBillingPrice, AllowanceItem, AllowanceRequest, AllowanceResetGrant,
+    AllowanceResetOutcome, AllowanceResetRequest, AllowanceResetResult,
+    AllowanceResetUnavailableReason, AllowanceResets, AllowanceResponse, ConnectionCheckResponse,
     ConnectionCheckVerification, GuestHost, ModelAllowance, PluginError, ProviderSnapshot,
     read_http_body,
 };
@@ -32,8 +34,12 @@ const SEVEN_DAYS: u64 = 604_800;
 pub(crate) fn execute(
     host: &GuestHost,
     provider: &ProviderSnapshot,
+    request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
     let access_token = access_token(provider)?;
+    if let Some(reset) = request.reset {
+        return execute_reset(host, access_token, reset);
+    }
     let response = host.http_start(usage_request(access_token), &crate::net_options())?;
     let status = response.status()?;
     let headers = response.headers()?;
@@ -52,10 +58,155 @@ pub(crate) fn execute(
     response.plan_label = plan.as_deref().and_then(display_name);
     // 等级能确定时才给出计费建议；价格为 Anthropic 官方页面公布的美元月费。
     response.billing = plan.as_deref().and_then(billing_for_plan);
+    response.resets = fetch_resets(host, access_token);
     // 只取登录时保存的邮箱；`organization_name` 是组织名，不是账号标识。
     response.account_label =
         first_account_label([provider.credentials.get("email").and_then(Value::as_str)]);
     Ok(response)
+}
+
+fn fetch_resets(host: &GuestHost, token: &str) -> Option<AllowanceResets> {
+    let mut request = usage_request(token);
+    request.url = format!("{USAGE_URL}?cedar_ember=1&skip_spend=1");
+    let response = host.http_start(request, &crate::net_options()).ok()?;
+    if !(200..300).contains(&response.status().ok()?) {
+        return None;
+    }
+    let body = read_http_body(&response, MAX_USAGE_BODY).ok()?;
+    let payload: Value = serde_json::from_slice(&body).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    parse_resets(&payload, i64::try_from(now.as_millis()).ok()?)
+}
+
+fn optional_timestamp(object: &Map<String, Value>, field: &str) -> Option<Option<i64>> {
+    match object.get(field) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => timestamp_millis(value).map(Some),
+    }
+}
+
+fn parse_resets(payload: &Value, now: i64) -> Option<AllowanceResets> {
+    use AllowanceResetUnavailableReason as Reason;
+    let program = payload.get("cedar_ember")?.as_object()?;
+    let eligible = program.get("eligible")?.as_bool()?;
+    let at_limit = program.get("at_limit")?.as_bool()?;
+    let cooldown = optional_timestamp(program, "cooldown_until")?;
+    let mut remaining = 0u32;
+    let mut grants = Vec::new();
+    for value in program.get("grants")?.as_array()? {
+        let grant = value.as_object()?;
+        let id = grant.get("id").and_then(non_empty)?.to_owned();
+        let count = u32::try_from(grant.get("resets_left")?.as_u64()?).ok()?;
+        let starts = optional_timestamp(grant, "starts_at")?;
+        let expires = optional_timestamp(grant, "ends_at")?;
+        if !expires.is_some_and(|at| at <= now) {
+            remaining = remaining.checked_add(count)?;
+        }
+        let paused = grant.get("paused")?.as_bool()?;
+        let usable_now = grant.get("usable_now")?.as_bool()?;
+        let requires_limit = grant.get("use_requires_limit")?.as_bool()?;
+        let reason = if count == 0 {
+            Some(Reason::Exhausted)
+        } else if expires.is_some_and(|at| at <= now) {
+            Some(Reason::Expired)
+        } else if starts.is_some_and(|at| at > now) {
+            Some(Reason::NotStarted)
+        } else if paused {
+            Some(Reason::Paused)
+        } else if !eligible {
+            Some(Reason::Ineligible)
+        } else if cooldown.is_some_and(|at| at > now) {
+            Some(Reason::Cooldown)
+        } else if requires_limit && !at_limit {
+            Some(Reason::NotLimited)
+        } else if !usable_now {
+            Some(Reason::Unavailable)
+        } else {
+            None
+        };
+        grants.push(AllowanceResetGrant {
+            id,
+            label: grant.get("label").and_then(non_empty).map(str::to_owned),
+            remaining: count,
+            expires_at_unix_ms: expires,
+            usable: reason.is_none(),
+            unavailable_reason: reason,
+        });
+    }
+    Some(AllowanceResets { remaining, grants })
+}
+
+fn execute_reset(
+    host: &GuestHost,
+    token: &str,
+    reset: AllowanceResetRequest,
+) -> Result<AllowanceResponse, PluginError> {
+    if uuid::Uuid::parse_str(&reset.request_id).is_err() || reset.grant_id.trim().is_empty() {
+        return Err(crate::invalid("Invalid Claude reset request"));
+    }
+    let profile = fetch_profile(host, token)
+        .ok_or_else(|| crate::invalid("Claude profile unavailable for reset"))?;
+    let org = profile
+        .pointer("/organization/uuid")
+        .and_then(Value::as_str)
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .ok_or_else(|| crate::invalid("Claude profile has no valid organization UUID"))?;
+    let url = format!("https://api.anthropic.com/api/organizations/{org}/reset_rate_limits");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "program": "cedar_ember", "grant_id": reset.grant_id, "request_id": reset.request_id,
+    }))
+    .map_err(|_| crate::invalid("Invalid Claude reset request"))?;
+    let response = host.http_start(
+        crate::net_request(
+            "POST",
+            url,
+            vec![
+                ("accept".into(), "application/json".into()),
+                ("anthropic-beta".into(), "oauth-2025-04-20".into()),
+                ("content-type".into(), "application/json".into()),
+                ("user-agent".into(), cli_user_agent(DEFAULT_CLIENT_VERSION)),
+                ("authorization".into(), format!("Bearer {token}")),
+            ],
+            body,
+        ),
+        &crate::net_options(),
+    )?;
+    let status = response.status()?;
+    let headers = response.headers()?;
+    let body = read_http_body(&response, MAX_USAGE_BODY)?;
+    if !(200..300).contains(&status) {
+        return Err(common::upstream_error(status, &headers, &body));
+    }
+    let payload: Value = serde_json::from_slice(&body)
+        .map_err(|_| crate::invalid("Claude reset returned invalid JSON"))?;
+    let outcome = reset_outcome(&payload)
+        .ok_or_else(|| crate::invalid("Claude reset returned unknown result"))?;
+    Ok(AllowanceResponse {
+        allowances: Vec::new(),
+        models: Vec::new(),
+        plan_label: None,
+        account_label: None,
+        billing: None,
+        resets: None,
+        reset_result: Some(AllowanceResetResult {
+            request_id: reset.request_id,
+            outcome,
+        }),
+    })
+}
+
+fn reset_outcome(payload: &Value) -> Option<AllowanceResetOutcome> {
+    Some(match payload.get("result")?.as_str()? {
+        "reset" => AllowanceResetOutcome::Reset,
+        "already_used" => AllowanceResetOutcome::AlreadyUsed,
+        "not_limited" => AllowanceResetOutcome::NotLimited,
+        "cooldown" => AllowanceResetOutcome::Cooldown,
+        "ineligible" => AllowanceResetOutcome::Ineligible,
+        "unavailable" => AllowanceResetOutcome::Unavailable,
+        _ => return None,
+    })
 }
 
 /// 固定 Anthropic 账号 usage 端点只验证 OAuth 凭据；它不请求配置的 Base URL，
@@ -129,6 +280,10 @@ fn validate_usage(value: &Value) -> Result<(), PluginError> {
 /// 取规范化订阅标识（见 `profile_plan`）。profile 接口只用于展示与计费建议，
 /// 失败或无 `user:profile` 权限时降级为 `None`，不让一次附加请求拖垮额度刷新。
 fn fetch_profile_plan(host: &GuestHost, access_token: &str) -> Option<String> {
+    profile_plan(&fetch_profile(host, access_token)?)
+}
+
+fn fetch_profile(host: &GuestHost, access_token: &str) -> Option<Value> {
     let response = host
         .http_start(
             crate::net_request(
@@ -150,7 +305,7 @@ fn fetch_profile_plan(host: &GuestHost, access_token: &str) -> Option<String> {
         return None;
     }
     let body = read_http_body(&response, MAX_PROFILE_BODY).ok()?;
-    profile_plan(&serde_json::from_slice(&body).ok()?)
+    serde_json::from_slice(&body).ok()
 }
 
 /// 依据 `/api/oauth/profile` 得到规范化订阅标识：`free` / `pro` / `max` /
@@ -341,6 +496,8 @@ fn parse(payload: &Value) -> Option<AllowanceResponse> {
         account_label: None,
         // 计费建议要等 profile 判定订阅等级后才能填；usage 响应本身不含计费信息。
         billing: None,
+        resets: None,
+        reset_result: None,
     })
 }
 
@@ -468,6 +625,109 @@ fn timestamp_millis(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reset_grants_keep_individual_expiry_and_eligibility() {
+        let grant = |id: &str, left: u32, ends: &str, usable: bool| {
+            json!({
+                "id": id, "label": id, "resets_left": left, "starts_at": null,
+                "ends_at": ends, "paused": false, "usable_now": usable, "use_requires_limit": true
+            })
+        };
+        let payload = json!({"cedar_ember": {"eligible": true, "at_limit": true,
+        "cooldown_until": null, "grants": [
+            grant("active", 2, "2030-01-01T00:00:00Z", true),
+            grant("expired", 1, "2020-01-01T00:00:00Z", true),
+            grant("empty", 0, "2030-01-01T00:00:00Z", false)
+        ]}});
+        let resets = parse_resets(&payload, 1_735_689_600_000).unwrap();
+        assert_eq!(resets.remaining, 2);
+        assert_eq!(resets.grants[1].remaining, 1);
+        assert_eq!(resets.grants[0].expires_at_unix_ms, Some(1_893_456_000_000));
+        assert!(resets.grants[0].usable);
+        assert_eq!(
+            resets.grants[1].unavailable_reason,
+            Some(AllowanceResetUnavailableReason::Expired)
+        );
+        assert_eq!(
+            resets.grants[2].unavailable_reason,
+            Some(AllowanceResetUnavailableReason::Exhausted)
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_reset_status_is_unknown_not_zero() {
+        assert!(parse_resets(&json!({}), 0).is_none());
+        assert!(
+            parse_resets(
+                &json!({"cedar_ember": {"eligible": true, "at_limit": true}}),
+                0
+            )
+            .is_none()
+        );
+        assert!(parse_resets(&json!({"cedar_ember": {"eligible": true, "at_limit": true, "grants": [{"id": "x", "resets_left": -1}]}}), 0).is_none());
+        let zero = parse_resets(
+            &json!({"cedar_ember": {"eligible": true, "at_limit": false, "grants": []}}),
+            0,
+        )
+        .unwrap();
+        assert_eq!(zero.remaining, 0);
+        assert!(zero.grants.is_empty());
+    }
+
+    #[test]
+    fn reset_grants_report_independent_blocking_reasons() {
+        let payload = json!({"cedar_ember": {"eligible": true, "at_limit": false, "grants": [
+            {"id": "future", "resets_left": 1, "starts_at": "2030-01-01T00:00:00Z", "ends_at": null, "paused": false, "usable_now": false, "use_requires_limit": false},
+            {"id": "paused", "resets_left": 1, "paused": true, "usable_now": false, "use_requires_limit": false},
+            {"id": "not-limited", "resets_left": 1, "paused": false, "usable_now": false, "use_requires_limit": true},
+            {"id": "unknown", "resets_left": 1, "paused": false, "usable_now": false, "use_requires_limit": false}
+        ]}});
+        let resets = parse_resets(&payload, 1_735_689_600_000).unwrap();
+        assert_eq!(resets.remaining, 4);
+        let reasons: Vec<_> = resets
+            .grants
+            .iter()
+            .map(|grant| grant.unavailable_reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                Some(AllowanceResetUnavailableReason::NotStarted),
+                Some(AllowanceResetUnavailableReason::Paused),
+                Some(AllowanceResetUnavailableReason::NotLimited),
+                Some(AllowanceResetUnavailableReason::Unavailable)
+            ]
+        );
+        let mut ineligible = payload.clone();
+        ineligible["cedar_ember"]["eligible"] = json!(false);
+        assert_eq!(
+            parse_resets(&ineligible, 1_735_689_600_000).unwrap().grants[2].unavailable_reason,
+            Some(AllowanceResetUnavailableReason::Ineligible)
+        );
+        let mut cooldown = payload;
+        cooldown["cedar_ember"]["cooldown_until"] = json!("2030-01-01T00:00:00Z");
+        assert_eq!(
+            parse_resets(&cooldown, 1_735_689_600_000).unwrap().grants[2].unavailable_reason,
+            Some(AllowanceResetUnavailableReason::Cooldown)
+        );
+    }
+
+    #[test]
+    fn reset_result_requires_known_business_outcome() {
+        for (value, expected) in [
+            ("reset", AllowanceResetOutcome::Reset),
+            ("already_used", AllowanceResetOutcome::AlreadyUsed),
+            ("not_limited", AllowanceResetOutcome::NotLimited),
+            ("cooldown", AllowanceResetOutcome::Cooldown),
+            ("ineligible", AllowanceResetOutcome::Ineligible),
+            ("unavailable", AllowanceResetOutcome::Unavailable),
+        ] {
+            assert_eq!(reset_outcome(&json!({"result": value})), Some(expected));
+        }
+        assert!(reset_outcome(&json!({"result": "future_code"})).is_none());
+        assert!(reset_outcome(&json!({})).is_none());
+    }
 
     /// 展示名和计费建议都由同一个规范化等级派生，旧用例通过这里继续校验展示名。
     fn profile_plan_label(profile: &Value) -> Option<String> {

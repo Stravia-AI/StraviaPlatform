@@ -61,6 +61,36 @@ export interface ProviderAllowanceGuardUpdate {
   target: ProviderAllowanceTarget
 }
 
+export type ProviderAllowanceResetUnavailableReason =
+  'expired' | 'not_started' | 'paused' | 'not_limited' | 'cooldown' | 'ineligible' | 'exhausted' | 'unavailable'
+
+export type ProviderAllowanceResetOutcome =
+  'reset' | 'already_used' | 'not_limited' | 'cooldown' | 'ineligible' | 'unavailable'
+
+export interface ProviderAllowanceResetGrant {
+  id: string
+  label: string
+  remaining: number
+  expires_at?: number | null
+  usable: boolean
+  unavailable_reason?: ProviderAllowanceResetUnavailableReason | null
+}
+
+export interface ProviderAllowanceResets {
+  remaining: number
+  grants: ProviderAllowanceResetGrant[]
+}
+
+export interface ProviderAllowanceResetRequest {
+  grant_id: string
+  request_id: string
+  retry?: boolean
+}
+
+export interface ProviderAllowanceResetResult {
+  outcome: ProviderAllowanceResetOutcome
+}
+
 export interface ProviderAllowanceSnapshot {
   provider_id: string
   guard_supported: boolean
@@ -72,6 +102,7 @@ export interface ProviderAllowanceSnapshot {
   plan_label?: string
   account_label?: string
   billing?: ProviderAllowanceBilling
+  resets?: ProviderAllowanceResets | null
   status: ProviderAllowanceStatus
   allowances: Allowance[]
   models: ModelAllowance[]

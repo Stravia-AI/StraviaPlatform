@@ -204,10 +204,9 @@ pub fn execute(
             auth::execute(host, &provider, request).map(OperationOutput::Auth)
         }
         OperationInput::Discover { provider, request } => discover(host, provider, request),
-        OperationInput::Allowance {
-            provider,
-            request: _,
-        } => allowance::execute(host, &provider).map(OperationOutput::Allowance),
+        OperationInput::Allowance { provider, request } => {
+            allowance::execute(host, &provider, request).map(OperationOutput::Allowance)
+        }
         OperationInput::ConfigValidation {
             provider: _,
             request,

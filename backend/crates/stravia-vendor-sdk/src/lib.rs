@@ -51,8 +51,10 @@ pub use envelope::{
 };
 pub use guest::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
-    AllowanceBillingPrice, AllowanceItem, AllowanceRequest, AllowanceResponse, AuthRequest,
-    AuthResponse, AuthStep, CatalogSyncOutcome, CatalogSyncRequest, ConfigValidationRequest,
+    AllowanceBillingPrice, AllowanceItem, AllowanceRequest, AllowanceResetGrant,
+    AllowanceResetOutcome, AllowanceResetRequest, AllowanceResetResult,
+    AllowanceResetUnavailableReason, AllowanceResets, AllowanceResponse, AuthRequest, AuthResponse,
+    AuthStep, CatalogSyncOutcome, CatalogSyncRequest, ConfigValidationRequest,
     ConfigValidationResponse, ConnectionCheckRequest, ConnectionCheckResponse,
     ConnectionCheckVerification, DiscoverRequest, DiscoverResponse, DiscoveredModel, ErrorKind,
     MediaArtifact, MediaImageAspectRatio, MediaImageRequest, MediaImageResolution,

@@ -69,6 +69,8 @@ pub(super) fn response(
     billing: Option<AllowanceBilling>,
 ) -> AllowanceResponse {
     AllowanceResponse {
+        resets: None,
+        reset_result: None,
         allowances,
         models: Vec::new(),
         plan_label: None,
@@ -442,6 +444,8 @@ fn parse_zai(payload: &Value) -> Result<AllowanceResponse, ()> {
     let plan = data.get("level").and_then(non_empty).and_then(display_name);
     let billing = billing::zai(plan.as_deref());
     Ok(AllowanceResponse {
+        resets: None,
+        reset_result: None,
         allowances,
         models: Vec::new(),
         plan_label: plan,
@@ -688,6 +692,8 @@ fn parse_wafer(payload: &Value) -> Result<AllowanceResponse, ()> {
         .map(str::to_owned);
     let billing = billing::wafer(plan.as_deref());
     Ok(AllowanceResponse {
+        resets: None,
+        reset_result: None,
         allowances: vec![allowance],
         models: Vec::new(),
         plan_label: plan,

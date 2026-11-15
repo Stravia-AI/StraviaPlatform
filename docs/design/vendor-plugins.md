@@ -175,6 +175,17 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 
 `openai-codex` 的 `credits.balance` 与 `spend_control.individual_limit` 金额按官方客户端语义使用 credits，输出现有 `unit="credits"` 且不声明 currency；保留数值和小数，不将点数当作 USD，不推测兑换率或缩放。WebUI 沿用通用额度单位本地化，中文显示「点」、英文显示 `credits`。更新独立 Codex 组件后刷新额度，既有 guard key、认证与数据库 schema 不变。固定官方源码证据、数值边界与验证见 [Codex 额度字段单位研究](../research/codex-credit-units.md)。
 
+### Codex 与 Claude Code 一次性额度重置
+
+额度页区分窗口自动恢复时间、OAuth 凭据有效期和一次性重置权益的有效期。更新宿主并重新构建、导入 Codex 与 Claude Code 独立插件后，点击供应商详情账号、套餐行的「重置权益」，即可展开默认折叠的表格，查看上游报告的剩余次数、逐份权益到期时间和不可用状态。确认框保留消耗一次免费权益、不可撤销及不会购买的后果提示，并默认聚焦取消。查询失败或上游未提供状态时保持未知，不按零处理，也不以套餐名称推算权益。
+
+- Codex 读取 `GET /wham/rate-limit-reset-credits`，余额采用上游 `available_count`，不按可能被截断的 `credits[]` 长度计算。确认后才发送 `POST /wham/rate-limit-reset-credits/consume`，携带选定 `credit_id` 和 UUID `redeem_request_id`。只允许已确认的个人账户权益；工作区账户及未知账户类型不开放兑换。协议依据为 [OpenAI 官方客户端实现](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs)及[重置说明](https://help.openai.com/en/articles/20001498-how-resets-work-in-codex)。
+- Claude Code 读取 `GET /api/oauth/usage?cedar_ember=1&skip_spend=1` 的 `cedar_ember.grants`，逐份保留 `resets_left`、`ends_at` 和可用资格；确认后向同一 OAuth 账户 profile 中的组织发送 `POST /api/organizations/{organization_uuid}/reset_rate_limits`，携带 `program: "cedar_ember"`、`grant_id` 和 `request_id`。不把独立的 `juniper_tide` 计划混入这些权益。协议核对自[官方 2.1.325 发行物](https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/2.1.325)；资格与不可撤销影响见[官方说明](https://support.claude.com/en/articles/17007452-what-is-a-limit-reset)。
+
+管理命令为 `POST /api/v1/provider-allowances/{provider_id}/reset`，JSON 包含 `grant_id`、`request_id` 和可选的 `retry`（默认 `false`）；桌面端适配相同 Core 行为。SDK 通过现有 Allowance JSON 请求的可选 `reset` 字段和响应的 `resets`、`reset_result` 表达显式命令，不修改 WIT 枚举；旧组件没有声明权益时不可重置，响应必须明确确认原请求 ID。自动刷新、连接检查及守护任务均不消费权益，也不购买付费重置。只有业务结果明确为 `reset` 才报告重置成功；后置额度读取失败单独提示，不把已兑换说成未执行。
+
+首次提交先取得 fresh 上游状态并校验权益；宿主按连接串行执行并绑定凭据、组件和权益身份，消费请求不自动刷新授权后重放。结果不明时，页面保留原请求 ID，用户重试复用该 ID，不另起一次消费。未决记录只在当前服务进程内：重启后携带 `retry: true` 的旧请求返回 `PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST`，不提交上游，需先到上游 Usage 核对。重置不会直接解除额度暂停，仍须新的成功读取证据。上述客户端内部协议并非公开稳定接口；离线协议与界面测试不代表真实账户获得权益，也未实际消耗权益。
+
 ### Devin 耗尽窗口
 
 Devin 的 `GetUserStatus` 在 `PlanStatus` 中报告每日、每周剩余百分比和重置时间。按照 [Protobuf 的隐式字段存在性规则](https://protobuf.dev/programming-guides/field_presence/)，剩余百分比为零时可以省略对应字段；只要上游仍报告该窗口的非零重置时间，插件就保留窗口，输出已用 `100%`、耗尽状态和原重置时间。明确编码的零值也保留；比例和非零重置时间都未报告时，不凭空生成额度窗口。

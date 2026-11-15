@@ -32,6 +32,7 @@ export class ProviderAllowanceRead {
   retryTargets = (): Promise<void> => this.#controller.retryTargets()
   retryProvider = (id: string): Promise<void> => this.#controller.retryProvider(id)
   refreshProvider = (id: string) => this.#controller.refreshProvider(id)
+  resetProvider = (id: string, grantId: string) => this.#controller.resetProvider(id, grantId)
   refreshAll = () => this.#controller.refreshAll()
   setGuard = (id: string, key: string, checked: boolean): Promise<void> => this.#controller.setGuard(id, key, checked)
 }

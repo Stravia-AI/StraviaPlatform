@@ -108,6 +108,8 @@ fn parse(payload: &Value) -> Option<AllowanceResponse> {
         return None;
     }
     Some(AllowanceResponse {
+        resets: None,
+        reset_result: None,
         allowances: items.into_values().collect(),
         models: Vec::new(),
         plan_label: None,

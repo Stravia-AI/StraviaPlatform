@@ -58,6 +58,8 @@ pub struct ProviderAllowanceSnapshot {
     /// automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<ProviderAllowanceBilling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets: Option<ProviderAllowanceResets>,
     pub status: ProviderAllowanceStatus,
     pub allowances: Vec<Allowance>,
     pub models: Vec<ModelAllowance>,
@@ -68,6 +70,68 @@ pub struct ProviderAllowanceSnapshot {
     pub guard_supported: bool,
     pub missing_guarded_keys: Vec<String>,
     pub suspension: Option<crate::db::models::AllowanceSuspension>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderAllowanceResetError {
+    #[error(
+        "This process cannot confirm the previous reset outcome. Review upstream Usage before taking further action."
+    )]
+    UnknownRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderAllowanceResetRequest {
+    pub grant_id: String,
+    pub request_id: String,
+    /// True only when reconciling a previously submitted request ID.
+    #[serde(default)]
+    pub retry: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderAllowanceResetResult {
+    pub outcome: ProviderAllowanceResetOutcome,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAllowanceResetOutcome {
+    Reset,
+    AlreadyUsed,
+    NotLimited,
+    Cooldown,
+    Ineligible,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderAllowanceResets {
+    pub remaining: u32,
+    pub grants: Vec<ProviderAllowanceResetGrant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderAllowanceResetGrant {
+    pub id: String,
+    pub label: Option<String>,
+    pub remaining: u32,
+    pub expires_at: Option<i64>,
+    pub usable: bool,
+    pub unavailable_reason: Option<ProviderAllowanceResetUnavailableReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAllowanceResetUnavailableReason {
+    Expired,
+    NotStarted,
+    Paused,
+    NotLimited,
+    Cooldown,
+    Ineligible,
+    Exhausted,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

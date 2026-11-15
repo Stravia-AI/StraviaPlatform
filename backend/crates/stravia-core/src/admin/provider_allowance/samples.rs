@@ -267,6 +267,7 @@ mod tests {
             plan_label: None,
             account_label: None,
             billing: None,
+            resets: None,
             status,
             allowances: vec![allowance("account")],
             models: vec![ModelAllowance {

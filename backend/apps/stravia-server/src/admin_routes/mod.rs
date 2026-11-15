@@ -33,7 +33,7 @@ mod provider_allowances;
 use connect_clients::preview_connect_client_handler;
 use provider_allowances::{
     get_provider_allowance, list_provider_allowances, refresh_provider_allowance,
-    replace_provider_allowance_guards,
+    replace_provider_allowance_guards, reset_provider_allowance,
 };
 
 #[cfg(test)]
@@ -342,6 +342,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route(
             "/provider-allowances/{provider_id}/refresh",
             post(refresh_provider_allowance),
+        )
+        .route(
+            "/provider-allowances/{provider_id}/reset",
+            post(reset_provider_allowance),
         )
         .route(
             "/provider-allowances/{provider_id}/guards",

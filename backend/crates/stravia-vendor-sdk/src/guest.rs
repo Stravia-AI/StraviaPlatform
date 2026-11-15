@@ -677,6 +677,60 @@ pub struct CatalogSyncOutcome {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllowanceRequest {
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<AllowanceResetRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowanceResetRequest {
+    pub grant_id: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowanceResets {
+    pub remaining: u32,
+    pub grants: Vec<AllowanceResetGrant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowanceResetGrant {
+    pub id: String,
+    pub label: Option<String>,
+    pub remaining: u32,
+    pub expires_at_unix_ms: Option<i64>,
+    pub usable: bool,
+    pub unavailable_reason: Option<AllowanceResetUnavailableReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowanceResetUnavailableReason {
+    Expired,
+    NotStarted,
+    Paused,
+    NotLimited,
+    Cooldown,
+    Ineligible,
+    Exhausted,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowanceResetResult {
+    pub request_id: String,
+    pub outcome: AllowanceResetOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowanceResetOutcome {
+    Reset,
+    AlreadyUsed,
+    NotLimited,
+    Cooldown,
+    Ineligible,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -713,6 +767,10 @@ pub struct ModelAllowance {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllowanceResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets: Option<AllowanceResets>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_result: Option<AllowanceResetResult>,
     #[serde(default)]
     pub allowances: Vec<AllowanceItem>,
     #[serde(default)]

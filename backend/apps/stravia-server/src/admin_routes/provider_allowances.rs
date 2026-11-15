@@ -4,7 +4,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use stravia_core::Gateway;
-use stravia_core::admin::provider_allowance::ProviderAllowanceGuardError;
+use stravia_core::admin::provider_allowance::{
+    ProviderAllowanceGuardError, ProviderAllowanceResetError, ProviderAllowanceResetRequest,
+};
 
 #[derive(Deserialize)]
 pub(super) struct ReplaceProviderAllowanceGuards {
@@ -122,6 +124,36 @@ pub(super) async fn refresh_provider_allowance(
             internal_error(
                 "PROVIDER_ALLOWANCE_REFRESH_FAILED",
                 "failed to refresh provider allowance",
+            )
+        }
+    }
+}
+
+pub(super) async fn reset_provider_allowance(
+    State(gateway): State<Gateway>,
+    Path(provider_id): Path<String>,
+    Json(input): Json<ProviderAllowanceResetRequest>,
+) -> impl IntoResponse {
+    match gateway
+        .admin()
+        .reset_provider_allowance(&provider_id, input)
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({ "data": result })).into_response(),
+        Err(error) => {
+            if matches!(
+                error.downcast_ref::<ProviderAllowanceResetError>(),
+                Some(ProviderAllowanceResetError::UnknownRequest)
+            ) {
+                return (StatusCode::CONFLICT, Json(serde_json::json!({
+                    "error": "This process cannot confirm the previous reset outcome. Review upstream Usage before taking further action.",
+                    "code": "PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST",
+                }))).into_response();
+            }
+            tracing::error!(provider_id, %error, "Failed to reset provider allowance");
+            internal_error(
+                "PROVIDER_ALLOWANCE_RESET_FAILED",
+                "failed to reset provider allowance",
             )
         }
     }

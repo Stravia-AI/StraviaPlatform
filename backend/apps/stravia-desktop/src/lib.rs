@@ -231,6 +231,7 @@ pub fn run() {
             startup::exit_desktop,
             startup::open_desktop_logs,
             commands::get_admin_session,
+            commands::reset_provider_allowance,
             commands::get_server_port,
             commands::get_desktop_port_state,
             commands::set_desktop_fixed_port,

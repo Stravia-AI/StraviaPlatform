@@ -646,6 +646,11 @@ impl Gateway {
         request: VendorRequest,
         context: &VendorCallContext,
     ) -> anyhow::Result<VendorExecution> {
+        if matches!(&request, VendorRequest::Allowance(input) if input.reset.is_some()) {
+            return self
+                .execute_prepared_vendor_once(prepared, request, context)
+                .await;
+        }
         if !matches!(
             prepared.kind,
             Operation::Discover
@@ -720,7 +725,7 @@ impl Gateway {
         })
     }
 
-    async fn execute_prepared_vendor_once(
+    pub(crate) async fn execute_prepared_vendor_once(
         &self,
         mut prepared: PreparedVendorExecution,
         request: VendorRequest,

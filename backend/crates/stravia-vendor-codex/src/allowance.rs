@@ -7,18 +7,25 @@ use stravia_vendor_common::connection_check::{self, invalid_response};
 use stravia_vendor_common::plan::display_name;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceBilling, AllowanceBillingKind, AllowanceBillingPeriod,
-    AllowanceBillingPrice, AllowanceItem, AllowanceResponse, ConnectionCheckResponse,
+    AllowanceBillingPrice, AllowanceItem, AllowanceRequest, AllowanceResetGrant,
+    AllowanceResetOutcome, AllowanceResetRequest, AllowanceResetResult,
+    AllowanceResetUnavailableReason, AllowanceResets, AllowanceResponse, ConnectionCheckResponse,
     ConnectionCheckVerification, ErrorKind, GuestHost, PluginError, ProviderSnapshot, net::Request,
 };
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 pub(super) fn execute(
     host: &GuestHost,
     provider: &ProviderSnapshot,
+    request: AllowanceRequest,
 ) -> Result<AllowanceResponse, PluginError> {
     let access_token = access_token(provider)?;
+    if let Some(reset) = request.reset {
+        return consume_reset(host, provider, access_token, &reset);
+    }
     let response = host.http_start(
         usage_request(provider, access_token),
         &crate::codex::http_options()?,
@@ -42,6 +49,35 @@ pub(super) fn execute(
         upstream_status: None,
     })?;
     parsed.account_label = account_label(&provider.credentials);
+    let limited = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("rate_limit").cloned())
+        .and_then(|rate| {
+            match (
+                rate.get("limit_reached").and_then(Value::as_bool),
+                rate.get("allowed").and_then(Value::as_bool),
+            ) {
+                (Some(true), Some(true)) | (Some(false), Some(false)) => None,
+                (Some(true), _) | (_, Some(false)) => Some(true),
+                (Some(false), _) | (_, Some(true)) => Some(false),
+                _ => None,
+            }
+        });
+    let personal_plan = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("plan_type")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+        })
+        .is_some_and(|plan| {
+            matches!(
+                plan.as_str(),
+                "free" | "go" | "plus" | "pro" | "prolite" | "promax"
+            )
+        });
+    parsed.resets = read_resets(host, provider, access_token, limited, personal_plan);
     Ok(parsed)
 }
 
@@ -92,6 +128,168 @@ fn usage_request(provider: &ProviderSnapshot, access_token: &str) -> Request {
         headers: crate::codex::http_fields(headers),
         body: Vec::new(),
     }
+}
+
+fn reset_request(
+    provider: &ProviderSnapshot,
+    token: &str,
+    reset: Option<&AllowanceResetRequest>,
+) -> Request {
+    let mut request = usage_request(provider, token);
+    request.url = RESET_URL.into();
+    if let Some(reset) = reset {
+        request.method = "POST".into();
+        request.url.push_str("/consume");
+        let mut headers = vec![
+            ("user-agent".into(), crate::codex::user_agent()),
+            ("authorization".into(), format!("Bearer {token}")),
+            ("accept".into(), "*/*".into()),
+            ("content-type".into(), "application/json".into()),
+        ];
+        if let Some(id) = account_id(provider, token) {
+            headers.push(("chatgpt-account-id".into(), id));
+        }
+        request.headers = crate::codex::http_fields(headers);
+        request.body = serde_json::to_vec(&serde_json::json!({
+            "redeem_request_id": reset.request_id,
+            "credit_id": reset.grant_id,
+        }))
+        .expect("reset request is serializable");
+    }
+    request
+}
+
+fn read_resets(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    token: &str,
+    limited: Option<bool>,
+    personal_plan: bool,
+) -> Option<AllowanceResets> {
+    let response = host
+        .http_start(
+            reset_request(provider, token, None),
+            &crate::codex::http_options().ok()?,
+        )
+        .ok()?;
+    if !(200..300).contains(&response.status().ok()?) {
+        return None;
+    }
+    let body = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES).ok()?;
+    parse_resets(
+        &body,
+        limited,
+        personal_plan,
+        chrono::Utc::now().timestamp_millis(),
+    )
+}
+
+fn parse_resets(
+    body: &[u8],
+    limited: Option<bool>,
+    personal_plan: bool,
+    now: i64,
+) -> Option<AllowanceResets> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object()?;
+    let remaining = u32::try_from(object.get("available_count")?.as_u64()?).ok()?;
+    let credits = object.get("credits")?.as_array()?;
+    let mut grants = Vec::with_capacity(credits.len());
+    for credit in credits {
+        let credit = credit.as_object()?;
+        let id = credit
+            .get("id")?
+            .as_str()
+            .filter(|id| !id.is_empty())?
+            .to_owned();
+        let status = credit.get("status").and_then(Value::as_str);
+        let expiry = credit.get("expires_at");
+        let expires_at_unix_ms = field_timestamp(credit, "expires_at");
+        let reason = if status == Some("expired")
+            || expires_at_unix_ms.is_some_and(|expires| expires <= now)
+        {
+            Some(AllowanceResetUnavailableReason::Expired)
+        } else if status != Some("available")
+            || credit.get("reset_type").and_then(Value::as_str) != Some("codex_rate_limits")
+            || expiry.is_none()
+            || expiry.is_some_and(|value| !value.is_null() && expires_at_unix_ms.is_none())
+        {
+            Some(AllowanceResetUnavailableReason::Unavailable)
+        } else if !personal_plan {
+            Some(AllowanceResetUnavailableReason::Ineligible)
+        } else if remaining == 0 {
+            Some(AllowanceResetUnavailableReason::Exhausted)
+        } else if limited == Some(false) {
+            Some(AllowanceResetUnavailableReason::NotLimited)
+        } else if limited.is_none() {
+            Some(AllowanceResetUnavailableReason::Unavailable)
+        } else {
+            None
+        };
+        grants.push(AllowanceResetGrant {
+            id,
+            label: credit.get("title").and_then(non_empty).map(str::to_owned),
+            remaining: u32::from(status == Some("available")),
+            expires_at_unix_ms,
+            usable: reason.is_none(),
+            unavailable_reason: reason,
+        });
+    }
+    Some(AllowanceResets { remaining, grants })
+}
+
+fn reset_outcome(body: &[u8]) -> Result<AllowanceResetOutcome, PluginError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|_| invalid_response("Codex reset response is not JSON"))?;
+    match value.get("code").and_then(Value::as_str) {
+        Some("reset") => Ok(AllowanceResetOutcome::Reset),
+        Some("nothing_to_reset") => Ok(AllowanceResetOutcome::NotLimited),
+        Some("no_credit") => Ok(AllowanceResetOutcome::Unavailable),
+        Some("already_redeemed") => Ok(AllowanceResetOutcome::AlreadyUsed),
+        _ => Err(invalid_response("Codex reset response has an unknown code")),
+    }
+}
+
+fn consume_reset(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    token: &str,
+    reset: &AllowanceResetRequest,
+) -> Result<AllowanceResponse, PluginError> {
+    if uuid::Uuid::parse_str(&reset.request_id).is_err() || reset.grant_id.is_empty() {
+        return Err(invalid_response(
+            "Codex reset request has an invalid identifier",
+        ));
+    }
+    let response = host.http_start(
+        reset_request(provider, token, Some(reset)),
+        &crate::codex::http_options()?,
+    )?;
+    let status = response.status()?;
+    if !(200..300).contains(&status) {
+        return Err(PluginError {
+            kind: if matches!(status, 401 | 403) {
+                ErrorKind::Auth
+            } else {
+                ErrorKind::upstream_unknown()
+            },
+            message: "upstream reset request failed".into(),
+            upstream_status: Some(status),
+        });
+    }
+    let body = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES)?;
+    Ok(AllowanceResponse {
+        allowances: Vec::new(),
+        models: Vec::new(),
+        plan_label: None,
+        account_label: None,
+        billing: None,
+        resets: None,
+        reset_result: Some(AllowanceResetResult {
+            request_id: reset.request_id.clone(),
+            outcome: reset_outcome(&body)?,
+        }),
+    })
 }
 
 /// 只接受 wham/usage 已知字段的实际类型；窗口为空或整个字段缺省仍是合法
@@ -247,6 +445,8 @@ fn parse(body: &[u8]) -> Option<AllowanceResponse> {
         plan_label: plan.as_deref().and_then(display_name),
         account_label: None,
         billing: plan.as_deref().and_then(billing_for_plan),
+        resets: None,
+        reset_result: None,
     })
 }
 
@@ -441,7 +641,108 @@ mod tests {
     use serde_json::{Value, json};
     use stravia_vendor_sdk::{AllowanceAmount, AllowanceBillingKind, AllowanceBillingPeriod};
 
-    use super::{account_label, billing_for_plan, parse, validate_usage};
+    use super::{
+        RESET_URL, USAGE_URL, account_label, billing_for_plan, parse, parse_resets, reset_outcome,
+        reset_request, validate_usage,
+    };
+    use stravia_vendor_sdk::{AllowanceResetOutcome, AllowanceResetRequest, ProviderSnapshot};
+
+    #[test]
+    fn reset_status_uses_authoritative_balance_and_independent_expiries() {
+        let body = br#"{"available_count":5,"credits":[
+            {"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":"2030-01-01T00:00:00Z"},
+            {"id":"b","status":"available","reset_type":"codex_rate_limits","expires_at":null},
+            {"id":"c","status":"available","reset_type":"codex_rate_limits","expires_at":"2020-01-01T00:00:00Z"},
+            {"id":"d","status":"available","reset_type":"codex_rate_limits"}
+        ]}"#;
+        let state = parse_resets(body, Some(true), true, 1_700_000_000_000).unwrap();
+        assert_eq!(state.remaining, 5);
+        assert_eq!(state.grants[0].expires_at_unix_ms, Some(1_893_456_000_000));
+        assert!(state.grants[0].usable);
+        assert_eq!(state.grants[1].expires_at_unix_ms, None);
+        assert!(state.grants[1].usable);
+        assert!(!state.grants[2].usable);
+        assert!(!state.grants[3].usable);
+        assert!(
+            !parse_resets(body, None, true, 1_700_000_000_000)
+                .unwrap()
+                .grants[0]
+                .usable
+        );
+        assert!(
+            !parse_resets(body, Some(false), true, 1_700_000_000_000)
+                .unwrap()
+                .grants[0]
+                .usable
+        );
+        assert!(
+            !parse_resets(body, Some(true), false, 1_700_000_000_000)
+                .unwrap()
+                .grants[0]
+                .usable
+        );
+        assert!(parse_resets(br#"{"credits":[]}"#, Some(true), true, 0).is_none());
+        assert_eq!(
+            parse_resets(
+                br#"{"available_count":0,"credits":[]}"#,
+                Some(true),
+                true,
+                0
+            )
+            .unwrap()
+            .remaining,
+            0
+        );
+        let zero = parse_resets(br#"{"available_count":0,"credits":[{"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":null}]}"#, Some(true), true, 0).unwrap();
+        assert!(!zero.grants[0].usable);
+    }
+
+    #[test]
+    fn reset_business_codes_are_not_http_success() {
+        for (code, expected) in [
+            ("reset", AllowanceResetOutcome::Reset),
+            ("nothing_to_reset", AllowanceResetOutcome::NotLimited),
+            ("no_credit", AllowanceResetOutcome::Unavailable),
+            ("already_redeemed", AllowanceResetOutcome::AlreadyUsed),
+        ] {
+            assert_eq!(
+                reset_outcome(serde_json::json!({"code":code}).to_string().as_bytes()).unwrap(),
+                expected
+            );
+        }
+        assert!(reset_outcome(br#"{"code":"future"}"#).is_err());
+        assert!(reset_outcome(br#"{}"#).is_err());
+    }
+
+    #[test]
+    fn reads_never_build_a_consume_request() {
+        let provider: ProviderSnapshot = serde_json::from_value(
+            json!({"provider_id":"p","channel":"codex","base_url":"","protocol":""}),
+        )
+        .unwrap();
+        let usage = super::usage_request(&provider, "test");
+        assert_eq!(
+            (usage.method.as_str(), usage.url.as_str()),
+            ("GET", USAGE_URL)
+        );
+        let read = reset_request(&provider, "test", None);
+        assert_eq!(
+            (read.method.as_str(), read.url.as_str()),
+            ("GET", RESET_URL)
+        );
+        assert!(read.body.is_empty());
+        let reset = AllowanceResetRequest {
+            grant_id: "credit-1".into(),
+            request_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+        };
+        let post = reset_request(&provider, "test", Some(&reset));
+        assert_eq!(post.method, "POST");
+        assert_eq!(post.url, format!("{RESET_URL}/consume"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&post.body).unwrap(),
+            json!({"credit_id":"credit-1","redeem_request_id":"123e4567-e89b-12d3-a456-426614174000"})
+        );
+    }
 
     fn credentials_with_id_token(claims: Value) -> BTreeMap<String, Value> {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
