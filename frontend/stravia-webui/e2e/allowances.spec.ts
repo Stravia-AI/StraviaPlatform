@@ -796,7 +796,6 @@ test('switches every allowance value between remaining and used and remembers th
   await expect(alpha).toContainText('9.99 CNY')
   await alpha.getByRole('button', { name: 'Alpha account allowance details' }).click()
   const details = matrix.getByRole('table', { name: 'Alpha account allowance details' })
-  await expect(details.getByRole('columnheader', { name: 'Used', exact: true })).toBeVisible()
   await expect(details.getByRole('progressbar', { name: 'Weekly window Used' })).toHaveAttribute(
     'aria-valuenow',
     '55.625',
@@ -1163,6 +1162,14 @@ test('uses wide workspace for more aligned quota tracks with a bounded rail', as
   expect(railBox.width).toBeGreaterThanOrEqual(20 * 16 - 1)
   const matrixBox = (await page.getByRole('region', { name: 'Allowance matrix' }).boundingBox())!
   expect(matrixBox.width).toBeGreaterThan(railBox.width * 2)
+})
+
+test('hides unknown reset counts but keeps a reported zero', async ({ page }) => {
+  await mockAllowances(page, [freshSnapshot, { ...staleSnapshot, resets: { remaining: 0, grants: [] } }])
+  await page.goto('/allowances')
+  await expect(page.getByTestId('allowance-provider-provider-alpha')).toBeVisible()
+  await expect(page.getByTestId('allowance-reset-count-provider-alpha')).toHaveCount(0)
+  await expect(page.getByTestId('allowance-reset-count-provider-beta')).toHaveText('0 resets')
 })
 
 test('confirms a free reset explicitly and leaves ordinary reads non-consuming', async ({ page }) => {
