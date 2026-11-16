@@ -49,20 +49,6 @@ pub(super) fn execute(
         upstream_status: None,
     })?;
     parsed.account_label = account_label(&provider.credentials);
-    let limited = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|value| value.get("rate_limit").cloned())
-        .and_then(|rate| {
-            match (
-                rate.get("limit_reached").and_then(Value::as_bool),
-                rate.get("allowed").and_then(Value::as_bool),
-            ) {
-                (Some(true), Some(true)) | (Some(false), Some(false)) => None,
-                (Some(true), _) | (_, Some(false)) => Some(true),
-                (Some(false), _) | (_, Some(true)) => Some(false),
-                _ => None,
-            }
-        });
     let personal_plan = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|value| {
@@ -77,7 +63,7 @@ pub(super) fn execute(
                 "free" | "go" | "plus" | "pro" | "prolite" | "promax"
             )
         });
-    parsed.resets = read_resets(host, provider, access_token, limited, personal_plan);
+    parsed.resets = read_resets(host, provider, access_token, personal_plan);
     Ok(parsed)
 }
 
@@ -163,7 +149,6 @@ fn read_resets(
     host: &GuestHost,
     provider: &ProviderSnapshot,
     token: &str,
-    limited: Option<bool>,
     personal_plan: bool,
 ) -> Option<AllowanceResets> {
     let response = host
@@ -178,7 +163,6 @@ fn read_resets(
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES).ok()?;
     parse_resets(
         &body,
-        limited,
         personal_plan,
         chrono::Utc::now().timestamp_millis(),
     )
@@ -186,7 +170,6 @@ fn read_resets(
 
 fn parse_resets(
     body: &[u8],
-    limited: Option<bool>,
     personal_plan: bool,
     now: i64,
 ) -> Option<AllowanceResets> {
@@ -219,10 +202,6 @@ fn parse_resets(
             Some(AllowanceResetUnavailableReason::Ineligible)
         } else if remaining == 0 {
             Some(AllowanceResetUnavailableReason::Exhausted)
-        } else if limited == Some(false) {
-            Some(AllowanceResetUnavailableReason::NotLimited)
-        } else if limited.is_none() {
-            Some(AllowanceResetUnavailableReason::Unavailable)
         } else {
             None
         };
@@ -655,7 +634,7 @@ mod tests {
             {"id":"c","status":"available","reset_type":"codex_rate_limits","expires_at":"2020-01-01T00:00:00Z"},
             {"id":"d","status":"available","reset_type":"codex_rate_limits"}
         ]}"#;
-        let state = parse_resets(body, Some(true), true, 1_700_000_000_000).unwrap();
+        let state = parse_resets(body, true, 1_700_000_000_000).unwrap();
         assert_eq!(state.remaining, 5);
         assert_eq!(state.grants[0].expires_at_unix_ms, Some(1_893_456_000_000));
         assert!(state.grants[0].usable);
@@ -664,28 +643,15 @@ mod tests {
         assert!(!state.grants[2].usable);
         assert!(!state.grants[3].usable);
         assert!(
-            !parse_resets(body, None, true, 1_700_000_000_000)
+            !parse_resets(body, false, 1_700_000_000_000)
                 .unwrap()
                 .grants[0]
                 .usable
         );
-        assert!(
-            !parse_resets(body, Some(false), true, 1_700_000_000_000)
-                .unwrap()
-                .grants[0]
-                .usable
-        );
-        assert!(
-            !parse_resets(body, Some(true), false, 1_700_000_000_000)
-                .unwrap()
-                .grants[0]
-                .usable
-        );
-        assert!(parse_resets(br#"{"credits":[]}"#, Some(true), true, 0).is_none());
+        assert!(parse_resets(br#"{"credits":[]}"#, true, 0).is_none());
         assert_eq!(
             parse_resets(
                 br#"{"available_count":0,"credits":[]}"#,
-                Some(true),
                 true,
                 0
             )
@@ -693,7 +659,7 @@ mod tests {
             .remaining,
             0
         );
-        let zero = parse_resets(br#"{"available_count":0,"credits":[{"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":null}]}"#, Some(true), true, 0).unwrap();
+        let zero = parse_resets(br#"{"available_count":0,"credits":[{"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":null}]}"#, true, 0).unwrap();
         assert!(!zero.grants[0].usable);
     }
 

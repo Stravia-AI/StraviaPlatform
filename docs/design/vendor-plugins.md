@@ -177,9 +177,9 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 
 ### Codex 与 Claude Code 一次性额度重置
 
-额度页区分窗口自动恢复时间、OAuth 凭据有效期和一次性重置权益的有效期。更新宿主并重新构建、导入 Codex 与 Claude Code 独立插件后，点击供应商详情账号、套餐行的「重置权益」，即可展开默认折叠的表格，查看上游报告的剩余次数、逐份权益到期时间和不可用状态。确认框保留消耗一次免费权益、不可撤销及不会购买的后果提示，并默认聚焦取消。查询失败或上游未提供状态时保持未知，不按零处理，也不以套餐名称推算权益。
+额度页区分窗口自动恢复时间、OAuth 凭据有效期和一次性重置权益的有效期。更新宿主并重新构建、导入 Codex 与 Claude Code 独立插件后，点击供应商详情账号、套餐行的「重置权益」，即可展开默认折叠的明细。额度与权益明细不显示表头，每项一行，保留读屏列名；不可用原因与权益名称同行，窄屏允许内容换行。只有上游明确报告重置次数时才显示计数，零次仍显示，未知时不显示。确认框保留消耗一次免费权益、不可撤销及不会购买的后果提示，并默认聚焦取消。查询失败或上游未提供状态时不按零处理，也不以套餐名称推算权益。
 
-- Codex 读取 `GET /wham/rate-limit-reset-credits`，余额采用上游 `available_count`，不按可能被截断的 `credits[]` 长度计算。确认后才发送 `POST /wham/rate-limit-reset-credits/consume`，携带选定 `credit_id` 和 UUID `redeem_request_id`。只允许已确认的个人账户权益；工作区账户及未知账户类型不开放兑换。协议依据为 [OpenAI 官方客户端实现](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs)及[重置说明](https://help.openai.com/en/articles/20001498-how-resets-work-in-codex)。
+- Codex 读取 `GET /wham/rate-limit-reset-credits`，余额采用上游 `available_count`，不按可能被截断的 `credits[]` 长度计算。确认后才发送 `POST /wham/rate-limit-reset-credits/consume`，携带选定 `credit_id` 和 UUID `redeem_request_id`。只允许已确认的个人账户权益；工作区账户及未知账户类型不开放兑换。有效权益不因普通用量的 `rate_limit.allowed`、`limit_reached` 或这些字段缺失而禁用；这些字段不证明重置资格，最终是否执行以兑换接口的业务结果为准，包括 `nothing_to_reset`。协议依据为 [OpenAI 官方客户端实现](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs)及[重置说明](https://help.openai.com/en/articles/20001498-how-resets-work-in-codex)。
 - Claude Code 读取 `GET /api/oauth/usage?cedar_ember=1&skip_spend=1` 的 `cedar_ember.grants`，逐份保留 `resets_left`、`ends_at` 和可用资格；确认后向同一 OAuth 账户 profile 中的组织发送 `POST /api/organizations/{organization_uuid}/reset_rate_limits`，携带 `program: "cedar_ember"`、`grant_id` 和 `request_id`。不把独立的 `juniper_tide` 计划混入这些权益。协议核对自[官方 2.1.325 发行物](https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/2.1.325)；资格与不可撤销影响见[官方说明](https://support.claude.com/en/articles/17007452-what-is-a-limit-reset)。
 
 管理命令为 `POST /api/v1/provider-allowances/{provider_id}/reset`，JSON 包含 `grant_id`、`request_id` 和可选的 `retry`（默认 `false`）；桌面端适配相同 Core 行为。SDK 通过现有 Allowance JSON 请求的可选 `reset` 字段和响应的 `resets`、`reset_result` 表达显式命令，不修改 WIT 枚举；旧组件没有声明权益时不可重置，响应必须明确确认原请求 ID。自动刷新、连接检查及守护任务均不消费权益，也不购买付费重置。只有业务结果明确为 `reset` 才报告重置成功；后置额度读取失败单独提示，不把已兑换说成未执行。

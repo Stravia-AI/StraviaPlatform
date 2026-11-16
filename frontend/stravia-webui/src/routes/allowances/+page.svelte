@@ -664,63 +664,68 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
 {/snippet}
 
 {#snippet guardControl(provider: VisibleProvider, snapshot: ProviderAllowanceSnapshot, allowance: Allowance)}
-  <Switch
-    bind:checked={
-      () => allowance.guarded,
-      (checked: boolean) => {
-        void reading.setGuard(snapshot.provider_id, allowance.key, checked)
+  <span class="inline-flex items-center gap-2">
+    <span class="hidden text-xs text-muted-foreground @xl:inline">{m.allowances_guard_column()}</span>
+    <Tooltip.Root delayDuration={0}>
+      <Tooltip.Trigger
+        type="button"
+        class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground"
+        aria-label={m.allowances_guard_help_label()}>
+        <CircleHelpIcon class="size-3.5" />
+      </Tooltip.Trigger>
+      <Tooltip.Content class="max-w-80 text-pretty">{m.allowances_guard_help()}</Tooltip.Content>
+    </Tooltip.Root>
+    <Switch
+      bind:checked={
+        () => allowance.guarded,
+        (checked: boolean) => {
+          void reading.setGuard(snapshot.provider_id, allowance.key, checked)
+        }
       }
-    }
-    disabled={!provider.canSaveGuards}
-    aria-busy={provider.savingGuards}
-    aria-label={m.allowances_guard_item({ item: allowanceLabel(allowance) })} />
+      disabled={!provider.canSaveGuards}
+      aria-busy={provider.savingGuards}
+      aria-label={m.allowances_guard_item({ item: allowanceLabel(allowance) })} />
+  </span>
 {/snippet}
 
 {#snippet allowanceDetailTable(provider: VisibleProvider)}
   {@const snapshot = provider.snapshot}
   {@const guardSnapshot = snapshot?.guard_supported ? snapshot : undefined}
   <Table.Root
-    class="table-fixed"
+    class="block table-fixed @2xl:table"
     aria-label={m.allowances_provider_details({ provider: provider.target.provider_name })}>
-    <Table.Header>
-      <Table.Row class="hover:bg-transparent">
-        <Table.Head class="h-9 ps-0 text-xs font-medium text-muted-foreground">{m.allowances_item()}</Table.Head>
-        <Table.Head class="h-9 w-24 text-xs font-medium text-muted-foreground @md:w-44">{valueModeLabel}</Table.Head>
-        <Table.Head class="hidden h-9 w-44 text-xs font-medium text-muted-foreground @2xl:table-cell"
-          >{m.allowances_reset()}</Table.Head>
-        {#if guardSnapshot}
-          <Table.Head class="h-9 w-24 whitespace-normal text-xs font-medium text-muted-foreground @md:w-36">
-            <span class="inline-flex items-center gap-1">
-              {m.allowances_guard_column()}
-              <Tooltip.Root delayDuration={0}>
-                <Tooltip.Trigger
-                  type="button"
-                  class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground"
-                  aria-label={m.allowances_guard_help_label()}>
-                  <CircleHelpIcon class="size-3.5" />
-                </Tooltip.Trigger>
-                <Tooltip.Content class="max-w-80 text-pretty">{m.allowances_guard_help()}</Tooltip.Content>
-              </Tooltip.Root>
-            </span>
-          </Table.Head>
-        {/if}
+    <colgroup class="hidden @2xl:table-column-group">
+      <col />
+      <col class="w-24 @md:w-44" />
+      <col class="hidden w-48 @2xl:table-column" />
+      {#if guardSnapshot}<col class="w-52" />{/if}
+    </colgroup>
+    <Table.Header class="sr-only">
+      <Table.Row>
+        <Table.Head>{m.allowances_item()}</Table.Head>
+        <Table.Head>{valueModeLabel}</Table.Head>
+        <Table.Head class="hidden @2xl:table-cell">{m.allowances_reset()}</Table.Head>
+        {#if guardSnapshot}<Table.Head>{m.allowances_guard_column()}</Table.Head>{/if}
       </Table.Row>
     </Table.Header>
-    <Table.Body>
+    <Table.Body class="block @2xl:table-row-group">
       {#each provider.allowances as allowance (allowance.key)}
         {@const triggered = triggeredSuspension(provider, allowance)}
         <Table.Row
-          class={cn('h-8 last:border-b-0 hover:bg-muted/30', triggered && 'bg-warning/10 hover:bg-warning/15')}>
-          <Table.Cell class="ps-0 py-1 whitespace-normal">
+          class={cn(
+            'grid grid-cols-[minmax(0,1fr)_auto] items-center py-1 last:border-b-0 hover:bg-muted/30 @2xl:table-row @2xl:h-8 @2xl:py-0',
+            triggered && 'bg-warning/10 hover:bg-warning/15',
+          )}>
+          <Table.Cell class="col-span-2 ps-0 py-1 whitespace-normal">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
               <span class="min-w-0 break-words font-medium">{allowanceLabel(allowance)}</span>
               {#if triggered}<Badge variant="outline">{m.allowances_suspension_trigger()}</Badge>{/if}
+              {#if allowance.reset_at != null}
+                <span class="font-technical text-xs text-muted-foreground tabular-nums @2xl:hidden">
+                  {m.allowances_reset_at({ time: resetDisplay(allowance) })}
+                </span>
+              {/if}
             </div>
-            {#if allowance.reset_at != null}
-              <p class="font-technical mt-0.5 text-xs text-muted-foreground tabular-nums @2xl:hidden">
-                {m.allowances_reset_at({ time: resetDisplay(allowance) })}
-              </p>
-            {/if}
           </Table.Cell>
           <Table.Cell class="py-1">
             <div class="flex min-w-0 items-center gap-3">
@@ -789,16 +794,14 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               <span class="relative z-10 inline-flex"><AllowanceSuspension {suspension} /></span>
             {/if}
             {#if presentation}<Badge variant={presentation.variant}>{presentation.label}</Badge>{/if}
-            <span
-              class="text-xs text-muted-foreground tabular-nums"
-              data-testid={`allowance-reset-count-${providerId}`}
-              aria-label={snapshot?.resets != null
-                ? m.allowances_free_resets({ count: String(snapshot.resets.remaining) })
-                : m.allowances_free_resets_unknown()}>
-              {snapshot?.resets != null
-                ? m.allowances_free_resets_compact({ count: String(snapshot.resets.remaining) })
-                : m.allowances_free_resets_compact_unknown()}
-            </span>
+            {#if snapshot?.resets != null}
+              <span
+                class="text-xs text-muted-foreground tabular-nums"
+                data-testid={`allowance-reset-count-${providerId}`}
+                aria-label={m.allowances_free_resets({ count: String(snapshot.resets.remaining) })}>
+                {m.allowances_free_resets_compact({ count: String(snapshot.resets.remaining) })}
+              </span>
+            {/if}
           </div>
         </div>
         <div class="col-span-2 ps-[1.625rem] @2xl:col-span-1 @2xl:col-start-2 @2xl:row-start-1 @2xl:ps-0">
@@ -889,38 +892,46 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                 <p class="py-2 text-sm" role="status">{m.allowances_grant_stale()}</p>
               {/if}
               <Collapsible.Content>
-                <Table.Root class="table-fixed" aria-label={m.allowances_reset_grants()}>
-                  <Table.Header>
-                    <Table.Row class="hover:bg-transparent">
-                      <Table.Head class="h-9 ps-0 text-xs font-medium text-muted-foreground"
-                        ><span class="sr-only">{m.allowances_reset_grants()}</span></Table.Head>
-                      <Table.Head class="h-9 w-24 text-xs font-medium text-muted-foreground @md:w-44"
-                        >{m.allowances_remaining()}</Table.Head>
-                      <Table.Head class="hidden h-9 w-44 text-xs font-medium text-muted-foreground @2xl:table-cell"
-                        >{m.allowances_grant_expiry()}</Table.Head>
-                      <Table.Head class="h-9 w-24 whitespace-normal text-xs font-medium text-muted-foreground @md:w-36"
-                        ><span class="sr-only">{m.allowances_grant_action()}</span></Table.Head>
+                <Table.Root class="block table-fixed @2xl:table" aria-label={m.allowances_reset_grants()}>
+                  <colgroup class="hidden @2xl:table-column-group">
+                    <col />
+                    <col class="w-24 @md:w-44" />
+                    <col class="hidden w-48 @2xl:table-column" />
+                    <col class="w-52" />
+                  </colgroup>
+                  <Table.Header class="sr-only">
+                    <Table.Row>
+                      <Table.Head>{m.allowances_reset_grants()}</Table.Head>
+                      <Table.Head>{m.allowances_remaining()}</Table.Head>
+                      <Table.Head class="hidden @2xl:table-cell">{m.allowances_grant_expiry()}</Table.Head>
+                      <Table.Head>{m.allowances_grant_action()}</Table.Head>
                     </Table.Row>
                   </Table.Header>
-                  <Table.Body>
+                  <Table.Body class="block @2xl:table-row-group">
                     {#each snapshot.resets.grants as grant (grant.id)}
                       {@const reason = resetGrantReason(grant)}
-                      <Table.Row class="h-8 last:border-b-0 hover:bg-muted/30">
-                        <Table.Cell class="ps-0 py-1 whitespace-normal">
-                          <span class="break-words font-medium">{grant.label}</span>
-                          <p
-                            class="font-technical mt-0.5 break-words text-xs text-muted-foreground tabular-nums @2xl:hidden">
-                            {grant.expires_at != null
-                              ? m.allowances_grant_until({ time: formatLogTime(grant.expires_at, localeState.current) })
-                              : m.allowances_grant_no_expiry()}
-                          </p>
-                          {#if reason}<p class="mt-0.5 text-xs">{reason}</p>{/if}
+                      <Table.Row
+                        class="grid grid-cols-[minmax(0,1fr)_auto] items-center py-1 last:border-b-0 hover:bg-muted/30 @2xl:table-row @2xl:h-8 @2xl:py-0">
+                        <Table.Cell class="col-span-2 ps-0 py-1 whitespace-normal">
+                          <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                            <span class="min-w-0 break-words font-medium">{grant.label}</span>
+                            {#if reason}<span class="text-xs">{reason}</span>{/if}
+                            <span class="font-technical text-xs text-muted-foreground tabular-nums @2xl:hidden">
+                              {grant.expires_at != null
+                                ? m.allowances_grant_until({
+                                    time: formatLogTime(grant.expires_at, localeState.current),
+                                  })
+                                : m.allowances_grant_no_expiry()}
+                            </span>
+                          </div>
                         </Table.Cell>
-                        <Table.Cell class="font-technical py-1 tabular-nums">{grant.remaining}</Table.Cell>
+                        <Table.Cell class="font-technical py-1 tabular-nums">
+                          {m.allowances_free_resets_compact({ count: String(grant.remaining) })}
+                        </Table.Cell>
                         <Table.Cell
                           class="font-technical hidden py-1 text-muted-foreground tabular-nums @2xl:table-cell">
                           {grant.expires_at != null
-                            ? formatLogTime(grant.expires_at, localeState.current)
+                            ? m.allowances_grant_until({ time: formatLogTime(grant.expires_at, localeState.current) })
                             : m.allowances_grant_no_expiry()}
                         </Table.Cell>
                         <Table.Cell class="py-0.5">
