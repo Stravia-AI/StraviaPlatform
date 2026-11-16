@@ -185,6 +185,19 @@ test('title row, messages and composer stay at the 56rem reading width while the
   const title = page.getByRole('heading', { level: 1 }).locator('xpath=..')
   const answer = page.getByRole('article', { name: 'Assistant response' })
   const composer = page.getByRole('textbox', { name: 'Message', exact: true }).locator('xpath=ancestor::form')
+  const userMessage = page.getByRole('article', { name: 'Your message' })
+  const expectUserRightAligned = async () => {
+    await expect
+      .poll(async () => {
+        const [composerBox, ...messageBoxes] = await Promise.all(
+          [composer, userMessage, userMessage.locator('.user-bubble'), userMessage.locator('.message-meta')].map(
+            async (locator) => (await locator.boundingBox())!,
+          ),
+        )
+        return messageBoxes.map((box) => Math.round(box.x + box.width - composerBox.x - composerBox.width))
+      })
+      .toEqual([0, 0, 0])
+  }
   const container = page.getByRole('main').locator('> div')
   for (const [viewport, containerWidth] of [
     [{ width: 1440, height: 900 }, 1124],
@@ -202,6 +215,11 @@ test('title row, messages and composer stay at the 56rem reading width while the
     )
     expect(titleBox.x).toBeCloseTo(answerBox.x, 0)
     expect(composerBox.x).toBeCloseTo(answerBox.x, 0)
+    await expectUserRightAligned()
+  }
+  for (const width of [320, 500, 965]) {
+    await page.setViewportSize({ width, height: 900 })
+    await expectUserRightAligned()
   }
 })
 

@@ -36,8 +36,8 @@ let {
   min-width: 0;
 }
 .message-user {
-  align-self: flex-end;
   max-width: 85%;
+  margin-inline-start: auto;
 }
 .message-body {
   display: flex;

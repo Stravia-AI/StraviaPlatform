@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- User message bubbles and their metadata now align with the reading column's right edge in virtualized conversations, matching the composer without removing the message width limit.
 - Structural headings and technical text now fall back to the bundled Chinese font when system CJK glyphs are unavailable.
 - One-time allowance resets now use the shared cryptographically secure UUID generator on HTTP management pages, where `crypto.randomUUID` is unavailable.
 
