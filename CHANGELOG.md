@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking — StraviaRead input:** Move `question`, `attachments`, `allowed_domains` and `wait` from the top level into the optional `body` object; old flat calls are rejected without a compatibility shim. Model declarations use `strict: false` and expose only `path` and `body` in the schema, with body parameters described by capability.
+
+### Fixed
+
+- StraviaRead parameter errors provide actionable field, type and usage guidance without echoing input values; runtime type, field and capability checks remain enforced.
+
 ## [0.7.2] - 2026-11-15
 
 This release also includes the changes listed under [0.7.1](#071---2026-11-14), whose publication was cancelled.

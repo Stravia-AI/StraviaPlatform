@@ -390,11 +390,9 @@ fn apply_request_actions_staged(
                         exposed.spec
                     }
                 };
-                // 工具声明的字段按合并后的暴露范围裁剪；已暂存的 spec 同样重算。
+                // 合并执行范围；body 参数由描述说明并在执行时校验，schema 只保留 path/body。
                 staged_read_scope = staged_read_scope.union(scope);
-                spec.parameters = stravia_web_access_contract::read_path::model_input_schema(
-                    crate::mcp::read::schema_scope(staged_read_scope, false),
-                );
+                spec.parameters = stravia_web_access_contract::read_path::model_input_schema();
                 if !description.is_empty() {
                     match spec.description.as_mut() {
                         Some(current) if !current.lines().any(|line| line == description) => {

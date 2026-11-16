@@ -8,7 +8,7 @@
 
 实现归属独立 `stravia-web-search` crate，包含 Runner、Local/External Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化及内部工具 ID 归 `stravia-web-access-contract`，静态地址规则继续归 `stravia-web-access`。
 
-Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `stravia://search` path 并在 `question` 中给出搜索文本，执行完整研究并返回带来源的 `SearchReport`；Local 与 External backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md) 与 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
+Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `stravia://search` path 并在 `body.question` 中给出搜索文本，执行完整研究并返回带来源的 `SearchReport`；Local 与 External backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md) 与 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
 
 平台总开关决定联网能力是否存在。开关开启后，每个有效 API Key 都可以显式调用；关闭后，普通请求和 MCP 的联网分流均不可用。API Key 的 Transparent Injection 只决定是否自动暴露 `StraviaRead` 的联网分流，不承担显式调用授权；执行层强制检查本次暴露范围。
 
@@ -19,12 +19,14 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 ```json
 {
   "path": "stravia://search",
-  "question": "question or topic",
-  "allowed_domains": ["example.com"]
+  "body": {
+    "question": "question or topic",
+    "allowed_domains": ["example.com"]
+  }
 }
 ```
 
-所有读取入口只接受一个 `path`，自由文本放在 `question`，其余字段按暴露范围出现，未知字段明确拒绝。`allowed_domains` 原始列表最多 20 项、每项非空白，规范化后去重；空数组、省略或 `null` 都表示继承或不限制。搜索文本必须非空白且不超过 `MAX_SEARCH_TEXT_BYTES`，空白按未传处理并报缺少 `question`。续接直接把上一份报告的 `stravia://turns/<turn-id>` 作为 `path`，`question` 是后续问题，不再有独立的续接参数；续接省略允许域名或传空列表则继承父策略，显式非空列表替换。不能用空列表清空允许域名，需要时启动新根。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。旧 URL scheme 与旧 query／fragment 选项给出可执行的报错，不保留别名。
+所有读取入口的顶层只接受 `path` 和可省略、可为 `null` 的 `body` 对象；自由文本放在 `body.question`，其余选项放在 `body` 内，未知字段明确拒绝，旧顶层字段不兼容。`allowed_domains` 原始列表最多 20 项、每项非空白，规范化后去重；空数组、省略或 `null` 都表示继承或不限制。搜索文本必须非空白且不超过 `MAX_SEARCH_TEXT_BYTES`，空白按未传处理并报缺少 `question`。续接直接把上一份报告的 `stravia://turns/<turn-id>` 作为 `path`，`question` 是后续问题，不再有独立的续接参数；续接省略允许域名或传空列表则继承父策略，显式非空列表替换。不能用空列表清空允许域名，需要时启动新根。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。旧 URL scheme 与旧 query／fragment 选项给出可执行的报错，不保留别名。
 
 `blocked_domains` 已从 Stravia 搜索输入、策略、Provider 执行和结果过滤中删除。新输入及原生转工具声明携带该字段时明确拒绝；历史 payload 不重写，读取时忽略旧黑名单，不恢复执行。普通 Provider 原生不透明 JSON 直通不做全局字段剥离。允许域名是来源约束，不是网络访问授权。
 

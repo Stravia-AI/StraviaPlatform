@@ -16,7 +16,9 @@ use stravia_runtime_contract::protocol::ir::{
     ContentBlock, NativeTool, NativeToolKind, ToolChoice, WebSearchTool,
 };
 
-use stravia_web_access_contract::read_path::{ReadInput, ReadTarget, parse_read_input};
+use stravia_web_access_contract::read_path::{
+    ReadBody, ReadInput, ReadTarget, decode_read_input, parse_read_input,
+};
 
 use super::{SearchTurnId, WebSearchEvent, WebSearchInput, WebSearchRunPolicy, WebSearchRunner};
 
@@ -478,14 +480,15 @@ where
     Fut: Future<Output = bool>,
 {
     let allowed_domains = filters.allowed_domains.clone()?;
-    let path = arguments.get("path")?.as_str()?;
-    // 只用解析器分类 path 形式；探测用的 question 不会被读取。
+    // Invalid model arguments must reach the decoder unchanged, never be repaired here.
+    let decoded = decode_read_input(Value::Object(arguments.clone())).ok()?;
+    // Classify the path independently of its question without changing the call.
     let probe = ReadInput {
-        path: path.to_owned(),
-        question: Some("probe".to_owned()),
-        attachments: None,
-        allowed_domains: None,
-        wait: None,
+        path: decoded.path,
+        body: Some(ReadBody {
+            question: Some("probe".to_owned()),
+            ..Default::default()
+        }),
     };
     let applies = match parse_read_input(&probe).ok()? {
         ReadTarget::Search(_) => true,
@@ -499,7 +502,12 @@ where
         return None;
     }
     let mut rewritten = arguments.clone();
-    rewritten.insert("allowed_domains".into(), serde_json::json!(allowed_domains));
+    let body = rewritten.entry("body").or_insert(Value::Null);
+    if body.is_null() {
+        *body = serde_json::json!({});
+    }
+    body.as_object_mut()?
+        .insert("allowed_domains".into(), serde_json::json!(allowed_domains));
     Some(rewritten)
 }
 
@@ -600,9 +608,11 @@ mod tests {
     fn arguments(path: &str) -> serde_json::Map<String, Value> {
         serde_json::json!({
             "path": path,
-            "question": "climate policy",
-            "attachments": null,
-            "allowed_domains": ["other.org"],
+            "body": {
+                "question": "climate policy",
+                "attachments": null,
+                "allowed_domains": ["other.org"],
+            },
         })
         .as_object()
         .expect("arguments")
@@ -672,6 +682,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_filters_do_not_repair_invalid_arguments() {
+        for value in [
+            serde_json::json!({"path": SEARCH_PATH, "question": "legacy"}),
+            serde_json::json!({"path": SEARCH_PATH, "body": "not an object"}),
+            serde_json::json!({"path": SEARCH_PATH, "body": {"question": "q", "unknown": "secret"}}),
+        ] {
+            assert!(
+                rewritten_arguments(value.as_object().unwrap(), &example_filters(), |_| async {
+                    true
+                })
+                .await
+                .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn native_allowed_domains_replace_only_that_field_of_a_search() {
         let original = arguments(SEARCH_PATH);
         let rewritten = rewritten_arguments(&original, &example_filters(), |_| async {
@@ -681,11 +708,16 @@ mod tests {
         .expect("search override");
 
         assert_eq!(
-            rewritten["allowed_domains"],
+            rewritten["body"]["allowed_domains"],
             serde_json::json!(["example.com"])
         );
         let mut expected = original.clone();
-        expected.insert("allowed_domains".into(), serde_json::json!(["example.com"]));
+        expected
+            .get_mut("body")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("allowed_domains".into(), serde_json::json!(["example.com"]));
         assert_eq!(rewritten, expected);
     }
 
@@ -701,7 +733,7 @@ mod tests {
 
         assert_eq!(rewritten["path"], TURN_PATH);
         assert_eq!(
-            rewritten["allowed_domains"],
+            rewritten["body"]["allowed_domains"],
             serde_json::json!(["example.com"])
         );
     }
@@ -723,7 +755,12 @@ mod tests {
             "not a path".to_owned(),
         ] {
             let mut input = arguments(&path);
-            input.remove("question");
+            input
+                .get_mut("body")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove("question");
             assert!(
                 rewritten_arguments(&input, &filters, |_| async { true })
                     .await

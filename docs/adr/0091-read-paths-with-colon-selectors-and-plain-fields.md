@@ -4,7 +4,7 @@ status: accepted
 
 # 用 `:` 选择器与纯文本字段读取路径
 
-StraviaRead 的输入不再是一个必须转义的 URL 字符串，而是 `path` 加少量可空字段：`path` 只承载地址和写在末尾的 `:` 选择器，自由文本放在 `question`，`attachments`、`allowed_domains`、`wait` 按暴露范围出现。本决定局部取代 [ADR-0051](0051-disambiguate-artifact-download-and-understanding.md) 的公开输入约定（只公开 `path`、`search://`、`#stravia?` fragment、Artifact query 选项与搜索 query 参数）、[ADR-0064](0064-use-stravia-uri-references-without-sessions.md) 中 StraviaRead query 参数 `previous_path` 的约定，以及 [ADR-0082](0082-expose-queryable-tool-executions-after-bounded-wait.md) 中 `?wait=` 查询参数的约定。
+StraviaRead 的输入不再是一个必须转义的 URL 字符串，而是 `path` 加可选 `body` 对象：`path` 只承载地址和写在末尾的 `:` 选择器，自由文本放在 `body.question`，`attachments`、`allowed_domains`、`wait` 放在 `body` 内。本决定局部取代 [ADR-0051](0051-disambiguate-artifact-download-and-understanding.md) 的公开输入约定（只公开 `path`、`search://`、`#stravia?` fragment、Artifact query 选项与搜索 query 参数）、[ADR-0064](0064-use-stravia-uri-references-without-sessions.md) 中 StraviaRead query 参数 `previous_path` 的约定，以及 [ADR-0082](0082-expose-queryable-tool-executions-after-bounded-wait.md) 中 `?wait=` 查询参数的约定。
 
 ## 背景
 
@@ -27,29 +27,15 @@ StraviaRead 的输入不再是一个必须转义的 URL 字符串，而是 `path
 
 ## 自由文本走字段
 
-唯一解析入口是 `parse_read_input(&ReadInput)`，输入结构固定为：
+顶层只接受 `path` 和 `body`：`path` 是必填字符串，`body` 可省略或为 `null`，否则必须为对象。`body` 接受 `question`（字符串）、`attachments` 与 `allowed_domains`（字符串数组）、`wait`（非负整数），这些字段均可省略或为 `null`。顶层与 `body` 内的未知字段、类型错误及不适用的非零字段均被拒绝；旧的顶层平铺字段明确拒绝并提示移入 `body`，不提供兼容 shim。参数错误提示字段位置、期望类型和正确用法，不回显输入值。
 
-```rust
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ReadInput {
-    pub path: String,
-    #[serde(default)] pub question: Option<String>,
-    #[serde(default)] pub attachments: Option<Vec<String>>,
-    #[serde(default)] pub allowed_domains: Option<Vec<String>>,
-    #[serde(default)] pub wait: Option<u64>,
-}
-```
-
-JSON 里的 `null`、缺省与零值（空白 `question`、空数组、`wait: 0`）含义相同：解析入口先把零值归一为缺省，各 path 只校验有内容的字段，零值不会因“字段不适用于该 path”被拒绝，原因见“严格 schema 的可空写法”。`question` 承载搜索文本、网页/媒体问题与续接追问；搜索轮与续接必须带非空白的 `question`，空白按缺省报缺少字段，搜索轮不超过 `MAX_SEARCH_TEXT_BYTES`；`attachments`、`allowed_domains`、`wait` 可空。`allowed_domains` 沿用现有规则：原始条目 ≤ 20、每项非空白、经 `normalize_domains` 规范化去重、规范化后非空；空数组与省略、`null` 相同，新搜索不限制来源，续接继承父策略，非空列表表示替换。空数组本身没有可执行的独立含义（不能表示“禁止所有来源”，也不能清空续接继承的策略），因此不单独报错。`attachments` 的 `[]` 等同于缺省；每项必须是精确的 Artifact Reference（`stravia://artifacts/<55 lowercase>`）或公网 http(s) URL，按字面值处理，不剥离选择器，也不接受 `#stravia?`；重复项报错，数量上限由媒体执行侧负责。`wait` 只对 tool-executions path 有效，缺省为 0；其他 path 只拒绝正整数 `wait`。
+JSON 里的 `null`、缺省与零值（空白 `question`、空数组、`wait: 0`）含义相同：解析入口先把零值归一为缺省，各 path 只校验有内容的字段，零值不会因“字段不适用于该 path”被拒绝，原因见“模型 schema 与运行时校验”。`question` 承载搜索文本、网页/媒体问题与续接追问；搜索轮与续接必须带非空白的 `question`，空白按缺省报缺少字段，搜索轮不超过 `MAX_SEARCH_TEXT_BYTES`；`attachments`、`allowed_domains`、`wait` 可空。`allowed_domains` 沿用现有规则：原始条目 ≤ 20、每项非空白、经 `normalize_domains` 规范化去重、规范化后非空；空数组与省略、`null` 相同，新搜索不限制来源，续接继承父策略，非空列表表示替换。空数组本身没有可执行的独立含义（不能表示“禁止所有来源”，也不能清空续接继承的策略），因此不单独报错。`attachments` 的 `[]` 等同于缺省；每项必须是精确的 Artifact Reference（`stravia://artifacts/<55 lowercase>`）或公网 http(s) URL，按字面值处理，不剥离选择器，也不接受 `#stravia?`；重复项报错，数量上限由媒体执行侧负责。`wait` 只对 tool-executions path 有效，缺省为 0；其他 path 只拒绝正整数 `wait`。
 
 解析器不知道 Turn 的类型：`attachments` 只适用于媒体轮，`allowed_domains` 只适用于搜索轮，由 core 在查出 Turn 类型后校验。
 
 ## 按范围裁剪
 
-字段按暴露范围裁剪，以控制 token 成本。`ReadSchemaScope { networking, media, internal }` 决定字段集：`path` 总是有；`wait` 仅在 `!internal` 时出现；`question` 在 `networking || media` 时出现；`attachments` 在 `media` 时出现；`allowed_domains` 在 `networking` 时出现。`FULL` 表示 networking 与 media 均为 true、internal 为 false。内部 Agent 使用 `{networking: true, media: true, internal: true}`，即 path、question、attachments、allowed_domains。
-
-为减少 schema 长度，字段 `description` 每个不超过一句。`pagination_schema()` 不变。
+参数表放在工具 description 中，按暴露范围裁剪以控制 token 成本：`wait` 仅面向非内部入口；`question` 随联网、媒体或历史范围出现；`attachments` 随媒体范围出现；`allowed_domains` 随联网范围出现。描述裁剪不放宽运行时权限与各 path 的字段矩阵。内部 Agent 不提供 `wait`，但提供搜索和媒体相关字段。
 
 ## 续接
 
@@ -59,19 +45,19 @@ JSON 里的 `null`、缺省与零值（空白 `question`、空数组、`wait: 0`
 
 `stravia://search` 取代 `search://`；Artifact 与 HTTP(S) 资源的 `:` 选择器取代 `?`／`#` 选项；续接 path 取代 `previous_path` 参数；`wait` 字段取代 `?wait=`。旧语法不保留别名，只给出可执行的报错：
 
-- `search://…` 或 `query://…` → “use path `stravia://search` and put the search text in question”；
-- Artifact 带 `?` 或 `#` → “options are `:` selectors such as :raw, :download or :1-50; put questions in the question field”；
+- `search://…` 或 `query://…` → 提示使用 path `stravia://search` 并把搜索文本放入 `body.question`；
+- Artifact 带 `?` 或 `#` → 提示使用 `:` 选择器并把问题放入 `body.question`；
 - HTTP fragment 以 `stravia?` 开头 → 同上提示；
-- tool-executions 带 `?wait=` → “use the wait field”；
+- tool-executions 带 `?wait=` → 提示使用 `body.wait`；
 - Turn 带后缀 → 无效 Turn Reference。
 
 其他 `stravia://`、`sa:`、`https://stravia/artifact/…` 继续拒绝；HTTP 普通 fragment 保留源语义。报错不回显完整 URL、question 或字段值。
 
-## 严格 schema 的可空写法
+## 模型 schema 与运行时校验
 
-模型侧声明采用“全部出现的字段都必填 + 可空”的严格形式：`model_input_schema(scope)` 把所有出现的字段列入 `required`，可选字段类型写成 `[T, "null"]`（数组字段写 `"type": ["array", "null"]` 并带 `items`），`additionalProperties: false`，`strict_schema()` 保持 true。MCP 使用可选形式：`input_schema(scope)` 只有 `path` 必填，`additionalProperties: false`。
+模型侧声明使用 `strict: false`，schema 只公开 `path` 与可空对象 `body`，模型声明可将两者都列入 `required`；MCP schema 只有 `path` 必填。`body` 内部字段不在模型 schema 中展开，仅在 description 中按能力范围提供参数表。这一取舍避免严格 schema 将每个内部字段都强制填入，并保留模型可自纠的参数错误；后端仍执行强类型校验、未知字段检查和路径／能力限制，不能因 schema 宽松而放宽授权。
 
-原因是暴露工具时还不知道目标协议，跨协议改写 strict 会改变客户端看到的工具声明；既有 web-search 平台工具已采用“全部必填 + 可空”的写法（`stravia-web-search/src/platform.rs`），各编码器都能处理。模型仍可传 `null` 表示不设置，语义与省略一致。部分模型不传 `null`，而用空字符串、空数组或 `0` 填满必填字段（已观测到 Gemini 对历史路径传 `"question":""` 与 `"wait":0`），所以零值同样按省略处理；否则同一调用会因不适用字段的占位值反复失败。
+模型仍可传 `null` 表示不设置，语义与省略一致。部分模型使用空字符串、空数组或 `0` 作为占位值，因此零值也按省略处理；否则调用会因不适用字段的占位值反复失败。
 
 ## Considered options
 

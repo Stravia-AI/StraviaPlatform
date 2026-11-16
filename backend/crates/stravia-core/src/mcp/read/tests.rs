@@ -1,5 +1,36 @@
 use super::*;
 
+#[tokio::test]
+async fn invalid_read_arguments_are_actionable_and_redacted() {
+    let (_dir, reader, context, _) = document_fixture().await;
+    assert!(!PlatformTool::strict_schema(&reader));
+    for (arguments, location) in [
+        (
+            json!({"path": "https://example.com/?secret=hidden", "question": "hidden"}),
+            "body.question",
+        ),
+        (
+            json!({"path": "https://example.com/?secret=hidden", "body": {"question": 42}}),
+            "body.question",
+        ),
+        (
+            json!({"path": "https://example.com/?secret=hidden", "body": "hidden"}),
+            "body",
+        ),
+    ] {
+        let error = reader
+            .read(arguments.clone(), context.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(location), "{error}");
+        assert!(!error.contains("hidden"), "{error}");
+        let policy_error = is_execution_query(&arguments).unwrap_err().to_string();
+        assert!(policy_error.contains(location), "{policy_error}");
+        assert!(!policy_error.contains("hidden"), "{policy_error}");
+    }
+}
+
 fn office_docx_bytes(text: &str) -> bytes::Bytes {
     use office_oxide::ir::{DocumentIR, Element, InlineContent, Paragraph, Section, TextSpan};
     let ir = DocumentIR {
@@ -229,7 +260,7 @@ async fn office_document_question_routes_to_media_understanding() {
     // availability error.
     let error = reader
         .read(
-            json!({"path": format!("stravia://artifacts/{}", artifact.id.as_str()), "question": "summary"}),
+            json!({"path": format!("stravia://artifacts/{}", artifact.id.as_str()), "body": {"question": "summary"}}),
             context,
         )
         .await
@@ -290,10 +321,7 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
     );
     let ReadTarget::Resource(next) = parse_read_input(&ReadInput {
         path: next_path.to_owned(),
-        question: None,
-        attachments: None,
-        allowed_domains: None,
-        wait: None,
+        body: None,
     })
     .unwrap() else {
         panic!("snapshot path")

@@ -87,7 +87,7 @@ async fn read(reader: &ReadTool, owner: &str, path: &str) -> McpToolOutput {
 }
 
 async fn read_waiting(reader: &ReadTool, owner: &str, path: &str, wait: u64) -> McpToolOutput {
-    read_input(reader, owner, json!({"path":path,"wait":wait})).await
+    read_input(reader, owner, json!({"path":path,"body":{"wait":wait}})).await
 }
 
 async fn read_input(reader: &ReadTool, owner: &str, input: serde_json::Value) -> McpToolOutput {
@@ -103,7 +103,7 @@ async fn background(reader: &ReadTool, owner: &str, upstream: &ControlledSearch)
         read_input(
             &reader,
             &owner,
-            json!({"path":"stravia://search","question":"controlled evidence"}),
+            json!({"path":"stravia://search","body":{"question":"controlled evidence"}}),
         )
         .await
     });
@@ -175,7 +175,7 @@ async fn search_queries_wait_independently_and_preserve_the_original_report() {
     );
     let cancelled = registered_query(McpTool::call(
         &reader,
-        json!({"path":path,"wait":120}),
+        json!({"path":path,"body":{"wait":120}}),
         &cancelled_context,
     ))
     .await;

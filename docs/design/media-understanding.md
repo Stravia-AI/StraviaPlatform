@@ -8,7 +8,7 @@
 
 实现归属独立 `stravia-media` crate，包含 Definition、配置策略、媒体预处理、Derivative 存储、报告校验、ingest/snapshot、bridge 规划及 Platform Tool 行为。`stravia-core` 在编译期注入 `MediaHost`、`MediaAgentHost`、`MediaArtifactHost`，并保留 MCP/管理面 Adapter；能力不依赖 Gateway 类型。共享 IR、Agent、Artifact、Hook 与身份契约来自 `stravia-runtime-contract`，不复制类型或通过 JSON 往返 canonical 数据。
 
-Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的图片 path 调用；默认描述与 OCR，指定问题放在 `question` 字段。普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)，以及 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
+Media Understanding 是由独立平台开关控制的 Advanced Capability，通过 `StraviaRead` 的图片 path 调用；默认描述与 OCR，指定问题放在 `body.question` 字段。普通模型请求和 MCP 共用同一个 Media Report contract。统一入口的授权、收存、下载和路由归 core，媒体理解仍由本能力执行。参见 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md) 至 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)，以及 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
 
 用户可见名称采用“多模态理解”，为未来 PDF 和视频扩展保留产品语义。运行时支持静态 JPEG、PNG 与 WebP 图片，Office 文档（DOCX、XLSX、PPTX、DOC、XLS、PPT）的 Markdown 提取与内嵌图片归一化，以及 WAV、MP3、FLAC、OGG、AAC、AIFF 音频；页面不展示或承诺未来格式。图片（含文档）与音频是两种独立模态：各自拥有 internal Definition、启用开关、逻辑 Model 与思考等级，一次理解调用不得混用音频与图片/文档。
 
@@ -27,7 +27,7 @@ StraviaRead
 ```json
 {
   "path": "stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc",
-  "question": "Describe the image"
+  "body": {"question": "Describe the image"}
 }
 ```
 
@@ -36,12 +36,14 @@ StraviaRead
 ```json
 {
   "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
-  "question": "What changed?",
-  "attachments": ["stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc"]
+  "body": {
+    "question": "What changed?",
+    "attachments": ["stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc"]
+  }
 }
 ```
 
-唯一必填输入是 `path`，`question` 与 `attachments` 按媒体暴露范围出现。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；具体问题放在 `question`。续接时把上一份媒体报告的 `stravia://turns/<turn-id>` 直接作为 `path`，`question` 是后续问题，新增图片或文件放入 `attachments`（精确的 Artifact Reference 或公网 HTTP(S) URL）；已在祖先中保留的 source 复用，不重复附加，媒体续接保留同 Principal 的续接与分支。Artifact path 用 `:` 选择器（如 `:download`），公网 URL 的源 query 完整保留，平台问题不发送给源站。图片不支持 `raw`、行范围或文本 cursor。Office 文档不带 `question` 时直接读取为提取的 Markdown 文本快照，支持既有的行范围选择器；带 `question` 时进入 Media Understanding，`:download` 在任何解析或模型执行之前返回下载信息，不支持 `raw`。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url、旧 Artifact wrapper、裸 Artifact ID 与 Artifact fragment 不再执行。
+唯一必填输入是 `path`，可省略或传 `null` 的 `body` 对象包含 `question` 与 `attachments`，其可用性取决于媒体暴露范围。所属 Artifact 与公网图片默认都描述内容并提取文字，公网图片先收存；具体问题放在 `question`。续接时把上一份媒体报告的 `stravia://turns/<turn-id>` 直接作为 `path`，`question` 是后续问题，新增图片或文件放入 `attachments`（精确的 Artifact Reference 或公网 HTTP(S) URL）；已在祖先中保留的 source 复用，不重复附加，媒体续接保留同 Principal 的续接与分支。Artifact path 用 `:` 选择器（如 `:download`），公网 URL 的源 query 完整保留，平台问题不发送给源站。图片不支持 `raw`、行范围或文本 cursor。Office 文档不带 `question` 时直接读取为提取的 Markdown 文本快照，支持既有的行范围选择器；带 `question` 时进入 Media Understanding，`:download` 在任何解析或模型执行之前返回下载信息，不支持 `raw`。显式 download 不调用模型；能力关闭或格式不支持不能以下载冒充理解。旧平台调用别名、顶层 url、旧 Artifact wrapper、裸 Artifact ID 与 Artifact fragment 不再执行。
 
 长答案的工具交付在完整报告校验与落盘之后分页：首包保留自身 `path`、输入 `artifacts`、`report.artifacts`、limitations 和 completion，顶层 pagination 给出 next_path；续页只读取不可变文本快照，不增加模型 Turn。完整契约见 [Web Search 设计的统一资源读取与文本分页](web-search.md#统一资源读取与文本分页)。
 

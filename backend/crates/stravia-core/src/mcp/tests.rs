@@ -216,7 +216,7 @@ impl Drop for TestApp {
 type SdkClient = RunningService<RoleClient, InitializeRequestParams>;
 
 #[tokio::test]
-async fn read_tool_responses_schema_supports_strict_optional_arguments() {
+async fn read_tool_responses_schema_accepts_path_and_body() {
     use crate::hook::tool::PlatformToolRegistry;
     use stravia_protocol_codec::codec::open_responses::encoder::ResponsesEncoder;
     use stravia_runtime_contract::hook::ToolId;
@@ -250,91 +250,26 @@ async fn read_tool_responses_schema_supports_strict_optional_arguments() {
         .encode_request(request)
         .expect("encode Responses request");
     let function = &body["tools"][0];
-    assert_eq!(function["strict"], true);
+    assert_eq!(function["strict"], false);
     let schema = &function["parameters"];
-    let required = schema["required"].as_array().expect("required array");
-    for name in schema["properties"].as_object().expect("properties").keys() {
-        assert!(
-            required.contains(&json!(name)),
-            "invalid_function_parameters: strict StraviaRead schema is missing required property {name}"
-        );
-    }
+    assert_eq!(schema["required"], json!(["path", "body"]));
     assert_eq!(schema["additionalProperties"], false);
     let validator = jsonschema::validator_for(schema).expect("valid schema");
     let search = json!({
         "path": "stravia://search",
-        "question": "Rust",
-        "attachments": null,
-        "allowed_domains": ["example.com"],
-        "wait": null,
+        "body": {"question": "Rust", "allowed_domains": ["example.com"]},
     });
     assert!(validator.is_valid(&search));
-    assert!(!validator.is_valid(&json!({"path": 42, "question": null, "attachments": null, "allowed_domains": null, "wait": null})));
-    assert!(
-        !validator.is_valid(&json!({"path": "stravia://search"})),
-        "strict StraviaRead schemas require every exposed field; optional fields are nullable"
-    );
+    assert!(validator.is_valid(&json!({"path": "https://example.com/", "body": null})));
+    assert!(!validator.is_valid(&json!({"path": 42, "body": null})));
+    assert!(!validator.is_valid(&json!({"path": "stravia://search", "body": "not an object"})));
+    assert!(!validator.is_valid(&json!({"path": "stravia://search", "question": "Rust"})));
     let mut legacy = search.clone();
     legacy["previous_path"] = json!("stravia://turns/abcdefghijklmnopqrstuvwxyzab");
-    assert!(
-        !validator.is_valid(&legacy),
-        "removed fields must be rejected"
-    );
+    assert!(!validator.is_valid(&legacy));
     let mcp_validator = jsonschema::validator_for(&mcp_schema).expect("valid MCP schema");
-    assert!(mcp_validator.is_valid(&json!({"path": "stravia://search", "question": "Rust"})));
+    assert!(mcp_validator.is_valid(&search));
     assert!(mcp_validator.is_valid(&json!({"path": "stravia://artifacts/x"})));
-}
-
-#[test]
-fn read_schema_fields_follow_exposure_scope() {
-    use stravia_runtime_contract::hook::ReadExposureScope;
-    use stravia_web_access_contract::read_path::{input_schema, model_input_schema};
-
-    let keys = |scope: ReadExposureScope, internal: bool| {
-        let scope = read::schema_scope(scope, internal);
-        let mut names: Vec<String> = model_input_schema(scope)["properties"]
-            .as_object()
-            .expect("properties")
-            .keys()
-            .cloned()
-            .collect();
-        names.sort();
-        // 宽松形式与严格形式暴露的字段一致。
-        let mut loose: Vec<String> = input_schema(scope)["properties"]
-            .as_object()
-            .expect("properties")
-            .keys()
-            .cloned()
-            .collect();
-        loose.sort();
-        assert_eq!(names, loose);
-        names
-    };
-    assert_eq!(
-        keys(ReadExposureScope::FULL, false),
-        ["allowed_domains", "attachments", "path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::new(true, false), false),
-        ["allowed_domains", "path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::new(false, true), false),
-        ["attachments", "path", "question", "wait"]
-    );
-    assert_eq!(keys(ReadExposureScope::NONE, false), ["path", "wait"]);
-    assert_eq!(
-        keys(ReadExposureScope::NONE.with_history(), false),
-        ["path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::FULL.with_history(), false),
-        ["allowed_domains", "attachments", "path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::FULL, true),
-        ["allowed_domains", "attachments", "path", "question"]
-    );
 }
 
 async fn test_app() -> TestApp {

@@ -611,7 +611,7 @@ def test_storage_failure_preserves_published_background_media_task(
             release.set()
             status, queried = http_request('POST', env['proxy'] + '/mcp', {
                 'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {
-                    'name': 'StraviaRead', 'arguments': {'path': delivered['path'], 'wait': 30},
+                    'name': 'StraviaRead', 'arguments': {'path': delivered['path'], 'body': {'wait': 30}},
                     '_meta': {'io.modelcontextprotocol/protocolVersion': '2026-07-28',
                               'io.modelcontextprotocol/clientCapabilities': {}}}},
                 {**auth, 'Accept': 'application/json, text/event-stream',

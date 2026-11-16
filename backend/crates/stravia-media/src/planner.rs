@@ -165,7 +165,7 @@ impl HookSession for MediaPlanningSession {
                     HookAction::PatchRequest(Box::new(RequestPatch::SetMediaRouting(Some(plan)))),
                     HookAction::ExposeRead {
                         scope: ReadExposureScope::new(false, true),
-                        description: "Read an image Artifact path; put a specific media question in question.".into(),
+                        description: "Read an image Artifact path; put a specific media question in body.question, or use body: null for default understanding.".into(),
                     },
                 ],
             });
@@ -304,7 +304,7 @@ impl HookSession for MediaPlanningSession {
             HookAction::ExposeRead {
                     scope: ReadExposureScope::new(false, true),
                     description:
-                        "Read an image Artifact path; put a specific media question in question."
+                        "Read an image Artifact path; put a specific media question in body.question, or use body: null for default understanding."
                             .into(),
             },
         ]);

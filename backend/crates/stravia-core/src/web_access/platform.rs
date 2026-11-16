@@ -4,17 +4,15 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use stravia_runtime_contract::hook::{
-    PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, ToolExecutionContext,
-    ToolId,
+    PlatformTool, PlatformToolError, PlatformToolOutput, ToolExecutionContext, ToolId,
 };
 use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_web_access_contract::{
     DEFAULT_SEARCH_RESULTS, STRAVIA_READ_TOOL_ID, STRAVIA_READ_TOOL_NAME,
-    read_path::{ReadInput, ReadTarget, model_input_schema, parse_read_input},
+    read_path::{ReadTarget, decode_read_input, model_input_schema, parse_read_input},
 };
 
 use super::{SearchRequest, WebAccessError};
-use crate::mcp::read::schema_scope;
 
 pub(crate) fn internal_platform_tools(gateway: &crate::Gateway) -> Vec<Arc<dyn PlatformTool>> {
     vec![Arc::new(InternalReadTool {
@@ -38,12 +36,16 @@ impl PlatformTool for InternalReadTool {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read a single path. Set path to stravia://search and question to plain-text search text for basic public web retrieval, never a research Agent. Public HTTP(S) pages return Markdown; images and files follow platform artifact rules. Resource paths accept `:` selectors such as :raw, :download or :1-50; put a specific question in question.",
+            "Read a single path with optional body (object or null); omit it for ordinary reads. For basic public web retrieval use path stravia://search and body.question as plain text, optionally body.allowed_domains as an array of domains; this never starts a research Agent. Public HTTP(S) pages return Markdown and body.question does not answer questions about HTML. Images and files follow platform artifact rules; use body.question for media. Resource paths accept :raw, :download or :1-50 selectors. For media continuation use a turn path with body.question and optional body.attachments. Research continuation is not supported here.",
         )
     }
 
     fn parameters(&self) -> Value {
-        model_input_schema(schema_scope(ReadExposureScope::FULL, true))
+        model_input_schema()
+    }
+
+    fn strict_schema(&self) -> bool {
+        false
     }
 
     fn parallel_safe(&self) -> bool {
@@ -65,7 +67,7 @@ impl PlatformTool for InternalReadTool {
         arguments: Value,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        let request: ReadInput = match serde_json::from_value(arguments) {
+        let request = match decode_read_input(arguments) {
             Ok(request) => request,
             Err(error) => {
                 return Ok(web_access_error_output(WebAccessError::invalid(format!(
