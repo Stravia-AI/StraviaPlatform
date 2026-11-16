@@ -358,10 +358,7 @@ mod tests {
                 &stravia_web_access_contract::read_path::ReadInput {
                     path: "https://example.com/file.png?sig=a%2Bb&question=platform:download"
                         .into(),
-                    question: None,
-                    attachments: None,
-                    allowed_domains: None,
-                    wait: None,
+                    body: None,
                 },
             )
             .expect("resource path")

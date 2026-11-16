@@ -1,7 +1,7 @@
 //! StraviaRead 的唯一 path 契约：统一读取表达式的解析与工具 schema。
 //!
-//! 模型只提供一个 `path` 字符串和若干结构化字段，由 [`parse_read_input`] 解析为
-//! [`ReadTarget`]。这里没有任何 percent 解码或编码路径：自由文本放在 `question`，
+//! 模型提供 `path` 字符串和可选的 `body` 对象，由 [`parse_read_input`] 解析为
+//! [`ReadTarget`]。这里没有任何 percent 解码或编码路径：自由文本放在 `body.question`，
 //! 结构化选项写成 path 末尾的 `:` 选择器。
 //!
 //! 支持的 path 形式：
@@ -27,8 +27,8 @@
 //! 不保留别名，只返回带正确写法的错误。
 //!
 //! [`input_schema`] 是 MCP 使用的宽松形式（只有 `path` 必填）；[`model_input_schema`]
-//! 是模型工具声明使用的严格形式（出现的字段全部必填，可选字段类型可为 `null`）。
-//! 字段按 [`ReadSchemaScope`] 的暴露范围裁剪。
+//! 是模型工具声明使用的形式（`path` 与可为 `null` 的 `body` 必填）。
+//! `body` 是自由对象，具体字段按能力在工具说明中描述。
 
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +64,14 @@ const ARTIFACT_DIGEST_LEN: usize = 55;
 #[serde(deny_unknown_fields)]
 pub struct ReadInput {
     pub path: String,
+    #[serde(default)]
+    pub body: Option<ReadBody>,
+}
+
+/// Optional path-specific read parameters.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadBody {
     #[serde(default)]
     pub question: Option<String>,
     #[serde(default)]
@@ -224,12 +232,15 @@ pub enum LineSelection {
 /// Display 消息不回显完整 URL、question 或其他字段值，并给出可执行的正确写法。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReadPathError {
+    /// Invalid external input; the message contains only trusted field names and guidance.
+    #[error("{message}")]
+    InvalidInput { message: &'static str },
     /// path 为空或仅空白。
     #[error("read path must not be blank")]
     BlankPath,
     /// 旧 `search://` 或 `query://` 表达式。
     #[error(
-        "legacy search paths are not accepted; set path to `stravia://search` and put the search text in question"
+        "legacy search paths are not accepted; set path to `stravia://search` and put the search text in body.question"
     )]
     LegacySearchScheme,
     /// 不是受支持的 path 形式。
@@ -249,35 +260,35 @@ pub enum ReadPathError {
         hint: &'static str,
     },
     /// 该 path 形式缺少必填字段。
-    #[error("`{field}` is required for {target}; {hint}")]
+    #[error("`body.{field}` is required for {target}; {hint}")]
     MissingField {
         field: &'static str,
         target: &'static str,
         hint: &'static str,
     },
     /// 字段在该 path 形式下不允许出现。
-    #[error("`{field}` is not accepted for {target}; {hint}")]
+    #[error("`body.{field}` is not accepted for {target}; remove it or set it to null; {hint}")]
     FieldNotAllowed {
         field: &'static str,
         target: &'static str,
         hint: &'static str,
     },
     /// `question` 超过 [`MAX_SEARCH_TEXT_BYTES`]。
-    #[error("question must not exceed 65536 UTF-8 bytes")]
+    #[error("body.question must not exceed 65536 UTF-8 bytes; shorten it")]
     QuestionTooLarge,
     /// `allowed_domains` 原始条目超过 [`MAX_ALLOWED_DOMAINS`] 项。
-    #[error("allowed_domains accepts at most 20 entries before normalization")]
+    #[error("body.allowed_domains accepts at most 20 entries before normalization; remove excess entries")]
     TooManyAllowedDomains { count: usize },
     /// `allowed_domains` 含无效条目或规范化后无可保留条目。
-    #[error("allowed_domains entries must be valid domain filters, for example `docs.rs`")]
+    #[error("body.allowed_domains entries must be valid domain filters; replace invalid entries with domains such as `docs.rs`, or remove the field")]
     InvalidAllowedDomains,
     /// `attachments` 条目不是精确 Artifact Reference 或公网 http(s) URL。
     #[error(
-        "each attachment must be an exact `stravia://artifacts/<artifact-id>` or a public http(s) URL, without `:` selectors or tool option fragments"
+        "body.attachments entries must be exact `stravia://artifacts/<artifact-id>` paths or public http(s) URLs, without `:` selectors or tool option fragments; replace invalid entries or remove the field"
     )]
     InvalidAttachment,
     /// `attachments` 含重复条目。
-    #[error("attachments must not contain duplicate entries")]
+    #[error("body.attachments must not contain duplicate entries; remove duplicates")]
     DuplicateAttachment,
     /// Artifact 引用不是裸身份或身份字符非法。
     #[error("invalid Artifact Reference: {reason}")]
@@ -293,15 +304,15 @@ pub enum ReadPathError {
     )]
     InvalidToolExecutionReference,
     /// 同一种选择器出现多次。
-    #[error("`{selector}` may appear at most once in a path")]
+    #[error("`{selector}` may appear at most once in path; remove the duplicate selector")]
     DuplicateSelector { selector: &'static str },
     /// 旧 `?options` 语法；已改为 `:` 选择器。
     #[error(
-        "legacy path options are not accepted; options are `:` selectors such as :raw, :download or :1-50; put questions in the question field"
+        "legacy path options are not accepted; options are `:` selectors such as :raw, :download or :1-50; put questions in the body.question field"
     )]
     LegacyOptionsSyntax,
     /// 旧 `?wait=` 语法；已改为 `wait` 字段。
-    #[error("legacy `?wait=` is not accepted; put the wait seconds in the wait field")]
+    #[error("legacy `?wait=` is not accepted; put the wait seconds in the body.wait field")]
     LegacyWaitParameter,
     /// 行选择语法或数值非法。
     #[error("invalid lines selection: {reason}")]
@@ -314,133 +325,31 @@ pub enum ReadPathError {
     InvalidHistoryPath { reason: &'static str },
 }
 
-/// 工具 schema 的暴露范围；由 core 的 `ReadExposureScope` 映射而来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadSchemaScope {
-    pub networking: bool,
-    pub media: bool,
-    pub internal: bool,
-    pub history: bool,
+/// MCP schema: only `path` is required; body contents are documented by the caller.
+pub fn input_schema() -> serde_json::Value {
+    read_schema(false)
 }
 
-impl ReadSchemaScope {
-    /// 公网工具：networking 与 media 均可见，`internal` 为 false。
-    pub const FULL: Self = Self {
-        networking: true,
-        media: true,
-        internal: false,
-        history: false,
+/// Model schema: both properties are required, with a nullable free-form body.
+pub fn model_input_schema() -> serde_json::Value {
+    read_schema(true)
+}
+
+fn read_schema(model: bool) -> serde_json::Value {
+    let required = if model {
+        vec!["path", "body"]
+    } else {
+        vec!["path"]
     };
-}
-
-/// 宽松输入 schema：只有 `path` 必填，供 MCP 使用。
-pub fn input_schema(scope: ReadSchemaScope) -> serde_json::Value {
-    let properties = schema_properties(scope, false);
     serde_json::json!({
         "type": "object",
-        "properties": properties,
-        "required": ["path"],
-        "additionalProperties": false
-    })
-}
-
-/// 严格输入 schema：出现的字段全部必填，可选字段类型含 `"null"`。
-///
-/// 供模型侧工具声明使用；跨协议编码器都能处理这种写法。
-pub fn model_input_schema(scope: ReadSchemaScope) -> serde_json::Value {
-    let properties = schema_properties(scope, true);
-    let required: Vec<&str> = properties.keys().map(String::as_str).collect();
-    serde_json::json!({
-        "type": "object",
-        "properties": properties,
+        "properties": {
+            "path": { "type": "string", "minLength": 1,
+                "description": "Resource path; append `:` selectors such as :raw, :download or :1-50." },
+            "body": { "type": ["object", "null"], "additionalProperties": true }
+        },
         "required": required,
         "additionalProperties": false
-    })
-}
-
-fn schema_properties(
-    scope: ReadSchemaScope,
-    strict: bool,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut properties = serde_json::Map::new();
-    properties.insert("path".into(), path_property());
-    if scope.networking || scope.media || scope.history {
-        properties.insert("question".into(), question_property(strict, scope.history));
-    }
-    if scope.media {
-        properties.insert("attachments".into(), attachments_property(strict));
-    }
-    if scope.networking {
-        properties.insert("allowed_domains".into(), allowed_domains_property(strict));
-    }
-    if !scope.internal {
-        properties.insert("wait".into(), wait_property(strict));
-    }
-    properties
-}
-
-fn path_property() -> serde_json::Value {
-    serde_json::json!({
-        "type": "string",
-        "minLength": 1,
-        "description": "Resource path; append `:` selectors such as :raw, :download or :1-50."
-    })
-}
-
-fn question_property(strict: bool, history: bool) -> serde_json::Value {
-    let kind = if strict {
-        serde_json::json!(["string", "null"])
-    } else {
-        serde_json::json!("string")
-    };
-    // ADR-0091：字段说明不超过一句。
-    let description = if history {
-        "Plain-text question or search text, no encoding; on `stravia://history/`, a chain directory, or a transcript it searches that scope by whitespace-separated terms (double quotes make an adjacent phrase) and cannot be combined with a line range or a search cursor."
-    } else {
-        "Plain-text question or search text; no encoding."
-    };
-    serde_json::json!({
-        "type": kind,
-        "description": description
-    })
-}
-
-fn attachments_property(strict: bool) -> serde_json::Value {
-    let kind = if strict {
-        serde_json::json!(["array", "null"])
-    } else {
-        serde_json::json!("array")
-    };
-    serde_json::json!({
-        "type": kind,
-        "items": { "type": "string" },
-        "description": "Additional Artifact paths or public URLs for a media follow-up."
-    })
-}
-
-fn allowed_domains_property(strict: bool) -> serde_json::Value {
-    let kind = if strict {
-        serde_json::json!(["array", "null"])
-    } else {
-        serde_json::json!("array")
-    };
-    serde_json::json!({
-        "type": kind,
-        "items": { "type": "string" },
-        "description": "Domains that final sources must belong to."
-    })
-}
-
-fn wait_property(strict: bool) -> serde_json::Value {
-    let kind = if strict {
-        serde_json::json!(["integer", "null"])
-    } else {
-        serde_json::json!("integer")
-    };
-    serde_json::json!({
-        "type": kind,
-        "minimum": 0,
-        "description": "Seconds to wait on a `stravia://tool-executions/` path; 0 or null returns immediately."
     })
 }
 
@@ -474,6 +383,68 @@ pub fn pagination_schema() -> serde_json::Value {
     })
 }
 
+/// Decode untrusted arguments without exposing field values or unknown field names in errors.
+pub fn decode_read_input(arguments: serde_json::Value) -> Result<ReadInput, ReadPathError> {
+    validate_read_input(&arguments)?;
+    serde_json::from_value(arguments).map_err(|_| ReadPathError::InvalidInput {
+        message: "invalid arguments; send a string path and an object or null body",
+    })
+}
+
+/// Decode borrowed arguments without cloning the JSON value.
+pub fn decode_read_input_ref(arguments: &serde_json::Value) -> Result<ReadInput, ReadPathError> {
+    validate_read_input(arguments)?;
+    ReadInput::deserialize(arguments).map_err(|_| ReadPathError::InvalidInput {
+        message: "invalid arguments; send a string path and an object or null body",
+    })
+}
+
+fn validate_read_input(arguments: &serde_json::Value) -> Result<(), ReadPathError> {
+    let invalid = |message| ReadPathError::InvalidInput { message };
+    let object = arguments.as_object().ok_or_else(|| {
+        invalid("arguments must be an object with path and optional body; send a JSON object")
+    })?;
+    for key in object.keys() {
+        let message = match key.as_str() {
+            "path" | "body" => continue,
+            "question" => "top-level question is not accepted; move it to body.question",
+            "attachments" => "top-level attachments is not accepted; move it to body.attachments",
+            "allowed_domains" => {
+                "top-level allowed_domains is not accepted; move it to body.allowed_domains"
+            }
+            "wait" => "top-level wait is not accepted; move it to body.wait",
+            _ => "unknown top-level field; remove it and use only path and body",
+        };
+        return Err(invalid(message));
+    }
+    if !object.get("path").is_some_and(serde_json::Value::is_string) {
+        return Err(invalid(
+            "path is required and must be a string; set path to a supported read path",
+        ));
+    }
+    if let Some(body) = object.get("body").filter(|body| !body.is_null()) {
+        let body = body.as_object().ok_or_else(|| {
+            invalid("body must be an object or null, not a JSON string; send the object directly")
+        })?;
+        for (key, value) in body {
+            let message = match key.as_str() {
+                "question" if !value.is_null() && !value.is_string() =>
+                    "body.question must be a string or null; supply text or remove it",
+                "attachments" if !value.is_null() && !value.as_array().is_some_and(|v| v.iter().all(serde_json::Value::is_string)) =>
+                    "body.attachments must be an array of strings or null; supply string entries or remove it",
+                "allowed_domains" if !value.is_null() && !value.as_array().is_some_and(|v| v.iter().all(serde_json::Value::is_string)) =>
+                    "body.allowed_domains must be an array of strings or null; supply string entries or remove it",
+                "wait" if !value.is_null() && value.as_u64().is_none() =>
+                    "body.wait must be a non-negative integer or null; supply whole seconds or remove it",
+                "question" | "attachments" | "allowed_domains" | "wait" => continue,
+                _ => "unknown body field; remove it and use only body.question, body.attachments, body.allowed_domains, or body.wait",
+            };
+            return Err(invalid(message));
+        }
+    }
+    Ok(())
+}
+
 /// 解析 [`ReadInput`] 为读取目标。
 ///
 /// 每种 path 形式只接受表中列出的字段；其余字段报错，不做静默忽略。零值字段先按
@@ -493,7 +464,7 @@ pub fn parse_read_input(input: &ReadInput) -> Result<ReadTarget, ReadPathError> 
     if path.starts_with(SEARCH_PATH) {
         return Err(ReadPathError::UnexpectedSuffix {
             target: "stravia://search",
-            hint: "put the search text in question",
+            hint: "put the search text in body.question",
         });
     }
     if path.starts_with(TURN_REFERENCE_PREFIX) {
@@ -527,20 +498,20 @@ struct PresentFields<'a> {
 
 impl<'a> PresentFields<'a> {
     fn of(input: &'a ReadInput) -> Self {
+        let body = input.body.as_ref();
         Self {
-            question: input
-                .question
-                .as_deref()
+            question: body
+                .and_then(|body| body.question.as_deref())
                 .filter(|text| !text.trim().is_empty()),
-            attachments: input
-                .attachments
-                .as_deref()
+            attachments: body
+                .and_then(|body| body.attachments.as_deref())
                 .filter(|values| !values.is_empty()),
-            allowed_domains: input
-                .allowed_domains
-                .as_deref()
+            allowed_domains: body
+                .and_then(|body| body.allowed_domains.as_deref())
                 .filter(|values| !values.is_empty()),
-            wait: input.wait.filter(|&seconds| seconds != 0),
+            wait: body
+                .and_then(|body| body.wait)
+                .filter(|&seconds| seconds != 0),
         }
     }
 }
@@ -549,7 +520,7 @@ fn parse_search(fields: &PresentFields) -> Result<ReadTarget, ReadPathError> {
     let query = required_question(
         fields,
         "`stravia://search`",
-        "set question to the plain-text search text",
+        "set body.question to the plain-text search text",
     )?;
     if query.len() > MAX_SEARCH_TEXT_BYTES {
         return Err(ReadPathError::QuestionTooLarge);
@@ -581,7 +552,7 @@ fn parse_continuation(fields: &PresentFields, path: &str) -> Result<ReadTarget, 
     let question = required_question(
         fields,
         "a `stravia://turns/<turn-id>` continuation",
-        "set question to the follow-up text",
+        "set body.question to the follow-up text",
     )?;
     let attachments = parse_attachments(fields.attachments)?;
     reject_field(
@@ -746,7 +717,7 @@ fn parse_history(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadP
     }
     if selectors.lines.is_some() && selectors.cursor.is_some() {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "cursor cannot be combined with other options",
+            reason: "cursor cannot be combined with other options; remove the :cursor selector or remove the other selectors and body.question",
         });
     }
     let question = match fields.question {
@@ -766,12 +737,12 @@ fn parse_history(fields: &PresentFields, path: &str) -> Result<ReadTarget, ReadP
         }
         if selectors.lines.is_some() {
             return Err(ReadPathError::ConflictingOptions {
-                reason: "question cannot be combined with line ranges; first search without a line range, then read the returned `path:L-M`",
+                reason: "body.question cannot be combined with line ranges; remove the line selector, search first, then read the returned `path:L-M`",
             });
         }
         if selectors.cursor.is_some() {
             return Err(ReadPathError::ConflictingOptions {
-                reason: "a search cursor already carries its question; to continue, omit question, or start a new search without a cursor",
+                reason: "a search cursor already carries its question; remove body.question or set it to null, or start a new search without the cursor selector",
             });
         }
     }
@@ -858,13 +829,13 @@ fn finish_resource_options(
 ) -> Result<ReadOptions, ReadPathError> {
     if selectors.cursor.is_some() && !is_artifact {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "cursor is only valid on an Artifact Reference",
+            reason: "cursor is only valid on an Artifact Reference; remove the :cursor selector or use an Artifact Reference",
         });
     }
     let question = fields.question.map(str::to_owned);
     if selectors.raw && question.is_some() {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "raw cannot be combined with question",
+            reason: "raw cannot be combined with body.question; remove the :raw selector or remove body.question or set it to null",
         });
     }
     if selectors.download
@@ -874,14 +845,14 @@ fn finish_resource_options(
             || selectors.cursor.is_some())
     {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "download cannot be combined with other options",
+            reason: "download cannot be combined with other options; remove the :download selector or remove the other selectors and body.question",
         });
     }
     if selectors.cursor.is_some()
         && (question.is_some() || selectors.raw || selectors.lines.is_some())
     {
         return Err(ReadPathError::ConflictingOptions {
-            reason: "cursor cannot be combined with other options",
+            reason: "cursor cannot be combined with other options; remove the :cursor selector or remove the other selectors and body.question",
         });
     }
     Ok(ReadOptions {
@@ -1220,16 +1191,16 @@ mod tests {
     fn read_input(path: &str) -> ReadInput {
         ReadInput {
             path: path.to_owned(),
-            question: None,
-            attachments: None,
-            allowed_domains: None,
-            wait: None,
+            body: Some(ReadBody::default()),
         }
     }
 
     fn with_question(path: &str, question: &str) -> ReadInput {
         ReadInput {
-            question: Some(question.to_owned()),
+            body: Some(ReadBody {
+                question: Some(question.to_owned()),
+                ..ReadBody::default()
+            }),
             ..read_input(path)
         }
     }
@@ -1291,7 +1262,7 @@ mod tests {
         );
 
         let mut domains = with_question(SEARCH_PATH, "q");
-        domains.allowed_domains = Some(vec![
+        domains.body.as_mut().unwrap().allowed_domains = Some(vec![
             "Docs.RS".into(),
             "docs.rs.".into(),
             "example.com".into(),
@@ -1303,17 +1274,17 @@ mod tests {
                 allowed_domains: Some(vec!["docs.rs".into(), "example.com".into()]),
             })
         );
-        domains.allowed_domains = Some(vec!["docs.rs/path".into()]);
+        domains.body.as_mut().unwrap().allowed_domains = Some(vec!["docs.rs/path".into()]);
         assert_eq!(
             parse_read_input(&domains).unwrap_err(),
             ReadPathError::InvalidAllowedDomains
         );
-        domains.allowed_domains = Some(vec![" ".into()]);
+        domains.body.as_mut().unwrap().allowed_domains = Some(vec![" ".into()]);
         assert_eq!(
             parse_read_input(&domains).unwrap_err(),
             ReadPathError::InvalidAllowedDomains
         );
-        domains.allowed_domains = Some(
+        domains.body.as_mut().unwrap().allowed_domains = Some(
             (0..=MAX_ALLOWED_DOMAINS)
                 .map(|index| format!("docs{index}.rs"))
                 .collect(),
@@ -1337,7 +1308,7 @@ mod tests {
             );
         }
         let mut input = with_question(SEARCH_PATH, "q");
-        input.attachments = Some(Vec::new());
+        input.body.as_mut().unwrap().attachments = Some(Vec::new());
         assert!(parse_read_input(&input).is_ok());
     }
 
@@ -1346,10 +1317,12 @@ mod tests {
     fn zero_value_fields_equal_absent_fields() {
         let zeroed = |path: &str| ReadInput {
             path: path.to_owned(),
-            question: Some(" \t ".into()),
-            attachments: Some(Vec::new()),
-            allowed_domains: Some(Vec::new()),
-            wait: Some(0),
+            body: Some(ReadBody {
+                question: Some(" \t ".into()),
+                attachments: Some(Vec::new()),
+                allowed_domains: Some(Vec::new()),
+                wait: Some(0),
+            }),
         };
         for path in [
             "stravia://history/".to_owned(),
@@ -1371,10 +1344,8 @@ mod tests {
                 ),
                 "{path}"
             );
-            let asked = ReadInput {
-                question: Some("q".into()),
-                ..zeroed(&path)
-            };
+            let mut asked = zeroed(&path);
+            asked.body.as_mut().unwrap().question = Some("q".into());
             assert_eq!(
                 parse_read_input(&asked),
                 parse_read_input(&with_question(&path, "q")),
@@ -1387,8 +1358,9 @@ mod tests {
     fn continuation_requires_question_and_validates_attachments() {
         let path = turn_path();
         let mut follow_up = with_question(&path, "what changed?");
-        follow_up.attachments = Some(vec![artifact_path(), "https://example.com/a.png".into()]);
-        follow_up.allowed_domains = Some(vec!["Docs.RS".into()]);
+        follow_up.body.as_mut().unwrap().attachments =
+            Some(vec![artifact_path(), "https://example.com/a.png".into()]);
+        follow_up.body.as_mut().unwrap().allowed_domains = Some(vec!["Docs.RS".into()]);
         assert_eq!(
             parse_read_input(&follow_up).unwrap(),
             ReadTarget::Continuation(ContinuationTarget {
@@ -1400,7 +1372,7 @@ mod tests {
         );
 
         let mut empty = with_question(&path, "q");
-        empty.attachments = Some(Vec::new());
+        empty.body.as_mut().unwrap().attachments = Some(Vec::new());
         assert_eq!(
             parse_read_input(&empty).unwrap(),
             ReadTarget::Continuation(ContinuationTarget {
@@ -1435,7 +1407,7 @@ mod tests {
             turn_path(),
         ] {
             let mut input = with_question(&path, "q");
-            input.attachments = Some(vec![attachment.clone()]);
+            input.body.as_mut().unwrap().attachments = Some(vec![attachment.clone()]);
             assert_eq!(
                 parse_read_input(&input).unwrap_err(),
                 ReadPathError::InvalidAttachment,
@@ -1445,11 +1417,11 @@ mod tests {
 
         // 附件按字面值处理：URL 末尾的选择器形态不被剥离，也不算无效。
         let mut literal = with_question(&path, "q");
-        literal.attachments = Some(vec!["https://example.com/a:raw".into()]);
+        literal.body.as_mut().unwrap().attachments = Some(vec!["https://example.com/a:raw".into()]);
         assert!(parse_read_input(&literal).is_ok());
 
         let mut duplicate = with_question(&path, "q");
-        duplicate.attachments = Some(vec![artifact_path(), artifact_path()]);
+        duplicate.body.as_mut().unwrap().attachments = Some(vec![artifact_path(), artifact_path()]);
         assert_eq!(
             parse_read_input(&duplicate).unwrap_err(),
             ReadPathError::DuplicateAttachment
@@ -1473,7 +1445,7 @@ mod tests {
             );
         }
         let mut wait = with_question(&turn_path(), "q");
-        wait.wait = Some(1);
+        wait.body.as_mut().unwrap().wait = Some(1);
         assert!(matches!(
             parse_read_input(&wait).unwrap_err(),
             ReadPathError::FieldNotAllowed { field: "wait", .. }
@@ -1493,7 +1465,7 @@ mod tests {
         );
         for wait in [0, 61, u64::MAX] {
             let mut input = read_input(&path);
-            input.wait = Some(wait);
+            input.body.as_mut().unwrap().wait = Some(wait);
             assert_eq!(
                 parse_read_input(&input).unwrap(),
                 ReadTarget::ToolExecution(ToolExecutionPath {
@@ -1503,7 +1475,7 @@ mod tests {
             );
         }
         let mut empty_attachments = read_input(&path);
-        empty_attachments.attachments = Some(Vec::new());
+        empty_attachments.body.as_mut().unwrap().attachments = Some(Vec::new());
         assert!(parse_read_input(&empty_attachments).is_ok());
 
         for suffix in ["?wait=61", "?wait=", "?wait"] {
@@ -1536,10 +1508,12 @@ mod tests {
     #[test]
     fn field_matrix_rejects_fields_outside_each_path_kind() {
         type Setter = fn(&mut ReadInput);
-        let attachments: Setter = |input| input.attachments = Some(vec![artifact_path()]);
-        let domains: Setter = |input| input.allowed_domains = Some(vec!["docs.rs".into()]);
-        let wait: Setter = |input| input.wait = Some(1);
-        let question: Setter = |input| input.question = Some("q".into());
+        let attachments: Setter =
+            |input| input.body.as_mut().unwrap().attachments = Some(vec![artifact_path()]);
+        let domains: Setter =
+            |input| input.body.as_mut().unwrap().allowed_domains = Some(vec!["docs.rs".into()]);
+        let wait: Setter = |input| input.body.as_mut().unwrap().wait = Some(1);
+        let question: Setter = |input| input.body.as_mut().unwrap().question = Some("q".into());
         let http = "https://example.com/a".to_owned();
         let cases: Vec<(String, bool, Setter, &str)> = vec![
             (SEARCH_PATH.to_owned(), true, attachments, "attachments"),
@@ -1558,7 +1532,7 @@ mod tests {
         for (path, needs_question, set, field) in cases {
             let mut input = read_input(&path);
             if needs_question {
-                input.question = Some("q".into());
+                input.body.as_mut().unwrap().question = Some("q".into());
             }
             set(&mut input);
             assert!(
@@ -1643,7 +1617,7 @@ mod tests {
         );
 
         let mut question = read_input(&format!("{base}:1-5"));
-        question.question = Some("what is this?".into());
+        question.body.as_mut().unwrap().question = Some("what is this?".into());
         assert_eq!(
             parse_read_input(&question).unwrap(),
             resource(
@@ -1820,7 +1794,7 @@ mod tests {
         let http = "https://example.com/a";
         let conflict = |path: String, question: Option<&str>| {
             let mut input = read_input(&path);
-            input.question = question.map(str::to_owned);
+            input.body.as_mut().unwrap().question = question.map(str::to_owned);
             match parse_read_input(&input) {
                 Err(ReadPathError::ConflictingOptions { reason }) => reason,
                 other => panic!("expected conflict for {path}: {other:?}"),
@@ -1846,7 +1820,7 @@ mod tests {
 
         // 行范围与 question 可以共存；raw 与行范围可以共存。
         let mut lines = read_input(&format!("{http}:1-5"));
-        lines.question = Some("q".into());
+        lines.body.as_mut().unwrap().question = Some("q".into());
         assert!(parse_read_input(&lines).is_ok());
         assert!(parse(&format!("{http}:raw:1-5")).is_ok());
     }
@@ -1953,9 +1927,11 @@ mod tests {
         let secret = "secret";
         let conflicting = with_question("https://example.com/a:raw", secret);
         let mut bad_attachment = with_question(&turn_path(), secret);
-        bad_attachment.attachments = Some(vec![format!("ftp://user:{secret}@example.com")]);
+        bad_attachment.body.as_mut().unwrap().attachments =
+            Some(vec![format!("ftp://user:{secret}@example.com")]);
         let mut bad_domain = with_question(SEARCH_PATH, secret);
-        bad_domain.allowed_domains = Some(vec![format!("user:{secret}@example.com")]);
+        bad_domain.body.as_mut().unwrap().allowed_domains =
+            Some(vec![format!("user:{secret}@example.com")]);
         let inputs = [
             read_input(&format!("ftp://user:{secret}@example.com")),
             read_input(&format!("https://user:{secret}@example.com:raw")),
@@ -1974,155 +1950,88 @@ mod tests {
     }
 
     #[test]
-    fn null_and_absent_fields_are_equivalent() {
-        let absent: ReadInput =
-            serde_json::from_value(json!({ "path": SEARCH_PATH, "question": "q" })).unwrap();
-        let nulls: ReadInput = serde_json::from_value(json!({
-            "path": SEARCH_PATH,
-            "question": "q",
-            "attachments": null,
-            "allowed_domains": null,
-            "wait": null,
-        }))
-        .unwrap();
-        assert_eq!(absent, nulls);
-        assert_eq!(
-            parse_read_input(&absent).unwrap(),
-            parse_read_input(&nulls).unwrap()
-        );
-        for value in [
-            json!({ "url": "https://example.com" }),
-            json!({ "path": SEARCH_PATH, "previous_path": null }),
-            json!({ "path": SEARCH_PATH, "i": "read" }),
-            json!({ "path": null }),
-            json!({ "path": SEARCH_PATH, "wait": -1 }),
+    fn body_forms_and_safe_decoder_errors() {
+        let path = "https://example.com/";
+        let targets: Vec<_> = [
+            json!({"path": path}),
+            json!({"path": path, "body": null}),
+            json!({"path": path, "body": {}}),
+        ]
+        .into_iter()
+        .map(|value| parse_read_input(&decode_read_input(value).unwrap()).unwrap())
+        .collect();
+        assert_eq!(targets[0], targets[1]);
+        assert_eq!(targets[1], targets[2]);
+        for (value, location) in [
+            (
+                json!({"path": SEARCH_PATH, "question": "secret"}),
+                "body.question",
+            ),
+            (
+                json!({"path": path, "body": "{\"question\":\"secret\"}"}),
+                "body",
+            ),
+            (json!({"path": path, "body": 3}), "body"),
+            (
+                json!({"path": path, "body": {"question": 2}}),
+                "body.question",
+            ),
+            (
+                json!({"path": path, "body": {"attachments": ["secret", 1]}}),
+                "body.attachments",
+            ),
+            (
+                json!({"path": path, "body": {"allowed_domains": "secret"}}),
+                "body.allowed_domains",
+            ),
+            (json!({"path": path, "body": {"wait": -1}}), "body.wait"),
+            (json!({"path": path, "body": {"wait": 1.5}}), "body.wait"),
+            (
+                json!({"path": path, "body": {"secret-name": "secret-value"}}),
+                "body",
+            ),
+            (
+                json!({"path": path, "secret-name": "secret-value"}),
+                "top-level",
+            ),
         ] {
-            assert!(serde_json::from_value::<ReadInput>(value).is_err());
+            let borrowed_error = decode_read_input_ref(&value).unwrap_err();
+            let message = decode_read_input(value).unwrap_err().to_string();
+            assert_eq!(borrowed_error.to_string(), message);
+            assert!(message.contains(location), "{message}");
+            assert!(!message.contains("secret"), "{message}");
         }
+        let missing = parse_read_input(&decode_read_input(json!({"path": SEARCH_PATH})).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("body.question"));
+        let arguments = json!({"path": SEARCH_PATH, "body": {"question": "q"}});
+        let borrowed = decode_read_input_ref(&arguments).unwrap();
+        let repaired = decode_read_input(arguments).unwrap();
+        assert_eq!(borrowed, repaired);
+        assert!(parse_read_input(&repaired).is_ok());
+        let invalid = decode_read_input(json!({"path": path, "body": {"wait": 1}})).unwrap();
+        let error = parse_read_input(&invalid).unwrap_err().to_string();
+        assert!(error.contains("body.wait") && error.contains("null"));
+        assert!(parse_read_input(
+            &decode_read_input(json!({"path": path, "body": {"wait": null}})).unwrap()
+        )
+        .is_ok());
     }
 
     #[test]
-    fn schemas_expose_fields_by_scope() {
-        let scope = |networking, media, internal| ReadSchemaScope {
-            networking,
-            media,
-            internal,
-            history: false,
-        };
-        assert_eq!(ReadSchemaScope::FULL, scope(true, true, false));
-        let cases = [
-            (
-                scope(true, true, false),
-                vec!["allowed_domains", "attachments", "path", "question", "wait"],
-            ),
-            (
-                ReadSchemaScope {
-                    history: true,
-                    ..scope(true, true, false)
-                },
-                vec!["allowed_domains", "attachments", "path", "question", "wait"],
-            ),
-            (
-                scope(true, true, true),
-                vec!["allowed_domains", "attachments", "path", "question"],
-            ),
-            (
-                scope(true, false, false),
-                vec!["allowed_domains", "path", "question", "wait"],
-            ),
-            (
-                scope(false, true, false),
-                vec!["attachments", "path", "question", "wait"],
-            ),
-            (
-                ReadSchemaScope {
-                    history: true,
-                    ..scope(false, false, false)
-                },
-                vec!["path", "question", "wait"],
-            ),
-            (scope(false, false, false), vec!["path", "wait"]),
-            (scope(false, false, true), vec!["path"]),
-        ];
-        for (scope, expected) in cases {
-            for schema in [input_schema(scope), model_input_schema(scope)] {
-                let mut keys: Vec<&str> = schema["properties"]
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .map(String::as_str)
-                    .collect();
-                keys.sort_unstable();
-                assert_eq!(keys, expected, "{scope:?}");
-                assert_eq!(schema["type"], json!("object"));
-                assert_eq!(schema["additionalProperties"], json!(false));
-            }
-            assert_eq!(input_schema(scope)["required"], json!(["path"]));
-            let strict = model_input_schema(scope);
-            let mut required: Vec<&str> = strict["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|name| name.as_str().unwrap())
-                .collect();
-            required.sort_unstable();
-            assert_eq!(required, expected, "{scope:?}");
+    fn schemas_use_only_path_and_free_form_body() {
+        for schema in [input_schema(), model_input_schema()] {
+            let properties = schema["properties"].as_object().unwrap();
+            assert_eq!(properties.len(), 2);
+            assert_eq!(properties["path"]["type"], json!("string"));
+            assert_eq!(properties["body"]["type"], json!(["object", "null"]));
+            assert_eq!(properties["body"]["additionalProperties"], json!(true));
+            assert!(properties["body"].get("properties").is_none());
+            assert_eq!(schema["additionalProperties"], json!(false));
         }
-    }
-
-    #[test]
-    fn strict_schema_makes_every_field_required_and_nullable() {
-        let strict = model_input_schema(ReadSchemaScope::FULL);
-        for (name, property) in strict["properties"].as_object().unwrap() {
-            if name == "path" {
-                assert_eq!(property["type"], json!("string"));
-                continue;
-            }
-            let kinds = property["type"].as_array().unwrap();
-            assert!(
-                kinds.iter().any(|kind| kind.as_str() == Some("null")),
-                "{name}"
-            );
-            assert!(
-                property["description"]
-                    .as_str()
-                    .is_some_and(|text| !text.is_empty()),
-                "{name}"
-            );
-        }
-        assert_eq!(
-            strict["properties"]["attachments"]["type"],
-            json!(["array", "null"])
-        );
-        assert_eq!(
-            strict["properties"]["attachments"]["items"],
-            json!({"type": "string"})
-        );
-        assert_eq!(strict["properties"]["wait"]["minimum"], json!(0));
-
-        let loose = input_schema(ReadSchemaScope::FULL);
-        assert_eq!(loose["properties"]["question"]["type"], json!("string"));
-        assert_eq!(loose["properties"]["wait"]["type"], json!("integer"));
-
-        // 严格形式要求出现的字段全部给出；可选字段写成 null 仍是合法参数。
-        let arguments = json!({
-            "path": SEARCH_PATH,
-            "question": "q",
-            "attachments": null,
-            "allowed_domains": null,
-            "wait": null,
-        });
-        let keys = arguments
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for name in strict["required"].as_array().unwrap() {
-            assert!(keys.iter().any(|key| Some(key.as_str()) == name.as_str()));
-        }
-        let input: ReadInput = serde_json::from_value(arguments).unwrap();
-        assert!(parse_read_input(&input).is_ok());
+        assert_eq!(input_schema()["required"], json!(["path"]));
+        assert_eq!(model_input_schema()["required"], json!(["path", "body"]));
     }
 
     fn history(
@@ -2364,13 +2273,13 @@ mod tests {
     fn history_paths_reject_unrelated_fields() {
         type Setter = fn(&mut ReadInput);
         let setters: [(Setter, &str); 3] = [
-            (|input| input.wait = Some(1), "wait"),
+            (|input| input.body.as_mut().unwrap().wait = Some(1), "wait"),
             (
-                |input| input.allowed_domains = Some(vec!["docs.rs".into()]),
+                |input| input.body.as_mut().unwrap().allowed_domains = Some(vec!["docs.rs".into()]),
                 "allowed_domains",
             ),
             (
-                |input| input.attachments = Some(vec![artifact_path()]),
+                |input| input.body.as_mut().unwrap().attachments = Some(vec![artifact_path()]),
                 "attachments",
             ),
         ];

@@ -238,7 +238,7 @@ def search(
     *, read_hit: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """用一个不含检索词的新 Interaction 检索，返回检索页与（可选）命中行的读取结果。"""
-    steps: list[dict[str, Any]] = [{"read": {"path": path, "question": question}}]
+    steps: list[dict[str, Any]] = [{"read": {"path": path, "body": {"question": question}}}]
     if read_hit:
         steps.append({"read": {"path": "{hit}"}})
     message, results = turn(upstream, env, key, model, [{"role": "user", "content": f"probe {uuid.uuid4().hex}"}], steps)
@@ -312,7 +312,7 @@ def test_history_search_reads_hits_excludes_issuer_isolates_keys_and_clears(
         [issuer_path] = interaction_paths(wait_for_hits(upstream, env, owner, model, needle, 1))
         resumed = [*issuer, handoff, {"role": "tool", "tool_call_id": handoff["tool_calls"][0]["id"], "content": "record"}]
         message, results = turn(upstream, env, owner, model, resumed,
-                                [{"client": "lookup"}, {"read": {"path": ROOT, "question": needle}}], tools=[LOOKUP_TOOL])
+                                [{"client": "lookup"}, {"read": {"path": ROOT, "body": {"question": needle}}}], tools=[LOOKUP_TOOL])
         assert message["content"] == ANSWER, message
         own = json.loads(results[1])
         assert issuer_path not in own["content"] and not interaction_paths(own), own

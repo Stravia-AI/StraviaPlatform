@@ -189,7 +189,7 @@ def test_public_tool_execution_cleanup_and_restart(
     def read(key: str, path: str, wait: int | None = None) -> dict[str, Any]:
         arguments: dict[str, Any] = {"path": path}
         if wait is not None:
-            arguments["wait"] = wait
+            arguments["body"] = {"wait": wait}
         return call(key, "StraviaRead", arguments)
 
     try:

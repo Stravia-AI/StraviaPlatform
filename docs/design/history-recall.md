@@ -28,7 +28,7 @@
 - `<interaction-id>` 必须属于 `<root-id>` 所在的链路，否则视为不存在。
 - 工具调用按开始事件的先后编号，不使用客户端提供的 call id，因为 call id 可能含 `:` 或 `/`。
 - 选择器沿用 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md) 的语法。文件接受行范围（最多 16 段）或 `cursor=`；目录和检索结果只接受 `cursor=`。`raw` 与 `download` 被拒绝。
-- `question` 只在根目录、链路目录和交互转录上有效，表示在该路径范围内检索（第 5 节）。它与行范围互斥。`cursor` 自带检索条件，再传 `question` 视为冲突。工具文件不接受 `question`，因为工具结果不进入索引。
+- `body.question` 只在根目录、链路目录和交互转录上有效，表示在该路径范围内检索（第 5 节），例如 `StraviaRead({"path":"stravia://history/","body":{"question":"数据库迁移"}})`。它与行范围互斥。`cursor` 自带检索条件，再传 `question` 视为冲突。工具文件不接受 `question`，因为工具结果不进入索引。
 - `wait`、`attachments`、`allowed_domains` 携带有内容的值时一律拒绝；`0`、`[]` 与 `null` 视为未传。空白 `question` 同样视为未传，即列出目录或读取文件。
 - 不存在、已清理和属于其他 Principal 的路径返回同一个错误：`History entry unavailable: it does not exist, has expired, or was cleared.`
 

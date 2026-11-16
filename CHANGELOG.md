@@ -6,12 +6,17 @@
 
 - Provider allowance details now show Codex and Claude Code one-time reset balances, individual entitlement expiry dates and unavailable states in initially collapsed, headerless detail rows matching the allowance detail styling. Its compact toggle stays beside the account and plan. Reported reset counters, including zero, remain visible; unknown counts are omitted, and redemption requires an explicit confirmation that initially focuses Cancel before redeeming a free reset. Reads never consume an entitlement or purchase a reset. Ambiguous submissions retain their request ID; a restarted service rejects unknown pending retries instead of submitting another reset. Update the host and rebuild/re-import both standalone plugins. These are upstream client-internal interfaces; no live entitlement was consumed during verification.
 
+### Changed
+
+- **Breaking — StraviaRead input:** Move `question`, `attachments`, `allowed_domains` and `wait` from the top level into the optional `body` object; old flat calls are rejected without a compatibility shim. Model declarations use `strict: false` and expose only `path` and `body` in the schema, with body parameters described by capability.
+
 ### Fixed
 
 - User message bubbles and their metadata now align with the reading column's right edge in virtualized conversations, matching the composer without removing the message width limit.
 - Codex no longer blocks valid reset entitlements based on ordinary usage being allowed or its limit flags being absent. Entitlement balance, expiry and personal-account checks remain; only the upstream redemption result confirms a reset. Rebuild and re-import the standalone Codex plugin.
 - Structural headings and technical text now fall back to the bundled Chinese font when system CJK glyphs are unavailable.
 - One-time allowance resets now use the shared cryptographically secure UUID generator on HTTP management pages, where `crypto.randomUUID` is unavailable.
+- StraviaRead parameter errors provide actionable field, type and usage guidance without echoing input values; runtime type, field and capability checks remain enforced.
 
 ## [0.7.2] - 2026-11-15
 

@@ -400,7 +400,7 @@ Ingress 接受 `{ "id": "..." }`；若显式提供 `type`，必须等于 `item_r
 
 平台工具使用标准 function 声明，`name` 为 `StraviaRead`，参数由统一入口 schema 描述。旧平台扩展 `stravia:web_search` 不再接受，不保留调用别名。Provider-native `web_search` 等工具类型继续按其原协议透传，不被平台工具改名覆盖；客户端自有的同名 function 也不因此改写为原生工具类型。
 
-模型侧 `StraviaRead` 声明使用 `strict: true`，所有出现的字段都列入 `required`，`question`、`attachments`、`allowed_domains`、`wait` 写成可空类型；MCP 使用只有 `path` 必填的可选形式。MCP、外层模型与内部 Agent 共用 `path` 加纯文本字段的输入：`path` 只承载地址和 `:` 选择器，搜索使用 `stravia://search` 并在 `question` 放搜索文本，`allowed_domains` 是独立字段；续接把 `stravia://turns/<turn-id>` 直接作为 `path`。旧 url、旧 URL scheme、旧 `#`／`?` 选项和 Stravia 管理的 blocked_domains 明确拒绝。长报告仅裁剪工具交付副本的 answer，并在 pagination 中提供文本快照续读路径，历史完整报告不受影响。
+模型侧 `StraviaRead` 声明使用 `strict: false`，schema 只公开 `path` 和 `body`（模型声明可将两者都列为 required）；MCP 只有 `path` 必填。`body` 可省略或为 `null`，否则为对象；内部字段仅在 description 中按能力范围说明，运行时仍强类型校验并拒绝未知、不适用或类型错误的字段。MCP、外层模型与内部 Agent 共用这一输入：`path` 只承载地址和 `:` 选择器，搜索使用 `stravia://search`，搜索文本与允许域名分别放在 `body.question` 和 `body.allowed_domains`；续接把 `stravia://turns/<turn-id>` 直接作为 `path`。旧顶层字段不兼容，旧 url、旧 URL scheme、旧 `#`／`?` 选项和 Stravia 管理的 blocked_domains 明确拒绝。长报告仅裁剪工具交付副本的 answer，并在 pagination 中提供文本快照续读路径，历史完整报告不受影响。
 
 ### 9.3 Final output policy
 

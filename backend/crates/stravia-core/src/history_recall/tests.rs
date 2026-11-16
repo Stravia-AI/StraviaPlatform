@@ -301,10 +301,7 @@ async fn read(
 ) -> Result<Value, PlatformToolError> {
     let input = ReadInput {
         path: path.to_owned(),
-        question: None,
-        attachments: None,
-        allowed_domains: None,
-        wait: None,
+        body: None,
     };
     let ReadTarget::History(history) = parse_read_input(&input).expect("history path") else {
         panic!("{path} is not a history path");
@@ -315,10 +312,10 @@ async fn read(
 async fn search(recall: &Recall<'_>, principal: &str, path: &str, question: &str) -> Value {
     let input = ReadInput {
         path: path.to_owned(),
-        question: Some(question.to_owned()),
-        attachments: None,
-        allowed_domains: None,
-        wait: None,
+        body: Some(stravia_web_access_contract::read_path::ReadBody {
+            question: Some(question.to_owned()),
+            ..Default::default()
+        }),
     };
     let ReadTarget::History(history) = parse_read_input(&input).expect("search path") else {
         panic!("not a history path");

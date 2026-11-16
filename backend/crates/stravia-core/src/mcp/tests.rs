@@ -216,7 +216,7 @@ impl Drop for TestApp {
 type SdkClient = RunningService<RoleClient, InitializeRequestParams>;
 
 #[tokio::test]
-async fn read_tool_responses_schema_supports_strict_optional_arguments() {
+async fn read_tool_responses_schema_accepts_path_and_body() {
     use crate::hook::tool::PlatformToolRegistry;
     use stravia_protocol_codec::codec::open_responses::encoder::ResponsesEncoder;
     use stravia_runtime_contract::hook::ToolId;
@@ -250,91 +250,26 @@ async fn read_tool_responses_schema_supports_strict_optional_arguments() {
         .encode_request(request)
         .expect("encode Responses request");
     let function = &body["tools"][0];
-    assert_eq!(function["strict"], true);
+    assert_eq!(function["strict"], false);
     let schema = &function["parameters"];
-    let required = schema["required"].as_array().expect("required array");
-    for name in schema["properties"].as_object().expect("properties").keys() {
-        assert!(
-            required.contains(&json!(name)),
-            "invalid_function_parameters: strict StraviaRead schema is missing required property {name}"
-        );
-    }
+    assert_eq!(schema["required"], json!(["path", "body"]));
     assert_eq!(schema["additionalProperties"], false);
     let validator = jsonschema::validator_for(schema).expect("valid schema");
     let search = json!({
         "path": "stravia://search",
-        "question": "Rust",
-        "attachments": null,
-        "allowed_domains": ["example.com"],
-        "wait": null,
+        "body": {"question": "Rust", "allowed_domains": ["example.com"]},
     });
     assert!(validator.is_valid(&search));
-    assert!(!validator.is_valid(&json!({"path": 42, "question": null, "attachments": null, "allowed_domains": null, "wait": null})));
-    assert!(
-        !validator.is_valid(&json!({"path": "stravia://search"})),
-        "strict StraviaRead schemas require every exposed field; optional fields are nullable"
-    );
+    assert!(validator.is_valid(&json!({"path": "https://example.com/", "body": null})));
+    assert!(!validator.is_valid(&json!({"path": 42, "body": null})));
+    assert!(!validator.is_valid(&json!({"path": "stravia://search", "body": "not an object"})));
+    assert!(!validator.is_valid(&json!({"path": "stravia://search", "question": "Rust"})));
     let mut legacy = search.clone();
     legacy["previous_path"] = json!("stravia://turns/abcdefghijklmnopqrstuvwxyzab");
-    assert!(
-        !validator.is_valid(&legacy),
-        "removed fields must be rejected"
-    );
+    assert!(!validator.is_valid(&legacy));
     let mcp_validator = jsonschema::validator_for(&mcp_schema).expect("valid MCP schema");
-    assert!(mcp_validator.is_valid(&json!({"path": "stravia://search", "question": "Rust"})));
+    assert!(mcp_validator.is_valid(&search));
     assert!(mcp_validator.is_valid(&json!({"path": "stravia://artifacts/x"})));
-}
-
-#[test]
-fn read_schema_fields_follow_exposure_scope() {
-    use stravia_runtime_contract::hook::ReadExposureScope;
-    use stravia_web_access_contract::read_path::{input_schema, model_input_schema};
-
-    let keys = |scope: ReadExposureScope, internal: bool| {
-        let scope = read::schema_scope(scope, internal);
-        let mut names: Vec<String> = model_input_schema(scope)["properties"]
-            .as_object()
-            .expect("properties")
-            .keys()
-            .cloned()
-            .collect();
-        names.sort();
-        // 宽松形式与严格形式暴露的字段一致。
-        let mut loose: Vec<String> = input_schema(scope)["properties"]
-            .as_object()
-            .expect("properties")
-            .keys()
-            .cloned()
-            .collect();
-        loose.sort();
-        assert_eq!(names, loose);
-        names
-    };
-    assert_eq!(
-        keys(ReadExposureScope::FULL, false),
-        ["allowed_domains", "attachments", "path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::new(true, false), false),
-        ["allowed_domains", "path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::new(false, true), false),
-        ["attachments", "path", "question", "wait"]
-    );
-    assert_eq!(keys(ReadExposureScope::NONE, false), ["path", "wait"]);
-    assert_eq!(
-        keys(ReadExposureScope::NONE.with_history(), false),
-        ["path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::FULL.with_history(), false),
-        ["allowed_domains", "attachments", "path", "question", "wait"]
-    );
-    assert_eq!(
-        keys(ReadExposureScope::FULL, true),
-        ["allowed_domains", "attachments", "path", "question"]
-    );
 }
 
 async fn test_app() -> TestApp {
@@ -1020,8 +955,10 @@ async fn official_client_calls_media_with_a_principal_owned_artifact() {
             CallToolRequestParams::new("StraviaRead").with_arguments(
                 json!({
                     "path": previous_path,
-                    "question": "What else is visible?",
-                    "attachments": [&second_source_path],
+                    "body": {
+                        "question": "What else is visible?",
+                        "attachments": [&second_source_path],
+                    },
                 })
                 .as_object()
                 .expect("continuation arguments")
@@ -1072,7 +1009,7 @@ async fn media_continuation_without_attachments_reuses_the_parent_sources() {
     let continued = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path": &turn_path, "question": "Anything else?"})
+                json!({"path": &turn_path, "body": {"question": "Anything else?"}})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -1136,19 +1073,19 @@ async fn turn_continuation_rejects_fields_that_do_not_fit_the_turn_kind() {
     let missing = TurnNodeId::agent().reference();
     let cases = [
         (
-            json!({"path": turns[0], "question": "more", "attachments": ["stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc"]}),
-            "attachments only apply to media continuation",
+            json!({"path": turns[0], "body": {"question": "more", "attachments": ["stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc"]}}),
+            "body.attachments",
         ),
         (
-            json!({"path": turns[1], "question": "more", "allowed_domains": ["example.com"]}),
-            "allowed_domains only apply to search continuation",
+            json!({"path": turns[1], "body": {"question": "more", "allowed_domains": ["example.com"]}}),
+            "body.allowed_domains",
         ),
         (
-            json!({"path": turns[2], "question": "more"}),
+            json!({"path": turns[2], "body": {"question": "more"}}),
             "Turn cannot be continued with StraviaRead",
         ),
         (
-            json!({"path": missing, "question": "more"}),
+            json!({"path": missing, "body": {"question": "more"}}),
             "Turn unavailable",
         ),
     ];
@@ -1193,7 +1130,7 @@ async fn official_client_reads_html_and_raw_text_without_media_execution() {
     let result = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path": source.reference(), "question": "Explain"})
+                json!({"path": source.reference(), "body": {"question": "Explain"}})
                     .as_object()
                     .unwrap()
                     .clone(),

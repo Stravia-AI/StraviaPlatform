@@ -124,7 +124,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     tool_round["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
         "id": "guessed-search",
         "type": "function",
-        "function": {"name": "StraviaRead", "arguments": "{\"path\":\"stravia://search\",\"question\":\"unexposed networking\"}"}
+        "function": {"name": "StraviaRead", "arguments": "{\"path\":\"stravia://search\",\"body\":{\"question\":\"unexposed networking\"}}"}
     }]);
     tool_round["choices"][0]["finish_reason"] = serde_json::json!("tool_calls");
     let (parent_url, parent_calls, requests) = serve_openai_sequence_with_requests(vec![

@@ -66,18 +66,17 @@ async fn long_unicode_line_is_complete_and_independent_of_the_original_artifact(
         .find(|tool| tool.name == "StraviaRead")
         .unwrap();
     assert_eq!(tool.input_schema.get("required"), Some(&json!(["path"])));
-    // 字段按 Principal 当前的能力裁剪：该 key 只启用了媒体理解。
     let properties = tool
         .input_schema
         .get("properties")
         .unwrap()
         .as_object()
         .unwrap();
-    for name in ["path", "question", "attachments", "wait"] {
-        assert!(properties.contains_key(name), "missing {name}");
-    }
-    assert!(!properties.contains_key("allowed_domains"));
-    assert!(!properties.contains_key("previous_path"));
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["body", "path"]
+    );
+    assert!(properties["body"].get("properties").is_none());
     let original = "中文🙂".repeat(9 * 1024);
     let source = put(
         &app,

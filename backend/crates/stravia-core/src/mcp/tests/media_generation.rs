@@ -563,7 +563,7 @@ async fn cancellation_after_handoff_commit_before_ack_preserves_original_generat
     let completed = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":execution_path,"wait":120})
+                json!({"path":execution_path,"body":{"wait":120}})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -652,7 +652,7 @@ async fn bounded_generation_queries_share_a_durable_result_and_preserve_artifact
     let running = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":execution_path,"wait":0})
+                json!({"path":execution_path,"body":{"wait":0}})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -669,7 +669,7 @@ async fn bounded_generation_queries_share_a_durable_result_and_preserve_artifact
     let completed = client
         .call_tool(
             CallToolRequestParams::new("StraviaRead").with_arguments(
-                json!({"path":execution_path,"wait":120})
+                json!({"path":execution_path,"body":{"wait":120}})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -823,7 +823,7 @@ async fn execution_storage_failure_never_claims_handoff_or_success_or_retries_ge
                 crate::mcp::read::ReadTool::new(&fixture.app.gateway, &mut Vec::new()).unwrap();
             let result = McpTool::call(
                 &reader,
-                json!({"path":path,"wait":120}),
+                json!({"path":path,"body":{"wait":120}}),
                 &McpContext::new(fixture.app.key_id.clone()),
             )
             .await

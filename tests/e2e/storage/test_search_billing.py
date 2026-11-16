@@ -127,7 +127,7 @@ def test_external_search_route_bills_attempt_to_root_api_key(usage_env, repo_roo
                 "name": "StraviaRead",
                 "arguments": {
                     "path": "stravia://search",
-                    "question": "billing probe",
+                    "body": {"question": "billing probe"},
                 },
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
