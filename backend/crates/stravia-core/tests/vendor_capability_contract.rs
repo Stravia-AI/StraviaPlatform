@@ -1646,6 +1646,173 @@ async fn image_route_filters_reference_inputs_before_priority_and_failover() -> 
 }
 
 #[tokio::test]
+async fn minimax_profiles_generate_and_edit_owned_images_through_base() -> anyhow::Result<()> {
+    let harness = TestHarness::new().await?;
+    let upstream = LocalUpstream::start().await?;
+    let client = harness.connect().await;
+    let expected_bytes = base64::engine::general_purpose::STANDARD.decode(PNG_BASE64)?;
+    let mut second_png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 3).write_to(&mut second_png, image::ImageFormat::Png)?;
+    let second_base64 = base64::engine::general_purpose::STANDARD.encode(second_png.into_inner());
+    let response = |encoded: &str| json!({"data":[{"b64_json":encoded}],"output_format":"png"});
+    let mut first_reference = None;
+
+    for profile in [
+        "minimax",
+        "minimax-cn",
+        "minimax-coding-plan",
+        "minimax-cn-coding-plan",
+    ] {
+        let model = "future-image-model-not-h3";
+        let provider = create_provider(
+            &harness.gateway,
+            profile,
+            profile,
+            &format!("{}/gateway/anthropic/v1", upstream.url),
+            "anthropic-messages",
+        )
+        .await?;
+        harness
+            .gateway
+            .admin()
+            .create_manual_provider_model(
+                &provider.id,
+                model,
+                CreateManualProviderModel {
+                    metadata: json!({
+                        "id":model,
+                        "capabilities":["media_image"],
+                        "modalities":{"input":["text","image"],"output":["image"]}
+                    }),
+                    template_id: None,
+                },
+            )
+            .await?;
+        let route = create_route(
+            &harness.gateway,
+            &format!("{profile}-image-route"),
+            vec![(&provider, model, 0)],
+            0,
+            stravia_core::db::models::RouteOutputModality::Image,
+        )
+        .await?;
+        configure_image_generation(&harness.gateway, &route.model_id).await?;
+        upstream
+            .push_json(
+                "/gateway/v1/images/generations",
+                StatusCode::OK,
+                response(PNG_BASE64),
+            )
+            .await;
+        let generated = call_generate(
+            &client,
+            json!({
+                "type":"image",
+                "input":{"prompt":"a controlled image","aspect_ratio":"16:9","resolution":"4K"}
+            }),
+        )
+        .await;
+        assert_ne!(generated.is_error, Some(true), "{profile}: {generated:?}");
+        let output = generated.structured_content.expect("generated Artifact");
+        assert_eq!(output["mime_type"], "image/png");
+        assert_eq!(output["media"], json!({"width":1,"height":1}));
+        let reference = output["path"]
+            .as_str()
+            .expect("Artifact reference")
+            .to_owned();
+        let artifact_id = ArtifactId::from_reference(&reference)?;
+        let store = harness.gateway.artifact_store().expect("Artifact store");
+        let reader = store
+            .open(&Principal::new(harness.key_id.clone()), &artifact_id)
+            .await?;
+        assert_eq!(reader.artifact.mime_type, "image/png");
+        let stravia_runtime_contract::artifact::ArtifactSource::LocalPath(path) = &reader.source
+        else {
+            panic!("generated Artifact must be locally readable");
+        };
+        let stored = tokio::fs::read(path).await?;
+        assert_eq!(stored, expected_bytes);
+        assert!(
+            store
+                .open(&Principal::new("another-principal"), &artifact_id)
+                .await
+                .is_err()
+        );
+        if first_reference.is_none() {
+            first_reference = Some(reference);
+            upstream
+                .push_json(
+                    "/gateway/v1/images/generations",
+                    StatusCode::OK,
+                    response(&second_base64),
+                )
+                .await;
+            let second = call_generate(
+                &client,
+                json!({"type":"image","input":{"prompt":"second image"}}),
+            )
+            .await;
+            assert_ne!(second.is_error, Some(true), "{second:?}");
+            let second_reference = second.structured_content.expect("second Artifact")["path"]
+                .as_str()
+                .expect("second Artifact reference")
+                .to_owned();
+            upstream
+                .push_json(
+                    "/gateway/v1/images/edits",
+                    StatusCode::OK,
+                    response(PNG_BASE64),
+                )
+                .await;
+            let edited = call_generate(&client, json!({
+                "type":"image",
+                "input":{"prompt":"edit both images","reference_images":[first_reference.as_ref().unwrap(),second_reference],"aspect_ratio":"16:9","resolution":"4K"}
+            })).await;
+            assert_ne!(edited.is_error, Some(true), "{edited:?}");
+            assert_eq!(
+                edited.structured_content.expect("edited Artifact")["mime_type"],
+                "image/png"
+            );
+        }
+    }
+
+    let requests = upstream.requests().await;
+    assert_eq!(requests.len(), 6);
+    for request in &requests {
+        assert_eq!(
+            request.headers["authorization"],
+            "Bearer fixture-secret-not-production"
+        );
+        assert_eq!(request.body["model"], "future-image-model-not-h3");
+        assert_eq!(request.body["n"], 1);
+        assert_eq!(request.body["stream"], false);
+        assert_eq!(request.body["response_format"], "b64_json");
+        assert_eq!(request.body["output_format"], "jpeg");
+        assert!(!request.body.to_string().contains("stravia://"));
+        if request.body["prompt"] != "second image" {
+            assert_eq!(request.body["aspect_ratio"], "16:9");
+            assert_eq!(request.body["area"], "4K");
+        }
+    }
+    assert_eq!(requests[0].path, "/gateway/v1/images/generations");
+    assert_eq!(requests[1].path, "/gateway/v1/images/generations");
+    assert_eq!(requests[2].path, "/gateway/v1/images/edits");
+    assert_eq!(
+        requests[2].body["images"],
+        json!([
+            {"image_url":format!("data:image/png;base64,{PNG_BASE64}")},
+            {"image_url":format!("data:image/png;base64,{second_base64}")}
+        ])
+    );
+    assert!(
+        requests[3..]
+            .iter()
+            .all(|request| request.path == "/gateway/v1/images/generations")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn pure_image_vendor_stores_real_owned_png_and_cannot_chat() -> anyhow::Result<()> {
     let harness = TestHarness::new().await?;
     install_fixture(&harness.gateway, "capability-pure-image.wasm", false).await?;

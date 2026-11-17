@@ -4,6 +4,8 @@
 
 ### Added
 
+- Built-in Base MiniMax API and Plan connections now support image generation and reference-image editing through the same `generate` tool and image model. Model sync discovers image models and reference-input support from MiniMax's public OpenAPI schemas instead of a hardcoded model list; failed refreshes retain the previous inventory. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, Credits consumption and existing Provider-wide allowance guards still apply.
+
 - Provider allowance details now show Codex and Claude Code one-time reset balances, individual entitlement expiry dates and unavailable states in initially collapsed, headerless detail rows matching the allowance detail styling. Its compact toggle stays beside the account and plan. Reported reset counters, including zero, remain visible; unknown counts are omitted, and redemption requires an explicit confirmation that initially focuses Cancel before redeeming a free reset. Reads never consume an entitlement or purchase a reset. Ambiguous submissions retain their request ID; a restarted service rejects unknown pending retries instead of submitting another reset. Update the host and rebuild/re-import both standalone plugins. These are upstream client-internal interfaces; no live entitlement was consumed during verification.
 
 ### Changed
