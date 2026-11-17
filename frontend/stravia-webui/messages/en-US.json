@@ -576,6 +576,8 @@
   "server_startup_connection_failed": "Unable to check server startup",
   "server_startup_connection_action": "Check your connection and whether the service is running, then refresh to reconnect.",
   "server_startup_refresh": "Refresh and reconnect",
+  "server_authentication_failed_title": "Unable to verify your sign-in",
+  "server_authentication_forbidden_action": "Check the management address and reverse proxy settings, then try again.",
   "desktop_startup_starting_title": "Starting Stravia",
   "desktop_startup_stage_data_directory": "Data directory",
   "desktop_startup_stage_gateway": "Local gateway",

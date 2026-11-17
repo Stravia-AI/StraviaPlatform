@@ -117,9 +117,11 @@ export async function getAuthState(): Promise<AuthState> {
 async function refreshServerSession(): Promise<boolean> {
   const run = async (): Promise<boolean> => {
     const stateResponse = await rawFetch('/auth/state', {}, false)
-    if (stateResponse.ok && (await decodeAdmin<AuthState>(stateResponse)).authenticated) return true
+    if ((await decodeAdmin<AuthState>(stateResponse)).authenticated) return true
     const response = await rawFetch('/auth/refresh', { method: 'POST', headers: unsafeHeaders(false) }, false)
-    return response.ok
+    if (response.status === 401) return false
+    if (!response.ok) await decodeAdmin(response)
+    return true
   }
 
   if (typeof navigator !== 'undefined' && navigator.locks) {
@@ -135,7 +137,7 @@ async function renewAuthentication(): Promise<boolean> {
           () => true,
           () => false,
         )
-      : refreshServerSession().catch(() => false)
+      : refreshServerSession()
   ).finally(() => {
     refreshFlight = undefined
   })

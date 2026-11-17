@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Server WebUI no longer treats authentication storage failures, rejected-origin requests, or network interruptions as expired sessions. Startup authentication errors preserve the original URL and provide a retry action without clearing persistent cookies.
 - User message bubbles and their metadata now align with the reading column's right edge in virtualized conversations, matching the composer without removing the message width limit.
 - Codex no longer blocks valid reset entitlements based on ordinary usage being allowed or its limit flags being absent. Entitlement balance, expiry and personal-account checks remain; only the upstream redemption result confirms a reset. Rebuild and re-import the standalone Codex plugin.
 - Structural headings and technical text now fall back to the bundled Chinese font when system CJK glyphs are unavailable.

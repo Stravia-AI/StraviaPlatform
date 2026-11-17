@@ -6,8 +6,16 @@ import { Button } from '#lib/components/ui/button/index.js'
 import * as m from '#lib/paraglide/messages.js'
 import type { ServerStartupState } from '#lib/server-startup.js'
 
-let { state, connectionError = false }: { state: ServerStartupState; connectionError?: boolean } = $props()
-const failed = $derived(state.status === 'failed' || connectionError)
+let {
+  state,
+  connectionError = false,
+  authenticationError,
+}: {
+  state: ServerStartupState
+  connectionError?: boolean
+  authenticationError?: 'unavailable' | 'forbidden'
+} = $props()
+const failed = $derived(state.status === 'failed' || connectionError || !!authenticationError)
 </script>
 
 <main class="flex min-h-svh min-w-0 flex-col bg-background p-4 text-foreground sm:p-8" data-testid="server-startup">
@@ -18,20 +26,30 @@ const failed = $derived(state.status === 'failed' || connectionError)
   <section class="m-auto flex w-full min-w-0 max-w-xl flex-col gap-6 py-8" aria-labelledby="server-startup-title">
     <div role={failed ? 'alert' : undefined}>
       <h1 id="server-startup-title" class="font-structural text-2xl font-semibold text-balance">
-        {connectionError
-          ? m.server_startup_connection_failed()
-          : state.status === 'failed'
-            ? m.server_startup_failed_title()
-            : m.desktop_startup_starting_title()}
+        {authenticationError
+          ? m.server_authentication_failed_title()
+          : connectionError
+            ? m.server_startup_connection_failed()
+            : state.status === 'failed'
+              ? m.server_startup_failed_title()
+              : m.desktop_startup_starting_title()}
       </h1>
       {#if failed}
         <p class="mt-2 text-sm text-muted-foreground text-pretty">
-          {connectionError ? m.server_startup_connection_action() : m.server_startup_failed_action()}
+          {authenticationError === 'forbidden'
+            ? m.server_authentication_forbidden_action()
+            : authenticationError
+              ? m.login_server_unavailable()
+              : connectionError
+                ? m.server_startup_connection_action()
+                : m.server_startup_failed_action()}
         </p>
       {/if}
     </div>
     {#if failed}
-      <Button class="self-start" onclick={() => window.location.reload()}>{m.server_startup_refresh()}</Button>
+      <Button class="self-start" onclick={() => window.location.reload()}>
+        {authenticationError ? m.common_retry() : m.server_startup_refresh()}
+      </Button>
     {:else}
       <StartupProgress
         progress={state.progress ?? { phase: 'gateway', label: 'Preparing services', completed: 0, total: null }} />

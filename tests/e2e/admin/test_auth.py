@@ -822,6 +822,51 @@ def test_changing_credentials_revokes_every_existing_session(
 
 @pytest.mark.e2e
 @pytest.mark.admin
+@pytest.mark.parametrize("expire_access", [False, True], ids=["original-access", "refresh-access"])
+def test_authenticated_session_survives_server_restart(
+    stravia_binary: Path, expire_access: bool,
+) -> None:
+    with _initialized_server(stravia_binary) as server:
+        base = str(server["base"])
+        session = server["session"]
+        proc = server["proc"]
+        logs = server["logs"]
+        assert isinstance(session, WebSession)
+        assert isinstance(proc, subprocess.Popen)
+        assert isinstance(logs, list)
+        assert session.cookie_value("stravia_access") is not None
+        assert session.cookie_value("stravia_refresh") is not None
+        assert session.request("GET", "/api/v1/status")[0] == 200
+        stop_stravia_server(proc, logs)
+
+        restarted, restarted_logs = start_stravia_server(
+            stravia_binary=stravia_binary,
+            args=[
+                "--host", "127.0.0.1", "--port", str(urlsplit(base).port),
+                "--data-dir", str(server["data_dir"]),
+            ],
+        )
+        try:
+            wait_until_ready(f"{base}/api/v1/auth/state")
+            if expire_access:
+                access = next(cookie for cookie in session.cookies if cookie.name == "stravia_access")
+                session.cookies.clear(access.domain, access.path, access.name)
+                assert session.request("GET", "/api/v1/status")[0] == 401
+                assert session.request("POST", "/api/v1/auth/refresh", {})[0] == 200
+                assert session.cookie_value("stravia_access") is not None
+
+            status, state = session.request("GET", "/api/v1/auth/state")
+            assert status == 200
+            assert state["mode"] == "server"
+            assert state["authenticated"] is True
+            assert state["username"] == "owner"
+            assert session.request("GET", "/api/v1/status")[0] == 200
+        finally:
+            stop_stravia_server(restarted, restarted_logs)
+
+
+@pytest.mark.e2e
+@pytest.mark.admin
 def test_configured_server_restart_uses_saved_database_without_reopening_setup(
     stravia_binary: Path,
 ) -> None:

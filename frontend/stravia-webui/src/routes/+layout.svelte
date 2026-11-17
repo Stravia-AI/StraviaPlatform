@@ -88,6 +88,7 @@ $effect(() => {
 let desktopStartup = $state.raw<DesktopStartupState>(initialDesktopStartupState)
 let serverStartup = $state.raw<ServerStartupState>(initialServerStartupState)
 let serverConnectionError = $state(false)
+let serverAuthenticationError = $state<'unavailable' | 'forbidden'>()
 const serverSurfaceState = $derived<ServerStartupState>(
   serverStartup.status === 'ready' && !authReady
     ? {
@@ -163,15 +164,13 @@ onMount(() => {
 
         return false
       }
-    } catch {
+    } catch (cause) {
       if (desktop) {
         failDesktopStartup('session', 'frontend_auth_bootstrap_failed')
         return false
       }
-      if (window.location.pathname !== '/login') {
-        window.location.replace('/login')
-        return false
-      }
+      serverAuthenticationError = (cause as { status?: number } | null)?.status === 403 ? 'forbidden' : 'unavailable'
+      return false
     }
     return true
   }
@@ -257,7 +256,10 @@ onMount(() => {
 {#if isTauri && (!authReady || desktopStartup.status !== 'ready')}
   <DesktopStartup state={desktopSurfaceState} />
 {:else if !isTauri && (!authReady || serverStartup.status !== 'ready' || serverConnectionError)}
-  <ServerStartup state={serverSurfaceState} connectionError={serverConnectionError} />
+  <ServerStartup
+    state={serverSurfaceState}
+    connectionError={serverConnectionError}
+    authenticationError={serverAuthenticationError} />
 {:else}
   <QueryClientProvider client={queryClient}>
     <Tooltip.Provider>

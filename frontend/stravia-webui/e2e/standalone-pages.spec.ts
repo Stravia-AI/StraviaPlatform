@@ -449,6 +449,73 @@ test.describe('Global error', () => {
 })
 
 test.describe('Server startup', () => {
+  for (const locale of ['en-US', 'zh-CN'] as const) {
+    for (const failure of ['state', 'refresh', 'forbidden', 'network'] as const) {
+      test(`preserves login recovery after ${failure} failure in ${locale}`, async ({ page, context, baseURL }) => {
+        await prepareApp(page)
+        await page.addInitScript((locale) => localStorage.setItem('stravia-locale', locale), locale)
+        await context.addCookies([
+          {
+            name: 'stravia_refresh',
+            value: 'isolated-recovery-cookie',
+            url: `${baseURL}/api/v1/auth/refresh`,
+            httpOnly: true,
+            sameSite: 'Strict',
+            expires: Math.floor(Date.now() / 1000) + 3600,
+          },
+        ])
+        let recovered = false
+        await page.route('**/api/v1/auth/state', (route) => {
+          if (!recovered && failure === 'state') {
+            return route.fulfill({ status: 503, json: { error: 'auth_unavailable', code: 'auth_unavailable' } })
+          }
+          return route.fulfill({ json: { ...signedOut, authenticated: recovered, username: recovered ? 'admin' : null } })
+        })
+        await page.route('**/api/v1/auth/refresh', (route) =>
+          failure === 'network'
+            ? route.abort('connectionfailed')
+            : route.fulfill({
+                status: failure === 'forbidden' ? 403 : 503,
+                json: { error: failure === 'forbidden' ? 'origin_mismatch' : 'auth_unavailable' },
+              }),
+        )
+        const originalPath = '/providers?session-recovery=1'
+        await page.setViewportSize({ width: 320, height: 640 })
+        await page.goto(originalPath)
+        await expect(
+          page.getByRole('heading', {
+            level: 1,
+            name: locale === 'zh-CN' ? '暂时无法验证登录状态' : 'Unable to verify your sign-in',
+          }),
+        ).toBeVisible()
+        if (failure === 'forbidden') {
+          await expect(
+            page.getByText(
+              locale === 'zh-CN'
+                ? '请检查管理入口地址和反向代理设置，然后重试。'
+                : 'Check the management address and reverse proxy settings, then try again.',
+              { exact: true },
+            ),
+          ).toBeVisible()
+        }
+        await expect(page).toHaveURL(`${baseURL}${originalPath}`)
+        await expect(page.locator('#admin-username')).toHaveCount(0)
+        await expectNoApplicationNavigation(page)
+        await expectContainedHorizontally(page)
+        expect((await context.cookies()).find((cookie) => cookie.name === 'stravia_refresh')?.value).toBe(
+          'isolated-recovery-cookie',
+        )
+
+        recovered = true
+        await page.getByRole('button', { name: locale === 'zh-CN' ? '重试' : 'Retry', exact: true }).click()
+        await expect(page.locator('[data-testid="server-startup"]')).toHaveCount(0)
+        await expect(page.locator('h1')).toBeVisible()
+        await expect(page).toHaveURL(`${baseURL}${originalPath}`)
+        await expect(page.locator('#admin-username')).toHaveCount(0)
+      })
+    }
+  }
+
   async function mockStartup(page: Page, startup: { status: number; json?: unknown }): Promise<void> {
     await page.addInitScript(() => localStorage.setItem('stravia-locale', 'en-US'))
     await page.route('**/api/v1/startup', (route) => route.fulfill(startup))

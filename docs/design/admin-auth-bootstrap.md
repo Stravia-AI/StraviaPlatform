@@ -14,6 +14,8 @@
 - 访问 JWT 有效期为 15 分钟；使用可撤销、轮换的 refresh token 静默续期，登录总有效期最多为 7 天。
 - JWT 验签之外还必须校验服务端会话状态。退出撤销当前会话，修改密码或本地恢复凭据撤销全部旧会话；后续请求与刷新均不得继续使用已撤销会话。
 - 认证存储故障返回 `503`，不能被当成无效凭据或成功注销。撤销未完成时不得清除 Cookie；WebUI 保留当前页面并显示错误，避免把仍有效的服务端会话误报为已退出。
+- WebUI 恢复登录时，只有 refresh 明确返回 `401` 才按登录失效处理；状态读取或续期的网络异常、`403` 与服务端错误向调用方传播，不清除 Cookie。初始化阶段的认证故障保留原地址及查询参数，显示可重试的独立错误界面；管理入口或代理校验被拒绝时提示检查地址与代理设置，手动重试重新加载同一地址。
+- 管理会话与 JWT 签名密钥持久化在所选数据库中。同一数据目录和数据库的普通服务重启不撤销有效登录；浏览器继续使用原 access Cookie，或以原 refresh Cookie 恢复访问，不需要重新提交用户名和密码。
 - Server WebUI 通过 `stravia_access`（`Path=/`）与 `stravia_refresh`（`Path=/api/v1/auth`）两个 `HttpOnly`、`SameSite=Strict` Cookie 携带凭据；HTTPS origin 下同时设置 `Secure`。前端不将凭据存入 localStorage。
 - `GET /api/v1/auth/state` 报告 `setup`、`server`、`desktop` 或 `unavailable` 模式，以及当前请求的认证/设置资格；该只读检查不会刷新凭据。`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout` 与 `PUT /api/v1/auth/credentials` 是 Server 日常认证入口；响应正文不返回 token。所有会修改状态的 Web 请求均要求 `Origin` 精确等于独立恢复的当前请求外部源，并携带 `X-Stravia-CSRF: 1`；需要正文时还必须使用 JSON content type。
 - Desktop 通过受限原生通道取得 access JWT，仅在内存中保存，以 Bearer JWT 请求 HTTP 管理 API；refresh token 只保留在原生进程内存中。两种载体共享后端会话验证。登录总有效期耗尽后，Desktop 可通过原生通道重新取得会话。

@@ -570,6 +570,8 @@
   "server_startup_connection_failed": "无法确认服务端启动状态",
   "server_startup_connection_action": "请检查网络连接及服务是否运行，然后刷新页面重新连接。",
   "server_startup_refresh": "刷新并重新连接",
+  "server_authentication_failed_title": "暂时无法验证登录状态",
+  "server_authentication_forbidden_action": "请检查管理入口地址和反向代理设置，然后重试。",
   "desktop_startup_starting_title": "正在启动 Stravia",
   "desktop_startup_stage_data_directory": "数据目录",
   "desktop_startup_stage_gateway": "本地网关",
