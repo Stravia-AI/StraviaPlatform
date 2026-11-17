@@ -42,7 +42,7 @@ let {
 }: WebSearchBindingEditorProps = $props()
 
 let saving = $state(false)
-let backendKind = $state<'local' | 'external'>('local')
+let backendKind = $state<'local' | 'external'>('external')
 let localModelId = $state('')
 let externalRouteId = $state('')
 let error = $state('')
@@ -59,7 +59,7 @@ $effect.pre(() => {
 })
 
 function loadDraft(): void {
-  backendKind = backend?.kind ?? 'local'
+  backendKind = backend?.kind ?? 'external'
   localModelId = backend?.kind === 'local' ? (backend.model_id ?? '') : ''
   externalRouteId = backend?.kind === 'external' ? (backend.route_id ?? '') : ''
   error = ''
@@ -131,11 +131,11 @@ async function submit(): Promise<void> {
               </Select.Trigger>
               <Select.Content
                 ><Select.Group>
-                  <Select.Item value="local" label={m.web_search_use_stravia_model()}>
-                    {m.web_search_use_stravia_model()}
-                  </Select.Item>
                   <Select.Item value="external" label={m.web_search_use_external_route()}>
                     {m.web_search_use_external_route()}
+                  </Select.Item>
+                  <Select.Item value="local" label={m.web_search_use_stravia_model()}>
+                    {m.web_search_use_stravia_model()}
                   </Select.Item>
                 </Select.Group></Select.Content>
             </Select.Root>

@@ -105,6 +105,7 @@ pub(crate) struct VendorEvent {
 pub(crate) struct VendorExecution {
     pub(crate) output: OperationOutput,
     pub(crate) publication: VendorPublicationFence,
+    pub(crate) proxy: stravia_web_access::OutboundProxyMode,
     /// Persisted credential generation actually used by the successful attempt.
     /// Unpersisted sessions have neither a version nor an OAuth connection.
     pub(crate) credential_version: Option<ProviderCredentialVersion>,
@@ -1009,6 +1010,7 @@ impl Gateway {
             None
         };
         operation.ensure_current()?;
+        let web_proxy = proxy.web_access_mode();
         let network = VendorNetwork::new(
             Arc::clone(&self.vendor_transport),
             super::network::VendorNetworkConfig {
@@ -1119,6 +1121,7 @@ impl Gateway {
         Ok(VendorExecution {
             output,
             publication,
+            proxy: web_proxy,
             credential_version: None,
             oauth_connection_id: None,
             protocol,

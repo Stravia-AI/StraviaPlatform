@@ -33,9 +33,14 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
         Some(value) => value.as_array()?.as_slice(),
         None => &[],
     };
+    let searches = match payload.get("webSearchModelIds") {
+        Some(value) => value.as_array()?.as_slice(),
+        None => &[],
+    };
     let sorts = match payload.get("agentModelSorts") {
         Some(value) => value.as_array()?.as_slice(),
-        None if payload.get("imageGenerationModelIds").is_some() => &[],
+        None if payload.get("imageGenerationModelIds").is_some()
+            || payload.get("webSearchModelIds").is_some() => &[],
         None => return None,
     };
     let reroutes = match payload.get("deprecatedModelIds") {
@@ -209,6 +214,60 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
             family: Some(id.into()),
             selector: Some(id.into()),
             capabilities: vec!["media_image".into()],
+            metadata,
+        });
+    }
+    let mut seen_searches = BTreeSet::new();
+    for search in searches {
+        let id = search.as_str()?;
+        if id.trim().is_empty() {
+            continue;
+        }
+        let id = resolve_reroute(id, reroutes)?;
+        if id.trim().is_empty() || !seen_searches.insert(id) {
+            continue;
+        }
+        let details = match entries.get(id) {
+            Some(value) => Some(value.as_object()?),
+            None => None,
+        };
+        if details
+            .and_then(|details| details.get("disabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            continue;
+        }
+        let mut metadata = match details {
+            Some(details) => model_metadata(details)?,
+            None => BTreeMap::from([(
+                "modalities".into(),
+                json!({"input": ["text"], "output": ["text"]}),
+            )]),
+        };
+        let mut search_metadata = serde_json::Map::new();
+        search_metadata.insert("model_id".into(), json!(id));
+        if let Some(value) = details.and_then(|details| details.get("apiProvider")) {
+            search_metadata.insert("api_provider".into(), value.clone());
+        }
+        let search_metadata = Value::Object(search_metadata);
+        // Search 是独立操作，专属身份不改变 Agent 家族的选择器或各档位。
+        if let Some(model) = models.iter_mut().find(|model| model.id == id) {
+            model.capabilities.push("search".into());
+            model.metadata.insert("antigravity_search".into(), search_metadata);
+            continue;
+        }
+        metadata.insert("antigravity_search".into(), search_metadata);
+        let name = match details.and_then(|details| details.get("displayName")) {
+            Some(value) => value.as_str()?.trim(),
+            None => id,
+        };
+        models.push(DiscoveredModel {
+            id: id.into(),
+            display_name: if name.is_empty() { id } else { name }.into(),
+            family: Some(id.into()),
+            selector: Some(id.into()),
+            capabilities: vec!["search".into()],
             metadata,
         });
     }
@@ -553,6 +612,90 @@ mod tests {
         );
         payload["deprecatedModelIds"]["live"] = json!({"newModelId": "old"});
         assert!(parse(&payload).is_none());
+    }
+
+    #[test]
+    fn search_only_catalog_preserves_real_ids_and_provider() {
+        let result = parse(&json!({
+            "webSearchModelIds": ["web-one", "web-two"],
+            "models": {"web-one": {"displayName": "Web One", "apiProvider": "provider"}}
+        })).unwrap();
+        assert_eq!(result.models.len(), 2);
+        assert_eq!(result.models[0].id, "web-one");
+        assert_eq!(result.models[0].selector.as_deref(), Some("web-one"));
+        assert_eq!(result.models[0].display_name, "Web One");
+        assert_eq!(result.models[0].capabilities, ["search"]);
+        assert_eq!(result.models[0].metadata["antigravity_search"], json!({"model_id": "web-one", "api_provider": "provider"}));
+        assert_eq!(result.models[1].selector.as_deref(), Some("web-two"));
+        assert_eq!(result.models[1].capabilities, ["search"]);
+        assert!(parse(&json!({"webSearchModelIds": [], "models": {}})).unwrap().models.is_empty());
+        assert!(parse(&json!({"agentModelSorts": [], "models": {}})).unwrap().models.is_empty());
+    }
+
+    #[test]
+    fn search_merges_exact_single_identity_without_rewriting_selector() {
+        let result = parse(&json!({
+            "agentModelSorts": [{"groups": [{"modelIds": ["shared"]}]}],
+            "imageGenerationModelIds": ["shared"],
+            "webSearchModelIds": ["shared"],
+            "models": {"shared": {"apiProvider": 7}}
+        })).unwrap();
+        assert_eq!(result.models.len(), 1);
+        let model = &result.models[0];
+        assert_eq!(model.capabilities, ["infer", "media_image", "search"]);
+        assert_eq!(model.selector.as_deref(), Some("shared"));
+        assert_eq!(model.metadata["antigravity_search"], json!({"model_id": "shared", "api_provider": 7}));
+        assert_eq!(selector::resolve(&model.metadata[selector::EXTENSION_KEY], None).unwrap().id, "shared");
+    }
+
+    #[test]
+    fn search_ids_filter_empty_disabled_and_duplicate_reroutes() {
+        let result = parse(&json!({
+            "webSearchModelIds": ["", " ", "old", "live", "old", "disabled", "retired"],
+            "deprecatedModelIds": {"old": {"newModelId": "live"}, "retired": {"newModelId": "disabled"}},
+            "models": {"live": {}, "disabled": {"disabled": true}}
+        })).unwrap();
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].id, "live");
+        assert_eq!(result.models[0].capabilities, ["search"]);
+    }
+
+    #[test]
+    fn search_effort_id_does_not_grant_search_to_agent_family() {
+        let result = parse(&json!({
+            "defaultAgentModelId": "dual-low",
+            "agentModelSorts": [{"groups": [{"modelIds": ["dual-low", "dual-high"]}]}],
+            "webSearchModelIds": ["dual-high"],
+            "models": {"dual-low": {}, "dual-high": {"apiProvider": "web"}}
+        })).unwrap();
+        let family = result.models.iter().find(|model| model.id == "dual").unwrap();
+        assert_eq!(family.capabilities, ["infer"]);
+        assert_eq!(family.selector.as_deref(), Some("dual-low"));
+        assert_eq!(selector::resolve(&family.metadata[selector::EXTENSION_KEY], None).unwrap().id, "dual-low");
+        let search = result.models.iter().find(|model| model.id == "dual-high").unwrap();
+        assert_eq!(search.capabilities, ["search"]);
+        assert_eq!(search.selector.as_deref(), Some("dual-high"));
+        assert_eq!(search.metadata["antigravity_search"], json!({"model_id": "dual-high", "api_provider": "web"}));
+    }
+
+    #[test]
+    fn search_family_id_collision_preserves_agent_selection_table() {
+        let mut payload = json!({
+            "defaultAgentModelId": "dual-low",
+            "agentModelSorts": [{"groups": [{"modelIds": ["dual-low", "dual-high"]}]}],
+            "models": {"dual": {"apiProvider": "web"}, "dual-low": {}, "dual-high": {}}
+        });
+        let before = parse(&payload).unwrap();
+        payload["webSearchModelIds"] = json!(["dual"]);
+        let after = parse(&payload).unwrap();
+        assert_eq!(after.models.len(), 1);
+        let family = &after.models[0];
+        assert_eq!(family.id, "dual");
+        assert_eq!(family.capabilities, ["infer", "search"]);
+        assert_eq!(family.selector, before.models[0].selector);
+        assert_eq!(family.selector.as_deref(), Some("dual-low"));
+        assert_eq!(family.metadata[selector::EXTENSION_KEY], before.models[0].metadata[selector::EXTENSION_KEY]);
+        assert_eq!(family.metadata["antigravity_search"], json!({"model_id": "dual", "api_provider": "web"}));
     }
 
     #[test]

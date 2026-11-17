@@ -21,6 +21,7 @@ use super::provider::{AttemptCostContext, AttemptObservation};
 pub(crate) struct VendorRouteExecution {
     pub(crate) output: OperationOutput,
     pub(crate) publication: VendorPublicationFence,
+    pub(crate) proxy: stravia_web_access::OutboundProxyMode,
     pub(crate) provider_id: String,
     pub(crate) upstream_model: String,
     pub(crate) target_id: String,
@@ -552,6 +553,7 @@ impl Gateway {
                         return Ok(VendorRouteExecution {
                             output: execution.output,
                             publication: execution.publication,
+                            proxy: execution.proxy,
                             provider_id: provider_id.into(),
                             upstream_model: upstream_model.into(),
                             target_id,

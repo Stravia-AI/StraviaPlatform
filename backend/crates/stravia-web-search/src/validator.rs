@@ -7,10 +7,10 @@ use super::{
 };
 
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
-const MAX_SOURCES: usize = 20;
+pub const MAX_SEARCH_REPORT_SOURCES: usize = 20;
 const MAX_LIMITATIONS: usize = 20;
 const MAX_LIMITATION_BYTES: usize = 2 * 1024;
-const MAX_SOURCE_URL_BYTES: usize = 8 * 1024;
+pub const MAX_SEARCH_SOURCE_URL_BYTES: usize = 8 * 1024;
 const MAX_SOURCE_TITLE_BYTES: usize = 2 * 1024;
 const MAX_REPORT_BYTES: usize = 256 * 1024;
 
@@ -42,7 +42,7 @@ impl SearchReportValidator {
                 "Search Report answer must contain between 1 byte and 64 KiB",
             ));
         }
-        if !(1..=MAX_SOURCES).contains(&report.sources.len()) {
+        if !(1..=MAX_SEARCH_REPORT_SOURCES).contains(&report.sources.len()) {
             return Err(WebSearchError::new(
                 "invalid_report",
                 "Search Report must contain between 1 and 20 sources",
@@ -82,7 +82,7 @@ impl SearchReportValidator {
                     "Search Source path is not scoped to the current Turn",
                 ));
             }
-            if source.url.len() > MAX_SOURCE_URL_BYTES
+            if source.url.len() > MAX_SEARCH_SOURCE_URL_BYTES
                 || source
                     .title
                     .as_ref()

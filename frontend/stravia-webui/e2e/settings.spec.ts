@@ -576,6 +576,79 @@ test('administrator credentials are edited in a sheet that states every session 
     .toEqual({ current_password: 'old-password', username: 'playwright-admin', password: 'new-password' })
 })
 
+test('unconfigured web search defaults to External Route without enabling search or selecting a route', async ({
+  page,
+}) => {
+  let searchConfig = {
+    revision: 0,
+    enabled: false,
+    backend: null as { kind: string; route_id: string } | null,
+    max_turns: 12,
+    total_time_seconds: 600,
+    updated_at: '',
+    limits: { min_turns: 2, max_turns: 20, min_total_time_seconds: 60, max_total_time_seconds: 900 },
+  }
+  const searchSaves: unknown[] = []
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      const input = route.request().postDataJSON()
+      searchSaves.push(input)
+      searchConfig = { ...searchConfig, ...input, revision: searchConfig.revision + 1 }
+    }
+    await route.fulfill({ json: { data: searchConfig } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/web-search/external-routes', (route) =>
+    route.fulfill({
+      json: {
+        data: [{ id: 'route-external', model_id: 'external-search', display_name: 'External search', available: true }],
+      },
+    }),
+  )
+
+  await page.goto('/web-search')
+  const method = page.locator('#web-search-method')
+  await expect(method.getByText('External Route', { exact: true })).toBeVisible()
+  await expect(method.getByText('Search Route', { exact: true })).toBeVisible()
+  await expect(page.locator('#web-search-sources')).toHaveCount(0)
+  await expect(method.getByRole('button', { name: 'Advanced', exact: true })).toHaveCount(0)
+  const enable = page.getByRole('switch')
+  await expect(enable).not.toBeChecked()
+  await expect(enable).toBeDisabled()
+
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).first().click()
+  const sheet = page.getByRole('dialog', { name: 'Edit search method' })
+  await expect(sheet.locator('#search-backend')).toHaveText('External Route')
+  await expect(sheet.locator('#search-external-route')).toHaveValue('')
+  await expect(sheet.getByRole('button', { name: 'Save search method', exact: true })).toBeDisabled()
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(searchSaves).toEqual([])
+
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).first().click()
+  await sheet.locator('#search-external-route').click()
+  await page.getByRole('option', { name: 'External search' }).click()
+  await sheet.getByRole('button', { name: 'Save search method', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(searchSaves).toEqual([
+    {
+      revision: 0,
+      enabled: false,
+      backend: { kind: 'external', route_id: 'external-search' },
+      max_turns: 12,
+      total_time_seconds: 600,
+      updated_at: '',
+    },
+  ])
+  await expect(method.getByText('External search', { exact: true })).toBeVisible()
+  await expect(enable).not.toBeChecked()
+  await expect(enable).toBeEnabled()
+  await page.reload()
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).click()
+  await expect(sheet.locator('#search-backend')).toHaveText('External Route')
+  await expect(sheet.locator('#search-external-route')).toHaveValue('External search')
+})
+
 test('advanced features keep separate media and web search surfaces', async ({ page }) => {
   let searchConfig = {
     revision: 3,

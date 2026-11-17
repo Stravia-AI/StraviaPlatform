@@ -1,7 +1,7 @@
 use crate::agent::AgentRunner;
 use async_trait::async_trait;
 use futures::Stream;
-use std::{pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc};
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::agent::AgentEvent;
 use stravia_runtime_contract::agent::AgentInput;
@@ -127,12 +127,16 @@ impl ExternalSearchHost for SearchHost {
             .write_fence()
             .await
             .map_err(|_| external_publication_error(&cancellation, deadline))?;
-        let stravia_vendor_sdk::OperationOutput::Search(response) = execution.output else {
+        let stravia_vendor_sdk::OperationOutput::Search(mut response) = execution.output else {
             return Err(external_error(
                 "invalid_report",
                 "External Search Vendor returned an invalid result",
             ));
         };
+        resolve_grounding_sources(&mut response, |url| {
+            let proxy = execution.proxy.clone();
+            async move { stravia_web_access::fetch::resolve_final_url(&url, proxy).await }
+        }).await?;
         Ok(ExternalSearchExecution {
             response,
             publication: SearchPublicationGuard::new(Box::new(guard)),
@@ -140,6 +144,148 @@ impl ExternalSearchHost for SearchHost {
             upstream_model: execution.upstream_model,
             target_id: execution.target_id,
         })
+    }
+}
+
+async fn resolve_grounding_sources<F, Fut>(
+    response: &mut stravia_vendor_sdk::SearchResponse,
+    mut resolve: F,
+) -> Result<(), WebSearchError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<url::Url, stravia_web_access::fetch::FetchError>>,
+{
+    // Match the report validator's limits before making any network requests.
+    if response.sources.len() > stravia_web_search::MAX_SEARCH_REPORT_SOURCES
+        || response.sources.iter().any(|source| source.url.len() > stravia_web_search::MAX_SEARCH_SOURCE_URL_BYTES)
+    {
+        return Err(external_error("invalid_report", "Search Source count or URL exceeds the configured bounds"));
+    }
+    let mut resolved = std::collections::HashMap::<String, String>::new();
+    for source in &mut response.sources {
+        let Ok(url) = url::Url::parse(&source.url) else { continue };
+        if url.scheme() != "https"
+            || url.host_str() != Some("vertexaisearch.cloud.google.com")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || !url.path().strip_prefix("/grounding-api-redirect/").is_some_and(|tail| !tail.is_empty())
+        {
+            continue;
+        }
+        let final_url = if let Some(value) = resolved.get(&source.url) {
+            value.clone()
+        } else {
+            let value = resolve(source.url.clone()).await.map_err(|error| {
+                use stravia_web_access::fetch::FetchErrorCode;
+                match error.code() {
+                    FetchErrorCode::InvalidUrl => external_error("invalid_source_url", "External Search source redirect is not a public URL"),
+                    _ if error.to_string() == "HTTP redirect omitted Location" => external_error("source_resolution_failed", "External Search source redirect omitted Location"),
+                    _ if error.to_string() == "HTTP redirect limit exceeded" => external_error("source_resolution_failed", "External Search source redirect limit exceeded"),
+                    _ => external_error("source_resolution_failed", "External Search source redirect network request failed"),
+                }
+            })?.to_string();
+            resolved.insert(source.url.clone(), value.clone());
+            value
+        };
+        source.url = final_url;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod grounding_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn response(urls: &[&str]) -> stravia_vendor_sdk::SearchResponse {
+        stravia_vendor_sdk::SearchResponse {
+            answer: "Claim [sc:first]".into(),
+            sources: urls.iter().enumerate().map(|(index, url)| stravia_vendor_sdk::SearchSource {
+                id: if index == 0 { "first".into() } else { format!("source-{index}") },
+                url: (*url).into(), title: None, snippet: None, published_at: None,
+            }).collect(),
+            limitations: Vec::new(), usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn only_exact_grounding_sources_resolve_once_preserving_citations() {
+        let grounding = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/opaque";
+        let mut result = response(&[
+            "https://publisher.example/article", grounding, grounding,
+            "https://other.google.com/grounding-api-redirect/x",
+            "https://vertexaisearch.cloud.google.com:444/grounding-api-redirect/x",
+            "https://vertexaisearch.cloud.google.com/grounding-api-redirect/",
+        ]);
+        let calls = AtomicUsize::new(0);
+        resolve_grounding_sources(&mut result, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async { Ok(url::Url::parse("https://publisher.example/final").unwrap()) }
+        }).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(result.sources[0].url, "https://publisher.example/article");
+        assert_eq!(result.sources[1].url, "https://publisher.example/final");
+        assert_eq!(result.sources[2].url, result.sources[1].url);
+        assert_eq!(result.sources[0].id, "first");
+        assert_eq!(result.sources[1].id, "source-1");
+        assert_eq!(result.answer, "Claim [sc:first]");
+    }
+
+    #[tokio::test]
+    async fn ordinary_sources_never_trigger_resolution() {
+        let mut result = response(&["https://example.com/article", "https://google.com/grounding-api-redirect/a"]);
+        let calls = AtomicUsize::new(0);
+        resolve_grounding_sources(&mut result, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async { Ok(url::Url::parse("https://example.com/").unwrap()) }
+        }).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected_before_any_resolution() {
+        let grounding = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/opaque";
+        let oversized = "x".repeat(8193);
+        let mut result = response(&[grounding, &oversized]);
+        let calls = AtomicUsize::new(0);
+        let error = resolve_grounding_sources(&mut result, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async { Ok(url::Url::parse("https://publisher.example/").unwrap()) }
+        }).await.unwrap_err();
+        assert_eq!(error.code, "invalid_report");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn validator_checks_resolved_destination_against_allowed_domains() {
+        let mut result = response(&["https://vertexaisearch.cloud.google.com/grounding-api-redirect/opaque"]);
+        resolve_grounding_sources(&mut result, |_| async {
+            Ok(url::Url::parse("https://8.8.8.8/article").unwrap())
+        }).await.unwrap();
+        let turn = stravia_web_search::SearchTurnId::new("abcdefghijklmnopqrstuvwxyzab");
+        let path = format!("{}/sources/1", turn.reference());
+        let report = stravia_web_search::SearchReport {
+            answer: format!("Claim [{path}]"),
+            sources: vec![stravia_web_search::SearchSource { path, url: result.sources[0].url.clone(), title: None }],
+            limitations: Vec::new(),
+        };
+        let validator = stravia_web_search::SearchReportValidator;
+        let rejected = validator.validate(&turn, stravia_web_search::SearchCompletion::Complete, None, report.clone(), None, &["vertexaisearch.cloud.google.com".into()]).await.unwrap_err();
+        assert_eq!(rejected.code, "source_outside_allowed_domains");
+        let accepted = validator.validate(&turn, stravia_web_search::SearchCompletion::Complete, None, report, None, &["8.8.8.8".into()]).await.unwrap();
+        assert_eq!(accepted.sources[0].url, "https://8.8.8.8/article");
+        assert_eq!(result.sources[0].id, "first");
+    }
+
+    #[tokio::test]
+    async fn resolution_failure_is_user_visible_without_source_query() {
+        let mut result = response(&["https://vertexaisearch.cloud.google.com/grounding-api-redirect/opaque?secret=value"]);
+        let error = resolve_grounding_sources(&mut result, |_| async {
+            stravia_web_access::fetch::resolve_final_url("http://127.0.0.1/", stravia_web_access::OutboundProxyMode::Direct).await
+        }).await.unwrap_err();
+        assert_eq!(error.code, "invalid_source_url");
+        assert!(!error.message.contains("secret"));
     }
 }
 
