@@ -422,6 +422,7 @@ pub(crate) fn catalog_profile_descriptor(
             channel.default_base_url = Some(base_url.to_owned());
         }
     }
+    crate::minimax::configure_descriptor(&mut descriptor);
     Some(descriptor)
 }
 

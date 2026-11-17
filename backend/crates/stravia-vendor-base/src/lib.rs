@@ -6,6 +6,7 @@ mod codec;
 mod connection_check;
 mod generic;
 mod metadata;
+mod minimax;
 mod parameters;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
@@ -46,7 +47,7 @@ pub(crate) const INTERNAL_PROVIDER_IDS: &[&str] =
     &["custom", "gateway", "ollama", "openai-compatible"];
 
 fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
-    let descriptor = match provider_id {
+    let mut descriptor = match provider_id {
         "openai" => openai::descriptor(provider_id),
         "anthropic" => anthropic::descriptor(provider_id),
         "azure"
@@ -58,6 +59,7 @@ fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
         | "watsonx" => cloud::descriptor(provider_id),
         _ => metadata::descriptor(provider_id),
     }?;
+    minimax::configure_descriptor(&mut descriptor);
     Some(add_allowance_capabilities(descriptor))
 }
 
@@ -214,12 +216,44 @@ pub fn execute(
     }
     let provider_id = input.provider().provider_id.clone();
     validate_target(input.provider(), channel)?;
+    let minimax_discovery = operation == Operation::Discover && minimax::supports(&provider_id);
+    let restrict_models = minimax_discovery
+        && (input
+            .provider()
+            .operation_metadata
+            .contains_key("static_models")
+            || input
+                .provider()
+                .operation_metadata
+                .get("models_source")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|source| {
+                    let source = source.trim();
+                    !source.is_empty() && source != stravia_vendor_sdk::MODELS_SOURCE_CATALOG
+                }));
 
     if operation == Operation::Discover {
         let provider = input.provider();
         if let Some(response) = generic::explicit_discovery(&provider_id, provider)? {
+            let response = if minimax_discovery {
+                minimax::discover(host, &provider_id, response, restrict_models)?
+            } else {
+                response
+            };
             return Ok(OperationOutput::Discover(response));
         }
+    }
+    if operation == Operation::MediaImage && minimax::supports(&provider_id) {
+        let OperationInput::MediaImage { provider, request } = input else {
+            return Err(error(ErrorKind::Invalid, "image input mismatch"));
+        };
+        if provider.channel != channel {
+            return Err(error(
+                ErrorKind::Invalid,
+                "snapshot channel does not match execute channel",
+            ));
+        }
+        return minimax::generate(host, &provider, request).map(OperationOutput::MediaImage);
     }
     if operation == Operation::Allowance {
         let OperationInput::Allowance { provider, request } = input else {
@@ -240,7 +274,7 @@ pub fn execute(
         return allowance::execute(&provider_id, host, provider, request)
             .map(OperationOutput::Allowance);
     }
-    match provider_id.as_str() {
+    let output = match provider_id.as_str() {
         "openai" => openai::execute("openai", host, operation, channel, input),
         "anthropic" => anthropic::execute("anthropic", host, operation, channel, input),
         "azure" | "azure-cognitive-services" => {
@@ -264,6 +298,13 @@ pub fn execute(
             Some("@ai-sdk/gateway") => generic::execute("gateway", host, operation, channel, input),
             _ => generic::execute(&provider_id, host, operation, channel, input),
         },
+    }?;
+    match output {
+        OperationOutput::Discover(response) if minimax_discovery => {
+            minimax::discover(host, &provider_id, response, restrict_models)
+                .map(OperationOutput::Discover)
+        }
+        output => Ok(output),
     }
 }
 

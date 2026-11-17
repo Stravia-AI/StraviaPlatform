@@ -273,6 +273,10 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 
 已在隔离 Server 中通过默认 Edge 完成真实 Google OAuth，并用 `gemini-3.5-flash-lite` 验证四种客户端协议各三轮上下文与第三轮 SSE 终态；Responses 使用 `previous_response_id`，Gemini 保留真实签名。四协议还分别通过同步工具调用后流式回填、流式工具调用后同步回填：客户端执行声明的整数加法工具，并校验模型逐字返回工具生成的随机 receipt，确认工具结果实际进入下一轮。此验证不覆盖内置平台工具或 MCP。真实额度 API 与 Edge 额度页的四个共享窗口、剩余/已用切换和重置时间一致。这仅证明测试账号当时可用，不保证其它账号资格、全部模型或未来可用性。第三方 OAuth 使用可能违反 Google 条款并导致账号暂停或终止；私有协议与客户端识别也可能变化。固定 Linux/amd64 User-Agent 不代表复刻了原生 TLS、HTTP 或 JSON 序列化指纹。专属插件要求支持网站回调后手动授权码的 Stravia 版本，单独导入到旧宿主不能获得该流程；工具回放修复同样需要更新宿主与重建的独立插件。
 
+### MiniMax 图片生成与发现
+
+普通 MiniMax API 与 Plan 的四个 Profile 均由内置 `base` 提供图片生成，同一图片模型通过统一 `generate` 输入的可选参考图执行文生图或参考图编辑，不注册第二个工具或专用编辑模型。模型同步从官方两份图片 OpenAPI 合并发现型号及图片输入能力，不在实现中固定型号名单；显式模型来源限制、逐字段固定和发现失败保留旧库存继续有效。远端 schema 不改变请求目的地或认证，目录能力不等同账号授权。接入、区域地址、Credits 与 Provider 级额度守护限制见[媒体生成](media-generation.md#minimax-统一图片生成)。
+
 ### Provider 图标标识
 
 - `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有宿主图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。图像接口属于公开静态资源，不要求管理登录；入口 origin 策略仍生效。

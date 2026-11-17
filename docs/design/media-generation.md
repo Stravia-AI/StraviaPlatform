@@ -6,7 +6,7 @@
 
 Media Generation 的用户可见名称为“媒体生成”，属于 Advanced Capability。统一工具名为 `generate`；本期只支持图片生成与参考图编辑，首个接入后端为 Codex，不提前公布音频或视频类型。
 
-当前接入 Codex 托管图片工具和 Antigravity 原生图片模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
+当前接入 Codex 托管图片工具、Antigravity 原生图片模型及内置 `base` 的 MiniMax 图片模型。文生图与参考图编辑共用同一个 `generate` 入口和图片模型；是否提供 `reference_images` 决定本次操作，不拆出独立的编辑工具或模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
 
 透明注入总开关开启时同时提供基础 `StraviaRead`：所属 Artifact 的下载及公开工具执行状态／原始结果查询不依赖联网、多模态理解或媒体生成选择。联网与媒体理解仍按各自 Gate 和注入选择限制，不因基础 Read 自动开放。
 
@@ -155,6 +155,25 @@ Antigravity 的图片传输与请求形状以 2026-11-06 官方 agy 1.5.1 原生
 
 已安装实例须重新构建并导入独立 `antigravity` 插件，再同步账号模型，随后将发现的图片模型绑定到图片 Route 并在媒体生成中选择该 Route。未固定的规格字段随同步刷新，人工固定字段不被强制覆盖；不自动创建、改绑或启用 Route。账号是否广告图片模型、配额与真实生图资格仍由上游决定，本地合约验证不能代替真实账号验证。
 
+### MiniMax 统一图片生成
+
+MiniMax 普通 API 与 Plan 共用内置 `base`，沿用 `minimax`、`minimax-cn`、`minimax-coding-plan` 和 `minimax-cn-coding-plan` 四个 Profile，不新增插件、认证字段、工具或图片编辑专用模型。原聊天协议、连接与额度监控不变。
+
+模型同步保留既有文字发现，同时读取对应区域官方公开的 [文生图 OpenAPI](https://platform.minimax.io/docs/api-reference/image/generation/api/h3-image-generations.json) 与 [参考图编辑 OpenAPI](https://platform.minimax.io/docs/api-reference/image/generation/api/h3-image-edits.json)；中国区使用 `https://platform.minimax.cn` 下的同路径文件。读取不携带 Provider 凭据。只沿已实现图片操作的本地 `requestBody` schema 引用提取 `model.enum`，不解析网页、不按型号名称猜测，也不在代码维护图片型号白名单。
+
+- 文生图枚举提供图片模型集合，参考图编辑枚举为其中同一型号增加图片输入能力；每个型号只登记一次。图片模型登记 `media_image` 与图片输出，不凭空获得聊天能力；同 ID 已有真实文字能力时保留。
+- 显式静态模型列表及自定义模型发现源仍限制模型集合，官方 schema 只补齐其中已选型号的图片能力，不擅自增加成员。人工固定的规格继续由既有逐字段规则保护。
+- 两份 schema 必须完整下载并解析成功。失败明确报告同步失败，由 Core 保留上次成功的模型库存，不以旧结果伪装刷新成功；已有 Route 不自动创建、改绑或启用。
+- 官方 schema 只声明供应商协议支持，不证明当前 Key 的套餐权限、剩余额度或生图成功。远端 schema 不得改写连接目的地、鉴权或网络授权；新协议或新路径仍须新增适配。
+
+`generate` 无参考图时调用 `/v1/images/generations`，有参考图时调用 `/v1/images/edits`，两者仍是同一模型与 Route。请求固定单图、非流式 JSON 和 base64 图片返回；比例映射到 `aspect_ratio`，分辨率映射到 `area`，有序参考图片以 data URI 发送。省略的偏好使用上游默认，不增加供应商专用工具参数。国际图片操作使用 `api.minimax.io`，中国区使用当前官方 `api.minimax.cn`；旧中国区官方聊天基址只对图片操作转换，不改写已保存连接。自定义地址保留其部署前缀，不隐式改投官方地址。
+
+成功响应仍须验证恰好一张图片、严格编码与大小，并由 Core 解码实际格式和像素后收存为当前 Principal 的 Artifact。HTTP 200 中的逐图错误不代表成功；内容政策拒绝、套餐不支持、额度不足与速率限制按各自类别交给现有执行策略。上游明确报告的用量按真实计数保存，不估算。
+
+MiniMax 服务端最长等待 600 秒；本地仍服从调用者 deadline 和现有 15 分钟工具总期限。接口不幂等，断连或超时不保证上游取消，Route 重试可能再次生成并计费；适配器不添加隐藏重试。Plan Key 使用订阅额度及已有 Credits，按量 Key 使用账户余额，不自动换 Key 或购买 Credits。图片仅受上游周额度限制，但现有 [Provider 级额度守护](../adr/0078-suspend-provider-routing-on-guarded-allowance-exhaustion.md) 不变：管理员勾选五小时条目后，耗尽仍会连带暂停同连接的图片 Target；只守护周额度可避免这一连带影响。
+
+升级宿主内嵌的 `base` 后重新同步模型，将图片型号绑定到图片 Route，再在媒体生成中选择该 Route。真实生成会消耗上游额度，必须另行取得针对账号与影响的明确授权。
+
 ## 5. 失败与重试
 
 沿用普通推理的可重试错误分类与 Route 重试、Target 切换策略，参见 [ADR-0034](../adr/0034-layer-route-target-selection.md)。不因请求已发送且执行状态不明而额外阻止原策略允许的重试；明确接受重复生成、重复消耗额度的风险，不承诺恰好执行一次。
@@ -181,7 +200,7 @@ Antigravity 的图片传输与请求形状以 2026-11-06 官方 agy 1.5.1 原生
 
 实施时须通过产品入口验证以下已确认契约；本节是验收要求，不是已执行的测试报告：
 
-- 统一输入严格按类型校验，图片生成与参考图编辑可经 Codex 托管工具或 Antigravity 原生图片模型完成；Antigravity 调用所选 Target 的真实图片模型，而非自动改选广告列表首项。
+- 统一输入严格按类型校验，图片生成与参考图编辑可经 Codex 托管工具、Antigravity 原生图片模型或 Base MiniMax 图片模型完成；同一图片模型与 `generate` 入口按参考图有无执行，不拆出编辑专用模型。Antigravity 调用所选 Target 的真实图片模型，而非自动改选广告列表首项；MiniMax 从官方 OpenAPI 合并发现型号及参考图资格，不按型号名单猜测，发现失败保留旧库存。
 - 图片 Route 的绑定与运行前资格均校验；输出模态漂移保留绑定但排除执行，剩余合格 Target 可继续执行，其他适配器不兼容仍明确失败。
 - SQLite 和 PostgreSQL 升级后，未配置用途的历史 Route 均自动归为文字；已明确保存的用途、身份、绑定和启停偏好保持不变。失效图片生成引用可关闭、解绑，关闭总开关不等于解绑。
 - 平台 Gate、显式调用、MCP 与透明注入组合符合既有高级能力规则，已有 Key 不自动启用媒体生成注入。
@@ -190,4 +209,4 @@ Antigravity 的图片传输与请求形状以 2026-11-06 官方 agy 1.5.1 原生
 - 错误分类、重试和切换符合已接受的重复执行风险边界，收存失败不重跑生成。
 - 管理页仅包含本期配置功能；中英文、主题及窄屏行为遵循现有设计规范。
 
-真实 Codex 或 Antigravity 生成验证会调用外部服务并消耗额度，必须在执行前取得针对测试账号与影响的明确授权；不能把本次设计讨论当作生产服务调用授权。
+真实 Codex、Antigravity 或 MiniMax 生成验证会调用外部服务并消耗额度，必须在执行前取得针对测试账号与影响的明确授权；不能把本次设计讨论当作生产服务调用授权。
