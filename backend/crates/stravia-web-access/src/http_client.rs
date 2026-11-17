@@ -128,17 +128,27 @@ impl HttpClient {
         self.fetch_with_redirects(request, false).await
     }
 
+    pub(crate) async fn fetch_once_headers(&self, request: Request) -> Result<Response> {
+        let (response, _) = tokio::time::timeout(
+            self.inner.timeout,
+            self.fetch_inner(request, false, true),
+        )
+        .await
+        .context("HTTP request timed out")??;
+        Ok(response)
+    }
+
     async fn fetch_with_redirects(
         &self,
         request: Request,
         follow: bool,
     ) -> Result<(Response, Vec<u8>)> {
-        tokio::time::timeout(self.inner.timeout, self.fetch_inner(request, follow))
+        tokio::time::timeout(self.inner.timeout, self.fetch_inner(request, follow, false))
             .await
             .context("HTTP request timed out")?
     }
 
-    async fn fetch_inner(&self, mut request: Request, follow: bool) -> Result<(Response, Vec<u8>)> {
+    async fn fetch_inner(&self, mut request: Request, follow: bool, headers_only: bool) -> Result<(Response, Vec<u8>)> {
         // 请求只携带 HTTP 语义，不能覆盖出站代理、Cookie、解压或超时策略。
         request.extensions_mut().clear();
         for count in 0..=MAX_REDIRECTS {
@@ -274,6 +284,10 @@ impl HttpClient {
                 }
                 response.forbid_recycle();
                 continue;
+            }
+            if headers_only {
+                response.forbid_recycle();
+                return Ok((response, Vec::new()));
             }
             let mut body = Vec::new();
             if let Some(limit) = self.inner.response_limit {

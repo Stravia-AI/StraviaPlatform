@@ -4,6 +4,7 @@ mod catalog;
 mod client;
 mod connection;
 mod media_generation;
+mod search;
 mod selector;
 mod wire;
 mod messages {
@@ -32,6 +33,7 @@ const CLI_USER_AGENT: &str = "antigravity/cli/1.5.8 (aidev_client; os_type=linux
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([
         Capability::Infer,
+        Capability::Search,
         Capability::MediaImage,
         Capability::AuthOauth,
         Capability::ModelDiscovery,
@@ -42,7 +44,7 @@ pub fn descriptor() -> VendorDescriptor {
         vendor_id: VENDOR_ID.into(),
         version: semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("valid package version"),
         display_name: "Antigravity".into(),
-        description: Some("Antigravity CLI OAuth models, native image generation, and account quota monitoring.".into()),
+        description: Some("Antigravity CLI OAuth models, grounded web search, native image generation, and account quota monitoring.".into()),
         authors: vec!["Stravia".into()],
         canonical_format_version: CANONICAL_FORMAT_VERSION,
         kind: VendorKind::Dedicated,
@@ -144,6 +146,9 @@ pub fn execute(
         OperationInput::Infer { provider, request } => wire::infer(host, provider, request)
             .map(Box::new)
             .map(OperationOutput::Infer),
+        OperationInput::Search { provider, request } => {
+            search::execute(host, &provider, request).map(OperationOutput::Search)
+        }
         OperationInput::MediaImage { provider, request } => {
             media_generation::generate(host, &provider, request).map(OperationOutput::MediaImage)
         }

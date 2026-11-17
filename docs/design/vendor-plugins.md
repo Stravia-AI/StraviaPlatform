@@ -249,6 +249,12 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 
 模型同步同时读取 `imageGenerationModelIds`，按真实图片 ID 独立登记，不按推理档位折叠，也不创建虚拟默认型号。图片专用条目仅声明 `media_image` 和图片输出；仅与相同 ID 的 Agent 条目合并时保留双输出。`supportsImages` 仍只表示图片输入。升级独立插件并重新同步后，可将这些模型绑定到图片 Route，再在媒体生成设置中选用；未固定的规格字段随同步刷新，固定字段保持不变。生图复用原 OAuth、project 与连接，按官方 agy 1.5.1 抓包走 `generateContent` 定长 JSON，不修改普通 Infer 白名单，不在请求时换成账号广告的另一型号。请求映射、单图与收存契约见[媒体生成](media-generation.md#antigravity-原生图片生成)；本地响应回放不代表所有真实账号都有生图权限或额度。
 
+完整搜索同时读取 `webSearchModelIds`，搜索专用条目仅声明 `search`，不会被加入普通推理清单。`metadata.antigravity_search` 保存真实 `model_id` 和目录提供的 `api_provider`；与同一公开身份的推理家族合并时保留原推理 selector 与档位表，搜索使用独立、已保存的操作身份，不在请求时换成目录首项。升级插件并重新同步后，将搜索模型绑定到 Route，再到 Web Search 设置选择外部 Route；不自动改绑或启用已有配置。
+
+搜索走独立的非流式 `generateContent`，`requestType = web_search`，复用 OAuth、project、连接与出站形态。consumer 通道按已保存模型的 `apiProvider` 选择工具：`API_PROVIDER_GOOGLE_VERTEX`（3）使用 `enterpriseWebSearch`，其余使用 `googleSearch`；不篡改账号资格或在失败后偷偷换工具重试。缺少 grounding、无有效引用、非法 UTF-8 字节范围或非完整终态均失败，不把生成文本当作搜索结果。来源、引用和用量归一到既有完整搜索契约，未知用量保持未知；不支持外部续接。协议与证据见[搜索调研](../research/antigravity-cli-web-search.md)。
+
+Google grounding 跳转来源由宿主安全解析，普通来源不额外请求；保留所选 Vendor 执行时的代理快照，直连逐跳执行公网 DNS 校验并固定地址，代理路径沿用既有由代理解析源站的信任语义。最终 URL 再做报告、公网 DNS 与允许域名校验，解析失败不发布原跳转链接或不完整报告。该路径需要更新宿主；仅导入新插件不会为旧宿主补齐来源解析。
+
 合并复用现有 Provider Model 的 `family`、`selector`、`reasoning_efforts` 和插件专有 extensions 契约，不新增前端供应商分支、公共 API 或数据库 schema。`antigravity` 选择表保留每档真实请求 ID、显示 slug 和规格；家族规格只承诺各档共有的输入模态与最小已知上下文，任一档上下文未知时不登记家族上下文。未指定档位时使用上游默认项所在档位，其他家族使用其 Agent 引用顺序中的首项；显式 Effort 必须匹配表中已登记档位，不存在时在网络请求前报错，不编造 ID 或回退到另一档。选择后的 envelope 模型 ID 与 thinking 控制均取对应档位，不另按通用 Effort 推导 Gemini budget；独立的原生 Budget 等控制保持既有行为。
 
 推理未指定输出上限时发送 `generationConfig.maxOutputTokens: 65536`，显式上限保持优先。目录的数值 `thinkingLevel` 在最终 wire 投影为 CLI 枚举名：`0`–`6` 分别为 `UNSPECIFIED`、`LOW`、`MEDIUM`、`HIGH`、`MINIMAL`、`EXTRA_HIGH`、`MAX`；只改变表示，不改变已选档位。显式扩展档位不再被公开 Gemini codec 折叠为 HIGH；预算路径及 `includeThoughts` 语义不变，非法目录档位仍在发送前失败。

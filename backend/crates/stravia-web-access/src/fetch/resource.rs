@@ -13,7 +13,7 @@ use futures::StreamExt;
 use url::{Host, Url};
 
 use super::{
-    get_with_redirects, policy, BackendFuture, FetchError, FetchErrorCode, HttpBackend,
+    get_redirects, policy, BackendFuture, FetchError, FetchErrorCode, HttpBackend,
     HttpResponse, DOWNLOAD_BYTE_CAP,
 };
 
@@ -55,7 +55,7 @@ async fn fetch_read_resource_with(
 ) -> Result<ReadResource, FetchError> {
     let requested_url = policy::validate_url(value)?;
     let (final_url, response) =
-        get_with_redirects(requested_url, backend, RESOURCE_REDIRECT_LIMIT).await?;
+        get_redirects(requested_url, backend, RESOURCE_REDIRECT_LIMIT, false).await?;
     if !(200..300).contains(&response.status) {
         return Err(FetchError::unavailable(format!(
             "HTTP request returned status {}",

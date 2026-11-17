@@ -98,7 +98,7 @@ Web Search 是一个由平台总开关控制的 Advanced Capability。普通模�
 
 Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_ids` 与 `fetch_provider_ids`，分别表示搜索与网页读取来源的有序选择；管理 HTTP 与 Desktop 使用同一结构。旧实例的 `web_access_enabled` 设置不再读写，也不再决定运行时可用性。该调整不自动启用 `web_search_config.enabled`，不改变 API Key、MCP 或网络安全校验。
 
-管理界面仅保留顶部 Web Search 启停开关。Local 模式开启前必须有有效的已保存模型绑定，以及可用的搜索与网页读取来源；缺少配置时就地提供补齐入口。来源选择与排序独立即时保存，模型绑定和预算仍显式保存；启停不提交表单草稿，External Route 模式不依赖 Local 来源。
+管理界面仅保留顶部 Web Search 启停开关。尚未绑定搜索目标时，页面与绑定编辑器默认呈现 External Route；用户需选择并保存有效 Route 才能启用搜索，不自动选择目标、启用能力或改写已有 Local／External 绑定。仅已保存的 Local 绑定显示来源与预算。Local 模式开启前必须有有效的已保存模型绑定，以及可用的搜索与网页读取来源；缺少配置时就地提供补齐入口。来源选择与排序独立即时保存，模型绑定和预算仍显式保存；启停不提交表单草稿，External Route 模式不依赖 Local 来源。
 
 ## 4. Tool identity 与 surface
 
@@ -134,6 +134,7 @@ Local 配置的 `backend.model_id` 保存逻辑模型的内部记录键 `models.
 - 管理员为外部完整搜索绑定 Route，`backend.route_id` 仍保存公开名称 `models.model_id`，不改为 Local 使用的内部记录键。由宿主选择具备完整搜索能力的 Target；Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
 - Target 必须绑定 Provider 与非空白的上游模型；所选 Provider Model 必须支持完整搜索，不能省略模型或使用虚假模型绕过能力校验。
 - [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。正式接入必须提供可选择的真实 Provider Model；该服务是设计参考，不自动列入本期正式供应商交付清单。
+- Google grounding 的 `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<id>` 来源在生成报告前由宿主还原为重定向链的最终 URL；仅匹配精确来源形态，普通来源不额外请求。同次结果内复用重复地址的解析结果，先执行来源数量与 URL 长度限制，解析失败不删除来源或回退发布跳转 URL。解析复用 Web Access 的无正文安全重定向循环，沿用实际成功 Target 执行时的代理快照、取消与 deadline；直连校验全部 DNS 地址并固定连接，代理继续由代理解析源站，不伪称本地 DNS 固定。最终来源仍通过完整报告的公网 DNS 与允许域名检查。
 - 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。
 - 外部搜索沿用 Route 的选择、重试和 Target 切换策略；插件提供错误分类，宿主在结果提交前对明确可重试的上游错误决定重试或切换。取消、参数错误及权限错误不触发，结果提交后不重放；接受重复执行与重复消耗额度风险。
 - 插件归一答案和引用，宿主校验报告结构、引用、公网 URL、DNS 与允许域名策略，并继续执行平台 Gate、Principal 隔离及交付。External 不构造本地 evidence，也不要求来源 URL 或标题匹配 Local 工具记录；来源可靠性由供应商负责。基础链接列表不能冒充完整报告，缺失用量不能伪造为零。

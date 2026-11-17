@@ -92,10 +92,12 @@ struct Fixture {
     error_stream: AtomicBool,
     require_call_signature: AtomicBool,
     image_refusal: Mutex<Option<Value>>,
+    search_response: Mutex<Option<(StatusCode, Value)>>,
 }
 async fn upstream(
     State(fixture): State<Arc<Fixture>>,
     OriginalUri(uri): OriginalUri,
+    method: axum::http::Method,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -149,7 +151,12 @@ async fn upstream(
                 ]}]}],
                 "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
                 "imageGenerationModelIds": ["gemini-3.1-flash-image", "account-image"],
+                "webSearchModelIds": ["search-first", "search-consumer", "search-vertex-number", "search-vertex-string"],
                 "models":{
+                "search-first":{"displayName":"First search"},
+                "search-consumer":{"displayName":"Consumer search","apiProvider":1},
+                "search-vertex-number":{"displayName":"Vertex search","apiProvider":3},
+                "search-vertex-string":{"displayName":"Vertex string search","apiProvider":"API_PROVIDER_GOOGLE_VERTEX"},
                 "account-model":{"displayName":"Account model","supportsImages":true,"maxTokens":131072},
                 "hidden-model":{"isInternal":true},
                 "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true,"thinkingBudget":-1},
@@ -184,6 +191,13 @@ async fn upstream(
             json!({"groups":[{"displayName":"Gemini","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7,"resetTime":"2026-01-01T00:00:00Z"}]}],"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7}]})
         }
         "/v1internal:generateContent" => {
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            if request["requestType"] == "web_search" {
+                assert_eq!(method, axum::http::Method::POST);
+                let (status, response) = fixture.search_response.lock().clone()
+                    .expect("search fixture response");
+                return (status, [("retry-after", "9")], axum::Json(response)).into_response();
+            }
             if fixture.error_stream.load(Ordering::Relaxed) {
                 return (
                     [("retry-after", "9")],
@@ -416,6 +430,131 @@ fn artifact() -> std::path::PathBuf {
 const IMAGE_PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const IMAGE_POLICY_MESSAGE: &str = "Unable to show the generated image. The image was filtered out because it violated Google's [Generative AI Prohibited Use policy](https://policies.google.com/terms/generative-ai/use-policy). You will not be charged for blocked images. Try rephrasing the prompt. If you think this was an error, [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting).";
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
+    let fixture = Arc::new(Fixture::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app = Router::new().fallback(upstream).with_state(Arc::clone(&fixture));
+    let services = Arc::new(Services {
+        root: format!("http://{}", listener.local_addr().unwrap()),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        state: Mutex::new(None),
+        deltas: Mutex::new(Vec::new()),
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime.load(&std::fs::read(artifact()).unwrap()).await.unwrap();
+    let mut provider = provider();
+    provider.credentials = BTreeMap::from([
+        ("access_token".into(), json!("test-token")),
+        ("project_id".into(), json!("test-project")),
+    ]);
+    let OperationOutput::Discover(catalog) = run(&runtime, &plugin, &services,
+        OperationInput::Discover { provider: provider.clone(), request: DiscoverRequest::default() }
+    ).await.unwrap() else { panic!("catalog") };
+    let request = stravia_vendor_sdk::SearchRequest {
+        query: "中文查询".into(), continuation: None,
+        allowed_domains: vec!["example.com".into(), "example.org".into()],
+        language: Some("zh-CN".into()), max_sources: Some(3),
+    };
+    let response = json!({"response":{"candidates":[{
+        "finishReason":"STOP",
+        "content":{"role":"model","parts":[
+            {"thought":true,"text":"hidden thought"}, {"text":"中文答案"}, {"text":"第二段"}
+        ]},
+        "groundingMetadata":{
+            "groundingChunks":[
+                {"web":{"uri":"https://example.com/a","title":"来源一"}},
+                {"web":{"uri":"https://example.com/a","title":"重复"}},
+                {"web":{"uri":"https://example.org/b","title":"来源二"}}
+            ],
+            "groundingSupports":[
+                {"segment":{"partIndex":1,"startIndex":0,"endIndex":6,"text":"中文"},"groundingChunkIndices":[0,1]},
+                {"segment":{"partIndex":2,"startIndex":0,"endIndex":9,"text":"第二段"},"groundingChunkIndices":[2]}
+            ]
+        }
+    }]}});
+    *fixture.search_response.lock() = Some((StatusCode::OK, response.clone()));
+    for (id, api_provider, tool) in [
+        ("search-first", None, json!({"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}})),
+        ("search-consumer", Some(json!(1)), json!({"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}})),
+        ("search-vertex-number", Some(json!(3)), json!({"enterpriseWebSearch":{}})),
+        ("search-vertex-string", Some(json!("API_PROVIDER_GOOGLE_VERTEX")), json!({"enterpriseWebSearch":{}})),
+    ] {
+        let model = catalog.models.iter().find(|model| model.id == id).unwrap();
+        assert!(model.capabilities.iter().any(|capability| capability == "search"));
+        assert_eq!(model.metadata["antigravity_search"]["model_id"], id);
+        assert_eq!(model.metadata["antigravity_search"].get("api_provider"), api_provider.as_ref());
+        // The inference selector and provider.model must not override the discovered search binding.
+        provider.model = Some("account-model".into());
+        provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+            selector: Some("wrong-infer-selector".into()),
+            extensions: BTreeMap::from([("antigravity_search".into(), model.metadata["antigravity_search"].clone())]),
+            ..Default::default()
+        });
+        let OperationOutput::Search(output) = run(&runtime, &plugin, &services,
+            OperationInput::Search { provider: provider.clone(), request: request.clone() }
+        ).await.unwrap() else { panic!("search output") };
+        assert_eq!(output.answer, "中文[sc:g1]答案第二段[sc:g2]");
+        assert_eq!(output.sources.len(), 2);
+        assert_eq!(output.sources[0].id, "g1");
+        assert_eq!(output.sources[0].url, "https://example.com/a");
+        assert_eq!(output.sources[0].title.as_deref(), Some("来源一"));
+        assert_eq!(output.sources[1].id, "g2");
+        assert_eq!(output.sources[1].url, "https://example.org/b");
+        for source in &output.sources { assert!(output.answer.contains(&format!("[sc:{}]", source.id))); }
+        assert!(output.usage.is_none());
+        let received = fixture.received.lock();
+        let (path, headers, body) = received.last().unwrap();
+        assert_eq!(path, "/v1internal:generateContent");
+        assert_eq!(headers["authorization"], "Bearer test-token");
+        assert!(!headers.contains_key("x-downstream-secret"));
+        let envelope: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(envelope["project"], "test-project");
+        assert_eq!(envelope["model"], id);
+        assert_eq!(envelope["requestType"], "web_search");
+        assert_eq!(envelope["request"]["contents"][0]["role"], "user");
+        assert_eq!(envelope["request"]["contents"][0]["parts"][0]["text"], "中文查询 (site:example.com OR site:example.org)");
+        assert_eq!(envelope["request"]["systemInstruction"]["role"], "user");
+        assert_eq!(envelope["request"]["generationConfig"], json!({"candidateCount":1}));
+        assert_eq!(envelope["request"]["tools"], json!([tool]));
+    }
+    let before = fixture.received.lock().len();
+    let mut missing = provider.clone();
+    missing.model_metadata = None;
+    let error = run(&runtime, &plugin, &services, OperationInput::Search {
+        provider: missing, request: request.clone(),
+    }).await.unwrap_err();
+    assert!(matches!(error, stravia_vendor_runtime::RuntimeError::Plugin { kind: ErrorKind::Invalid, .. }));
+    assert_eq!(fixture.received.lock().len(), before);
+    let mut no_grounding = response.clone();
+    no_grounding["response"]["candidates"][0].as_object_mut().unwrap().remove("groundingMetadata");
+    let mut invalid_utf8 = response.clone();
+    invalid_utf8["response"]["candidates"][0]["groundingMetadata"]["groundingSupports"][0]["segment"]["startIndex"] = json!(1);
+    let mut out_of_bounds = response.clone();
+    out_of_bounds["response"]["candidates"][0]["groundingMetadata"]["groundingSupports"][0]["segment"]["endIndex"] = json!(99);
+    let mut out_of_range = response.clone();
+    out_of_range["response"]["candidates"][0]["groundingMetadata"]["groundingSupports"][0]["groundingChunkIndices"] = json!([99]);
+    let mut max_tokens = response.clone();
+    max_tokens["response"]["candidates"][0]["finishReason"] = json!("MAX_TOKENS");
+    for bad in [no_grounding, invalid_utf8, out_of_bounds, out_of_range, max_tokens] {
+        *fixture.search_response.lock() = Some((StatusCode::OK, bad));
+        let error = run(&runtime, &plugin, &services, OperationInput::Search {
+            provider: provider.clone(), request: request.clone(),
+        }).await.unwrap_err();
+        assert!(matches!(error, stravia_vendor_runtime::RuntimeError::Plugin { kind, .. } if kind.model_error_kind() == Some(AiErrorKind::ServerError)));
+    }
+    for (status, expected) in [(StatusCode::UNAUTHORIZED, AiErrorKind::AuthenticationError), (StatusCode::TOO_MANY_REQUESTS, AiErrorKind::RateLimitError)] {
+        *fixture.search_response.lock() = Some((status, json!({"error":{"message":"upstream rejected request"}})));
+        let error = run(&runtime, &plugin, &services, OperationInput::Search {
+            provider: provider.clone(), request: request.clone(),
+        }).await.unwrap_err();
+        assert!(matches!(error, stravia_vendor_runtime::RuntimeError::Plugin { kind, .. } if kind.model_error_kind() == Some(expected)));
+    }
+    server.abort();
+}
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]

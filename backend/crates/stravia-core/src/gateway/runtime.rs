@@ -1194,6 +1194,16 @@ pub(crate) enum EffectiveVendorProxy {
 }
 
 impl EffectiveVendorProxy {
+    pub(crate) fn web_access_mode(&self) -> stravia_web_access::OutboundProxyMode {
+        match self {
+            Self::Direct => stravia_web_access::OutboundProxyMode::Direct,
+            Self::Explicit { proxy_url, bypass, .. } => stravia_web_access::OutboundProxyMode::Explicit {
+                url: proxy_url.clone(),
+                bypass: bypass.clone(),
+            },
+        }
+    }
+
     pub(crate) fn into_settings(self) -> crate::outbound_proxy::OutboundProxySettings {
         match self {
             Self::Direct => crate::outbound_proxy::OutboundProxySettings::default(),

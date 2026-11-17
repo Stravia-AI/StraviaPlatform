@@ -30,6 +30,8 @@ use crate::db::models::{CreateProvider, ProviderCredentialInput, ProviderSourceI
 
 #[path = "vendor_antigravity_shape_acceptance_tests.rs"]
 mod antigravity_shape_acceptance_tests;
+#[path = "vendor_antigravity_search_tests.rs"]
+mod antigravity_search_tests;
 #[path = "vendor_claude_shape_acceptance_tests.rs"]
 mod claude_shape_acceptance_tests;
 #[path = "vendor_cli_shape_acceptance_tests.rs"]

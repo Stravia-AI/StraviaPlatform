@@ -157,6 +157,28 @@ pub fn convert_read_bytes(
     }
 }
 
+/// Resolve an HTTP redirect chain using Fetch's per-hop safety policy without reading bodies.
+/// Proxy-resolved origins retain the existing trusted-proxy DNS semantics.
+pub async fn resolve_final_url(value: &str, mode: crate::OutboundProxyMode) -> Result<Url, FetchError> {
+    let backend = NetworkBackend::from_mode(mode)?;
+    let url = policy::validate_url(value).map_err(sanitize_resolution_error)?;
+    let (url, response) = get_redirects(url, &backend, MAX_REDIRECTS, true).await.map_err(sanitize_resolution_error)?;
+    if !(200..300).contains(&response.status) {
+        return Err(FetchError::unavailable(format!("HTTP request returned status {}", response.status)));
+    }
+    Ok(url)
+}
+
+fn sanitize_resolution_error(error: FetchError) -> FetchError {
+    let message = match error.message.as_str() {
+        "HTTP redirect omitted Location" => "HTTP redirect omitted Location",
+        "HTTP redirect limit exceeded" => "HTTP redirect limit exceeded",
+        _ if error.code == FetchErrorCode::InvalidUrl => "Redirect URL is not public HTTP(S)",
+        _ => "HTTP redirect resolution failed",
+    };
+    FetchError::new(error.code, message)
+}
+
 pub(crate) async fn fetch_with_runtime(
     web: &LocalWeb,
     value: &str,
@@ -189,6 +211,14 @@ trait HttpBackend: Sync {
         url: &'a Url,
         addresses: &'a [IpAddr],
     ) -> BackendFuture<'a, Result<HttpResponse, FetchError>>;
+
+    fn get_headers<'a>(
+        &'a self,
+        url: &'a Url,
+        addresses: &'a [IpAddr],
+    ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
+        self.get(url, addresses)
+    }
 }
 
 trait RenderBackend: Sync {
@@ -255,7 +285,7 @@ async fn fetch_with(
 ) -> Result<FetchedPage, FetchError> {
     let requested_url = policy::validate_url(value)?;
     let (final_url, response) =
-        get_with_redirects(requested_url.clone(), http, MAX_REDIRECTS).await?;
+        get_redirects(requested_url.clone(), http, MAX_REDIRECTS, false).await?;
     if !(200..300).contains(&response.status) {
         return Err(FetchError::unavailable(format!(
             "HTTP request returned status {}",
@@ -290,10 +320,11 @@ async fn fetch_with(
     Ok(page)
 }
 
-async fn get_with_redirects(
+async fn get_redirects(
     mut url: Url,
     http: &impl HttpBackend,
     redirect_limit: usize,
+    headers_only: bool,
 ) -> Result<(Url, HttpResponse), FetchError> {
     for redirect_count in 0..=redirect_limit {
         policy::validate_parsed_url(&url)?;
@@ -302,7 +333,11 @@ async fn get_with_redirects(
         } else {
             Vec::new()
         };
-        let response = http.get(&url, &addresses).await?;
+        let response = if headers_only {
+            http.get_headers(&url, &addresses).await?
+        } else {
+            http.get(&url, &addresses).await?
+        };
         if !(300..400).contains(&response.status) {
             return Ok((url, response));
         }
@@ -533,6 +568,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headers_only_resolution_follows_relative_multihop_and_rejects_unsafe_targets() {
+        let backend = StubBackend::default();
+        let response = |status, location: Option<&str>| HttpResponse {
+            status, content_type: None, location: location.map(str::to_owned), body: Vec::new(),
+        };
+        *backend.responses.lock() = VecDeque::from([
+            response(302, Some("/next")),
+            response(301, Some("https://publisher.example/final")),
+            response(200, None),
+        ]);
+        let (url, _) = get_redirects(Url::parse("https://example.com/start").unwrap(), &backend, MAX_REDIRECTS, true).await.unwrap();
+        assert_eq!(url.as_str(), "https://publisher.example/final");
+        assert_eq!(*backend.requested_urls.lock(), ["https://example.com/start", "https://example.com/next", "https://publisher.example/final"]);
+
+        let backend = StubBackend::default();
+        *backend.responses.lock() = VecDeque::from([response(302, Some("http://10.0.0.1/private?secret=value"))]);
+        let error = get_redirects(Url::parse("https://example.com/start").unwrap(), &backend, MAX_REDIRECTS, true).await.err().unwrap();
+        assert_eq!(error.code(), FetchErrorCode::InvalidUrl);
+        assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn headers_only_resolution_fails_on_missing_location_and_redirect_loop() {
+        let backend = StubBackend::default();
+        let redirect = || HttpResponse { status: 302, content_type: None, location: Some("/loop".into()), body: Vec::new() };
+        *backend.responses.lock() = (0..=MAX_REDIRECTS).map(|_| redirect()).collect();
+        let error = get_redirects(Url::parse("https://example.com/loop").unwrap(), &backend, MAX_REDIRECTS, true).await.err().unwrap();
+        assert_eq!(error.to_string(), "HTTP redirect limit exceeded");
+        assert_eq!(backend.requests.load(Ordering::Relaxed), MAX_REDIRECTS + 1);
+        let backend = StubBackend::default();
+        *backend.responses.lock() = VecDeque::from([HttpResponse { location: None, ..redirect() }]);
+        let error = get_redirects(Url::parse("https://example.com/").unwrap(), &backend, MAX_REDIRECTS, true).await.err().unwrap();
+        assert_eq!(error.to_string(), "HTTP redirect omitted Location");
+    }
+
+    #[tokio::test]
     async fn rejects_non_public_urls_before_network_io() {
         for url in [
             "file:///etc/passwd",
@@ -577,6 +648,10 @@ mod tests {
         let renderer = StubBackend::default();
         for (answers, code) in [
             (
+                Ok(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]),
+                FetchErrorCode::InvalidUrl,
+            ),
+            (
                 Ok(vec![
                     IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
                     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -590,9 +665,9 @@ mod tests {
             ),
         ] {
             let backend = DnsBackend(Mutex::new(Some(answers)));
-            let error = fetch_with("https://example.com/article", &backend, &renderer)
+            let error = get_redirects(Url::parse("https://example.com/article").unwrap(), &backend, MAX_REDIRECTS, true)
                 .await
-                .unwrap_err();
+                .err().unwrap();
 
             assert_eq!(error.code(), code);
             assert_eq!(renderer.renders.load(Ordering::Relaxed), 0);

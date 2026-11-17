@@ -29,8 +29,8 @@ const externalRoutesQuery = createQuery(() => ({
   queryFn: admin.webSearch.externalRoutes,
 }))
 
-// Local 来源与预算只属于已保存的 Local 绑定；尚未配置绑定时按 Local 呈现。
-const usesLocal = $derived(configQuery.data !== undefined && configQuery.data.backend?.kind !== 'external')
+// 仅已保存的 Local 绑定显示来源与预算；尚未配置时默认使用外部 Route。
+const usesLocal = $derived(configQuery.data?.backend?.kind === 'local')
 
 const sourceSettingsQuery = createQuery(() => ({
   queryKey: ['web-access-settings'],
@@ -62,12 +62,12 @@ const externalRoutes = $derived(externalRoutesQuery.data ?? [])
 const backend = $derived(config?.backend)
 
 const methodLabel = $derived(
-  backend?.kind === 'external' ? m.web_search_use_external_route() : m.web_search_use_stravia_model(),
+  usesLocal ? m.web_search_use_stravia_model() : m.web_search_use_external_route(),
 )
 // 已保存的目标名称；不可用或已移除的历史值仍以原始标识呈现。
 const bindingTarget = $derived.by(() => {
-  if (backend?.kind === 'external') {
-    if (!backend.route_id) return m.web_search_not_selected()
+  if (backend?.kind !== 'local') {
+    if (!backend?.route_id) return m.web_search_not_selected()
     return externalRoutes.find((route) => route.model_id === backend.route_id)?.display_name ?? backend.route_id
   }
   if (!backend?.model_id) return m.web_search_not_selected()
@@ -288,7 +288,7 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
         {/snippet}
         <SettingRow title={m.web_search_method()} value={methodLabel} />
         <SettingRow
-          title={backend?.kind === 'external' ? m.web_search_external_route() : m.web_search_model_used()}
+          title={usesLocal ? m.web_search_model_used() : m.web_search_external_route()}
           value={bindingTarget} />
         {#if usesLocal}
           <Collapsible.Root bind:open={advancedOpen} class="flex flex-col gap-4 border-t py-2">
