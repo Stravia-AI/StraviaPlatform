@@ -5,7 +5,7 @@
 //! 内嵌 JSON、`diagnostics` 与最终字节 `cch`。业务内容、工具定义和
 //! JSON schema 不按请求参数递归过滤；自定义工具额外使用 `_` 前缀与内建工具隔离。
 //!
-//! [`prepare`] 归一参数；[`encode`] 始终发送完整历史、system 和 tools。
+//! [`prepare`] 归一参数；[`encode`] 按线程模式选择完整历史或增量。
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cache;
 use crate::capabilities::{self, ModelCapabilities};
-use crate::session::WireContext;
+use crate::session::{ThreadMode, WireContext};
 use crate::thinking::{self, ModelProfile};
 use crate::xxhash::Xxh64;
 
@@ -28,6 +28,7 @@ const STAINLESS_OS: &str = "Linux";
 const STAINLESS_ARCH: &str = "x64";
 
 pub(crate) const OAUTH_BETA: &str = "oauth-2025-04-20";
+pub(crate) const THREADS_BETA: &str = "message-threads-2026-08-12";
 /// 普通交互式 CLI 的身份；非交互 SDK 的另一种身份不能混入同一个请求。
 const IDENTITY_TEXT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const SDK_IDENTITY_TEXT: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
@@ -218,13 +219,15 @@ pub(crate) fn prepare(
 
 /// 把 [`prepare`] 产出的完整请求序列化为最终线上字节（已写入 `cch`）。
 ///
-/// 全量发送历史和工具，携带上一次消息 ID 的诊断信息。缓存断点只复制承载它的那一条消息。
+/// Off 和 Create 发送完整历史；Continue 仅发送新增消息和计费块。
+/// 计费指纹与 beta 始终基于完整历史，缓存断点只复制承载它的那一条消息。
 pub(crate) fn encode(
     body: &Value,
     client_version: &str,
     identity: &AccountIdentity<'_>,
     context: &WireContext,
     caps: &ModelCapabilities,
+    mode: &ThreadMode,
 ) -> Result<ShapedRequest, String> {
     let object = body
         .as_object()
@@ -234,7 +237,19 @@ pub(crate) fn encode(
         Some(Value::Array(messages)) => messages,
         Some(_) => return Err("Anthropic messages must be an array".into()),
     };
-    let messages = history;
+    let messages = match mode {
+        ThreadMode::Continue {
+            offset,
+            previous_message_id,
+        } => {
+            if previous_message_id.is_empty() || *offset >= history.len() {
+                return Err("continuing a message thread requires a previous message id and at least one new message".into());
+            }
+            &history[*offset..]
+        }
+        _ => history,
+    };
+    let continuing = matches!(mode, ThreadMode::Continue { .. });
 
     let mut system = vec![json!({
         "type": "text",
@@ -244,19 +259,22 @@ pub(crate) fn encode(
             context,
         ),
     })];
-    system.push(json!({ "type": "text", "text": IDENTITY_TEXT }));
-    match object.get("system") {
-        None => {}
-        Some(Value::Array(blocks)) => system.extend(blocks.iter().cloned()),
-        Some(_) => return Err("Anthropic system must be prepared into an array".into()),
+    if !continuing {
+        system.push(json!({ "type": "text", "text": IDENTITY_TEXT }));
+        match object.get("system") {
+            None => {}
+            Some(Value::Array(blocks)) => system.extend(blocks.iter().cloned()),
+            Some(_) => return Err("Anthropic system must be prepared into an array".into()),
+        }
+        cache::anchor_system(&mut system[1..]);
     }
-    cache::anchor_system(&mut system[1..]);
 
     let mut entries: Vec<(&str, Slot<'_>)> = Vec::with_capacity(object.len() + 4);
     for (key, value) in object {
         match key.as_str() {
             // 丢弃客户端提供的这些字段；本函数重建可信字段。
             "messages" | "system" | "metadata" | "thread" | "diagnostics" => {}
+            "tools" if continuing => {}
             _ => entries.push((key.as_str(), Slot::Borrowed(value))),
         }
     }
@@ -272,14 +290,35 @@ pub(crate) fn encode(
         "metadata",
         Slot::Owned(json!({ "user_id": metadata_user_id(&context.session_id, identity) })),
     ));
+    let previous_message_id = match mode {
+        ThreadMode::Off => context.previous_message_id.as_deref(),
+        ThreadMode::Create => {
+            entries.push(("thread", Slot::Owned(json!({ "type": "create" }))));
+            None
+        }
+        ThreadMode::Continue {
+            previous_message_id,
+            ..
+        } => {
+            entries.push((
+                "thread",
+                Slot::Owned(json!({
+                    "type": "continue", "previous_message_id": previous_message_id,
+                })),
+            ));
+            Some(previous_message_id.as_str())
+        }
+    };
     entries.push((
         "diagnostics",
-        Slot::Owned(json!({
-            "previous_message_id": context.previous_message_id.as_deref(),
-        })),
+        Slot::Owned(json!({ "previous_message_id": previous_message_id })),
     ));
 
-    let betas = beta_header(object, caps);
+    let mut betas = beta_header(object, caps);
+    if !matches!(mode, ThreadMode::Off) {
+        betas.push(',');
+        betas.push_str(THREADS_BETA);
+    }
     let mut bytes = Vec::new();
     let system_at = write_body(entries, &mut bytes).map_err(|error| error.to_string())?;
     patch_cch(&mut bytes, system_at)?;
@@ -531,7 +570,7 @@ fn prefix_tool_names(object: &mut Map<String, Value>) {
 }
 
 /// 请求历史中的工具名称与工具声明一致。
-fn prefix_message_tool_names(messages: &mut [Value]) {
+pub(crate) fn prefix_message_tool_names(messages: &mut [Value]) {
     for message in messages {
         if let Some(Value::Array(content)) = message.get_mut("content") {
             prefix_content_tool_names(content);
@@ -1222,12 +1261,65 @@ mod tests {
             &identity(),
             context,
             &ModelCapabilities::default(),
+            &ThreadMode::Off,
         )
         .expect("request encodes");
         (
             serde_json::from_slice(&shaped.body).expect("wire body is JSON"),
             shaped,
         )
+    }
+
+    #[test]
+    fn thread_modes_shape_history_and_diagnostics() {
+        let prepared = prep(user_turns());
+        let context = prior_context();
+        let encode_mode = |mode: &ThreadMode| {
+            let shaped = encode(
+                &prepared,
+                DEFAULT_CLIENT_VERSION,
+                &identity(),
+                &context,
+                &ModelCapabilities::default(),
+                mode,
+            )
+            .expect("request encodes");
+            let body: Value = serde_json::from_slice(&shaped.body).unwrap();
+            (body, shaped)
+        };
+        let (off, off_shaped) = encode_mode(&ThreadMode::Off);
+        let (create, create_shaped) = encode_mode(&ThreadMode::Create);
+        let (continued, continued_shaped) = encode_mode(&ThreadMode::Continue {
+            offset: 1,
+            previous_message_id: "msg_thread".into(),
+        });
+        assert!(off.get("thread").is_none());
+        assert_eq!(off["diagnostics"]["previous_message_id"], "msg_previous");
+        assert!(!betas_of(&off_shaped).contains(&THREADS_BETA));
+        assert_eq!(create["thread"], json!({"type": "create"}));
+        assert!(create["diagnostics"]["previous_message_id"].is_null());
+        assert_eq!(create["messages"], off["messages"]);
+        assert_eq!(create["tools"], off["tools"]);
+        assert_eq!(
+            create["system"].as_array().unwrap().len(),
+            off["system"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            continued["thread"],
+            json!({"type": "continue", "previous_message_id": "msg_thread"})
+        );
+        assert_eq!(
+            continued["diagnostics"]["previous_message_id"],
+            "msg_thread"
+        );
+        assert_eq!(
+            continued["messages"].as_array().unwrap().len(),
+            off["messages"].as_array().unwrap().len() - 1
+        );
+        assert_eq!(continued["system"].as_array().unwrap().len(), 1);
+        assert!(continued.get("tools").is_none());
+        assert!(betas_of(&create_shaped).contains(&THREADS_BETA));
+        assert_eq!(create_shaped.betas, continued_shaped.betas);
     }
 
     /// 完整创建请求。

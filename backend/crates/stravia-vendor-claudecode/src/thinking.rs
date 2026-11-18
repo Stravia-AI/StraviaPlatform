@@ -232,6 +232,12 @@ fn parse_known(model: &str) -> Option<(Family, Revision)> {
     }
 }
 
+/// Message Threads 的型号准入按 Anthropic Messages 的已知支持范围；不从思考或压缩能力推断。
+pub(crate) fn supports_message_threads(model: &str) -> bool {
+    model == "claude-mythos-preview"
+        || parse_known(model).is_some_and(|(_, revision)| revision >= [4, 5, 0])
+}
+
 /// 发现阶段仅发布上游明确声明的 effort；预算和开关仍由请求协议编码。
 pub(crate) fn reasoning_efforts(caps: &ModelCapabilities) -> Option<Vec<Value>> {
     caps.efforts

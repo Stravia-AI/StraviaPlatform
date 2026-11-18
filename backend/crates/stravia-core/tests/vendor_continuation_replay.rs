@@ -1,5 +1,5 @@
 //! 真实 Vendor Wasm + Core Gateway/HTTP router + 隔离 SQLite + 回环上游：
-//! Claude 默认发送完整历史；Codex 本地连接失效时在同一次逻辑 attempt 内恢复。
+//! Claude 线程拒绝或 Codex 本地连接失效时，宿主在同一次逻辑 attempt 内恢复。
 //!
 //! 前置：`task build:vendors:all`（读取 target/vendor-plugins-all）。上游、凭据均为假 fixture。
 
@@ -361,21 +361,29 @@ fn completed(count: usize) -> Vec<(String, Option<String>)> {
     vec![("completed".to_owned(), None); count]
 }
 
-/// 默认交互模式始终发送完整历史，包括工具结果中的图片。
+/// 创建、增量续接后线程失效，宿主在同一 attempt 完整重放含图工具结果。
 #[tokio::test]
-async fn default_mode_sends_full_history_without_thread() -> anyhow::Result<()> {
+async fn rejected_thread_is_replayed_inside_one_completed_attempt() -> anyhow::Result<()> {
     use base64::Engine as _;
 
     let harness = Harness::start().await?;
-    harness.script([message("msg_1"), message("msg_2")]);
+    harness.script([
+        message("msg_1"),
+        message("msg_2"),
+        error(404, Some("thread_not_found")),
+        message("msg_3"),
+    ]);
 
     assert_eq!(harness.turn(0).await.0, StatusCode::OK);
+    assert_eq!(harness.turn(1).await.0, StatusCode::OK);
     let source = json!({
         "type": "base64", "media_type": "image/png",
         "data": base64::engine::general_purpose::STANDARD.encode(include_bytes!("fixtures/media/transparent.png"))
     });
     let (status, body) = harness.messages(vec![
         json!({"role": "user", "content": "Remember the marker."}),
+        json!({"role": "assistant", "content": [{"type": "text", "text": "READY"}]}),
+        json!({"role": "user", "content": "Continue 1."}),
         json!({"role": "assistant", "content": [{"type": "text", "text": "READY"}]}),
         json!({"role": "user", "content": "Inspect the screenshot."}),
         json!({"role": "assistant", "content": [{"type": "tool_use", "id": "read_image", "name": "read_image", "input": {}}]}),
@@ -388,36 +396,49 @@ async fn default_mode_sends_full_history_without_thread() -> anyhow::Result<()> 
 
     {
         let sent = harness.upstream.bodies.lock();
-        assert_eq!(sent.len(), 2);
-        assert!(sent[0].get("thread").is_none());
-        assert!(sent[1].get("thread").is_none());
-        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 5);
+        assert_eq!(sent.len(), 4, "one rejected send and exactly one replay");
+        assert_eq!(sent[0]["thread"]["type"], "create");
+        assert_eq!(sent[0]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(sent[1]["thread"]["type"], "continue");
+        assert_eq!(sent[1]["thread"]["previous_message_id"], "msg_1");
+        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(sent[2]["thread"]["type"], "continue");
+        assert_eq!(sent[2]["thread"]["previous_message_id"], "msg_2");
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
+        assert!(sent[3].get("thread").is_none());
+        assert_eq!(sent[3]["messages"].as_array().unwrap().len(), 7);
+        assert_eq!(sent[2]["messages"][1]["content"][0]["type"], "tool_use");
+        assert_eq!(sent[3]["messages"][5]["content"][0]["type"], "tool_use");
         assert_eq!(
-            sent[1]["messages"][4]["content"][0]["content"][1]["source"],
+            sent[2]["messages"][2]["content"][0]["content"][1]["source"],
+            source
+        );
+        assert_eq!(
+            sent[3]["messages"][6]["content"][0]["content"][1]["source"],
             source
         );
     }
 
-    // 两轮各一条成功，没有失败记录。
-    assert_eq!(harness.attempts().await?, completed(2));
+    // 被消化的线程拒绝不是 attempt：三轮各一条成功，没有失败记录。
+    assert_eq!(harness.attempts().await?, completed(3));
     assert_eq!(harness.target_state().await?, "available");
     Ok(())
 }
 
-/// 没有发送 thread 时，thread_not_found 只是一次真实上游错误，不得触发重放。
+/// 普通请求错误不是线程拒绝，即使请求携带 thread 也不得重放。
 #[tokio::test]
-async fn thread_error_without_thread_is_an_observed_failure() -> anyhow::Result<()> {
+async fn ordinary_error_with_thread_is_an_observed_failure() -> anyhow::Result<()> {
     let harness = Harness::start().await?;
-    harness.script([message("msg_1"), error(404, Some("thread_not_found"))]);
+    harness.script([message("msg_1"), error(400, None)]);
 
     assert_eq!(harness.turn(0).await.0, StatusCode::OK);
     let (status, body) = harness.turn(1).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     {
         let sent = harness.upstream.bodies.lock();
         assert_eq!(sent.len(), 2);
-        assert!(sent[1].get("thread").is_none());
-        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(sent[1]["thread"]["type"], "continue");
+        assert_eq!(sent[1]["thread"]["previous_message_id"], "msg_1");
     }
 
     let attempts = harness.attempts().await?;
@@ -427,9 +448,69 @@ async fn thread_error_without_thread_is_an_observed_failure() -> anyhow::Result<
     Ok(())
 }
 
-/// 半开探测在单个 attempt 中发送完整历史，成功后 Target 回到 Available。
+/// 明确不支持线程时重放一次，并在同一会话后续请求中保持禁用。
 #[tokio::test]
-async fn half_open_probe_sends_one_full_history_attempt() -> anyhow::Result<()> {
+async fn unsupported_thread_is_replayed_and_disabled_for_session() -> anyhow::Result<()> {
+    let harness = Harness::start().await?;
+    harness.script([
+        message("msg_1"),
+        error(400, Some("thread_unsupported_request")),
+        message("msg_2"),
+        message("msg_3"),
+    ]);
+
+    assert_eq!(harness.turn(0).await.0, StatusCode::OK);
+    let (status, body) = harness.turn(1).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = harness.turn(2).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let sent = harness.upstream.bodies.lock();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(sent[0]["thread"]["type"], "create");
+        assert_eq!(sent[1]["thread"]["type"], "continue");
+        assert_eq!(sent[1]["thread"]["previous_message_id"], "msg_1");
+        assert_eq!(sent[1]["messages"].as_array().unwrap().len(), 1);
+        assert!(sent[2].get("thread").is_none());
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
+        assert!(sent[3].get("thread").is_none());
+        assert_eq!(sent[3]["messages"].as_array().unwrap().len(), 5);
+    }
+    assert_eq!(harness.attempts().await?, completed(3));
+    assert_eq!(harness.target_state().await?, "available");
+    Ok(())
+}
+
+/// 重放遇到真实错误时只记录一次失败，不再重放。
+#[tokio::test]
+async fn error_after_replay_is_an_observed_failure() -> anyhow::Result<()> {
+    let harness = Harness::start().await?;
+    harness.script([
+        message("msg_1"),
+        error(404, Some("thread_not_found")),
+        error(400, None),
+    ]);
+
+    assert_eq!(harness.turn(0).await.0, StatusCode::OK);
+    let (status, body) = harness.turn(1).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    {
+        let sent = harness.upstream.bodies.lock();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[1]["thread"]["type"], "continue");
+        assert!(sent[2].get("thread").is_none());
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
+    }
+    let attempts = harness.attempts().await?;
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    assert_eq!(attempts[0].0, "completed");
+    assert_eq!(attempts[1].0, "failed", "{attempts:?}");
+    Ok(())
+}
+
+/// 半开探测在单个 attempt 中续接线程，成功后 Target 回到 Available。
+#[tokio::test]
+async fn half_open_probe_sends_one_continuation_attempt() -> anyhow::Result<()> {
     let harness = Harness::start().await?;
     harness.script([message("msg_1"), error(503, None), message("msg_2")]);
 
@@ -450,8 +531,9 @@ async fn half_open_probe_sends_one_full_history_attempt() -> anyhow::Result<()> 
     {
         let sent = harness.upstream.bodies.lock();
         assert_eq!(sent.len(), 3);
-        assert!(sent[2].get("thread").is_none());
-        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(sent[2]["thread"]["type"], "continue");
+        assert_eq!(sent[2]["thread"]["previous_message_id"], "msg_1");
+        assert_eq!(sent[2]["messages"].as_array().unwrap().len(), 1);
     }
 
     // 仅冷却前的 503 是失败；探测 attempt 本身是一条成功，并关闭了熔断。
