@@ -259,7 +259,9 @@ impl AdminService {
             options: provider.options.clone(),
         };
         let vendor_id = provider.provider_id.clone();
-        let scope = self.gw.create_vendor_session_scope(&vendor_id, provider)?;
+        let scope = self
+            .gw
+            .create_vendor_session_scope(&vendor_id, None, provider)?;
         let execution = self
             .gw
             .execute_vendor_session(

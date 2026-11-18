@@ -415,7 +415,11 @@ mod tests {
         };
         let (provider, auth_descriptor) =
             admin.provider_auth_candidate_snapshot(&candidate).await?;
-        let scope = gw.create_vendor_session_scope(&candidate.vendor_id, provider)?;
+        let scope = gw.create_vendor_session_scope(
+            &candidate.vendor_id,
+            candidate.provider_id.as_deref(),
+            provider,
+        )?;
         admin
             .create_auth_session_record(
                 candidate,

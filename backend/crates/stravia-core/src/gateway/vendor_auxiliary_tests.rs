@@ -1216,6 +1216,56 @@ async fn codex_unsaved_connection_authorizes_and_checks_credentials() -> anyhow:
 }
 
 #[tokio::test]
+async fn provider_device_identity_is_stable_and_isolated() -> anyhow::Result<()> {
+    use stravia_runtime_contract::{CancellationToken, Deadline};
+    use stravia_vendor_sdk::Operation;
+
+    let server = local_tls_server(1, |_| LocalResponse::json(json!({"rate_limit": {}}))).await?;
+    let vendor = "openai-codex";
+    let (_directory, gateway) = gateway_for(&server, &[vendor]).await?;
+    let first_provider = synthetic_oauth_provider(&gateway, vendor, false).await?;
+    let context = crate::plugin::VendorCallContext::new(
+        CancellationToken::new(),
+        Deadline::from_now(Duration::from_secs(30)),
+    );
+    let prepare =
+        |id| gateway.prepare_vendor_execution(id, None, Operation::ConnectionCheck, &context);
+    let first = prepare(&first_provider.id).await?.provider().clone();
+    gateway
+        .admin()
+        .update_provider(
+            &first_provider.id,
+            crate::db::models::UpdateProvider {
+                name: Some("Renamed Codex Provider".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let second = synthetic_oauth_provider(&gateway, vendor, false).await?;
+    let second_execution = prepare(&second.id).await?;
+    let repeat_execution = prepare(&first_provider.id).await?;
+    let key = "client_installation_id";
+    let id = &first.operation_metadata[key];
+    let raw = id.as_str().context("missing virtual installation UUID")?;
+    assert!(uuid::Uuid::parse_str(raw).is_ok());
+    assert_ne!(raw, gateway.client_installation_id.as_ref());
+    assert_ne!(id, &second_execution.provider().operation_metadata[key]);
+    assert_eq!(id, &repeat_execution.provider().operation_metadata[key]);
+
+    let saved =
+        gateway.create_vendor_session_scope(vendor, Some(&first_provider.id), first.clone())?;
+    assert_eq!(id, &saved.provider.operation_metadata[key]);
+    let draft_one = gateway.create_vendor_session_scope(vendor, None, first.clone())?;
+    let draft_two = gateway.create_vendor_session_scope(vendor, None, first.clone())?;
+    assert_ne!(id, &draft_one.provider.operation_metadata[key]);
+    assert_ne!(
+        draft_one.provider.operation_metadata[key],
+        draft_two.provider.operation_metadata[key]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn codex_edited_draft_checks_saved_credentials_without_updating_provider()
 -> anyhow::Result<()> {
     let server = local_tls_server(1, |_| LocalResponse::json(json!({"rate_limit": {}}))).await?;

@@ -238,9 +238,11 @@ impl AdminService {
         provider
             .operation_metadata
             .insert("use_proxy".into(), Value::Bool(candidate.use_proxy));
-        let scope = self
-            .gw
-            .create_vendor_session_scope(&candidate.vendor_id, provider)?;
+        let scope = self.gw.create_vendor_session_scope(
+            &candidate.vendor_id,
+            candidate.provider_id.as_deref(),
+            provider,
+        )?;
         let state = stravia_runtime_contract::identifier::new_id();
         let (response, publication) =
             if auth_descriptor.flow == stravia_vendor_sdk::AuthFlow::Manual {

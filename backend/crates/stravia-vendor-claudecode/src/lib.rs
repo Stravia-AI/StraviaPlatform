@@ -392,7 +392,7 @@ fn infer(
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .ok_or_else(|| invalid("Claude inference requires host client_installation_id"))?;
     let mut device_hash = Sha256::new();
-    device_hash.update(b"stravia:claude-code:virtual-installation-device-id:v1\0");
+    device_hash.update(b"stravia:claude-code:virtual-provider-device-id:v1\0");
     device_hash.update(installation_id.as_bytes());
     let device_id =
         stravia_runtime_contract::protocol::ir::canonical::hash_hex(&device_hash.finalize().into());

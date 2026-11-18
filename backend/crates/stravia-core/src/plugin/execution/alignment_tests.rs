@@ -1063,19 +1063,16 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
                     .required_capability()
                     .map(|capability| channel.capabilities.contains(&capability));
             }
-            let (mut snapshot, use_proxy, origins) = provider_snapshot(
+            let (snapshot, use_proxy, origins) = provider_snapshot(
                 descriptor,
                 &connection,
                 input.model.as_deref(),
                 request.operation(),
                 connection.provider.models_source.as_deref(),
                 &context,
+                &gateway.client_installation_id,
             )?;
             anyhow::ensure!(origins.allows(&url::Url::parse(&snapshot.base_url)?));
-            snapshot.operation_metadata.insert(
-                "client_installation_id".into(),
-                Value::String(gateway.client_installation_id.to_string()),
-            );
             let prepared = PreparedVendorExecution {
                 plugin,
                 operation,

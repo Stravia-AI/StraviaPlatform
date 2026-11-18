@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
@@ -258,6 +259,7 @@ impl Gateway {
     pub(crate) fn create_vendor_session_scope(
         &self,
         vendor_id: &str,
+        saved_provider_id: Option<&str>,
         mut provider: ProviderSnapshot,
     ) -> anyhow::Result<VendorSessionScope> {
         let (plugin, operation, data_epoch) = self.vendor_plugins.acquire(vendor_id)?;
@@ -293,6 +295,13 @@ impl Gateway {
             .into_iter()
             .map(|grant| grant.origin),
         )?;
+        provider.operation_metadata.insert(
+            CLIENT_INSTALLATION_ID.into(),
+            Value::String(client_installation_identity(
+                &self.client_installation_id,
+                saved_provider_id,
+            )),
+        );
         drop(operation);
         Ok(VendorSessionScope {
             vendor_id: vendor_id.to_owned(),
@@ -545,11 +554,8 @@ impl Gateway {
                 kind,
                 effective_models_source,
                 context,
+                &self.client_installation_id,
             )?;
-            provider.operation_metadata.insert(
-                "client_installation_id".into(),
-                Value::String(self.client_installation_id.to_string()),
-            );
             if let Some(models) = catalog_models {
                 provider
                     .operation_metadata
@@ -611,11 +617,8 @@ impl Gateway {
                         .get("models_source")
                         .and_then(Value::as_str),
                     context,
+                    &self.client_installation_id,
                 )?;
-                provider.operation_metadata.insert(
-                    "client_installation_id".into(),
-                    Value::String(self.client_installation_id.to_string()),
-                );
                 if let Some(models) = catalog_models {
                     provider
                         .operation_metadata
@@ -744,7 +747,7 @@ impl Gateway {
             if !matches!(
                 key.as_str(),
                 "host_platform"
-                    | "client_installation_id"
+                    | CLIENT_INSTALLATION_ID
                     | "egress_protocol"
                     | "egress_base_url"
                     | "models_source"
@@ -837,16 +840,18 @@ impl Gateway {
         let channel = selected_channel(descriptor, &provider.channel)?;
         provider.protocol = pinned_protocol(channel, &provider.protocol);
         provider.client_headers = filtered_client_headers(&context.client_headers, channel);
-        provider.operation_metadata.extend(context.metadata.clone());
+        provider.operation_metadata.extend(
+            context
+                .metadata
+                .iter()
+                .filter(|(key, _)| key.as_str() != CLIENT_INSTALLATION_ID)
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         provider.operation_metadata.insert(
             "egress_protocol".into(),
             Value::String(provider.protocol.clone()),
         );
         apply_host_metadata(&mut provider.operation_metadata);
-        provider.operation_metadata.insert(
-            "client_installation_id".into(),
-            Value::String(self.client_installation_id.to_string()),
-        );
         let use_proxy = provider
             .operation_metadata
             .get("use_proxy")
@@ -1129,6 +1134,23 @@ impl Gateway {
     }
 }
 
+const CLIENT_INSTALLATION_ID: &str = "client_installation_id";
+
+fn client_installation_identity(installation_id: &str, saved_provider_id: Option<&str>) -> String {
+    let Some(provider_id) = saved_provider_id else {
+        return uuid::Uuid::new_v4().to_string();
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"stravia:provider-device-id:v1\0");
+    hash.update(installation_id.as_bytes());
+    hash.update(provider_id.as_bytes());
+    let digest = hash.finalize();
+    let bytes = digest[..16].try_into().expect("128 bits of SHA-256");
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
 fn provider_snapshot(
     descriptor: &stravia_vendor_sdk::ProviderDescriptor,
     connection: &ConnectionSnapshot,
@@ -1136,6 +1158,7 @@ fn provider_snapshot(
     kind: Operation,
     discovery_source: Option<&str>,
     context: &VendorCallContext,
+    installation_id: &str,
 ) -> anyhow::Result<(ProviderSnapshot, bool, NetworkPolicy)> {
     let use_proxy = connection.provider.use_proxy;
     let options = json_object(&connection.provider.vendor_options, "provider options")?;
@@ -1219,6 +1242,13 @@ fn provider_snapshot(
     operation_metadata.insert("egress_protocol".into(), Value::String(protocol.clone()));
     operation_metadata.insert("egress_base_url".into(), Value::String(base_url.clone()));
     apply_host_metadata(&mut operation_metadata);
+    operation_metadata.insert(
+        CLIENT_INSTALLATION_ID.into(),
+        Value::String(client_installation_identity(
+            installation_id,
+            Some(&connection.provider.id),
+        )),
+    );
     Ok((
         ProviderSnapshot {
             provider_id: descriptor.provider_id.clone(),

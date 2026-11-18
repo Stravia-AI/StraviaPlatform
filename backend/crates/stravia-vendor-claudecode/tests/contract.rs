@@ -1645,6 +1645,77 @@ fn history_request(messages: &[Value]) -> AiRequest {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn provider_device_id_is_independent_of_oauth_account_and_target() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices {
+        routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+        ..Default::default()
+    });
+    let first = "00000000-0000-4000-8000-000000000001";
+    let second = "00000000-0000-4000-8000-000000000002";
+    let other_account = "00000000-0000-4000-8000-0000000000bb";
+    let request = history_request(&[json!({"role":"user","content":"Read a."})]);
+    for (index, (installation, account)) in [
+        (first, Some(ACCOUNT_UUID)),
+        (second, Some(ACCOUNT_UUID)),
+        (first, Some(other_account)),
+        (first, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut credentials = BTreeMap::from([(
+            "access_token".into(),
+            json!(format!("sk-ant-oat01-test-{index}")),
+        )]);
+        if let Some(account) = account {
+            credentials.insert("account_uuid".into(), json!(account));
+        }
+        let mut provider = provider(credentials);
+        provider
+            .operation_metadata
+            .insert("client_installation_id".into(), json!(installation));
+        provider.operation_metadata.insert(
+            "transport_affinity".into(),
+            json!(format!("target-{index}")),
+        );
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider,
+                request: request.clone(),
+            },
+        )
+        .await
+        .expect("inference succeeds");
+    }
+    let requests = services.requests.lock();
+    let identities: Vec<Value> = requests
+        .iter()
+        .map(|sent| {
+            let body: Value = serde_json::from_slice(&sent.body).unwrap();
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(identities[0]["account_uuid"], ACCOUNT_UUID);
+    assert_eq!(identities[1]["account_uuid"], ACCOUNT_UUID);
+    assert_eq!(identities[2]["account_uuid"], other_account);
+    assert_eq!(identities[3]["account_uuid"], "");
+    assert_ne!(identities[0]["device_id"], identities[1]["device_id"]);
+    assert_eq!(identities[0]["device_id"], identities[2]["device_id"]);
+    assert_eq!(identities[0]["device_id"], identities[3]["device_id"]);
+    assert!(identities.iter().all(|identity| {
+        let id = identity["device_id"].as_str().unwrap();
+        id.len() == 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn typed_server_tool_history_is_projected_without_mutation() {
     use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
 

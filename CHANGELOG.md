@@ -11,6 +11,7 @@
 
 ### Changed
 
+- Claude Code, Codex, Grok, Command Code, and Devin now use a stable virtual device identity per saved Provider. Two connections to the same upstream account use different IDs; reauthorizing an existing connection does not change its ID. Update the host and rebuild and re-import the standalone Claude Code plugin. Existing device IDs change once. No database migration is required, and Antigravity is unchanged.
 - Unconfigured Web Search now defaults to External Route in the settings summary and binding editor. Selecting and saving a valid Route is still required before enabling search; existing Local and External bindings are unchanged.
 - **Breaking — StraviaRead input:** Move `question`, `attachments`, `allowed_domains` and `wait` from the top level into the optional `body` object; old flat calls are rejected without a compatibility shim. Model declarations use `strict: false` and expose only `path` and `body` in the schema, with body parameters described by capability.
 
