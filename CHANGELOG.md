@@ -4,6 +4,8 @@
 
 ### Added
 
+- When adding an OAuth provider, you can open the sign-in page directly or get a link to copy without opening the browser. If clipboard access fails, the link stays selectable while authorization is pending.
+
 - Antigravity now exposes discovered web-search models as External Search Route targets, using native grounded search with validated UTF-8 citations and honest unknown usage. Search-only models do not gain inference capability, and existing bindings remain unchanged. The host safely resolves Google grounding redirects using the selected connection's proxy snapshot before validating final source domains. Update the host, rebuild and re-import the standalone plugin, then sync models and select a search Route. Private upstream behavior, account eligibility and third-party OAuth terms remain risks; local replay verification is not a live-account guarantee.
 - Built-in Base MiniMax API and Plan connections now support image generation and reference-image editing through the same `generate` tool and image model. Model sync discovers image models and reference-input support from MiniMax's public OpenAPI schemas instead of a hardcoded model list; failed refreshes retain the previous inventory. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, Credits consumption and existing Provider-wide allowance guards still apply.
 
@@ -17,6 +19,7 @@
 ### Fixed
 
 - Bundled vendor plugins and their matching official catalog entries now share one row, with both the installed and available versions visible. Third-party sources stay separate, and reinstalling from the official source still requires confirmation.
+- WebUI copy buttons now work on plain HTTP when the browser supports copying from a user click. Secure contexts still use the Clipboard API and respect permission denials. OAuth sign-in links remain manually selectable if copying is unavailable.
 - Server WebUI no longer treats authentication storage failures, rejected-origin requests, or network interruptions as expired sessions. Startup authentication errors preserve the original URL and provide a retry action without clearing persistent cookies.
 - User message bubbles and their metadata now align with the reading column's right edge in virtualized conversations, matching the composer without removing the message width limit.
 - Codex no longer blocks valid reset entitlements based on ordinary usage being allowed or its limit flags being absent. Entitlement balance, expiry and personal-account checks remain; only the upstream redemption result confirms a reset. Rebuild and re-import the standalone Codex plugin.

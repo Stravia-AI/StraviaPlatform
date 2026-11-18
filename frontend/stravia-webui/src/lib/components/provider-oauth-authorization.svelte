@@ -1,13 +1,16 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { createQuery } from '@tanstack/svelte-query'
+import CopyIcon from '@lucide/svelte/icons/copy'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
+import LinkIcon from '@lucide/svelte/icons/link'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import { onDestroy } from 'svelte'
 import { toast } from 'svelte-sonner'
 
 import { admin, isTauri } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { copyText } from '#lib/clipboard.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { openExternalUrl } from '#lib/open-external.js'
 import { resolvePluginText } from '#lib/plugin-text.js'
@@ -31,6 +34,8 @@ interface Props {
   class?: string
 }
 
+type StartAction = 'sign-in' | 'get-link'
+
 let {
   vendorId,
   channel,
@@ -47,7 +52,8 @@ let oauthSession = $state<OAuthSessionInitData>()
 let callbackUrl = $state('')
 let manualValue = $state('')
 let callbackError = $state('')
-let starting = $state(false)
+let starting = $state<StartAction>()
+let showSignInLink = $state(false)
 let completing = $state(false)
 let sessionGeneration = 0
 let reportedSessionId: string | undefined
@@ -89,6 +95,7 @@ const supportsManualCallback = $derived(
   flow === 'authorization_code' && oauthSession?.callback_mode === 'manual' && !manualInput,
 )
 const supportsManualInput = $derived(Boolean(manualInput) && oauthInProgress)
+const signInLinkInputId = $props.id()
 const callbackInputId = $derived(mode === 'connect' ? 'oauth-callback-url' : 'provider-oauth-callback-url')
 const manualInputId = $derived(mode === 'connect' ? 'oauth-manual-value' : 'provider-oauth-manual-value')
 
@@ -118,6 +125,7 @@ function resetLocalSession(): string | undefined {
   callbackUrl = ''
   manualValue = ''
   callbackError = ''
+  showSignInLink = false
   completing = false
   return sessionId
 }
@@ -128,7 +136,7 @@ function isCurrentSession(generation: number, sessionId: string): boolean {
 
 export async function cancel(): Promise<void> {
   sessionGeneration += 1
-  starting = false
+  starting = undefined
   const sessionId = resetLocalSession()
   if (!sessionId) return
   try {
@@ -138,17 +146,23 @@ export async function cancel(): Promise<void> {
   }
 }
 
-export async function begin(): Promise<void> {
+export function begin(): Promise<void> {
+  return startSession('sign-in')
+}
+
+async function startSession(action: StartAction): Promise<void> {
   if (disabled || starting) return
   if (!vendorId || !channel) {
     toast.error(m.provider_oauth_authorization_unavailable())
     return
   }
   const popup =
-    flow === 'manual' || typeof window === 'undefined' || isTauri ? null : window.open('about:blank', '_blank')
+    action === 'sign-in' && flow !== 'manual' && typeof window !== 'undefined' && !isTauri
+      ? window.open('about:blank', '_blank')
+      : null
   const generation = ++sessionGeneration
   const previousSessionId = resetLocalSession()
-  starting = true
+  starting = action
   if (previousSessionId) {
     try {
       await admin.oauth.cancel(previousSessionId)
@@ -175,9 +189,8 @@ export async function begin(): Promise<void> {
       return
     }
     oauthSession = session
-    if (session.auth_url) {
-      if (popup) popup.location.replace(session.auth_url)
-      else await openExternalUrl(session.auth_url)
+    if (action === 'sign-in' && session.auth_url) {
+      await openSignInPage(session.auth_url, popup)
     } else {
       popup?.close()
     }
@@ -185,13 +198,44 @@ export async function begin(): Promise<void> {
     popup?.close()
     if (generation === sessionGeneration) toast.error(localizeBackendErrorMessage(error))
   } finally {
-    if (generation === sessionGeneration) starting = false
+    if (generation === sessionGeneration) starting = undefined
   }
 }
 
-async function reopen(): Promise<void> {
-  if (disabled) return
-  if (currentAuthUrl) await openExternalUrl(currentAuthUrl)
+async function openSignInPage(url: string, popup?: Window | null): Promise<void> {
+  const generation = sessionGeneration
+  try {
+    if (popup) popup.location.replace(url)
+    else await openExternalUrl(url)
+  } catch {
+    popup?.close()
+    if (generation === sessionGeneration && oauthInProgress) {
+      toast.error(m.provider_oauth_authorization_open_sign_in_page_failed())
+    }
+  }
+}
+
+function openCurrentSignInPage(): void {
+  if (disabled || !oauthInProgress || !currentAuthUrl) return
+  void openSignInPage(currentAuthUrl)
+}
+
+async function copySignInLink(trigger: HTMLElement): Promise<void> {
+  const sessionId = oauthSession?.session_id
+  const url = currentAuthUrl
+  if (disabled || !oauthInProgress || !sessionId || !url) return
+  const generation = sessionGeneration
+  let copied = false
+  try {
+    await copyText(url, trigger)
+    copied = true
+  } catch {
+    // The waiting session can offer the link for manual selection instead.
+  }
+  if (disabled || !isCurrentSession(generation, sessionId) || !oauthInProgress || currentAuthUrl !== url) return
+  showSignInLink = !copied
+  if (copied) toast.success(m.common_copied_clipboard())
+  else toast.error(m.common_not_copy_clipboard())
 }
 
 async function completeManual(): Promise<void> {
@@ -259,13 +303,13 @@ export async function updateProxy(nextUseProxy: boolean): Promise<void> {
 
 export function consume(): void {
   sessionGeneration += 1
-  starting = false
+  starting = undefined
   resetLocalSession()
 }
 
 onDestroy(() => {
   sessionGeneration += 1
-  starting = false
+  starting = undefined
   const sessionId = resetLocalSession()
   if (sessionId) void admin.oauth.cancel(sessionId).catch((error) => toast.error(localizeBackendErrorMessage(error)))
 })
@@ -288,15 +332,34 @@ onDestroy(() => {
                 : m.provider_oauth_authorization_reconnect_warning()}
           </p>
         </div>
-        <Button type="button" onclick={() => void begin()} disabled={disabled || starting}>
-          {#if starting}<Spinner data-icon="inline-start" />{:else if flow !== 'manual'}<ExternalLinkIcon
-              data-icon="inline-start" />{/if}
-          {flow === 'manual'
-            ? m.provider_oauth_authorization_begin_manual()
-            : mode === 'connect'
-              ? m.provider_oauth_authorization_sign_oauth()
-              : m.provider_oauth_authorization_sign_again()}
-        </Button>
+        <div class="flex max-w-full flex-wrap gap-2">
+          <Button
+            type="button"
+            onclick={() => void begin()}
+            disabled={disabled || Boolean(starting)}
+            aria-busy={starting === 'sign-in'}>
+            {#if starting === 'sign-in'}<Spinner
+                data-icon="inline-start" />{:else if flow !== 'manual'}<ExternalLinkIcon
+                data-icon="inline-start" />{/if}
+            {flow === 'manual'
+              ? m.provider_oauth_authorization_begin_manual()
+              : mode === 'connect'
+                ? m.provider_oauth_authorization_sign_oauth()
+                : m.provider_oauth_authorization_sign_again()}
+          </Button>
+          {#if flow !== 'manual'}
+            <Button
+              type="button"
+              variant="outline"
+              onclick={() => void startSession('get-link')}
+              disabled={disabled || Boolean(starting)}
+              aria-busy={starting === 'get-link'}>
+              {#if starting === 'get-link'}<Spinner data-icon="inline-start" />{:else}<LinkIcon
+                  data-icon="inline-start" />{/if}
+              {m.provider_oauth_authorization_get_sign_in_link()}
+            </Button>
+          {/if}
+        </div>
       </div>
     {:else}
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -333,7 +396,7 @@ onDestroy(() => {
             {/if}
           {/if}
         </div>
-        <div class="flex flex-wrap justify-end gap-2">
+        <div class="flex max-w-full flex-wrap justify-end gap-2">
           {#if oauthStatus?.status === 'error' || oauthStatusQuery.isError}
             <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
               <RefreshCwIcon data-icon="inline-start" />{m.common_try_again()}
@@ -344,11 +407,15 @@ onDestroy(() => {
             </Button>
           {:else}
             {#if currentAuthUrl}
-              <Button type="button" variant="outline" {disabled} onclick={() => void reopen()}>
-                <ExternalLinkIcon data-icon="inline-start" />{oauthStatus?.status === 'pending' &&
-                oauthStatus.last_error
-                  ? m.provider_oauth_authorization_try_sign_again()
-                  : m.provider_oauth_authorization_reopen_sign_page()}
+              <Button type="button" variant="outline" {disabled} onclick={openCurrentSignInPage}>
+                <ExternalLinkIcon data-icon="inline-start" />{m.provider_oauth_authorization_open_sign_in_page()}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                {disabled}
+                onclick={(event) => void copySignInLink(event.currentTarget)}>
+                <CopyIcon data-icon="inline-start" />{m.provider_oauth_authorization_copy_sign_in_link()}
               </Button>
             {/if}
             <Button type="button" variant="ghost" {disabled} onclick={() => void cancel()}>
@@ -357,6 +424,19 @@ onDestroy(() => {
           {/if}
         </div>
       </div>
+
+      {#if showSignInLink && !disabled && oauthInProgress && currentAuthUrl}
+        <Field.Field class="mt-4">
+          <Field.Label for={signInLinkInputId}>{m.provider_oauth_authorization_sign_in_link()}</Field.Label>
+          <Input
+            id={signInLinkInputId}
+            class="font-technical"
+            readonly
+            spellcheck={false}
+            value={currentAuthUrl}
+            onfocus={(event) => event.currentTarget.select()} />
+        </Field.Field>
+      {/if}
 
       {#if userCode && oauthInProgress}
         <div class="mt-4 rounded-lg border bg-background px-4 py-3">

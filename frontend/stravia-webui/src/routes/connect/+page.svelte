@@ -16,6 +16,7 @@ import { toast } from 'svelte-sonner'
 import { admin, isTauri, proxyBase } from '#lib/admin-client.js'
 import { getConnectSetup } from '#lib/connect-setup.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { copyText } from '#lib/clipboard.js'
 import { applyConnectClient, asConnectClientApplyError, planConnectClient } from '#lib/connect-client-apply.js'
 import { logicalModelOption, sortLogicalModels } from '#lib/logical-model.js'
 import {
@@ -157,9 +158,9 @@ const claudeMappingRows = [
   { id: 'cli-opus-model', key: 'opusModel', label: () => m.connect_opus_model_mapping() },
 ] as const
 
-async function copyText(value: string): Promise<void> {
+async function copyOutput(value: string, trigger: HTMLElement): Promise<void> {
   try {
-    await navigator.clipboard.writeText(value)
+    await copyText(value, trigger)
     toast.success(m.common_copied_clipboard())
   } catch {
     toast.error(m.common_not_copy_clipboard())
@@ -343,7 +344,7 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                     {/if}
                     <Button
                       variant={isTauri ? 'outline' : 'default'}
-                      onclick={() => void copyText(generatedCliConfig)}
+                      onclick={(event) => void copyOutput(generatedCliConfig, event.currentTarget)}
                       disabled={!generatedCliConfig}
                       ><ClipboardCopyIcon data-icon="inline-start" />{cliToolId === 'chatgpt'
                         ? m.connect_copy_both()
@@ -476,7 +477,9 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                 <h2 id="code-output-title" class="route-section-title">
                   {m.connect_generated_request()}
                 </h2>
-                <Button onclick={() => void copyText(generatedCode)} disabled={!codeModel || !selectedCodeKey}
+                <Button
+                  onclick={(event) => void copyOutput(generatedCode, event.currentTarget)}
+                  disabled={!codeModel || !selectedCodeKey}
                   ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
               </div>
               <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">

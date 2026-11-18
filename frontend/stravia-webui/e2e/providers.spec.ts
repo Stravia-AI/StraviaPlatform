@@ -1787,9 +1787,79 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
   await expect(manualModelPicker).toHaveValue('Claude Opus 4.6')
 })
 
-test('OAuth Provider configuration allows manual completion while the localhost listener is active', async ({
+test('OAuth Provider can copy and open the pending authorization URL without restarting sign-in', async ({
+  context,
   page,
 }) => {
+  const authUrl = 'https://oauth.example.test/authorize?state=fixture%2Bstate&redirect_uri=http%3A%2F%2Flocalhost'
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await context.route('https://oauth.example.test/**', (route) => route.fulfill({ body: 'Fixture sign-in page' }))
+  let authorizations = 0
+  await page.route('**/api/v1/oauth/sessions/init', (route) => {
+    authorizations += 1
+    return route.fulfill({
+      json: {
+        data: {
+          session_id: 'oauth-session-1',
+          vendor_id: 'openai-codex',
+          channel: 'codex',
+          flow: 'authorization_code',
+          callback_mode: 'auto',
+          expires_in: 600,
+          interval: 2,
+        },
+      },
+    })
+  })
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/status', (route) =>
+    route.fulfill({ json: { data: { status: 'pending', auth_url: authUrl, expires_in: 600 } } }),
+  )
+  await page.route('**/api/v1/oauth/sessions/oauth-session-1/cancel', (route) =>
+    route.fulfill({ json: { data: null } }),
+  )
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
+  await page.getByRole('button', { name: /Codex.*OAuth account/ }).click()
+  await page.getByRole('button', { name: 'Get sign-in link' }).click()
+  const copy = page.getByRole('button', { name: 'Copy sign-in link' })
+  await copy.click()
+  await expect(page.locator('[data-sonner-toast]')).toContainText('Copied to clipboard.')
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(authUrl)
+  expect(context.pages()).toEqual([page])
+
+  const popupPromise = context.waitForEvent('page')
+  await page.getByRole('button', { name: 'Open sign-in page' }).click()
+  const popup = await popupPromise
+  await expect(popup).toHaveURL(authUrl)
+  await popup.close()
+  expect(authorizations).toBe(1)
+
+  await page.getByRole('button', { name: 'Cancel sign-in' }).click()
+  await expect(copy).toHaveCount(0)
+})
+
+test('OAuth Provider copies the full sign-in URL without the Clipboard API', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined })
+  })
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
+  await page.getByRole('button', { name: /Codex.*OAuth account/ }).click()
+  await page.getByRole('button', { name: 'Get sign-in link' }).click()
+  await page.getByRole('button', { name: 'Copy sign-in link' }).click()
+  await expect(page.locator('[data-sonner-toast]')).toContainText('Copied to clipboard.')
+  const pasteTarget = page.getByLabel('Callback URL', { exact: true })
+  await pasteTarget.press('ControlOrMeta+V')
+  await expect(pasteTarget).toHaveValue('https://auth.openai.example/authorize')
+})
+
+test('OAuth Provider configuration allows manual completion while the localhost listener is active', async ({
+  context,
+  page,
+}) => {
+  const authUrl = 'https://auth.openai.example/authorize'
+  await context.route(authUrl, (route) => route.fulfill({ body: 'Fixture sign-in page' }))
   await page.goto('/providers')
   await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
   await page.getByRole('button', { name: /Codex.*OAuth account/ }).click()
@@ -1802,6 +1872,7 @@ test('OAuth Provider configuration allows manual completion while the localhost 
   const popupPromise = page.waitForEvent('popup')
   await page.getByRole('button', { name: 'Sign in with OAuth' }).click()
   const popup = await popupPromise
+  await expect(popup).toHaveURL(authUrl)
   await popup.close()
 
   expect((await initRequest).postDataJSON()).toMatchObject({
@@ -1813,7 +1884,7 @@ test('OAuth Provider configuration allows manual completion while the localhost 
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
   await expect(page.getByLabel('Callback URL')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Complete', exact: true })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Reopen sign-in page' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open sign-in page' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel sign-in' })).toBeVisible()
 
   let createBody: Record<string, unknown> | undefined

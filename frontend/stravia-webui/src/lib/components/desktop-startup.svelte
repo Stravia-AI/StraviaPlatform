@@ -7,6 +7,7 @@ import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import { userPrefersMode } from 'mode-watcher'
 import { onMount } from 'svelte'
 
+import { copyText } from '#lib/clipboard.js'
 import BrandMark from '#lib/components/brand-mark.svelte'
 import BrandWordmark from '#lib/components/brand-wordmark.svelte'
 import StartupProgress from '#lib/components/startup-progress.svelte'
@@ -71,9 +72,9 @@ function failureImpact(value: DesktopStartupStage): string {
   }
 }
 
-async function copyDiagnostics(): Promise<void> {
+async function copyDiagnostics(trigger: HTMLElement): Promise<void> {
   try {
-    await navigator.clipboard.writeText(technicalDiagnostics)
+    await copyText(technicalDiagnostics, trigger)
     feedback = { message: m.desktop_startup_diagnostics_copied(), error: false }
   } catch {
     feedback = { message: m.desktop_startup_diagnostics_copy_failed(), error: true }
@@ -188,7 +189,11 @@ onMount(() => {
           <pre
             class="mt-3 overflow-x-auto border-t pt-3 font-mono text-xs whitespace-pre-wrap text-muted-foreground">{technicalDiagnostics}</pre>
           <div class="mt-3 flex flex-wrap gap-2">
-            <Button data-testid="startup-copy" variant="outline" size="sm" onclick={copyDiagnostics}>
+            <Button
+              data-testid="startup-copy"
+              variant="outline"
+              size="sm"
+              onclick={(event) => void copyDiagnostics(event.currentTarget)}>
               <CopyIcon data-icon="inline-start" />
               {m.desktop_startup_copy_diagnostics()}
             </Button>

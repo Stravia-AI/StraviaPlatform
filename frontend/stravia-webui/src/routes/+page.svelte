@@ -3,8 +3,10 @@ import { goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { page } from '$app/state'
 import { onMount, tick, untrack } from 'svelte'
+import type { MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
 import { isTauri } from '#lib/admin-client.js'
+import { copyText } from '#lib/clipboard.js'
 import { getConsoleChat } from '#lib/console-chat.svelte.js'
 import { consoleAssistantBlocks, consoleAssistantContent, consoleVisibleText } from '#lib/console-chat.js'
 import type {
@@ -223,9 +225,9 @@ async function newConversation() {
   await goto(resolve('/'))
   composer?.focus()
 }
-async function copy(value: string) {
+async function copy(value: string, trigger: HTMLElement) {
   await command(async () => {
-    await navigator.clipboard.writeText(consoleVisibleText(value))
+    await copyText(consoleVisibleText(value), trigger)
     toast.success(m.common_copied_clipboard())
   })
 }
@@ -249,7 +251,13 @@ async function submitEdit(id: string) {
 }
 </script>
 
-{#snippet iconAction(label: string, Icon: typeof CopyIcon, onclick: () => void, disabled = false, compact = false)}
+{#snippet iconAction(
+  label: string,
+  Icon: typeof CopyIcon,
+  onclick: MouseEventHandler<HTMLElement>,
+  disabled = false,
+  compact = false,
+)}
   <Tooltip.Root>
     <Tooltip.Trigger
       aria-label={label}
@@ -324,7 +332,13 @@ async function submitEdit(id: string) {
         {#snippet meta()}
           <div class="flex items-center gap-1">
             <time datetime={message.createdAt} class="px-1 font-technical">{formatLogTime(message.createdAt)}</time>
-            {@render iconAction(m.console_chat_copy_message(), CopyIcon, () => void copy(userText), false, true)}
+            {@render iconAction(
+              m.console_chat_copy_message(),
+              CopyIcon,
+              (event) => void copy(userText, event.currentTarget),
+              false,
+              true,
+            )}
             {#if !snapshot.readOnlyReason && !editing}
               {@render iconAction(
                 m.console_chat_edit_message(),
@@ -383,7 +397,13 @@ async function submitEdit(id: string) {
           <span role="status" class="sr-only">{m.console_chat_generating()}</span>
         {:else}
           <div class="flex items-center gap-1">
-            {@render iconAction(m.console_chat_copy(), CopyIcon, () => void copy(content.text), false, true)}
+            {@render iconAction(
+              m.console_chat_copy(),
+              CopyIcon,
+              (event) => void copy(content.text, event.currentTarget),
+              false,
+              true,
+            )}
             {#if message === lastMessage && !generation && !snapshot.readOnlyReason}
               {#if message.status === 'failed'}<Button
                   variant="outline"
