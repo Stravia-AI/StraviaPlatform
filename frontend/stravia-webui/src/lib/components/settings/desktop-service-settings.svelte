@@ -5,6 +5,7 @@ import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import { toast } from 'svelte-sonner'
 
+import { copyText } from '#lib/clipboard.js'
 import {
   asDesktopPortOperationError,
   getDesktopClientSettings,
@@ -195,9 +196,9 @@ async function applyExternalAccess(enabled: boolean): Promise<void> {
   }
 }
 
-async function copyLanUrl(): Promise<void> {
+async function copyLanUrl(trigger: HTMLElement): Promise<void> {
   try {
-    await navigator.clipboard.writeText(lanUrl)
+    await copyText(lanUrl, trigger)
     toast.success(m.common_copied_clipboard())
   } catch {
     toast.error(m.common_not_copy_clipboard())
@@ -355,7 +356,7 @@ async function copyLanUrl(): Promise<void> {
               <InputGroup.Button
                 size="icon-sm"
                 aria-label={m.technical_value_copy_full_value()}
-                onclick={() => void copyLanUrl()}>
+                onclick={(event) => void copyLanUrl(event.currentTarget)}>
                 <ClipboardCopyIcon />
               </InputGroup.Button>
             </InputGroup.Addon>

@@ -4,6 +4,7 @@ import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import { onDestroy } from 'svelte'
 import { toast } from 'svelte-sonner'
 
+import { copyText } from '#lib/clipboard.js'
 import { cn } from '#lib/utils.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
@@ -25,9 +26,9 @@ onDestroy(() => {
   clearTimeout(copiedTimer)
 })
 
-async function copyValue(): Promise<void> {
+async function copyValue(trigger: HTMLElement): Promise<void> {
   try {
-    await navigator.clipboard.writeText(value)
+    await copyText(value, trigger)
     if (disposed) return
     copied = true
     clearTimeout(copiedTimer)
@@ -55,7 +56,7 @@ async function copyValue(): Promise<void> {
       type="button"
       size="icon-sm"
       variant="ghost"
-      onclick={() => void copyValue()}
+      onclick={(event) => void copyValue(event.currentTarget)}
       aria-label={m.technical_value_copy_full_value()}>
       <ClipboardCopyIcon />
     </Button>
