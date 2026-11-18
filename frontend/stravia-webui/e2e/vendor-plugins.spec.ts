@@ -141,6 +141,59 @@ test('marketplace browsing, search and installed filters use the cached catalog'
   await expect(page.getByText('WorkBuddy')).toHaveCount(0)
 })
 
+test('bundled plugins share the official catalog row without merging other sources', async ({ page }) => {
+  const official: PluginSourceSummary = {
+    ...source,
+    id: 'official',
+    repository_id: 1350654373,
+    repository: 'Stravia-AI/StraviaPlatform',
+    url: 'https://github.com/Stravia-AI/StraviaPlatform',
+    official: true,
+  }
+  const catalog = view()
+  catalog.sources.push(official)
+  catalog.entries.push({ ...catalog.entries[0], source_id: official.id })
+  await prepareApp(page)
+  await page.route('**/api/v1/vendor-plugins', (route) =>
+    route.fulfill({ json: { data: [{ ...installed, source: 'builtin', origin: null, builtin_version: '1.0.0' }] } }),
+  )
+  await page.route('**/api/v1/plugin-marketplace', (route) => route.fulfill({ json: { data: catalog } }))
+  await page.route('**/api/v1/plugin-marketplace/refresh', (route) => route.fulfill({ json: { data: catalog } }))
+
+  await page.goto('/vendor-plugins')
+  const rows = page.getByRole('row').filter({ hasText: 'WorkBuddy' })
+  await expect(rows).toHaveCount(2)
+  const officialRow = rows.filter({ hasText: 'Official' })
+  await expect(officialRow).toContainText('Bundled')
+  await expect(officialRow.getByRole('cell', { name: '1.0.0', exact: true })).toBeVisible()
+  await expect(officialRow).toContainText('2.0.0')
+  await expect(officialRow.getByText('Installed', { exact: true })).toBeVisible()
+  await expect(officialRow.getByRole('button', { name: 'Reinstall from source' })).toBeEnabled()
+  await expect(rows.filter({ hasText: 'example/plugins' })).not.toContainText('1.0.0')
+
+  await page.getByRole('tab', { name: 'Installed' }).click()
+  await expect(rows).toHaveCount(1)
+  await expect(officialRow).toBeVisible()
+  await page.getByRole('combobox', { name: /source/i }).click()
+  await page.getByRole('option', { name: official.repository }).click()
+  await expect(officialRow).toBeVisible()
+  await officialRow.getByRole('button', { name: 'Details' }).click()
+  const detail = page.getByRole('dialog', { name: 'WorkBuddy' })
+  await expect(detail).toContainText('Bundled')
+  await expect(detail.getByRole('button', { name: 'Install version' })).toBeEnabled()
+  await detail.getByRole('button', { name: 'Close' }).click()
+  await page.getByRole('tab', { name: /updates/i }).click()
+  await expect(rows).toHaveCount(0)
+
+  await page.setViewportSize({ width: 320, height: 700 })
+  await page.getByRole('tab', { name: 'Installed' }).click()
+  const mobileRows = page.getByRole('listitem').filter({ hasText: 'WorkBuddy' })
+  await expect(mobileRows).toHaveCount(1)
+  await expect(mobileRows).toContainText('Bundled')
+  await expect(mobileRows).toContainText('Official')
+  await expect(mobileRows.getByRole('button', { name: 'Reinstall from source' })).toBeEnabled()
+})
+
 test('automatically refreshes and keeps cached plugins on refresh failure', async ({ page }) => {
   await mockMarketplace(page, [installed])
   let checks = 0

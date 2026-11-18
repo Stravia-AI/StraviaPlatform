@@ -133,19 +133,20 @@ const plugins = $derived(pluginsQuery.data ?? [])
 const sources = $derived(marketQuery.data?.sources ?? [])
 const rows = $derived.by(() => {
   const entries = marketQuery.data?.entries ?? []
-  const result: MarketRow[] = entries.map((entry) => ({
-    key: `${entry.source_id}:${entry.vendor_id}`,
-    vendorId: entry.vendor_id,
-    entry,
-    source: sources.find((source) => source.id === entry.source_id),
-    installed: plugins.find((plugin) => plugin.vendor_id === entry.vendor_id),
-  }))
+  const result: MarketRow[] = entries.map((entry) => {
+    const source = sources.find((item) => item.id === entry.source_id)
+    const installed = plugins.find((plugin) => plugin.vendor_id === entry.vendor_id)
+    return {
+      // 并入官方目录的随附安装沿用独立随附行的 key：目录首次出现或消失时，已打开的详情不丢行。
+      key: bundledInto(installed, source) ? `installed:${entry.vendor_id}` : `${entry.source_id}:${entry.vendor_id}`,
+      vendorId: entry.vendor_id,
+      entry,
+      source,
+      installed,
+    }
+  })
   for (const installed of plugins) {
-    if (
-      !result.some(
-        (row) => row.vendorId === installed.vendor_id && row.entry?.source_id === installed.origin?.source_id,
-      )
-    ) {
+    if (!result.some((row) => row.vendorId === installed.vendor_id && attachedVersion(row) !== undefined)) {
       result.push({
         key: `installed:${installed.vendor_id}`,
         vendorId: installed.vendor_id,
@@ -158,33 +159,51 @@ const rows = $derived.by(() => {
 })
 const filteredRows = $derived(
   rows.filter((row) => {
-    const name =
-      row.entry?.latest?.display_name ?? row.entry?.releases[0]?.display_name ?? row.installed?.name ?? row.vendorId
     const attached = attachedVersion(row) !== undefined
     return (
-      (!search || `${name} ${row.vendorId}`.toLowerCase().includes(search.toLowerCase())) &&
+      (!search || `${rowName(row)} ${row.vendorId}`.toLowerCase().includes(search.toLowerCase())) &&
       (!sourceFilter || row.entry?.source_id === sourceFilter) &&
-      (tab === 'all' || (tab === 'installed' && attached) || (tab === 'updates' && row.entry?.update && attached))
+      (tab === 'all' ||
+        (tab === 'installed' && attached) ||
+        // 随附合并行算已安装，但更新只认后端 entry.update 与真实市场安装来源。
+        (tab === 'updates' && row.entry?.update && row.installed?.origin?.source_id === row.entry.source_id))
     )
   }),
 )
 const detailRow = $derived(rows.find((row) => row.key === detailKey))
+/** 随附安装只并入后端标记 official 的同 Vendor 目录；不按仓库名或显示名称推断。 */
+function bundledInto(installed: PluginSummary | undefined, source: PluginSourceSummary | undefined): boolean {
+  return installed?.source === 'builtin' && source?.official === true
+}
+/** 合并行仍是随附安装：官方目录只提供可选版本，不建立市场来源或更新关系。 */
+function isBundledOfficial(row: MarketRow): row is MarketRow & { entry: MarketplaceEntry; installed: PluginSummary } {
+  return row.entry !== undefined && bundledInto(row.installed, row.source)
+}
 function rowName(row: MarketRow): string {
+  if (isBundledOfficial(row)) return row.installed.name
   return row.entry?.latest?.display_name ?? row.entry?.releases[0]?.display_name ?? row.installed?.name ?? row.vendorId
+}
+function rowIcon(row: MarketRow): string | null | undefined {
+  return isBundledOfficial(row)
+    ? (row.installed.icon_svg ?? row.entry.latest?.icon_svg)
+    : (row.entry?.latest?.icon_svg ?? row.installed?.icon_svg)
 }
 function rowRelease(row: MarketRow): MarketplaceRelease | undefined {
   return row.entry?.update ?? row.entry?.latest ?? row.entry?.releases[0] ?? undefined
 }
-/** 只有来自本行来源（或无来源条目）的安装才算本行已安装版本。 */
+/** 只有来自本行来源（随附并入官方目录，或无来源条目）的安装才算本行已安装版本。 */
 function attachedVersion(row: MarketRow): string | undefined {
-  return row.installed && (!row.entry || row.installed.origin?.source_id === row.entry.source_id)
+  return row.installed &&
+    (!row.entry || row.installed.origin?.source_id === row.entry.source_id || isBundledOfficial(row))
     ? row.installed.version
     : undefined
 }
 type StatusTone = NonNullable<ComponentProps<typeof StatusIndicator>['tone']>
 type RowStatus = { label: string; tone: StatusTone; primary: boolean }
 function rowStatus(row: MarketRow): RowStatus {
-  switch (marketplaceStatus(row.entry, row.source, row.installed)) {
+  const status = marketplaceStatus(row.entry, row.source, row.installed)
+  // 合并行的官方候选正常时显示已安装；冲突、来源停用/异常与需升级宿主照常透出。
+  switch (status === 'available' && isBundledOfficial(row) ? 'installed' : status) {
     case 'conflict':
       return { label: m.market_conflict(), tone: 'error', primary: false }
     case 'source-error':
@@ -665,7 +684,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
     <ProviderMark
       class="market-icon size-9 shrink-0"
       name={rowName(row)}
-      svg={row.entry?.latest?.icon_svg ?? row.installed?.icon_svg}
+      svg={rowIcon(row)}
       logo={row.vendorId} />
     <span class="truncate font-medium">{rowName(row)}</span>{#if row.source && !row.source.official}<PuzzleIcon
         class="size-4 shrink-0 text-muted-foreground"
@@ -673,13 +692,21 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
   </div>
 {/snippet}
 {#snippet marketSource(context: DataTableCellContext<MarketRow>)}
-  {@const row = context.row.original}
-  <span class="flex min-w-0 items-center gap-2">
-    {#if row.source}<span class="truncate">{row.source.repository}</span>
-      {#if row.source.official}<Badge variant="outline" class="shrink-0">{m.plugin_sources_official()}</Badge>{/if}
-    {:else if row.installed?.origin}<span class="truncate text-muted-foreground"
-        >{row.installed.origin.repository}</span>
-    {:else if row.installed}<span class="text-muted-foreground">{sourceLabel(row.installed.source)}</span>{/if}
+  {@render rowSource(context.row.original, 'flex-wrap')}
+{/snippet}
+{#snippet rowSource(row: MarketRow, className: string)}
+  <!-- 合并行同时标出目录来源与实际随附安装；列宽不足时「随附」换到第二行，仓库名截断而徽章保留。 -->
+  <span class={cn('flex min-w-0 items-center gap-x-2 gap-y-0.5', className)}>
+    <span class="flex min-w-0 items-center gap-2">
+      {#if row.source}<span class="truncate">{row.source.repository}</span>
+        {#if row.source.official}<Badge variant="outline" class="shrink-0">{m.plugin_sources_official()}</Badge>{/if}
+      {:else if row.installed?.origin}<span class="truncate text-muted-foreground"
+          >{row.installed.origin.repository}</span>
+      {:else if row.installed}<span class="text-muted-foreground">{sourceLabel(row.installed.source)}</span>{/if}
+    </span>
+    {#if isBundledOfficial(row)}<span class="shrink-0 text-xs text-muted-foreground"
+        >{sourceLabel(row.installed.source)}</span
+      >{/if}
   </span>
 {/snippet}
 {#snippet marketInstalled(context: DataTableCellContext<MarketRow>)}
@@ -836,7 +863,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
             <ProviderMark
               class="market-icon size-9 shrink-0"
               name={rowName(row)}
-              svg={row.entry?.latest?.icon_svg ?? row.installed?.icon_svg}
+              svg={rowIcon(row)}
               logo={row.vendorId} />
             <div class="flex min-w-0 flex-1 flex-col gap-2">
               <div class="min-w-0">
@@ -845,11 +872,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                       class="size-4 shrink-0 text-muted-foreground"
                       aria-label={m.market_external()} />{/if}
                 </p>
-                <p class="truncate text-xs text-muted-foreground">
-                  {row.source?.repository ??
-                    row.installed?.origin?.repository ??
-                    (row.installed ? sourceLabel(row.installed.source) : '')}
-                </p>
+                <div class="text-xs text-muted-foreground">{@render rowSource(row, '')}</div>
               </div>
               {@render statusCell(row)}
               <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
