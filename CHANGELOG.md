@@ -22,6 +22,7 @@
 - Structural headings and technical text now fall back to the bundled Chinese font when system CJK glyphs are unavailable.
 - One-time allowance resets now use the shared cryptographically secure UUID generator on HTTP management pages, where `crypto.randomUUID` is unavailable.
 - StraviaRead parameter errors provide actionable field, type and usage guidance without echoing input values; runtime type, field and capability checks remain enforced.
+- CI regression tests now use `StraviaRead`'s `body.wait` parameter, check plan text and its accessible label separately, and configure Local Web Search explicitly for the Windows browser-path smoke test.
 
 ## [0.7.2] - 2026-11-15
 

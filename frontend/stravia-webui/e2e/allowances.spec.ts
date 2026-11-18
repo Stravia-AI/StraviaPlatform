@@ -674,7 +674,8 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   // 详情只展示上游账号标识；供应商目录 ID / 渠道不再展示，没有标识的供应商不出现该行
   await expect(page.getByTestId('allowance-account-provider-alpha')).toHaveText('alpha@example.test')
   const planDetail = page.getByTestId('allowance-plan-provider-alpha')
-  await expect(planDetail).toHaveText('Plan: Pro')
+  await expect(planDetail).toHaveText('Pro')
+  await expect(planDetail).toHaveAttribute('aria-label', 'Plan: Pro')
   const accountBox = await page.getByTestId('allowance-account-provider-alpha').boundingBox()
   const planBox = await planDetail.boundingBox()
   expect(planBox!.x).toBeGreaterThan(accountBox!.x + accountBox!.width)

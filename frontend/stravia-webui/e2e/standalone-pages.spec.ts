@@ -469,7 +469,9 @@ test.describe('Server startup', () => {
           if (!recovered && failure === 'state') {
             return route.fulfill({ status: 503, json: { error: 'auth_unavailable', code: 'auth_unavailable' } })
           }
-          return route.fulfill({ json: { ...signedOut, authenticated: recovered, username: recovered ? 'admin' : null } })
+          return route.fulfill({
+            json: { ...signedOut, authenticated: recovered, username: recovered ? 'admin' : null },
+          })
         })
         await page.route('**/api/v1/auth/refresh', (route) =>
           failure === 'network'

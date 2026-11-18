@@ -61,9 +61,7 @@ const eligibleModels = $derived(eligibleModelsQuery.data ?? [])
 const externalRoutes = $derived(externalRoutesQuery.data ?? [])
 const backend = $derived(config?.backend)
 
-const methodLabel = $derived(
-  usesLocal ? m.web_search_use_stravia_model() : m.web_search_use_external_route(),
-)
+const methodLabel = $derived(usesLocal ? m.web_search_use_stravia_model() : m.web_search_use_external_route())
 // 已保存的目标名称；不可用或已移除的历史值仍以原始标识呈现。
 const bindingTarget = $derived.by(() => {
   if (backend?.kind !== 'local') {
