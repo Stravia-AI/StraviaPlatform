@@ -282,6 +282,12 @@ CLI 1.3.2 曾记录 Gemini 3.8 Flash Medium/High 的目录预算 `4000`/`-1`，�
 
 临时服务、存储、模型响应夹具与截图在验证后清理。上述请求只访问本地假上游，不证明真实 Google 推理可用性；未运行完整仓库测试矩阵或 Tauri 原生宿主。本轮首次编译的错误枚举名称已修正为项目既有 `ErrorKind::Invalid`，后续列出的检查均为修正后结果。
 
+### 2026-11-18：Sonnet 5.5 Medium 与 Target 禁用的区别
+
+`agy` 1.5.11 的真实 Sonnet 5.5 Medium 交互请求使用 `claude-sonnet-5-5-medium`、`maxOutputTokens: 128000` 和 `thinkingConfig: {"thinkingLevel":"MEDIUM","includeThoughts":true}`，没有 `thinkingBudget`，上游返回 HTTP 200。当时运行的 Stravia 没有指向 Antigravity Sonnet 的推理路由；[契约测试](../../backend/crates/stravia-vendor-antigravity/tests/contract.rs)在真实 Wasm 到 loopback HTTP 的边界检验同一组字段，不将它当作线上 Sonnet 抓包。
+
+诊断时先核对同一次调用的 `effective_request.reasoning.target_control`，不能从出站模型名的 `-medium` 后缀反推强度。一条 Hydrogen 历史请求的入站为 `effort: high, summary: auto`，但实际生效的 Target 控制是 `disabled`。插件保留默认 Medium 模型 ID，按显式控制发送 `thinkingBudget: 0, includeThoughts: false`，而不是按目录发送 `thinkingLevel`。若期望 Medium 强度，应将对应 Target 档位映射到 `Effort(medium)`，而非 `Disabled`；无需更改全局摘要默认值。这条历史记录不能解释另一次请求的 429。
+
 ## 9. 官方有 3.7/3.8 而 Stravia 缺项的根因
 
 用户升级后的桌面截图只有五个家族，而同一已登录官方 CLI 仍列出 Gemini 3.7／3.8 Flash。只读检查桌面 SQLite：五条家族记录为 `present`，共有八个档位；另有 23 条旧记录为 `missing`，包括 `gemini-3.7-flash-tiered` 和 `gemini-3.8-flash-tiered`。页面筛选解释了旧记录隐藏，但不能解释官方与插件为何拿到不同 Agent 选项。

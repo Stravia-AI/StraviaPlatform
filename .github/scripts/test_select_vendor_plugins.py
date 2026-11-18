@@ -10,8 +10,8 @@ selector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selector)
 
 
-def tree(version="1.0.0"):
-    names = [package for package, _ in selector.PLUGINS.values()] + ["stravia-vendor-common"]
+def tree(version="1.0.0", without=()):
+    names = [package for package, _ in selector.PLUGINS.values() if package not in without] + ["stravia-vendor-common"]
     paths = [f"backend/crates/{name}" for name in names]
     files = {
         "Cargo.toml": f'[workspace]\nmembers = {json.dumps(paths)}\n[workspace.package]\nversion = "{version}"\nedition = "2024"\n[workspace.dependencies]\nserde = "1"\n',
@@ -49,6 +49,10 @@ class SelectionTests(unittest.TestCase):
         old, new = tree(), tree("3.0.0")
         new["frontend/stravia-webui/src/unrelated.ts"] = b"changed"
         self.assertEqual(self.select(old, new), [])
+
+    def test_new_plugin_selected_against_older_baseline(self):
+        old = tree(without=("stravia-vendor-kiro",))
+        self.assertEqual(self.select(old, tree()), ["kiro"])
 
     def test_single_plugin_and_shared_changes(self):
         old, new = tree(), tree()

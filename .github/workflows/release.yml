@@ -213,7 +213,7 @@ jobs:
 
           directory = Path("target/vendor-plugins-all")
           records = json.loads((directory / "manifest.json").read_text())
-          names = {"openai-codex": "OpenAI Codex", "xai-grok": "xAI Grok", "command-code": "Command Code", "devin": "Devin", "opencode-free": "OpenCode Zen Free", "claude-code": "Claude Code", "antigravity": "Antigravity"}
+          names = {"openai-codex": "OpenAI Codex", "xai-grok": "xAI Grok", "command-code": "Command Code", "devin": "Devin", "opencode-free": "OpenCode Zen Free", "claude-code": "Claude Code", "antigravity": "Antigravity", "kiro": "Kiro"}
           dedicated = [record for record in records if record["vendor_id"] != "base"]
           selected = set(os.environ["SELECTED"].split(","))
           if not selected <= set(names) or len(dedicated) != len(selected) or {record["vendor_id"] for record in dedicated} != selected:

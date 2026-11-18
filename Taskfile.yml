@@ -87,6 +87,7 @@ tasks:
       - backend/crates/stravia-vendor-*/build.rs
       - backend/crates/stravia-vendor-*/src/**/*.rs
       - backend/crates/stravia-vendor-*/src/assets/**/*.svg
+      - backend/crates/stravia-vendor-*/egress-shape.json
       - frontend/stravia-webui/src/assets/icons/*.svg
       - backend/crates/stravia-vendor-*/messages/*.json
       - backend/crates/stravia-vendor-sdk/build-support/**/*.rs

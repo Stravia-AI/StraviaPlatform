@@ -49,6 +49,7 @@ Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再�
 | --- | --- | --- |
 | `stravia-vendor-base` | `base` / `fallback` | 除下列专属 Profile 外的全部现有供应商；`openai`、`xai`、`anthropic` 仅保留普通 API channel。 |
 | `stravia-vendor-codex` | `openai-codex` / `dedicated` | `provider_id = openai-codex`、`catalog_id = openai`、channel `codex`。 |
+| `stravia-vendor-kiro` | `kiro` / `dedicated` | `provider_id = kiro`，无目录映射，channel `default`；模型列表来自 Kiro 账号。 |
 | `stravia-vendor-grok` | `xai-grok` / `dedicated` | `provider_id = xai-grok`、`catalog_id = xai`、channel `grok`。 |
 | `stravia-vendor-command-code` | `command-code` / `dedicated` | `provider_id = command-code`、`catalog_id = commandcode`、channel `default`；目录名称为 `CommandCode`。 |
 | `stravia-vendor-devin` | `devin` / `dedicated` | `provider_id = devin`、`catalog_id = devin`、channel `devin`。 |
@@ -149,6 +150,15 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 |其他插件|各自既有固定官方协议／工具源码、模型目录与 OMP 实现|通过实际 Wasm 合同验证投影与流式解析，不把离线 fixture 当作账号资格证明。|
 
 除表中明确注明的授权真实调用外，上述 CLI 捕获使用合成凭据、隔离配置与 loopback 接收器，返回受控错误，不执行模型工具，不产生官方服务调用。它们证明工具构造出的参数形态，不证明上游接受任意字段取值；授权的真实调用另行验证成功终态。Devin 的真实调用使用只读生产数据库取得的连接凭据、临时 CLI 配置与临时 Stravia 数据库，不修改生产连接或部署；已安装的独立 Devin 插件须重建并重新导入才能采用无签名思考修复。真实 Codex HTTP 对同一可用模型的 `stream:false` 返回 400／`stream must be set to true`，改为 `stream:true` 后返回 200 并完成。插件因此对推理与独立压缩固定使用官方流式 wire；客户端可继续选择非流式响应，由宿主汇总结果，canonical 的交付选择不被改写。独立压缩是末尾带 `compaction_trigger` 的流式 `/responses`，不调用 `/responses/compact`。
+
+### Kiro CLI 接入
+
+1. `task build:vendors:all` 后从 `target/vendor-plugins-all/manifest.json` 找到 `kiro`，在扩展页导入对应的 Wasm。也可直接导入单包 `cargo build --locked --release --lib --target wasm32-wasip2 -p stravia-vendor-kiro` 的产物。
+2. 新建 Kiro 连接，填写为该账号生成的 Kiro API key。CLI 登录和 `--resume-id` 不会向插件授予权限。美东使用默认基础 URL；欧洲账号使用 `https://runtime.eu-central-1.kiro.dev`。插件不向其他地址发送密钥。连接检查访问该区域的受保护模型目录，不消耗生成额度，也不证明某个模型可生成。
+3. 同步模型，将账号目录中的目标模型（例如 `qwen3-coder-next`）绑定到 Route。推理使用所选模型，不回退、不加载 CLI 自带工具，也不访问 CLI 的工作区、历史或记忆。
+4. 在「额度」刷新该连接。只读 `GetUsageLimits` 不生成文本；月度、有效试用及各笔赠送独立显示，不合并成虚构的总余额。部分字段、未知单位与读取失败不视为零。额度来自账号区域的 management 服务，详见[计量规则](../research/kiro-cli-credits.md)。
+
+协议基准为官方 CLI 3.4.0 V3 的 `GenerateAssistantResponse` 分支。插件支持文本对话、函数工具和二进制事件流；不支持的媒体和生成控制返回错误。私有协议留在 Wasm 内，不新增公共端点。插件使用自己的客户端标识并关闭内容收集，不复刻 SDK 指纹、内置系统提示词或实验性 `/v1/responses` 路径。账号、区域、配额及上游兼容性受 Kiro 控制。版本、实际序列化和验证边界见[请求对齐记录](../research/kiro-cli-request-alignment.md)。
 
 ### Command Code 模型发现
 

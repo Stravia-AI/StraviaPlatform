@@ -17,6 +17,7 @@ PLUGINS = {
     "opencode-free": ("stravia-vendor-opencode-free", "opencode-logo-light.svg"),
     "claude-code": ("stravia-vendor-claudecode", "anthropic.svg"),
     "antigravity": ("stravia-vendor-antigravity", None),
+    "kiro": ("stravia-vendor-kiro", None),
 }
 MARKER = "stravia-plugin-selection-v1.json"
 
@@ -29,7 +30,7 @@ def blob(rev, path):
     return subprocess.check_output(["git", "show", f"{rev}:{path}"])
 
 
-def snapshot(rev, package, icon):
+def snapshot(rev, package, icon, allow_missing=False):
     """Fingerprint only source inputs and the plugin's locked dependency closure."""
     files = git("ls-tree", "-r", "--name-only", rev).splitlines()
     lock = tomllib.loads(blob(rev, "Cargo.lock").decode())
@@ -43,6 +44,8 @@ def snapshot(rev, package, icon):
         members[metadata["name"]] = path
         if metadata.get("version") == {"workspace": True}:
             inherited.add(metadata["name"])
+    if allow_missing and package not in members:
+        return None
     by_name = {}
     for item in lock["package"]:
         by_name.setdefault(item["name"], []).append(item)
@@ -156,7 +159,7 @@ def select(baseline, head="HEAD"):
     if baseline is None:
         return list(PLUGINS)
     return [name for name, (package, icon) in PLUGINS.items()
-            if snapshot(baseline, package, icon) != snapshot(head, package, icon)]
+            if snapshot(baseline, package, icon, allow_missing=True) != snapshot(head, package, icon)]
 
 
 def releases():

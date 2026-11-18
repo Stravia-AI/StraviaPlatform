@@ -170,6 +170,8 @@ impl crate::plugin::network::transport::Resolver for LoopbackOnlyResolver {
                     | "opencode.ai"
                     | "api.commandcode.ai"
                     | "api.x.ai"
+                    | "runtime.us-east-1.kiro.dev"
+                    | "management.us-east-1.kiro.dev"
                     | "localhost"
             ) {
                 Ok(vec![self.address])

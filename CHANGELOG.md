@@ -4,6 +4,7 @@
 
 ### Added
 
+- The standalone Kiro plugin discovers account models, streams text and replays function-tool rounds on the Kiro CLI 3.4.0 default inference protocol. Import the Wasm, configure a Kiro API key and region, then sync models and bind a Route. Refresh Allowances to see reported monthly credits, active trials and bonuses separately, including fractional amounts. The plugin identifies itself as Stravia and does not read your CLI login or resume local sessions.
 - When adding an OAuth provider, you can open the sign-in page directly or get a link to copy without opening the browser. If clipboard access fails, the link stays selectable while authorization is pending.
 
 - Claude Code restores Message Threads for supported models in scoped OAuth sessions. It sends only new messages when the saved thread matches the current history, and the host replays full history once if Anthropic explicitly rejects the thread before execution. Anthropic remote compaction stays unsupported. Rebuild and re-import the standalone Claude Code plugin; no database migration is required.

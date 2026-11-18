@@ -1640,6 +1640,8 @@
   "allowances_label_five_hour": "5 小时窗口",
   "allowances_label_weekly": "每周窗口",
   "allowances_label_daily": "每日窗口",
+  "allowances_label_trial": "免费试用",
+  "allowances_label_bonus": "赠送额度",
   "allowances_label_monthly": "每月窗口",
   "allowances_label_billing_cycle": "计费周期",
   "allowances_label_balance": "账户余额",

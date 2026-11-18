@@ -147,7 +147,8 @@ async fn upstream(
                 "agentModelSorts":[{"groups":[{"modelIds":[
                     "account-model", "gemini-pro-agent", "gemini-3.1-pro-low",
                     "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-                    "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low"
+                    "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low",
+                    "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium"
                 ]}]}],
                 "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
                 "imageGenerationModelIds": ["gemini-3.1-flash-image", "account-image"],
@@ -169,6 +170,8 @@ async fn upstream(
                 "gemini-4-hydrogen-medium":{"displayName":"Gemini 4 Hydrogen (Medium)","supportsThinking":true,"thinkingLevel":2,"maxTokens":1048576,"maxOutputTokens":262144},
                 "gemini-4-hydrogen-high":{"displayName":"Gemini 4 Hydrogen (High)","supportsThinking":true,"thinkingLevel":3,"maxTokens":1048576,"maxOutputTokens":262144},
                 "gemini-4-hydrogen-xhigh":{"displayName":"Gemini 4 Hydrogen (XHigh)","supportsThinking":true,"thinkingLevel":100,"maxTokens":1048576,"maxOutputTokens":262144},
+                "claude-sonnet-5-5-high":{"displayName":"Claude Sonnet 5.5 (High)","supportsThinking":true,"thinkingLevel":3,"maxOutputTokens":128000},
+                "claude-sonnet-5-5-medium":{"displayName":"Claude Sonnet 5.5 (Medium)","supportsThinking":true,"thinkingLevel":2,"maxOutputTokens":128000},
                 "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
                 "account-image":{"displayName":"Account image","supportsImages":true},
                 "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
@@ -1483,6 +1486,13 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             true,
         ),
         ("gemini-4-hydrogen", None, "gemini-4-hydrogen-medium", true),
+        ("claude-sonnet-5-5", None, "claude-sonnet-5-5-medium", true),
+        (
+            "claude-sonnet-5-5",
+            Some("medium"),
+            "claude-sonnet-5-5-medium",
+            true,
+        ),
     ] {
         let model = catalog
             .models
@@ -1541,7 +1551,14 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             envelope.pointer("/request/generationConfig/thinkingConfig/includeThoughts"),
             Some(&serde_json::json!(summary))
         );
-        if family == "gemini-4-hydrogen" {
+        if family == "claude-sonnet-5-5" {
+            let generation = &envelope["request"]["generationConfig"];
+            assert_eq!(generation["maxOutputTokens"], 128000);
+            assert_eq!(
+                generation["thinkingConfig"],
+                json!({"thinkingLevel":"MEDIUM", "includeThoughts":true})
+            );
+        } else if family == "gemini-4-hydrogen" {
             assert_eq!(
                 model.metadata["reasoning_efforts"],
                 json!(["low", "medium", "high", "xhigh"])
@@ -1764,8 +1781,15 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             stravia_runtime_contract::thinking::ThinkingLevel::from_wire(level).unwrap()
         });
         selected_request.reasoning.target_control = control;
-        selected_request.reasoning.summary =
-            (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None);
+        selected_request.reasoning.summary = if matches!(
+            selected_request.reasoning.target_control,
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
+        ) {
+            // 客户端即使索取摘要，也不能反转 Target 的显式禁用。
+            Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::Auto)
+        } else {
+            (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None)
+        };
         let OperationOutput::Infer(_) = run(
             &runtime,
             &plugin,

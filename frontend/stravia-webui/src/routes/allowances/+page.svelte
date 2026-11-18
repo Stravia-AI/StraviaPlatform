@@ -401,10 +401,20 @@ function modePercent(allowance: Allowance): number | undefined {
   return valueMode === 'used' ? usedPercent(allowance) : remainingPercent(allowance)
 }
 
+// Keep a reported percentage as the primary reading. For amount-based credit pools,
+// the meter can show the calculated percentage without hiding the actual quota.
+function creditQuotaLimit(allowance: Allowance) {
+  if (allowance.kind !== 'balance' && allowance.used_percent == null && allowance.limit?.unit === 'credits') {
+    return allowance.limit
+  }
+}
+
 function valueDisplay(allowance: Allowance): string {
+  const amount = allowance.kind === 'balance' || valueMode === 'remaining' ? allowance.remaining : allowance.used
+  const limit = creditQuotaLimit(allowance)
+  if (limit) return formatAllowanceAmount(amount, localeState.current, limit)
   const percent = modePercent(allowance)
   if (percent != null) return formatAllowancePercent(percent, localeState.current)
-  const amount = allowance.kind === 'balance' || valueMode === 'remaining' ? allowance.remaining : allowance.used
   return formatAllowanceAmount(amount, localeState.current)
 }
 
@@ -444,16 +454,8 @@ function triggeredSuspension(provider: VisibleProvider, allowance: Allowance): b
   return Boolean(provider.snapshot?.suspension?.triggered_keys.includes(allowance.key))
 }
 
-function allowanceLabel(allowance: Allowance): string {
-  // 各供应商余额 key 不一致（credits、credits_balance_cny、balance_usd 等），统一显示为账户余额
-  if (
-    allowance.key === 'credits' ||
-    allowance.key.startsWith('credits_balance') ||
-    allowance.key.startsWith('balance_')
-  ) {
-    return m.allowances_label_balance()
-  }
-  switch (allowance.key) {
+function knownAllowanceLabel(key: string): string | undefined {
+  switch (key) {
     case '5h':
     case 'five_hour':
       return m.allowances_label_five_hour()
@@ -474,9 +476,26 @@ function allowanceLabel(allowance: Allowance): string {
       return m.allowances_label_mcp_tools()
     case 'extra_usage':
       return m.allowances_label_extra_usage()
+    case 'trial':
+      return m.allowances_label_trial()
+    case 'bonus':
+      return m.allowances_label_bonus()
     case 'tokens':
       return m.allowances_label_tokens()
   }
+}
+
+function allowanceLabel(allowance: Allowance): string {
+  // 各供应商余额 key 不一致（credits、credits_balance_cny、balance_usd 等），统一显示为账户余额
+  if (
+    allowance.key === 'credits' ||
+    allowance.key.startsWith('credits_balance') ||
+    allowance.key.startsWith('balance_')
+  ) {
+    return m.allowances_label_balance()
+  }
+  const known = knownAllowanceLabel(allowance.key) ?? knownAllowanceLabel(allowance.label)
+  if (known) return known
   // 只识别已知上游标签组合；未知模型组或窗口保持原文，不从持久化 key 推断。
   const disabled = allowance.label.endsWith(' (disabled)')
   const label = disabled ? allowance.label.slice(0, -' (disabled)'.length) : allowance.label
@@ -532,7 +551,8 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
   {@const condition = effectiveAllowanceCondition(allowance)}
   <span
     class={cn(
-      'font-technical inline-flex items-center gap-1.5 whitespace-nowrap tabular-nums',
+      'font-technical inline-flex items-center gap-1.5 tabular-nums',
+      creditQuotaLimit(allowance) ? 'min-w-0 whitespace-normal' : 'whitespace-nowrap',
       conditionTextClass(condition),
       className,
     )}>
@@ -583,7 +603,7 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
             'flex min-w-0 scroll-m-4 flex-col justify-between gap-1.5 rounded-sm',
             highlightedAllowanceId === id && 'bg-accent ring-2 ring-primary ring-offset-2 ring-offset-background',
           )}>
-          <span class="flex min-w-0 items-start justify-between gap-3">
+          <span class={creditQuotaLimit(allowance) ? 'grid min-w-0 gap-1' : 'flex min-w-0 items-start justify-between gap-3'}>
             <span class="flex min-w-0 items-center gap-1 text-xs leading-4 text-muted-foreground">
               <span class="line-clamp-2 break-words" title={allowanceLabel(allowance)}
                 >{allowanceLabel(allowance)}</span>
@@ -728,7 +748,7 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
             </div>
           </Table.Cell>
           <Table.Cell class="py-1">
-            <div class="flex min-w-0 items-center gap-3">
+            <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               {@render allowanceValue(allowance, 'min-w-[4.5rem]')}
               {@render allowanceMeter(allowance, 'hidden w-16 @md:block', false)}
             </div>

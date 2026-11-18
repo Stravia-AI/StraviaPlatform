@@ -1,0 +1,35 @@
+[package]
+name = "stravia-vendor-kiro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Kiro CLI-compatible inference, model discovery, and credit usage for Stravia"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+stravia-vendor-sdk.workspace = true
+stravia-vendor-common.workspace = true
+stravia-protocol-codec.workspace = true
+stravia-runtime-contract.workspace = true
+serde.workspace = true
+rust_decimal.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+uuid.workspace = true
+crc32fast.workspace = true
+
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true
+async-trait.workspace = true
+stravia-vendor-runtime.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

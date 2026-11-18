@@ -1,0 +1,7 @@
+{
+  "channel_default": "Default",
+  "channel_description": "Run inference, sync available models, and check your Kiro account’s credit usage.",
+  "authentication": "Authentication",
+  "api_key": "Kiro API key",
+  "api_key_description": "Enter an API key you generated for your Kiro account, not a CLI session ID. This connection does not read local credentials. For the base URL, keep the US East default or enter https://runtime.eu-central-1.kiro.dev for Frankfurt."
+}

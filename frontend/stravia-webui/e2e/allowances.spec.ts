@@ -809,6 +809,60 @@ test('switches every allowance value between remaining and used and remembers th
   await expect(matrix.getByTestId('allowance-provider-provider-alpha')).toContainText('55.63%')
 })
 
+for (const { locale, width, monthly, trial, bonus, used, unit } of [
+  { locale: 'en-US', width: 1440, monthly: 'Monthly window', trial: 'Free trial', bonus: 'Bonus', used: 'Used', unit: 'credits' },
+  { locale: 'zh-CN', width: 375, monthly: '每月窗口', trial: '免费试用', bonus: '赠送额度', used: '已用', unit: '点' },
+]) {
+  test(`shows Kiro credit pools in the common allowance matrix (${locale}, ${width}px)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
+    const quota = (key: string, label: string, spent: number, cap: number) => ({
+      key,
+      label,
+      kind: 'quota_window',
+      guarded: false,
+      used: { value: spent, unit: 'credits' },
+      remaining: { value: cap - spent, unit: 'credits' },
+      limit: { value: cap, unit: 'credits' },
+      forecast: { status: 'unknown' },
+    })
+    await mockAllowances(page, [
+      {
+        ...freshSnapshot,
+        provider_id: 'kiro-demo',
+        provider_name: 'Kiro demo',
+        catalog_provider_id: 'kiro',
+        channel: 'default',
+        guard_supported: false,
+        plan_label: 'Kiro Pro',
+        account_label: undefined,
+        allowances: [quota('monthly', 'monthly', 8.125, 100), quota('trial', 'trial', 4.5, 20), quota('bonus_0_1', 'bonus', 0, 5)],
+        models: [],
+      },
+      freshSnapshot,
+    ])
+    await page.goto('/allowances')
+    const provider = page.getByTestId('allowance-provider-kiro-demo')
+    await expect(provider).toContainText(monthly)
+    await expect(provider).toContainText(trial)
+    await expect(provider).toContainText(bonus)
+    await expect(provider).toContainText(`91.875 / 100 ${unit}`)
+    await expect(provider).toContainText(`15.5 / 20 ${unit}`)
+    await expect(provider).toContainText(`5 / 5 ${unit}`)
+    await expect(page.getByTestId('allowance-provider-provider-alpha')).toContainText('44.38%')
+    await provider.getByRole('button', { name: /^Kiro demo/ }).click()
+    const details = provider.getByRole('table')
+    await expect(details).toContainText(`91.875 / 100 ${unit}`)
+    await expect(provider).toContainText('Kiro Pro')
+    await page.getByRole('tab', { name: used, exact: true }).click()
+    await expect(details).toContainText(`8.125 / 100 ${unit}`)
+    await expect(details).toContainText(`0 / 5 ${unit}`)
+    await expect(page.getByTestId('allowance-provider-provider-alpha')).toContainText('55.63%')
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0)
+    await page.screenshot({ path: test.info().outputPath(`kiro-credits-${locale}.png`) })
+  })
+}
+
 test('keeps allowance details visible when refresh replaces provider snapshots', async ({ page }) => {
   const snapshots = structuredClone([freshSnapshot, staleSnapshot])
   const posts = await mockAllowances(page, snapshots)

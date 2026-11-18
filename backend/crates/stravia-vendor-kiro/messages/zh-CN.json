@@ -1,0 +1,7 @@
+{
+  "channel_default": "默认",
+  "channel_description": "使用 Kiro 进行推理，同步账号可用的模型，并查看点数用量。",
+  "authentication": "身份验证",
+  "api_key": "Kiro API 密钥",
+  "api_key_description": "请单独填写你为 Kiro 账号生成的 API 密钥，而不是 CLI 会话 ID。此连接不会读取本机凭据。基础 URL 可保留默认的美国东部地址；如需连接法兰克福，请填写 https://runtime.eu-central-1.kiro.dev。"
+}

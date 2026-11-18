@@ -3,10 +3,21 @@ import * as m from '#lib/paraglide/messages.js'
 import type { Locale } from '#lib/paraglide/runtime.js'
 import type { AllowanceAmount } from '#lib/types.js'
 
-export function formatAllowanceAmount(amount: AllowanceAmount | undefined, locale: Locale): string {
+const creditFormatters: Record<Locale, Intl.NumberFormat> = {
+  'en-US': new Intl.NumberFormat('en-US', { maximumSignificantDigits: 12 }),
+  'zh-CN': new Intl.NumberFormat('zh-CN', { maximumSignificantDigits: 12 }),
+}
+
+function amountNumber(amount: AllowanceAmount | undefined, locale: Locale): string {
   if (!amount || !Number.isFinite(amount.value)) return '–'
-  const unit = amount.currency?.trim() || localizedAllowanceUnit(amount.unit, locale)
-  const value = formatNumber(amount.value, locale)
+  return amount.unit === 'credits' ? creditFormatters[locale].format(amount.value) : formatNumber(amount.value, locale)
+}
+
+export function formatAllowanceAmount(amount: AllowanceAmount | undefined, locale: Locale, limit?: AllowanceAmount): string {
+  const denomination = limit ?? amount
+  if (!denomination || !Number.isFinite(denomination.value)) return '–'
+  const unit = denomination.currency?.trim() || localizedAllowanceUnit(denomination.unit, locale)
+  const value = limit ? `${amountNumber(amount, locale)} / ${amountNumber(limit, locale)}` : amountNumber(amount, locale)
   return unit ? `${value} ${unit}` : value
 }
 
