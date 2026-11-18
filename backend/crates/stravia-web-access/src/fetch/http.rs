@@ -19,8 +19,13 @@ impl NetworkBackend {
     pub(super) fn from_mode(mode: crate::OutboundProxyMode) -> Result<Self, FetchError> {
         let snapshot = crate::outbound::resolve_mode(mode, |key| std::env::var(key).ok())
             .map_err(|_| FetchError::unavailable("Invalid outbound proxy configuration"))?;
-        let proxied = HttpClient::new(snapshot.clone(), HTTP_TIMEOUT, false, Some(DOWNLOAD_BYTE_CAP))
-            .map_err(|_| FetchError::unavailable("HTTP client initialization failed"))?;
+        let proxied = HttpClient::new(
+            snapshot.clone(),
+            HTTP_TIMEOUT,
+            false,
+            Some(DOWNLOAD_BYTE_CAP),
+        )
+        .map_err(|_| FetchError::unavailable("HTTP client initialization failed"))?;
         Ok(Self { snapshot, proxied })
     }
 
@@ -111,7 +116,11 @@ impl NetworkBackend {
     }
 }
 
-async fn send_get(client: HttpClient, url: &Url, headers_only: bool) -> Result<HttpResponse, FetchError> {
+async fn send_get(
+    client: HttpClient,
+    url: &Url,
+    headers_only: bool,
+) -> Result<HttpResponse, FetchError> {
     let request = wreq::Request::new(
         wreq::Method::GET,
         url.as_str()
@@ -119,7 +128,10 @@ async fn send_get(client: HttpClient, url: &Url, headers_only: bool) -> Result<H
             .map_err(|_| FetchError::invalid_url(url.as_str()))?,
     );
     let result = if headers_only {
-        client.fetch_once_headers(request).await.map(|response| (response, Vec::new()))
+        client
+            .fetch_once_headers(request)
+            .await
+            .map(|response| (response, Vec::new()))
     } else {
         client.fetch_once(request).await
     };

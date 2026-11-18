@@ -5,6 +5,7 @@ import FileTextIcon from '@lucide/svelte/icons/file-text'
 import LogOutIcon from '@lucide/svelte/icons/log-out'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import { userPrefersMode } from 'mode-watcher'
+import type { MouseEventHandler } from 'svelte/elements'
 import { onMount } from 'svelte'
 
 import { copyText } from '#lib/clipboard.js'
@@ -71,6 +72,8 @@ function failureImpact(value: DesktopStartupStage): string {
       return m.desktop_startup_failure_desktop()
   }
 }
+
+const handleCopyDiagnostics: MouseEventHandler<HTMLElement> = ({ currentTarget }) => void copyDiagnostics(currentTarget)
 
 async function copyDiagnostics(trigger: HTMLElement): Promise<void> {
   try {
@@ -189,11 +192,7 @@ onMount(() => {
           <pre
             class="mt-3 overflow-x-auto border-t pt-3 font-mono text-xs whitespace-pre-wrap text-muted-foreground">{technicalDiagnostics}</pre>
           <div class="mt-3 flex flex-wrap gap-2">
-            <Button
-              data-testid="startup-copy"
-              variant="outline"
-              size="sm"
-              onclick={(event) => void copyDiagnostics(event.currentTarget)}>
+            <Button data-testid="startup-copy" variant="outline" size="sm" onclick={handleCopyDiagnostics}>
               <CopyIcon data-icon="inline-start" />
               {m.desktop_startup_copy_diagnostics()}
             </Button>

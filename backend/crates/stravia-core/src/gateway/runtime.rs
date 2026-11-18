@@ -1197,7 +1197,9 @@ impl EffectiveVendorProxy {
     pub(crate) fn web_access_mode(&self) -> stravia_web_access::OutboundProxyMode {
         match self {
             Self::Direct => stravia_web_access::OutboundProxyMode::Direct,
-            Self::Explicit { proxy_url, bypass, .. } => stravia_web_access::OutboundProxyMode::Explicit {
+            Self::Explicit {
+                proxy_url, bypass, ..
+            } => stravia_web_access::OutboundProxyMode::Explicit {
                 url: proxy_url.clone(),
                 bypass: bypass.clone(),
             },

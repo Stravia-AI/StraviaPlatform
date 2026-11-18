@@ -365,8 +365,12 @@ struct ResetResponse(Mutex<Option<Vec<u8>>>);
 
 #[async_trait]
 impl HostHttpResponse for ResetResponse {
-    async fn status(&self) -> Result<u16, HostFailure> { Ok(200) }
-    async fn headers(&self) -> Result<Vec<Field>, HostFailure> { Ok(Vec::new()) }
+    async fn status(&self) -> Result<u16, HostFailure> {
+        Ok(200)
+    }
+    async fn headers(&self) -> Result<Vec<Field>, HostFailure> {
+        Ok(Vec::new())
+    }
     async fn read_body(&self) -> Result<Option<Vec<u8>>, HostFailure> {
         Ok(self.0.lock().take())
     }
@@ -381,32 +385,64 @@ impl HostServices for ResetServices {
     fn validate_net_option(&self, key: &str, value: &str) -> Result<(), net::OptionError> {
         net::validate_host_option(key, value)
     }
-    fn http_start(&self, request: Request, _: Options) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
+    fn http_start(
+        &self,
+        request: Request,
+        _: Options,
+    ) -> Result<Arc<dyn HostHttpResponse>, HostFailure> {
         let body = match (request.method.as_str(), request.url.as_str()) {
             ("GET", "https://chatgpt.com/backend-api/wham/usage") => serde_json::json!({
                 "plan_type":"plus",
                 "rate_limit":{"allowed":true,"limit_reached":false,"secondary_window":{"limit_window_seconds":604800,"used_percent":29}},
                 "credits":{"has_credits":true,"unlimited":false,"balance":"10"}
             }),
-            ("GET", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") => serde_json::json!({
-                "available_count":1,"credits":[{"id":"credit-1","status":"available","reset_type":"codex_rate_limits","expires_at":null}]
-            }),
-            ("POST", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume") => serde_json::json!({"code":"nothing_to_reset"}),
+            ("GET", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") => {
+                serde_json::json!({
+                    "available_count":1,"credits":[{"id":"credit-1","status":"available","reset_type":"codex_rate_limits","expires_at":null}]
+                })
+            }
+            ("POST", "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume") => {
+                serde_json::json!({"code":"nothing_to_reset"})
+            }
             _ => panic!("unexpected request {} {}", request.method, request.url),
         };
-        self.requests.lock().push((request.method, request.url, request.body));
-        Ok(Arc::new(ResetResponse(Mutex::new(Some(serde_json::to_vec(&body).unwrap())))))
+        self.requests
+            .lock()
+            .push((request.method, request.url, request.body));
+        Ok(Arc::new(ResetResponse(Mutex::new(Some(
+            serde_json::to_vec(&body).unwrap(),
+        )))))
     }
-    async fn ws_connect(&self, _: ConnectRequest, _: Options) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
+    async fn ws_connect(
+        &self,
+        _: ConnectRequest,
+        _: Options,
+    ) -> Result<Arc<dyn HostWebSocket>, HostFailure> {
         panic!("unexpected WebSocket")
     }
-    async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> { panic!("unexpected state read") }
-    async fn write_private_state(&self, _: Vec<u8>) -> Result<(), HostFailure> { panic!("unexpected state write") }
-    async fn open_state(&self, _: StateScope, _: String) -> Result<Arc<dyn HostStateCell>, StateError> { panic!("unexpected state access") }
-    async fn open_volatile_state(&self, _: String) -> Result<Arc<dyn HostStateCell>, StateError> { panic!("unexpected state access") }
-    async fn emit_event(&self, _: RuntimeEvent) -> Result<(), HostFailure> { panic!("unexpected event") }
+    async fn read_private_state(&self) -> Result<Option<Vec<u8>>, HostFailure> {
+        panic!("unexpected state read")
+    }
+    async fn write_private_state(&self, _: Vec<u8>) -> Result<(), HostFailure> {
+        panic!("unexpected state write")
+    }
+    async fn open_state(
+        &self,
+        _: StateScope,
+        _: String,
+    ) -> Result<Arc<dyn HostStateCell>, StateError> {
+        panic!("unexpected state access")
+    }
+    async fn open_volatile_state(&self, _: String) -> Result<Arc<dyn HostStateCell>, StateError> {
+        panic!("unexpected state access")
+    }
+    async fn emit_event(&self, _: RuntimeEvent) -> Result<(), HostFailure> {
+        panic!("unexpected event")
+    }
     fn log(&self, _: LogLevel, _: &str) {}
-    fn generation_is_current(&self, _: u64) -> bool { true }
+    fn generation_is_current(&self, _: u64) -> bool {
+        true
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -414,22 +450,65 @@ impl HostServices for ResetServices {
 async fn reset_credit_remains_usable_with_ordinary_usage_available() {
     use stravia_vendor_sdk::{AllowanceRequest, AllowanceResetOutcome, AllowanceResetRequest};
     let (runtime, plugin) = load_codex().await;
-    let services = Arc::new(ResetServices { requests: Mutex::new(Vec::new()) });
+    let services = Arc::new(ResetServices {
+        requests: Mutex::new(Vec::new()),
+    });
     let provider = codex_provider();
-    let scope = || OperationScope::new(services.clone(), CancellationToken::new(), Deadline::from_now(Duration::from_secs(30)), 0);
-    let (operation, input) = OperationInput::Allowance { provider: provider.clone(), request: AllowanceRequest::default() }.encode_for_host().unwrap();
-    let OperationOutput::Allowance(response) = runtime.execute(&plugin, "codex", operation, input, scope()).await.unwrap() else { panic!("expected allowance") };
+    let scope = || {
+        OperationScope::new(
+            services.clone(),
+            CancellationToken::new(),
+            Deadline::from_now(Duration::from_secs(30)),
+            0,
+        )
+    };
+    let (operation, input) = OperationInput::Allowance {
+        provider: provider.clone(),
+        request: AllowanceRequest::default(),
+    }
+    .encode_for_host()
+    .unwrap();
+    let OperationOutput::Allowance(response) = runtime
+        .execute(&plugin, "codex", operation, input, scope())
+        .await
+        .unwrap()
+    else {
+        panic!("expected allowance")
+    };
     let resets = response.resets.unwrap();
     assert_eq!(resets.remaining, 1);
     assert!(resets.grants[0].usable);
     assert_eq!(resets.grants[0].unavailable_reason, None);
     let request_id = "123e4567-e89b-12d3-a456-426614174000";
-    let (operation, input) = OperationInput::Allowance { provider, request: AllowanceRequest { model: None, reset: Some(AllowanceResetRequest { grant_id: resets.grants[0].id.clone(), request_id: request_id.into() }) } }.encode_for_host().unwrap();
-    let OperationOutput::Allowance(response) = runtime.execute(&plugin, "codex", operation, input, scope()).await.unwrap() else { panic!("expected allowance") };
-    assert_eq!(response.reset_result.unwrap().outcome, AllowanceResetOutcome::NotLimited);
+    let (operation, input) = OperationInput::Allowance {
+        provider,
+        request: AllowanceRequest {
+            model: None,
+            reset: Some(AllowanceResetRequest {
+                grant_id: resets.grants[0].id.clone(),
+                request_id: request_id.into(),
+            }),
+        },
+    }
+    .encode_for_host()
+    .unwrap();
+    let OperationOutput::Allowance(response) = runtime
+        .execute(&plugin, "codex", operation, input, scope())
+        .await
+        .unwrap()
+    else {
+        panic!("expected allowance")
+    };
+    assert_eq!(
+        response.reset_result.unwrap().outcome,
+        AllowanceResetOutcome::NotLimited
+    );
     let requests = services.requests.lock();
     assert_eq!(requests.len(), 3);
-    assert_eq!(serde_json::from_slice::<Value>(&requests[2].2).unwrap(), serde_json::json!({"credit_id":"credit-1", "redeem_request_id":request_id}));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[2].2).unwrap(),
+        serde_json::json!({"credit_id":"credit-1", "redeem_request_id":request_id})
+    );
 }
 
 async fn http_case(case: &'static str) {

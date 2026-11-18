@@ -6,6 +6,7 @@ import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
 import LinkIcon from '@lucide/svelte/icons/link'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import { onDestroy } from 'svelte'
+import type { FocusEventHandler, MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
 
 import { admin, isTauri } from '#lib/admin-client.js'
@@ -220,6 +221,9 @@ function openCurrentSignInPage(): void {
   void openSignInPage(currentAuthUrl)
 }
 
+const handleCopySignInLink: MouseEventHandler<HTMLElement> = ({ currentTarget }) => void copySignInLink(currentTarget)
+const selectSignInLink: FocusEventHandler<HTMLInputElement> = ({ currentTarget }) => currentTarget.select()
+
 async function copySignInLink(trigger: HTMLElement): Promise<void> {
   const sessionId = oauthSession?.session_id
   const url = currentAuthUrl
@@ -410,11 +414,7 @@ onDestroy(() => {
               <Button type="button" variant="outline" {disabled} onclick={openCurrentSignInPage}>
                 <ExternalLinkIcon data-icon="inline-start" />{m.provider_oauth_authorization_open_sign_in_page()}
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                {disabled}
-                onclick={(event) => void copySignInLink(event.currentTarget)}>
+              <Button type="button" variant="outline" {disabled} onclick={handleCopySignInLink}>
                 <CopyIcon data-icon="inline-start" />{m.provider_oauth_authorization_copy_sign_in_link()}
               </Button>
             {/if}
@@ -434,7 +434,7 @@ onDestroy(() => {
             readonly
             spellcheck={false}
             value={currentAuthUrl}
-            onfocus={(event) => event.currentTarget.select()} />
+            onfocus={selectSignInLink} />
         </Field.Field>
       {/if}
 

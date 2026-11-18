@@ -13,8 +13,8 @@ use futures::StreamExt;
 use url::{Host, Url};
 
 use super::{
-    get_redirects, policy, BackendFuture, FetchError, FetchErrorCode, HttpBackend,
-    HttpResponse, DOWNLOAD_BYTE_CAP,
+    get_redirects, policy, BackendFuture, FetchError, FetchErrorCode, HttpBackend, HttpResponse,
+    DOWNLOAD_BYTE_CAP,
 };
 
 /// 单请求（含正文流式读取）总超时，沿用原 media 下载器语义。

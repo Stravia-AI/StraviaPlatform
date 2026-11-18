@@ -3,6 +3,7 @@ import * as m from '#lib/paraglide/messages.js'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
+import type { MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
 
 import { copyText } from '#lib/clipboard.js'
@@ -196,6 +197,8 @@ async function applyExternalAccess(enabled: boolean): Promise<void> {
   }
 }
 
+const handleCopyLanUrl: MouseEventHandler<HTMLElement> = ({ currentTarget }) => void copyLanUrl(currentTarget)
+
 async function copyLanUrl(trigger: HTMLElement): Promise<void> {
   try {
     await copyText(lanUrl, trigger)
@@ -356,7 +359,7 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
               <InputGroup.Button
                 size="icon-sm"
                 aria-label={m.technical_value_copy_full_value()}
-                onclick={(event) => void copyLanUrl(event.currentTarget)}>
+                onclick={handleCopyLanUrl}>
                 <ClipboardCopyIcon />
               </InputGroup.Button>
             </InputGroup.Addon>

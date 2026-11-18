@@ -40,7 +40,10 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
     let sorts = match payload.get("agentModelSorts") {
         Some(value) => value.as_array()?.as_slice(),
         None if payload.get("imageGenerationModelIds").is_some()
-            || payload.get("webSearchModelIds").is_some() => &[],
+            || payload.get("webSearchModelIds").is_some() =>
+        {
+            &[]
+        }
         None => return None,
     };
     let reroutes = match payload.get("deprecatedModelIds") {
@@ -254,7 +257,9 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
         // Search 是独立操作，专属身份不改变 Agent 家族的选择器或各档位。
         if let Some(model) = models.iter_mut().find(|model| model.id == id) {
             model.capabilities.push("search".into());
-            model.metadata.insert("antigravity_search".into(), search_metadata);
+            model
+                .metadata
+                .insert("antigravity_search".into(), search_metadata);
             continue;
         }
         metadata.insert("antigravity_search".into(), search_metadata);
@@ -619,17 +624,31 @@ mod tests {
         let result = parse(&json!({
             "webSearchModelIds": ["web-one", "web-two"],
             "models": {"web-one": {"displayName": "Web One", "apiProvider": "provider"}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(result.models.len(), 2);
         assert_eq!(result.models[0].id, "web-one");
         assert_eq!(result.models[0].selector.as_deref(), Some("web-one"));
         assert_eq!(result.models[0].display_name, "Web One");
         assert_eq!(result.models[0].capabilities, ["search"]);
-        assert_eq!(result.models[0].metadata["antigravity_search"], json!({"model_id": "web-one", "api_provider": "provider"}));
+        assert_eq!(
+            result.models[0].metadata["antigravity_search"],
+            json!({"model_id": "web-one", "api_provider": "provider"})
+        );
         assert_eq!(result.models[1].selector.as_deref(), Some("web-two"));
         assert_eq!(result.models[1].capabilities, ["search"]);
-        assert!(parse(&json!({"webSearchModelIds": [], "models": {}})).unwrap().models.is_empty());
-        assert!(parse(&json!({"agentModelSorts": [], "models": {}})).unwrap().models.is_empty());
+        assert!(
+            parse(&json!({"webSearchModelIds": [], "models": {}}))
+                .unwrap()
+                .models
+                .is_empty()
+        );
+        assert!(
+            parse(&json!({"agentModelSorts": [], "models": {}}))
+                .unwrap()
+                .models
+                .is_empty()
+        );
     }
 
     #[test]
@@ -639,13 +658,22 @@ mod tests {
             "imageGenerationModelIds": ["shared"],
             "webSearchModelIds": ["shared"],
             "models": {"shared": {"apiProvider": 7}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(result.models.len(), 1);
         let model = &result.models[0];
         assert_eq!(model.capabilities, ["infer", "media_image", "search"]);
         assert_eq!(model.selector.as_deref(), Some("shared"));
-        assert_eq!(model.metadata["antigravity_search"], json!({"model_id": "shared", "api_provider": 7}));
-        assert_eq!(selector::resolve(&model.metadata[selector::EXTENSION_KEY], None).unwrap().id, "shared");
+        assert_eq!(
+            model.metadata["antigravity_search"],
+            json!({"model_id": "shared", "api_provider": 7})
+        );
+        assert_eq!(
+            selector::resolve(&model.metadata[selector::EXTENSION_KEY], None)
+                .unwrap()
+                .id,
+            "shared"
+        );
     }
 
     #[test]
@@ -667,15 +695,32 @@ mod tests {
             "agentModelSorts": [{"groups": [{"modelIds": ["dual-low", "dual-high"]}]}],
             "webSearchModelIds": ["dual-high"],
             "models": {"dual-low": {}, "dual-high": {"apiProvider": "web"}}
-        })).unwrap();
-        let family = result.models.iter().find(|model| model.id == "dual").unwrap();
+        }))
+        .unwrap();
+        let family = result
+            .models
+            .iter()
+            .find(|model| model.id == "dual")
+            .unwrap();
         assert_eq!(family.capabilities, ["infer"]);
         assert_eq!(family.selector.as_deref(), Some("dual-low"));
-        assert_eq!(selector::resolve(&family.metadata[selector::EXTENSION_KEY], None).unwrap().id, "dual-low");
-        let search = result.models.iter().find(|model| model.id == "dual-high").unwrap();
+        assert_eq!(
+            selector::resolve(&family.metadata[selector::EXTENSION_KEY], None)
+                .unwrap()
+                .id,
+            "dual-low"
+        );
+        let search = result
+            .models
+            .iter()
+            .find(|model| model.id == "dual-high")
+            .unwrap();
         assert_eq!(search.capabilities, ["search"]);
         assert_eq!(search.selector.as_deref(), Some("dual-high"));
-        assert_eq!(search.metadata["antigravity_search"], json!({"model_id": "dual-high", "api_provider": "web"}));
+        assert_eq!(
+            search.metadata["antigravity_search"],
+            json!({"model_id": "dual-high", "api_provider": "web"})
+        );
     }
 
     #[test]
@@ -694,8 +739,14 @@ mod tests {
         assert_eq!(family.capabilities, ["infer", "search"]);
         assert_eq!(family.selector, before.models[0].selector);
         assert_eq!(family.selector.as_deref(), Some("dual-low"));
-        assert_eq!(family.metadata[selector::EXTENSION_KEY], before.models[0].metadata[selector::EXTENSION_KEY]);
-        assert_eq!(family.metadata["antigravity_search"], json!({"model_id": "dual", "api_provider": "web"}));
+        assert_eq!(
+            family.metadata[selector::EXTENSION_KEY],
+            before.models[0].metadata[selector::EXTENSION_KEY]
+        );
+        assert_eq!(
+            family.metadata["antigravity_search"],
+            json!({"model_id": "dual", "api_provider": "web"})
+        );
     }
 
     #[test]

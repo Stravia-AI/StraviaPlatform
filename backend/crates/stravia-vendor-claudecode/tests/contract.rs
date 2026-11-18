@@ -1349,56 +1349,58 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     .await
     .expect("inference succeeds");
 
-    let requests = services.requests.lock();
-    assert_eq!(requests.len(), 1);
-    let sent = &requests[0];
-    assert_eq!(sent.url, "https://api.anthropic.com/v1/messages?beta=true");
-    assert_eq!(
-        wire_header(sent, "accept-encoding"),
-        "gzip, deflate, br, zstd"
-    );
-    let header = |name: &str| {
-        sent.headers
-            .get(name)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-    };
-    assert_eq!(header("authorization"), Some("Bearer sk-ant-oat01-test"));
-    let body: Value = serde_json::from_slice(&sent.body).unwrap();
-    assert_eq!(body["system"][2]["text"], "You are a helpful agent.");
-    let tools = body["tools"].as_array().unwrap();
-    let names: std::collections::BTreeSet<_> = tools
-        .iter()
-        .map(|tool| tool["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        names,
-        std::collections::BTreeSet::from(["_read", "__read", "web_search"])
-    );
-    let read = tools.iter().find(|tool| tool["name"] == "_read").unwrap();
-    assert_eq!(read["eager_input_streaming"], true);
-    assert!(read.get("cache_control").is_none());
-    let web = tools
-        .iter()
-        .find(|tool| tool["name"] == "web_search")
-        .unwrap();
-    assert_eq!(web["type"], "web_search_20250305");
-    assert!(web.get("cache_control").is_none());
-    assert_eq!(body["tool_choice"]["name"], "__read");
-    assert_eq!(body["thread"], json!({"type":"create"}));
-    assert_eq!(body["diagnostics"], json!({"previous_message_id":null}));
-    assert!(wire_header(sent, "anthropic-beta").contains("message-threads-2026-08-12"));
-    assert_eq!(body["stream"], json!(true));
-    let user_id: Value =
-        serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
-    assert_eq!(user_id["account_uuid"], ACCOUNT_UUID);
-    assert!(!user_id["device_id"].as_str().unwrap().is_empty());
-    assert_ne!(user_id["session_id"], "client-session");
-    assert_ne!(user_id["parent_session_id"], "client-parent");
-    assert!(uuid::Uuid::parse_str(user_id["parent_session_id"].as_str().unwrap()).is_ok());
-    assert_eq!(
-        user_id["session_id"].as_str(),
-        header("x-claude-code-session-id")
-    );
+    {
+        let requests = services.requests.lock();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0];
+        assert_eq!(sent.url, "https://api.anthropic.com/v1/messages?beta=true");
+        assert_eq!(
+            wire_header(sent, "accept-encoding"),
+            "gzip, deflate, br, zstd"
+        );
+        let header = |name: &str| {
+            sent.headers
+                .get(name)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        };
+        assert_eq!(header("authorization"), Some("Bearer sk-ant-oat01-test"));
+        let body: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body["system"][2]["text"], "You are a helpful agent.");
+        let tools = body["tools"].as_array().unwrap();
+        let names: std::collections::BTreeSet<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["_read", "__read", "web_search"])
+        );
+        let read = tools.iter().find(|tool| tool["name"] == "_read").unwrap();
+        assert_eq!(read["eager_input_streaming"], true);
+        assert!(read.get("cache_control").is_none());
+        let web = tools
+            .iter()
+            .find(|tool| tool["name"] == "web_search")
+            .unwrap();
+        assert_eq!(web["type"], "web_search_20250305");
+        assert!(web.get("cache_control").is_none());
+        assert_eq!(body["tool_choice"]["name"], "__read");
+        assert_eq!(body["thread"], json!({"type":"create"}));
+        assert_eq!(body["diagnostics"], json!({"previous_message_id":null}));
+        assert!(wire_header(sent, "anthropic-beta").contains("message-threads-2026-08-12"));
+        assert_eq!(body["stream"], json!(true));
+        let user_id: Value =
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(user_id["account_uuid"], ACCOUNT_UUID);
+        assert!(!user_id["device_id"].as_str().unwrap().is_empty());
+        assert_ne!(user_id["session_id"], "client-session");
+        assert_ne!(user_id["parent_session_id"], "client-parent");
+        assert!(uuid::Uuid::parse_str(user_id["parent_session_id"].as_str().unwrap()).is_ok());
+        assert_eq!(
+            user_id["session_id"].as_str(),
+            header("x-claude-code-session-id")
+        );
+    }
 
     let OperationOutput::Infer(response) = output else {
         panic!("expected Infer output");
@@ -1410,17 +1412,17 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
         .map(|call| call.name.as_str())
         .collect();
     assert_eq!(calls, ["_read"]);
-    let deltas = services.deltas.lock();
-    let starts: Vec<_> = deltas
-        .iter()
-        .filter_map(|delta| match delta {
-            AiStreamDelta::ToolCallStart { id, name, .. } => Some((id.as_str(), name.as_str())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(starts, [("toolu_1", "_read")]);
-    drop(deltas);
-    drop(requests);
+    {
+        let deltas = services.deltas.lock();
+        let starts: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                AiStreamDelta::ToolCallStart { id, name, .. } => Some((id.as_str(), name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [("toolu_1", "_read")]);
+    }
 
     raw_request["messages"] = json!([
         {"role":"user","content":"Read a."},

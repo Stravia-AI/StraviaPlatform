@@ -161,18 +161,10 @@ fn read_resets(
         return None;
     }
     let body = stravia_vendor_sdk::read_http_body(&response, MAX_RESPONSE_BYTES).ok()?;
-    parse_resets(
-        &body,
-        personal_plan,
-        chrono::Utc::now().timestamp_millis(),
-    )
+    parse_resets(&body, personal_plan, chrono::Utc::now().timestamp_millis())
 }
 
-fn parse_resets(
-    body: &[u8],
-    personal_plan: bool,
-    now: i64,
-) -> Option<AllowanceResets> {
+fn parse_resets(body: &[u8], personal_plan: bool, now: i64) -> Option<AllowanceResets> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let object = value.as_object()?;
     let remaining = u32::try_from(object.get("available_count")?.as_u64()?).ok()?;
@@ -642,21 +634,12 @@ mod tests {
         assert!(state.grants[1].usable);
         assert!(!state.grants[2].usable);
         assert!(!state.grants[3].usable);
-        assert!(
-            !parse_resets(body, false, 1_700_000_000_000)
-                .unwrap()
-                .grants[0]
-                .usable
-        );
+        assert!(!parse_resets(body, false, 1_700_000_000_000).unwrap().grants[0].usable);
         assert!(parse_resets(br#"{"credits":[]}"#, true, 0).is_none());
         assert_eq!(
-            parse_resets(
-                br#"{"available_count":0,"credits":[]}"#,
-                true,
-                0
-            )
-            .unwrap()
-            .remaining,
+            parse_resets(br#"{"available_count":0,"credits":[]}"#, true, 0)
+                .unwrap()
+                .remaining,
             0
         );
         let zero = parse_resets(br#"{"available_count":0,"credits":[{"id":"a","status":"available","reset_type":"codex_rate_limits","expires_at":null}]}"#, true, 0).unwrap();

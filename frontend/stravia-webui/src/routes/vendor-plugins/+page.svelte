@@ -681,11 +681,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 {#snippet marketIdentity(context: DataTableCellContext<MarketRow>)}
   {@const row = context.row.original}
   <div class="flex min-w-0 items-center gap-3">
-    <ProviderMark
-      class="market-icon size-9 shrink-0"
-      name={rowName(row)}
-      svg={rowIcon(row)}
-      logo={row.vendorId} />
+    <ProviderMark class="market-icon size-9 shrink-0" name={rowName(row)} svg={rowIcon(row)} logo={row.vendorId} />
     <span class="truncate font-medium">{rowName(row)}</span>{#if row.source && !row.source.official}<PuzzleIcon
         class="size-4 shrink-0 text-muted-foreground"
         aria-label={m.market_external()} />{/if}

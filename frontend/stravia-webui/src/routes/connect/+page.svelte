@@ -6,6 +6,7 @@ import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { resolve } from '$app/paths'
 import { goto } from '$app/navigation'
 import { untrack } from 'svelte'
+import type { MouseEventHandler } from 'svelte/elements'
 import { createQuery } from '@tanstack/svelte-query'
 import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import CheckIcon from '@lucide/svelte/icons/check'
@@ -157,6 +158,11 @@ const claudeMappingRows = [
   { id: 'cli-sonnet-model', key: 'sonnetModel', label: () => m.connect_sonnet_model_mapping() },
   { id: 'cli-opus-model', key: 'opusModel', label: () => m.connect_opus_model_mapping() },
 ] as const
+
+const copyGeneratedCliConfig: MouseEventHandler<HTMLElement> = ({ currentTarget }) =>
+  void copyOutput(generatedCliConfig, currentTarget)
+const copyGeneratedCode: MouseEventHandler<HTMLElement> = ({ currentTarget }) =>
+  void copyOutput(generatedCode, currentTarget)
 
 async function copyOutput(value: string, trigger: HTMLElement): Promise<void> {
   try {
@@ -344,7 +350,7 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                     {/if}
                     <Button
                       variant={isTauri ? 'outline' : 'default'}
-                      onclick={(event) => void copyOutput(generatedCliConfig, event.currentTarget)}
+                      onclick={copyGeneratedCliConfig}
                       disabled={!generatedCliConfig}
                       ><ClipboardCopyIcon data-icon="inline-start" />{cliToolId === 'chatgpt'
                         ? m.connect_copy_both()
@@ -477,9 +483,7 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                 <h2 id="code-output-title" class="route-section-title">
                   {m.connect_generated_request()}
                 </h2>
-                <Button
-                  onclick={(event) => void copyOutput(generatedCode, event.currentTarget)}
-                  disabled={!codeModel || !selectedCodeKey}
+                <Button onclick={copyGeneratedCode} disabled={!codeModel || !selectedCodeKey}
                   ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
               </div>
               <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">

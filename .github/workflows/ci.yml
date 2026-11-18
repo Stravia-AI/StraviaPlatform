@@ -246,11 +246,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install NASM for BoringSSL
+      - &install_nasm
+        name: Install NASM for BoringSSL
+        shell: pwsh
         run: |
-          choco install nasm --yes --no-progress
-          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
+          # Download the pinned upstream build without querying Chocolatey's community feed.
+          $archive = Join-Path $env:RUNNER_TEMP 'nasm-3.02-win64.zip'
+          Invoke-WebRequest 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $archive
+          $expectedHash = '161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7'
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw 'NASM archive SHA-256 mismatch'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          $nasmDirectory = Join-Path $env:RUNNER_TEMP 'nasm-3.02'
           & (Join-Path $nasmDirectory 'nasm.exe') -v
+          if ($LASTEXITCODE -ne 0) { throw 'NASM could not run' }
           $nasmDirectory >> $env:GITHUB_PATH
 
       - name: Setup Rust
@@ -566,12 +576,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install NASM for BoringSSL
-        run: |
-          choco install nasm --yes --no-progress
-          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
-          & (Join-Path $nasmDirectory 'nasm.exe') -v
-          $nasmDirectory >> $env:GITHUB_PATH
+      - *install_nasm
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1

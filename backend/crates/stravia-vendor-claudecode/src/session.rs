@@ -290,8 +290,8 @@ impl SessionStore {
             && response_messages[0].get("role").and_then(Value::as_str) == Some("assistant")
         {
             input_count.checked_add(1).map(|count| ThreadTip {
-                fixed: hex(&fixed),
-                chain: hex(&chain_step(&input_chain, &response_messages[0])),
+                fixed: hex(fixed),
+                chain: hex(&chain_step(input_chain, &response_messages[0])),
                 count,
                 message_id: response_id.to_owned(),
                 at_ms: now_ms,
@@ -364,16 +364,15 @@ impl SessionStore {
         else {
             return false;
         };
-        if let Some(entry) = self.sessions.get_mut(&plan.scope) {
-            if entry.session_id == plan.context.session_id
-                && entry
-                    .thread_tip_v2
-                    .as_ref()
-                    .is_some_and(|tip| tip.message_id == *previous_message_id)
-            {
-                entry.thread_tip_v2 = None;
-                return true;
-            }
+        if let Some(entry) = self.sessions.get_mut(&plan.scope)
+            && entry.session_id == plan.context.session_id
+            && entry
+                .thread_tip_v2
+                .as_ref()
+                .is_some_and(|tip| tip.message_id == *previous_message_id)
+        {
+            entry.thread_tip_v2 = None;
+            return true;
         }
         false
     }

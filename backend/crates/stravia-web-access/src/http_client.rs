@@ -129,12 +129,10 @@ impl HttpClient {
     }
 
     pub(crate) async fn fetch_once_headers(&self, request: Request) -> Result<Response> {
-        let (response, _) = tokio::time::timeout(
-            self.inner.timeout,
-            self.fetch_inner(request, false, true),
-        )
-        .await
-        .context("HTTP request timed out")??;
+        let (response, _) =
+            tokio::time::timeout(self.inner.timeout, self.fetch_inner(request, false, true))
+                .await
+                .context("HTTP request timed out")??;
         Ok(response)
     }
 
@@ -148,7 +146,12 @@ impl HttpClient {
             .context("HTTP request timed out")?
     }
 
-    async fn fetch_inner(&self, mut request: Request, follow: bool, headers_only: bool) -> Result<(Response, Vec<u8>)> {
+    async fn fetch_inner(
+        &self,
+        mut request: Request,
+        follow: bool,
+        headers_only: bool,
+    ) -> Result<(Response, Vec<u8>)> {
         // 请求只携带 HTTP 语义，不能覆盖出站代理、Cookie、解压或超时策略。
         request.extensions_mut().clear();
         for count in 0..=MAX_REDIRECTS {

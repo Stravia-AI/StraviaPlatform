@@ -578,8 +578,9 @@ describe('Stravia desktop smoke', () => {
       await expect(path).toHaveValue(invalidPath)
       await $('[role="dialog"]').$('button=Cancel').click()
       await $('button=Discard changes').click()
+      await expect($('#web-provider-browser-path')).not.toExist()
       await edit.click()
-      await expect(path).toHaveValue(savedPath)
+      await expect($('#web-provider-browser-path')).toHaveValue(savedPath)
       await $('[role="dialog"]').$('button=Cancel').click()
     } finally {
       await adminRequest(port, '/web-search/config', { method: 'PUT', body: JSON.stringify(savedConfig) })

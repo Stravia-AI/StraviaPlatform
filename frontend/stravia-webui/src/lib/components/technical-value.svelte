@@ -2,6 +2,7 @@
 import * as m from '#lib/paraglide/messages.js'
 import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import { onDestroy } from 'svelte'
+import type { MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
 
 import { copyText } from '#lib/clipboard.js'
@@ -25,6 +26,8 @@ onDestroy(() => {
   disposed = true
   clearTimeout(copiedTimer)
 })
+
+const handleCopyValue: MouseEventHandler<HTMLElement> = ({ currentTarget }) => void copyValue(currentTarget)
 
 async function copyValue(trigger: HTMLElement): Promise<void> {
   try {
@@ -56,7 +59,7 @@ async function copyValue(trigger: HTMLElement): Promise<void> {
       type="button"
       size="icon-sm"
       variant="ghost"
-      onclick={(event) => void copyValue(event.currentTarget)}
+      onclick={handleCopyValue}
       aria-label={m.technical_value_copy_full_value()}>
       <ClipboardCopyIcon />
     </Button>

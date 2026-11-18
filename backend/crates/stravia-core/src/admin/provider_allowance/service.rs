@@ -304,31 +304,31 @@ impl AdminService {
             )
             .await?;
         let key = (provider_id.to_owned(), request.request_id.clone());
-        if let Some(submission) = state.inner.reset_requests.lock().await.get(&key) {
-            if let Some(result) = &submission.result {
-                let latest = self
-                    .gw
-                    .storage
-                    .providers()
-                    .get(provider_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("provider changed during reset"))?;
-                let identity = successful_execution_identity(
-                    self,
-                    &latest,
-                    fingerprint.as_slice(),
-                    prepared.credential_version(),
-                    prepared.oauth_connection_id(),
-                )
-                .await?;
-                anyhow::ensure!(
-                    identity.as_deref() == Some(submission.identity.as_str())
-                        && submission.component == prepared.pinned_component().identity()
-                        && submission.grant_id == request.grant_id,
-                    "reset request identity changed"
-                );
-                return Ok(result.clone());
-            }
+        if let Some(submission) = state.inner.reset_requests.lock().await.get(&key)
+            && let Some(result) = &submission.result
+        {
+            let latest = self
+                .gw
+                .storage
+                .providers()
+                .get(provider_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("provider changed during reset"))?;
+            let identity = successful_execution_identity(
+                self,
+                &latest,
+                fingerprint.as_slice(),
+                prepared.credential_version(),
+                prepared.oauth_connection_id(),
+            )
+            .await?;
+            anyhow::ensure!(
+                identity.as_deref() == Some(submission.identity.as_str())
+                    && submission.component == prepared.pinned_component().identity()
+                    && submission.grant_id == request.grant_id,
+                "reset request identity changed"
+            );
+            return Ok(result.clone());
         }
         let read = self
             .gw

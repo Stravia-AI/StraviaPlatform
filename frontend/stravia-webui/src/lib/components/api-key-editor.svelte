@@ -4,6 +4,7 @@ import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down'
 import CopyIcon from '@lucide/svelte/icons/copy'
+import type { MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
 import { admin, currencyQueryOptions } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
@@ -146,6 +147,10 @@ function setOpen(next: boolean): void {
   open = next
 }
 
+const copyFormKey: MouseEventHandler<HTMLElement> = ({ currentTarget }) => void copySecret(form.key, currentTarget)
+const copyCreatedKey: MouseEventHandler<HTMLElement> = ({ currentTarget }) =>
+  void copySecret(createdSecret ?? '', currentTarget)
+
 async function copySecret(secret: string, trigger: HTMLElement): Promise<void> {
   if (!secret) return
   try {
@@ -273,7 +278,7 @@ async function saveKey(): Promise<void> {
             autocomplete="off"
             required>
             {#snippet actions()}
-              <InputGroup.Button type="button" onclick={(event) => void copySecret(form.key, event.currentTarget)}>
+              <InputGroup.Button type="button" onclick={copyFormKey}>
                 <CopyIcon data-icon="inline-start" />{m.common_copy()}
               </InputGroup.Button>
             {/snippet}
@@ -573,9 +578,7 @@ async function saveKey(): Promise<void> {
                 hideLabel={m.api_key_editor_hide_api_key()}
                 readonly>
                 {#snippet actions()}
-                  <InputGroup.Button
-                    type="button"
-                    onclick={(event) => void copySecret(createdSecret ?? '', event.currentTarget)}>
+                  <InputGroup.Button type="button" onclick={copyCreatedKey}>
                     <CopyIcon data-icon="inline-start" />{m.common_copy()}
                   </InputGroup.Button>
                 {/snippet}
