@@ -167,7 +167,7 @@ fn net_request(
 }
 
 use request::{AccountIdentity, DEFAULT_CLIENT_VERSION};
-use session::SessionStore;
+use session::{SessionStore, ThreadMode};
 
 const VENDOR_ID: &str = "claude-code";
 const CATALOG_ID: &str = "anthropic";
@@ -392,7 +392,7 @@ fn infer(
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .ok_or_else(|| invalid("Claude inference requires host client_installation_id"))?;
     let mut device_hash = Sha256::new();
-    device_hash.update(b"stravia:claude-code:virtual-installation-device-id:v1\0");
+    device_hash.update(b"stravia:claude-code:virtual-provider-device-id:v1\0");
     device_hash.update(installation_id.as_bytes());
     let device_id =
         stravia_runtime_contract::protocol::ir::canonical::hash_hex(&device_hash.finalize().into());
@@ -413,9 +413,30 @@ fn infer(
     .map_err(PluginError::from)?;
     let state = cell.load().map_err(PluginError::from)?;
     let store = SessionStore::from_bytes(state.payload.as_deref()).map_err(invalid)?;
+    let has_session = provider
+        .operation_metadata
+        .get("transport_affinity")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty());
+    let continuation_replay = provider
+        .operation_metadata
+        .get("continuation_replay")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let allow_threads = has_session
+        && !continuation_replay
+        && identity.account_uuid.is_some_and(|id| !id.is_empty())
+        && provider
+            .model
+            .as_deref()
+            .is_some_and(thinking::supports_message_threads);
     let mut plan = store
-        .plan(&scope, session_id, &body, now_ms()?)
+        .plan(&scope, session_id, &body, now_ms()?, allow_threads)
         .map_err(invalid)?;
+    if continuation_replay {
+        plan.context.previous_message_id = None;
+        plan.context.previous_request_id = None;
+    }
     let position = |key: &str| -> Result<Option<usize>, PluginError> {
         provider
             .operation_metadata
@@ -450,8 +471,15 @@ fn infer(
         "{}?beta=true",
         common::endpoint_url(&provider.base_url, &encoded.path)?
     );
-    let shaped =
-        request::encode(&body, client_version, &identity, &plan.context, &caps).map_err(invalid)?;
+    let shaped = request::encode(
+        &body,
+        client_version,
+        &identity,
+        &plan.context,
+        &caps,
+        &plan.mode,
+    )
+    .map_err(invalid)?;
     let tool_cell = tool_ledger::open()?;
     let tools_used = tool_ledger::seed(&tool_cell, &body)?;
     let headers = request::inference_headers(
@@ -472,6 +500,25 @@ fn infer(
     if !(200..300).contains(&status) {
         let error_body = read_http_body(&response, 256 * 1024)?;
         let error_value = serde_json::from_slice::<Value>(&error_body).ok();
+        if let Some((rejection, detail)) = error_value
+            .as_ref()
+            .and_then(|value| thread_rejection(status, value, &plan.mode))
+        {
+            // 只登记上游明确未执行的拒绝。模型重放由宿主重新准入，插件不重发。
+            if let Err(error) = update_session(&cell, |latest| {
+                Ok(latest.reject(&plan, matches!(rejection, ThreadRejection::Unsupported)))
+            }) {
+                host.log(
+                    stravia_vendor_sdk::LogLevel::Warn,
+                    &format!("Claude Code thread rejection state was not saved: {error}"),
+                );
+            }
+            return Err(PluginError {
+                kind: ErrorKind::ContinuationNotFound,
+                message: format!("Anthropic rejected Message Threads: {detail}"),
+                upstream_status: Some(status),
+            });
+        }
         let mut error = error_value
             .as_ref()
             .and_then(|value| common::classify_anthropic_error(value, false))
@@ -493,43 +540,118 @@ fn infer(
             Ok(())
         },
     )?;
-    if complete.error.is_none()
-        && provider
-            .operation_metadata
-            .get("transport_affinity")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
-    {
-        // Successful responses update scoped diagnostics without retaining content.
-        let save = (|| {
-            let request_id = response_headers
-                .get("request-id")
-                .and_then(|bytes| std::str::from_utf8(bytes).ok());
-            let committed_at = now_ms()?;
-            loop {
-                let snapshot = cell.load().map_err(PluginError::from)?;
-                let mut latest =
-                    SessionStore::from_bytes(snapshot.payload.as_deref()).map_err(invalid)?;
-                latest
-                    .commit(plan.clone(), &complete.id, request_id, committed_at)
-                    .map_err(invalid)?;
-                let bytes = latest.to_bytes().map_err(invalid)?;
-                match cell.compare_exchange(snapshot.revision, Some(&bytes)) {
-                    Ok(()) => break Ok(()),
-                    Err(stravia_vendor_sdk::state::Error::Conflict) => continue,
-                    Err(error) => break Err(PluginError::from(error)),
-                }
+    if complete.error.is_none() && has_session {
+        // 用与下轮相同的 Anthropic 编码，只投影本轮响应；状态中不保存历史或签名。
+        let mut response_history = None;
+        if !matches!(&plan.mode, ThreadMode::Off)
+            && matches!(complete.stop_reason.as_deref(), Some("stop" | "tool_calls"))
+            && provider.model.as_deref() == Some(complete.model.as_str())
+        {
+            match common::encode_inference_request(
+                &protocol,
+                AiRequest::new(&complete.model, complete.items.clone()),
+            ) {
+                Ok(encoded) => response_history = Some(encoded.body),
+                Err(error) => host.log(
+                    stravia_vendor_sdk::LogLevel::Warn,
+                    &format!("Claude Code thread response could not be projected: {error}"),
+                ),
             }
-        })();
+        }
+        let response_messages = response_history
+            .as_mut()
+            .and_then(|body| body.get_mut("messages"))
+            .and_then(Value::as_array_mut)
+            .map_or(&[][..], |messages| {
+                request::prefix_message_tool_names(messages);
+                messages.as_slice()
+            });
+        let request_id = response_headers
+            .get("request-id")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        let save = now_ms().and_then(|committed_at| {
+            update_session(&cell, |latest| {
+                latest
+                    .commit(
+                        &plan,
+                        response_messages,
+                        &complete.id,
+                        request_id,
+                        committed_at,
+                    )
+                    .map_err(invalid)?;
+                Ok(true)
+            })
+        });
         if let Err(error) = save {
-            // 已完成的模型响应不因可丢弃的诊断状态失效而变成生成失败。
+            // 已交付的响应不能因可重建的会话状态保存失败变成生成失败。
             host.log(
                 stravia_vendor_sdk::LogLevel::Warn,
-                &format!("Claude Code diagnostics state was not saved: {error}"),
+                &format!("Claude Code session state was not saved: {error}"),
             );
         }
     }
     Ok(OperationOutput::Infer(Box::new(complete)))
+}
+
+fn update_session(
+    cell: &stravia_vendor_sdk::state::Cell,
+    mut update: impl FnMut(&mut SessionStore) -> Result<bool, PluginError>,
+) -> Result<(), PluginError> {
+    loop {
+        let snapshot = cell.load().map_err(PluginError::from)?;
+        let mut latest = SessionStore::from_bytes(snapshot.payload.as_deref()).map_err(invalid)?;
+        if !update(&mut latest)? {
+            return Ok(());
+        }
+        let bytes = latest.to_bytes().map_err(invalid)?;
+        match cell.compare_exchange(snapshot.revision, Some(&bytes)) {
+            Ok(()) => return Ok(()),
+            Err(stravia_vendor_sdk::state::Error::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+enum ThreadRejection {
+    Stale,
+    Unsupported,
+}
+
+/// 仅模型执行前的显式线程拒绝可让宿主重放；一般 400/404、超时和流错误不能。
+fn thread_rejection<'a>(
+    status: u16,
+    error: &'a Value,
+    mode: &ThreadMode,
+) -> Option<(ThreadRejection, &'a str)> {
+    if matches!(mode, ThreadMode::Off) || !matches!(status, 400 | 404) {
+        return None;
+    }
+    let message = error.pointer("/error/message").and_then(Value::as_str);
+    let rejection = match error
+        .pointer("/error/details/error_code")
+        .and_then(Value::as_str)
+    {
+        Some(
+            "thread_not_found"
+            | "thread_already_continued"
+            | "thread_continue_in_flight"
+            | "thread_fingerprint_mismatch",
+        ) if matches!(mode, ThreadMode::Continue { .. }) => ThreadRejection::Stale,
+        Some("thread_unsupported_request") => ThreadRejection::Unsupported,
+        _ if status == 400
+            && message.is_some_and(|message| {
+                message.contains(request::THREADS_BETA)
+                    && (message.contains("Unsupported")
+                        || message.contains("unsupported")
+                        || message.contains("invalid beta"))
+            }) =>
+        {
+            ThreadRejection::Unsupported
+        }
+        _ => return None,
+    };
+    Some((rejection, message.unwrap_or("thread rejected")))
 }
 
 fn diagnostics_scope(provider: &ProviderSnapshot, session_id: &str) -> String {
@@ -811,7 +933,7 @@ mod tests {
         ).unwrap();
         let plan = SessionStore::from_bytes(None)
             .unwrap()
-            .plan("test", fallback_session_id(&provider), &body, 0)
+            .plan("test", fallback_session_id(&provider), &body, 0, false)
             .unwrap();
         let shaped = request::encode(
             &body,
@@ -823,6 +945,7 @@ mod tests {
             },
             &plan.context,
             &capabilities::ModelCapabilities::default(),
+            &plan.mode,
         )
         .unwrap();
         let body: Value = serde_json::from_slice(&shaped.body).unwrap();

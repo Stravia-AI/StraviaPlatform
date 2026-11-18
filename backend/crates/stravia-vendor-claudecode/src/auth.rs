@@ -322,8 +322,8 @@ fn token_values(
     Ok((values, expires_at_unix_ms))
 }
 
-/// 令牌响应缺少账号身份时向 Claude Code 启动接口补取。身份只用于请求元数据，
-/// 缺失不影响推理，因此该接口失败时保持登录成功，只是不写入这些字段。
+/// 令牌响应缺少账号身份时向 Claude Code 启动接口补取。设备标识由 Provider
+/// 派生；账号身份缺失不影响保存 OAuth 凭据或推理。
 fn complete_identity(host: &GuestHost, values: &mut BTreeMap<String, Value>) {
     if values.contains_key(ACCOUNT_UUID) && values.contains_key(EMAIL) {
         return;

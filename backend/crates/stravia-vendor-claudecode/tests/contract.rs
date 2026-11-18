@@ -1296,15 +1296,23 @@ async fn discovered_capabilities_can_disable_cli_defaults() {
 async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices {
-        routes: vec![(
-            UPSTREAM,
-            200,
-            "text/event-stream",
-            SSE_TOOL_USE.replace("\"name\":\"_read\"", "\"name\":\"__read\""),
-        )],
+        script: Mutex::new(VecDeque::from([
+            (
+                200,
+                "text/event-stream",
+                SSE_TOOL_USE.replace("\"name\":\"_read\"", "\"name\":\"__read\""),
+                None,
+            ),
+            (
+                200,
+                "application/json",
+                message_reply("msg_2", json!([{"type":"text","text":"Done"}]), "end_turn"),
+                None,
+            ),
+        ])),
         ..MockServices::default()
     });
-    let request = anthropic_client_request(json!({
+    let mut raw_request = json!({
         "model": "claude-sonnet-4-5",
         "max_tokens": 1024,
         "system": "You are a helpful agent.",
@@ -1317,7 +1325,8 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
         "tool_choice":{"type":"tool","name":"_read"},
         "metadata":{"user_id":"{\"session_id\":\"client-session\",\"parent_session_id\":\"client-parent\"}"},
         "messages": [{"role": "user", "content": "Read a."}]
-    }));
+    });
+    let request = anthropic_client_request(raw_request.clone());
     let mut provider = signed_in();
     provider
         .operation_metadata
@@ -1332,7 +1341,10 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
         &runtime,
         &plugin,
         &services,
-        OperationInput::Infer { provider, request },
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request,
+        },
     )
     .await
     .expect("inference succeeds");
@@ -1372,9 +1384,9 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
     assert_eq!(web["type"], "web_search_20250305");
     assert!(web.get("cache_control").is_none());
     assert_eq!(body["tool_choice"]["name"], "__read");
-    assert!(body.get("thread").is_none());
+    assert_eq!(body["thread"], json!({"type":"create"}));
     assert_eq!(body["diagnostics"], json!({"previous_message_id":null}));
-    assert!(!wire_header(sent, "anthropic-beta").contains("message-threads"));
+    assert!(wire_header(sent, "anthropic-beta").contains("message-threads-2026-08-12"));
     assert_eq!(body["stream"], json!(true));
     let user_id: Value =
         serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
@@ -1407,6 +1419,42 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
         })
         .collect();
     assert_eq!(starts, [("toolu_1", "_read")]);
+    drop(deltas);
+    drop(requests);
+
+    raw_request["messages"] = json!([
+        {"role":"user","content":"Read a."},
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"toolu_1","name":"_read","input":{"path":"a"}}
+        ]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"toolu_1","content":"file contents","is_error":false}
+        ]}
+    ]);
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider,
+            request: anthropic_client_request(raw_request),
+        },
+    )
+    .await
+    .expect("tool result continues the thread");
+    let requests = services.requests.lock();
+    let continued: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(
+        continued["thread"],
+        json!({"type":"continue","previous_message_id":"msg_1"})
+    );
+    assert!(continued.get("tools").is_none());
+    assert_eq!(continued["system"].as_array().unwrap().len(), 1);
+    assert_eq!(continued["messages"].as_array().unwrap().len(), 1);
+    let result = &continued["messages"][0]["content"][0];
+    assert_eq!(result["tool_use_id"], "toolu_1");
+    assert_eq!(result["content"], "file contents");
+    assert_eq!(result["is_error"], false);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1521,7 +1569,7 @@ async fn retry_fork_and_reload_preserve_visible_prompt_and_tool_lineage() {
             wire_header(&sent[1], "x-claude-code-prompt-id")
         );
         let body: Value = serde_json::from_slice(&sent[1].body).unwrap();
-        assert!(body.get("thread").is_none());
+        assert_eq!(body["thread"], json!({"type":"create"}));
         let identity: Value =
             serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap();
         (
@@ -1642,6 +1690,77 @@ fn history_request(messages: &[Value]) -> AiRequest {
             "input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}],
         "messages":messages
     }))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_device_id_is_independent_of_oauth_account_and_target() {
+    let (runtime, plugin) = load_plugin().await;
+    let services = Arc::new(MockServices {
+        routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+        ..Default::default()
+    });
+    let first = "00000000-0000-4000-8000-000000000001";
+    let second = "00000000-0000-4000-8000-000000000002";
+    let other_account = "00000000-0000-4000-8000-0000000000bb";
+    let request = history_request(&[json!({"role":"user","content":"Read a."})]);
+    for (index, (installation, account)) in [
+        (first, Some(ACCOUNT_UUID)),
+        (second, Some(ACCOUNT_UUID)),
+        (first, Some(other_account)),
+        (first, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut credentials = BTreeMap::from([(
+            "access_token".into(),
+            json!(format!("sk-ant-oat01-test-{index}")),
+        )]);
+        if let Some(account) = account {
+            credentials.insert("account_uuid".into(), json!(account));
+        }
+        let mut provider = provider(credentials);
+        provider
+            .operation_metadata
+            .insert("client_installation_id".into(), json!(installation));
+        provider.operation_metadata.insert(
+            "transport_affinity".into(),
+            json!(format!("target-{index}")),
+        );
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider,
+                request: request.clone(),
+            },
+        )
+        .await
+        .expect("inference succeeds");
+    }
+    let requests = services.requests.lock();
+    let identities: Vec<Value> = requests
+        .iter()
+        .map(|sent| {
+            let body: Value = serde_json::from_slice(&sent.body).unwrap();
+            serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(identities[0]["account_uuid"], ACCOUNT_UUID);
+    assert_eq!(identities[1]["account_uuid"], ACCOUNT_UUID);
+    assert_eq!(identities[2]["account_uuid"], other_account);
+    assert_eq!(identities[3]["account_uuid"], "");
+    assert_ne!(identities[0]["device_id"], identities[1]["device_id"]);
+    assert_eq!(identities[0]["device_id"], identities[2]["device_id"]);
+    assert_eq!(identities[0]["device_id"], identities[3]["device_id"]);
+    assert!(identities.iter().all(|identity| {
+        let id = identity["device_id"].as_str().unwrap();
+        id.len() == 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

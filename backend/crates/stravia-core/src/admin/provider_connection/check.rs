@@ -368,10 +368,11 @@ async fn check_draft(
         client_headers: Vec::new(),
         operation_metadata,
     };
-    let mut scope = match admin
-        .gw
-        .create_vendor_session_scope(&validated.descriptor.provider_id, snapshot)
-    {
+    let mut scope = match admin.gw.create_vendor_session_scope(
+        &validated.descriptor.provider_id,
+        saved.as_ref().map(|provider| provider.id.as_str()),
+        snapshot,
+    ) {
         Ok(scope) => scope,
         Err(_) => return Ok(configuration_failure("invalid_configuration")),
     };

@@ -6,6 +6,7 @@
 
 - When adding an OAuth provider, you can open the sign-in page directly or get a link to copy without opening the browser. If clipboard access fails, the link stays selectable while authorization is pending.
 
+- Claude Code restores Message Threads for supported models in scoped OAuth sessions. It sends only new messages when the saved thread matches the current history, and the host replays full history once if Anthropic explicitly rejects the thread before execution. Anthropic remote compaction stays unsupported. Rebuild and re-import the standalone Claude Code plugin; no database migration is required.
 - Antigravity now exposes discovered web-search models as External Search Route targets, using native grounded search with validated UTF-8 citations and honest unknown usage. Search-only models do not gain inference capability, and existing bindings remain unchanged. The host safely resolves Google grounding redirects using the selected connection's proxy snapshot before validating final source domains. Update the host, rebuild and re-import the standalone plugin, then sync models and select a search Route. Private upstream behavior, account eligibility and third-party OAuth terms remain risks; local replay verification is not a live-account guarantee.
 - Built-in Base MiniMax API and Plan connections now support image generation and reference-image editing through the same `generate` tool and image model. Model sync discovers image models and reference-input support from MiniMax's public OpenAPI schemas instead of a hardcoded model list; failed refreshes retain the previous inventory. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, Credits consumption and existing Provider-wide allowance guards still apply.
 
@@ -13,6 +14,7 @@
 
 ### Changed
 
+- Claude Code, Codex, Grok, Command Code, and Devin now use a stable virtual device identity per saved Provider. Two connections to the same upstream account use different IDs; reauthorizing an existing connection does not change its ID. Update the host and rebuild and re-import the standalone Claude Code plugin. Existing device IDs change once. No database migration is required, and Antigravity is unchanged.
 - Unconfigured Web Search now defaults to External Route in the settings summary and binding editor. Selecting and saving a valid Route is still required before enabling search; existing Local and External bindings are unchanged.
 - **Breaking — StraviaRead input:** Move `question`, `attachments`, `allowed_domains` and `wait` from the top level into the optional `body` object; old flat calls are rejected without a compatibility shim. Model declarations use `strict: false` and expose only `path` and `body` in the schema, with body parameters described by capability.
 
