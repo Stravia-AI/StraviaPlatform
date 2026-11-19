@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [0.7.3] - 2026-11-19
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Added
 
 - The Models list now supports instant keyword search on desktop and mobile, matching display names, client and internal IDs, all destination models and providers (including fallbacks), status, and output type. Search ignores case and surrounding whitespace, and clearing it restores the full list.
@@ -41,6 +47,7 @@
 - One-time allowance resets now use the shared cryptographically secure UUID generator on HTTP management pages, where `crypto.randomUUID` is unavailable.
 - StraviaRead parameter errors provide actionable field, type and usage guidance without echoing input values; runtime type, field and capability checks remain enforced.
 - CI regression tests now use `StraviaRead`'s `body.wait` parameter, check plan text and its accessible label separately, and configure Local Web Search explicitly for the Windows browser-path smoke test.
+- History-search upgrade E2E now rolls back migration 0056 cleanly before re-upgrading in both SQLite and PostgreSQL, and WebUI model/allowance files match repository Prettier formatting.
 
 ## [0.7.2] - 2026-11-15
 

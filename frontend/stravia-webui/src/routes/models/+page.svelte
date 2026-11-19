@@ -403,7 +403,10 @@ async function deleteModel(): Promise<void> {
       </div>
       <div class="route-mobile-list">
         <InputGroup.Root class="mb-3 w-full min-w-0">
-          <InputGroup.Input bind:value={query} aria-label={m.models_table_search()} placeholder={m.models_table_search()} />
+          <InputGroup.Input
+            bind:value={query}
+            aria-label={m.models_table_search()}
+            placeholder={m.models_table_search()} />
           <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
         </InputGroup.Root>
         {#each visibleModels as model (model.id)}

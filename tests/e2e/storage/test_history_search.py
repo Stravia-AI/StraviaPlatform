@@ -335,7 +335,7 @@ def test_history_search_reads_hits_excludes_issuer_isolates_keys_and_clears(
 def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
     """删除 0051 创建的对象与迁移记录，得到升级前（≤0050）的真实库形态与已有历史。
 
-    迁移历史必须是连续前缀，因此也回退 0052–0055。0055 只清理凭据数据，
+    迁移历史必须是连续前缀，因此也回退 0052–0056。0055 只清理凭据数据，
     该场景不生成凭据映射；0053 会丢弃旧使用时间，所以只允许在映射表为空时重建旧结构。
     """
     if server.dsn is not None:
@@ -343,8 +343,10 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
 
         with psycopg.connect(server.dsn) as connection:
             versions = connection.execute("SELECT version FROM _sqlx_migrations WHERE version >= 51 ORDER BY version").fetchall()
-            assert versions == [(51,), (52,), (53,), (54,), (55,)], versions
+            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,)], versions
             assert connection.execute("SELECT COUNT(*) FROM reversible_redaction_mappings").fetchone() == (0,)
+            connection.execute("ALTER TABLE vendor_atomic_lineages DROP COLUMN model_turn_cursor")
+            connection.execute("ALTER TABLE vendor_atomic_checkpoints DROP COLUMN model_turn_cursor")
             connection.execute("ALTER TABLE model_backends ALTER COLUMN first_token_timeout_ms SET DEFAULT 60000")
             connection.execute("DROP INDEX reversible_redaction_mappings_last_detected_at_idx")
             connection.execute("ALTER TABLE reversible_redaction_mappings RENAME COLUMN last_detected_at TO last_used_at")
@@ -361,7 +363,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
                 "ALTER TABLE vendor_plugins ADD CONSTRAINT vendor_plugins_source_check"
                 " CHECK (source IN ('builtin', 'local'))"
             )
-            connection.execute("DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 55")
+            connection.execute("DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 56")
             [(latest,)] = connection.execute("SELECT MAX(version) FROM _sqlx_migrations").fetchall()
     else:
         # 0012 定义的 Target 表正是 0054 之前的形态；复用其建表、复制和约束。
@@ -369,11 +371,13 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
         target_schema = migration[migration.index("CREATE TABLE model_backends_new"):migration.index("-- RPM")]
         with closing(sqlite3.connect(server.data_dir / "db" / "gateway.db")) as connection, connection:
             versions = connection.execute("SELECT version FROM _sqlx_migrations WHERE version >= 51 ORDER BY version").fetchall()
-            assert versions == [(51,), (52,), (53,), (54,), (55,)], versions
+            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,)], versions
             assert connection.execute("SELECT COUNT(*) FROM reversible_redaction_mappings").fetchone() == (0,)
             connection.executescript(target_schema)
             connection.executescript(
-                "DROP INDEX reversible_redaction_mappings_last_detected_at_idx;"
+                "ALTER TABLE vendor_atomic_lineages DROP COLUMN model_turn_cursor;"
+                " ALTER TABLE vendor_atomic_checkpoints DROP COLUMN model_turn_cursor;"
+                " DROP INDEX reversible_redaction_mappings_last_detected_at_idx;"
                 " ALTER TABLE reversible_redaction_mappings RENAME COLUMN last_detected_at TO last_used_at;"
                 " CREATE INDEX reversible_redaction_mappings_last_used_at_idx ON reversible_redaction_mappings(last_used_at);"
                 " UPDATE history_retention_watermarks SET name = 'reversible_redaction_mappings.last_used_at',"
@@ -389,7 +393,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
                 " INSERT INTO vendor_plugins_old SELECT vendor_id, version, source, descriptor, digest,"
                 " revision, data_epoch, installed_at FROM vendor_plugins;"
                 " DROP TABLE vendor_plugins; ALTER TABLE vendor_plugins_old RENAME TO vendor_plugins;"
-                " DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 55;"
+                " DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 56;"
             )
             [(latest,)] = connection.execute("SELECT MAX(version) FROM _sqlx_migrations").fetchall()
     assert latest == 50, latest
