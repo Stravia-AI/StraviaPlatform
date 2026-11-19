@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Nix builds cache compiled Rust dependencies for the Server and bundled Wasm vendors separately from application sources. Source-only updates can reuse the cache; a persistent result link keeps it across Nix garbage collection.
+
 ## [0.7.3] - 2026-11-19
 
 ### Verification

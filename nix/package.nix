@@ -5,6 +5,7 @@
   bun2nix,
   rustPlatform,
   rustToolchain,
+  craneLib,
   source,
   autoPatchelfHook,
   callPackage,
@@ -15,6 +16,7 @@
   pkg-config,
   python3,
   symlinkJoin,
+  zstd,
 }:
 let
   rootPackage = lib.importJSON (source + "/package.json");
@@ -84,6 +86,9 @@ let
         && type != "symlink";
     };
   inTree = root: path: path == root || lib.hasPrefix (root + "/") path;
+  rustPatchInput =
+    path: inTree "patches" path && lib.hasSuffix ".patch" path && lib.hasInfix "+" (baseNameOf path);
+  rustPatches = cleanSource (path: path == "patches" || rustPatchInput path);
   frontendInput =
     path:
     builtins.elem path [
@@ -101,7 +106,6 @@ let
       "Cargo.lock"
       "rust-toolchain.toml"
       "LICENSE"
-      "patches"
       "frontend"
       "frontend/stravia-webui"
       "frontend/stravia-webui/src"
@@ -109,7 +113,6 @@ let
       "frontend/stravia-webui/static"
     ]
     || inTree ".cargo" path
-    || (inTree "patches" path && lib.hasSuffix ".patch" path && lib.hasInfix "+" (baseNameOf path))
     || inTree "backend" path
     || inTree "frontend/stravia-webui/src/assets/icons" path
     || path == "frontend/stravia-webui/static/stravia-logo.svg"
@@ -161,6 +164,105 @@ let
       runHook postInstall
     '';
   };
+  rustBuild = {
+    inherit version;
+    cargoDeps = symlinkJoin {
+      # 主锁文件源必须在前，保留其 Cargo.lock 和包含 Git 依赖的 source 配置。
+      name = "cargo-vendor-dir";
+      paths = [
+        (rustPlatform.importCargoLock {
+          lockFile = builtins.path {
+            path = source + "/Cargo.lock";
+            name = "Cargo.lock";
+          };
+          outputHashes = {
+            "tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";
+            "tungstenite-0.27.0" = "sha256-VVHhk7l9J/sEmG3q/UuV/sQ3f+fGsmq5vumSy8vbMvw=";
+          };
+        })
+        patchSources
+      ];
+    };
+    # cargoSetupHook 默认复制 vendor 目录并刷新 mtime，导致 build script 的
+    # fingerprint 失效。保留 importCargoLock 生成的相对路径，换成只读链接。
+    cargoVendorDir = "../cargo-vendor-dir";
+    cargoDepsHook = ''
+      ln -s "$cargoDeps" "$sourceRoot/$cargoVendorDir"
+    '';
+    postPatch = ''
+      cmp Cargo.lock "$cargoDeps/Cargo.lock"
+    '';
+    nativeBuildInputs = [
+      rustToolchain
+      rustPlatform.cargoSetupHook
+      rustPlatform.bindgenHook
+      clang
+      cmake
+      gitMinimal
+      ninja
+      pkg-config
+      python3
+      patchCrate
+      zstd
+    ];
+    strictDeps = true;
+    dontConfigure = true;
+
+    # 两阶段使用相同的 feature、profile 和目标；不归档临时增量编译状态。
+    env = {
+      CARGO_INCREMENTAL = "0";
+      CARGO_NET_OFFLINE = "true";
+      CMAKE_POLICY_VERSION_MINIMUM = "3.5";
+    };
+    buildPhase = ''
+      export CARGO_HOME="$TMPDIR/cargo-home"
+      export CARGO_BUILD_JOBS="$NIX_BUILD_CORES"
+      mkdir -p "$CARGO_HOME"
+      runHook preBuild
+      cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors -- --all
+      cargo build --locked --offline --release -p stravia-server --bin stravia-server --features bundled-vendors
+      runHook postBuild
+    '';
+  };
+
+  vendorBuilderPath = "backend/crates/stravia-vendor-base/src/bin/stravia-build-vendors.rs";
+  vendorBuilder = builtins.path {
+    path = source + "/${vendorBuilderPath}";
+    name = baseNameOf vendorBuilderPath;
+  };
+  cargoArtifacts = stdenv.mkDerivation (
+    rustBuild
+    // {
+      pname = "stravia-server-rust-deps";
+      src = craneLib.mkDummySrc {
+        src = serverSource;
+        # patch-crate 仍需工作区补丁元数据。沿用实际的 vendor 构建器，
+        # 以同样的顺序和 feature 图预编译各 guest 的依赖。
+        cleanCargoTomlFilter =
+          path:
+          lib.take 2 path == [
+            "workspace"
+            "metadata"
+          ]
+          || craneLib.filters.cargoTomlDefault path;
+        extraDummyScript = ''
+          cp -r ${rustPatches}/patches "$out/patches"
+          cp --remove-destination ${vendorBuilder} "$out/${vendorBuilderPath}"
+        '';
+      };
+      nativeBuildInputs = rustBuild.nativeBuildInputs ++ [ craneLib.installCargoArtifactsHook ];
+      doInstallCargoArtifacts = true;
+      preBuild = ''
+        cargo patch-crate --force
+      '';
+      installPhase = ''
+        runHook preInstall
+        # 桩组件不能进入最终包；保留已经应用的补丁及其编译产物。
+        rm -r target/vendor-plugins-all
+        runHook postInstall
+      '';
+    }
+  );
 in
 assert lib.assertMsg (
   bun.version == rootPackage.engines.bun
@@ -173,73 +275,32 @@ assert lib.assertMsg (
 ) "Stravia requires the Rust version in rust-toolchain.toml";
 assert lib.assertMsg (builtins.elem "wasm32-wasip2" toolchain.toolchain.targets)
   "Stravia requires the wasm32-wasip2 Rust target";
-stdenv.mkDerivation {
-  pname = "stravia-server";
-  inherit version;
-  src = serverSource;
-  cargoDeps = symlinkJoin {
-    # cargoSetupHook 按名称复制目录，须与 importCargoLock 的目录源配置一致。
-    # 主锁文件源必须在前，保留其 Cargo.lock 和包含 Git 依赖的 source 配置。
-    name = "cargo-vendor-dir";
-    paths = [
-      (rustPlatform.importCargoLock {
-        lockFile = builtins.path {
-          path = source + "/Cargo.lock";
-          name = "Cargo.lock";
-        };
-        outputHashes = {
-          "tokio-tungstenite-0.28.0" = "sha256-V1xmnrfRWOcZZogelZEA4vvyMj2awCfHVA5/glQ6KAI=";
-          "tungstenite-0.27.0" = "sha256-VVHhk7l9J/sEmG3q/UuV/sQ3f+fGsmq5vumSy8vbMvw=";
-        };
-      })
-      patchSources
-    ];
-  };
-  nativeBuildInputs = [
-    rustToolchain
-    rustPlatform.cargoSetupHook
-    rustPlatform.bindgenHook
-    clang
-    cmake
-    gitMinimal
-    ninja
-    pkg-config
-    python3
-    patchCrate
-  ];
-  strictDeps = true;
-  dontConfigure = true;
-
-  # Cargo 的子进程继承同一离线配置，guest 的显式 --target 不受宿主默认 target 干扰。
-  env = {
-    CARGO_NET_OFFLINE = "true";
-    CMAKE_POLICY_VERSION_MINIMUM = "3.5";
-  };
-  buildPhase = ''
-    runHook preBuild
-    export CARGO_HOME="$TMPDIR/cargo-home"
-    export CARGO_BUILD_JOBS="$NIX_BUILD_CORES"
-    mkdir -p "$CARGO_HOME" frontend/stravia-webui/dist
-    cp -r ${webui}/. frontend/stravia-webui/dist/
-    cargo patch-crate --force
-    cargo run --locked --offline -p stravia-vendor-base --bin stravia-build-vendors -- --all
-    cargo build --locked --offline --release -p stravia-server --bin stravia-server --features bundled-vendors
-    runHook postBuild
-  '';
-  installPhase = ''
-    runHook preInstall
-    install -Dm755 target/release/stravia-server "$out/bin/stravia-server"
-    install -Dm644 LICENSE "$out/share/licenses/stravia-server/LICENSE"
-    runHook postInstall
-  '';
-  meta = {
-    description = "Stravia Server with embedded production WebUI and official Wasm vendors";
-    homepage = "https://github.com/Stravia-AI/StraviaPlatform";
-    license = lib.licenses.agpl3Only;
-    mainProgram = "stravia-server";
-    platforms = [
-      "x86_64-linux"
-      "aarch64-linux"
-    ];
-  };
-}
+stdenv.mkDerivation (
+  rustBuild
+  // {
+    pname = "stravia-server";
+    src = serverSource;
+    inherit cargoArtifacts;
+    nativeBuildInputs = rustBuild.nativeBuildInputs ++ [ craneLib.inheritCargoArtifactsHook ];
+    preBuild = ''
+      mkdir -p frontend/stravia-webui/dist
+      cp -r ${webui}/. frontend/stravia-webui/dist/
+    '';
+    installPhase = ''
+      runHook preInstall
+      install -Dm755 target/release/stravia-server "$out/bin/stravia-server"
+      install -Dm644 LICENSE "$out/share/licenses/stravia-server/LICENSE"
+      runHook postInstall
+    '';
+    meta = {
+      description = "Stravia Server with embedded production WebUI and official Wasm vendors";
+      homepage = "https://github.com/Stravia-AI/StraviaPlatform";
+      license = lib.licenses.agpl3Only;
+      mainProgram = "stravia-server";
+      platforms = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+    };
+  }
+)

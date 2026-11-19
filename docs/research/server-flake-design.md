@@ -98,7 +98,7 @@ flowchart LR
 
 ### 4.2 Rust：一个 derivation 顺序构建 vendor 和 Server
 
-优先沿用 omp 的 `stdenv.mkDerivation` + `rustPlatform.importCargoLock` + `cargoSetupHook`，显式控制多阶段 Cargo 调用。当前没有证据表明需要引入 crane 或依赖缓存框架。`buildRustPackage` 也支持 `cargoLock`，但本仓库仍需额外处理嵌套 Wasm、预生成 manifest 和 WebUI 注入，不能把默认 Cargo build hook 当成完整方案。[O2][N5]
+初版沿用 omp 的 `stdenv.mkDerivation` + `rustPlatform.importCargoLock` + `cargoSetupHook`，显式控制多阶段 Cargo 调用。`buildRustPackage` 也支持 `cargoLock`，但本仓库仍需额外处理嵌套 Wasm、预生成 manifest 和 WebUI 注入，不能把默认 Cargo build hook 当成完整方案。[O2][N5] 后续在保留离线目录源和最终构建顺序的前提下，使用 Crane 拆出编译依赖缓存，见[当前 Nix 部署说明](../design/architecture.md#nix-server-与-nixos-服务)。
 
 在同一个可写源码目录中，复用同一份根 Cargo 锁与 vendor sources，按顺序完成：
 
