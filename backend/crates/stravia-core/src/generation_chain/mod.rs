@@ -422,6 +422,26 @@ impl PreparedCompactionInput {
             index: 0,
         })
     }
+    pub(crate) fn client_conversation_for_admission(
+        &self,
+        admission_id: uuid::Uuid,
+        created_at_ms: i64,
+    ) -> (String, i64) {
+        self.user_prompt_metadata
+            .as_ref()
+            .map(|metadata| {
+                (
+                    metadata.client_conversation_id.clone(),
+                    metadata.client_conversation_created_at_ms,
+                )
+            })
+            .or_else(|| {
+                self.source_logical_turn
+                    .map(|turn| (turn.id.to_string(), turn.created_at_ms))
+            })
+            .unwrap_or_else(|| (admission_id.to_string(), created_at_ms))
+    }
+
     /// Bind standalone compaction to its actual admitted execution identity.
     /// Pure compaction retains exact source metadata; a newly admitted
     /// client prompt advances it only when the source ordinal is proven.

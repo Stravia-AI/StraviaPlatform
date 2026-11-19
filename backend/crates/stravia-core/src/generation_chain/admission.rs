@@ -147,6 +147,14 @@ impl GenerationChainWrite {
     pub(crate) fn virtual_window(&self) -> Option<VirtualWindow> {
         self.virtual_window
     }
+    pub(crate) fn client_conversation(&self) -> Option<(&str, i64)> {
+        self.prompt_admission.as_ref().map(|entry| {
+            (
+                entry.conversation_id.as_str(),
+                entry.conversation_created_at_ms,
+            )
+        })
+    }
     pub(crate) fn atomic_conversation_context(
         &self,
     ) -> Option<crate::plugin::execution::AtomicConversationContext> {

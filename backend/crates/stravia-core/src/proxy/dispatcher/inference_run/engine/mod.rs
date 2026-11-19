@@ -984,6 +984,10 @@ pub(super) async fn orchestrate(
             let window = prepared.source_window_for_admission(uuid::Uuid::new_v4());
             turn_input.context_window_id = Some(window.id);
             turn_input.context_window_index = Some(window.index);
+            let (conversation_id, conversation_created_at_ms) =
+                prepared.client_conversation_for_admission(atomic_admission_id, atomic_created_at_ms);
+            turn_input.client_conversation_id = Some(conversation_id);
+            turn_input.client_conversation_created_at_ms = Some(conversation_created_at_ms);
         }
         turn_input.generation_parent_target = compact_parent_target;
         let mut turn = match executor.execute(turn_input).await {
@@ -1439,6 +1443,14 @@ async fn acquire_turn(input: AcquireTurnInput<'_>) -> Result<ModelTurn, RoundOut
         {
             input.context_window_id = Some(window.id);
             input.context_window_index = Some(window.index);
+        }
+        if let Some((conversation_id, created_at_ms)) = generation
+            .write
+            .as_ref()
+            .and_then(|write| write.client_conversation())
+        {
+            input.client_conversation_id = Some(conversation_id.to_owned());
+            input.client_conversation_created_at_ms = Some(created_at_ms);
         }
         input
     };
