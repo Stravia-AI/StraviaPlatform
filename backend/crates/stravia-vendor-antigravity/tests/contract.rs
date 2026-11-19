@@ -1275,7 +1275,20 @@ async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
         ("project_id".into(), json!("test-project")),
     ]);
     let schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "$defs": {"Port": {"type": ["integer", "null"], "minimum": 1}},
         "properties": {
+            "ready": {"anyOf": [
+                {"type": "object", "properties": {"port": {"$ref": "#/$defs/Port"}},
+                 "required": ["port"], "additionalProperties": false},
+                {"type": "null"}
+            ]},
+            "toggle": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+            "task": {"anyOf": [
+                {"type": "string"}, {"type": "array", "items": {"type": "string"}},
+                {"type": "null"}
+            ]},
             "model": {"not": true},
             "allowed": true,
             "forbidden": false,
@@ -1314,12 +1327,37 @@ async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
         .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
         .unwrap();
     let envelope: Value = serde_json::from_slice(bytes).unwrap();
-    let parameters = &envelope["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+    let declaration = &envelope["request"]["tools"][0]["functionDeclarations"][0];
+    assert!(declaration.get("parameters").is_none());
+    let parameters = &declaration["parametersJsonSchema"];
+    assert_eq!(parameters, &schema);
     let validator = jsonschema::validator_for(parameters).unwrap();
     for (arguments, valid) in [
         (json!({"values": []}), true),
         (json!({"values": [], "allowed": {"flag": false}}), true),
         (json!({"values": [], "choice": false}), true),
+        (
+            json!({"values": [], "ready": null, "toggle": null, "task": null}),
+            true,
+        ),
+        (
+            json!({"values": [], "ready": {"port": null}, "toggle": false, "task": "read"}),
+            true,
+        ),
+        (
+            json!({"values": [], "ready": {"port": 8080}, "task": ["read", "edit"]}),
+            true,
+        ),
+        (json!({"values": [], "ready": {"port": 0}}), false),
+        (json!({"values": [], "ready": {"port": "8080"}}), false),
+        (
+            json!({"values": [], "ready": {"port": 8080, "extra": true}}),
+            false,
+        ),
+        (json!({"values": [], "ready": {}}), false),
+        (json!({"values": [], "toggle": "false"}), false),
+        (json!({"values": [], "task": [false]}), false),
+        (json!({"values": [], "task": 1}), false),
         (json!({"values": [], "model": "override"}), false),
         (json!({"values": [], "model": null}), false),
         (json!({"values": [], "forbidden": false}), false),
@@ -1824,33 +1862,24 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             body["request"]["toolConfig"]["functionCallingConfig"],
             json!({"mode":"ANY","allowedFunctionNames":["read"]})
         );
-        let parameters = &body["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+        let declaration = &body["request"]["tools"][0]["functionDeclarations"][0];
+        assert!(declaration.get("parameters").is_none());
+        let parameters = &declaration["parametersJsonSchema"];
         assert_eq!(parameters["additionalProperties"], false);
         assert_eq!(
-            parameters["properties"]["metadata"]["properties"]["seed"]["ref"],
-            "#/defs/Seed"
+            parameters["properties"]["metadata"]["properties"]["seed"]["$ref"],
+            "#/$defs/Seed"
         );
-        assert_eq!(parameters["defs"]["Seed"]["default"], 7);
-        fn accepts_kind(schema: &Value, kind: &str) -> bool {
-            if kind == "NULL" && schema["nullable"] == true {
-                return true;
-            }
-            schema.get("type").is_none_or(|value| value == kind)
-                && schema.get("allOf").is_none_or(|clauses| {
-                    clauses.as_array().is_some_and(|clauses| {
-                        clauses.iter().all(|clause| accepts_kind(clause, kind))
-                    })
-                })
-                && schema.get("anyOf").is_none_or(|clauses| {
-                    clauses.as_array().is_some_and(|clauses| {
-                        clauses.iter().any(|clause| accepts_kind(clause, kind))
-                    })
-                })
+        assert_eq!(parameters["$defs"]["Seed"]["default"], 7);
+        let validator = jsonschema::validator_for(parameters).unwrap();
+        for (arguments, valid) in [
+            (json!({"metadata": {"seed": 7}}), true),
+            (json!({"metadata": {"seed": null}}), true),
+            (json!({"metadata": {"seed": "7"}}), false),
+            (json!({"extra": true}), false),
+        ] {
+            assert_eq!(validator.is_valid(&arguments), valid, "{arguments}");
         }
-        let seed = &parameters["defs"]["Seed"];
-        assert!(accepts_kind(seed, "INTEGER"));
-        assert!(accepts_kind(seed, "NULL"));
-        assert!(!accepts_kind(seed, "STRING"));
         let output_schema = &body["request"]["generationConfig"]["responseSchema"];
         assert_eq!(output_schema["additionalProperties"], false);
         assert_eq!(
