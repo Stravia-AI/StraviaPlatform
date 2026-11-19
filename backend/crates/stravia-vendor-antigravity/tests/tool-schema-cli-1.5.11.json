@@ -1,0 +1,246 @@
+{
+  "source": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$defs": {
+      "Name": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "type": "object",
+    "properties": {
+      "allowed": true,
+      "forbidden": false,
+      "nullOnly": {
+        "type": "null"
+      },
+      "numericEnum": {
+        "type": "integer",
+        "enum": [
+          0,
+          1
+        ]
+      },
+      "format": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "allOf": {
+        "allOf": [
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "simple": {
+        "type": "string",
+        "title": "Simple",
+        "description": "String constraint probe",
+        "enum": [
+          "a",
+          "b"
+        ],
+        "minLength": 1,
+        "maxLength": 3,
+        "pattern": "^[ab]$",
+        "default": "a",
+        "examples": [
+          "a"
+        ],
+        "example": "b"
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9,
+        "exclusiveMinimum": 0,
+        "multipleOf": 1
+      },
+      "meta": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": {
+          "type": "string"
+        },
+        "minProperties": 1,
+        "maxProperties": 3,
+        "propertyOrdering": [
+          "type"
+        ]
+      },
+      "list": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1,
+        "maxItems": 2,
+        "uniqueItems": true
+      },
+      "nullable": {
+        "type": "string",
+        "nullable": true
+      },
+      "ref": {
+        "$ref": "#/$defs/Name"
+      },
+      "typeUnion": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "composition": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "not": {
+          "const": "blocked"
+        }
+      },
+      "literal": {
+        "const": "literal",
+        "default": {
+          "type": "business"
+        }
+      },
+      "flag": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "ready": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "port": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 1
+              }
+            },
+            "required": [
+              "port"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "task": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "flag",
+      "ready",
+      "task"
+    ],
+    "additionalProperties": false
+  },
+  "official_projection": {
+    "type": "OBJECT",
+    "properties": {
+      "allOf": {},
+      "composition": {},
+      "count": {
+        "type": "INTEGER",
+        "minimum": 1,
+        "maximum": 9
+      },
+      "flag": {},
+      "format": {
+        "type": "STRING",
+        "format": "date-time"
+      },
+      "list": {
+        "type": "ARRAY",
+        "items": {
+          "type": "STRING"
+        },
+        "minItems": "1",
+        "maxItems": "2"
+      },
+      "literal": {
+        "default": {
+          "type": "business"
+        }
+      },
+      "meta": {
+        "type": "OBJECT",
+        "properties": {
+          "type": {
+            "type": "STRING"
+          }
+        }
+      },
+      "nullOnly": {
+        "type": "NULL"
+      },
+      "nullable": {
+        "type": "STRING"
+      },
+      "numericEnum": {
+        "type": "INTEGER",
+        "enum": [
+          "",
+          ""
+        ]
+      },
+      "ready": {},
+      "ref": {},
+      "simple": {
+        "type": "STRING",
+        "description": "String constraint probe",
+        "default": "a",
+        "enum": [
+          "a",
+          "b"
+        ],
+        "minLength": "1",
+        "maxLength": "3",
+        "pattern": "^[ab]$"
+      },
+      "task": {},
+      "typeUnion": {}
+    },
+    "required": [
+      "flag",
+      "ready",
+      "task"
+    ]
+  },
+  "observation": "CLI 1.5.11 native enum silently turns numeric enum members into empty strings; upstream rejects. Do not reproduce that bug. Boolean property schemas are omitted; not converted to {}. All other entries are captured native output. toolSummary wrapper metadata removed from this neutral corpus."
+}
