@@ -6,6 +6,7 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
 import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
+import SearchIcon from '@lucide/svelte/icons/search'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
@@ -36,6 +37,7 @@ import {
 
 import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
+import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 
 const queryClient = useQueryClient()
@@ -50,11 +52,17 @@ const mediaUnderstandingQuery = createQuery(() => ({
   queryFn: admin.mediaUnderstanding.get,
 }))
 
+let query = $state('')
 let deleteTarget = $state<Route>()
 let deleteOpen = $state(false)
 let actingModelId = $state<string>()
 const models = $derived(sortLogicalModels(modelsQuery.data ?? []))
 const providers = $derived(providersQuery.data ?? [])
+const providerNames = $derived(new Map(providers.map((provider) => [provider.id, provider.name])))
+const normalizedQuery = $derived(query.trim().toLocaleLowerCase())
+const visibleModels = $derived(
+  normalizedQuery ? models.filter((model) => modelSearchText(model).includes(normalizedQuery)) : models,
+)
 // 只有一个供应商时直接进入它的模型清单；否则先到供应商列表选择。
 const providerModelsHref = $derived(
   providers.length === 1 ? `/providers/${encodeURIComponent(providers[0].id)}?view=models` : '/providers',
@@ -82,7 +90,11 @@ const resourcesEmpty = $derived(
 )
 
 const apiKeys = $derived(apiKeysQuery.data ?? [])
-const tableLabels = $derived(getDataTableLabels())
+const modelTableLabels = $derived({
+  ...getDataTableLabels(),
+  search: m.models_table_search(),
+  noResults: m.models_table_no_results(),
+})
 const modelColumnHelper = createDataTableColumnHelper<Route>()
 
 const modelColumns = modelColumnHelper.columns([
@@ -129,6 +141,27 @@ const modelColumns = modelColumnHelper.columns([
     size: 64,
   }),
 ])
+
+function outputLabel(model: Route): string {
+  if (model.output_modality === 'image') return m.route_output_image()
+  if (model.output_modality === 'text') return m.route_output_text()
+  return m.route_output_reconfigure()
+}
+
+function modelSearchText(model: Route): string {
+  const fields = [
+    effectiveModelDisplayName(model),
+    model.model_id,
+    model.id,
+    model.is_enabled ? m.common_enabled_status() : m.common_disabled_status(),
+    model.output_modality,
+    outputLabel(model),
+  ]
+  for (const target of model.targets) {
+    fields.push(target.model, target.model_name ?? '', target.provider_id, providerNames.get(target.provider_id) ?? '')
+  }
+  return fields.join(' ').toLocaleLowerCase()
+}
 
 function getModelRowId(model: Route): string {
   return model.id
@@ -256,11 +289,7 @@ async function deleteModel(): Promise<void> {
 
 {#snippet outputState(model: Route)}
   <span class={['block text-xs', !model.output_modality && 'text-warning']}>
-    {model.output_modality === 'image'
-      ? m.route_output_image()
-      : model.output_modality === 'text'
-        ? m.route_output_text()
-        : m.route_output_reconfigure()}
+    {outputLabel(model)}
   </span>
   {#if model.targets.some((target) => target.output_modality_mismatch)}
     <span class="block text-xs text-warning">{m.route_output_mismatch()}</span>
@@ -359,9 +388,13 @@ async function deleteModel(): Promise<void> {
           stickyHeader
           data={models}
           columns={modelColumns}
-          labels={tableLabels}
+          labels={modelTableLabels}
           getRowId={getModelRowId}
           ariaLabel={m.models_configured_models()}
+          globalFilterEnabled
+          bind:globalFilter={query}
+          globalFilterText={modelSearchText}
+          globalFilterPlaceholder={m.models_table_search()}
           size="small"
           stripedRows
           sortMode="multiple"
@@ -369,7 +402,11 @@ async function deleteModel(): Promise<void> {
           onRowClick={handleModelTableRowClick} />
       </div>
       <div class="route-mobile-list">
-        {#each models as model (model.id)}
+        <InputGroup.Root class="mb-3 w-full min-w-0">
+          <InputGroup.Input bind:value={query} aria-label={m.models_table_search()} placeholder={m.models_table_search()} />
+          <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
+        </InputGroup.Root>
+        {#each visibleModels as model (model.id)}
           <div class="route-mobile-row">
             <div class="min-w-0">
               <a class="block truncate font-medium" href={resolve(`models/${encodeURIComponent(model.model_id)}`)}
@@ -394,6 +431,8 @@ async function deleteModel(): Promise<void> {
             </div>
             <div class="flex items-start gap-1">{@render modelActions(model)}</div>
           </div>
+        {:else}
+          <p class="py-6 text-center text-sm text-muted-foreground" role="status">{m.models_table_no_results()}</p>
         {/each}
       </div>
     {/if}

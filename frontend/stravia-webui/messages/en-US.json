@@ -1074,6 +1074,8 @@
   "models_no_models_configured": "No models configured",
   "models_split_share": "Split by share",
   "models_stravia_not_check_everything_uses_model_try_again": "Stravia could not check everything that uses this model. Try again after the related settings are available.",
+  "models_table_no_results": "No models match your search.",
+  "models_table_search": "Search models…",
   "models_web_search_no_longer_has_model": "Web search will no longer have a model to use.",
   "not_found_page_not_found": "Page not found",
   "not_found_page_value_does_not_exist_have_moved": "The page {requestedPath} does not exist or may have moved.",

@@ -436,6 +436,114 @@ test('Models table fits the desktop content width without horizontal scrolling',
   )
 })
 
+for (const { width, locale } of [
+  { width: 1440, locale: 'en-US' },
+  { width: 390, locale: 'en-US' },
+  { width: 320, locale: 'zh-CN' },
+]) {
+  test(`Model list search includes fallback destinations (${locale}, ${width}px)`, async ({ page }) => {
+    const zh = locale === 'zh-CN'
+    await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
+    await page.setViewportSize({ width, height: 800 })
+    await page.route('**/api/v1/providers', (request) =>
+      request.fulfill({
+        json: {
+          data: [
+            { id: 'primary-service', name: 'Primary service', is_enabled: true },
+            { id: 'reserve-provider-id', name: 'Reserve service', is_enabled: true },
+          ],
+        },
+      }),
+    )
+    const target = (provider: string, model: string, name: string, priority: number) => ({
+      id: `${provider}-${model}`,
+      model_id: 'internal-writing-route',
+      provider_id: provider,
+      model,
+      model_name: name,
+      route_output_modalities: ['text'],
+      enabled: true,
+      priority,
+      thinking_level_map: [],
+    })
+    await page.route('**/api/v1/models', (request) =>
+      request.fulfill({
+        json: {
+          data: [
+            {
+              id: 'internal-writing-route',
+              model_id: 'writing-client',
+              display_name: 'Writing assistant',
+              output_modality: 'text',
+              image_generation_bound: false,
+              balance: 'traffic_equalization',
+              is_enabled: true,
+              targets: [
+                target('primary-service', 'primary-upstream', 'Primary model', 10),
+                target('reserve-provider-id', 'reserve-upstream', 'Hidden fallback model', 0),
+              ],
+            },
+            {
+              id: 'internal-art-route',
+              model_id: 'art-client',
+              display_name: 'Art studio',
+              output_modality: 'image',
+              image_generation_bound: false,
+              balance: 'traffic_equalization',
+              is_enabled: false,
+              targets: [],
+            },
+          ],
+        },
+      }),
+    )
+
+    await page.goto('/models')
+    const results = page.locator(width >= 768 ? '.route-desktop-table' : '.route-mobile-list')
+    const search = page.getByRole('textbox', { name: zh ? /^搜索模型/ : /^Search models/ })
+    await expect(search).toBeVisible()
+    await expect(results.getByText('Writing assistant', { exact: true })).toBeVisible()
+    await expect(results.getByText('Art studio', { exact: true })).toBeVisible()
+    // 后备层没有在行内列出，仍应可通过模型与供应商定位所属 Route。
+    await expect(results).not.toContainText('Hidden fallback model')
+    await expect(results).not.toContainText('Reserve service')
+    for (const query of [
+      '  WRITING ASSISTANT  ',
+      'writing-client',
+      'internal-writing-route',
+      'reserve-upstream',
+      'Hidden fallback model',
+      'Reserve service',
+      'reserve-provider-id',
+      zh ? '已启用' : 'Enabled',
+      zh ? '文本' : 'Text',
+    ]) {
+      await search.fill(query)
+      await expect(results.getByText('Writing assistant', { exact: true })).toBeVisible()
+      await expect(results.getByText('Art studio', { exact: true })).toHaveCount(0)
+    }
+    await search.fill(zh ? '已禁用' : 'Disabled')
+    await expect(results.getByText('Art studio', { exact: true })).toBeVisible()
+    await expect(results.getByText('Writing assistant', { exact: true })).toHaveCount(0)
+    await search.fill('__no_model_matches__')
+    await expect(results).toContainText(zh ? '没有符合搜索条件的模型。' : 'No models match your search.')
+    await expect(page.getByRole('link', { name: zh ? '添加模型' : 'Add model', exact: true })).toBeVisible()
+    await search.fill('reserve-upstream')
+
+    // 两种响应式布局切换时保留查询和结果。
+    const nextWidth = width >= 768 ? 320 : 1440
+    await page.setViewportSize({ width: nextWidth, height: 800 })
+    await expect(search).toHaveValue('reserve-upstream')
+    const resizedResults = page.locator(nextWidth >= 768 ? '.route-desktop-table' : '.route-mobile-list')
+    await expect(resizedResults.getByText('Writing assistant', { exact: true })).toBeVisible()
+    await expect(resizedResults.getByText('Art studio', { exact: true })).toHaveCount(0)
+    await search.fill('')
+    await expect(resizedResults.getByText('Writing assistant', { exact: true })).toBeVisible()
+    await expect(resizedResults.getByText('Art studio', { exact: true })).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
 test('Model destinations summarize the preferred layer across any number of layers', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 800 })
   const provider = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
