@@ -103,7 +103,15 @@ const modelColumns = modelColumnHelper.columns([
     header: () => m.models_display_name(),
     cell: (context) => renderSnippet(modelDisplayNameCell, context),
     meta: { label: () => m.models_display_name(), width: 'fill' },
-    size: 180,
+    size: 140,
+  }),
+  modelColumnHelper.display({
+    id: 'purpose',
+    header: () => m.route_purpose_label(),
+    cell: (context) => renderSnippet(purposeState, context.row.original),
+    enableSorting: false,
+    meta: { label: () => m.route_purpose_label(), width: 'compact' },
+    size: 100,
   }),
   modelColumnHelper.accessor('model_id', {
     header: () => m.models_client_model_id(),
@@ -123,7 +131,7 @@ const modelColumns = modelColumnHelper.columns([
     header: () => m.models_destinations(),
     cell: (context) => renderSnippet(modelDestinationsCell, context),
     meta: { label: () => m.models_destinations(), width: 'fill' },
-    size: 280,
+    size: 200,
   }),
   modelColumnHelper.accessor('is_enabled', {
     header: () => m.common_status(),
@@ -282,7 +290,6 @@ async function deleteModel(): Promise<void> {
 
 {#snippet modelDisplayNameCell(context: DataTableCellContext<Route>)}
   <span class="block truncate font-medium">{effectiveModelDisplayName(context.row.original)}</span>
-  {@render purposeState(context.row.original)}
 {/snippet}
 
 {#snippet purposeState(model: Route)}
@@ -290,7 +297,7 @@ async function deleteModel(): Promise<void> {
     {purposeLabel(model)}
   </span>
   {#if model.targets.some((target) => target.purpose_mismatch)}
-    <span class="block text-xs text-warning">{m.route_purpose_mismatch()}</span>
+    <span class="block text-xs whitespace-normal text-warning">{m.route_purpose_mismatch()}</span>
   {/if}
 {/snippet}
 
@@ -414,7 +421,10 @@ async function deleteModel(): Promise<void> {
                 >{effectiveModelDisplayName(model)}</a>
 
               <TechnicalValue value={model.model_id} copyable />
-              {@render purposeState(model)}
+              <dl class="mt-1 flex min-w-0 items-start gap-1.5">
+                <dt class="shrink-0 text-xs text-muted-foreground">{m.route_purpose_label()}</dt>
+                <dd class="min-w-0">{@render purposeState(model)}</dd>
+              </dl>
               <p class="mt-1 text-xs text-muted-foreground">
                 {m.model_specification_context()}:
                 <span class="font-technical tabular-nums">
