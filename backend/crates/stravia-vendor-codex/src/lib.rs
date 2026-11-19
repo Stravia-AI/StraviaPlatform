@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
-use stravia_runtime_contract::protocol::ir::AiRequest;
+use stravia_runtime_contract::protocol::ir::{AiRequest, ServiceTier};
 use stravia_vendor_common::{common, thinking};
 #[cfg(target_arch = "wasm32")]
 use stravia_vendor_sdk::VendorGuest;
@@ -28,6 +28,7 @@ use stravia_vendor_sdk::{
 const VENDOR_ID: &str = "openai-codex";
 const CATALOG_ID: &str = "openai";
 const CHANNEL: &str = "codex";
+const FAST_MODE_OPTION: &str = "fast_mode";
 /// Spoofed Codex CLI version sent on every request. The backend version-gates
 /// model availability for `/models` and `/responses` by exact client version
 /// rather than the catalog's `minimal_client_version`; an older pin silently
@@ -113,21 +114,38 @@ pub fn descriptor() -> VendorDescriptor {
                 id: "advanced".into(),
                 label: crate::messages::advanced(),
             }],
-            config_fields: vec![ConfigField {
-                key: "websocket_url".into(),
-                label: crate::messages::websocket_url(),
-                description: Some(crate::messages::websocket_description()),
-                kind: ConfigFieldKind::String { multiline: false },
-                required: false,
-                default_json: None,
-                group: Some("advanced".into()),
-                secret: false,
-                min: None,
-                max: None,
-                max_length: Some(4096),
-                pattern: Some(r"^wss?://.+".into()),
-                visible_when: None,
-            }],
+            config_fields: vec![
+                ConfigField {
+                    key: FAST_MODE_OPTION.into(),
+                    label: crate::messages::fast_mode(),
+                    description: Some(crate::messages::fast_mode_description()),
+                    kind: ConfigFieldKind::Bool,
+                    required: false,
+                    default_json: None,
+                    group: None,
+                    secret: false,
+                    min: None,
+                    max: None,
+                    max_length: None,
+                    pattern: None,
+                    visible_when: None,
+                },
+                ConfigField {
+                    key: "websocket_url".into(),
+                    label: crate::messages::websocket_url(),
+                    description: Some(crate::messages::websocket_description()),
+                    kind: ConfigFieldKind::String { multiline: false },
+                    required: false,
+                    default_json: None,
+                    group: Some("advanced".into()),
+                    secret: false,
+                    min: None,
+                    max: None,
+                    max_length: Some(4096),
+                    pattern: Some(r"^wss?://.+".into()),
+                    visible_when: None,
+                },
+            ],
             network: NetworkDeclaration {
                 base_url_field: None,
                 extra_origins: vec![
@@ -247,6 +265,12 @@ fn infer(
     let model = required_model(&provider)?;
     require_codex_protocol(&provider)?;
     normalize_request(model, &mut request);
+    if operation == Operation::Infer
+        && provider.options.get(FAST_MODE_OPTION) == Some(&Value::Bool(true))
+    {
+        // Codex's Fast mode is the Responses priority service tier.
+        request.parameters.service_tier = Some(ServiceTier::Priority);
+    }
     if operation == Operation::Compact {
         // V2 使用同一份 typed IR：缺省摘要指令是实时 base instructions，
         // 触发器位于 input 末尾；不发送 V1 context_management 控制。

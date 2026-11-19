@@ -334,6 +334,12 @@ async fn http_nonstream_client_uses_native_stream() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
+async fn http_fast_mode_sends_priority_tier() {
+    http_case("fast").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
 async fn http_reasoning_ignores_unsupported_logprobs() {
     http_case("logprobs").await;
 }
@@ -611,6 +617,10 @@ async fn http_case(case: &'static str) {
             }
         }
         assert_eq!(body["stream"], true);
+        if case == "fast" {
+            assert_eq!(body["service_tier"], "priority");
+            assert!(at("service_tier") < at("input"));
+        }
         assert_eq!(header("x-client-request-id"), Some(thread));
         assert_eq!(body["client_metadata"]["thread_id"], thread);
         let turn: Value = serde_json::from_str(
@@ -779,6 +789,9 @@ async fn http_case(case: &'static str) {
     );
     let mut inference = request();
     inference.stream.enabled = case != "nonstream";
+    if case == "fast" {
+        provider.options.insert("fast_mode".into(), true.into());
+    }
     if case.starts_with("compact") {
         inference.tools = Some(vec![stravia_runtime_contract::protocol::ir::ToolSpec {
             name: "lookup".into(),
@@ -1400,6 +1413,45 @@ async fn websocket_ignores_chat_logprobs_without_disabling_reasoning() {
 /// `fuel_per_operation = 50_000_000` trapped `OutOfFuel` while decoding a
 /// ~256 KiB `encrypted_content` blob, and `max_event_bytes` rejected single
 /// canonical events over 2 MiB.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn websocket_fast_mode_overrides_tier_only_when_enabled() {
+    let (runtime, plugin) = load_codex().await;
+    for (fast_mode, requested_tier, expected_tier) in [
+        (None, ServiceTier::Default, "default"),
+        (Some(false), ServiceTier::Flex, "flex"),
+        (Some(true), ServiceTier::Flex, "priority"),
+    ] {
+        let mut provider = codex_provider();
+        if let Some(enabled) = fast_mode {
+            provider.options.insert("fast_mode".into(), enabled.into());
+        }
+        let mut request = request();
+        request.parameters.service_tier = Some(requested_tier);
+        let recorded = Arc::new(Recording::default());
+        execute_once(
+            &runtime,
+            &plugin,
+            provider,
+            request,
+            codex_frames(0, "resp_fast_mode"),
+            &recorded,
+        )
+        .await
+        .expect("Codex WebSocket inference");
+        assert_eq!(recorded.sent.lock()[0]["service_tier"], expected_tier);
+        let hint = if expected_tier == "default" {
+            "model=gpt-6-astra".to_owned()
+        } else {
+            format!("model=gpt-6-astra;tier={expected_tier}")
+        };
+        assert_eq!(
+            recorded.connections.lock()[0].headers["x-codex-routing-hint"],
+            hint
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
 async fn large_reasoning_signature_completes() {
