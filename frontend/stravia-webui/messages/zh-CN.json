@@ -1068,6 +1068,8 @@
   "models_no_models_configured": "尚未配置模型",
   "models_split_share": "按份额分配",
   "models_stravia_not_check_everything_uses_model_try_again": "Stravia 暂时无法检查此模型的全部使用位置。请在相关设置可用后重试。",
+  "models_table_no_results": "没有符合搜索条件的模型。",
+  "models_table_search": "搜索模型…",
   "models_web_search_no_longer_has_model": "联网搜索将没有可用模型。",
   "not_found_page_not_found": "页面未找到",
   "not_found_page_value_does_not_exist_have_moved": "页面 {requestedPath} 不存在或可能已移动。",
