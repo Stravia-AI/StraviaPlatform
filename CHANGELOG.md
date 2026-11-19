@@ -5,6 +5,7 @@
 ### Added
 
 - The Models list now supports instant keyword search on desktop and mobile, matching display names, client and internal IDs, all destination models and providers (including fallbacks), status, and output type. Search ignores case and surrounding whitespace, and clearing it restores the full list.
+- OpenAI Codex connections have an opt-in Fast mode. It sends inference requests over HTTP and WebSocket with the priority service tier, overriding the client-selected tier while enabled. Fast mode may consume more allowance and depends on upstream account and model support. Rebuild and re-import the standalone Codex plugin.
 
 - The standalone Kiro plugin offers four device sign-in channels: Google, GitHub, AWS Builder ID, and AWS IAM Identity Center. Existing API-key connections must be replaced with a device sign-in connection and their Routes rebound. Sync models to pick up reported input modalities and reasoning efforts; the streaming adapter exposes text output. Inference, model discovery, and credit checks use the authorized profile's region. Allowances show monthly credits, active trials, and bonuses separately, including fractional amounts. The plugin does not read CLI login files or resume local sessions.
 - Kiro's regional AWS OIDC permissions are shown as one host pattern covering the same HTTPS endpoints. The model editor no longer crashes when opening the reasoning effort picker for a model without registered levels.
