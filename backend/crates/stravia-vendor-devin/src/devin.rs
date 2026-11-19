@@ -19,10 +19,10 @@ use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiStreamDelta};
 use stravia_vendor_common::common;
 use stravia_vendor_sdk::{
     AuthCallback, AuthCallbackPort, AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType,
-    CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, ConfigField, ConfigFieldKind,
-    ConfigGroup, DataCompatibility, DiscoverResponse, ErrorKind, GuestHost, NetworkDeclaration,
-    Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
-    ProviderSnapshot, VendorDescriptor, VendorKind, read_http_body,
+    CANONICAL_FORMAT_VERSION, Capability, ChannelDescriptor, DataCompatibility, DiscoverResponse,
+    ErrorKind, GuestHost, NetworkDeclaration, Operation, OperationInput, OperationOutput,
+    OriginDeclaration, PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor,
+    VendorKind, read_http_body,
 };
 
 const DEFAULT_BASE_URL: &str = "https://server.codeium.com";
@@ -143,25 +143,8 @@ pub(crate) fn descriptor() -> VendorDescriptor {
             capabilities,
             website: None,
             implementation: None,
-            config_groups: vec![ConfigGroup {
-                id: "authentication".into(),
-                label: crate::messages::authentication(),
-            }],
-            config_fields: vec![ConfigField {
-                key: "apiKey".into(),
-                label: crate::messages::session_token(),
-                description: Some(crate::messages::session_token_description()),
-                kind: ConfigFieldKind::String { multiline: false },
-                required: true,
-                default_json: None,
-                group: Some("authentication".into()),
-                secret: true,
-                min: None,
-                max: None,
-                max_length: Some(16_384),
-                pattern: None,
-                visible_when: None,
-            }],
+            config_groups: Vec::new(),
+            config_fields: Vec::new(),
             network: NetworkDeclaration {
                 base_url_field: None,
                 extra_origins: vec![
