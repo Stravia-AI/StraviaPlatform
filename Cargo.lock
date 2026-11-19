@@ -8774,6 +8774,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "stravia-vendor-kiro"
+version = "0.7.2"
+dependencies = [
+ "async-trait",
+ "crc32fast",
+ "parking_lot",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "stravia-protocol-codec",
+ "stravia-runtime-contract",
+ "stravia-vendor-common",
+ "stravia-vendor-runtime",
+ "stravia-vendor-sdk",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "stravia-vendor-lifecycle-contract-fixture"
 version = "0.7.2"
 dependencies = [

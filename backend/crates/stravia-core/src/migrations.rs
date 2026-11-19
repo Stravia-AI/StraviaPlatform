@@ -126,10 +126,11 @@ async fn ensure_sqlite_foreign_keys(
 fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> bool {
     // 重建表及其数据转换（2、7、8、12、24、32、33）仍需 FK-off 和完整审计。
     // 52 只重建没有入站外键的 vendor_plugins，其余为新表，FK 保持开启即可。
+    // 56 仅增加可空 cursor 元数据列，不回填数据，也不改动外键。
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55 | 56
     ) {
         return false;
     }

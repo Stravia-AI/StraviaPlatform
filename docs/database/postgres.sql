@@ -1236,6 +1236,11 @@ CREATE TABLE public.admin_identity (
     CONSTRAINT admin_identity_credential_revision_check CHECK ((credential_revision > 0)),
     CONSTRAINT admin_identity_singleton_id_check CHECK ((singleton_id = 1))
 );
+ALTER TABLE ONLY public.admin_identity ALTER COLUMN singleton_id SET (pg_attver=31220240);
+ALTER TABLE ONLY public.admin_identity ALTER COLUMN username SET (pg_attver=31220240);
+ALTER TABLE ONLY public.admin_identity ALTER COLUMN password_hash SET (pg_attver=31220240);
+ALTER TABLE ONLY public.admin_identity ALTER COLUMN jwt_secret SET (pg_attver=31220240);
+ALTER TABLE ONLY public.admin_identity ALTER COLUMN credential_revision SET (pg_attver=31220240);
 
 
 --
@@ -1251,6 +1256,12 @@ CREATE TABLE public.admin_sessions (
     revoked boolean DEFAULT false NOT NULL,
     CONSTRAINT admin_sessions_identity_id_check CHECK ((identity_id = 1))
 );
+ALTER TABLE ONLY public.admin_sessions ALTER COLUMN id SET (pg_attver=31236856);
+ALTER TABLE ONLY public.admin_sessions ALTER COLUMN identity_id SET (pg_attver=31236856);
+ALTER TABLE ONLY public.admin_sessions ALTER COLUMN credential_revision SET (pg_attver=31236856);
+ALTER TABLE ONLY public.admin_sessions ALTER COLUMN refresh_hash SET (pg_attver=31236856);
+ALTER TABLE ONLY public.admin_sessions ALTER COLUMN expires_at SET (pg_attver=31236856);
+ALTER TABLE ONLY public.admin_sessions ALTER COLUMN revoked SET (pg_attver=31236856);
 
 
 --
@@ -1265,6 +1276,11 @@ CREATE TABLE public.agent_definition_configs (
     thinking_level text,
     CONSTRAINT agent_definition_configs_thinking_level_check CHECK ((thinking_level = ANY (ARRAY['off'::text, 'minimal'::text, 'low'::text, 'medium'::text, 'high'::text, 'xhigh'::text, 'max'::text])))
 );
+ALTER TABLE ONLY public.agent_definition_configs ALTER COLUMN definition_id SET (pg_attver=31255664);
+ALTER TABLE ONLY public.agent_definition_configs ALTER COLUMN enabled SET (pg_attver=31255664);
+ALTER TABLE ONLY public.agent_definition_configs ALTER COLUMN model_id SET (pg_attver=31255664);
+ALTER TABLE ONLY public.agent_definition_configs ALTER COLUMN updated_at SET (pg_attver=31255664);
+ALTER TABLE ONLY public.agent_definition_configs ALTER COLUMN thinking_level SET (pg_attver=31255664);
 
 
 --
@@ -1280,6 +1296,12 @@ CREATE TABLE public.agent_definition_revisions (
     created_at bigint NOT NULL,
     CONSTRAINT agent_definition_revisions_version_check CHECK ((version > 0))
 );
+ALTER TABLE ONLY public.agent_definition_revisions ALTER COLUMN definition_id SET (pg_attver=31269912);
+ALTER TABLE ONLY public.agent_definition_revisions ALTER COLUMN slug SET (pg_attver=31269912);
+ALTER TABLE ONLY public.agent_definition_revisions ALTER COLUMN version SET (pg_attver=31269912);
+ALTER TABLE ONLY public.agent_definition_revisions ALTER COLUMN spec_hash SET (pg_attver=31269912);
+ALTER TABLE ONLY public.agent_definition_revisions ALTER COLUMN spec_json SET (pg_attver=31269912);
+ALTER TABLE ONLY public.agent_definition_revisions ALTER COLUMN created_at SET (pg_attver=31269912);
 
 
 --
@@ -1290,6 +1312,8 @@ CREATE TABLE public.api_key_models (
     api_key_id text NOT NULL,
     model_id text NOT NULL
 );
+ALTER TABLE ONLY public.api_key_models ALTER COLUMN api_key_id SET (pg_attver=31282672);
+ALTER TABLE ONLY public.api_key_models ALTER COLUMN model_id SET (pg_attver=31282672);
 
 
 --
@@ -1303,6 +1327,11 @@ CREATE TABLE public.api_key_spend (
     reset_at text,
     updated_at text NOT NULL
 );
+ALTER TABLE ONLY public.api_key_spend ALTER COLUMN api_key_id SET (pg_attver=33479040);
+ALTER TABLE ONLY public.api_key_spend ALTER COLUMN spent_custom_nanos SET (pg_attver=33479040);
+ALTER TABLE ONLY public.api_key_spend ALTER COLUMN spent_usd_unconverted_nanos SET (pg_attver=33479040);
+ALTER TABLE ONLY public.api_key_spend ALTER COLUMN reset_at SET (pg_attver=33479040);
+ALTER TABLE ONLY public.api_key_spend ALTER COLUMN updated_at SET (pg_attver=33479040);
 
 
 --
@@ -1326,6 +1355,18 @@ CREATE TABLE public.api_keys (
     CONSTRAINT api_keys_spend_limit_nanos_check CHECK (((spend_limit_nanos IS NULL) OR (spend_limit_nanos > 0))),
     CONSTRAINT api_keys_transparent_injections_check CHECK ((jsonb_typeof(transparent_injections) = 'array'::text))
 );
+ALTER TABLE ONLY public.api_keys ALTER COLUMN id SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN token SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN name SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN is_enabled SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN expires_at SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN created_at SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN updated_at SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN mcp_access_enabled SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN transparent_injection_enabled SET (pg_attver=31292560);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN rpm_limit SET (pg_attver=32708440);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN spend_limit_nanos SET (pg_attver=33452912);
+ALTER TABLE ONLY public.api_keys ALTER COLUMN transparent_injections SET (pg_attver=35103608);
 
 
 --
@@ -1337,6 +1378,9 @@ CREATE TABLE public.artifact_download_grants (
     artifact_id text NOT NULL,
     expires_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.artifact_download_grants ALTER COLUMN token_hash SET (pg_attver=31312656);
+ALTER TABLE ONLY public.artifact_download_grants ALTER COLUMN artifact_id SET (pg_attver=31312656);
+ALTER TABLE ONLY public.artifact_download_grants ALTER COLUMN expires_at SET (pg_attver=31312656);
 
 
 --
@@ -1351,6 +1395,10 @@ CREATE TABLE public.artifact_upload_parts (
     CONSTRAINT artifact_upload_parts_part_number_check CHECK ((part_number > 0)),
     CONSTRAINT artifact_upload_parts_size_check CHECK ((size >= 0))
 );
+ALTER TABLE ONLY public.artifact_upload_parts ALTER COLUMN upload_id SET (pg_attver=31322896);
+ALTER TABLE ONLY public.artifact_upload_parts ALTER COLUMN part_number SET (pg_attver=31322896);
+ALTER TABLE ONLY public.artifact_upload_parts ALTER COLUMN etag SET (pg_attver=31322896);
+ALTER TABLE ONLY public.artifact_upload_parts ALTER COLUMN size SET (pg_attver=31322896);
 
 
 --
@@ -1369,6 +1417,14 @@ CREATE TABLE public.artifact_uploads (
     CONSTRAINT artifact_uploads_declared_size_check CHECK ((declared_size >= 0)),
     CONSTRAINT artifact_uploads_received_size_check CHECK ((received_size >= 0))
 );
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN id SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN artifact_id SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN principal SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN token_hash SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN declared_size SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN received_size SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN expires_at SET (pg_attver=31336528);
+ALTER TABLE ONLY public.artifact_uploads ALTER COLUMN created_at SET (pg_attver=31336528);
 
 
 --
@@ -1390,6 +1446,17 @@ CREATE TABLE public.artifacts (
     CONSTRAINT artifacts_size_check CHECK ((size >= 0)),
     CONSTRAINT artifacts_state_check CHECK ((state = ANY (ARRAY['staging'::text, 'ready'::text])))
 );
+ALTER TABLE ONLY public.artifacts ALTER COLUMN id SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN principal SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN mime_type SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN size SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN backend_key SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN state SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN expires_at SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN created_at SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN storage_backend SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN storage_endpoint SET (pg_attver=31352208);
+ALTER TABLE ONLY public.artifacts ALTER COLUMN storage_bucket SET (pg_attver=31352208);
 
 
 --
@@ -1399,6 +1466,7 @@ CREATE TABLE public.artifacts (
 CREATE TABLE public.content_gc (
     content_id bigint NOT NULL
 );
+ALTER TABLE ONLY public.content_gc ALTER COLUMN content_id SET (pg_attver=34286840);
 
 
 --
@@ -1409,6 +1477,8 @@ CREATE TABLE public.content_scopes (
     id bigint NOT NULL,
     principal text NOT NULL
 );
+ALTER TABLE ONLY public.content_scopes ALTER COLUMN id SET (pg_attver=33729976);
+ALTER TABLE ONLY public.content_scopes ALTER COLUMN principal SET (pg_attver=33729976);
 
 
 --
@@ -1426,7 +1496,13 @@ CREATE TABLE public.contents (
     CONSTRAINT contents_format_check CHECK ((format = ANY (ARRAY[0, 1]))),
     CONSTRAINT contents_raw_len_check CHECK ((raw_len >= 0))
 );
+ALTER TABLE ONLY public.contents ALTER COLUMN id SET (pg_attver=34256640);
+ALTER TABLE ONLY public.contents ALTER COLUMN scope_id SET (pg_attver=34256640);
+ALTER TABLE ONLY public.contents ALTER COLUMN digest SET (pg_attver=34256640);
+ALTER TABLE ONLY public.contents ALTER COLUMN format SET (pg_attver=34256640);
+ALTER TABLE ONLY public.contents ALTER COLUMN raw_len SET (pg_attver=34256640);
 ALTER TABLE ONLY public.contents ALTER COLUMN body SET STORAGE EXTERNAL;
+ALTER TABLE ONLY public.contents ALTER COLUMN body SET (pg_attver=34256640);
 
 
 --
@@ -1456,6 +1532,13 @@ CREATE TABLE public.credential_custom_rules (
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN id SET (pg_attver=32513736);
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN name SET (pg_attver=32513736);
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN description SET (pg_attver=32513736);
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN enabled SET (pg_attver=32513736);
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN spec SET (pg_attver=32513736);
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN created_at SET (pg_attver=32513736);
+ALTER TABLE ONLY public.credential_custom_rules ALTER COLUMN updated_at SET (pg_attver=32513736);
 
 
 --
@@ -1471,6 +1554,13 @@ CREATE TABLE public.credential_mapping_reuses (
     latest_input boolean DEFAULT false NOT NULL,
     last_reused_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN marker SET (pg_attver=34010128);
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN interaction_id SET (pg_attver=34010128);
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN run_id SET (pg_attver=34010128);
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN source_type SET (pg_attver=34010128);
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN tool_id SET (pg_attver=34010128);
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN latest_input SET (pg_attver=34010128);
+ALTER TABLE ONLY public.credential_mapping_reuses ALTER COLUMN last_reused_at SET (pg_attver=34010128);
 
 
 --
@@ -1483,6 +1573,9 @@ CREATE TABLE public.history_marker_contents (
     content_id bigint NOT NULL,
     CONSTRAINT history_marker_contents_ordinal_check CHECK ((ordinal >= 0))
 );
+ALTER TABLE ONLY public.history_marker_contents ALTER COLUMN reference SET (pg_attver=34324576);
+ALTER TABLE ONLY public.history_marker_contents ALTER COLUMN ordinal SET (pg_attver=34324576);
+ALTER TABLE ONLY public.history_marker_contents ALTER COLUMN content_id SET (pg_attver=34324576);
 
 
 --
@@ -1492,6 +1585,7 @@ CREATE TABLE public.history_marker_contents (
 CREATE TABLE public.history_marker_gc (
     reference text NOT NULL
 );
+ALTER TABLE ONLY public.history_marker_gc ALTER COLUMN reference SET (pg_attver=34551544);
 
 
 --
@@ -1519,7 +1613,22 @@ CREATE TABLE public.history_markers (
     CONSTRAINT history_markers_kind_check CHECK ((kind = ANY (ARRAY['platform'::text, 'thinking'::text]))),
     CONSTRAINT history_markers_pending_until_check CHECK (((published_at IS NULL) OR (pending_until IS NULL)))
 );
+ALTER TABLE ONLY public.history_markers ALTER COLUMN reference SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN principal SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN kind SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN activity SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN tool_id SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN call_payload SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN execution_state SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN execution_owner SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN lease_expires_at SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN execution_deadline SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN published_at SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN created_at SET (pg_attver=31387120);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN updated_at SET (pg_attver=31387120);
 ALTER TABLE ONLY public.history_markers ALTER COLUMN segment_payload SET STORAGE EXTERNAL;
+ALTER TABLE ONLY public.history_markers ALTER COLUMN segment_payload SET (pg_attver=34407152);
+ALTER TABLE ONLY public.history_markers ALTER COLUMN pending_until SET (pg_attver=34473280);
 
 
 --
@@ -1530,6 +1639,8 @@ CREATE TABLE public.history_retention_watermarks (
     name text NOT NULL,
     "position" bigint NOT NULL
 );
+ALTER TABLE ONLY public.history_retention_watermarks ALTER COLUMN name SET (pg_attver=34601016);
+ALTER TABLE ONLY public.history_retention_watermarks ALTER COLUMN "position" SET (pg_attver=34601016);
 
 
 --
@@ -1541,6 +1652,9 @@ CREATE TABLE public.history_search_progress (
     last_event_sequence bigint DEFAULT 0 NOT NULL,
     indexed_terminal boolean DEFAULT false NOT NULL
 );
+ALTER TABLE ONLY public.history_search_progress ALTER COLUMN interaction_id SET (pg_attver=35147432);
+ALTER TABLE ONLY public.history_search_progress ALTER COLUMN last_event_sequence SET (pg_attver=35147432);
+ALTER TABLE ONLY public.history_search_progress ALTER COLUMN indexed_terminal SET (pg_attver=35147432);
 
 
 --
@@ -1560,6 +1674,17 @@ CREATE TABLE public.history_search_segments (
     byte_end bigint NOT NULL,
     tokens tsvector NOT NULL
 );
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN id SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN interaction_id SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN principal SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN root_id SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN event_sequence SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN segment_ordinal SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN role_weight SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN occurred_at SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN byte_start SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN byte_end SET (pg_attver=35118056);
+ALTER TABLE ONLY public.history_search_segments ALTER COLUMN tokens SET (pg_attver=35118056);
 
 
 --
@@ -1610,6 +1735,33 @@ CREATE TABLE public.inference_run_observations (
     superseded_by text,
     CONSTRAINT inference_run_background_active_contract CHECK ((background_active >= 0))
 );
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN id SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN interaction_id SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN parent_run_id SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN generation_node_id SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN generation_parent_id SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN ingress_protocol SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN route_id SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN model_display_name SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN status SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN terminal_reason SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN user_interrupted SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN background_active SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN debug_enabled SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN client_output_committed SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN started_at SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN last_active_at SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN finished_at SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN last_event_sequence SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN failure_json SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN request_model SET (pg_attver=31415008);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN delivery_completed_at SET (pg_attver=32644384);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN rejected_before_target SET (pg_attver=33202144);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN inferred_retry SET (pg_attver=34712560);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN grouping_reason SET (pg_attver=34713832);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN diagnostic_source_run_id SET (pg_attver=34714280);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN has_new_user SET (pg_attver=34714736);
+ALTER TABLE ONLY public.inference_run_observations ALTER COLUMN superseded_by SET (pg_attver=34716008);
 
 
 --
@@ -1634,6 +1786,22 @@ CREATE TABLE public.interaction_observations (
     last_event_sequence bigint DEFAULT 0 NOT NULL,
     input_sequence bigint
 );
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN principal SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN api_key_id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN api_key_name SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN generation_root_id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN parent_interaction_id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN root_id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN root_run_id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN first_route_id SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN first_model_display_name SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN status SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN started_at SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN last_active_at SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN observation_gap SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN last_event_sequence SET (pg_attver=31435400);
+ALTER TABLE ONLY public.interaction_observations ALTER COLUMN input_sequence SET (pg_attver=34712064);
 
 
 --
@@ -1646,6 +1814,10 @@ CREATE TABLE public.media_derivatives (
     derivative_artifact_id text NOT NULL,
     created_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.media_derivatives ALTER COLUMN principal SET (pg_attver=31455192);
+ALTER TABLE ONLY public.media_derivatives ALTER COLUMN source_artifact_id SET (pg_attver=31455192);
+ALTER TABLE ONLY public.media_derivatives ALTER COLUMN derivative_artifact_id SET (pg_attver=31455192);
+ALTER TABLE ONLY public.media_derivatives ALTER COLUMN created_at SET (pg_attver=31455192);
 
 
 --
@@ -1671,6 +1843,17 @@ CREATE TABLE public.model_backends (
     CONSTRAINT model_backends_retry_contract CHECK ((target_retry_budget >= 0)),
     CONSTRAINT model_backends_thinking_map_contract CHECK ((jsonb_typeof(thinking_level_map) = 'array'::text))
 );
+ALTER TABLE ONLY public.model_backends ALTER COLUMN id SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN model_id SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN provider_id SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN model SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN priority SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN created_at SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN thinking_level_map SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN first_token_timeout_ms SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN target_retry_budget SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN target_cooldown_ms SET (pg_attver=31465768);
+ALTER TABLE ONLY public.model_backends ALTER COLUMN enabled SET (pg_attver=31465768);
 
 
 --
@@ -1683,6 +1866,10 @@ CREATE TABLE public.model_change_items (
     model_id_key text NOT NULL,
     change_type text NOT NULL
 );
+ALTER TABLE ONLY public.model_change_items ALTER COLUMN record_id SET (pg_attver=33034960);
+ALTER TABLE ONLY public.model_change_items ALTER COLUMN name_key SET (pg_attver=33034960);
+ALTER TABLE ONLY public.model_change_items ALTER COLUMN model_id_key SET (pg_attver=33034960);
+ALTER TABLE ONLY public.model_change_items ALTER COLUMN change_type SET (pg_attver=33034960);
 
 
 --
@@ -1696,6 +1883,11 @@ CREATE TABLE public.model_changes (
     source text NOT NULL,
     record_json text NOT NULL
 );
+ALTER TABLE ONLY public.model_changes ALTER COLUMN id SET (pg_attver=33016432);
+ALTER TABLE ONLY public.model_changes ALTER COLUMN provider_id SET (pg_attver=33016432);
+ALTER TABLE ONLY public.model_changes ALTER COLUMN checked_at SET (pg_attver=33016432);
+ALTER TABLE ONLY public.model_changes ALTER COLUMN source SET (pg_attver=33016432);
+ALTER TABLE ONLY public.model_changes ALTER COLUMN record_json SET (pg_attver=33016432);
 
 
 --
@@ -1717,6 +1909,18 @@ CREATE TABLE public.model_turn_observations (
     estimated_input_tokens bigint,
     CONSTRAINT model_turn_observations_estimated_input_tokens_check CHECK ((estimated_input_tokens >= 0))
 );
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN id SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN run_id SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN interaction_id SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN route_id SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN model_display_name SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN api_key_id SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN api_key_name SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN status SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN started_at SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN finished_at SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN last_event_sequence SET (pg_attver=31488192);
+ALTER TABLE ONLY public.model_turn_observations ALTER COLUMN estimated_input_tokens SET (pg_attver=32503832);
 
 
 --
@@ -1739,6 +1943,16 @@ CREATE TABLE public.models (
     CONSTRAINT models_default_thinking_level_contract CHECK (((default_thinking_level IS NULL) OR (default_thinking_level = ANY (ARRAY['off'::text, 'minimal'::text, 'low'::text, 'medium'::text, 'high'::text, 'xhigh'::text, 'max'::text])))),
     CONSTRAINT models_output_modality_check CHECK (((output_modality IS NULL) OR (output_modality = ANY (ARRAY['text'::text, 'image'::text]))))
 );
+ALTER TABLE ONLY public.models ALTER COLUMN id SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN model_id SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN balance SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN is_enabled SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN priority SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN created_at SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN display_name SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN default_thinking_level SET (pg_attver=31506352);
+ALTER TABLE ONLY public.models ALTER COLUMN output_modality SET (pg_attver=33074656);
+ALTER TABLE ONLY public.models ALTER COLUMN billing_json SET (pg_attver=33455208);
 
 
 --
@@ -1750,6 +1964,9 @@ CREATE TABLE public.native_compaction_atomic_checkpoints (
     principal text NOT NULL,
     checkpoint_id text NOT NULL
 );
+ALTER TABLE ONLY public.native_compaction_atomic_checkpoints ALTER COLUMN record_id SET (pg_attver=34911032);
+ALTER TABLE ONLY public.native_compaction_atomic_checkpoints ALTER COLUMN principal SET (pg_attver=34911032);
+ALTER TABLE ONLY public.native_compaction_atomic_checkpoints ALTER COLUMN checkpoint_id SET (pg_attver=34911032);
 
 
 --
@@ -1759,6 +1976,7 @@ CREATE TABLE public.native_compaction_atomic_checkpoints (
 CREATE TABLE public.native_compaction_gc (
     record_id text NOT NULL
 );
+ALTER TABLE ONLY public.native_compaction_gc ALTER COLUMN record_id SET (pg_attver=34584560);
 
 
 --
@@ -1770,6 +1988,8 @@ CREATE TABLE public.native_compaction_sources (
     source_id text NOT NULL,
     CONSTRAINT native_compaction_sources_check CHECK ((record_id <> source_id))
 );
+ALTER TABLE ONLY public.native_compaction_sources ALTER COLUMN record_id SET (pg_attver=31520800);
+ALTER TABLE ONLY public.native_compaction_sources ALTER COLUMN source_id SET (pg_attver=31520800);
 
 
 --
@@ -1783,6 +2003,11 @@ CREATE TABLE public.native_compaction_states (
     fingerprint text NOT NULL,
     state_payload text NOT NULL
 );
+ALTER TABLE ONLY public.native_compaction_states ALTER COLUMN record_id SET (pg_attver=31532656);
+ALTER TABLE ONLY public.native_compaction_states ALTER COLUMN principal SET (pg_attver=31532656);
+ALTER TABLE ONLY public.native_compaction_states ALTER COLUMN native_identity SET (pg_attver=31532656);
+ALTER TABLE ONLY public.native_compaction_states ALTER COLUMN fingerprint SET (pg_attver=31532656);
+ALTER TABLE ONLY public.native_compaction_states ALTER COLUMN state_payload SET (pg_attver=31532656);
 
 
 --
@@ -1800,6 +2025,14 @@ CREATE TABLE public.native_compactions (
     confirmed_at bigint,
     CONSTRAINT native_compactions_confirmation_check CHECK (((confirmed_at IS NULL) OR (pending_until IS NULL)))
 );
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN id SET (pg_attver=31544296);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN principal SET (pg_attver=31544296);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN source_generation_id SET (pg_attver=31544296);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN operation_id SET (pg_attver=31544296);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN payload SET (pg_attver=31544296);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN created_at SET (pg_attver=31544296);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN pending_until SET (pg_attver=34474360);
+ALTER TABLE ONLY public.native_compactions ALTER COLUMN confirmed_at SET (pg_attver=34474808);
 
 
 --
@@ -1819,6 +2052,15 @@ CREATE TABLE public.observation_blocks (
     CONSTRAINT observation_blocks_channel_check CHECK ((channel = ANY (ARRAY['thinking'::text, 'visible'::text]))),
     CONSTRAINT observation_blocks_item_ordinal_check CHECK ((item_ordinal >= 0))
 );
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN sequence SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN interaction_id SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN run_id SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN model_turn_id SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN attempt_id SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN item_ordinal SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN channel SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN complete SET (pg_attver=34680552);
+ALTER TABLE ONLY public.observation_blocks ALTER COLUMN envelope SET (pg_attver=34680552);
 
 
 --
@@ -1831,6 +2073,9 @@ CREATE TABLE public.observation_event_contents (
     content_id bigint NOT NULL,
     CONSTRAINT observation_event_contents_ordinal_check CHECK ((ordinal >= 0))
 );
+ALTER TABLE ONLY public.observation_event_contents ALTER COLUMN sequence SET (pg_attver=34357168);
+ALTER TABLE ONLY public.observation_event_contents ALTER COLUMN ordinal SET (pg_attver=34357168);
+ALTER TABLE ONLY public.observation_event_contents ALTER COLUMN content_id SET (pg_attver=34357168);
 
 
 --
@@ -1860,6 +2105,15 @@ CREATE TABLE public.observation_events (
     operation_id text,
     attrs bytea
 );
+ALTER TABLE ONLY public.observation_events ALTER COLUMN sequence SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN occurred_at SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN interaction_id SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN run_id SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN rejection_id SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN kind SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN tool_id SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN operation_id SET (pg_attver=32649056);
+ALTER TABLE ONLY public.observation_events ALTER COLUMN attrs SET (pg_attver=34678416);
 
 
 --
@@ -1873,6 +2127,11 @@ CREATE TABLE public.observation_pending_tools (
     interaction_id text NOT NULL,
     expires_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.observation_pending_tools ALTER COLUMN principal SET (pg_attver=31577720);
+ALTER TABLE ONLY public.observation_pending_tools ALTER COLUMN tool_id SET (pg_attver=31577720);
+ALTER TABLE ONLY public.observation_pending_tools ALTER COLUMN run_id SET (pg_attver=31577720);
+ALTER TABLE ONLY public.observation_pending_tools ALTER COLUMN interaction_id SET (pg_attver=31577720);
+ALTER TABLE ONLY public.observation_pending_tools ALTER COLUMN expires_at SET (pg_attver=31577720);
 
 
 --
@@ -1887,6 +2146,12 @@ CREATE TABLE public.observation_tail_sources (
     generation_node_id text,
     expires_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.observation_tail_sources ALTER COLUMN run_id SET (pg_attver=31588664);
+ALTER TABLE ONLY public.observation_tail_sources ALTER COLUMN interaction_id SET (pg_attver=31588664);
+ALTER TABLE ONLY public.observation_tail_sources ALTER COLUMN principal SET (pg_attver=31588664);
+ALTER TABLE ONLY public.observation_tail_sources ALTER COLUMN last_unit_hash SET (pg_attver=31588664);
+ALTER TABLE ONLY public.observation_tail_sources ALTER COLUMN generation_node_id SET (pg_attver=31588664);
+ALTER TABLE ONLY public.observation_tail_sources ALTER COLUMN expires_at SET (pg_attver=31588664);
 
 
 --
@@ -1901,6 +2166,11 @@ CREATE TABLE public.observation_tool_results (
     content_id bigint NOT NULL,
     CONSTRAINT observation_tool_results_ordinal_check CHECK ((ordinal >= 0))
 );
+ALTER TABLE ONLY public.observation_tool_results ALTER COLUMN sequence SET (pg_attver=34377368);
+ALTER TABLE ONLY public.observation_tool_results ALTER COLUMN ordinal SET (pg_attver=34377368);
+ALTER TABLE ONLY public.observation_tool_results ALTER COLUMN tool_id SET (pg_attver=34377368);
+ALTER TABLE ONLY public.observation_tool_results ALTER COLUMN is_error SET (pg_attver=34377368);
+ALTER TABLE ONLY public.observation_tool_results ALTER COLUMN content_id SET (pg_attver=34377368);
 
 
 --
@@ -1912,6 +2182,8 @@ CREATE TABLE public.prompt_admission_epoch (
     epoch bigint NOT NULL,
     CONSTRAINT prompt_admission_epoch_id_check CHECK ((id = 1))
 );
+ALTER TABLE ONLY public.prompt_admission_epoch ALTER COLUMN id SET (pg_attver=34756472);
+ALTER TABLE ONLY public.prompt_admission_epoch ALTER COLUMN epoch SET (pg_attver=34756472);
 
 
 --
@@ -1947,6 +2219,25 @@ CREATE TABLE public.prompt_admissions (
     CONSTRAINT prompt_admissions_ordinal_check CHECK ((ordinal >= 0)),
     CONSTRAINT prompt_admissions_user_turn_index_check CHECK ((user_turn_index >= 0))
 );
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN id SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN principal SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN parent_id SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN atomic_lineage_created SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN ordinal SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN user_turn_index SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN dialogue_prompt_index SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN history_count SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN prefix_digest SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN controls_digest SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN created_at_ms SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN conversation_id SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN conversation_created_at_ms SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN user_prompt_id SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN user_prompt_created_at_ms SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN logical_turn_id SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN logical_turn_created_at_ms SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN context_window_id SET (pg_attver=34769136);
+ALTER TABLE ONLY public.prompt_admissions ALTER COLUMN context_window_index SET (pg_attver=34769136);
 
 
 --
@@ -1958,6 +2249,9 @@ CREATE TABLE public.provider_allowance_guards (
     allowance_key text NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
+ALTER TABLE ONLY public.provider_allowance_guards ALTER COLUMN provider_id SET (pg_attver=32714680);
+ALTER TABLE ONLY public.provider_allowance_guards ALTER COLUMN allowance_key SET (pg_attver=32714680);
+ALTER TABLE ONLY public.provider_allowance_guards ALTER COLUMN created_at SET (pg_attver=32714680);
 
 
 --
@@ -1977,6 +2271,17 @@ CREATE TABLE public.provider_allowance_samples (
     currency text,
     reset_at bigint
 );
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN id SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN provider_id SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN allowance_key SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN sampled_at SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN used_value SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN remaining_value SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN limit_value SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN used_percent SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN amount_unit SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN currency SET (pg_attver=31599856);
+ALTER TABLE ONLY public.provider_allowance_samples ALTER COLUMN reset_at SET (pg_attver=31599856);
 
 
 --
@@ -1991,6 +2296,12 @@ CREATE TABLE public.provider_allowance_suspensions (
     earliest_reset_at bigint,
     evidence_completed_at bigint NOT NULL
 );
+ALTER TABLE ONLY public.provider_allowance_suspensions ALTER COLUMN provider_id SET (pg_attver=32733280);
+ALTER TABLE ONLY public.provider_allowance_suspensions ALTER COLUMN suspended SET (pg_attver=32733280);
+ALTER TABLE ONLY public.provider_allowance_suspensions ALTER COLUMN suspended_at SET (pg_attver=32733280);
+ALTER TABLE ONLY public.provider_allowance_suspensions ALTER COLUMN triggered_keys SET (pg_attver=32733280);
+ALTER TABLE ONLY public.provider_allowance_suspensions ALTER COLUMN earliest_reset_at SET (pg_attver=32733280);
+ALTER TABLE ONLY public.provider_allowance_suspensions ALTER COLUMN evidence_completed_at SET (pg_attver=32733280);
 
 
 --
@@ -2008,6 +2319,15 @@ CREATE TABLE public.provider_cost_plans (
     price_currency text,
     created_at text NOT NULL
 );
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN id SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN provider_id SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN effective_from SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN basis SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN period SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN price_usd_nanos SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN price_custom_nanos SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN price_currency SET (pg_attver=33461952);
+ALTER TABLE ONLY public.provider_cost_plans ALTER COLUMN created_at SET (pg_attver=33461952);
 
 
 --
@@ -2028,6 +2348,15 @@ CREATE TABLE public.provider_model_cost_rules (
     CONSTRAINT provider_model_cost_rules_rule_kind_check CHECK ((rule_kind = ANY (ARRAY['context_over_200k'::text, 'tier'::text]))),
     CONSTRAINT provider_model_cost_rules_threshold_tokens_check CHECK ((threshold_tokens >= 0))
 );
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN provider_id SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN model_id SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN rule_index SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN rule_kind SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN threshold_tokens SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN cost_input SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN cost_output SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN cost_cache_read SET (pg_attver=31612624);
+ALTER TABLE ONLY public.provider_model_cost_rules ALTER COLUMN cost_cache_write SET (pg_attver=31612624);
 
 
 --
@@ -2040,6 +2369,10 @@ CREATE TABLE public.provider_model_sync_state (
     has_successful_sync boolean DEFAULT false NOT NULL,
     last_check text
 );
+ALTER TABLE ONLY public.provider_model_sync_state ALTER COLUMN provider_id SET (pg_attver=32996280);
+ALTER TABLE ONLY public.provider_model_sync_state ALTER COLUMN automatic_sync SET (pg_attver=32996280);
+ALTER TABLE ONLY public.provider_model_sync_state ALTER COLUMN has_successful_sync SET (pg_attver=32996280);
+ALTER TABLE ONLY public.provider_model_sync_state ALTER COLUMN last_check SET (pg_attver=32996280);
 
 
 --
@@ -2096,6 +2429,27 @@ END)),
     CONSTRAINT provider_models_source_kind_check CHECK ((source_kind = ANY (ARRAY['discovered'::text, 'manual'::text]))),
     CONSTRAINT provider_models_source_metadata_json_check CHECK (((source_metadata_json IS NULL) OR (jsonb_typeof(source_metadata_json) = 'object'::text)))
 );
+ALTER TABLE ONLY public.provider_models ALTER COLUMN provider_id SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN model_id SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN source_kind SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN metadata_source_provider_id SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN presence SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN lifecycle_status SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN selection_policy SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN name SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN family SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN open_weights SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN limit_context SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN cost_input SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN cost_output SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN cost_cache_read SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN cost_cache_write SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN metadata_json SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN revision SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN created_at SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN updated_at SET (pg_attver=31630592);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN snapshot_state SET (pg_attver=32463992);
+ALTER TABLE ONLY public.provider_models ALTER COLUMN source_metadata_json SET (pg_attver=33457808);
 
 
 --
@@ -2121,6 +2475,23 @@ CREATE TABLE public.provider_oauth_credentials (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     connection_id text NOT NULL
 );
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN provider_id SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN driver_key SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN scheme SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN access_token SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN refresh_token SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN expires_at SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN resource_url SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN subject_id SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN scopes SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN meta SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN status SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN status_version SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN last_error SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN last_refresh_at SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN created_at SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN updated_at SET (pg_attver=31667784);
+ALTER TABLE ONLY public.provider_oauth_credentials ALTER COLUMN connection_id SET (pg_attver=31667784);
 
 
 --
@@ -2159,6 +2530,32 @@ CREATE TABLE public.providers (
     CONSTRAINT providers_credential_status_check CHECK ((credential_status = ANY (ARRAY['ok'::text, 'invalid'::text]))),
     CONSTRAINT providers_vendor_options_contract CHECK (((vendor_options IS NOT NULL) AND (jsonb_typeof((vendor_options)::jsonb) = 'object'::text)))
 );
+ALTER TABLE ONLY public.providers ALTER COLUMN id SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN name SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN vendor SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN protocol SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN base_url SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN preset_key SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN channel SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN models_source SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN static_models SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN api_key SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN auth_mode SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN access_token SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN refresh_token SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN expires_at SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN use_proxy SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN last_test_success SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN last_test_at SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN is_enabled SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN priority SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN created_at SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN updated_at SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN adapter_credentials SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN vendor_options SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN credential_status SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN credential_invalid_at SET (pg_attver=31689624);
+ALTER TABLE ONLY public.providers ALTER COLUMN revision SET (pg_attver=31689624);
 
 
 --
@@ -2180,6 +2577,17 @@ CREATE TABLE public.public_tool_executions (
     CONSTRAINT public_tool_executions_check CHECK ((((source_kind = 'mcp'::text) AND (source_run_id IS NULL)) OR ((source_kind = 'inference_run'::text) AND (source_run_id IS NOT NULL)))),
     CONSTRAINT public_tool_executions_source_kind_check CHECK ((source_kind = ANY (ARRAY['mcp'::text, 'inference_run'::text])))
 );
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN id SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN marker_reference SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN principal SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN source_kind SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN source_run_id SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN process_id SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN handed_off_at SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN expires_at SET (pg_attver=33098400);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN retention_ms SET (pg_attver=33162096);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN terminal_at SET (pg_attver=33163520);
+ALTER TABLE ONLY public.public_tool_executions ALTER COLUMN retention_started_at SET (pg_attver=33163960);
 
 
 --
@@ -2189,6 +2597,7 @@ CREATE TABLE public.public_tool_executions (
 CREATE TABLE public.redaction_mapping_gc (
     reference text NOT NULL
 );
+ALTER TABLE ONLY public.redaction_mapping_gc ALTER COLUMN reference SET (pg_attver=34567904);
 
 
 --
@@ -2213,6 +2622,22 @@ CREATE TABLE public.rejected_request_observations (
     started_at bigint,
     duration_ms bigint
 );
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN id SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN occurred_at SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN method SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN path SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN ingress_protocol SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN stage SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN code SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN status_code SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN debug_enabled SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN last_event_sequence SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN failure_json SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN request_model SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN api_key_id SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN api_key_name SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN started_at SET (pg_attver=31721640);
+ALTER TABLE ONLY public.rejected_request_observations ALTER COLUMN duration_ms SET (pg_attver=31721640);
 
 
 --
@@ -2230,6 +2655,14 @@ CREATE TABLE public.reversible_redaction_mappings (
     pending_until bigint,
     CONSTRAINT reversible_redaction_mappings_pending_until_check CHECK (((published_at IS NULL) OR (pending_until IS NULL)))
 );
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN reference SET (pg_attver=31740352);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN principal SET (pg_attver=31740352);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN secret SET (pg_attver=31740352);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN published_at SET (pg_attver=31740352);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN created_at SET (pg_attver=31740352);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN last_detected_at SET (pg_attver=31740352);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN rule_ids SET (pg_attver=33396368);
+ALTER TABLE ONLY public.reversible_redaction_mappings ALTER COLUMN pending_until SET (pg_attver=34473776);
 
 
 --
@@ -2241,6 +2674,9 @@ CREATE TABLE public.settings (
     value text NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE ONLY public.settings ALTER COLUMN name SET (pg_attver=31751768);
+ALTER TABLE ONLY public.settings ALTER COLUMN value SET (pg_attver=31751768);
+ALTER TABLE ONLY public.settings ALTER COLUMN updated_at SET (pg_attver=31751768);
 
 
 --
@@ -2281,6 +2717,38 @@ CREATE TABLE public.target_attempt_observations (
     billing_usd_nanos bigint,
     billing_custom_nanos bigint
 );
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN id SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN model_turn_id SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN run_id SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN interaction_id SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN target_id SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN provider_id SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN provider_name SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN upstream_model SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN protocol SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN status SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN status_code SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN error_code SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN started_at SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN finished_at SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN duration_ms SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN first_token_ms SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN input_tokens SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN output_tokens SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN cache_read_tokens SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN cache_write_tokens SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN reasoning_tokens SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN usage_recorded SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN last_event_sequence SET (pg_attver=31762608);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN error_source SET (pg_attver=33203496);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN error_message SET (pg_attver=33203944);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN upstream_error_code SET (pg_attver=33204392);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN cost_basis SET (pg_attver=33407224);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN cost_usd_nanos SET (pg_attver=33407664);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN cost_custom_nanos SET (pg_attver=33408112);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN billing_state SET (pg_attver=33408560);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN billing_usd_nanos SET (pg_attver=33409080);
+ALTER TABLE ONLY public.target_attempt_observations ALTER COLUMN billing_custom_nanos SET (pg_attver=33409528);
 
 
 --
@@ -2914,6 +3382,50 @@ CREATE TABLE public.stats_usage_buckets (
     recovered_request_count bigint DEFAULT 0 NOT NULL,
     recovery_known_request_count bigint DEFAULT 0 NOT NULL
 );
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN scope SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN identity SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN bucket_start SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN entity_id SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN label SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN request_count SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN input_tokens_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN input_tokens_known SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN output_tokens_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN output_tokens_known SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cache_read_tokens_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cache_read_tokens_known SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cache_write_tokens_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cache_write_tokens_known SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN reasoning_tokens_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN reasoning_tokens_known SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN duration_ms_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN duration_ms_count SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN first_token_ms_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN first_token_ms_count SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN successful_attempt_count SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN successful_output_known_count SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN successful_duration_known_count SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN successful_output_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN successful_duration_sum SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN last_used_at SET (pg_attver=32776336);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN terminal_request_count SET (pg_attver=33205144);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN failed_request_count SET (pg_attver=33206896);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN upstream_request_count SET (pg_attver=33208328);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN upstream_error_count SET (pg_attver=33209760);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cost_custom_nanos SET (pg_attver=33410032);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cost_usd_unconverted_nanos SET (pg_attver=33411456);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cost_known_count SET (pg_attver=33412888);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN cost_unknown_count SET (pg_attver=33414312);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN payg_cost_custom_nanos SET (pg_attver=33415840);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN payg_cost_usd_unconverted_nanos SET (pg_attver=33417272);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN payg_cost_known_count SET (pg_attver=33418712);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN payg_cost_unknown_count SET (pg_attver=33420208);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN billing_custom_nanos SET (pg_attver=33425216);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN billing_usd_unconverted_nanos SET (pg_attver=33426648);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN billing_charged_count SET (pg_attver=33428496);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN billing_unknown_count SET (pg_attver=33429928);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN recovered_request_count SET (pg_attver=34035096);
+ALTER TABLE ONLY public.stats_usage_buckets ALTER COLUMN recovery_known_request_count SET (pg_attver=34036744);
 
 
 --
@@ -2968,6 +3480,52 @@ CREATE TABLE public.stats_usage_checkpoints (
     recovered_request_count bigint DEFAULT 0 NOT NULL,
     recovery_known_request_count bigint DEFAULT 0 NOT NULL
 );
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN source_kind SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN source_id SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN scope SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN identity SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN bucket_start SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN entity_id SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN label SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN request_count SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN input_tokens_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN input_tokens_known SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN output_tokens_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN output_tokens_known SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cache_read_tokens_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cache_read_tokens_known SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cache_write_tokens_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cache_write_tokens_known SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN reasoning_tokens_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN reasoning_tokens_known SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN duration_ms_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN duration_ms_count SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN first_token_ms_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN first_token_ms_count SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN successful_attempt_count SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN successful_output_known_count SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN successful_duration_known_count SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN successful_output_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN successful_duration_sum SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN last_used_at SET (pg_attver=32821728);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN terminal_request_count SET (pg_attver=33211544);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN failed_request_count SET (pg_attver=33213464);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN upstream_request_count SET (pg_attver=33214896);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN upstream_error_count SET (pg_attver=33216328);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cost_custom_nanos SET (pg_attver=33431408);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cost_usd_unconverted_nanos SET (pg_attver=33433048);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cost_known_count SET (pg_attver=33434480);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN cost_unknown_count SET (pg_attver=33435904);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN payg_cost_custom_nanos SET (pg_attver=33437440);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN payg_cost_usd_unconverted_nanos SET (pg_attver=33438872);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN payg_cost_known_count SET (pg_attver=33440336);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN payg_cost_unknown_count SET (pg_attver=33441768);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN billing_custom_nanos SET (pg_attver=33443200);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN billing_usd_unconverted_nanos SET (pg_attver=33444632);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN billing_charged_count SET (pg_attver=33446448);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN billing_unknown_count SET (pg_attver=33447880);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN recovered_request_count SET (pg_attver=34038384);
+ALTER TABLE ONLY public.stats_usage_checkpoints ALTER COLUMN recovery_known_request_count SET (pg_attver=34039816);
 
 
 --
@@ -3336,6 +3894,9 @@ CREATE TABLE public.turn_node_atomic_checkpoints (
     principal text NOT NULL,
     checkpoint_id text NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_atomic_checkpoints ALTER COLUMN node_pk SET (pg_attver=34883384);
+ALTER TABLE ONLY public.turn_node_atomic_checkpoints ALTER COLUMN principal SET (pg_attver=34883384);
+ALTER TABLE ONLY public.turn_node_atomic_checkpoints ALTER COLUMN checkpoint_id SET (pg_attver=34883384);
 
 
 --
@@ -3346,6 +3907,8 @@ CREATE TABLE public.turn_node_compactions (
     node_pk bigint NOT NULL,
     record_id text NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_compactions ALTER COLUMN node_pk SET (pg_attver=34528664);
+ALTER TABLE ONLY public.turn_node_compactions ALTER COLUMN record_id SET (pg_attver=34528664);
 
 
 --
@@ -3359,6 +3922,10 @@ CREATE TABLE public.turn_node_contents (
     content_id bigint NOT NULL,
     CONSTRAINT turn_node_contents_v4_ordinal_check CHECK ((ordinal >= 0))
 );
+ALTER TABLE ONLY public.turn_node_contents ALTER COLUMN node_pk SET (pg_attver=34297672);
+ALTER TABLE ONLY public.turn_node_contents ALTER COLUMN scope_id SET (pg_attver=34297672);
+ALTER TABLE ONLY public.turn_node_contents ALTER COLUMN ordinal SET (pg_attver=34297672);
+ALTER TABLE ONLY public.turn_node_contents ALTER COLUMN content_id SET (pg_attver=34297672);
 
 
 --
@@ -3368,6 +3935,7 @@ CREATE TABLE public.turn_node_contents (
 CREATE TABLE public.turn_node_gc (
     node_pk bigint NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_gc ALTER COLUMN node_pk SET (pg_attver=33889576);
 
 
 --
@@ -3378,6 +3946,8 @@ CREATE TABLE public.turn_node_markers (
     node_pk bigint NOT NULL,
     reference text NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_markers ALTER COLUMN node_pk SET (pg_attver=34477832);
+ALTER TABLE ONLY public.turn_node_markers ALTER COLUMN reference SET (pg_attver=34477832);
 
 
 --
@@ -3388,7 +3958,9 @@ CREATE TABLE public.turn_node_payloads (
     node_pk bigint NOT NULL,
     payload bytea NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_payloads ALTER COLUMN node_pk SET (pg_attver=33800536);
 ALTER TABLE ONLY public.turn_node_payloads ALTER COLUMN payload SET STORAGE EXTERNAL;
+ALTER TABLE ONLY public.turn_node_payloads ALTER COLUMN payload SET (pg_attver=33800536);
 
 
 --
@@ -3399,6 +3971,8 @@ CREATE TABLE public.turn_node_redaction_mappings (
     node_pk bigint NOT NULL,
     reference text NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_redaction_mappings ALTER COLUMN node_pk SET (pg_attver=34505512);
+ALTER TABLE ONLY public.turn_node_redaction_mappings ALTER COLUMN reference SET (pg_attver=34505512);
 
 
 --
@@ -3409,6 +3983,8 @@ CREATE TABLE public.turn_node_retention (
     node_pk bigint NOT NULL,
     deleting boolean DEFAULT false NOT NULL
 );
+ALTER TABLE ONLY public.turn_node_retention ALTER COLUMN node_pk SET (pg_attver=33818208);
+ALTER TABLE ONLY public.turn_node_retention ALTER COLUMN deleting SET (pg_attver=33818208);
 
 
 --
@@ -3433,6 +4009,20 @@ CREATE TABLE public.turn_nodes (
     CONSTRAINT turn_nodes_kind_check CHECK ((kind = ANY (ARRAY['response'::text, 'agent'::text, 'web_search'::text]))),
     CONSTRAINT turn_nodes_payload_version_check CHECK ((payload_version > 0))
 );
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN node_pk SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN id SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN scope_id SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN kind SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN parent_pk SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN payload_version SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN created_at SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_namespace SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_fingerprint SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_item_count SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_completed_at SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_projection_version SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_controls_fingerprint SET (pg_attver=33749104);
+ALTER TABLE ONLY public.turn_nodes ALTER COLUMN prefix_context_fingerprint SET (pg_attver=33749104);
 
 
 --
@@ -3483,6 +4073,20 @@ CREATE TABLE public.vendor_atomic_boundary_facts (
     prefix_hash bytea NOT NULL,
     controls_hash bytea NOT NULL
 );
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN node_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN principal SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN vendor_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN provider_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN provider_fence SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN previous_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN boundary_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN window_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN owner_admission_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN source_admission_id SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN source_item_gap SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN source_unit_gap SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN prefix_hash SET (pg_attver=35013368);
+ALTER TABLE ONLY public.vendor_atomic_boundary_facts ALTER COLUMN controls_hash SET (pg_attver=35013368);
 
 
 --
@@ -3499,6 +4103,14 @@ CREATE TABLE public.vendor_atomic_cells (
     payload bytea,
     journal_head text
 );
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN vendor_id SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN provider_id SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN principal SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN admission_id SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN cell_key SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN revision SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN payload SET (pg_attver=34934872);
+ALTER TABLE ONLY public.vendor_atomic_cells ALTER COLUMN journal_head SET (pg_attver=35033920);
 
 
 --
@@ -3515,6 +4127,14 @@ CREATE TABLE public.vendor_atomic_checkpoint_cells (
     payload bytea,
     journal_head text
 );
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN principal SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN checkpoint_id SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN vendor_id SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN provider_id SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN cell_key SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN revision SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN payload SET (pg_attver=34955072);
+ALTER TABLE ONLY public.vendor_atomic_checkpoint_cells ALTER COLUMN journal_head SET (pg_attver=35034416);
 
 
 --
@@ -3527,8 +4147,16 @@ CREATE TABLE public.vendor_atomic_checkpoints (
     admission_id text NOT NULL,
     lease_id text NOT NULL,
     created_at_ms bigint NOT NULL,
-    boundary_head text
+    boundary_head text,
+    model_turn_cursor text
 );
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN principal SET (pg_attver=34868272);
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN checkpoint_id SET (pg_attver=34868272);
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN admission_id SET (pg_attver=34868272);
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN lease_id SET (pg_attver=34868272);
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN created_at_ms SET (pg_attver=34868272);
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN boundary_head SET (pg_attver=35011152);
+ALTER TABLE ONLY public.vendor_atomic_checkpoints ALTER COLUMN model_turn_cursor SET (pg_attver=35250592);
 
 
 --
@@ -3548,6 +4176,15 @@ CREATE TABLE public.vendor_atomic_journal_nodes (
     CONSTRAINT vendor_atomic_journal_nodes_document_size_check CHECK ((document_size >= 0)),
     CONSTRAINT vendor_atomic_journal_nodes_logical_size_check CHECK ((logical_size >= 0))
 );
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN node_id SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN principal SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN vendor_id SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN provider_id SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN data_epoch SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN previous_id SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN content_id SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN logical_size SET (pg_attver=35044512);
+ALTER TABLE ONLY public.vendor_atomic_journal_nodes ALTER COLUMN document_size SET (pg_attver=35044512);
 
 
 --
@@ -3562,6 +4199,11 @@ CREATE TABLE public.vendor_atomic_journal_pins (
     staged_bytes bigint DEFAULT 0 NOT NULL,
     CONSTRAINT vendor_atomic_journal_pins_staged_bytes_check CHECK ((staged_bytes >= 0))
 );
+ALTER TABLE ONLY public.vendor_atomic_journal_pins ALTER COLUMN principal SET (pg_attver=35070912);
+ALTER TABLE ONLY public.vendor_atomic_journal_pins ALTER COLUMN admission_id SET (pg_attver=35070912);
+ALTER TABLE ONLY public.vendor_atomic_journal_pins ALTER COLUMN lease_id SET (pg_attver=35070912);
+ALTER TABLE ONLY public.vendor_atomic_journal_pins ALTER COLUMN node_id SET (pg_attver=35070912);
+ALTER TABLE ONLY public.vendor_atomic_journal_pins ALTER COLUMN staged_bytes SET (pg_attver=35070912);
 
 
 --
@@ -3574,6 +4216,10 @@ CREATE TABLE public.vendor_atomic_leases (
     lease_id text NOT NULL,
     expires_at_ms bigint NOT NULL
 );
+ALTER TABLE ONLY public.vendor_atomic_leases ALTER COLUMN principal SET (pg_attver=34853216);
+ALTER TABLE ONLY public.vendor_atomic_leases ALTER COLUMN admission_id SET (pg_attver=34853216);
+ALTER TABLE ONLY public.vendor_atomic_leases ALTER COLUMN lease_id SET (pg_attver=34853216);
+ALTER TABLE ONLY public.vendor_atomic_leases ALTER COLUMN expires_at_ms SET (pg_attver=34853216);
 
 
 --
@@ -3585,8 +4231,15 @@ CREATE TABLE public.vendor_atomic_lineages (
     admission_id text NOT NULL,
     created_at_ms bigint NOT NULL,
     history_epoch bigint DEFAULT 0 NOT NULL,
-    boundary_head text
+    boundary_head text,
+    model_turn_cursor text
 );
+ALTER TABLE ONLY public.vendor_atomic_lineages ALTER COLUMN principal SET (pg_attver=34831072);
+ALTER TABLE ONLY public.vendor_atomic_lineages ALTER COLUMN admission_id SET (pg_attver=34831072);
+ALTER TABLE ONLY public.vendor_atomic_lineages ALTER COLUMN created_at_ms SET (pg_attver=34831072);
+ALTER TABLE ONLY public.vendor_atomic_lineages ALTER COLUMN history_epoch SET (pg_attver=35009232);
+ALTER TABLE ONLY public.vendor_atomic_lineages ALTER COLUMN boundary_head SET (pg_attver=35010656);
+ALTER TABLE ONLY public.vendor_atomic_lineages ALTER COLUMN model_turn_cursor SET (pg_attver=35250072);
 
 
 --
@@ -3597,6 +4250,8 @@ CREATE TABLE public.vendor_atomic_provider_fences (
     provider_id text NOT NULL,
     generation bigint NOT NULL
 );
+ALTER TABLE ONLY public.vendor_atomic_provider_fences ALTER COLUMN provider_id SET (pg_attver=34993328);
+ALTER TABLE ONLY public.vendor_atomic_provider_fences ALTER COLUMN generation SET (pg_attver=34993328);
 
 
 --
@@ -3620,6 +4275,8 @@ CREATE TABLE public.vendor_data_recovery (
     data_kind text NOT NULL,
     CONSTRAINT vendor_data_recovery_data_kind_check CHECK ((data_kind = ANY (ARRAY['options'::text, 'credentials'::text, 'models'::text])))
 );
+ALTER TABLE ONLY public.vendor_data_recovery ALTER COLUMN provider_id SET (pg_attver=31822144);
+ALTER TABLE ONLY public.vendor_data_recovery ALTER COLUMN data_kind SET (pg_attver=31822144);
 
 
 --
@@ -3631,6 +4288,9 @@ CREATE TABLE public.vendor_plugin_catalogs (
     release_id text NOT NULL,
     catalog_json text NOT NULL
 );
+ALTER TABLE ONLY public.vendor_plugin_catalogs ALTER COLUMN source_id SET (pg_attver=35205208);
+ALTER TABLE ONLY public.vendor_plugin_catalogs ALTER COLUMN release_id SET (pg_attver=35205208);
+ALTER TABLE ONLY public.vendor_plugin_catalogs ALTER COLUMN catalog_json SET (pg_attver=35205208);
 
 
 --
@@ -3641,6 +4301,8 @@ CREATE TABLE public.vendor_plugin_check_sequence (
     id integer NOT NULL,
     generation bigint NOT NULL
 );
+ALTER TABLE ONLY public.vendor_plugin_check_sequence ALTER COLUMN id SET (pg_attver=35174144);
+ALTER TABLE ONLY public.vendor_plugin_check_sequence ALTER COLUMN generation SET (pg_attver=35174144);
 
 
 --
@@ -3654,6 +4316,11 @@ CREATE TABLE public.vendor_plugin_seen_digests (
     digest text NOT NULL,
     conflict boolean DEFAULT false NOT NULL
 );
+ALTER TABLE ONLY public.vendor_plugin_seen_digests ALTER COLUMN source_id SET (pg_attver=35223240);
+ALTER TABLE ONLY public.vendor_plugin_seen_digests ALTER COLUMN vendor_id SET (pg_attver=35223240);
+ALTER TABLE ONLY public.vendor_plugin_seen_digests ALTER COLUMN version SET (pg_attver=35223240);
+ALTER TABLE ONLY public.vendor_plugin_seen_digests ALTER COLUMN digest SET (pg_attver=35223240);
+ALTER TABLE ONLY public.vendor_plugin_seen_digests ALTER COLUMN conflict SET (pg_attver=35223240);
 
 
 --
@@ -3671,6 +4338,15 @@ CREATE TABLE public.vendor_plugin_sources (
     check_generation bigint DEFAULT 0 NOT NULL,
     incomplete boolean DEFAULT false NOT NULL
 );
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN id SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN source_json SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN repository_id SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN repository SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN fingerprint SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN trust_revision SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN enabled SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN check_generation SET (pg_attver=35181512);
+ALTER TABLE ONLY public.vendor_plugin_sources ALTER COLUMN incomplete SET (pg_attver=35181512);
 
 
 --
@@ -3691,6 +4367,15 @@ CREATE TABLE public.vendor_plugins (
     CONSTRAINT vendor_plugins_revision_check CHECK ((revision > 0)),
     CONSTRAINT vendor_plugins_source_check CHECK ((source = ANY (ARRAY['builtin'::text, 'local'::text, 'marketplace'::text])))
 );
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN vendor_id SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN version SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN source SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN descriptor SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN digest SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN revision SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN data_epoch SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN installed_at SET (pg_attver=31834904);
+ALTER TABLE ONLY public.vendor_plugins ALTER COLUMN origin SET (pg_attver=35169616);
 
 
 --
@@ -3705,6 +4390,11 @@ CREATE TABLE public.vendor_private_state (
     updated_at bigint NOT NULL,
     CONSTRAINT vendor_private_state_payload_check CHECK ((octet_length(payload) <= 262144))
 );
+ALTER TABLE ONLY public.vendor_private_state ALTER COLUMN provider_id SET (pg_attver=31856848);
+ALTER TABLE ONLY public.vendor_private_state ALTER COLUMN vendor_id SET (pg_attver=31856848);
+ALTER TABLE ONLY public.vendor_private_state ALTER COLUMN format_version SET (pg_attver=31856848);
+ALTER TABLE ONLY public.vendor_private_state ALTER COLUMN payload SET (pg_attver=31856848);
+ALTER TABLE ONLY public.vendor_private_state ALTER COLUMN updated_at SET (pg_attver=31856848);
 
 
 --
@@ -3726,6 +4416,16 @@ CREATE TABLE public.web_providers (
     CONSTRAINT web_providers_kind_check CHECK ((kind = ANY (ARRAY['local'::text, 'exa'::text, 'zhipu'::text]))),
     CONSTRAINT web_providers_local_engines_contract CHECK (((kind <> 'local'::text) OR COALESCE((jsonb_typeof(local_engines) = 'object'::text), false)))
 );
+ALTER TABLE ONLY public.web_providers ALTER COLUMN id SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN name SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN kind SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN api_key SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN last_test_success SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN last_test_at SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN created_at SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN updated_at SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN use_proxy SET (pg_attver=31869464);
+ALTER TABLE ONLY public.web_providers ALTER COLUMN local_engines SET (pg_attver=31869464);
 
 
 --

@@ -23,6 +23,7 @@ use stravia_runtime_contract::protocol::{
     ir::{AiErrorKind, AiStreamDelta},
 };
 use stravia_runtime_contract::{CancellationToken, Deadline};
+use stravia_vendor_runtime::host::{HostStateCell, StateError, StateScope, StateSnapshot};
 use stravia_vendor_runtime::{
     HostFailure, HostHttpResponse, HostServices, HostWebSocket, LoadedPlugin, LogLevel,
     OperationScope, RuntimeEvent, VendorRuntime,
@@ -147,7 +148,8 @@ async fn upstream(
                 "agentModelSorts":[{"groups":[{"modelIds":[
                     "account-model", "gemini-pro-agent", "gemini-3.1-pro-low",
                     "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-                    "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low"
+                    "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low",
+                    "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium"
                 ]}]}],
                 "deprecatedModelIds": {"gemini-3.1-pro-high": {"newModelId": "gemini-pro-agent"}},
                 "imageGenerationModelIds": ["gemini-3.1-flash-image", "account-image"],
@@ -159,9 +161,9 @@ async fn upstream(
                 "search-vertex-string":{"displayName":"Vertex string search","apiProvider":"API_PROVIDER_GOOGLE_VERTEX"},
                 "account-model":{"displayName":"Account model","supportsImages":true,"maxTokens":131072},
                 "hidden-model":{"isInternal":true},
-                "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true,"thinkingBudget":-1},
+                "gemini-pro-agent":{"displayName":"Gemini 3.1 Pro (High)","model":"MODEL_PRO_HIGH","supportsThinking":true,"thinkingBudget":-1},
                 "gemini-3.1-pro-high":{"displayName":"Gemini 3.1 Pro (High)","supportsThinking":true},
-                "gemini-3.1-pro-low":{"displayName":"Gemini 3.1 Pro (Low)","supportsThinking":true,"thinkingBudget":1024},
+                "gemini-3.1-pro-low":{"displayName":"Gemini 3.1 Pro (Low)","model":"MODEL_PRO_LOW","supportsThinking":true,"thinkingBudget":1024},
                 "gemini-3.8-flash-high":{"displayName":"Gemini 3.8 Flash (High)","supportsThinking":true,"thinkingLevel":3,"minThinkingBudget":32},
                 "gemini-3.8-flash-medium":{"displayName":"Gemini 3.8 Flash (Medium)","supportsThinking":true,"thinkingLevel":2,"minThinkingBudget":32},
                 "gemini-3.8-flash-low":{"displayName":"Gemini 3.8 Flash (Low)","supportsThinking":true,"thinkingLevel":1,"minThinkingBudget":32},
@@ -169,6 +171,8 @@ async fn upstream(
                 "gemini-4-hydrogen-medium":{"displayName":"Gemini 4 Hydrogen (Medium)","supportsThinking":true,"thinkingLevel":2,"maxTokens":1048576,"maxOutputTokens":262144},
                 "gemini-4-hydrogen-high":{"displayName":"Gemini 4 Hydrogen (High)","supportsThinking":true,"thinkingLevel":3,"maxTokens":1048576,"maxOutputTokens":262144},
                 "gemini-4-hydrogen-xhigh":{"displayName":"Gemini 4 Hydrogen (XHigh)","supportsThinking":true,"thinkingLevel":100,"maxTokens":1048576,"maxOutputTokens":262144},
+                "claude-sonnet-5-5-high":{"displayName":"Claude Sonnet 5.5 (High)","supportsThinking":true,"thinkingLevel":3,"maxOutputTokens":128000},
+                "claude-sonnet-5-5-medium":{"displayName":"Claude Sonnet 5.5 (Medium)","supportsThinking":true,"thinkingLevel":2,"maxOutputTokens":128000},
                 "gemini-3.1-flash-image":{"displayName":"Gemini 3.1 Flash Image"},
                 "account-image":{"displayName":"Account image","supportsImages":true},
                 "gemini-2.5-pro":{"displayName":"Gemini 2.5 Pro"}
@@ -266,10 +270,37 @@ async fn upstream(
     };
     axum::Json(payload).into_response()
 }
+// The wire-contract fixture supplies an isolated operation-bound cell. Durable
+// checkpoint inheritance and fencing are exercised through Core, not this cell.
+struct FixtureCell(Mutex<StateSnapshot>);
+
+#[async_trait]
+impl HostStateCell for FixtureCell {
+    async fn load(&self) -> Result<StateSnapshot, StateError> {
+        Ok(self.0.lock().clone())
+    }
+
+    async fn compare_exchange(
+        &self,
+        revision: u64,
+        payload: Option<Vec<u8>>,
+    ) -> Result<bool, StateError> {
+        let mut state = self.0.lock();
+        if state.revision != revision {
+            return Ok(false);
+        }
+        state.revision += 1;
+        state.payload = payload;
+        Ok(true)
+    }
+}
+
 struct Services {
     root: String,
     client: reqwest::Client,
     state: Mutex<Option<Vec<u8>>>,
+    conversation: Arc<FixtureCell>,
+    fail_conversation: AtomicBool,
     deltas: Mutex<Vec<AiStreamDelta>>,
 }
 #[async_trait]
@@ -342,6 +373,19 @@ impl HostServices for Services {
         *self.state.lock() = Some(bytes);
         Ok(())
     }
+    async fn open_state(
+        &self,
+        scope: StateScope,
+        _key: String,
+    ) -> Result<Arc<dyn HostStateCell>, StateError> {
+        if scope != StateScope::Conversation || self.fail_conversation.load(Ordering::Relaxed) {
+            return Err(StateError::new(
+                "unsupported",
+                "conversation state unavailable",
+            ));
+        }
+        Ok(self.conversation.clone())
+    }
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), HostFailure> {
         if let RuntimeEvent::Delta(delta) = event {
             self.deltas.lock().push(delta);
@@ -371,8 +415,39 @@ async fn run(
     runtime: &VendorRuntime,
     plugin: &LoadedPlugin,
     services: &Arc<Services>,
-    input: OperationInput,
+    mut input: OperationInput,
 ) -> Result<OperationOutput, stravia_vendor_runtime::RuntimeError> {
+    // Each independent wire-shape request is a fresh admitted conversation.
+    if let OperationInput::Infer { provider, .. } = &mut input
+        && !provider.operation_metadata.contains_key("model_turn_id")
+    {
+        *services.conversation.0.lock() = StateSnapshot {
+            revision: 0,
+            payload: None,
+        };
+        for key in [
+            "model_turn_id",
+            "logical_turn_id",
+            "client_conversation_id",
+            "context_window_id",
+        ] {
+            provider
+                .operation_metadata
+                .insert(key.into(), json!(uuid::Uuid::new_v4().to_string()));
+        }
+        provider
+            .operation_metadata
+            .insert("context_window_index".into(), json!(0));
+        provider
+            .operation_metadata
+            .insert("user_prompt_index".into(), json!(1));
+        provider
+            .operation_metadata
+            .insert("model_turn_index".into(), json!(0));
+        provider
+            .operation_metadata
+            .insert("model_turn_mixed_providers".into(), json!(false));
+    }
     let (operation, encoded) = input
         .encode_for_host()
         .map_err(|_| stravia_vendor_runtime::RuntimeError::InvalidOutput)?;
@@ -436,6 +511,127 @@ const IMAGE_POLICY_MESSAGE: &str = "Unable to show the generated image. The imag
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
+async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
+    let fixture = Arc::new(Fixture::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let services = Arc::new(Services {
+        root: format!("http://{}", listener.local_addr().unwrap()),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
+        deltas: Mutex::new(Vec::new()),
+    });
+    let app = Router::new()
+        .fallback(upstream)
+        .with_state(Arc::clone(&fixture));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime
+        .load(&std::fs::read(artifact()).unwrap())
+        .await
+        .unwrap();
+    let mut provider = provider();
+    provider.credentials = BTreeMap::from([
+        ("access_token".into(), json!("test-token")),
+        ("project_id".into(), json!("test-project")),
+    ]);
+    provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+        extensions: BTreeMap::from([(
+            "antigravity".into(),
+            json!({"default":"account-model","variants":[{"id":"account-model","metadata":{"modelProvider":4}}]}),
+        )]),
+        ..Default::default()
+    });
+    for key in [
+        "model_turn_id",
+        "logical_turn_id",
+        "client_conversation_id",
+        "context_window_id",
+    ] {
+        provider
+            .operation_metadata
+            .insert(key.into(), json!(uuid::Uuid::new_v4().to_string()));
+    }
+    provider
+        .operation_metadata
+        .insert("context_window_index".into(), json!(0));
+    provider
+        .operation_metadata
+        .insert("user_prompt_index".into(), json!(1));
+    provider
+        .operation_metadata
+        .insert("model_turn_index".into(), json!(0));
+    provider
+        .operation_metadata
+        .insert("model_turn_mixed_providers".into(), json!(false));
+    let endpoint = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    let request = ProtocolTransform::global()
+        .bind(endpoint, endpoint)
+        .unwrap()
+        .decode_request(json!({"contents":[{"role":"user","parts":[{"text":"first"}]}]}))
+        .unwrap();
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer {
+            provider: provider.clone(),
+            request,
+        },
+    )
+    .await
+    .unwrap();
+    provider.operation_metadata.insert(
+        "model_turn_id".into(),
+        json!(uuid::Uuid::new_v4().to_string()),
+    );
+    provider.operation_metadata.insert(
+        "logical_turn_id".into(),
+        json!(uuid::Uuid::new_v4().to_string()),
+    );
+    provider
+        .operation_metadata
+        .insert("user_prompt_index".into(), json!(2));
+    // One intervening generation was routed to another provider, outside this cell.
+    provider
+        .operation_metadata
+        .insert("model_turn_index".into(), json!(2));
+    provider
+        .operation_metadata
+        .insert("model_turn_mixed_providers".into(), json!(true));
+    let request = ProtocolTransform::global().bind(endpoint, endpoint).unwrap()
+        .decode_request(json!({"contents":[{"role":"user","parts":[{"text":"first"}]},{"role":"user","parts":[{"text":"after other provider"}]}]})).unwrap();
+    run(
+        &runtime,
+        &plugin,
+        &services,
+        OperationInput::Infer { provider, request },
+    )
+    .await
+    .unwrap();
+    let received = fixture.received.lock();
+    let first: Value = serde_json::from_slice(&received[0].2).unwrap();
+    let last: Value = serde_json::from_slice(&received[1].2).unwrap();
+    assert!(
+        first["request"]["labels"]["request_id"]
+            .as_str()
+            .unwrap()
+            .ends_with("-0")
+    );
+    let labels = &last["request"]["labels"];
+    assert!(labels.get("request_id").is_none());
+    assert!(labels.get("last_step_index").is_none());
+    assert_eq!(labels["used_claude_conservative"], "true");
+    assert_eq!(labels["used_non_gemini_model"], "true");
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
 async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
     let fixture = Arc::new(Fixture::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -446,6 +642,11 @@ async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
         root: format!("http://{}", listener.local_addr().unwrap()),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -685,6 +886,11 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
         root: format!("http://{}", listener.local_addr().unwrap()),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
     let server = tokio::spawn(async move {
@@ -916,6 +1122,11 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
         root: format!("http://{}", listener.local_addr().unwrap()),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
     let server = tokio::spawn(async move {
@@ -988,7 +1199,46 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
         let received = fixture.received.lock();
         let envelope: Value = serde_json::from_slice(&received.last().unwrap().2).unwrap();
         assert_eq!(envelope["request"]["contents"], expected);
+        let labels = &envelope["request"]["labels"];
+        assert!(labels.get("request_id").is_none());
+        assert!(labels.get("last_step_index").is_none());
+        assert_eq!(labels["used_claude"], "false");
+        assert_eq!(labels["used_claude_conservative"], "true");
+        assert_eq!(labels["used_non_gemini_model"], "true");
     }
+    fixture
+        .require_call_signature
+        .store(false, Ordering::Relaxed);
+    services.fail_conversation.store(true, Ordering::Relaxed);
+    let mut provider = provider();
+    provider.credentials = BTreeMap::from([
+        ("access_token".into(), json!("test-token")),
+        ("project_id".into(), json!("test-project")),
+    ]);
+    let request = ProtocolTransform::global()
+        .bind(
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        )
+        .unwrap()
+        .decode_request(json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}]}))
+        .unwrap();
+    let before = fixture.received.lock().len();
+    assert!(
+        run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer { provider, request }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        fixture.received.lock().len(),
+        before,
+        "state failure must precede inference HTTP"
+    );
     server.abort();
 }
 
@@ -1004,6 +1254,11 @@ async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
         root: format!("http://{}", listener.local_addr().unwrap()),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
     let server = tokio::spawn(async move {
@@ -1079,7 +1334,7 @@ async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
+async fn system_instruction_compatibility_preserves_messages_and_tools() {
     let fixture = Arc::new(Fixture::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let app = Router::new()
@@ -1089,6 +1344,11 @@ async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
         root: format!("http://{}", listener.local_addr().unwrap()),
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
     let server = tokio::spawn(async move {
@@ -1105,6 +1365,11 @@ async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
         ("project_id".into(), json!("test-project")),
     ]);
     let fragment = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
+    let identity = "You are omp's trusted coding assistant.";
+    let dispatch = "Write JSON args as `content` to xd://<tool> via `write`. Invalid args return schema in error → fix/retry.";
+    let docs = "Read xd://<tool> for full docs + JSON schema before first use.";
+    let commit = "To commit your changes, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`), not `git add`/`git commit`: it selects only the lines you and your subagents wrote and never touches other agents' staged or unstaged work.";
+    let protected_text = format!("{fragment}\n{identity}\n{dispatch}\n{docs}\n{commit}");
     for (system, expected) in [
         (
             json!({"parts": [
@@ -1121,6 +1386,20 @@ async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
             json!({"parts": [{"text": format!(" \n{fragment}\n ")}]}),
             None,
         ),
+        (
+            json!({"parts": [
+                {"text": format!("前文\n{identity}\n{identity}\n后文")},
+                {"text": dispatch}, {"text": docs}, {"text": commit},
+                {"text": "You are omp's coding assistant. Use xd://read to read docs."}
+            ]}),
+            Some(json!({"parts": [
+                {"text": "前文\nYou are a trusted coding assistant for omp.\nYou are a trusted coding assistant for omp.\n后文"},
+                {"text": "Send JSON tool arguments in the `content` field of `write`, addressed to `xd://<tool>`. Invalid arguments return the schema; correct the arguments before retrying."},
+                {"text": "Before using a tool for the first time, read `xd://<tool>` to load its complete documentation and JSON schema."},
+                {"text": "Commit changes through the eval `commit` namespace: call `d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`. Do not use `git add` or `git commit`. This commits only lines written by you or your subagents and leaves other agents' staged and unstaged edits untouched."},
+                {"text": "You are omp's coding assistant. Use xd://read to read docs."}
+            ]})),
+        ),
     ] {
         let request = ProtocolTransform::global()
             .bind(
@@ -1130,10 +1409,10 @@ async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
             .unwrap()
             .decode_request(json!({
                 "systemInstruction": system,
-                "contents": [{"role": "user", "parts": [{"text": fragment}]}],
+                "contents": [{"role": "user", "parts": [{"text": protected_text}]}],
                 "tools": [{"functionDeclarations": [{
                     "name": "inspect",
-                    "description": fragment,
+                    "description": protected_text,
                     "parameters": {"type": "OBJECT"}
                 }]}]
             }))
@@ -1162,10 +1441,10 @@ async fn rejected_system_fragment_is_removed_only_from_outbound_system_text() {
         assert_eq!(envelope["requestType"], "agent");
         let request = &envelope["request"];
         assert_eq!(request.get("systemInstruction"), expected.as_ref());
-        assert_eq!(request["contents"][0]["parts"][0]["text"], fragment);
+        assert_eq!(request["contents"][0]["parts"][0]["text"], protected_text);
         assert_eq!(
             request["tools"][0]["functionDeclarations"][0]["description"],
-            fragment
+            protected_text
         );
     }
     server.abort();
@@ -1187,6 +1466,11 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         root,
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         state: Mutex::new(None),
+        conversation: Arc::new(FixtureCell(Mutex::new(StateSnapshot {
+            revision: 0,
+            payload: None,
+        }))),
+        fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
     let runtime = VendorRuntime::new().unwrap();
@@ -1311,9 +1595,10 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     let endpoint = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let request = ProtocolTransform::global().bind(endpoint,endpoint).unwrap().decode_request(json!({
         "contents":[{"role":"user","parts":[{"text":"Run read","future":"strip"}],"foreign":"strip"}],
-        "tools":[{"functionDeclarations":[{"name":"read","parameters":{"type":"OBJECT","properties":{"metadata":{"type":"OBJECT","properties":{"seed":{"type":"INTEGER"}}}},"foreign":"strip"},"strict":true}]}],
+        "tools":[{"functionDeclarations":[{"name":"read","parameters":{"type":"OBJECT","properties":{"metadata":{"type":"OBJECT","properties":{"seed":{"type":"INTEGER"}}}},"foreign":"strip"},"strict":true},{"name":"list","description":"List entries","parameters":{"type":"OBJECT"}}]},{"googleSearch":{}}],
         "generationConfig":{"temperature":0.5,"seed":42,"foreign":"strip","thinkingConfig":{"thinkingBudget":2048,"foreign":"strip"}},
-        "cachedContent":"strip", "foreign":"strip"
+        "cachedContent":"strip", "foreign":"strip",
+        "labels":{"request_id":"client-supplied","model_enum":"client-model","trajectory_id":"client-trajectory"}
     })).unwrap();
     let OperationOutput::Infer(output) = run(
         &runtime,
@@ -1347,6 +1632,23 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             Some(0)
         );
     }
+    let assert_read_list_groups = |request: &Value| {
+        let groups: Vec<Vec<&str>> = request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("functionDeclarations"))
+            .map(|declarations| {
+                declarations
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|decl| decl["name"].as_str().unwrap())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(groups, [["read"], ["list"]]);
+    };
     let call = output
         .items
         .iter()
@@ -1377,6 +1679,10 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         assert!(!headers.contains_key("x-goog-api-client"));
         assert_eq!(headers["transfer-encoding"], "chunked");
         assert_eq!(headers["accept-encoding"], "gzip");
+        assert_eq!(
+            headers["user-agent"],
+            "antigravity/cli/1.5.11 (aidev_client; os_type=linux; arch=amd64; cl=1024248524; auth_method=consumer)"
+        );
         let body: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(body["project"], "test-project");
         assert_eq!(body["model"], "account-model");
@@ -1388,7 +1694,30 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         let request_id = body["requestId"].as_str().unwrap();
         let native_id = uuid::Uuid::parse_str(request_id.strip_prefix("agent/").unwrap()).unwrap();
         assert_eq!(native_id.get_version_num(), 4);
+        let labels = &body["request"]["labels"];
+        let cascade = labels["cascade_id"].as_str().unwrap();
+        uuid::Uuid::parse_str(cascade).unwrap();
+        let trajectory = labels["trajectory_id"].as_str().unwrap();
+        uuid::Uuid::parse_str(trajectory).unwrap();
+        assert_ne!(trajectory, cascade);
+        assert_eq!(
+            labels,
+            &json!({
+                "request_id": format!("{trajectory}-0"),
+                "cascade_id": cascade, "root_cascade_id": cascade, "trajectory_id": trajectory,
+                "last_step_index": "0", "used_claude": "false",
+                "used_claude_conservative": "true", "used_non_gemini_model": "true"
+            })
+        );
         assert!(body["request"].get("cachedContent").is_none());
+        assert_read_list_groups(&body["request"]);
+        let tools = body["request"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.get("googleSearch") == Some(&json!({})))
+        );
         assert!(body["request"]["generationConfig"].get("seed").is_none());
         for pointer in [
             "/request/foreign",
@@ -1454,7 +1783,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
                 "type":"object","additionalProperties":false,
                 "$defs":{"Seed":{"type":["integer","null"],"default":7}},
                 "properties":{"metadata":{"type":"object","properties":{"seed":{"$ref":"#/$defs/Seed"}}}}
-            }}}],
+            }}},{"type":"function","function":{"name":"list","parameters":{"type":"object"}}}],
             "tool_choice":{"type":"function","function":{"name":"read"}},
             "response_format":{"type":"json_schema","json_schema":{"name":"reply","strict":true,
                 "schema":{"type":"object","additionalProperties":false,
@@ -1488,6 +1817,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             body["request"]["generationConfig"]["stopSequences"],
             json!(["END"])
         );
+        assert_read_list_groups(&body["request"]);
         assert_eq!(body["request"]["generationConfig"]["maxOutputTokens"], 128);
         assert_eq!(body["request"]["generationConfig"]["temperature"], 0.5);
         assert_eq!(
@@ -1600,6 +1930,13 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             true,
         ),
         ("gemini-4-hydrogen", None, "gemini-4-hydrogen-medium", true),
+        ("claude-sonnet-5-5", None, "claude-sonnet-5-5-medium", true),
+        (
+            "claude-sonnet-5-5",
+            Some("medium"),
+            "claude-sonnet-5-5-medium",
+            true,
+        ),
     ] {
         let model = catalog
             .models
@@ -1654,11 +1991,29 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             .unwrap();
         let envelope: Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(envelope["model"], expected);
+        let expected_enum = match expected {
+            "gemini-pro-agent" => Some("MODEL_PRO_HIGH"),
+            "gemini-3.1-pro-low" => Some("MODEL_PRO_LOW"),
+            _ => None,
+        };
+        assert_eq!(
+            envelope
+                .pointer("/request/labels/model_enum")
+                .and_then(Value::as_str),
+            expected_enum
+        );
         assert_eq!(
             envelope.pointer("/request/generationConfig/thinkingConfig/includeThoughts"),
             Some(&serde_json::json!(summary))
         );
-        if family == "gemini-4-hydrogen" {
+        if family == "claude-sonnet-5-5" {
+            let generation = &envelope["request"]["generationConfig"];
+            assert_eq!(generation["maxOutputTokens"], 128000);
+            assert_eq!(
+                generation["thinkingConfig"],
+                json!({"thinkingLevel":"MEDIUM", "includeThoughts":true})
+            );
+        } else if family == "gemini-4-hydrogen" {
             assert_eq!(
                 model.metadata["reasoning_efforts"],
                 json!(["low", "medium", "high", "xhigh"])
@@ -1881,8 +2236,15 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             stravia_runtime_contract::thinking::ThinkingLevel::from_wire(level).unwrap()
         });
         selected_request.reasoning.target_control = control;
-        selected_request.reasoning.summary =
-            (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None);
+        selected_request.reasoning.summary = if matches!(
+            selected_request.reasoning.target_control,
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
+        ) {
+            // 客户端即使索取摘要，也不能反转 Target 的显式禁用。
+            Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::Auto)
+        } else {
+            (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None)
+        };
         let OperationOutput::Infer(_) = run(
             &runtime,
             &plugin,
@@ -2090,6 +2452,13 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     assert!(
         matches!(&error, stravia_vendor_runtime::RuntimeError::Plugin { kind, .. } if kind.model_error_kind()==Some(AiErrorKind::RateLimitError))
     );
+    let received = fixture.received.lock();
+    let failed_request: Value = serde_json::from_slice(&received.last().unwrap().2).unwrap();
+    let correlation_id = failed_request["request"]["labels"]["request_id"]
+        .as_str()
+        .unwrap();
+    assert!(error.diagnostic_message().unwrap().contains(correlation_id));
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(9)));
     println!(
         "Antigravity Wasm + loopback HTTP: OAuth PKCE/state/manual exchange/refresh; async project; Agent-only families; default/low/medium/high request IDs; unsupported effort rejected before HTTP; shared quota 30%; strict wire filter; SSE text/tool signature; truncated/429 errors: OK"
     );

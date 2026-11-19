@@ -1646,6 +1646,8 @@
   "allowances_label_five_hour": "5-hour window",
   "allowances_label_weekly": "Weekly window",
   "allowances_label_daily": "Daily window",
+  "allowances_label_trial": "Free trial",
+  "allowances_label_bonus": "Bonus",
   "allowances_label_monthly": "Monthly window",
   "allowances_label_billing_cycle": "Billing cycle",
   "allowances_label_balance": "Account balance",

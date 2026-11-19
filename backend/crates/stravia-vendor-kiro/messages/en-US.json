@@ -1,0 +1,15 @@
+{
+  "channel_google": "Google account",
+  "channel_google_description": "Sign in with Google on Kiro’s verification page to authorize this device.",
+  "channel_github": "GitHub account",
+  "channel_github_description": "Sign in with GitHub on Kiro’s verification page to authorize this device.",
+  "channel_builder_id": "AWS Builder ID",
+  "channel_builder_id_description": "Authorize this device with your personal AWS Builder ID.",
+  "channel_identity_center": "AWS IAM Identity Center",
+  "channel_identity_center_description": "Authorize this device through your organization’s AWS access portal.",
+  "authentication": "Authentication",
+  "start_url": "Start URL",
+  "start_url_description": "Enter the URL of your organization’s AWS access portal, such as https://example.awsapps.com/start.",
+  "region": "AWS region",
+  "region_description": "Enter the region code for your IAM Identity Center instance, such as us-east-1."
+}

@@ -227,15 +227,11 @@ impl PluginStore {
                             );
                         }
                     }
-                    data.atomic_lineage_boundary_heads
-                        .remove(&(principal.clone(), admission.clone()));
-                    data.atomic_lineage_epochs
-                        .remove(&(principal.clone(), admission.clone()));
-                    deleted += u64::from(
-                        data.atomic_lineages
-                            .remove(&(principal, admission))
-                            .is_some(),
-                    );
+                    let lineage = (principal, admission);
+                    data.atomic_lineage_boundary_heads.remove(&lineage);
+                    data.atomic_lineage_cursors.remove(&lineage);
+                    data.atomic_lineage_epochs.remove(&lineage);
+                    deleted += u64::from(data.atomic_lineages.remove(&lineage).is_some());
                 }
                 Ok(deleted)
             }

@@ -107,7 +107,11 @@ async function setup(page: Page): Promise<Fixture> {
                   models: Object.values(fixture.details).map((detail) => ({
                     ...detail,
                     name: detail.metadata.name,
-                    specification: { limit: detail.metadata.limit, modalities: null },
+                    specification: {
+                      limit: detail.metadata.limit,
+                      modalities: null,
+                      reasoning_efforts: detail.metadata.reasoning_efforts,
+                    },
                   })),
                 },
               },
@@ -214,6 +218,39 @@ test('rejected peak pricing retains the model draft and clears the error when di
   await openModel(page, 'Beta Model')
   await expect(nameField(page)).toHaveValue('Beta Model')
   await expect(alert).toHaveCount(0)
+})
+
+test('unregistered reasoning efforts can be selected, saved, and reopened from the model cell', async ({ page }) => {
+  const fixture = await setup(page)
+  fixture.details['model-a'].metadata.reasoning_efforts = null
+  fixture.save = async (route, detail, body) => {
+    const saved = { ...applyChanges(detail, body.changes as Record<string, unknown>), revision: detail.revision + 1 }
+    fixture.details[detail.id] = saved
+    await route.fulfill({ json: { data: saved } })
+  }
+
+  const cell = page.getByRole('button', { name: 'Reasoning effort model-a', exact: true })
+  await expect(cell).toHaveText('Not registered')
+  await cell.click()
+  const picker = page.getByRole('combobox', { name: 'Reasoning effort', exact: true })
+  await expect(picker).toHaveText('Select supported reasoning efforts')
+  await picker.click()
+  const high = page.getByRole('option', { name: 'high', exact: true })
+  await expect(high).toHaveAttribute('aria-checked', 'false')
+  await high.click()
+  await page.getByRole('combobox', { name: 'Search or enter a custom effort', exact: true }).fill('adaptive')
+  await page.getByRole('option', { name: 'Add "adaptive"', exact: true }).click()
+  await page.keyboard.press('Escape')
+  const editor = page.getByRole('dialog')
+  await editor.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(editor).toBeHidden()
+
+  await expect(cell).toHaveText('high, adaptive')
+  expect(fixture.writes.map((write) => write.changes)).toEqual([{ reasoning_efforts: ['high', 'adaptive'] }])
+  await cell.click()
+  await picker.click()
+  await expect(high).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByRole('option', { name: 'adaptive', exact: true })).toHaveAttribute('aria-checked', 'true')
 })
 
 test('cell editors keep optional explanations behind help hints', async ({ page }) => {

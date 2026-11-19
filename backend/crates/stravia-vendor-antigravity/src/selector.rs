@@ -11,6 +11,8 @@ pub(crate) const EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high"
 #[derive(Serialize)]
 pub(crate) struct Variant {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_enum: Option<String>,
     pub slug: String,
     pub effort: Option<String>,
     pub metadata: BTreeMap<String, Value>,
@@ -30,6 +32,9 @@ pub(crate) enum ThinkingControl {
 
 pub(crate) struct Selection<'a> {
     pub id: &'a str,
+    pub model_enum: Option<&'a str>,
+    pub api_provider: Option<&'a Value>,
+    pub model_provider: Option<&'a Value>,
     pub thinking: Option<ThinkingControl>,
     pub max_output_tokens: Option<i32>,
 }
@@ -147,6 +152,16 @@ pub(crate) fn resolve<'a>(
         .transpose()?;
     Ok(Selection {
         id,
+        model_enum: variant
+            .get("model_enum")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty()),
+        api_provider: variant
+            .get("metadata")
+            .and_then(|metadata| metadata.get("apiProvider")),
+        model_provider: variant
+            .get("metadata")
+            .and_then(|metadata| metadata.get("modelProvider")),
         thinking,
         max_output_tokens,
     })
@@ -159,11 +174,14 @@ mod tests {
 
     #[test]
     fn effort_retains_variant_budget_and_explicit_controls_override_metadata() {
-        let table = json!({"default":"flash-high","variants":[
-            {"id":"flash-high","effort":"high","metadata":{"thinkingBudget":-1}},
-            {"id":"flash-medium","effort":"medium","metadata":{"thinkingBudget":4000}}
+        let table = json!({"default":"opaque-high","variants":[
+            {"id":"opaque-high","effort":"high","metadata":{"thinkingBudget":-1,"apiProvider":26,"modelProvider":4}},
+            {"id":"opaque-medium","effort":"medium","metadata":{"thinkingBudget":4000,"apiProvider":"API_PROVIDER_ANTHROPIC_VERTEX","modelProvider":"MODEL_PROVIDER_GOOGLE"}}
         ]});
-        for (effort, id, budget) in [("medium", "flash-medium", 4000), ("high", "flash-high", -1)] {
+        for (effort, id, budget, api_provider, model_provider) in [
+            ("medium", "opaque-medium", 4000, json!("API_PROVIDER_ANTHROPIC_VERTEX"), json!("MODEL_PROVIDER_GOOGLE")),
+            ("high", "opaque-high", -1, json!(26), json!(4)),
+        ] {
             let selection = resolve(
                 &table,
                 Some(&TargetThinkingControl::Effort {
@@ -173,6 +191,8 @@ mod tests {
             .unwrap();
             assert_eq!(selection.id, id);
             assert_eq!(selection.thinking, Some(ThinkingControl::Budget(budget)));
+            assert_eq!(selection.api_provider, Some(&api_provider));
+            assert_eq!(selection.model_provider, Some(&model_provider));
         }
         for budget in [json!(null), json!("4000"), json!(-2), json!(2147483648_i64)] {
             let mut invalid_table = table.clone();
@@ -197,7 +217,10 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(resolve(&missing, None).unwrap().thinking, None);
+        let legacy = resolve(&missing, None).unwrap();
+        assert_eq!(legacy.thinking, None);
+        assert_eq!(legacy.api_provider, None);
+        assert_eq!(legacy.model_provider, None);
         for control in [
             TargetThinkingControl::Budget { value: 2048 },
             TargetThinkingControl::Disabled,

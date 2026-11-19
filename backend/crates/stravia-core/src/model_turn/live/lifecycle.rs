@@ -270,6 +270,7 @@ impl Operation<'_, '_> {
         context.events = Some(event_tx);
         context.observer = prepared.observer.clone();
         context.model_turn_id = Some(prepared.model_turn_id.clone());
+        context.model_turn_registration = prepared.model_turn_registration.clone();
         context.attempt_id = Some(attempt.id.clone());
         context.client_headers = prepared.client_headers.clone();
         context.metadata = prepared.metadata.clone();

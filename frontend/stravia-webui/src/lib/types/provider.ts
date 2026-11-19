@@ -142,7 +142,7 @@ export interface ProviderModelLimit {
 export interface ModelSpecification {
   limit?: ProviderModelLimit | null
   modalities?: ProviderModelModalities | null
-  reasoning_efforts?: string[]
+  reasoning_efforts?: string[] | null
 }
 
 export interface ProviderModelPrices {

@@ -9,6 +9,8 @@ use tower::ServiceExt;
 
 #[path = "vendor_command_shape_acceptance_tests.rs"]
 mod command_shape_acceptance_tests;
+#[path = "vendor_kiro_shape_acceptance_tests.rs"]
+mod kiro_shape_acceptance_tests;
 #[path = "vendor_devin_shape_acceptance_tests.rs"]
 mod devin_shape_acceptance_tests;
 

@@ -1,0 +1,15 @@
+{
+  "channel_google": "Google 账号",
+  "channel_google_description": "在 Kiro 验证页面使用 Google 账号登录，授权此设备。",
+  "channel_github": "GitHub 账号",
+  "channel_github_description": "在 Kiro 验证页面使用 GitHub 账号登录，授权此设备。",
+  "channel_builder_id": "AWS Builder ID",
+  "channel_builder_id_description": "使用个人 AWS Builder ID 授权此设备。",
+  "channel_identity_center": "AWS IAM Identity Center",
+  "channel_identity_center_description": "通过组织的 AWS 访问门户授权此设备。",
+  "authentication": "身份验证",
+  "start_url": "起始 URL（Start URL）",
+  "start_url_description": "填写组织的 AWS 访问门户地址，例如 https://example.awsapps.com/start。",
+  "region": "AWS 区域",
+  "region_description": "填写 IAM Identity Center 实例所在的区域代码，例如 us-east-1。"
+}

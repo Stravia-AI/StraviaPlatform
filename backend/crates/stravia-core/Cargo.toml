@@ -119,6 +119,7 @@ url = { workspace = true }
 stable_deref_trait = { workspace = true }
 
 [dev-dependencies]
+crc32fast = { workspace = true }
 reqwest-websocket = { workspace = true }
 tokio-tungstenite-deflate = { workspace = true, features = ["handshake"] }
 sqlx = { workspace = true, features = ["sqlite-deserialize"] }

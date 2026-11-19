@@ -80,7 +80,7 @@ let
     assert status == 200, vendors
     expected_vendors = {
         "base", "openai-codex", "xai-grok", "command-code", "devin",
-        "opencode-free", "claude-code", "antigravity",
+        "opencode-free", "claude-code", "antigravity", "kiro",
     }
     bundled = [v for v in vendors["data"] if v["vendor_id"] in expected_vendors]
     assert len(bundled) == len(expected_vendors), vendors

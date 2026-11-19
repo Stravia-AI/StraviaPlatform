@@ -22,7 +22,7 @@ use super::{
 use crate::Gateway;
 use crate::error::GatewayError;
 use crate::interaction_observation::RunEvent;
-use crate::plugin::execution::PreparedVendorExecution;
+use crate::plugin::execution::{ModelTurnRegistration, PreparedVendorExecution};
 use crate::plugin::{VendorCallContext, VendorExecution, VendorPublicationFence};
 use crate::proxy::security::Security;
 use crate::router::{
@@ -757,6 +757,12 @@ fn execute_inner(
 ) -> impl Future<Output = Result<ModelTurn, ModelTurnError>> + Send {
     // 在构造边界装箱，避免把准备、重试和派发状态逐层嵌入外层 select 的栈帧。
     Box::pin(async move {
+        let registration = input.atomic_conversation.clone().map(|atomic_state| {
+            Arc::new(ModelTurnRegistration::new(
+                model_turn_id.clone(),
+                atomic_state,
+            ))
+        });
         let gateway = &executor.gateway;
         let route = {
             let cache = gateway.model_cache.read().await;
@@ -854,6 +860,7 @@ fn execute_inner(
                     &target,
                     &input,
                     &model_turn_id,
+                    registration.clone(),
                     attempts.current_is_probe(),
                     transport_preference,
                 )
@@ -1175,6 +1182,7 @@ impl Drop for UpstreamLocalWork<'_> {
 
 struct PreparedAttempt {
     model_turn_id: String,
+    model_turn_registration: Option<Arc<ModelTurnRegistration>>,
     authorization: ModelTurnAuthorization,
     route: RouteContext,
     provider_name: String,
@@ -1328,6 +1336,7 @@ async fn prepare_attempt(
     target: &SelectedTarget,
     input: &TurnInput,
     model_turn_id: &str,
+    model_turn_registration: Option<Arc<ModelTurnRegistration>>,
     probe: bool,
     transport_preference: TransportPreference,
 ) -> Result<PreparedAttempt, AttemptFailure> {
@@ -1972,6 +1981,7 @@ async fn prepare_attempt(
 
     Ok(PreparedAttempt {
         model_turn_id: model_turn_id.to_owned(),
+        model_turn_registration,
         authorization: input.authorization,
         route: RouteContext {
             model_id: route.id.to_string(),
