@@ -120,6 +120,114 @@ async fn ambiguous_failed_admissions_reach_ordinary_http_upstream() {
     close_test_gateway(gateway, data_dir).await;
 }
 
+#[tokio::test]
+async fn ambiguous_failed_admissions_preserve_trusted_lifecycle_identity() {
+    type LifecycleSnapshot = (
+        Option<u64>,
+        Option<String>,
+        Option<i64>,
+        Option<uuid::Uuid>,
+        Option<uuid::Uuid>,
+    );
+    struct LifecycleRecordingExecutor {
+        inner: Arc<dyn crate::model_turn::ModelTurnExecutor>,
+        recorded: Arc<parking_lot::Mutex<Vec<LifecycleSnapshot>>>,
+    }
+    #[async_trait]
+    impl crate::model_turn::ModelTurnExecutor for LifecycleRecordingExecutor {
+        async fn execute(
+            &self,
+            input: crate::model_turn::TurnInput,
+        ) -> Result<crate::model_turn::ModelTurn, stravia_runtime_contract::model_turn::ModelTurnError>
+        {
+            self.recorded.lock().push((
+                input.user_prompt_index,
+                input.client_conversation_id.clone(),
+                input.client_conversation_created_at_ms,
+                input.context_window_id,
+                input.logical_turn_id,
+            ));
+            self.inner.execute(input).await
+        }
+    }
+
+    let (base_url, calls) = serve_openai_response(200, openai_response("upstream answer")).await;
+    let data_dir = tempfile::tempdir().unwrap();
+    let gateway = Gateway::builder(crate::config::GatewayConfig {
+        data_dir: data_dir.path().into(),
+        ..Default::default()
+    })
+    .hook(Arc::new(RejectFirstTwoRequests(Arc::new(
+        AtomicUsize::new(0),
+    ))))
+    .build()
+    .await
+    .unwrap();
+    let model = "ambiguous-lifecycle";
+    configure_route(&gateway, model, &[base_url]).await;
+    let headers = authorized_headers(&gateway).await;
+    let recorded = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let executor: Arc<dyn crate::model_turn::ModelTurnExecutor> =
+        Arc::new(LifecycleRecordingExecutor {
+            inner: Arc::clone(&gateway.model_turn),
+            recorded: Arc::clone(&recorded),
+        });
+    let user_item = |text: &str| {
+        let mut item = stravia_runtime_contract::protocol::ir::AiItem::output_text(text);
+        item.role = stravia_runtime_contract::protocol::ir::Role::User;
+        item
+    };
+    for (index, items) in [
+        vec![user_item("one")],
+        vec![user_item("one")],
+        vec![user_item("one"), user_item("two")],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = execute(RunInput {
+            executor: Arc::clone(&executor),
+            gateway: gateway.clone(),
+            headers: headers.clone(),
+            envelope: RawEnvelope::new(
+                Some(serde_json::json!({ "model": model })),
+                HashMap::new(),
+                "POST",
+                "/v1/chat/completions",
+            ),
+            request: AiRequest::new(model, items),
+            ingress: OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            context: RequestContext::new(
+                OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+                std::time::Duration::from_secs(300),
+            ),
+        })
+        .await;
+        if index < 2 {
+            assert_eq!(response.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+            continue;
+        }
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let recorded = recorded.lock();
+    assert_eq!(recorded.len(), 1);
+    let (prompt_index, conversation_id, conversation_created_at_ms, window_id, logical_turn_id) =
+        &recorded[0];
+    assert_eq!(*prompt_index, None);
+    assert!(
+        conversation_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty()),
+        "ambiguous prefix admission must still propagate client_conversation_id"
+    );
+    assert!(conversation_created_at_ms.is_some());
+    assert!(window_id.is_some());
+    assert!(logical_turn_id.is_some());
+    drop(recorded);
+    close_test_gateway(gateway, data_dir).await;
+}
+
 async fn assert_rpm_rejection(response: axum::response::Response, retry_after: u64) {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(

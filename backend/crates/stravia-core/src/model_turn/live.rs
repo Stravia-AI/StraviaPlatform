@@ -2998,7 +2998,8 @@ fn classify_vendor_kind(
         ErrorKind::Invalid => AttemptFailure::terminal(
             "vendor_request_invalid",
             "Vendor operation input was rejected",
-        ),
+        )
+        .with_diagnostic_message(diagnostic_message),
         ErrorKind::InvalidResponse => AttemptFailure::terminal(
             "vendor_response_invalid",
             "Vendor upstream response could not be parsed",

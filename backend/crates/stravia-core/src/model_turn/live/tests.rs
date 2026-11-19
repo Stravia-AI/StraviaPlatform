@@ -739,3 +739,18 @@ fn disarmed_deadline_guard_does_not_record_failure() {
         TargetRuntimeState::Available
     );
 }
+
+#[test]
+fn invalid_vendor_kind_preserves_diagnostic_message() {
+    let failure = super::classify_vendor_kind(
+        stravia_vendor_sdk::ErrorKind::Invalid,
+        None,
+        Some("Antigravity requires trusted lifecycle metadata".into()),
+    );
+    assert_eq!(failure.error.code, "vendor_request_invalid");
+    assert_eq!(failure.error.message, "Vendor operation input was rejected");
+    assert_eq!(
+        failure.diagnostic.message.as_deref(),
+        Some("Antigravity requires trusted lifecycle metadata")
+    );
+}
