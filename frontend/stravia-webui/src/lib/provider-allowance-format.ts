@@ -3,14 +3,18 @@ import * as m from '#lib/paraglide/messages.js'
 import type { Locale } from '#lib/paraglide/runtime.js'
 import type { AllowanceAmount } from '#lib/types.js'
 
-const creditFormatters: Record<Locale, Intl.NumberFormat> = {
-  'en-US': new Intl.NumberFormat('en-US', { maximumSignificantDigits: 12 }),
-  'zh-CN': new Intl.NumberFormat('zh-CN', { maximumSignificantDigits: 12 }),
+// Credits and currency always show two decimals; Intl's default rounding takes halves away from zero.
+const twoDecimalOptions = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+const twoDecimalAmountFormatters: Record<Locale, Intl.NumberFormat> = {
+  'en-US': new Intl.NumberFormat('en-US', twoDecimalOptions),
+  'zh-CN': new Intl.NumberFormat('zh-CN', twoDecimalOptions),
 }
 
 function amountNumber(amount: AllowanceAmount | undefined, locale: Locale): string {
   if (!amount || !Number.isFinite(amount.value)) return '–'
-  return amount.unit === 'credits' ? creditFormatters[locale].format(amount.value) : formatNumber(amount.value, locale)
+  return amount.unit === 'credits' || amount.unit === 'currency'
+    ? twoDecimalAmountFormatters[locale].format(amount.value)
+    : formatNumber(amount.value, locale)
 }
 
 export function formatAllowanceAmount(

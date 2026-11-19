@@ -47,7 +47,7 @@ const freshSnapshot = {
       guarded: false,
       label: 'Credit balance',
       kind: 'balance',
-      remaining: { value: 9.99, unit: 'currency', currency: 'CNY' },
+      remaining: { value: 9.989, unit: 'currency', currency: 'CNY' },
       condition: 'normal',
       forecast: { status: 'unknown' },
     },
@@ -606,7 +606,7 @@ test('renders the matrix, shared summary, timeline, forecast, model details, and
   await expect(matrix.getByText('Stale', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Unavailable', { exact: true })).toBeVisible()
   await expect(matrix.getByText('Exhausted', { exact: true }).first()).toBeVisible()
-  await expect(matrix.getByText('0 USD')).toBeVisible()
+  await expect(matrix.getByText('0.00 USD')).toBeVisible()
   // 币种后缀 key（credits_balance_cny）与普通 credits_balance 共用同一标签展示
   await expect(matrix.getByText('9.99 CNY')).toBeVisible()
   await expect(matrix.getByText('Account balance', { exact: true })).toHaveCount(2)
@@ -797,6 +797,7 @@ test('switches every allowance value between remaining and used and remembers th
   await expect(alpha).toContainText('9.99 CNY')
   await alpha.getByRole('button', { name: 'Alpha account allowance details' }).click()
   const details = matrix.getByRole('table', { name: 'Alpha account allowance details' })
+  await expect(details).toContainText('9.99 CNY')
   await expect(details.getByRole('progressbar', { name: 'Weekly window Used' })).toHaveAttribute(
     'aria-valuenow',
     '55.625',
@@ -858,17 +859,18 @@ for (const { locale, width, monthly, trial, bonus, used, unit } of [
     await expect(provider).toContainText(monthly)
     await expect(provider).toContainText(trial)
     await expect(provider).toContainText(bonus)
-    await expect(provider).toContainText(`91.875 / 100 ${unit}`)
-    await expect(provider).toContainText(`15.5 / 20 ${unit}`)
-    await expect(provider).toContainText(`5 / 5 ${unit}`)
+    await expect(provider).toContainText(`91.88 / 100.00 ${unit}`)
+    await expect(provider).toContainText(`15.50 / 20.00 ${unit}`)
+    await expect(provider).toContainText(`5.00 / 5.00 ${unit}`)
     await expect(page.getByTestId('allowance-provider-provider-alpha')).toContainText('44.38%')
     await provider.getByRole('button', { name: /^Kiro demo/ }).click()
     const details = provider.getByRole('table')
-    await expect(details).toContainText(`91.875 / 100 ${unit}`)
+    await expect(details).toContainText(`91.88 / 100.00 ${unit}`)
+    await expect(details).toContainText(`15.50 / 20.00 ${unit}`)
     await expect(provider).toContainText('Kiro Pro')
     await page.getByRole('tab', { name: used, exact: true }).click()
-    await expect(details).toContainText(`8.125 / 100 ${unit}`)
-    await expect(details).toContainText(`0 / 5 ${unit}`)
+    await expect(details).toContainText(`8.13 / 100.00 ${unit}`)
+    await expect(details).toContainText(`0.00 / 5.00 ${unit}`)
     await expect(page.getByTestId('allowance-provider-provider-alpha')).toContainText('55.63%')
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(
       0,
@@ -884,20 +886,20 @@ test('keeps allowance details visible when refresh replaces provider snapshots',
   const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   const details = matrix.getByRole('table', { name: 'Alpha account allowance details' })
   await expect(matrix.getByText('Weekly window', { exact: true })).toHaveCount(2)
-  await expect(matrix.getByText('0 USD')).toBeVisible()
+  await expect(matrix.getByText('0.00 USD')).toBeVisible()
   await matrix.getByRole('button', { name: 'Alpha account allowance details' }).click()
   await expect(details).toBeVisible()
 
   snapshots[0].allowances[1].remaining!.value = 12
   await page.getByRole('button', { name: 'Refresh all' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
-  await expect(details.getByText('12 USD')).toBeVisible()
+  await expect(details.getByText('12.00 USD')).toBeVisible()
   await expect(details.getByText('Weekly window', { exact: true })).toBeVisible()
 
   snapshots[0].allowances[1].remaining!.value = 24
   await matrix.getByRole('button', { name: 'Refresh Alpha account' }).click()
   await expect.poll(() => posts).toContain('/api/v1/provider-allowances/provider-alpha/refresh')
-  await expect(details.getByText('24 USD')).toBeVisible()
+  await expect(details.getByText('24.00 USD')).toBeVisible()
   await expect(details.getByText('Weekly window', { exact: true })).toBeVisible()
 })
 
@@ -908,7 +910,7 @@ test('does not treat an exhausted allowance without a reset date as exhausted', 
   const matrix = page.getByRole('list', { name: 'Allowance matrix' })
   const provider = matrix.getByTestId('allowance-provider-provider-alpha')
   const forecastPanel = page.getByRole('region', { name: 'Exhaustion forecast' })
-  await expect(matrix.getByText('0 USD')).toBeVisible()
+  await expect(matrix.getByText('0.00 USD')).toBeVisible()
   await expect(provider.getByText('Exhausted', { exact: true })).toHaveCount(0)
   await expect(
     page.getByRole('region', { name: 'Allowance summary' }).getByText('Normal', { exact: true }),
