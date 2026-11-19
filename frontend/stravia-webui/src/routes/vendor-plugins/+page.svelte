@@ -960,7 +960,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
               {#if row.installed.installed_at}
                 <dt>{m.market_installed_at()}</dt>
                 <dd class="font-technical tabular-nums">
-                  {new Date(row.installed.installed_at * 1000).toLocaleString()}
+                  {new Date(row.installed.installed_at).toLocaleString()}
                 </dd>
               {/if}
             </dl>

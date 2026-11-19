@@ -158,6 +158,7 @@ export interface PluginSummary {
   source: PluginSource
   origin: PluginInstallOrigin | null
   digest: string
+  /** Milliseconds since the Unix epoch. */
   installed_at: number
   status: string
   error: string | null

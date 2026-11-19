@@ -52,7 +52,7 @@
 
 ### 安装来源
 
-`builtin/local` 继续表示既有安装方式，增加 `marketplace`。每条市场安装记录额外保存来源 ID、仓库 ID、公钥指纹、Release ID/tag、目录摘要、压缩资产摘要和最终 Component 摘要；与安装 revision 同一事务提交。`vendor_id` 仍是运行与安装身份，不改成 `(source_id, vendor_id)`，同一 Vendor 不并行安装多个来源。
+`builtin/local` 继续表示既有安装方式，增加 `marketplace`。`PluginSummary.installed_at` 为 Unix 毫秒时间戳，详情页直接按毫秒格式化为本地时间，不再乘以 1000。每条市场安装记录额外保存来源 ID、仓库 ID、公钥指纹、Release ID/tag、目录摘要、压缩资产摘要和最终 Component 摘要；与安装 revision 同一事务提交。`vendor_id` 仍是运行与安装身份，不改成 `(source_id, vendor_id)`，同一 Vendor 不并行安装多个来源。
 
 - 更新只跟随已安装来源，不从所有来源中挑最高版本覆盖它。
 - 不同市场来源的同一 Vendor 分别展示；替换来源仍经过与升级相同的影响预览。程序随附安装与同一 `vendor_id` 的官方目录条目合并展示，但不会因此绑定官方来源或参与市场更新。

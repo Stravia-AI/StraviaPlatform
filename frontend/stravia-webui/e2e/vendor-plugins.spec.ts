@@ -9,6 +9,8 @@ import type {
 } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
+test.use({ locale: 'en-US', timezoneId: 'UTC' })
+
 const source: PluginSourceSummary = {
   id: 'community',
   repository_id: 42,
@@ -90,7 +92,7 @@ const installed: PluginSummary = {
   source: 'marketplace',
   origin,
   digest: 'b'.repeat(64),
-  installed_at: 1700000000,
+  installed_at: 1700000000000,
   status: 'ready',
   error: null,
   builtin_version: null,
@@ -180,6 +182,7 @@ test('bundled plugins share the official catalog row without merging other sourc
   await officialRow.getByRole('button', { name: 'Details' }).click()
   const detail = page.getByRole('dialog', { name: 'WorkBuddy' })
   await expect(detail).toContainText('Bundled')
+  await expect(detail.locator('dt:text-is("Installed on") + dd')).toHaveText('11/14/2023, 10:13:20 PM')
   await expect(detail.getByRole('button', { name: 'Install version' })).toBeEnabled()
   await detail.getByRole('button', { name: 'Close' }).click()
   await page.getByRole('tab', { name: /updates/i }).click()
