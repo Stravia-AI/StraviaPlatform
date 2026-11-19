@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Antigravity inference now sends the official CLI's five-part `requestId` when the step count is known, with a dispatch timestamp and conversation and trajectory identifiers. Unknown steps retain the UUID fallback. Rebuild and re-import the standalone plugin; this does not change cache policy or require a database migration.
+
 ## [0.7.3] - 2026-11-19
 
 ### Verification

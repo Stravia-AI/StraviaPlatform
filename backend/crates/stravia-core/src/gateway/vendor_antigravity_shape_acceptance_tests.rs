@@ -330,6 +330,16 @@ async fn lifecycle_response(gateway: &Gateway, token: &str, input: Value) -> any
 async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() -> anyhow::Result<()>
 {
     let (address, certificate, mut captured, server) = lifecycle_listener().await?;
+    let assert_dispatch_id = |wire: &Value, steps: &str| {
+        let labels = &wire["request"]["labels"];
+        let id = wire["requestId"].as_str().expect("inference requestId");
+        let parts: Vec<_> = id.split('/').collect();
+        assert_eq!(parts.len(), 5, "unexpected inference requestId: {id}");
+        assert_eq!(parts[0], "agent");
+        assert_eq!(parts[1], labels["cascade_id"].as_str().unwrap());
+        assert_eq!(parts[3], labels["trajectory_id"].as_str().unwrap());
+        assert_eq!(parts[4], steps);
+    };
     let directory = tempfile::tempdir()?;
     let pool = crate::db::init_pool(directory.path()).await?;
     crate::migrations::migrate_sqlite(&pool, None).await?;
@@ -399,6 +409,7 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
     let root_wire = with_real_time_limit(captured.recv())
         .await?
         .context("root inference")?;
+    assert_dispatch_id(&root_wire, "1");
     let root_labels = &root_wire["request"]["labels"];
     let trajectory = root_labels["trajectory_id"]
         .as_str()
@@ -417,6 +428,7 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
     let first_wire = with_real_time_limit(captured.recv())
         .await?
         .context("first continuation")?;
+    assert_dispatch_id(&first_wire, "3");
     assert_eq!(
         first_wire["request"]["labels"]["request_id"],
         format!("{trajectory}-1")
@@ -504,6 +516,7 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
     let tool_wire = with_real_time_limit(captured.recv())
         .await?
         .context("tool generation")?;
+    assert_dispatch_id(&tool_wire, "1");
     let tool_trajectory = tool_wire["request"]["labels"]["trajectory_id"]
         .as_str()
         .context("tool trajectory")?
@@ -524,6 +537,7 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
     let tool_result = with_real_time_limit(captured.recv())
         .await?
         .context("tool continuation")?;
+    assert_dispatch_id(&tool_result, "3");
     assert_eq!(
         tool_result["request"]["labels"]["request_id"],
         format!("{tool_trajectory}-1")
@@ -587,6 +601,8 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
     let retry_second = with_real_time_limit(captured.recv())
         .await?
         .context("second retry attempt")?;
+    assert_dispatch_id(&retry_first, "1");
+    assert_dispatch_id(&retry_second, "1");
     let first_labels = &retry_first["request"]["labels"];
     let second_labels = &retry_second["request"]["labels"];
     assert_eq!(first_labels["request_id"], second_labels["request_id"]);
@@ -641,6 +657,9 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
     assert_eq!(first_labels["used_claude_conservative"], "false");
     assert_eq!(first_labels["used_non_gemini_model"], "false");
     let assert_mixed = |request: &Value| {
+        let request_id = request["requestId"].as_str().unwrap();
+        let fallback = uuid::Uuid::parse_str(request_id.strip_prefix("agent/").unwrap()).unwrap();
+        assert_eq!(fallback.get_version_num(), 4);
         let labels = &request["request"]["labels"];
         assert!(
             labels.get("request_id").is_none(),
