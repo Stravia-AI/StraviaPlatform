@@ -5,6 +5,7 @@
 ### Changed
 
 - Models now select a single purpose: Inference, Image Generation, or Web Search. Search-only models can be used without declaring text output and do not appear in conversation or client model selectors. External Web Search binds a Web Search route; Local Search still uses an inference route. Migration preserves existing route IDs and moves an existing external binding to a dedicated search route with the same eligible targets. The admin API now uses `purpose` instead of `output_modality`.
+- Antigravity inference now sends the official CLI's five-part `requestId` when the step count is known, with a dispatch timestamp and conversation and trajectory identifiers. Unknown steps retain the UUID fallback. Rebuild and re-import the standalone plugin; this does not change cache policy or require a database migration.
 
 ## [0.7.3] - 2026-11-19
 

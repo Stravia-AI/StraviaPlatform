@@ -1608,6 +1608,10 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     provider
         .operation_metadata
         .insert("session_affinity".into(), json!(" principal/目标/会话 "));
+    provider.operation_metadata.insert(
+        "logical_turn_started_at_ms".into(),
+        json!(1_700_000_000_000i64),
+    );
     let endpoint = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let request = ProtocolTransform::global().bind(endpoint,endpoint).unwrap().decode_request(json!({
         "contents":[{"role":"user","parts":[{"text":"Run read","future":"strip"}],"foreign":"strip"}],
@@ -1616,6 +1620,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         "cachedContent":"strip", "foreign":"strip",
         "labels":{"request_id":"client-supplied","model_enum":"client-model","trajectory_id":"client-trajectory"}
     })).unwrap();
+    let inference_started_ms = chrono::Utc::now().timestamp_millis();
     let OperationOutput::Infer(output) = run(
         &runtime,
         &plugin,
@@ -1629,6 +1634,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     .unwrap() else {
         panic!("inference")
     };
+    let inference_finished_ms = chrono::Utc::now().timestamp_millis();
     assert_eq!(output.output_text(), "真实 HTTP 冒烟");
     assert_eq!(output.usage.cache_read_tokens, Some(0));
     assert_eq!(output.usage.prompt_tokens, 5);
@@ -1708,14 +1714,24 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         );
         assert_eq!(body["request"]["sessionId"], "-2713670015314466186");
         let request_id = body["requestId"].as_str().unwrap();
-        let native_id = uuid::Uuid::parse_str(request_id.strip_prefix("agent/").unwrap()).unwrap();
-        assert_eq!(native_id.get_version_num(), 4);
         let labels = &body["request"]["labels"];
         let cascade = labels["cascade_id"].as_str().unwrap();
         uuid::Uuid::parse_str(cascade).unwrap();
         let trajectory = labels["trajectory_id"].as_str().unwrap();
         uuid::Uuid::parse_str(trajectory).unwrap();
         assert_ne!(trajectory, cascade);
+        let parts: Vec<_> = request_id.split('/').collect();
+        assert_eq!(
+            parts.len(),
+            5,
+            "unexpected inference requestId: {request_id}"
+        );
+        assert_eq!(
+            (parts[0], parts[1], parts[3], parts[4]),
+            ("agent", cascade, trajectory, "1")
+        );
+        let dispatched_at_ms = parts[2].parse::<i64>().unwrap();
+        assert!((inference_started_ms..=inference_finished_ms).contains(&dispatched_at_ms));
         assert_eq!(
             labels,
             &json!({

@@ -16,11 +16,21 @@ const MAX_EVENT: usize = 16 * 1024 * 1024;
 struct InferenceEnvelope<'a> {
     project: &'a str,
     model: &'a str,
-    request: InferenceBody<'a>,
+    request: &'a InferenceBody<'a>,
     user_agent: &'static str,
     request_type: &'static str,
     #[serde(serialize_with = "serialize_agent_request_id")]
-    request_id: uuid::Uuid,
+    request_id: AgentRequestId<'a>,
+}
+
+enum AgentRequestId<'a> {
+    Dispatch {
+        cascade_id: &'a str,
+        timestamp_ms: i64,
+        trajectory_id: uuid::Uuid,
+        steps: u64,
+    },
+    Fallback(uuid::Uuid),
 }
 
 // `body` 已经投影并排除了下游 labels；仅添加本次请求可以证实的元数据。
@@ -67,12 +77,20 @@ impl<'a> RequestLabels<'a> {
 }
 
 fn serialize_agent_request_id<S: serde::Serializer>(
-    id: &uuid::Uuid,
+    id: &AgentRequestId<'_>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    // CLI 1.3.5 computeRequestID's fallback when native operation metadata
-    // is absent is request-type/UUID, not the community proxy's agent-UUID.
-    serializer.collect_str(&format_args!("agent/{id}"))
+    match id {
+        AgentRequestId::Dispatch {
+            cascade_id,
+            timestamp_ms,
+            trajectory_id,
+            steps,
+        } => serializer.collect_str(&format_args!(
+            "agent/{cascade_id}/{timestamp_ms}/{trajectory_id}/{steps}"
+        )),
+        AgentRequestId::Fallback(id) => serializer.collect_str(&format_args!("agent/{id}")),
+    }
 }
 
 // CLI 1.3.5 codeassistclient.getSessionID hashes the complete source bytes
@@ -183,7 +201,6 @@ pub(crate) fn infer(
     request.stream.enabled = true;
     let protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let model = request.model.clone();
-    let request_id = uuid::Uuid::new_v4();
     let lifecycle_input =
         crate::lifecycle::Input::new(&provider, &request, api_provider, model_provider)?;
     let mut body = common::encode_inference_request(&protocol.to_string(), request)?.body;
@@ -332,13 +349,28 @@ pub(crate) fn infer(
     }
     host.emit_started()?;
     let (reservation, lifecycle_labels) = crate::lifecycle::Reservation::begin(lifecycle_input)?;
+    let steps = lifecycle_labels
+        .last_step_index
+        .and_then(|n| n.checked_add(1));
+    let request = InferenceBody {
+        body: &body,
+        labels: RequestLabels::new(lifecycle_labels, model_enum),
+    };
+    // agy 1.5.11 StreamGenerateContent samples the wall clock on each dispatch,
+    // not at the start of the logical user turn. Do not guess an unknown step count.
+    let request_id = match steps {
+        Some(steps) => AgentRequestId::Dispatch {
+            cascade_id: &request.labels.cascade_id,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            trajectory_id: request.labels.trajectory_id,
+            steps,
+        },
+        None => AgentRequestId::Fallback(uuid::Uuid::new_v4()),
+    };
     let envelope = InferenceEnvelope {
         project: &project,
         model: &model,
-        request: InferenceBody {
-            body: &body,
-            labels: RequestLabels::new(lifecycle_labels, model_enum),
-        },
+        request: &request,
         user_agent: "antigravity",
         request_type: "agent",
         request_id,
@@ -370,14 +402,18 @@ pub(crate) fn infer(
     let (response, terminal_deltas) = result.map_err(|mut error| {
         if error.upstream_status == Some(429) {
             use std::fmt::Write;
+            let attempt_id = match envelope.request_id {
+                AgentRequestId::Fallback(id) => id,
+                AgentRequestId::Dispatch { .. } => uuid::Uuid::new_v4(),
+            };
             if let Some(id) = &envelope.request.labels.request_id {
                 write!(
                     error.message,
-                    " (Antigravity request_id: {id}, attempt_id: {request_id})"
+                    " (Antigravity request_id: {id}, attempt_id: {attempt_id})"
                 )
                 .expect("writing to a String cannot fail");
             } else {
-                write!(error.message, " (Antigravity attempt_id: {request_id})")
+                write!(error.message, " (Antigravity attempt_id: {attempt_id})")
                     .expect("writing to a String cannot fail");
             }
         }
@@ -1260,16 +1296,17 @@ mod tests {
             },
             None,
         );
+        let request = InferenceBody {
+            body: &request,
+            labels,
+        };
         let envelope = serde_json::to_value(InferenceEnvelope {
             project: "synthetic-project",
             model: "synthetic-model",
-            request: InferenceBody {
-                body: &request,
-                labels,
-            },
+            request: &request,
             user_agent: "antigravity",
             request_type: "agent",
-            request_id: id,
+            request_id: AgentRequestId::Fallback(id),
         })
         .unwrap();
         assert_eq!(

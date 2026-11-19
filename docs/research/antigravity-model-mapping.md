@@ -461,5 +461,27 @@ To commit your changes, use the eval `commit` namespace (`d = await commit.draft
 
 建议后续先明确宿主能否耐久保存生成记录、step 和 executor 生命周期，以及 fork/压缩和失败重试的定义，再决定是否投影或省略无法可靠表达的字段；不可由消息数或模型名冒充原生累计状态。本轮仅研究和记录，不修改生产插件、数据库或部署。
 
+## 14. Neon 隐式缓存：原生 TUI、工具续接与 Stravia 现场对照
+
+> 下文的 Stravia 抓包早于外层 `requestId` 对齐。对齐时在同一 `agy` 1.5.11 ELF 核实：`StreamGenerateContent` 于 `0x925ef26` 取 `time.Now`、换算 Unix 毫秒后于 `0x925f027` 传入 `computeRequestID`。新的 CCPA continuation leg 也会通过 `0x929718e` 重新取时钟；重发同一已编码 HTTP 请求体则保留 ID。此证据不覆盖所有 HTTP 状态对应的重试分支。当前 Stravia 使用[五段式派发关联号](../design/vendor-plugins.md#antigravity-cli-接入)，未知步骤时仍回退。此前缓存读数不代表这个改动能提高命中率。
+
+现场是 OMP 18.22.2 经 `/v1/responses` 到 Stravia 的 `gemini-4-neon-medium`，不是原生 agy。附件中同一用户轮内进行五次完整推理，第六次请求中断、没有上游响应。前五次输入依次为 `11420 / 19236 / 36750 / 53576 / 60478`，上游缓存读数为 `0 / 0 / 19237 / 0 / 0`。只有第 3 次的 Google SSE `usageMetadata` 带 `cachedContentTokenCount`；其它完整 usage 省略的私有 proto3 标量按零解释，不能将第 6 次也计为零。各次的 Provider、Target、project、实际模型、`prompt_cache_key`、`sessionId`、cascade/root/trajectory、系统指令、工具和生成配置相同；上一请求的所有 `contents` 都逐项原样保留，包含工具参数、结果和签名，仅在尾部追加。附件已永久脱敏 Authorization，不能比较其原值。第 3→4 次派发相隔约 20 秒，且输入增加 16,826；这不是输入不够长、旧前缀被改写或可见选路变化的例子。
+
+使用官方 agy 1.5.11 的交互 TUI、隔离 CLI profile 和 loopback HTTPS 观测器。Mock 在断外网的网络命名空间执行，`read_file` 只读合成文件；真实探针只转发 Neon Medium 的 Agent 推理，预取标题等辅助生成和 ACL 写入在本地处理，不重放事故内容。真实对照共 20 个 Agent 请求，均 HTTP 200；靠读取 Google SSE 而不是 TUI 输出计量。
+
+| 对照场景 | 输入数（依次） | Google 缓存读数（依次） |
+| --- | --- | --- |
+| 原生普通五轮，均匀追加 | 17068 / 20208 / 23355 / 26500 / 29634 | 0 / 0 / 20209 / 23356 / 26501 |
+| 原生普通五轮，接近事故量级 | 11716 / 19358 / 35928 / 51984 / 58807 | 0 / 11717 / 19359 / 35929 / 51985 |
+| 原生同一用户轮，四次顺序 `read_file` | 9747 / 16094 / 22286 / 28470 / 34626 | 0 / 9748 / 16095 / 22287 / 28471 |
+| 同一工具实验，观测器只将 `request.sessionId` 改成会话内稳定的非空输入散列 | 9742 / 16040 / 22232 / 28416 / 34572 | 0 / 0 / 0 / 22233 / 28417 |
+
+- **原生 `sessionId`**：同项目、同档位的原生样本值等于空串的 FNV-1a64 按有符号十进制输出（`-3750763034362895579`），并非 cascade 或 trajectory UUID 的散列。`getSessionID`（1.5.11 ELF `0x925b060`）证实算法；不能外推至所有 CLI 路径。Stravia 的非空版本由[宿主链路根、主体、Target 派生](../../backend/crates/stravia-core/src/model_turn/live.rs#L1955-L1967)，再经[同格式 FNV-1a64](../../backend/crates/stravia-vendor-antigravity/src/wire.rs#L77-L87)；现场值全程不变且非空串散列。改写探针在转发前断言仅一项 JSON 字段变化；后两轮命中，说明稳定的非空散列并不禁用缓存。两组工具实验是独立会话，时序、模型输出与上游内部状态不固定，样本不足以从早期未命中归因于 `sessionId` 或估计命中率差异。
+- **原生会话与关联号**：同一会话的 `labels.cascade_id`、`root_cascade_id`、`trajectory_id` 稳定。`labels.request_id`、`last_step_index` 和外层 `requestId` 随生成变化；原生外层五段 ID 中含 cascade 和 trajectory，现场插件为 `agent/<attempt UUID>`。同一用户轮工具续接时，原生和现场均可全程没有 `last_execution_id`；跨用户轮才观察到它变化。关联号不是已知 Google 缓存键。原生样本没有 `cachedContent`、`prompt_cache_key` 或专用缓存 HTTP 头。
+- **并行工具历史打包**：mock 返回两个原生 `read_file` 调用，下一请求将两个 `functionCall` 放进同一个 `model` content（首个带签名），两个 `functionResponse` 放进同一个 `user` content。现场 Stravia 回填也合并 `functionResponse`，但将每个并行 `functionCall` 放进不同 `model` content。两种路径各自都只在末尾追加，故差异是历史表示而不是轮间改写。未在真实上游单独改变并行分组，不能将它归为已知失效原因。
+- **Stravia 内部亲和**：入站 `prompt_cache_key` 可用于 Conversation Affinity，不原样送给 Google；当没有会话身份时才可能使用 [canonical 前缀的 Cache Affinity](../../backend/crates/stravia-core/src/router/cache_affinity.rs#L63-L162) 偏好已成功处理前缀的 Target。其 20,000 输入阈值只影响 Stravia 选路，不决定 Google 是否命中；本次没有切 Target。
+
+[Gemini 公开缓存文档](https://ai.google.dev/gemini-api/docs/caching?generate-content=true)给 Neon 4,096 输入门槛及 Gemini 4 完整前缀复用的 2,050 新增输入条件，不保证隐式命中，也没有公开 Antigravity 私有服务的键、落盘状态、分片或失效原因。原生出现过续接未命中，且纯文本能稳定复用约 52k、工具续接也能命中；没有在原生探针复现现场“命中后连续归零”。现场最窄结论是上游没有报告重用保持不变的前缀；不能断言具体是未写入、淘汰、分片或某个请求形状差异。后续优先用同一合成并行工具 workload 隔离真实 Gateway 与原生路径的差异；复发时用第 3–5 次 SSE envelope 的 `traceId` 向 Google 核对 cache write / lookup。在因果证据前不改会话键、不重试补缓存，不将真实提示、追踪号或凭据写入此笔记。
+
 
 
