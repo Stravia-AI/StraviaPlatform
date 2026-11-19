@@ -2,11 +2,6 @@
 
 ## Unreleased
 
-### Changed
-
-- Models now select a single purpose: Inference, Image Generation, or Web Search. Search-only models can be used without declaring text output and do not appear in conversation or client model selectors. External Web Search binds a Web Search route; Local Search still uses an inference route. Migration preserves existing route IDs and moves an existing external binding to a dedicated search route with the same eligible targets. The admin API now uses `purpose` instead of `output_modality`.
-- Antigravity inference now sends the official CLI's five-part `requestId` when the step count is known, with a dispatch timestamp and conversation and trajectory identifiers. Unknown steps retain the UUID fallback. Rebuild and re-import the standalone plugin; this does not change cache policy or require a database migration.
-
 ## [0.7.3] - 2026-11-19
 
 ### Verification
@@ -30,6 +25,8 @@
 
 ### Changed
 
+- Models now select a single purpose: Inference, Image Generation, or Web Search. Search-only models can be used without declaring text output and do not appear in conversation or client model selectors. External Web Search binds a Web Search route; Local Search still uses an inference route. Migration preserves existing route IDs and moves an existing external binding to a dedicated search route with the same eligible targets. The admin API now uses `purpose` instead of `output_modality`.
+- Antigravity inference now sends the official CLI's five-part `requestId` when the step count is known, with a dispatch timestamp and conversation and trajectory identifiers. Unknown steps retain the UUID fallback. Rebuild and re-import the standalone plugin; this does not change cache policy or require a database migration.
 - The Allowances page rounds credit and currency amounts to two decimal places in summaries and details. Reported values, percentages, and exhaustion checks are unchanged.
 - Antigravity uses the official CLI 1.5.11 identity, including build `1024248524`, and persists inference lifecycle state through host-managed conversation CAS/checkpoints. Labels no longer count assistant messages: known generation and step records survive restart and branching, retries retain their Model Turn identity, and catalog-derived model flags accumulate across model switches. Host dispatch cursors detect skipped-provider history; unknown imported or interrupted facts are omitted rather than reconstructed. Update the host (additive SQLite/PostgreSQL migration 0056), rebuild/re-import the plugin, and sync models. Existing history is not backfilled; a new conversation establishes a complete baseline. This does not guarantee native agy fork/compaction parity or eliminate upstream 429s; retry policy is unchanged.
 - Antigravity inference now sends each declared function in its own tool entry, matching the native CLI's eager MCP tools. Function order, schemas, and named tool selection are preserved. Re-import the rebuilt standalone Antigravity plugin to apply the change.
@@ -52,7 +49,7 @@
 - One-time allowance resets now use the shared cryptographically secure UUID generator on HTTP management pages, where `crypto.randomUUID` is unavailable.
 - StraviaRead parameter errors provide actionable field, type and usage guidance without echoing input values; runtime type, field and capability checks remain enforced.
 - CI regression tests now use `StraviaRead`'s `body.wait` parameter, check plan text and its accessible label separately, and configure Local Web Search explicitly for the Windows browser-path smoke test.
-- History-search upgrade E2E now rolls back migration 0056 cleanly before re-upgrading in both SQLite and PostgreSQL, and WebUI model/allowance files match repository Prettier formatting.
+- History-search upgrade E2E now rolls back migrations 0056–0057 cleanly before re-upgrading in both SQLite and PostgreSQL, and Rust/WebUI files match repository formatting.
 
 ## [0.7.2] - 2026-11-15
 

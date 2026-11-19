@@ -187,10 +187,7 @@ impl Gateway {
                 capability,
             )?;
         }
-        anyhow::ensure!(
-            matching_targets > 0,
-            "Route has no purpose-matching Target"
-        );
+        anyhow::ensure!(matching_targets > 0, "Route has no purpose-matching Target");
         Ok(())
     }
 
@@ -992,9 +989,9 @@ async fn any_vendor_cancelled(vendor_leases: &BTreeMap<String, PreparedVendorExe
 
 fn selection_error(error: SelectionError) -> anyhow::Error {
     match error {
-        SelectionError::UnconfiguredRoute => anyhow::anyhow!(
-            "Route purpose is unconfigured; select and save a purpose"
-        ),
+        SelectionError::UnconfiguredRoute => {
+            anyhow::anyhow!("Route purpose is unconfigured; select and save a purpose")
+        }
         SelectionError::SchedulingEvidence(source) => {
             source.context("Route scheduling is unavailable")
         }

@@ -179,7 +179,13 @@ mod tests {
             {"id":"opaque-medium","effort":"medium","metadata":{"thinkingBudget":4000,"apiProvider":"API_PROVIDER_ANTHROPIC_VERTEX","modelProvider":"MODEL_PROVIDER_GOOGLE"}}
         ]});
         for (effort, id, budget, api_provider, model_provider) in [
-            ("medium", "opaque-medium", 4000, json!("API_PROVIDER_ANTHROPIC_VERTEX"), json!("MODEL_PROVIDER_GOOGLE")),
+            (
+                "medium",
+                "opaque-medium",
+                4000,
+                json!("API_PROVIDER_ANTHROPIC_VERTEX"),
+                json!("MODEL_PROVIDER_GOOGLE"),
+            ),
             ("high", "opaque-high", -1, json!(26), json!(4)),
         ] {
             let selection = resolve(

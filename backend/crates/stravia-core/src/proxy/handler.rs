@@ -416,7 +416,7 @@ mod tests {
             vec![RouteConfig {
                 purpose: Some(crate::db::models::RoutePurpose::Inference),
                 image_generation_bound: false,
-            web_search_bound: false,
+                web_search_bound: false,
                 id: "model-id".into(),
                 model_id: "model".into(),
                 display_name: None,

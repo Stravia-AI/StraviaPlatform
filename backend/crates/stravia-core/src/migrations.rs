@@ -893,9 +893,20 @@ mod tests {
     #[tokio::test]
     async fn sqlite_route_purpose_upgrade_preserves_search_binding_and_eligibility() {
         let pool = sqlite_pool().await;
-        let prefix = Migrator::with_migrations(SQLITE_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
-        super::run_sqlite_migrator(&pool, &prefix, None).await.unwrap();
-        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE).execute(&pool).await.unwrap();
+        let prefix = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 56)
+                .cloned()
+                .collect(),
+        );
+        super::run_sqlite_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE)
+            .execute(&pool)
+            .await
+            .unwrap();
         migrate_sqlite(&pool, None).await.unwrap();
         assert_route_purpose_upgrade!(pool);
         migrate_sqlite(&pool, None).await.unwrap();
@@ -903,31 +914,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_route_purpose_upgrade_preserves_search_binding_and_eligibility_when_configured() {
-        let Some(url) = std::env::var("DB_URL").ok().or_else(|| std::env::var("DATABASE_URL").ok()) else { return; };
+    async fn postgres_route_purpose_upgrade_preserves_search_binding_and_eligibility_when_configured()
+     {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
         let admin = sqlx::PgPool::connect(&url).await.unwrap();
         let schema = format!("route_purpose_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
         let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2)
-            .connect_with(options.options([("search_path", schema.as_str())])).await.unwrap();
-        let prefix = Migrator::with_migrations(super::POSTGRES_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
-        super::run_postgres_migrator(&pool, &prefix, None).await.unwrap();
-        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE).execute(&pool).await.unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .unwrap();
+        let prefix = Migrator::with_migrations(
+            super::POSTGRES_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 56)
+                .cloned()
+                .collect(),
+        );
+        super::run_postgres_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE)
+            .execute(&pool)
+            .await
+            .unwrap();
         migrate_postgres(&pool, None).await.unwrap();
         assert_route_purpose_upgrade!(pool);
         migrate_postgres(&pool, None).await.unwrap();
         assert_route_purpose_upgrade!(pool);
         pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
     }
 
     macro_rules! assert_unresolved_route_binding {
         ($pool:expr) => {{
-            let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE name='web_search_config'")
-                .fetch_one(&$pool).await.unwrap();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&value).unwrap()["backend"]["route_id"], "missing-route");
-            let routes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models").fetch_one(&$pool).await.unwrap();
+            let value: String =
+                sqlx::query_scalar("SELECT value FROM settings WHERE name='web_search_config'")
+                    .fetch_one(&$pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&value).unwrap()["backend"]["route_id"],
+                "missing-route"
+            );
+            let routes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+                .fetch_one(&$pool)
+                .await
+                .unwrap();
             assert_eq!(routes, 1);
         }};
     }
@@ -936,19 +982,37 @@ mod tests {
     async fn sqlite_route_purpose_failure_rolls_back_and_retries() {
         let directory = tempfile::tempdir().unwrap();
         let pool = sqlite_file_pool(directory.path()).await;
-        let prefix = Migrator::with_migrations(SQLITE_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
-        super::run_sqlite_migrator(&pool, &prefix, None).await.unwrap();
-        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE).execute(&pool).await.unwrap();
+        let prefix = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 56)
+                .cloned()
+                .collect(),
+        );
+        super::run_sqlite_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
+        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::raw_sql("CREATE TRIGGER reject_search_copy BEFORE INSERT ON model_backends WHEN NEW.id LIKE 'web-search-target:%' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
             .execute(&pool).await.unwrap();
         assert!(migrate_sqlite(&pool, None).await.is_err());
         let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(version, 56);
         let old: String = sqlx::query_scalar("SELECT output_modality FROM models WHERE id='route'")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(old, "text");
-        sqlx::query("DROP TRIGGER reject_search_copy").execute(&pool).await.unwrap();
+        sqlx::query("DROP TRIGGER reject_search_copy")
+            .execute(&pool)
+            .await
+            .unwrap();
         migrate_sqlite(&pool, None).await.unwrap();
         assert_route_purpose_upgrade!(pool);
     }
@@ -956,8 +1020,16 @@ mod tests {
     #[tokio::test]
     async fn sqlite_route_purpose_keeps_unresolved_binding() {
         let pool = sqlite_pool().await;
-        let prefix = Migrator::with_migrations(SQLITE_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
-        super::run_sqlite_migrator(&pool, &prefix, None).await.unwrap();
+        let prefix = Migrator::with_migrations(
+            SQLITE_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 56)
+                .cloned()
+                .collect(),
+        );
+        super::run_sqlite_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
         sqlx::raw_sql("INSERT INTO models(id,model_id,output_modality) VALUES ('r','public','image'); INSERT INTO settings(name,value) VALUES ('web_search_config','{\"enabled\":true,\"backend\":{\"kind\":\"external\",\"route_id\":\"missing-route\"}}');")
             .execute(&pool).await.unwrap();
         migrate_sqlite(&pool, None).await.unwrap();
@@ -966,21 +1038,43 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_route_purpose_keeps_unresolved_binding_when_configured() {
-        let Some(url) = std::env::var("DB_URL").ok().or_else(|| std::env::var("DATABASE_URL").ok()) else { return; };
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
         let admin = sqlx::PgPool::connect(&url).await.unwrap();
         let schema = format!("route_purpose_missing_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin)
+            .await
+            .unwrap();
         let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2)
-            .connect_with(options.options([("search_path", schema.as_str())])).await.unwrap();
-        let prefix = Migrator::with_migrations(super::POSTGRES_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
-        super::run_postgres_migrator(&pool, &prefix, None).await.unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())]))
+            .await
+            .unwrap();
+        let prefix = Migrator::with_migrations(
+            super::POSTGRES_MIGRATOR
+                .iter()
+                .filter(|m| m.version <= 56)
+                .cloned()
+                .collect(),
+        );
+        super::run_postgres_migrator(&pool, &prefix, None)
+            .await
+            .unwrap();
         sqlx::raw_sql("INSERT INTO models(id,model_id,output_modality) VALUES ('r','public','image'); INSERT INTO settings(name,value) VALUES ('web_search_config','{\"enabled\":true,\"backend\":{\"kind\":\"external\",\"route_id\":\"missing-route\"}}');")
             .execute(&pool).await.unwrap();
         migrate_postgres(&pool, None).await.unwrap();
         assert_unresolved_route_binding!(pool);
         pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin)
+            .await
+            .unwrap();
     }
 
     async fn sqlite_pool() -> sqlx::SqlitePool {

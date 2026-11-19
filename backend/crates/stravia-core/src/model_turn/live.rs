@@ -883,10 +883,7 @@ fn execute_inner(
                             )
                             .await
                             .map_err(|error| {
-                                ModelTurnError::new(
-                                    "route_purpose_unavailable",
-                                    error.to_string(),
-                                )
+                                ModelTurnError::new("route_purpose_unavailable", error.to_string())
                             })?
                         {
                             break;
@@ -1331,6 +1328,7 @@ impl AttemptFailure {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_attempt(
     executor: &LiveModelTurnExecutor,
     route: &crate::db::models::RouteConfig,

@@ -82,7 +82,9 @@ pub(crate) fn provider_snapshot(provider: &crate::db::models::Provider) -> Searc
 fn model_snapshot(model: crate::provider_models::ProviderModelRecord) -> SearchModel {
     SearchModel {
         available: model.effective_available()
-            && model.metadata.supports_route_purpose(crate::db::models::RoutePurpose::Inference),
+            && model
+                .metadata
+                .supports_route_purpose(crate::db::models::RoutePurpose::Inference),
         model_id: model.model_id,
     }
 }
@@ -109,7 +111,10 @@ impl ExternalSearchHost for SearchHost {
                 external_error("route_unavailable", "External Search Route is unavailable")
             })?;
         if route.purpose != Some(crate::db::models::RoutePurpose::WebSearch) {
-            return Err(external_error("route_unavailable", "External Search Route is incompatible"));
+            return Err(external_error(
+                "route_unavailable",
+                "External Search Route is incompatible",
+            ));
         }
         let mut context = crate::plugin::VendorCallContext::new(
             cancellation.clone(),
@@ -288,8 +293,10 @@ impl SearchAdminHost for SearchHost {
                             model_id: model.model_id.into(),
                             display_name,
                             is_enabled: model.is_enabled,
-                            is_inference: model.purpose == Some(crate::db::models::RoutePurpose::Inference),
-                            is_web_search: model.purpose == Some(crate::db::models::RoutePurpose::WebSearch),
+                            is_inference: model.purpose
+                                == Some(crate::db::models::RoutePurpose::Inference),
+                            is_web_search: model.purpose
+                                == Some(crate::db::models::RoutePurpose::WebSearch),
                             targets: model
                                 .targets
                                 .into_iter()

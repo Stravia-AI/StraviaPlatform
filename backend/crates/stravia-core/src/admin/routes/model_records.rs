@@ -258,13 +258,21 @@ impl RouteModule<'_> {
     ) -> anyhow::Result<()> {
         let mut projections = BTreeMap::<String, TargetModelProjection>::new();
         let (image_route_id, search_route_id) = if probe_remote_compaction {
-            let image = crate::media_generation::config::load(self.gw).await?.image.route_id;
-            let search = self.gw.admin().get_web_search_config().await?.config.backend.and_then(|backend| {
-                match backend {
+            let image = crate::media_generation::config::load(self.gw)
+                .await?
+                .image
+                .route_id;
+            let search = self
+                .gw
+                .admin()
+                .get_web_search_config()
+                .await?
+                .config
+                .backend
+                .and_then(|backend| match backend {
                     stravia_web_search::WebSearchBackendDraft::External { route_id } => route_id,
                     _ => None,
-                }
-            });
+                });
             (image, search)
         } else {
             (None, None)
@@ -305,14 +313,23 @@ impl RouteModule<'_> {
                         .and_then(|limit| limit.context);
                     let modalities = record.metadata.effective_modalities();
                     let search_channel = if probe_remote_compaction
-                        && record.metadata.supports_route_purpose(RoutePurpose::WebSearch)
+                        && record
+                            .metadata
+                            .supports_route_purpose(RoutePurpose::WebSearch)
                     {
                         let provider_id = target.provider_id().as_str();
                         match search_channels.get(provider_id) {
                             Some(&supported) => supported,
                             None => {
-                                let supported = self.gw.storage.providers().get(provider_id).await?
-                                    .is_some_and(|provider| provider_supports_web_search(self.gw, &provider));
+                                let supported = self
+                                    .gw
+                                    .storage
+                                    .providers()
+                                    .get(provider_id)
+                                    .await?
+                                    .is_some_and(|provider| {
+                                        provider_supports_web_search(self.gw, &provider)
+                                    });
                                 search_channels.insert(provider_id.to_owned(), supported);
                                 supported
                             }
@@ -330,7 +347,8 @@ impl RouteModule<'_> {
                             )
                             .await;
                     let mut purposes = crate::provider_models::eligible_route_purposes(
-                        &record.metadata, search_channel,
+                        &record.metadata,
+                        search_channel,
                     );
                     projections.insert(
                         key.clone(),
@@ -348,11 +366,13 @@ impl RouteModule<'_> {
                 }
                 if let Some(projection) = projections.get(&key) {
                     target.model_name.clone_from(&projection.name);
-                    target.route_purposes.extend(projection.route_purposes.into_iter().flatten());
+                    target
+                        .route_purposes
+                        .extend(projection.route_purposes.into_iter().flatten());
                 }
-                target.purpose_mismatch = route.purpose.is_none_or(|purpose| {
-                    !target.route_purposes.contains(&purpose)
-                });
+                target.purpose_mismatch = route
+                    .purpose
+                    .is_none_or(|purpose| !target.route_purposes.contains(&purpose));
             }
         }
 

@@ -453,8 +453,9 @@ async fn new_target_with_same_model_suffix_must_match_route_output() -> anyhow::
         ))
         .await?;
     let mut proposed = route_targets_for_update(&original);
-    proposed
-        .extend(modality_route_input("unused", &provider.id, Inference, &[("b/model", true)]).targets);
+    proposed.extend(
+        modality_route_input("unused", &provider.id, Inference, &[("b/model", true)]).targets,
+    );
     let error = admin
         .update_model(
             "same-suffix",
@@ -530,8 +531,9 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
     )
     .await?;
     let mut proposed = route_targets_for_update(&saved);
-    proposed
-        .extend(modality_route_input("unused", &provider.id, Inference, &[("image", false)]).targets);
+    proposed.extend(
+        modality_route_input("unused", &provider.id, Inference, &[("image", false)]).targets,
+    );
     let error = admin
         .update_model(
             "drift",
@@ -710,7 +712,8 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
             selection_strategy: "traffic_equalization".into(),
             is_enabled: true,
             targets: Some(
-                modality_route_input("unused", &provider.id, Inference, &[("a/model", true)]).targets,
+                modality_route_input("unused", &provider.id, Inference, &[("a/model", true)])
+                    .targets,
             ),
             default_thinking_level: None,
             billing: None,
@@ -730,8 +733,9 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
     assert_eq!(saved.targets[0].id, original.targets[0].id);
     assert_eq!(saved.targets[0].model().as_str(), "a/model");
     let mut proposed = route_targets_for_update(&saved);
-    proposed
-        .extend(modality_route_input("unused", &provider.id, Inference, &[("b/model", true)]).targets);
+    proposed.extend(
+        modality_route_input("unused", &provider.id, Inference, &[("b/model", true)]).targets,
+    );
     let error = admin
         .update_model(
             "unconfigured-same-suffix",
@@ -742,11 +746,7 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
         )
         .await
         .expect_err("a distinct same-suffix Target requires an explicit Route modality");
-    assert!(
-        error
-            .to_string()
-            .contains("ROUTE_PURPOSE_UNCONFIGURED")
-    );
+    assert!(error.to_string().contains("ROUTE_PURPOSE_UNCONFIGURED"));
     let persisted = admin.get_model("unconfigured-same-suffix").await?;
     assert!(persisted.purpose.is_none());
     assert_eq!(persisted.targets.len(), 1);
@@ -815,11 +815,7 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
         })
         .await
         .expect_err("historical duplicate binding cannot recover route");
-    assert!(
-        error
-            .to_string()
-            .contains("ROUTE_PURPOSE_UNCONFIGURED")
-    );
+    assert!(error.to_string().contains("ROUTE_PURPOSE_UNCONFIGURED"));
     gateway
         .storage
         .settings()

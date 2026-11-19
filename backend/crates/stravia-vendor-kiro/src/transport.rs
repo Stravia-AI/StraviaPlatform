@@ -131,6 +131,23 @@ pub(super) fn profile_origins(profile: &str) -> Result<(&'static str, &'static s
     }
 }
 
+pub(super) fn send(host: &GuestHost, request: Request) -> Result<HttpResponse, PluginError> {
+    let mut options = Options::new();
+    options
+        .shape("plugin:kiro-cli-3-4-0")
+        .expect("valid Kiro CLI egress shape selector");
+    let response = host.http_start(request, &options)?;
+    let status = response.status()?;
+    if !(200..300).contains(&status) {
+        return Err(upstream_error(
+            status,
+            &response.headers()?,
+            &read_http_body(&response, 1024 * 1024)?,
+        ));
+    }
+    Ok(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,21 +245,4 @@ mod tests {
         assert!(profile_origins("arn:aws:codewhisperer:us-east-1::").is_err());
         assert!(profile_origins("https://runtime.us-east-1.kiro.dev").is_err());
     }
-}
-
-pub(super) fn send(host: &GuestHost, request: Request) -> Result<HttpResponse, PluginError> {
-    let mut options = Options::new();
-    options
-        .shape("plugin:kiro-cli-3-4-0")
-        .expect("valid Kiro CLI egress shape selector");
-    let response = host.http_start(request, &options)?;
-    let status = response.status()?;
-    if !(200..300).contains(&status) {
-        return Err(upstream_error(
-            status,
-            &response.headers()?,
-            &read_http_body(&response, 1024 * 1024)?,
-        ));
-    }
-    Ok(response)
 }

@@ -448,23 +448,23 @@ fn find_profile(host: &GuestHost, region: &str, access: &str) -> Result<String, 
                 .and_then(Value::as_array)
                 .ok_or_else(invalid_response)?;
             for entry in profiles {
-                if let Some(arn) = entry.get("arn").and_then(Value::as_str) {
-                    if valid_profile(arn) {
-                        match entry.pointer("/optInFeatures/deviceCodeSignIn/toggle") {
-                            None | Some(Value::Null) | Some(Value::Bool(true)) => {}
-                            Some(Value::String(v)) if v.eq_ignore_ascii_case("enabled") => {}
-                            Some(Value::Bool(false)) => {
-                                disabled = true;
-                                continue;
-                            }
-                            Some(Value::String(v)) if v.eq_ignore_ascii_case("disabled") => {
-                                disabled = true;
-                                continue;
-                            }
-                            _ => return Err(invalid_response()),
+                if let Some(arn) = entry.get("arn").and_then(Value::as_str)
+                    && valid_profile(arn)
+                {
+                    match entry.pointer("/optInFeatures/deviceCodeSignIn/toggle") {
+                        None | Some(Value::Null) | Some(Value::Bool(true)) => {}
+                        Some(Value::String(v)) if v.eq_ignore_ascii_case("enabled") => {}
+                        Some(Value::Bool(false)) => {
+                            disabled = true;
+                            continue;
                         }
-                        return Ok(arn.to_owned());
+                        Some(Value::String(v)) if v.eq_ignore_ascii_case("disabled") => {
+                            disabled = true;
+                            continue;
+                        }
+                        _ => return Err(invalid_response()),
                     }
+                    return Ok(arn.to_owned());
                 }
             }
             match value.get("nextToken") {

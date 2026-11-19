@@ -237,7 +237,12 @@ impl RouteModule<'_> {
             .provider_models()
             .get(provider_id, &model_id)
             .await?
-            .map(|record| ProviderModelDetail::from_record(record, provider_supports_web_search(self.gw, &provider)))
+            .map(|record| {
+                ProviderModelDetail::from_record(
+                    record,
+                    provider_supports_web_search(self.gw, &provider),
+                )
+            })
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
         super::thinking_map::hide_unwritable_generated_controls(
             self.gw,
@@ -614,7 +619,10 @@ impl RouteModule<'_> {
                     models: active_routes,
                 };
                 self.gw.route_policy_state.clear_pricing();
-                ProviderModelDetail::from_record(*model, provider_supports_web_search(self.gw, &provider))
+                ProviderModelDetail::from_record(
+                    *model,
+                    provider_supports_web_search(self.gw, &provider),
+                )
             }
             ProviderModelRestore::NotFound => {
                 return Err(provider_model_not_found(provider_id, &model_id));
@@ -1420,7 +1428,10 @@ fn apply_provider_model_mutation(
             // The write committed: drop this Gateway's cached prices before
             // returning so the next selection sees the new values.
             gw.route_policy_state.clear_pricing();
-            let mut detail = ProviderModelDetail::from_record(*model, provider_supports_web_search(gw, provider));
+            let mut detail = ProviderModelDetail::from_record(
+                *model,
+                provider_supports_web_search(gw, provider),
+            );
             super::thinking_map::hide_unwritable_generated_controls(
                 gw,
                 provider,

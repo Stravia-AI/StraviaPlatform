@@ -75,19 +75,18 @@ pub(super) fn encode(
     let mut turns: Vec<Turn> = Vec::new();
     let mut seen_conversation = false;
     for item in &request.items {
-        if let Some(meta) = &item.meta {
-            if meta.reference().is_some()
+        if let Some(meta) = &item.meta
+            && (meta.reference().is_some()
                 || meta.opaque_value().is_some()
                 || meta.object_extensions().is_some_and(|fields| {
                     fields.keys().any(|key| {
                         key != stravia_runtime_contract::protocol::ir::TOOL_RESULT_CONTENT_KIND_META
                     })
-                })
-            {
-                return Err(invalid(
-                    "Kiro cannot represent message metadata or unresolved references",
-                ));
-            }
+                }))
+        {
+            return Err(invalid(
+                "Kiro cannot represent message metadata or unresolved references",
+            ));
         }
         if matches!(item.role, Role::System | Role::Developer) {
             if seen_conversation || item.tool_calls.is_some() || item.tool_call_id.is_some() {
@@ -132,10 +131,10 @@ pub(super) fn encode(
                     MessageContent::Blocks(blocks)
                         if matches!(blocks.as_slice(), [ContentBlock::ToolResult { .. }]) =>
                     {
-                        if let ContentBlock::ToolResult { tool_use_id, .. } = &blocks[0] {
-                            if tool_use_id != id {
-                                return Err(invalid("Tool result call IDs do not match"));
-                            }
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = &blocks[0]
+                            && tool_use_id != id
+                        {
+                            return Err(invalid("Tool result call IDs do not match"));
                         }
                         append_user_content(turn, &item.content)?;
                     }

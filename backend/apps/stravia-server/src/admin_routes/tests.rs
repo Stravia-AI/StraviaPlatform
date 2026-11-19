@@ -1466,8 +1466,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn route_purpose_http_contract_rejects_invalid_and_mismatched_writes()
--> anyhow::Result<()> {
+async fn route_purpose_http_contract_rejects_invalid_and_mismatched_writes() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
     let provider = gateway
@@ -1585,10 +1584,7 @@ async fn route_purpose_http_contract_rejects_invalid_and_mismatched_writes()
         serde_json::from_slice(&to_bytes(read.into_body(), usize::MAX).await?)?;
     assert_eq!(read["data"]["purpose"], "inference");
     assert_eq!(read["data"]["image_generation_bound"], false);
-    assert_eq!(
-        read["data"]["targets"][0]["purpose_mismatch"],
-        false
-    );
+    assert_eq!(read["data"]["targets"][0]["purpose_mismatch"], false);
 
     let null_update = app
         .oneshot(

@@ -188,7 +188,9 @@ async function submit(): Promise<void> {
                   }),
                   disabled: !route.available,
                 }))}
-                clearLabel={backend?.kind === 'external' && backend.route_id ? m.web_search_unlink_external_route() : undefined}
+                clearLabel={backend?.kind === 'external' && backend.route_id
+                  ? m.web_search_unlink_external_route()
+                  : undefined}
                 placeholder={m.web_search_select_external_route()}
                 emptyText={m.common_no_matching_models()}
                 disabled={saving || externalRoutesQuery.isPending || externalRoutesQuery.isError}

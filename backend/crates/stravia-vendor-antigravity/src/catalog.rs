@@ -481,14 +481,20 @@ mod tests {
         );
         let low = selector::resolve(table, None).unwrap();
         assert_eq!(low.model_enum, Some("OPAQUE_B"));
-        assert_eq!(low.api_provider, Some(&json!("API_PROVIDER_ANTHROPIC_VERTEX")));
+        assert_eq!(
+            low.api_provider,
+            Some(&json!("API_PROVIDER_ANTHROPIC_VERTEX"))
+        );
         assert_eq!(low.model_provider, Some(&json!("MODEL_PROVIDER_GOOGLE")));
         let high = selector::resolve(
             table,
-            Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
-                value: "high".into(),
-            }),
-        ).unwrap();
+            Some(
+                &stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                    value: "high".into(),
+                },
+            ),
+        )
+        .unwrap();
         assert_eq!(high.model_enum, Some("OPAQUE_A"));
         assert_eq!(high.api_provider, Some(&json!(26)));
         assert_eq!(high.model_provider, Some(&json!(4)));

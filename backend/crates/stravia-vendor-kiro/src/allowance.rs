@@ -148,19 +148,18 @@ fn parse(bytes: &[u8], now: Option<i64>) -> Result<AllowanceResponse, PluginErro
                 .or(breakdown.usage_limit),
             breakdown.next_date_reset.or(usage.next_date_reset),
         );
-        if let Some(trial) = &breakdown.free_trial_info {
-            if trial.free_trial_status.as_deref() == Some("ACTIVE")
-                && unexpired(trial.free_trial_expiry, now)
-            {
-                push_item(
-                    &mut allowances,
-                    format!("trial_{identity}"),
-                    unit,
-                    trial.current_usage_with_precision.or(trial.current_usage),
-                    trial.usage_limit_with_precision.or(trial.usage_limit),
-                    trial.free_trial_expiry,
-                );
-            }
+        if let Some(trial) = &breakdown.free_trial_info
+            && trial.free_trial_status.as_deref() == Some("ACTIVE")
+            && unexpired(trial.free_trial_expiry, now)
+        {
+            push_item(
+                &mut allowances,
+                format!("trial_{identity}"),
+                unit,
+                trial.current_usage_with_precision.or(trial.current_usage),
+                trial.usage_limit_with_precision.or(trial.usage_limit),
+                trial.free_trial_expiry,
+            );
         }
         let mut bonus_codes = HashSet::new();
         for bonus in &breakdown.bonuses {
@@ -295,7 +294,7 @@ fn push_item(
 // Smithy timestamp JSON is Unix seconds (potentially fractional), not ms.
 fn timestamp_millis(seconds: f64) -> Option<i64> {
     let ms = seconds * 1000.0;
-    (ms.is_finite() && ms >= 0.0 && ms < i64::MAX as f64).then(|| ms as i64)
+    (ms.is_finite() && ms >= 0.0 && ms < i64::MAX as f64).then_some(ms as i64)
 }
 
 #[cfg(test)]
@@ -388,7 +387,8 @@ mod tests {
         );
 
         for body in [
-            br#"{"usageBreakdownList":[],"userInfo":{"userId":"opaque-id","email":"   "}}"#.as_slice(),
+            br#"{"usageBreakdownList":[],"userInfo":{"userId":"opaque-id","email":"   "}}"#
+                .as_slice(),
             br#"{"usageBreakdownList":[],"userInfo":{"userId":"opaque-id"}}"#.as_slice(),
             br#"{"usageBreakdownList":[]}"#.as_slice(),
         ] {

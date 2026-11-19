@@ -100,8 +100,7 @@ impl KiroStream {
                     let total = u32::from_be_bytes(self.buffer[0..4].try_into().unwrap()) as usize;
                     let headers =
                         u32::from_be_bytes(self.buffer[4..8].try_into().unwrap()) as usize;
-                    if total < 16
-                        || total > MAX_MESSAGE
+                    if !(16..=MAX_MESSAGE).contains(&total)
                         || headers > MAX_HEADERS
                         || headers > total - 16
                     {
@@ -244,15 +243,15 @@ impl KiroStream {
                 }
             }
             "reasoningContentEvent" => {
-                if let Some(text) = optional_string(&payload, "text")? {
-                    if !text.is_empty() {
-                        emit(AiStreamDelta::ThinkingDelta(text.to_owned()))?;
-                    }
+                if let Some(text) = optional_string(&payload, "text")?
+                    && !text.is_empty()
+                {
+                    emit(AiStreamDelta::ThinkingDelta(text.to_owned()))?;
                 }
-                if let Some(signature) = optional_string(&payload, "signature")? {
-                    if !signature.is_empty() {
-                        emit(AiStreamDelta::ThinkingSignature(signature.to_owned()))?;
-                    }
+                if let Some(signature) = optional_string(&payload, "signature")?
+                    && !signature.is_empty()
+                {
+                    emit(AiStreamDelta::ThinkingSignature(signature.to_owned()))?;
                 }
             }
             "toolUseEvent" => self.tool_event(&payload, emit)?,
@@ -337,20 +336,20 @@ impl KiroStream {
         if tool.complete {
             return Err("Kiro tool fragment after completion".into());
         }
-        if let Some(name) = name {
-            if name != tool.name {
-                return Err("Kiro tool name changed".into());
-            }
+        if let Some(name) = name
+            && name != tool.name
+        {
+            return Err("Kiro tool name changed".into());
         }
         self.active_tool = Some(index);
-        if let Some(input) = input {
-            if !input.is_empty() {
-                tool.arguments.push_str(input);
-                emit(AiStreamDelta::ToolCallDelta {
-                    index,
-                    arguments: input.to_owned(),
-                })?;
-            }
+        if let Some(input) = input
+            && !input.is_empty()
+        {
+            tool.arguments.push_str(input);
+            emit(AiStreamDelta::ToolCallDelta {
+                index,
+                arguments: input.to_owned(),
+            })?;
         }
         if stop {
             tool.complete = true;
@@ -464,10 +463,10 @@ fn parse_headers(mut bytes: &[u8]) -> Result<Headers<'_>, String> {
                 ":error-message" => Some(&mut result.error_message),
                 _ => None,
             };
-            if let Some(slot) = slot {
-                if slot.replace(value).is_some() {
-                    return Err("duplicate event stream pseudo-header".into());
-                }
+            if let Some(slot) = slot
+                && slot.replace(value).is_some()
+            {
+                return Err("duplicate event stream pseudo-header".into());
             }
         }
         bytes = &bytes[prefix + length..];

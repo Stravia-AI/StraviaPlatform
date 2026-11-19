@@ -157,13 +157,15 @@ fn plan_client_config(
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
     let mut filtered_input;
-    let input = if input.models.iter().any(|model| {
-        model.purpose == Some(crate::db::models::RoutePurpose::WebSearch)
-    }) {
+    let input = if input
+        .models
+        .iter()
+        .any(|model| model.purpose == Some(crate::db::models::RoutePurpose::WebSearch))
+    {
         filtered_input = input.clone();
-        filtered_input.models.retain(|model| {
-            model.purpose != Some(crate::db::models::RoutePurpose::WebSearch)
-        });
+        filtered_input
+            .models
+            .retain(|model| model.purpose != Some(crate::db::models::RoutePurpose::WebSearch));
         &filtered_input
     } else {
         input
@@ -1520,7 +1522,10 @@ mod tests {
         let catalog = super::codex_catalog(&input.models, false);
         assert!(!catalog.to_string().contains("search-only"));
         input.models.retain(|model| model.model_id == "search-only");
-        assert_eq!(preview_connect_client_apply(&input).unwrap_err().code, "invalid_input");
+        assert_eq!(
+            preview_connect_client_apply(&input).unwrap_err().code,
+            "invalid_input"
+        );
     }
 
     #[test]

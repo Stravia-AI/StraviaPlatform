@@ -1023,8 +1023,7 @@ async function saveModel(): Promise<void> {
           <Select.Root
             type="single"
             bind:value={
-              () => form.purpose ?? undefined,
-              (value: RoutePurpose | undefined) => (form.purpose = value ?? null)
+              () => form.purpose ?? undefined, (value: RoutePurpose | undefined) => (form.purpose = value ?? null)
             }>
             <Select.Trigger id="route-purpose" class="w-full" aria-label={m.route_purpose_label()}>
               {#if form.purpose}
@@ -1074,7 +1073,8 @@ async function saveModel(): Promise<void> {
         <p class="mt-3 text-sm text-warning" role="status">
           {#if bindingBlocker === 'image_generation'}
             {m.backend_error_route_image_generation_bound()}
-            <a class="underline underline-offset-2" href={resolve('media-generation')}>{m.route_purpose_open_media()}</a>
+            <a class="underline underline-offset-2" href={resolve('media-generation')}
+              >{m.route_purpose_open_media()}</a>
           {:else}
             {m.backend_error_route_web_search_bound()}
             <a class="underline underline-offset-2" href={resolve('web-search')}>{m.route_purpose_open_search()}</a>

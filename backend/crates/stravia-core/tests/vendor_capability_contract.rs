@@ -767,27 +767,35 @@ async fn model_search_targets_enforce_complete_report_contracts() -> anyhow::Res
     )
     .await?;
 
-    harness.gateway.admin().create_manual_provider_model(
-        &provider.id,
-        "research-model",
-        CreateManualProviderModel {
-            metadata: json!({
-                "id": "research-model",
-                "name": "Search only",
-                "capabilities": ["search"],
-                "modalities": {"input": ["text"], "output": []}
-            }),
-            template_id: None,
-        },
-    ).await?;
+    harness
+        .gateway
+        .admin()
+        .create_manual_provider_model(
+            &provider.id,
+            "research-model",
+            CreateManualProviderModel {
+                metadata: json!({
+                    "id": "research-model",
+                    "name": "Search only",
+                    "capabilities": ["search"],
+                    "modalities": {"input": ["text"], "output": []}
+                }),
+                template_id: None,
+            },
+        )
+        .await?;
     let inference = create_route(
         &harness.gateway,
         "search-only-inference",
         vec![(&provider, "research-model", 10)],
         0,
         stravia_core::db::models::RoutePurpose::Inference,
-    ).await;
-    assert!(inference.is_err(), "search-only metadata must not bind to inference");
+    )
+    .await;
+    assert!(
+        inference.is_err(),
+        "search-only metadata must not bind to inference"
+    );
     let model_route = create_route(
         &harness.gateway,
         "model-search",
@@ -936,9 +944,11 @@ async fn model_search_targets_enforce_complete_report_contracts() -> anyhow::Res
             .iter()
             .any(|route| { route.model_id == model_route.model_id.as_str() && route.available })
     );
-    assert!(!eligible.iter().any(|route| {
-        route.model_id == ineligible_model_route.model_id.as_str()
-    }));
+    assert!(
+        !eligible
+            .iter()
+            .any(|route| { route.model_id == ineligible_model_route.model_id.as_str() })
+    );
     Ok(())
 }
 

@@ -120,8 +120,7 @@ function strategyLabel(strategy: RouteSelectionStrategy): string {
 export function formatRouteDestinations(summary: RouteDestinationSummary): RouteDestinationText {
   const { preferred } = summary
   if (!preferred) {
-    const { credential_invalid, provider_disabled, allowance_suspended, purpose_mismatch } =
-      summary.unavailableReasons
+    const { credential_invalid, provider_disabled, allowance_suspended, purpose_mismatch } = summary.unavailableReasons
     const details: RouteDestinationText['details'] = []
     if (credential_invalid > 0) {
       details.push({ text: m.models_destinations_credential_invalid({ count: credential_invalid }), tone: 'muted' })

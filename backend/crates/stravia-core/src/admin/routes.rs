@@ -66,14 +66,21 @@ pub(crate) struct RouteModule<'a> {
 fn provider_supports_web_search(gw: &Gateway, provider: &Provider) -> bool {
     use stravia_vendor_sdk::Capability;
 
-    provider.vendor.as_deref().map(str::trim).is_some_and(|vendor| {
-        gw.vendor_plugins.descriptor(vendor).is_ok_and(|descriptor| {
-            let channel_id = provider.channel.as_deref().unwrap_or("default");
-            descriptor.channels.iter().any(|channel| {
-                channel.id == channel_id && channel.capabilities.contains(&Capability::Search)
-            })
+    provider
+        .vendor
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|vendor| {
+            gw.vendor_plugins
+                .descriptor(vendor)
+                .is_ok_and(|descriptor| {
+                    let channel_id = provider.channel.as_deref().unwrap_or("default");
+                    descriptor.channels.iter().any(|channel| {
+                        channel.id == channel_id
+                            && channel.capabilities.contains(&Capability::Search)
+                    })
+                })
         })
-    })
 }
 
 impl<'a> RouteModule<'a> {
@@ -221,10 +228,14 @@ impl<'a> RouteModule<'a> {
                 .provider_models()
                 .find(provider_id, &model_id)
                 .await?;
-            let matches = record.is_some_and(|record| record.metadata.supports_route_purpose(purpose));
+            let matches =
+                record.is_some_and(|record| record.metadata.supports_route_purpose(purpose));
             if !matches
                 || (purpose == RoutePurpose::WebSearch
-                    && !provider_supports_web_search(self.gw, &self.get_provider(provider_id).await?))
+                    && !provider_supports_web_search(
+                        self.gw,
+                        &self.get_provider(provider_id).await?,
+                    ))
             {
                 return Err(coded_error(
                     "ROUTE_PURPOSE_MISMATCH",
@@ -497,10 +508,15 @@ impl<'a> RouteModule<'a> {
             })?;
         let search_channel = provider_supports_web_search(self.gw, &provider);
         let eligible = || {
-            crate::provider_models::eligible_route_purposes(&provider_model.metadata, search_channel)
+            crate::provider_models::eligible_route_purposes(
+                &provider_model.metadata,
+                search_channel,
+            )
         };
         let purpose = match existing.as_ref() {
-            Some(route) => route.purpose.ok_or_else(|| route_unconfigured_error(&route_id))?,
+            Some(route) => route
+                .purpose
+                .ok_or_else(|| route_unconfigured_error(&route_id))?,
             None => eligible().next().ok_or_else(|| {
                 coded_error(
                     "ROUTE_PURPOSE_UNREGISTERED",

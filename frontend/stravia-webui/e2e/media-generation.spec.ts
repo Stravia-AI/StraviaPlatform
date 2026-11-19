@@ -51,9 +51,7 @@ for (const enabled of [false, true]) {
     await page.route('**/api/v1/providers/text-provider/models', (route) =>
       route.fulfill({
         json: {
-          data: {
-            models: [{ id: 'text-model', name: 'Text model', available: true, route_purposes: ['inference'] }],
-          },
+          data: { models: [{ id: 'text-model', name: 'Text model', available: true, route_purposes: ['inference'] }] },
         },
       }),
     )

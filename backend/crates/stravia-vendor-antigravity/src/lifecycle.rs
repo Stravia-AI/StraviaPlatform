@@ -134,10 +134,9 @@ impl Input {
                 for block in blocks {
                     if let ContentBlock::ToolResult { tool_use_id, .. }
                     | ContentBlock::ServerToolResult { tool_use_id, .. } = block
+                        && item.tool_call_id.as_ref() != Some(tool_use_id)
                     {
-                        if item.tool_call_id.as_ref() != Some(tool_use_id) {
-                            *result_counts.entry(tool_use_id.to_string()).or_insert(0) += 1;
-                        }
+                        *result_counts.entry(tool_use_id.to_string()).or_insert(0) += 1;
                     }
                 }
             }

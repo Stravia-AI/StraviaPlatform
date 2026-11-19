@@ -379,10 +379,7 @@ async fn image_reference_blocks_text_even_when_disabled_until_explicitly_cleared
         .update_media_generation_config(GenerationRouteFixture::config(&route, true))
         .await
         .expect_err("a text-output Route cannot be bound as image generation");
-    assert_eq!(
-        error.code,
-        "media_generation_route_purpose_mismatch"
-    );
+    assert_eq!(error.code, "media_generation_route_purpose_mismatch");
     assert_eq!(fixture.upstream_calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
@@ -481,10 +478,7 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
         .update_media_generation_config(GenerationRouteFixture::config(&route, true))
         .await
         .expect_err("enabled Targets with output drift cannot qualify an image Route");
-    assert_eq!(
-        error.code,
-        "media_generation_targets_purpose_mismatch"
-    );
+    assert_eq!(error.code, "media_generation_targets_purpose_mismatch");
     let disabled = admin
         .update_media_generation_config(GenerationRouteFixture::config(&route, false))
         .await?;

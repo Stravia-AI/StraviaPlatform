@@ -19,10 +19,17 @@ describe('route purpose recovery errors', () => {
         expect(message).not.toContain('RAW_TARGET_SENTINEL')
         if (code === 'ROUTE_PURPOSE_MISMATCH') {
           const searchError = new Error(JSON.stringify({ code, params: { ...params, purpose: 'web_search' } }))
-          expect(localizeBackendErrorMessage(searchError, locale)).toContain(locale === 'en-US' ? 'Web Search' : '联网搜索')
+          expect(localizeBackendErrorMessage(searchError, locale)).toContain(
+            locale === 'en-US' ? 'Web Search' : '联网搜索',
+          )
         }
       }
-      for (const code of ['ROUTE_IMAGE_GENERATION_BOUND', 'ROUTE_WEB_SEARCH_BOUND', 'ROUTE_PURPOSE_UNCONFIGURED', 'ROUTE_NOT_FOUND']) {
+      for (const code of [
+        'ROUTE_IMAGE_GENERATION_BOUND',
+        'ROUTE_WEB_SEARCH_BOUND',
+        'ROUTE_PURPOSE_UNCONFIGURED',
+        'ROUTE_NOT_FOUND',
+      ]) {
         const error = new Error(JSON.stringify({ code, params, message: 'RAW_ROUTE_SENTINEL' }))
         const message = localizeBackendErrorMessage(error, locale)
         expect(message).toContain(params.route_id)

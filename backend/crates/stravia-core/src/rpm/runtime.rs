@@ -486,11 +486,10 @@ impl SendEligibility {
         {
             return Err(rejected());
         }
-        if !model.as_ref().is_some_and(|model| {
-            model
-                .metadata
-                .supports_route_purpose(purpose)
-        }) {
+        if !model
+            .as_ref()
+            .is_some_and(|model| model.metadata.supports_route_purpose(purpose))
+        {
             return Err(AdmissionError::Rejected(ModelTurnError::new(
                 "target_purpose_mismatch",
                 "Target no longer supports the Route purpose",

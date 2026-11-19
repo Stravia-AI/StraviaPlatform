@@ -69,13 +69,7 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
                 route_purposes: ['inference', 'image_generation'],
                 specification: {},
               },
-              {
-                id: 'text-only',
-                name: 'Text only',
-                available: true,
-                route_purposes: ['inference'],
-                specification: {},
-              },
+              { id: 'text-only', name: 'Text only', available: true, route_purposes: ['inference'], specification: {} },
             ],
           },
         },
@@ -145,7 +139,9 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
   })
 }
 
-test('historical model alias can repair its purpose without replacing its destination or schedule', async ({ page }) => {
+test('historical model alias can repair its purpose without replacing its destination or schedule', async ({
+  page,
+}) => {
   const service = {
     id: 'alias-provider',
     name: 'Alias service',

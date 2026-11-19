@@ -399,10 +399,15 @@ impl ProviderModelMetadata {
     /// Use the persisted model declaration, never display defaults. Search also
     /// requires support on the selected Vendor channel.
     pub fn supports_route_purpose(&self, purpose: RoutePurpose) -> bool {
-        let capabilities = self.extensions.get("capabilities").and_then(Value::as_array);
+        let capabilities = self
+            .extensions
+            .get("capabilities")
+            .and_then(Value::as_array);
         let declares = |capability| {
             capabilities.is_none_or(|values| {
-                values.iter().any(|value| value.as_str() == Some(capability))
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some(capability))
             })
         };
         let output = match purpose {
