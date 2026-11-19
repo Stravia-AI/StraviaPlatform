@@ -253,6 +253,17 @@ nix run . -- --data-dir "$HOME/.local/share/stravia-server"
 
 `nix run` 保留 Server 原有 CLI、默认 loopback 监听和首次设置流程；不是自动创建管理员的安装器。首次构建会下载固定来源的工具链与依赖，后续编译在 sandbox 内离线执行。`flake.lock` 与 `devenv.lock` 分别锁定发行包和开发环境，不会自动同步。不通过 `path:.` 将开发数据和凭据纳入 flake。
 
+Nix 在本机 store 中独立缓存编译好的 Rust 依赖，覆盖 Server、宿主 Vendor 构建器和 `wasm32-wasip2` 组件。只改业务源码或 WebUI 时，最终包重新编译自己的代码并生成真实组件，Cargo 复用仍有效的依赖产物。Rust 工具链、Cargo manifest / lockfile、构建配置或补丁变更会更新缓存；首次构建仍须完整编译依赖。
+
+依赖缓存不属于 Server 运行时闭包，可能被 Nix GC 回收。需要跨 GC 保留时，在仓库根目录为当前构建输入创建持久结果链接，不必更改系统的 GC 策略：
+
+```bash
+mkdir -p "$HOME/.local/state"
+nix build .#stravia-server.cargoArtifacts --out-link "$HOME/.local/state/stravia-rust-deps"
+```
+
+若从 NixOS 系统 flake 部署，在系统配置目录用 `.#nixosConfigurations.HOST.config.services.stravia.package.cargoArtifacts`（`HOST` 为配置名）替换仓库内属性，以保留实际部署所用的缓存。缓存输入更新后重新执行，链接会指向新缓存。
+
 NixOS 系统 flake 在现有 `inputs` 中加入 `stravia.url = "github:Stravia-AI/StraviaPlatform";`，并将 `stravia.nixosModules.default` 加入系统的 `modules` 列表。最小服务配置为：
 
 ```nix

@@ -136,9 +136,13 @@ fn digest(path: &Path) -> anyhow::Result<String> {
         }
         hasher.update(&buffer[..length]);
     }
-    Ok(stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-        &hasher.finalize().into(),
-    ))
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(hex)
 }
 
 struct PendingFile {

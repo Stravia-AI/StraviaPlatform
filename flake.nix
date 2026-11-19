@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/8edc0c72e3a38faf5434e40d1f19431125fe4b30";
+    crane.url = "github:ipetkov/crane/692f7e9ef2ece8125b466f66f2af532b3edaed0d";
     rust-overlay = {
       url = "github:oxalica/rust-overlay/a110337465cfb76e3806b81b9db3094c3e6e770a";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -17,6 +18,7 @@
     {
       self,
       nixpkgs,
+      crane,
       rust-overlay,
       bun2nix,
       ...
@@ -40,6 +42,7 @@
         pkgs.callPackage ./nix/package.nix {
           source = self.outPath;
           inherit rustToolchain;
+          craneLib = crane.mkLib pkgs;
           bun2nix = generatorFor system;
           bun = pkgs.bun;
         };
