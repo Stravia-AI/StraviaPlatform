@@ -145,11 +145,13 @@ operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注�
 | GenerationConfig | `temperature`、`topP`、`topK`、`candidateCount`、`maxOutputTokens`、`stopSequences`、`thinkingConfig`、`responseMimeType`、`responseSchema` |
 | ThinkingConfig | `includeThoughts`、`thinkingBudget`、`thinkingLevel` |
 | Tool | `functionDeclarations`、`googleSearch`、`googleSearchRetrieval`、`codeExecution`、`urlContext`；这些结构继续分别投影，不透传任意嵌套对象 |
-| FunctionDeclaration | `name`、`description`、`parameters`、`response` |
+| FunctionDeclaration | `name`、`description`、`parameters`、`parametersJsonSchema`、`response` |
 | ToolConfig | 仅 `functionCallingConfig` 的 `mode`、`allowedFunctionNames` |
 | SafetySetting | `category`、`threshold`、`method` |
 
-Schema 依据实际 `openapi.proto` 投影 type/format/title/description/nullable/default、数组与对象约束、enum、properties/propertyOrdering/required、数值与字符串约束、example、oneOf/anyOf/allOf/not、additionalProperties/additionalPropertiesSchema、ref/defs。properties/defs 的业务属性名保留，其 schema 值递归投影；type 规范化为 proto enum 名称，类型数组转换为原生组合约束，不把数组发送到 enum 字段。标准 JSON Schema 的 `$ref`/`$defs` 转换为 `ref`/`defs`，本地引用前缀转换为 `#/defs/`；int64 长度/数量约束按 protojson 转为字符串。枚举词汇与引用格式另对照 [Google Schema 官方文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/Schema)，该公开文档不等于私有 RPC 的实测证明。具体允许字段以 `wire.rs` 为实现来源。
+同协议原生 `parameters`/`response` 和生成配置的 `responseSchema` 依据实际 `openapi.proto` 投影 type/format/title/description/nullable/default、数组与对象约束、enum、properties/propertyOrdering/required、数值与字符串约束、example、oneOf/anyOf/allOf/not、additionalProperties/additionalPropertiesSchema、ref/defs。properties/defs 的业务属性名保留，其 schema 值递归投影；type 规范化为 proto enum 名称，类型数组转换为原生组合约束，不把数组发送到 enum 字段。标准 JSON Schema 的 `$ref`/`$defs` 转换为 `ref`/`defs`，本地引用前缀转换为 `#/defs/`；int64 长度/数量约束按 protojson 转为字符串。枚举词汇与引用格式另对照 [Google Schema 官方文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/Schema)，该公开文档不等于私有 RPC 的实测证明。具体允许字段以 `wire.rs` 为实现来源。
+
+CLI 1.5.11 的 master `tool.proto` 描述符将 `parametersJsonSchema` 声明为 `google.protobuf.Value`，与 typed `parameters` 互斥。canonical 函数参数使用前者，作为标准 JSON Schema 原样保留，不经过 typed Schema 投影，因此保留小写类型、类型数组、`anyOf`、`$defs`/`$ref` 和其他约束；同协议原生 typed 字段仍按原合同投影。官方 1.5.11 的 MCP 转换会丢弃 `anyOf`，不能作为复杂联合类型的保真路径。对同一原始 OMP bash schema 的上游代理实测，原 typed `parameters` 返回 HTTP 400，仅把子类型改为小写仍为 400；只将标准 schema 改放 `parametersJsonSchema`，Claude Opus High 返回 HTTP 200 / `OK`。这只证明该请求和账号的实测结果，不保证所有 schema 或模型均获上游接受。
 
 CLI 1.5.8 的 master 描述符声明 `thinkingLevel` enum：`THINKING_LEVEL_UNSPECIFIED=0`、`LOW=1`、`MEDIUM=2`、`HIGH=3`、`MINIMAL=4`、`EXTRA_HIGH=5`、`MAX=6`、`XHIGH=7`。已知数字按 protojson 写为符号，未知 int32 数值原样保留；不能将目录未知数值推测成某个已知符号。`thinkingBudget` 保留真实 int32 预算（`-1` 表示上游动态预算），不从 Effort 硬编码预算。
 
@@ -163,9 +165,13 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 
 `functionResponse.parts` 中的 inlineData/fileData 在 Gemini 解码时转成与业务 ToolResult 同属一个调用的 canonical 媒体块；编码时重新放回该 functionResponse，连续的并行工具结果合并到同一轮 content。上下文重写保持复合结果原子性，Observation 记录完整结果；转换为 Anthropic 或 Responses 时，业务 JSON 与支持的附件仍绑定同一个工具调用。URL 图片沿用现有 canonical 载体，只保证 URL 身份，不承诺保留其可选 MIME 提示；不为仅支持文本工具结果的 Chat Completions 增加多模态扩展。
 
-**删除边界**：cachedContent、labels、metadata、外部 project/session/request 身份、未知 Content/Part/Tool/Schema 字段，以及未纳入子集的 seed、presence/frequency penalty、logprobs、routingConfig、parallel-tool 控制等均不送上游。标准协议编码前先清除不支持的 canonical generation 控制和非 Google 协议扩展，编码后再投影 Google raw 扩展，防止同协议透传绕过白名单；不伪造原始协议标记来绕过共享 codec 校验。
+**删除边界**：cachedContent、labels、metadata、外部 project/session/request 身份、未知 Content/Part/Tool/typed Schema 字段，以及未纳入子集的 seed、presence/frequency penalty、logprobs、routingConfig、parallel-tool 控制等均不送上游；`parametersJsonSchema` 内的 JSON Schema 原样保留。标准协议编码前先清除不支持的 canonical generation 控制和非 Google 协议扩展，编码后再投影 Google raw 扩展，防止同协议透传绕过白名单；不伪造原始协议标记来绕过共享 codec 校验。
 
-可携带的工具定义、工具选择、stop 和响应格式由插件按 private master 边界构造，再统一投影。工具选择映射为 AUTO/NONE/ANY，具名选择附带 allowedFunctionNames；同协议原始工具配置保留后再清理。函数 `strict`、响应格式的 name/strict 不进入 CLI 请求，实际 schema 约束与业务 default/example 保留。此处理避免公开 Gemini codec 拒绝已经清除的外来控制，或删除私有 Schema 已有的字段；其他插件和共享 codec 校验不变。
+可携带的工具定义、工具选择、stop 和响应格式由插件按 private master 边界构造；canonical 工具 JSON Schema 原样保留，其余字段按上述白名单投影。工具选择映射为 AUTO/NONE/ANY，具名选择附带 allowedFunctionNames；同协议原始工具配置保留后再清理。函数 `strict`、响应格式的 name/strict 不进入 CLI 请求，实际 schema 约束与业务 default/example 保留。此处理避免公开 Gemini codec 拒绝已经清除的外来控制，或删除私有 Schema 已有的字段；其他插件和共享 codec 校验不变。
+
+### 2026-11-19：Hydrogen 503 对照
+
+用户捕获的 `gemini-4-hydrogen-high` 返回 `MODEL_CAPACITY_EXHAUSTED`，但官方 CLI 可以正常调用。同次排查通过 CLI 1.5.11、同一登录环境的隔离代理分别调用 High 和 Medium，两者均返回 HTTP 200。随后保留失败捕获的内层 `request` 与模型，只使用 CLI 本次生成的外层 `requestId` 重放；CLI 的 project 与捕获一致，仍返回 HTTP 200。该结果不能证明 503 已修复，也不能区分当时的短暂容量与传输路径差异；不据此添加自动重试、降低 effort 或改写模型。此处验证的是 CLI 经隔离代理的上游调用，不是线上 Stravia 实例的实时调用。
 
 ### 响应
 

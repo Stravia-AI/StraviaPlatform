@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Antigravity preserves nullable and union tool schemas as standard JSON Schema, including references and constraints, instead of converting them to typed schemas that can cause upstream Claude HTTP 400 errors. Rebuild and re-import the standalone Antigravity plugin.
 - Vendor plugin details now interpret installation timestamps as Unix milliseconds, preventing dates from appearing thousands of years in the future.
 - Antigravity applies meaning-preserving rewrites to four exact OMP 18.22.1 system-instruction sentences that independently triggered upstream 429s in controlled comparisons. Other system text, tool identifiers, code examples, ordinary messages and authoritative history are preserved; no invisible characters or automatic retries are added. The original native OMP request with 11 tools returned HTTP 200 / `OK` through the rebuilt plugin on Gemini 3.8 Flash Low. Opus High was not retested, and other upstream limits or content rules may still return 429. Re-import the standalone plugin to apply the fix.
 - Bundled vendor plugins and their matching official catalog entries now share one row, with both the installed and available versions visible. Third-party sources stay separate, and reinstalling from the official source still requires confirmation.

@@ -247,7 +247,7 @@ pub(crate) fn infer(
         for tool in tools {
             let mut declaration = serde_json::Map::new();
             declaration.insert("name".into(), Value::String(tool.name));
-            declaration.insert("parameters".into(), tool.parameters);
+            declaration.insert("parametersJsonSchema".into(), tool.parameters);
             if let Some(description) = tool.description {
                 declaration.insert("description".into(), Value::String(description));
             }
@@ -904,7 +904,16 @@ fn tool(value: &mut Value) -> Result<(), PluginError> {
     )?;
     if let Some(functions) = value.get_mut("functionDeclarations") {
         array(functions, |function| {
-            project(function, &["name", "description", "parameters", "response"])?;
+            project(
+                function,
+                &[
+                    "name",
+                    "description",
+                    "parameters",
+                    "parametersJsonSchema",
+                    "response",
+                ],
+            )?;
             if let Some(parameters) = function.get_mut("parameters") {
                 schema_projection(parameters)?;
             }
