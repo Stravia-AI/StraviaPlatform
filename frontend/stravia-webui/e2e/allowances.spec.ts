@@ -810,7 +810,15 @@ test('switches every allowance value between remaining and used and remembers th
 })
 
 for (const { locale, width, monthly, trial, bonus, used, unit } of [
-  { locale: 'en-US', width: 1440, monthly: 'Monthly window', trial: 'Free trial', bonus: 'Bonus', used: 'Used', unit: 'credits' },
+  {
+    locale: 'en-US',
+    width: 1440,
+    monthly: 'Monthly window',
+    trial: 'Free trial',
+    bonus: 'Bonus',
+    used: 'Used',
+    unit: 'credits',
+  },
   { locale: 'zh-CN', width: 375, monthly: '每月窗口', trial: '免费试用', bonus: '赠送额度', used: '已用', unit: '点' },
 ]) {
   test(`shows Kiro credit pools in the common allowance matrix (${locale}, ${width}px)`, async ({ page }) => {
@@ -836,7 +844,11 @@ for (const { locale, width, monthly, trial, bonus, used, unit } of [
         guard_supported: false,
         plan_label: 'Kiro Pro',
         account_label: undefined,
-        allowances: [quota('monthly', 'monthly', 8.125, 100), quota('trial', 'trial', 4.5, 20), quota('bonus_0_1', 'bonus', 0, 5)],
+        allowances: [
+          quota('monthly', 'monthly', 8.125, 100),
+          quota('trial', 'trial', 4.5, 20),
+          quota('bonus_0_1', 'bonus', 0, 5),
+        ],
         models: [],
       },
       freshSnapshot,
@@ -858,7 +870,9 @@ for (const { locale, width, monthly, trial, bonus, used, unit } of [
     await expect(details).toContainText(`8.125 / 100 ${unit}`)
     await expect(details).toContainText(`0 / 5 ${unit}`)
     await expect(page.getByTestId('allowance-provider-provider-alpha')).toContainText('55.63%')
-    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(
+      0,
+    )
     await page.screenshot({ path: test.info().outputPath(`kiro-credits-${locale}.png`) })
   })
 }

@@ -13,11 +13,17 @@ function amountNumber(amount: AllowanceAmount | undefined, locale: Locale): stri
   return amount.unit === 'credits' ? creditFormatters[locale].format(amount.value) : formatNumber(amount.value, locale)
 }
 
-export function formatAllowanceAmount(amount: AllowanceAmount | undefined, locale: Locale, limit?: AllowanceAmount): string {
+export function formatAllowanceAmount(
+  amount: AllowanceAmount | undefined,
+  locale: Locale,
+  limit?: AllowanceAmount,
+): string {
   const denomination = limit ?? amount
   if (!denomination || !Number.isFinite(denomination.value)) return '–'
   const unit = denomination.currency?.trim() || localizedAllowanceUnit(denomination.unit, locale)
-  const value = limit ? `${amountNumber(amount, locale)} / ${amountNumber(limit, locale)}` : amountNumber(amount, locale)
+  const value = limit
+    ? `${amountNumber(amount, locale)} / ${amountNumber(limit, locale)}`
+    : amountNumber(amount, locale)
   return unit ? `${value} ${unit}` : value
 }
 

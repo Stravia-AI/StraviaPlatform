@@ -603,7 +603,10 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
             'flex min-w-0 scroll-m-4 flex-col justify-between gap-1.5 rounded-sm',
             highlightedAllowanceId === id && 'bg-accent ring-2 ring-primary ring-offset-2 ring-offset-background',
           )}>
-          <span class={creditQuotaLimit(allowance) ? 'grid min-w-0 gap-1' : 'flex min-w-0 items-start justify-between gap-3'}>
+          <span
+            class={creditQuotaLimit(allowance)
+              ? 'grid min-w-0 gap-1'
+              : 'flex min-w-0 items-start justify-between gap-3'}>
             <span class="flex min-w-0 items-center gap-1 text-xs leading-4 text-muted-foreground">
               <span class="line-clamp-2 break-words" title={allowanceLabel(allowance)}
                 >{allowanceLabel(allowance)}</span>
