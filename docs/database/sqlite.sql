@@ -830,7 +830,7 @@ CREATE TABLE vendor_atomic_cells (vendor_id TEXT NOT NULL, provider_id TEXT NOT 
 
 CREATE TABLE vendor_atomic_checkpoint_cells (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, vendor_id TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, cell_key TEXT NOT NULL, revision BIGINT NOT NULL, payload BLOB, journal_head TEXT, PRIMARY KEY (principal, checkpoint_id, vendor_id, provider_id, cell_key), FOREIGN KEY (principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id) ON DELETE CASCADE);
 
-CREATE TABLE vendor_atomic_checkpoints (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, boundary_head TEXT, PRIMARY KEY (principal, checkpoint_id));
+CREATE TABLE vendor_atomic_checkpoints (principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, boundary_head TEXT, model_turn_cursor TEXT, PRIMARY KEY (principal, checkpoint_id));
 
 CREATE TABLE vendor_atomic_journal_nodes (
     node_id TEXT PRIMARY KEY,
@@ -855,7 +855,7 @@ CREATE TABLE vendor_atomic_journal_pins (
 
 CREATE TABLE vendor_atomic_leases (principal TEXT NOT NULL, admission_id TEXT NOT NULL, lease_id TEXT NOT NULL, expires_at_ms BIGINT NOT NULL, PRIMARY KEY(principal, admission_id, lease_id));
 
-CREATE TABLE vendor_atomic_lineages (principal TEXT NOT NULL, admission_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, history_epoch BIGINT NOT NULL DEFAULT 0, boundary_head TEXT, PRIMARY KEY (principal, admission_id));
+CREATE TABLE vendor_atomic_lineages (principal TEXT NOT NULL, admission_id TEXT NOT NULL, created_at_ms BIGINT NOT NULL, history_epoch BIGINT NOT NULL DEFAULT 0, boundary_head TEXT, model_turn_cursor TEXT, PRIMARY KEY (principal, admission_id));
 
 CREATE TABLE vendor_atomic_provider_fences (
     provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,

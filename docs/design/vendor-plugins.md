@@ -49,7 +49,7 @@ Core 先复用字段、协议、地址及 guest `ConfigValidation` 校验，再�
 | --- | --- | --- |
 | `stravia-vendor-base` | `base` / `fallback` | 除下列专属 Profile 外的全部现有供应商；`openai`、`xai`、`anthropic` 仅保留普通 API channel。 |
 | `stravia-vendor-codex` | `openai-codex` / `dedicated` | `provider_id = openai-codex`、`catalog_id = openai`、channel `codex`。 |
-| `stravia-vendor-kiro` | `kiro` / `dedicated` | `provider_id = kiro`，无目录映射，channel `default`；模型列表来自 Kiro 账号。 |
+| `stravia-vendor-kiro` | `kiro` / `dedicated` | `provider_id = kiro`，无目录映射；设备码通道 `oauth`（Google）、`github`、`builder-id`、`identity-center`。模型列表来自 Kiro 账号。 |
 | `stravia-vendor-grok` | `xai-grok` / `dedicated` | `provider_id = xai-grok`、`catalog_id = xai`、channel `grok`。 |
 | `stravia-vendor-command-code` | `command-code` / `dedicated` | `provider_id = command-code`、`catalog_id = commandcode`、channel `default`；目录名称为 `CommandCode`。 |
 | `stravia-vendor-devin` | `devin` / `dedicated` | `provider_id = devin`、`catalog_id = devin`、channel `devin`。 |
@@ -154,11 +154,13 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 ### Kiro CLI 接入
 
 1. `task build:vendors:all` 后从 `target/vendor-plugins-all/manifest.json` 找到 `kiro`，在扩展页导入对应的 Wasm。也可直接导入单包 `cargo build --locked --release --lib --target wasm32-wasip2 -p stravia-vendor-kiro` 的产物。
-2. 新建 Kiro 连接，填写为该账号生成的 Kiro API key。CLI 登录和 `--resume-id` 不会向插件授予权限。美东使用默认基础 URL；欧洲账号使用 `https://runtime.eu-central-1.kiro.dev`。插件不向其他地址发送密钥。连接检查访问该区域的受保护模型目录，不消耗生成额度，也不证明某个模型可生成。
-3. 同步模型，将账号目录中的目标模型（例如 `qwen3-coder-next`）绑定到 Route。推理使用所选模型，不回退、不加载 CLI 自带工具，也不访问 CLI 的工作区、历史或记忆。
+2. 新建 Kiro 连接，选择 Google、GitHub、AWS Builder ID 或 AWS IAM Identity Center，然后打开授权链接并按页面提示使用设备码。Google 的链接不预选登录方式；GitHub 使用自己的授权会话。IAM Identity Center 需要管理员给出的 Start URL 和身份目录 AWS Region；如果组织禁止设备码登录，必须由管理员启用。身份目录区域不一定是 Kiro profile 的区域，推理、模型目录和额度按 profile 路由（美东或法兰克福）。
+   - 原 API 密钥通道已移除。已有 API 密钥连接不会自动转换；新建设备码连接，同步模型并重新绑定 Route。插件不读取 CLI 登录文件，也不接受 `--resume-id` 作为凭据。
+   - 连接检查访问受保护的模型目录，不消耗生成额度，也不证明某个模型可生成。
+3. 同步模型，将账号目录中的目标模型（例如 `qwen3-coder-next`）绑定到 Route。目录声明的文本、图像输入和可用推理强度随同步更新；未声明具体档位时，插件不补填推理强度。当前流只投影文本输出。推理使用所选模型，不回退、不加载 CLI 自带工具，也不访问 CLI 的工作区、历史或记忆。
 4. 在「额度」刷新该连接。只读 `GetUsageLimits` 不生成文本；月度、有效试用及各笔赠送独立显示，不合并成虚构的总余额。部分字段、未知单位与读取失败不视为零。额度来自账号区域的 management 服务，详见[计量规则](../research/kiro-cli-credits.md)。
 
-协议基准为官方 CLI 3.4.0 V3 的 `GenerateAssistantResponse` 分支。插件支持文本对话、函数工具和二进制事件流；不支持的媒体和生成控制返回错误。私有协议留在 Wasm 内，不新增公共端点。插件使用自己的客户端标识并关闭内容收集，不复刻 SDK 指纹、内置系统提示词或实验性 `/v1/responses` 路径。账号、区域、配额及上游兼容性受 Kiro 控制。版本、实际序列化和验证边界见[请求对齐记录](../research/kiro-cli-request-alignment.md)。
+Google、GitHub 使用 Kiro 设备端点；Builder ID 和 IAM Identity Center 使用对应区域的 AWS SSO OIDC 端点。IAM Identity Center 只选允许设备码登录的可用 profile，网络与组织策略错误会阻止连接。推理、目录和额度以 Kiro CLI 3.4.0 交互式 `chat --tui --v3` 主请求为基准；IAM Identity Center 按 KAS 的身份类型映射附带 `TokenType: SSO_OIDC`。插件不补发 CLI 的遥测、启动或标题生成请求，不复制内置工具或提示。私有协议留在 Wasm 内；账号、区域、配额和协议可用性受 Kiro 控制。详见[交互式 TUI 实测](../research/kiro-cli-request-alignment.md#交互式-tui-实测)。
 
 ### Command Code 模型发现
 
@@ -272,13 +274,33 @@ Google grounding 跳转来源由宿主安全解析，普通来源不额外请求
 
 插件在最终出站 `systemInstruction.parts[].text` 中删除完整匹配的 `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`，包括同一段或多段中的重复出现。真实调用确认该片段与 `requestType: agent` 的组合可触发上游 `429 RESOURCE_EXHAUSTED`；此兼容处理保留 `requestType`，不改写其余 system 文本、普通消息、工具业务数据或权威历史，也不匹配大小写、空白或措辞不同的声明。仅因删除该片段而变为空白的 text 字段会被移除；不再含任何字段的 part 和因此清空的 systemInstruction 一并省略。该行为属于独立插件，须重建并重新导入后生效。
 
-升级时重新导入构建后的独立插件，再同步模型。旧逐档模型记录与 Route 绑定不自动删除或改绑；未再发现的记录沿用现有 missing 与可用状态规则，已有配置不会自动迁移到家族模型。需要统一档位选择时，从清单添加家族模型并显式调整原绑定。
+同一出站系统文本边界还对四个经单变量实验确认的 OMP 18.22.1 完整句子做等义改写：OMP 身份句、向 `xd://<tool>` 写入 JSON 的说明、首次读取工具文档的说明、使用 eval `commit` 命名空间的提交说明。只匹配固定完整文本；保留身份含义、JSON 字段名、URI、代码示例和禁止手工 `git add`/`git commit` 的约束，不删除这些指令、不改普通消息/工具定义/权威历史，也不改变 Stravia 脱敏标记。不存在匹配时不分配新字符串；重复匹配逐个处理。U+200B 与 U+034F 的实测最小案例仍被拒绝，因此不采用不可见字符插入。精确匹配与验证证据见[模型映射调研第 12 节](../research/antigravity-model-mapping.md#12-1511-身份与-stravia-labels-投影2026-11-19)。这是已证实内容触发的兼容处理，不能把所有 429 归为提示词问题；未知内容规则、真实限流和账号限制仍可能存在。
+
+Antigravity 推理把每个已声明的函数作为单独的 `tools[]` 项，每项只有一个 `functionDeclarations` 元素。多个 MCP 函数不按 server 合并；声明顺序、schema 和具名 `tool_choice` 保持不变，`googleSearch` 等原生工具不复制。这是本插件的出站约定，不改变公共 Gemini codec，也不为下游注入 CLI 的 lazy 工具。实测见[模型映射调研第 11 节](../research/antigravity-model-mapping.md#11-agy-1511mcp-工具分组labels-和历史提示词对照)。
+
+推理的 `request.labels` 不透传调用方数据，按 agy 1.5.11 的字符串键值表构造。生命周期保存在宿主管理、带 fencing 与 CAS 的 conversation cell `antigravity-lifecycle-v1`；不保存提示词、响应正文或凭据，不再从完整消息历史猜累计计数：
+
+- `cascade_id` 与 `root_cascade_id` 取可信 `client_conversation_id`，不随 Target 改变；独立 `trajectory_id` 在首次建立状态时分配并持久保存。宿主 checkpoint/fork 继承该快照，分支写入互不影响；内层关联号不是跨分支全局唯一的 attempt ID。外层仍使用独立的 `agent/<attempt UUID>` fallback。
+- 每个可信 `model_turn_id` 只登记一条生成记录。同一 Model Turn 的 Target 重试和 recovery 复用生成序号及输入步骤快照；HTTP 尝试不另计生成。记录在推理 HTTP 前持久化，表示宿主已发起的生成，不证明上游已执行。返回的成功或失败均完成该记录；失败不会因没有 assistant 消息而漏计。成功完成状态先持久化，再发布成功终态。
+- 已知连续历史中，`request_id` 为 `<trajectory_id>-<生成记录序号>`；`last_step_index` 按已记录的逻辑用户输入、模型响应／错误及本适配器真实发出的工具调用对应结果推进。一个响应中的 thought/text 不拆成多个步骤；一个消息中的多个工具结果分别计数，完整历史重放、重试和重复工具 ID 不重复计入。
+- `last_execution_id` 取已证明的上一逻辑用户轮 ID；同一用户轮的工具续接不改变它。跨 Provider 漏记导致无法证明紧邻上一执行时省略，不能拿上一次见到的 Antigravity 轮次冒充。它与 Model Turn ID、attempt ID 不同。
+- 宿主在所有 Provider 的 Infer／Compact 派发上记录 Model Turn 序列；序号在整个 Model Turn 生命周期中冻结，随 lineage/checkpoint 持久化。每次派发都校验 fencing/lease，并保留整个 lineage 是否曾涉及多个 Provider 的单调证据，新 Model Turn 不清零。因此，同一 Model Turn 先失败再经其它 Provider 成功，也不能在下一轮被误判为完整历史。序列缺口或跨 Provider 证据使累计计数转为未知、模型标志保守化，不再从消息回填。较旧的在途生成不能覆盖同 lineage 已推进的新状态，迟到派发也不会推进或倒退宿主序号。
+- `model_enum` 只取同步目录所选档位的 `model`；Claude 由 `apiProvider = API_PROVIDER_ANTHROPIC_VERTEX`（26）识别，Google 由 `modelProvider = MODEL_PROVIDER_GOOGLE`（4）识别，不按模型名猜。三个 `used_*` 从持久状态累计：连续 Google 为 `false/false/false`，Claude 后再回 Google 仍为 `true/true/true`，GPT-OSS 后再回 Google 为 `false/false/true`。缺少可信历史时仅保留已知 Claude 证据，另两项保守为 true；所有 wire 值都是字符串。
+- 只有宿主确认的新起点才建立已知零基计数。旧／导入历史没有状态或来源证明时省略未知 `request_id`、`last_step_index`，不按剩余消息回填；中断遗留的未完成记录、窗口替换也不会被伪造为成功或原生压缩步骤。窗口替换保留累计生成、模型与执行状态，但步骤基线转为未知。需要完整基线时从新会话开始；缺少必要宿主身份或 State 能力则明确失败，没有进程内回退。
+
+端到端验收使用真实 Wasm、Gateway、SQLite 与隔离 TLS 上游，覆盖重启续接、分支隔离、工具续接、目录模型切换、400 后继续、503 重试，以及同一 Model Turn 跨 Provider fallback 后再切回原 Provider。定向命令：`cargo test --locked -p stravia-core --lib gateway::vendor_auxiliary_tests::antigravity_shape_acceptance_tests::antigravity_lifecycle_survives_gateway_restart_and_isolates_branches -- --exact`。这不涉及生产推理，也不替代原生 CLI 未验证路径的对照实验。
+
+这些是有来源证明的 Stravia 生命周期投影，不宣称复刻 agy 尚未验证的 fork、压缩及内部 HTTP retry 行为。429 诊断保留可用的 `request_id` 与独立 `attempt_id`，不为未知内层计数伪造关联号；上游状态、限额分类和重试策略不变，也不保证消除 429。
+
+升级时先更新宿主并应用双库迁移 0056，再重新构建、导入独立插件并同步模型。迁移只为现有 lineage/checkpoint 增加可空 Model Turn cursor，不回填历史、不删除数据；SQLite 保持外键开启，沿用已审查的轻量增量路径。进度沿用 `schema_migrations` / `migration_verify`，不将未知工作量伪装为百分比，也不新增中英文阶段文案。旧宿主不能为新插件提供所需生命周期事实。旧逐档模型记录与 Route 绑定不自动删除或改绑；未再发现的记录沿用现有 missing 与可用状态规则，已有配置不会自动迁移到家族模型。需要统一档位选择时，从清单添加家族模型并显式调整原绑定。
+
+0056 隔离验收使用真实迁移与宿主转换构造 0055 基线，每库各有 10 万 lineage 和 10 万 checkpoint，未使用生产数据。正式 migrator 的升级／已升级复检耗时分别为：SQLite **17.67 / 0.64 ms**（约 25.4 MiB，WAL、`synchronous=FULL`），PostgreSQL 16 **25.28 / 5.23 ms**（两表及索引约 40.1 MiB，`synchronous_commit=on`）。旧记录数量保持不变，新增 cursor 均为 NULL，SQLite 外键仍开启；复检未再次执行 schema 阶段。`observe_startup` 捕获了真实阶段，未知总量保持 `null`；既有中英文阶段映射已核对。探针进程峰值 RSS 为 26.65 MiB（含夹具构造）。这是一次本机迁移样本，不代表完整服务启动时间或生产性能保证。
 
 客户端标识使用 `antigravity/cli/<version>`，不能省略 `/cli/`：实际同账号差分验证中，省略会使上游不返回 Gemini 3.7／3.8 Flash 的 Agent 档位，而不是本地合并规则删除了这些模型。同步结果取决于真实账号响应，不固定承诺家族数量；此次修复不改账号、project、端点或权限。
 
 OAuth 使用 CLI 1.2.16 静态核对的 `https://accounts.google.com/o/oauth2/auth`、`https://oauth2.googleapis.com/token`、固定网站回调 `https://antigravity.google/oauth-callback` 与 consumer 七个 scope。宿主通用契约允许 `AuthorizationCode + callback=None + manual_input.type=text`，有效模式为 `manual`、listener 为 `not_required`；缺少手动 text 输入的无 callback 授权码描述符仍拒绝。现有 WebUI 按描述符渲染，不增加供应商分支。
 
-推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头由插件构造 Bearer、JSON Content-Type 与 agy 1.5.1 Linux/amd64 的完整 CLI User-Agent（含 `cl=1014269460`）；通过宿主压缩策略协商 `Accept-Encoding: gzip` 并解压响应，不只手工添加声明。不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client，也不为 SSE 额外添加官方未发送的 Accept。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON、`functionResponse.parts` 中的附件和真实签名保留，不制造签名或伪成功。工具结果与附件共用调用边界，跨协议转换、上下文重写和 Observation 不再只留下业务 JSON。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
+推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头由插件构造 Bearer、JSON Content-Type 与 agy 1.5.11 Linux/amd64 consumer 的完整 CLI User-Agent（含 `cl=1024248524`）；通过宿主压缩策略协商 `Accept-Encoding: gzip` 并解压响应，不只手工添加声明。不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client，也不为 SSE 额外添加官方未发送的 Accept。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON、`functionResponse.parts` 中的附件和真实签名保留，不制造签名或伪成功。工具结果与附件共用调用边界，跨协议转换、上下文重写和 Observation 不再只留下业务 JSON。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
 
 Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false` 等价转换为 `{"not": {}}`，因此 `{"not": true}` 仍表示禁止任意值，不通过删除约束绕过本地校验。`additionalProperties` 的原生布尔开关，以及 `default`、`example`、工具参数与结果中的业务布尔值保持原样。
 
@@ -486,6 +508,7 @@ Claude Code `metadata.user_id.device_id`、Codex `client_metadata.x-codex-instal
 |`user_prompt_id`、`user_prompt_created_at_ms`|获准用户输入的独立身份与创建时间；纯工具结果和内部重试继承，新用户输入及并发分支分别分配，重启不重新生成。|
 |`logical_turn_id`、`logical_turn_started_at_ms`|本次逻辑用户轮的身份与起始时间；不以每次 HTTP 尝试或每次模型工具循环重新生成。|
 |`context_window_id`、`context_window_index`|有来源证明的上下文窗口及替换次数，与用户轮次不同；压缩安装新窗口后推进。|
+|`model_turn_id`、`model_turn_index`、`model_turn_mixed_providers`|宿主实际 Model Turn、该 lineage 中已登记的派发序号及 lineage 截至本次派发是否曾涉及多个 Provider。序号从 0 起，在整个 Model Turn 中冻结，重试/recovery 复用；不同 Model Turn 推进。Provider 多样性证据单调累计，不随新 Model Turn 清零。cursor 随 checkpoint/fork 和重启保留，不由客户端 metadata 或 Observation 提供，也不表示远端已执行。旧 NULL cursor 首次登记只建立跟踪起点，不回填旧生成。|
 |`history_boundaries`|当前送入 guest 的 canonical 视图中的已保留 gap 身份和当前位置；删除 reasoning 等转换同步投影位置，不以转换后的内容重新认定身份。原生续接只发送后缀时，已证明且落在复用前缀中的当前边界投影为后缀 gap 0，不因此降为不完整证明。|
 
 Generation Chain 的 `user_prompt_index` 统计含用户文本或媒体的用户项，排除纯工具结果；Claude 的 `user_turn_index`／`dialogue_prompt_index` 保留其独立的用户轮投影，混有工具结果的项不推进这两个计数。Agent 的用户轮由 Agent Turn 来源证明，不把每次 Model Turn 当作用户输入。已有旧历史没有所需证明时，要求该事实的插件明确报错；普通完整历史与有证明的续接路径不因此退化。

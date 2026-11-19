@@ -1728,8 +1728,244 @@ async fn same_admission_checkpoint_scenario(storage: &DynStorage) -> anyhow::Res
 }
 
 #[tokio::test]
+async fn sqlite_model_turn_cursor_reopen_and_fencing() -> anyhow::Result<()> {
+    use crate::plugin::execution::AtomicConversationContext;
+    let directory = tempfile::tempdir()?;
+    let pool = crate::db::init_pool(directory.path()).await?;
+    crate::migrations::migrate_sqlite(&pool, None).await?;
+    let store = PluginStore::sqlite(pool.clone());
+    let context = AtomicConversationContext {
+        principal: "cursor-reopen".into(),
+        admission_id: uuid::Uuid::new_v4(),
+        atomic_lease_id: uuid::Uuid::new_v4(),
+    };
+    let admission = context.admission_id.to_string();
+    let lease = context.atomic_lease_id.to_string();
+    store
+        .fork_atomic_state(&context.principal, &admission, None, &lease)
+        .await?;
+    let legacy: Option<String> = sqlx::query_scalar("SELECT model_turn_cursor FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$2")
+        .bind(&context.principal).bind(&admission).fetch_one(&pool).await?;
+    assert!(legacy.is_none());
+    let initial = store
+        .register_model_turn(&context, "first", "a", None)
+        .await?;
+    assert_eq!(initial.index, 0);
+    let (left, right) = tokio::join!(
+        store.register_model_turn(&context, "first", "b", Some(0)),
+        store.register_model_turn(&context, "first", "c", Some(0))
+    );
+    assert_eq!(left?.index, 0);
+    assert_eq!(right?.index, 0);
+    drop(store);
+    pool.close().await;
+    let pool = crate::db::init_pool(directory.path()).await?;
+    let store = PluginStore::sqlite(pool.clone());
+    let persisted = store
+        .register_model_turn(&context, "first", "a", Some(0))
+        .await?;
+    assert_eq!((persisted.index, persisted.mixed_providers), (0, true));
+    let next = store
+        .register_model_turn(&context, "second", "a", None)
+        .await?;
+    assert_eq!((next.index, next.mixed_providers), (1, true));
+    let mut tx = pool.begin_write().await?;
+    sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=0 WHERE principal=$1 AND admission_id=$2 AND lease_id=$3")
+        .bind(&context.principal).bind(&admission).bind(&lease).execute(&mut *tx).await?;
+    tx.commit().await?;
+    assert!(matches!(
+        store
+            .register_model_turn(&context, "third", "a", None)
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    let mut tx = pool.begin_write().await?;
+    sqlx::query("UPDATE vendor_atomic_leases SET expires_at_ms=$4 WHERE principal=$1 AND admission_id=$2 AND lease_id=$3")
+        .bind(&context.principal).bind(&admission).bind(&lease).bind(chrono::Utc::now().timestamp_millis() + 120_000).execute(&mut *tx).await?;
+    sqlx::query("UPDATE prompt_admission_epoch SET epoch=epoch+1 WHERE id=1")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert!(matches!(
+        store
+            .register_model_turn(&context, "third", "a", None)
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    Ok(())
+}
+
+async fn model_turn_cursor_scenario(storage: &DynStorage) -> anyhow::Result<()> {
+    use crate::plugin::execution::AtomicConversationContext;
+    let store = storage.vendor_plugins();
+    install(storage, "cursor-vendor").await?;
+    let provider_a = storage
+        .providers()
+        .create(provider("cursor a", "cursor-vendor"))
+        .await?
+        .id;
+    let provider_b = storage
+        .providers()
+        .create(provider("cursor b", "cursor-vendor"))
+        .await?
+        .id;
+    let retry_context = AtomicConversationContext {
+        principal: "cursor-retry".into(),
+        admission_id: uuid::Uuid::new_v4(),
+        atomic_lease_id: uuid::Uuid::new_v4(),
+    };
+    store
+        .fork_atomic_state(
+            &retry_context.principal,
+            &retry_context.admission_id.to_string(),
+            None,
+            &retry_context.atomic_lease_id.to_string(),
+        )
+        .await?;
+    assert!(matches!(
+        store
+            .register_model_turn(&retry_context, "old", &provider_a, Some(0))
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert_eq!(
+        store
+            .register_model_turn(&retry_context, "old", &provider_a, None)
+            .await?
+            .index,
+        0
+    );
+    assert_eq!(
+        store
+            .register_model_turn(&retry_context, "new", &provider_a, None)
+            .await?
+            .index,
+        1
+    );
+    assert!(matches!(
+        store
+            .register_model_turn(&retry_context, "new", &provider_a, Some(0))
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert!(matches!(
+        store
+            .register_model_turn(&retry_context, "old", &provider_a, Some(1))
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    assert!(matches!(
+        store
+            .register_model_turn(&retry_context, "old", &provider_a, Some(2))
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    let retry = store
+        .register_model_turn(&retry_context, "old", &provider_b, Some(0))
+        .await?;
+    assert_eq!((retry.index, retry.mixed_providers), (0, true));
+    let latest = store
+        .register_model_turn(&retry_context, "new", &provider_a, Some(1))
+        .await?;
+    assert_eq!((latest.index, latest.mixed_providers), (1, true));
+    let next = store
+        .register_model_turn(&retry_context, "third", &provider_a, None)
+        .await?;
+    assert_eq!((next.index, next.mixed_providers), (2, true));
+    let admission = uuid::Uuid::new_v4();
+    let branch = uuid::Uuid::new_v4();
+    let lease = uuid::Uuid::new_v4();
+    let branch_lease = uuid::Uuid::new_v4();
+    let context = AtomicConversationContext {
+        principal: "cursor-test".into(),
+        admission_id: admission,
+        atomic_lease_id: lease,
+    };
+    let branch_context = AtomicConversationContext {
+        principal: "cursor-test".into(),
+        admission_id: branch,
+        atomic_lease_id: branch_lease,
+    };
+    store
+        .fork_atomic_state(
+            "cursor-test",
+            &admission.to_string(),
+            None,
+            &lease.to_string(),
+        )
+        .await?;
+    let first = store
+        .register_model_turn(&context, "turn-1", &provider_a, None)
+        .await?;
+    assert_eq!((first.index, first.mixed_providers), (0, false));
+    let repeat = store
+        .register_model_turn(&context, "turn-1", &provider_a, Some(0))
+        .await?;
+    assert_eq!((repeat.index, repeat.mixed_providers), (0, false));
+    let mixed = store
+        .register_model_turn(&context, "turn-1", &provider_b, Some(0))
+        .await?;
+    assert_eq!((mixed.index, mixed.mixed_providers), (0, true));
+    store
+        .checkpoint_atomic_state(
+            "cursor-test",
+            &admission.to_string(),
+            "cursor-checkpoint",
+            &lease.to_string(),
+        )
+        .await?;
+    let next = store
+        .register_model_turn(&context, "turn-2", &provider_a, None)
+        .await?;
+    assert_eq!((next.index, next.mixed_providers), (1, true));
+    store
+        .fork_atomic_state(
+            "cursor-test",
+            &branch.to_string(),
+            Some("cursor-checkpoint"),
+            &branch_lease.to_string(),
+        )
+        .await?;
+    let inherited = store
+        .register_model_turn(&branch_context, "turn-1", &provider_a, Some(0))
+        .await?;
+    assert_eq!((inherited.index, inherited.mixed_providers), (0, true));
+    let advanced = store
+        .register_model_turn(&branch_context, "branch-turn", &provider_b, None)
+        .await?;
+    assert_eq!((advanced.index, advanced.mixed_providers), (1, true));
+    let original = store
+        .register_model_turn(&context, "turn-2", &provider_a, Some(1))
+        .await?;
+    assert_eq!((original.index, original.mixed_providers), (1, true));
+    let fenced = AtomicConversationContext {
+        atomic_lease_id: uuid::Uuid::new_v4(),
+        ..context.clone()
+    };
+    assert!(matches!(
+        store
+            .register_model_turn(&fenced, "turn-3", &provider_a, None)
+            .await,
+        Err(PluginStorageError::StaleOperation)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_mirrored_model_turn_cursor_checkpoint() -> anyhow::Result<()> {
+    let pool = crate::test_support::migrated_sqlite_pool().await?;
+    let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+    storage
+        .vendor_plugins()
+        .attach_atomic_history_pool(pool, storage.prompt_admissions().as_ref())
+        .await?;
+    model_turn_cursor_scenario(&storage).await
+}
+
+#[tokio::test]
 async fn memory_atomic_state_isolation_and_lifecycle() -> anyhow::Result<()> {
     let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+    model_turn_cursor_scenario(&storage).await?;
     same_epoch_reset_invalidates_absent_cell_fence(&storage).await?;
     same_admission_checkpoint_scenario(&storage).await?;
     scenario(storage).await
@@ -1741,6 +1977,7 @@ async fn sqlite_atomic_state_isolation_and_lifecycle() -> anyhow::Result<()> {
     let pool = crate::db::init_pool(directory.path()).await?;
     crate::migrations::migrate_sqlite(&pool, None).await?;
     let storage: DynStorage = Arc::new(SqliteStorage::from_pool(pool));
+    model_turn_cursor_scenario(&storage).await?;
     same_epoch_reset_invalidates_absent_cell_fence(&storage).await?;
     same_admission_checkpoint_scenario(&storage).await?;
     scenario(storage).await
@@ -1767,6 +2004,7 @@ async fn postgres_atomic_operations_do_not_serialize_on_unrelated_provider() -> 
         crate::migrations::migrate_postgres(&pool, None).await?;
         let storage: DynStorage =
             Arc::new(crate::storage::PostgresStorage::from_pool(pool.clone()));
+        model_turn_cursor_scenario(&storage).await?;
         same_epoch_reset_invalidates_absent_cell_fence(&storage).await?;
         same_admission_checkpoint_scenario(&storage).await?;
         install(&storage, "test-vendor").await?;

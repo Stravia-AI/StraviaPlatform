@@ -27,6 +27,8 @@ struct Model {
     model_id: String,
     model_name: Option<String>,
     token_limits: Option<Limits>,
+    supported_input_types: Option<Vec<String>>,
+    additional_model_request_fields_schema: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +63,60 @@ fn decode(bytes: &[u8]) -> Result<DiscoverResponse, PluginError> {
                 return Err(invalid_response("Kiro model is missing its ID"));
             }
             let mut metadata = BTreeMap::new();
+            if let Some(input) = m.supported_input_types {
+                let input: Vec<_> = input
+                    .into_iter()
+                    .filter_map(|kind| match kind.as_str() {
+                        "TEXT" => Some("text"),
+                        "IMAGE" => Some("image"),
+                        _ => None,
+                    })
+                    .collect();
+                // Kiro's GenerateAssistantResponse stream exposes text output; the
+                // catalog itself only declares supported input types.
+                metadata.insert(
+                    "modalities".into(),
+                    serde_json::json!({ "input": input, "output": ["text"] }),
+                );
+            }
+            if let Some(schema) = m.additional_model_request_fields_schema {
+                // Match KAS's effort schema precedence, including fallback for empty enums.
+                let efforts = [
+                    (
+                        "output_config",
+                        "/properties/output_config/properties/effort/enum",
+                    ),
+                    ("reasoning", "/properties/reasoning/properties/effort/enum"),
+                ]
+                .into_iter()
+                .filter_map(|(group, path)| {
+                    schema
+                        .pointer(path)
+                        .and_then(serde_json::Value::as_array)
+                        .map(|values| (group, values))
+                })
+                .map(|(group, values)| {
+                    let values = values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| {
+                            !value.is_empty()
+                                && value.len() <= 256
+                                && !value.chars().any(char::is_control)
+                                && !value.eq_ignore_ascii_case("default")
+                                && !value.eq_ignore_ascii_case("null")
+                        })
+                        .take(128)
+                        .collect::<Vec<_>>();
+                    (group, values)
+                })
+                .find(|(_, values)| !values.is_empty());
+                if let Some((group, efforts)) = efforts {
+                    metadata.insert("kiro_effort_group".into(), group.into());
+                    metadata.insert("reasoning_efforts".into(), serde_json::json!(efforts));
+                }
+            }
             if let Some(limits) = m.token_limits {
                 if let Some(n) = limits.max_input_tokens {
                     metadata.insert("max_input_tokens".into(), n.into());
@@ -91,6 +147,68 @@ fn decode(bytes: &[u8]) -> Result<DiscoverResponse, PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn maps_declared_input_types_and_effort_schema_without_inventing_output() {
+        let page = decode(br#"{"models":[
+            {"modelId":"anthropic-model","supportedInputTypes":["TEXT","IMAGE"],"additionalModelRequestFieldsSchema":{"properties":{"output_config":{"properties":{"effort":{"enum":["low","medium","high","max"]}}}}}},
+            {"modelId":"reasoning-model","supportedInputTypes":["TEXT"],"additionalModelRequestFieldsSchema":{"properties":{"reasoning":{"properties":{"effort":{"enum":["low","high"]}}}}}},
+            {"modelId":"unknown-model"}
+        ]}"#).unwrap();
+        let first = &page.models[0].metadata;
+        assert_eq!(
+            first["modalities"],
+            serde_json::json!({"input": ["text", "image"], "output": ["text"]})
+        );
+        assert_eq!(
+            first["reasoning_efforts"],
+            serde_json::json!(["low", "medium", "high", "max"])
+        );
+        assert_eq!(first["kiro_effort_group"], "output_config");
+        let second = &page.models[1].metadata;
+        assert_eq!(
+            second["modalities"],
+            serde_json::json!({"input": ["text"], "output": ["text"]})
+        );
+        assert_eq!(
+            second["reasoning_efforts"],
+            serde_json::json!(["low", "high"])
+        );
+        assert_eq!(second["kiro_effort_group"], "reasoning");
+        assert!(!page.models[2].metadata.contains_key("modalities"));
+        assert!(!page.models[2].metadata.contains_key("kiro_effort_group"));
+        assert!(!page.models[2].metadata.contains_key("reasoning_efforts"));
+    }
+
+    #[test]
+    fn effort_schema_uses_first_nonempty_supported_path() {
+        let page = decode(br#"{"models":[{"modelId":"model","supportedInputTypes":[],"additionalModelRequestFieldsSchema":{"properties":{"output_config":{"properties":{"effort":{"enum":[]}}},"reasoning":{"properties":{"effort":{"enum":["high"]}}}}}}]}"#).unwrap();
+        assert_eq!(
+            page.models[0].metadata["modalities"],
+            serde_json::json!({"input": [], "output": ["text"]})
+        );
+        assert_eq!(
+            page.models[0].metadata["reasoning_efforts"],
+            serde_json::json!(["high"])
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_types_and_prefers_output_config_effort() {
+        let page = decode(br#"{"models":[{"modelId":"model","supportedInputTypes":["TEXT","FUTURE"],"additionalModelRequestFieldsSchema":{"properties":{"output_config":{"properties":{"effort":{"enum":["low","high"]}}},"reasoning":{"properties":{"effort":{"enum":["max"]}}}}}}]}"#).unwrap();
+        assert_eq!(
+            page.models[0].metadata["modalities"],
+            serde_json::json!({"input": ["text"], "output": ["text"]})
+        );
+        assert_eq!(
+            page.models[0].metadata["reasoning_efforts"],
+            serde_json::json!(["low", "high"])
+        );
+        assert_eq!(
+            page.models[0].metadata["kiro_effort_group"],
+            "output_config"
+        );
+    }
+
     #[test]
     fn maps_account_inventory_without_substituting_a_model_or_dropping_the_cursor() {
         let page = decode(br#"{"models":[{"modelId":"plan-model","tokenLimits":{"maxInputTokens":4096}}],"nextToken":"next/page"}"#).unwrap();

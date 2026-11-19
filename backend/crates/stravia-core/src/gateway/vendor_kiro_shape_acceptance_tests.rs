@@ -38,18 +38,41 @@ async fn kiro_real_wasm_inference_matches_http_wire() -> anyhow::Result<()> {
     )
     .await?;
     let (_directory, gateway) = inference_gateway(&server, "kiro").await?;
-    let provider = create_vendor_provider(
-        &gateway,
-        "local Kiro",
-        "kiro",
-        "default",
-        "kiro-generate-assistant-response",
-        "https://runtime.us-east-1.kiro.dev",
-        ProviderCredentialInput::Fields {
-            values: BTreeMap::from([("apiKey".into(), json!("local-kiro-key"))]),
-        },
-    )
-    .await?;
+    let provider = gateway
+        .storage
+        .providers()
+        .create(crate::db::models::CreateProviderRecord {
+            name: "local Kiro".into(),
+            vendor: Some("kiro".into()),
+            protocol: "kiro-generate-assistant-response-oauth".into(),
+            base_url: "https://runtime.us-east-1.kiro.dev".into(),
+            preset_key: None,
+            channel: Some("oauth".into()),
+            models_source: None,
+            static_models: None,
+            api_key: String::new(),
+            adapter_credentials: "{}".into(),
+            vendor_options: "{}".into(),
+            auth_mode: "oauth".into(),
+            use_proxy: false,
+        })
+        .await?;
+    let profile_arn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/synthetic";
+    gateway
+        .storage
+        .oauth_credentials()
+        .upsert(
+            &provider.id,
+            crate::db::models::UpsertOAuthCredential {
+                driver_key: "kiro".into(),
+                scheme: "Bearer".into(),
+                access_token: "synthetic-kiro-access".into(),
+                expires_at: Some("2099-01-01T00:00:00Z".into()),
+                meta: Some(json!({"profileArn": profile_arn}).to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
     let key = route_key(&gateway, &provider.id, "qwen3-coder-next", "kiro-wire").await?;
     let response = with_real_time_limit(
         crate::proxy::server::create_router(gateway).oneshot(
@@ -86,49 +109,62 @@ async fn kiro_real_wasm_inference_matches_http_wire() -> anyhow::Result<()> {
         &captured.hello,
         "runtime.us-east-1.kiro.dev",
     );
+    let tui: Value = serde_json::from_str(include_str!(
+        "../../../stravia-vendor-kiro/kiro-cli-3.4.0-tui-http.json"
+    ))?;
     let mut lines = captured.head.lines();
-    assert_eq!(lines.next(), Some("POST / HTTP/1.1"));
+    assert_eq!(lines.next(), tui["requestLine"].as_str());
     let fields: Vec<_> = lines
         .filter(|line| !line.is_empty())
         .map(|line| line.split_once(": ").expect("HTTP field"))
         .collect();
-    let ua = concat!("Stravia/", env!("CARGO_PKG_VERSION"), " Kiro-compat/3.4.0");
     let length = captured.body.len().to_string();
-    let expected = [
-        ("content-type", "application/x-amz-json-1.0"),
-        (
-            "x-amz-target",
-            "KiroRuntimeService.GenerateAssistantResponse",
-        ),
-        ("content-length", length.as_str()),
-        ("x-amzn-codewhisperer-optout", "true"),
-        ("TokenType", "API_KEY"),
-        ("x-amzn-kiro-client-attribution", "stravia"),
-        ("x-amzn-kiro-mode-identifier", "vibe"),
-        ("x-amzn-kiro-fallback", "0;max=0"),
-        ("x-amz-user-agent", ua),
-        ("user-agent", ua),
-        ("host", "runtime.us-east-1.kiro.dev"),
-        ("amz-sdk-invocation-id", "<uuid>"),
-        ("amz-sdk-request", "attempt=1; max=1"),
-        ("x-amzn-kiro-attempt", "1;max=1"),
-        ("Authorization", "Bearer local-kiro-key"),
-        ("Connection", "keep-alive"),
-    ];
-    assert_eq!(fields.len(), expected.len(), "{}", captured.head);
-    for ((name, value), (expected_name, expected_value)) in fields.iter().zip(expected) {
-        assert_eq!(*name, expected_name, "{}", captured.head);
-        if expected_value == "<uuid>" {
-            assert!(
-                uuid::Uuid::parse_str(value).is_ok(),
-                "invalid invocation id: {value}"
-            );
-        } else {
-            assert_eq!(*value, expected_value, "field {name}");
-        }
+    let tui_headers = tui["headers"].as_array().context("TUI headers")?;
+    assert_eq!(fields.len(), tui_headers.len());
+    for (&(name, value), expected) in fields.iter().zip(tui_headers) {
+        assert_eq!(Some(name), expected[0].as_str());
+        let expected_value = match name {
+            "content-length" => &length,
+            "amz-sdk-invocation-id" => {
+                uuid::Uuid::parse_str(value)?;
+                continue;
+            }
+            "Authorization" => "Bearer synthetic-kiro-access",
+            _ => expected[1].as_str().context("fixed TUI field value")?,
+        };
+        assert_eq!(value, expected_value, "field {name}");
     }
     let request: Value = serde_json::from_slice(&captured.body)?;
-    let message = &request["conversationState"]["currentMessage"]["userInputMessage"];
+    let state = &request["conversationState"];
+    for (actual, expected) in [(&request, &tui["bodyKeys"]), (state, &tui["stateKeys"])] {
+        let keys = actual.as_object().context("wire JSON object")?;
+        let expected = expected.as_array().context("TUI JSON keys")?;
+        assert_eq!(keys.len(), expected.len());
+        for key in expected {
+            let key = key.as_str().context("TUI JSON field name")?;
+            assert!(keys.contains_key(key), "field {key}");
+        }
+    }
+    assert_eq!(request["profileArn"], profile_arn);
+    assert_eq!(request["agentMode"], tui["agentMode"]);
+    assert_eq!(state["agentTaskType"], tui["agentTaskType"]);
+    assert_eq!(state["chatTriggerType"], tui["chatTriggerType"]);
+    assert_eq!(state["rootConversationId"], state["conversationId"]);
+    let session = state["conversationId"]
+        .as_str()
+        .context("conversation ID")?;
+    uuid::Uuid::parse_str(
+        session
+            .strip_prefix("sess_")
+            .context("TUI session prefix")?,
+    )?;
+    uuid::Uuid::parse_str(
+        state["agentContinuationId"]
+            .as_str()
+            .context("continuation ID")?,
+    )?;
+    let message = &state["currentMessage"]["userInputMessage"];
+    assert_eq!(message["origin"], tui["origin"]);
     assert_eq!(message["modelId"], "qwen3-coder-next");
     assert_eq!(message["content"], "Reply local Kiro answer");
     with_real_time_limit(server.task).await???;

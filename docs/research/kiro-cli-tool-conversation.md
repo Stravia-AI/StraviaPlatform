@@ -1,5 +1,7 @@
 # Kiro CLI 3.4.0 工具与多轮请求证据
 
+本文保存外部 ACP 的对照实验；插件的主基准是[官方交互式 TUI 的真实 HTTP 请求](kiro-cli-request-alignment.md#交互式-tui-实测)。
+
 本地实验日期：2026-11-18。官方 3.4.0 的 V3 KAS（ACP stdio，KAS 0.66.111）以合成 API key、临时 HOME 和只含一个合成文本文件的临时工作区运行。父进程和 KAS 在独立用户及网络 namespace 中，只有 loopback，runtime 与 management endpoint 均指向本地 HTTP stub；未读取真实账户、用户目录或连接公网。模型目录和全部上游响应由 stub 构造，这不是线上服务行为的证明。没有替换或仿造 CLI 的内置 prompt、工具或工作区逻辑。
 
 ACP 客户端新建 session、选本地合成目录返回的 `qwen3-coder-next`，发送第一条 prompt。stub 用 AWS EventStream 二进制帧依次返回：
@@ -43,6 +45,6 @@ KAS 产生 ACP tool call，并实际执行其内置 `read_file` 读取该合成�
 
 ## 重新登录后的真实服务验证
 
-[线上 ACP 记录](kiro-cli-request-alignment.md#340-重新登录后的线上成功回合)验证了同一行为：所选 `qwen3-coder-next` 完成 `read_file`，使用匹配的 ID 提交结果；下一轮不读文件也正确复述测试串。工具续接和下一用户输入的 continuation ID 作用域与本地样本一致。这一结果适用于这次 CLI 登录调用，不代表 Stravia API key 已在公网验证。
+[线上 ACP 记录](kiro-cli-request-alignment.md#对照340-重新登录后的外部-acp-线上回合)验证了同一行为：所选 `qwen3-coder-next` 完成 `read_file`，使用匹配的 ID 提交结果；下一轮不读文件也正确复述测试串。工具续接和下一用户输入的 continuation ID 作用域与本地样本一致。这一结果适用于这次 CLI 登录调用，不代表 Stravia API key 已在公网验证。
 
 与 Stravia 的对应：已观察的工具调用与回执结构、结果移入 history 的行为由 request/stream 回归覆盖；宿主按用户输入提供的 `user_prompt_id` 供 `agentContinuationId` 使用，工具续接复用、独立输入改变，与本次 ID 作用域一致。Stravia 不复制 KAS 的内置 prompt、工具或工作区。合成流无法证明真实服务认证、真实模型输出或所有错误及分片行为。

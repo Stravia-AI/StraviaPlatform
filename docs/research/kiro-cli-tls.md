@@ -21,6 +21,8 @@
 
 `management.us-east-1.kiro.dev` 的 3 次与 `runtime.us-east-1.kiro.dev` 的 4 次 ClientHello，逐一与上述 fixture 比较。七次的版本、完整密码套件及扩展顺序、支持组、签名算法、版本列表、点格式、PSK 模式、安全扩展字段、空 ticket、key-share 组及长度均相同，无 ALPN 扩展；SNI 各自等于 CONNECT 目标（与 localhost 名称长度不同）。这确认了该平台、版本、账号和代理路径的七次新握手，不覆盖 TLS 恢复、所有区域或网络，也不意味着不同软件栈的握手字节完全相同。
 
+[交互式 TUI 直连实测](kiro-cli-request-alignment.md#交互式-tui-实测)另确认目录、额度与三次主推理均协商 TLS 1.3，未协商 ALPN。TUI 的 HTTP 记录是主协议基准；上面的完整 ClientHello 参考样本来自 KAS/ACP，不能说成重新捕获了 TUI ClientHello。
+
 ## 声明与离线验证
 
 插件独立声明 [`egress-shape.json`](../../backend/crates/stravia-vendor-kiro/egress-shape.json)，使用受支持的 WIT shape 字段；按捕获值配置空 HTTP ALPN、TLS 顺序、组和签名算法。不能实际协商的密码套件按宿主现有约定只作 advertise-only，部分组也只被声明而没有安装为可执行 key exchange；这不等于完整复刻官方客户端所有服务端选择分支。shape 不提供认证、域名权限、证书信任、安装 ID 或请求头策略。声明 HTTP/2 和 WebSocket 的默认字段不代表观察到相应 Kiro 流量。

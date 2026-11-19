@@ -16,11 +16,54 @@ const MAX_EVENT: usize = 16 * 1024 * 1024;
 struct InferenceEnvelope<'a> {
     project: &'a str,
     model: &'a str,
-    request: &'a Value,
+    request: InferenceBody<'a>,
     user_agent: &'static str,
     request_type: &'static str,
     #[serde(serialize_with = "serialize_agent_request_id")]
     request_id: uuid::Uuid,
+}
+
+// `body` 已经投影并排除了下游 labels；仅添加本次请求可以证实的元数据。
+#[derive(serde::Serialize)]
+struct InferenceBody<'a> {
+    #[serde(flatten)]
+    body: &'a Value,
+    labels: RequestLabels<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct RequestLabels<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_enum: Option<&'a str>,
+    cascade_id: String,
+    root_cascade_id: String,
+    trajectory_id: uuid::Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_step_index: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_execution_id: Option<String>,
+    used_claude: String,
+    used_claude_conservative: String,
+    used_non_gemini_model: String,
+}
+
+impl<'a> RequestLabels<'a> {
+    fn new(labels: crate::lifecycle::Labels, model_enum: Option<&'a str>) -> Self {
+        Self {
+            request_id: labels.request_id,
+            model_enum,
+            root_cascade_id: labels.cascade_id.clone(),
+            cascade_id: labels.cascade_id,
+            trajectory_id: labels.trajectory_id,
+            last_step_index: labels.last_step_index.map(|n| n.to_string()),
+            last_execution_id: labels.last_execution_id,
+            used_claude: labels.used_claude.to_string(),
+            used_claude_conservative: labels.used_claude_conservative.to_string(),
+            used_non_gemini_model: labels.used_non_gemini_model.to_string(),
+        }
+    }
 }
 
 fn serialize_agent_request_id<S: serde::Serializer>(
@@ -61,34 +104,42 @@ pub(crate) fn infer(
         && (request.reasoning.mode.is_some()
             || request.reasoning.level.is_some()
             || request.reasoning.budget_tokens.is_some());
-    let (selector_thinking, selector_max_output_tokens) = if let Some(table) = provider
-        .model_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.extensions.get(crate::selector::EXTENSION_KEY))
-    {
-        let selection = crate::selector::resolve(table, request.reasoning.target_control.as_ref())?;
-        request.model = selection.id.into();
-        let effort = matches!(
-            request.reasoning.target_control,
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
-        );
-        if effort {
-            // 真实 ID 与强度都来自所选档位；不能让通用 codec 再按 Effort 生成另一种控制。
-            request.reasoning.target_control = None;
-            request.reasoning.level = None;
-            request.reasoning.budget_tokens = None;
-        }
-        (selection.thinking, selection.max_output_tokens)
-    } else {
-        if let Some(selector) = provider
+    let (selector_thinking, selector_max_output_tokens, model_enum, api_provider, model_provider) =
+        if let Some(table) = provider
             .model_metadata
             .as_ref()
-            .and_then(|metadata| metadata.selector.as_deref())
+            .and_then(|metadata| metadata.extensions.get(crate::selector::EXTENSION_KEY))
         {
-            request.model = selector.into();
-        }
-        (None, None)
-    };
+            let selection =
+                crate::selector::resolve(table, request.reasoning.target_control.as_ref())?;
+            request.model = selection.id.into();
+            let effort = matches!(
+                request.reasoning.target_control,
+                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
+            );
+            if effort {
+                // 真实 ID 与强度都来自所选档位；不能让通用 codec 再按 Effort 生成另一种控制。
+                request.reasoning.target_control = None;
+                request.reasoning.level = None;
+                request.reasoning.budget_tokens = None;
+            }
+            (
+                selection.thinking,
+                selection.max_output_tokens,
+                selection.model_enum,
+                selection.api_provider,
+                selection.model_provider,
+            )
+        } else {
+            if let Some(selector) = provider
+                .model_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.selector.as_deref())
+            {
+                request.model = selector.into();
+            }
+            (None, None, None, None, None)
+        };
     // 在跨协议校验前删除 CLI 没有承诺的控制；最后的递归投影仍是唯一出口。
     request.generation.seed = None;
     request.generation.presence_penalty = None;
@@ -132,6 +183,9 @@ pub(crate) fn infer(
     request.stream.enabled = true;
     let protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let model = request.model.clone();
+    let request_id = uuid::Uuid::new_v4();
+    let lifecycle_input =
+        crate::lifecycle::Input::new(&provider, &request, api_provider, model_provider)?;
     let mut body = common::encode_inference_request(&protocol.to_string(), request)?.body;
     let object = body
         .as_object_mut()
@@ -173,20 +227,23 @@ pub(crate) fn infer(
         thinking.remove(other);
         thinking.insert(field.into(), json!(value));
     }
-    // 同协议 raw tools 保留原始 function response 与内置工具，再统一投影。
-    if let Some(tools) = tools.filter(|tools| !tools.is_empty())
-        && !object
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some_and(|tools| {
-                tools.iter().any(|tool| {
-                    tool.get("functionDeclarations")
-                        .and_then(Value::as_array)
-                        .is_some_and(|functions| !functions.is_empty())
-                })
-            })
+    // 同协议优先保留 raw 声明的 response schema 和原生工具；不重复添加 canonical 声明。
+    if let Some(groups) = object.get_mut("tools").and_then(Value::as_array_mut)
+        && groups.iter().any(|group| {
+            group
+                .get("functionDeclarations")
+                .and_then(Value::as_array)
+                .is_some_and(|declarations| !declarations.is_empty())
+        })
     {
-        let mut declarations = Vec::with_capacity(tools.len());
+        split_raw_function_groups(groups);
+    } else if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+        let groups = object
+            .entry("tools")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| invalid("tools must be an array"))?;
+        groups.reserve(tools.len());
         for tool in tools {
             let mut declaration = serde_json::Map::new();
             declaration.insert("name".into(), Value::String(tool.name));
@@ -194,16 +251,8 @@ pub(crate) fn infer(
             if let Some(description) = tool.description {
                 declaration.insert("description".into(), Value::String(description));
             }
-            declarations.push(Value::Object(declaration));
+            groups.push(function_group(Value::Object(declaration)));
         }
-        let mut tool = serde_json::Map::new();
-        tool.insert("functionDeclarations".into(), Value::Array(declarations));
-        object
-            .entry("tools")
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or_else(|| invalid("tools must be an array"))?
-            .push(Value::Object(tool));
     }
     if !object.contains_key("toolConfig") {
         let config = match tool_choice {
@@ -262,7 +311,7 @@ pub(crate) fn infer(
         }
     }
     sanitize_request(&mut body)?;
-    remove_rejected_system_fragment(&mut body);
+    normalize_system_instruction(&mut body);
     if imported_tool_history {
         gemini::prepare_imported_tool_history(&mut body);
     }
@@ -273,14 +322,6 @@ pub(crate) fn infer(
             .insert("sessionId".into(), json!(native_session_id(session)));
     }
     let project = client::project(host, &provider)?;
-    let envelope = InferenceEnvelope {
-        project: &project,
-        model: &model,
-        request: &body,
-        user_agent: "antigravity",
-        request_type: "agent",
-        request_id: uuid::Uuid::new_v4(),
-    };
     let mut headers = stravia_vendor_sdk::net::Fields::new();
     for field in client::headers(&provider)?.into_vec() {
         if field.name.eq_ignore_ascii_case("content-length") {
@@ -289,21 +330,77 @@ pub(crate) fn infer(
             headers.append(field.name, field.bytes);
         }
     }
-    let bytes = serde_json::to_vec(&envelope)
-        .map_err(|_| invalid("Antigravity request could not be encoded"))?;
     host.emit_started()?;
-    let response = client::http_start(
-        host,
-        stravia_vendor_sdk::net::Request {
-            method: "POST".into(),
-            url: format!(
-                "{}?alt=sse",
-                client::endpoint(&provider, "streamGenerateContent")
-            ),
-            headers,
-            body: bytes,
+    let (reservation, lifecycle_labels) = crate::lifecycle::Reservation::begin(lifecycle_input)?;
+    let envelope = InferenceEnvelope {
+        project: &project,
+        model: &model,
+        request: InferenceBody {
+            body: &body,
+            labels: RequestLabels::new(lifecycle_labels, model_enum),
         },
+        user_agent: "antigravity",
+        request_type: "agent",
+        request_id,
+    };
+    let result = (|| {
+        let bytes = serde_json::to_vec(&envelope)
+            .map_err(|_| invalid("Antigravity request could not be encoded"))?;
+        let response = client::http_start(
+            host,
+            stravia_vendor_sdk::net::Request {
+                method: "POST".into(),
+                url: format!(
+                    "{}?alt=sse",
+                    client::endpoint(&provider, "streamGenerateContent")
+                ),
+                headers,
+                body: bytes,
+            },
+        )?;
+        read_inference_response(host, response)
+    })();
+    reservation.finish(
+        result
+            .as_ref()
+            .ok()
+            .map(|(response, _)| response)
+            .filter(|response| !response.is_error()),
     )?;
+    let (response, terminal_deltas) = result.map_err(|mut error| {
+        if error.upstream_status == Some(429) {
+            use std::fmt::Write;
+            if let Some(id) = &envelope.request.labels.request_id {
+                write!(
+                    error.message,
+                    " (Antigravity request_id: {id}, attempt_id: {request_id})"
+                )
+                .expect("writing to a String cannot fail");
+            } else {
+                write!(error.message, " (Antigravity attempt_id: {request_id})")
+                    .expect("writing to a String cannot fail");
+            }
+        }
+        error
+    })?;
+    for delta in &terminal_deltas {
+        host.emit_delta(delta)?;
+    }
+    host.emit_completed(&response)?;
+    Ok(response)
+}
+
+fn read_inference_response(
+    host: &GuestHost,
+    response: stravia_vendor_sdk::HttpResponse,
+) -> Result<
+    (
+        AiResponse,
+        Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta>,
+    ),
+    PluginError,
+> {
+    let protocol = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let status = response.status()?;
     let headers = response.headers()?;
     if !(200..300).contains(&status) {
@@ -328,6 +425,7 @@ pub(crate) fn infer(
         return ProtocolTransform::global()
             .bind(protocol, protocol)
             .and_then(|pair| pair.decode_response(inner))
+            .map(|response| (response, Vec::new()))
             .map_err(common::map_response_transform_error);
     }
     let mut decoder = ProtocolTransform::global()
@@ -336,6 +434,7 @@ pub(crate) fn infer(
     let mut accumulator = StreamResponseAccumulator::default();
     let mut framing = EventFraming::default();
     let mut terminal = false;
+    let mut terminal_deltas = Vec::new();
     while let Some(chunk) = response.read_body()? {
         framing.push(&chunk, |payload| {
             decode_event(
@@ -343,6 +442,7 @@ pub(crate) fn infer(
                 &mut decoder,
                 &mut accumulator,
                 &mut terminal,
+                &mut terminal_deltas,
                 payload,
                 &headers,
             )
@@ -354,6 +454,7 @@ pub(crate) fn infer(
             &mut decoder,
             &mut accumulator,
             &mut terminal,
+            &mut terminal_deltas,
             payload,
             &headers,
         )
@@ -361,16 +462,14 @@ pub(crate) fn infer(
     let deltas = decoder
         .finish()
         .map_err(common::map_response_transform_error)?;
-    common::emit_deltas(host, &mut accumulator, &deltas)?;
+    emit_nonterminal_deltas(host, &mut accumulator, &deltas, &mut terminal_deltas)?;
     if !terminal {
         return Err(common::model_error(
             AiErrorKind::UnexpectedEof,
             "Antigravity stream ended before a finish reason",
         ));
     }
-    let complete = accumulator.into_ai_response();
-    host.emit_completed(&complete)?;
-    Ok(complete)
+    Ok((accumulator.into_ai_response(), terminal_deltas))
 }
 
 fn decode_event(
@@ -378,6 +477,7 @@ fn decode_event(
     decoder: &mut StreamDecodeStage,
     accumulator: &mut StreamResponseAccumulator,
     terminal: &mut bool,
+    terminal_deltas: &mut Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta>,
     payload: &[u8],
     headers: &stravia_vendor_sdk::net::Fields,
 ) -> Result<(), PluginError> {
@@ -412,7 +512,28 @@ fn decode_event(
     let deltas = decoder
         .decode_chunk(&event)
         .map_err(common::map_response_transform_error)?;
-    common::emit_deltas(host, accumulator, &deltas)
+    emit_nonterminal_deltas(host, accumulator, &deltas, terminal_deltas)
+}
+
+fn emit_nonterminal_deltas(
+    host: &GuestHost,
+    accumulator: &mut StreamResponseAccumulator,
+    deltas: &[stravia_runtime_contract::protocol::ir::AiStreamDelta],
+    terminal: &mut Vec<stravia_runtime_contract::protocol::ir::AiStreamDelta>,
+) -> Result<(), PluginError> {
+    use stravia_runtime_contract::protocol::ir::AiStreamDelta;
+    for delta in deltas {
+        if matches!(
+            delta,
+            AiStreamDelta::Done { .. } | AiStreamDelta::ResponseTerminal { .. }
+        ) {
+            accumulator.apply(delta);
+            terminal.push(delta.clone());
+        } else {
+            common::emit_deltas(host, accumulator, std::slice::from_ref(delta))?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn normalize_final_usage(response: &mut Value) {
@@ -466,16 +587,38 @@ pub(crate) fn response_error(
     ))
 }
 
-fn invalid(message: &str) -> PluginError {
+pub(crate) fn invalid(message: &str) -> PluginError {
     common::plugin_error(ErrorKind::Invalid, message)
 }
 fn invalid_upstream(message: &str) -> PluginError {
     common::model_error(AiErrorKind::ServerError, message)
 }
 
-fn remove_rejected_system_fragment(request: &mut Value) {
-    // 该片段与 requestType=agent 的组合会触发上游 429；仅清理出站副本，不改历史或用户消息。
-    const FRAGMENT: &str = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
+fn normalize_system_instruction(request: &mut Value) {
+    // 同连接单变量对照定位到四句 OMP 指令；等义改写仅作用于出站系统文本。
+    // 不插入已实测无效的零宽字符，也不改工具标识、代码、普通消息或权威历史。
+    const REWRITES: &[(&str, &str)] = &[
+        (
+            "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
+            "",
+        ),
+        (
+            "You are omp's trusted coding assistant.",
+            "You are a trusted coding assistant for omp.",
+        ),
+        (
+            "Write JSON args as `content` to xd://<tool> via `write`. Invalid args return schema in error → fix/retry.",
+            "Send JSON tool arguments in the `content` field of `write`, addressed to `xd://<tool>`. Invalid arguments return the schema; correct the arguments before retrying.",
+        ),
+        (
+            "Read xd://<tool> for full docs + JSON schema before first use.",
+            "Before using a tool for the first time, read `xd://<tool>` to load its complete documentation and JSON schema.",
+        ),
+        (
+            "To commit your changes, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`), not `git add`/`git commit`: it selects only the lines you and your subagents wrote and never touches other agents' staged or unstaged work.",
+            "Commit changes through the eval `commit` namespace: call `d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`. Do not use `git add` or `git commit`. This commits only lines written by you or your subagents and leaves other agents' staged and unstaged edits untouched.",
+        ),
+    ];
     let Some(parts) = request
         .get_mut("systemInstruction")
         .and_then(|system| system.get_mut("parts"))
@@ -490,12 +633,15 @@ fn remove_rejected_system_fragment(request: &mut Value) {
         let Some(Value::String(text)) = part.get_mut("text") else {
             return true;
         };
-        let mut offset = 0;
         let mut removed = false;
-        while let Some(index) = text[offset..].find(FRAGMENT) {
-            offset += index;
-            text.replace_range(offset..offset + FRAGMENT.len(), "");
-            removed = true;
+        for &(fragment, replacement) in REWRITES {
+            let mut offset = 0;
+            while let Some(index) = text[offset..].find(fragment) {
+                offset += index;
+                text.replace_range(offset..offset + fragment.len(), replacement);
+                offset += replacement.len();
+                removed |= replacement.is_empty();
+            }
         }
         if removed && text.trim().is_empty() {
             let object = part.as_object_mut().expect("system part was validated");
@@ -709,6 +855,42 @@ fn generation(value: &mut Value) -> Result<(), PluginError> {
     }
     Ok(())
 }
+fn function_group(declaration: Value) -> Value {
+    Value::Object(serde_json::Map::from_iter([(
+        "functionDeclarations".into(),
+        Value::Array(vec![declaration]),
+    )]))
+}
+
+fn split_raw_function_groups(groups: &mut Vec<Value>) {
+    let extra: usize = groups
+        .iter()
+        .filter_map(|group| group.get("functionDeclarations")?.as_array())
+        .map(|declarations| declarations.len().saturating_sub(1))
+        .sum();
+    if extra == 0 {
+        return;
+    }
+    // 从尾端展开，保留声明顺序，不复制 schema；同组的原生工具字段只保留在首项。
+    let original_len = groups.len();
+    let mut end = original_len + extra;
+    groups.resize_with(end, || Value::Null);
+    for index in (0..original_len).rev() {
+        let mut group = groups[index].take();
+        if let Some(declarations) = group
+            .get_mut("functionDeclarations")
+            .and_then(Value::as_array_mut)
+        {
+            while declarations.len() > 1 {
+                end -= 1;
+                groups[end] = function_group(declarations.pop().expect("multiple declarations"));
+            }
+        }
+        end -= 1;
+        groups[end] = group;
+    }
+}
+
 fn tool(value: &mut Value) -> Result<(), PluginError> {
     project(
         value,
@@ -981,10 +1163,26 @@ mod tests {
         );
         let request = json!({});
         let id = uuid::Uuid::parse_str("00112233-4455-4677-8899-aabbccddeeff").unwrap();
+        let labels = RequestLabels::new(
+            crate::lifecycle::Labels {
+                request_id: None,
+                cascade_id: "conversation".into(),
+                trajectory_id: id,
+                last_step_index: None,
+                last_execution_id: None,
+                used_claude: false,
+                used_claude_conservative: true,
+                used_non_gemini_model: true,
+            },
+            None,
+        );
         let envelope = serde_json::to_value(InferenceEnvelope {
             project: "synthetic-project",
             model: "synthetic-model",
-            request: &request,
+            request: InferenceBody {
+                body: &request,
+                labels,
+            },
             user_agent: "antigravity",
             request_type: "agent",
             request_id: id,
@@ -993,6 +1191,13 @@ mod tests {
         assert_eq!(
             envelope["requestId"],
             "agent/00112233-4455-4677-8899-aabbccddeeff"
+        );
+        assert_eq!(
+            envelope["request"]["labels"],
+            json!({
+                "cascade_id": "conversation", "root_cascade_id": "conversation", "trajectory_id": id,
+                "used_claude": "false", "used_claude_conservative": "true", "used_non_gemini_model": "true"
+            })
         );
     }
 

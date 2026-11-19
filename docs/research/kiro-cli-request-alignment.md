@@ -2,13 +2,45 @@
 
 调研日期：2026-11-18。下文分开记录官方 SDK 的合成请求、完整 KAS 的隔离执行、2.35.1 的线上成功以及 3.4.0 重新授权前后的线上请求。它们不能相互替代。
 
-## 3.4.0 重新登录后的线上成功回合
+## 交互式 TUI 实测
+
+在伪终端中启动原版 Linux x86_64 CLI，打开真正的 TUI 后用键盘提交两个短提示。没有调用 `kiro-cli acp`，也没有使用 `--no-interactive` 或 `--output-format stream-json`。CLI 内部启动 KAS（进程入口名仍是 `acp-server.js`，UA 包含 `acp-client/kiro-cli`）；这不表示测试外部 ACP 客户端。在 Node 序列化的 HTTP/1.1 请求头和请求体边界读取字段，保留头名、顺序、允许列出的值与请求形状；不保存 bearer、账号、会话 ID 原值、工具文件正文或系统提示。运行使用临时工作区与 copy-on-write 登录目录，登录由官方 CLI 处理。
+
+- 两次主推理均向 `runtime.us-east-1.kiro.dev` 发 `POST /`、`x-amz-target: KiroRuntimeService.GenerateAssistantResponse`，HTTP 200；`ListAvailableModels` 与 `GetUsageLimits` 均向同区域 `management` 主机发 `POST /` 并返回 200。三类响应均使用 TLS 1.3，未协商 ALPN。额外观察到 `GetUserPreference`、`GetFeatureConfiguration`、`InvokeMCP` 和 `simple-task` 会话标题请求，属于客户端初始化或界面辅助功能，插件不补发。
+- 主推理的实际字段顺序为 `content-type`、`x-amz-target`、`content-length`、`x-amzn-kiro-client-attribution`、`x-amzn-kiro-mode-identifier`、`x-amzn-kiro-fallback`、`x-amz-user-agent`、`user-agent`、`host`、`amz-sdk-invocation-id`、`amz-sdk-request`、`x-amzn-kiro-attempt`、`Authorization`、`Connection`。TUI 值为 `kiro-cli`、`vibe`、`0;max=0`、`attempt=1; max=3` 及 `1;max=3`；这与自定义 ACP 客户端曾发出的 `unrecognized`、`default-v2` 不同。同一 TUI 关闭代理后，目录、额度、主推理和工具续接仍使用 HTTP/1.1，均为 `Connection: keep-alive`；其余头名与顺序未变。走环境 HTTPS 代理时该逐跳字段为 `Connection: close`。插件保留直连的 `keep-alive`。
+- 直连工具实验记录了三次主推理，均为 HTTP 200，响应流完整结束：先收到 `read_file`；下一请求的当前用户消息带同一 `toolUseId`、`status: "success"` 和 text block；等工具续接响应结束后，在 TUI 键入第二轮，调用和结果进入 history，第一轮助手回答包含测试文件内容。工具续接复用 continuation ID，第二轮换新 ID。另一次在前一轮收尾时送入下一条输入，仍观测到沿用旧 ID；不把输入排队行为当成新轮协议。
+- body 是 `conversationState`、`profileArn`、`agentMode: "vibe"`；state 使用 `chatTriggerType: "MANUAL"`、`agentTaskType: "vibe"`、`origin: "KIRO_CLI"`、指定模型、相同的 `conversationId` / `rootConversationId`，以及每个独立用户轮次的 `agentContinuationId`。第二轮 history 包含第一轮的用户与助手消息。官方 TUI 在 history 前面加自己的启动消息并携带内置工具；Stravia 只发送请求方提供的上下文和工具。
+- TUI 使用浏览器登录分支，带 `profileArn`，不带 `TokenType: API_KEY`。插件的 OAuth 通道对齐 TUI 的双 UA、attribution、模式和尝试字段；实际重试仍由 Stravia 宿主管理。独立 API 密钥通道发送 `TokenType: API_KEY` 和 opt-out，不带 `profileArn`，保留 Stravia 标识与一次 SDK 尝试。两条通道均不读取浏览器或 CLI 登录态。
+
+### Stravia 的 OAuth 授权边界
+
+[Kiro 官方认证说明](https://kiro.dev/docs/getting-started/authentication/)公开的是 Kiro 自有客户端的浏览器登录和 device flow。[官方 CLI API key](https://kiro.dev/docs/getting-started/authentication/#api-key-authentication-cli)面向无交互使用。设备授权、刷新和推理所用的上游协议没有面向第三方的稳定性承诺；是否允许设备登录、发行哪个 profile、是否有权使用模型，由账户和组织策略决定。
+
+[`kiro-cli-3.4.0-tui-http.json`](../../backend/crates/stravia-vendor-kiro/kiro-cli-3.4.0-tui-http.json)保存直连 TUI 的脱敏请求形状。Wasm 契约覆盖设备授权、刷新及区域路由，网关验收对照 OAuth 分支的 HTTP 字段顺序与 JSON 形状。设备授权契约使用合成凭据，不是实际账户授权。插件不再提供 API key 通道；下文的 API key 记录仅是历史实验和协议对照。
+
+### 四种设备码通道
+
+原生 CLI 设备菜单有 Google、GitHub、AWS Builder ID 和 Your Organization（AWS IAM Identity Center）。外部 IdP 使用浏览器回调而不是设备码，不属于这四种通道。Google 与 GitHub 走 Kiro 的社交端点，分别发送 `loginProvider: Google` 和 `loginProvider: Github`。
+
+AWS 两种通道使用区域 [SSO OIDC](https://docs.aws.amazon.com/singlesignon/latest/OIDCAPIReference/Welcome.html) 的 `/client/register`、`/device_authorization`、`/token`。Builder ID 使用 `us-east-1` 和 `https://view.awsapps.com/start`；实测注册和创建授权均返回 HTTP 200，AWS 返回的是 `view.awsapps.com` 验证链接，不应由客户端猜测。IAM Identity Center 的区域与 Start URL 由用户填写；Kiro profile 通过 management 的 `ListAvailableProfiles` 选择，`optInFeatures.deviceCodeSignIn.toggle` 禁用的 profile 不会被选中。客户端注册密钥只用于 AWS OIDC，不发送给 Kiro management。尚未用真实账户完成 AWS 授权、刷新或组织 profile 验收。
+
+### 设备登录链接去掉 Google 预选
+
+在隔离的 HOME 与终端运行官方 `kiro-cli login --use-device-flow`，选择 `Use with Google`。CLI 生成 `https://app.kiro.dev/account/device?user_code=<本次设备码>&login_provider=<Google 预选值>`。仅删除 `login_provider`，保留原来的 `user_code` 并让 CLI 继续等待。用独立 Chromium 会话打开修改后的链接，确认转到 `app.kiro.dev/signin`（HTTP 200），仍携带 `user_code`，同时显示 Google 和 GitHub 选项。
+
+这仅移除浏览器的 Google 预选，不重新创建设备会话，也不改变 Kiro 的账户或组织策略；未验证 GitHub 可否完成从 Google 分支发起的会话。
+
+在同版原生 Linux CLI（ELF Build ID `4294d03b1cc66f54e058ce9f43a340e5ababde07`）的 `/oauth/device/authorization` 与 `/oauth/device/poll` 路径引用（`0xaf3a657`、`0xb011824`）追踪 HTTP 构造：两者 `Content-Type: application/json`、`User-Agent: Kiro-CLI`、`clientId: Kiro-CLI`。启动额外发送 `loginProvider: Google`，轮询发送一次性 `deviceCode`。`/refreshToken`（`0xa276ee7`）用相同头与 `refreshToken` 请求体；官方 token 解析器包含 `accessToken`、`expiresIn`（秒）和 `profileArn`。
+
+使用上述启动参数向 `prod.us-east-1.auth.desktop.kiro.dev` 发出的请求返回 HTTP 200；启动响应提供 `expiresInMilliseconds` 和 `intervalInMilliseconds`。原生轮询分支（`0xb012f39`）只以 `authorized` 为成功，`0xb01298a` 解析 `expiresIn`，`0xb01303e` 在字段缺失时回退到 3600 秒。插件保留相同规则；刷新缺少新 refresh token 或 profile 时沿用已授权的值。验证探针不输出设备码或令牌，未完成新的真实账户授权和刷新。
+
+## 对照：3.4.0 重新登录后的外部 ACP 线上回合
 
 使用官方 `kiro-cli acp --agent-engine=v3 --auth-method=cli`，通过 `session/new` 建立会话并选择 `qwen3-coder-next`。仅允许读取临时工作区中的一个测试文件。模型目录与 `GetUsageLimits` 均为 HTTP 200。服务实际返回 `usageBreakdownList`，其 `resourceType: "CREDIT"` 标为 `unit: "INVOCATIONS"`，同时具有整数和高精度 usage / limit。只记录字段和单位，不公布账户、余额或订阅身份。
 
 同一主会话三次 `GenerateAssistantResponse` 均为 HTTP 200：第一步产生 `read_file`；工具完成后第二次请求携带匹配的 `toolUseId`、`status: "success"` 与 text block，模型答对文件中的测试串。第二次用户输入要求不读文件而复述；第三次请求将工具调用和结果都放入 history，模型没有再使用工具，正确复述。两次用户输入均以 `end_turn` 完成。脱敏 ID 比较确认：三次主请求保留同一 `conversationId = rootConversationId`；工具续接不换 `agentContinuationId`，新一轮才换。另观察到官方客户端的一次独立 `simple-task` 辅助请求（独立 conversation ID、共享 root）；不属于主模型的三次调用，插件不模拟此后台行为。
 
-成功连接协商 TLS 1.3、未协商 ALPN；另有[七次公网 ClientHello 实测](kiro-cli-tls.md#已授权的公网-tls-验证)与插件使用的参考样本一致。Google 登录分支请求携带 `profileArn`，未携带 `TokenType: API_KEY`。这次自定义 ACP 客户端的推理头是 `x-amzn-kiro-client-attribution: unrecognized`、`x-amzn-kiro-mode-identifier: default-v2`、`x-amzn-kiro-fallback: 0;max=0`、`amz-sdk-request: attempt=1; max=3`、`x-amzn-kiro-attempt: 1;max=3`；目录 SDK 最大尝试数为 3，额度为 1。Stravia 只实现 API key 分支，以自己的双 UA 和 `stravia` attribution 发出一次请求，不声称自己是官方客户端。真实 Wasm 已通过本地 TLS 网关向 `/` 发送完整有序 HTTP/1.1 请求并返回文本；另经 Wasmtime 验证管理域名、额度请求体、小数与单位。上述线上 200 **不是**插件 API key 的线上验收。
+成功连接协商 TLS 1.3、未协商 ALPN；另有[七次公网 ClientHello 实测](kiro-cli-tls.md#已授权的公网-tls-验证)与插件使用的参考样本一致。Google 登录分支请求携带 `profileArn`，未携带 `TokenType: API_KEY`。这次自定义 ACP 客户端的推理头是 `x-amzn-kiro-client-attribution: unrecognized`、`x-amzn-kiro-mode-identifier: default-v2`、`x-amzn-kiro-fallback: 0;max=0`、`amz-sdk-request: attempt=1; max=3`、`x-amzn-kiro-attempt: 1;max=3`；目录 SDK 最大尝试数为 3，额度为 1。这仅是 ACP 对照，不是插件 OAuth 请求的目标；上述线上 200 **不是**插件连接的线上验收。
 
 ## 3.4.0 重新登录前的线上请求
 
@@ -51,6 +83,8 @@ KAS 两个客户端以 identity 的 `accessToken` 创建 Smithy bearer token；�
 ### 模型目录
 
 尽管 schema 将模型目录标为 `GET /List-Available-Models` 及 query 参数，提取 SDK 实测走 AWS JSON 协议，`POST /` body 包括必需 `origin`，以及可选 `maxResults`、`nextToken`、`profileArn`、`modelProvider`。KAS 实际调用传自身 origin、非空 profile ARN 和上页 nextToken；没有显式传 maxResults 或 modelProvider。响应为 `models`、可选 `defaultModel` 和 `nextToken`；它按页累加有 `modelId` 的模型，提取 `modelName`、描述、provider、token limits、状态以及可选 effort schema 等，并取第一个有效 default model。KAS 限制最多 10 页，触顶可能丢弃后续页；实现分页不能把第一页当完整目录。
+
+3.4.0 KAS 的 `Model` schema 用 `supportedInputTypes` 声明输入，没有同名的输出字段。插件映射 `TEXT` 和 `IMAGE`；目录提供输入声明时，输出按插件事件流的实际能力投影为 `text`。`additionalModelRequestFieldsSchema` 中的 `properties.output_config.properties.effort.enum` 优先于 `properties.reasoning.properties.effort.enum`，同步时保留可用值和来源路径。推理把所选值写回对应的 `additionalModelRequestFields` 子字段，不把 `thinking.type` 当作推理强度。
 
 静态追踪的 origin resolver 将客户端名 `kiro-cli`、`kiro-cli-non-interactive` 映射 `KIRO_CLI`，`kiro-ide`、`kiro-vscode` 映射 `AI_EDITOR`；未识别情况通常回退 `AI_EDITOR`，web 客户端和其他模式存在其他分支。目录调用取得 server origin；请求消息取得其配置的 getOrigin。下方独立 SDK 测试中的 origin 是手动传入，不能作为 CLI 默认值的动态证明。
 

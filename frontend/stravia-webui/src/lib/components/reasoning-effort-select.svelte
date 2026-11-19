@@ -12,15 +12,15 @@ interface Props {
   id: string
   value: string[]
   disabled?: boolean
-  registered?: readonly string[]
+  registered?: readonly string[] | null
 }
 
-let { id, value = $bindable(), disabled = false, registered = [] }: Props = $props()
+let { id, value = $bindable(), disabled = false, registered }: Props = $props()
 let open = $state(false)
 let query = $state('')
 
 // 已登记的自定义强度在取消选中后仍可重新选择，直到编辑完成。
-const options = $derived([...new Set([...specificationReasoningEfforts, ...registered, ...value])])
+const options = $derived([...new Set([...specificationReasoningEfforts, ...(registered ?? []), ...value])])
 const needle = $derived(query.trim())
 const matches = $derived(options.filter((option) => option.toLowerCase().includes(needle.toLowerCase())))
 // default / null 在请求里表示“沿用上游默认”，不能登记为一个强度。

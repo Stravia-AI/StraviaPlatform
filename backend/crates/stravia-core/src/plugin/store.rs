@@ -69,6 +69,64 @@ struct MemoryPluginData {
     boundary_facts: HashMap<String, atomic_journal::MemoryBoundaryFact>,
     boundary_fact_candidates: BoundaryFactCandidates,
     atomic_lineage_boundary_heads: HashMap<(String, String), String>,
+    atomic_lineage_cursors: HashMap<(String, String), ModelTurnCursor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelTurnCursor {
+    version: u8,
+    model_turn_id: String,
+    pub(crate) index: u64,
+    first_provider_id: String,
+    pub(crate) mixed_providers: bool,
+}
+
+impl ModelTurnCursor {
+    fn register(
+        previous: Option<Self>,
+        model_turn_id: &str,
+        provider_id: &str,
+        registered_index: Option<u64>,
+    ) -> Result<(Self, bool), PluginStorageError> {
+        let Some(mut cursor) = previous else {
+            if registered_index.is_some() {
+                return Err(PluginStorageError::StaleOperation);
+            }
+            return Ok((
+                Self {
+                    version: 1,
+                    model_turn_id: model_turn_id.to_owned(),
+                    index: 0,
+                    first_provider_id: provider_id.to_owned(),
+                    mixed_providers: false,
+                },
+                true,
+            ));
+        };
+        if cursor.version != 1 {
+            return Err(PluginStorageError::Storage);
+        }
+        let mut changed = false;
+        if let Some(index) = registered_index {
+            if index > cursor.index
+                || (index == cursor.index) != (cursor.model_turn_id == model_turn_id)
+            {
+                return Err(PluginStorageError::StaleOperation);
+            }
+        } else if cursor.model_turn_id != model_turn_id {
+            cursor.index = cursor
+                .index
+                .checked_add(1)
+                .ok_or(PluginStorageError::Limit)?;
+            cursor.model_turn_id = model_turn_id.to_owned();
+            changed = true;
+        }
+        if !cursor.mixed_providers && cursor.first_provider_id != provider_id {
+            cursor.mixed_providers = true;
+            changed = true;
+        }
+        Ok((cursor, changed))
+    }
 }
 
 struct MemoryAtomicCheckpoint {
@@ -76,6 +134,7 @@ struct MemoryAtomicCheckpoint {
     lease_id: String,
     created_at_ms: i64,
     boundary_head: Option<String>,
+    model_turn_cursor: Option<ModelTurnCursor>,
     cells: Vec<((String, String, String), AtomicStateSnapshot)>,
 }
 
@@ -498,8 +557,8 @@ async fn mirror_memory_atomic(
         }
     }
     if create_lineage {
-        let inserted = sqlx::query("INSERT INTO vendor_atomic_lineages(principal,admission_id,created_at_ms,history_epoch) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
-            .bind(principal).bind(admission).bind(created_at).bind(history_epoch).execute(&mut *tx).await.map_err(storage_error)?.rows_affected();
+        let inserted = sqlx::query("INSERT INTO vendor_atomic_lineages(principal,admission_id,created_at_ms,history_epoch,model_turn_cursor) VALUES($1,$2,$3,$4,(SELECT model_turn_cursor FROM vendor_atomic_checkpoints WHERE principal=$1 AND checkpoint_id=$5)) ON CONFLICT DO NOTHING")
+            .bind(principal).bind(admission).bind(created_at).bind(history_epoch).bind(parent.map(|p| p.0)).execute(&mut *tx).await.map_err(storage_error)?.rows_affected();
         if inserted != 1 {
             return Err(PluginStorageError::StaleOperation);
         }
@@ -507,7 +566,7 @@ async fn mirror_memory_atomic(
     sqlx::query("INSERT INTO vendor_atomic_leases(principal,admission_id,lease_id,expires_at_ms) VALUES($1,$2,$3,$4) ON CONFLICT(principal,admission_id,lease_id) DO UPDATE SET expires_at_ms=excluded.expires_at_ms")
         .bind(principal).bind(admission).bind(lease).bind(expiry).execute(&mut *tx).await.map_err(storage_error)?;
     if let Some(checkpoint) = checkpoint {
-        sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms) VALUES($1,$2,$3,$4,$5)")
+        sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms,model_turn_cursor) VALUES($1,$2,$3,$4,$5,(SELECT model_turn_cursor FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3))")
             .bind(principal).bind(checkpoint).bind(admission).bind(lease).bind(chrono::Utc::now().timestamp_millis()).execute(&mut *tx).await.map_err(storage_error)?;
     }
     tx.commit().await.map_err(storage_error)?;
@@ -515,6 +574,107 @@ async fn mirror_memory_atomic(
 }
 
 impl PluginStore {
+    pub(crate) async fn register_model_turn(
+        &self,
+        context: &crate::plugin::execution::AtomicConversationContext,
+        model_turn_id: &str,
+        provider_id: &str,
+        registered_index: Option<u64>,
+    ) -> Result<ModelTurnCursor, PluginStorageError> {
+        let principal = &context.principal;
+        let admission = context.admission_id.to_string();
+        let lease = context.atomic_lease_id.to_string();
+        macro_rules! register_sql {
+            ($pool:expr, $lock:literal, $pg:expr, $expected:expr) => {{
+                let mut tx = $pool.begin_write().await.map_err(storage_error)?;
+                sqlx::query($lock).execute(&mut *tx).await.map_err(storage_error)?;
+                let epoch_sql = if $pg { "SELECT epoch FROM prompt_admission_epoch WHERE id=1 FOR SHARE" } else { "SELECT epoch FROM prompt_admission_epoch WHERE id=1" };
+                let epoch: i64 = sqlx::query_scalar(epoch_sql).fetch_one(&mut *tx).await.map_err(storage_error)?;
+                if $pg {
+                    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('lineage:' || $1),hashtext($2))").bind(principal).bind(&admission).execute(&mut *tx).await.map_err(storage_error)?;
+                }
+                let row: Option<(Option<String>,)> = sqlx::query_as("SELECT g.model_turn_cursor FROM vendor_atomic_lineages g JOIN vendor_atomic_leases l ON l.principal=g.principal AND l.admission_id=g.admission_id WHERE g.principal=$1 AND g.admission_id=$2 AND g.history_epoch=$3 AND l.lease_id=$4 AND l.expires_at_ms>$5")
+                    .bind(principal).bind(&admission).bind(epoch).bind(&lease).bind(chrono::Utc::now().timestamp_millis()).fetch_optional(&mut *tx).await.map_err(storage_error)?;
+                let encoded = row.ok_or(PluginStorageError::StaleOperation)?.0;
+                let previous: Option<ModelTurnCursor> = encoded.as_deref().map(serde_json::from_str).transpose().map_err(|_| PluginStorageError::Storage)?;
+                let (mut cursor, changed) = ModelTurnCursor::register(previous, model_turn_id, provider_id, registered_index)?;
+                let expected: Option<&ModelTurnCursor> = $expected;
+                if expected.is_some_and(|value| value != &cursor) {
+                    return Err(PluginStorageError::Storage);
+                }
+                if changed {
+                    let encoded = serde_json::to_string(&cursor).map_err(|_| PluginStorageError::Storage)?;
+                    sqlx::query("UPDATE vendor_atomic_lineages SET model_turn_cursor=$3 WHERE principal=$1 AND admission_id=$2")
+                        .bind(principal).bind(&admission).bind(encoded).execute(&mut *tx).await.map_err(storage_error)?;
+                }
+                tx.commit().await.map_err(storage_error)?;
+                if let Some(index) = registered_index {
+                    cursor.index = index;
+                    if cursor.model_turn_id != model_turn_id {
+                        cursor.model_turn_id = model_turn_id.to_owned();
+                    }
+                }
+                Ok::<ModelTurnCursor, PluginStorageError>(cursor)
+            }};
+        }
+        match &self.backend {
+            PluginStoreBackend::Sqlite(pool) => register_sql!(
+                pool,
+                "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                false,
+                None
+            ),
+            PluginStoreBackend::Postgres(pool) => register_sql!(
+                pool,
+                "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
+                true,
+                None
+            ),
+            PluginStoreBackend::Memory(store) => {
+                let mut data = store.data.write().await;
+                let key = (principal.to_owned(), admission.clone());
+                let epoch = self.history_epoch().await?;
+                if data.atomic_lineage_epochs.get(&key) != Some(&epoch)
+                    || !data
+                        .atomic_leases
+                        .get(&(principal.to_owned(), admission.clone(), lease.clone()))
+                        .is_some_and(|expiry| *expiry > chrono::Utc::now().timestamp_millis())
+                {
+                    return Err(PluginStorageError::StaleOperation);
+                }
+                let (mut cursor, changed) = ModelTurnCursor::register(
+                    data.atomic_lineage_cursors.get(&key).cloned(),
+                    model_turn_id,
+                    provider_id,
+                    registered_index,
+                )?;
+                let pool = store
+                    .history_pool
+                    .read()
+                    .expect("history pool lock poisoned")
+                    .clone();
+                if let Some(pool) = pool {
+                    register_sql!(
+                        pool,
+                        "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                        false,
+                        Some(&cursor)
+                    )?;
+                }
+                if changed {
+                    data.atomic_lineage_cursors.insert(key, cursor.clone());
+                }
+                if let Some(index) = registered_index {
+                    cursor.index = index;
+                    if cursor.model_turn_id != model_turn_id {
+                        cursor.model_turn_id = model_turn_id.to_owned();
+                    }
+                }
+                Ok(cursor)
+            }
+        }
+    }
+
     pub(crate) fn attach_volatile_store(&self, store: super::volatile_state::VolatileStore) {
         *self
             .volatile_store
@@ -1551,13 +1711,14 @@ impl PluginStore {
                 let exists: Option<i64> = sqlx::query_scalar("SELECT CAST(1 AS BIGINT) FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$2").bind(principal).bind(admission).fetch_optional(&mut *tx).await.map_err(storage_error)?;
                 if exists.is_none() {
                     let mut boundary_head: Option<String> = None;
+                    let mut model_turn_cursor: Option<String> = None;
                     if let Some(parent) = parent_checkpoint {
-                        let found: Option<(Option<String>,)> = sqlx::query_as("SELECT boundary_head FROM vendor_atomic_checkpoints WHERE principal=$1 AND checkpoint_id=$2").bind(principal).bind(parent).fetch_optional(&mut *tx).await.map_err(storage_error)?;
-                        boundary_head = found.ok_or(PluginStorageError::StaleOperation)?.0;
+                        let found: Option<(Option<String>, Option<String>)> = sqlx::query_as("SELECT boundary_head, model_turn_cursor FROM vendor_atomic_checkpoints WHERE principal=$1 AND checkpoint_id=$2").bind(principal).bind(parent).fetch_optional(&mut *tx).await.map_err(storage_error)?;
+                        (boundary_head, model_turn_cursor) = found.ok_or(PluginStorageError::StaleOperation)?;
                         sqlx::query("INSERT INTO vendor_atomic_cells(vendor_id,provider_id,principal,admission_id,cell_key,revision,payload,journal_head) SELECT vendor_id,provider_id,principal,$3,cell_key,revision,payload,journal_head FROM vendor_atomic_checkpoint_cells WHERE principal=$1 AND checkpoint_id=$2")
                             .bind(principal).bind(parent).bind(admission).execute(&mut *tx).await.map_err(storage_error)?;
                     }
-                    sqlx::query("INSERT INTO vendor_atomic_lineages(principal,admission_id,created_at_ms,history_epoch,boundary_head) VALUES($1,$2,$3,$4,$5)").bind(principal).bind(admission).bind(chrono::Utc::now().timestamp_millis()).bind(current_epoch).bind(boundary_head).execute(&mut *tx).await.map_err(storage_error)?;
+                    sqlx::query("INSERT INTO vendor_atomic_lineages(principal,admission_id,created_at_ms,history_epoch,boundary_head,model_turn_cursor) VALUES($1,$2,$3,$4,$5,$6)").bind(principal).bind(admission).bind(chrono::Utc::now().timestamp_millis()).bind(current_epoch).bind(boundary_head).bind(model_turn_cursor).execute(&mut *tx).await.map_err(storage_error)?;
                 } else if expected_epoch.is_some() {
                     let lineage_epoch: i64 = sqlx::query_scalar("SELECT history_epoch FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$2").bind(principal).bind(admission).fetch_one(&mut *tx).await.map_err(storage_error)?;
                     if lineage_epoch != current_epoch { return Err(PluginStorageError::StaleOperation); }
@@ -1606,6 +1767,10 @@ impl PluginStore {
                             .ok_or(PluginStorageError::StaleOperation)?;
                         let cells = checkpoint.cells.clone();
                         let boundary_head = checkpoint.boundary_head.clone();
+                        let model_turn_cursor = checkpoint.model_turn_cursor.clone();
+                        if let Some(cursor) = model_turn_cursor {
+                            data.atomic_lineage_cursors.insert(lineage.clone(), cursor);
+                        }
                         if let Some(head) = boundary_head {
                             data.atomic_lineage_boundary_heads
                                 .insert(lineage.clone(), head);
@@ -1663,6 +1828,7 @@ impl PluginStore {
                         data.atomic_lineages.remove(&lineage);
                         data.atomic_lineage_epochs.remove(&lineage);
                         data.atomic_lineage_boundary_heads.remove(&lineage);
+                        data.atomic_lineage_cursors.remove(&lineage);
                         data.atomic_lineage_cells.remove(&lineage);
                         data.atomic_cells
                             .retain(|(_, _, p, a, _), _| p != principal || a != admission);
@@ -1700,7 +1866,7 @@ impl PluginStore {
                 }
                 let exists: Option<i64> = sqlx::query_scalar("SELECT CAST(1 AS BIGINT) FROM vendor_atomic_leases WHERE principal=$1 AND admission_id=$2 AND lease_id=$3 AND expires_at_ms>$4").bind(principal).bind(admission).bind(lease).bind(chrono::Utc::now().timestamp_millis()).fetch_optional(&mut *tx).await.map_err(storage_error)?;
                 if exists.is_none() { return Err(PluginStorageError::StaleOperation); }
-                let inserted = sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms,boundary_head) VALUES($1,$2,$3,$4,$5,(SELECT boundary_head FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3)) ON CONFLICT(principal,checkpoint_id) DO NOTHING")
+                let inserted = sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms,boundary_head,model_turn_cursor) VALUES($1,$2,$3,$4,$5,(SELECT boundary_head FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3),(SELECT model_turn_cursor FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3)) ON CONFLICT(principal,checkpoint_id) DO NOTHING")
                     .bind(principal).bind(checkpoint).bind(admission).bind(lease).bind(chrono::Utc::now().timestamp_millis()).execute(&mut *tx).await.map_err(storage_error)?.rows_affected();
                 if inserted != 1 { return Err(PluginStorageError::Changed); }
                 sqlx::query("INSERT INTO vendor_atomic_checkpoint_cells(principal,checkpoint_id,vendor_id,provider_id,cell_key,revision,payload,journal_head) SELECT principal,$3,vendor_id,provider_id,cell_key,revision,payload,journal_head FROM vendor_atomic_cells WHERE principal=$1 AND admission_id=$2")
@@ -1749,6 +1915,10 @@ impl PluginStore {
                     .atomic_lineage_boundary_heads
                     .get(&(principal.to_owned(), admission.to_owned()))
                     .cloned();
+                let model_turn_cursor = data
+                    .atomic_lineage_cursors
+                    .get(&(principal.to_owned(), admission.to_owned()))
+                    .cloned();
                 data.atomic_checkpoints.insert(
                     id.clone(),
                     MemoryAtomicCheckpoint {
@@ -1756,6 +1926,7 @@ impl PluginStore {
                         lease_id: lease.to_owned(),
                         created_at_ms: chrono::Utc::now().timestamp_millis(),
                         boundary_head,
+                        model_turn_cursor,
                         cells,
                     },
                 );

@@ -127,7 +127,37 @@ pub(crate) struct AtomicConversationContext {
     pub(crate) atomic_lease_id: uuid::Uuid,
 }
 
+pub(crate) struct ModelTurnRegistration {
+    model_turn_id: String,
+    atomic_state: AtomicConversationContext,
+    state: Mutex<Option<u64>>,
+}
+
+impl ModelTurnRegistration {
+    pub(crate) fn new(model_turn_id: String, atomic_state: AtomicConversationContext) -> Self {
+        Self {
+            model_turn_id,
+            atomic_state,
+            state: Mutex::new(None),
+        }
+    }
+
+    async fn register(
+        &self,
+        store: &PluginStore,
+        provider_id: &str,
+    ) -> Result<(u64, bool), PluginStorageError> {
+        let mut state = self.state.lock().await;
+        let cursor = store
+            .register_model_turn(&self.atomic_state, &self.model_turn_id, provider_id, *state)
+            .await?;
+        *state = Some(cursor.index);
+        Ok((cursor.index, cursor.mixed_providers))
+    }
+}
+
 pub(crate) struct VendorCallContext {
+    pub(crate) model_turn_registration: Option<Arc<ModelTurnRegistration>>,
     pub(crate) history_boundary_candidate:
         Option<crate::generation_chain::HistoryBoundaryCandidate>,
     pub(crate) atomic_state: Option<AtomicConversationContext>,
@@ -155,6 +185,7 @@ impl VendorCallContext {
             events: None,
             observer: None,
             model_turn_id: None,
+            model_turn_registration: None,
             attempt_id: None,
             websocket_affinity: None,
             response_continuation_available: Arc::new(AtomicBool::new(false)),
@@ -747,6 +778,9 @@ impl Gateway {
             if !matches!(
                 key.as_str(),
                 "host_platform"
+                    | "model_turn_id"
+                    | "model_turn_index"
+                    | "model_turn_mixed_providers"
                     | CLIENT_INSTALLATION_ID
                     | "egress_protocol"
                     | "egress_base_url"
@@ -760,6 +794,49 @@ impl Gateway {
                     .operation_metadata
                     .insert(key.clone(), value.clone());
             }
+        }
+        // 生命周期只认宿主 Model Turn：Target 重试与 recovery 复用，不能由通用 metadata 覆盖。
+        for key in [
+            "model_turn_id",
+            "model_turn_index",
+            "model_turn_mixed_providers",
+        ] {
+            prepared.provider.operation_metadata.remove(key);
+        }
+        if matches!(prepared.kind, Operation::Infer | Operation::Compact)
+            && let Some(registration) = &context.model_turn_registration
+        {
+            let (index, mixed_providers) = tokio::select! {
+                biased;
+                _ = context.cancellation.cancelled() => return Err(RuntimeError::Cancelled.into()),
+                () = context.deadline.wait() => return Err(RuntimeError::DeadlineExceeded.into()),
+                result = async {
+                    // The durable commit may complete while the caller is cancelled. Keep
+                    // its result in the turn resource even if the dispatch future is dropped.
+                    let registration = registration.clone();
+                    let store = self.vendor_plugins.store.clone();
+                    let provider_id = prepared.provider_id.clone();
+                    tokio::spawn(async move { registration.register(&store, &provider_id).await })
+                        .await
+                        .map_err(|_| RuntimeError::from_guest(ErrorKind::Trapped, "model turn registration task failed".into(), None))?
+                        .map_err(|error| {
+                            let failure = plugin_storage_failure(error);
+                            RuntimeError::from_guest(failure.kind, failure.message, failure.upstream_status)
+                        })
+                } => result?,
+            };
+            prepared.provider.operation_metadata.insert(
+                "model_turn_id".into(),
+                Value::String(registration.model_turn_id.clone()),
+            );
+            prepared
+                .provider
+                .operation_metadata
+                .insert("model_turn_index".into(), Value::from(index));
+            prepared.provider.operation_metadata.insert(
+                "model_turn_mixed_providers".into(),
+                Value::Bool(mixed_providers),
+            );
         }
         if let Some(affinity) = &context.websocket_affinity {
             prepared
@@ -1868,6 +1945,64 @@ fn plugin_storage_failure(error: PluginStorageError) -> HostFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registration_freezes_interleaved_turns_and_accumulates_provider_evidence()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pool = crate::db::init_pool(directory.path()).await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = PluginStore::sqlite(pool);
+        let context = AtomicConversationContext {
+            principal: "turn-registration".into(),
+            admission_id: uuid::Uuid::new_v4(),
+            atomic_lease_id: uuid::Uuid::new_v4(),
+        };
+        store
+            .fork_atomic_state(
+                &context.principal,
+                &context.admission_id.to_string(),
+                None,
+                &context.atomic_lease_id.to_string(),
+            )
+            .await?;
+        let a = ModelTurnRegistration::new("turn-a".into(), context.clone());
+        let b = ModelTurnRegistration::new("turn-b".into(), context);
+        assert_eq!(a.register(&store, "provider-a").await?, (0, false));
+        assert_eq!(b.register(&store, "provider-a").await?, (1, false));
+        assert_eq!(a.register(&store, "provider-a").await?, (0, false));
+        assert_eq!(a.register(&store, "provider-b").await?, (0, true));
+        assert_eq!(a.register(&store, "provider-a").await?, (0, true));
+        let c = ModelTurnRegistration::new("turn-c".into(), b.atomic_state.clone());
+        assert_eq!(c.register(&store, "provider-a").await?, (2, true));
+        let recreated = ModelTurnRegistration::new("turn-c".into(), b.atomic_state.clone());
+        assert_eq!(recreated.register(&store, "provider-a").await?, (2, true));
+
+        let second_context = AtomicConversationContext {
+            principal: "same-turn-registration".into(),
+            admission_id: uuid::Uuid::new_v4(),
+            atomic_lease_id: uuid::Uuid::new_v4(),
+        };
+        store
+            .fork_atomic_state(
+                &second_context.principal,
+                &second_context.admission_id.to_string(),
+                None,
+                &second_context.atomic_lease_id.to_string(),
+            )
+            .await?;
+        let first = ModelTurnRegistration::new("first".into(), second_context.clone());
+        assert_eq!(first.register(&store, "provider-a").await?, (0, false));
+        assert_eq!(first.register(&store, "provider-b").await?, (0, true));
+        let next = ModelTurnRegistration::new("next".into(), second_context.clone());
+        assert_eq!(next.register(&store, "provider-a").await?, (1, true));
+        let recreated_next = ModelTurnRegistration::new("next".into(), second_context);
+        assert_eq!(
+            recreated_next.register(&store, "provider-a").await?,
+            (1, true)
+        );
+        Ok(())
+    }
 
     fn header_channel(id: &str, names: &[&str]) -> stravia_vendor_sdk::ChannelDescriptor {
         stravia_vendor_sdk::ChannelDescriptor {

@@ -1,4 +1,5 @@
 mod allowance;
+mod auth;
 mod descriptor;
 mod discovery;
 mod request;
@@ -19,8 +20,12 @@ use stravia_vendor_sdk::{
 use uuid::Uuid;
 
 const VENDOR_ID: &str = "kiro";
-const CHANNEL_ID: &str = "default";
-const PROTOCOL: &str = "kiro-generate-assistant-response";
+const GOOGLE_CHANNEL: &str = "oauth";
+const GITHUB_CHANNEL: &str = "github";
+const BUILDER_ID_CHANNEL: &str = "builder-id";
+const IDENTITY_CENTER_CHANNEL: &str = "identity-center";
+const OAUTH_PROTOCOL: &str = "kiro-generate-assistant-response-oauth";
+const IDENTITY_CENTER_PROTOCOL: &str = "kiro-generate-assistant-response-sso-oidc";
 const DEFAULT_BASE_URL: &str = "https://runtime.us-east-1.kiro.dev";
 
 pub struct Kiro;
@@ -53,7 +58,12 @@ impl VendorGuest for Kiro {
         if operation != Operation::Infer {
             return Err(unsupported(operation));
         }
-        Ok(PROTOCOL.into())
+        Ok(if channel == IDENTITY_CENTER_CHANNEL {
+            IDENTITY_CENTER_PROTOCOL
+        } else {
+            OAUTH_PROTOCOL
+        }
+        .into())
     }
 
     fn execute(
@@ -70,6 +80,9 @@ impl VendorGuest for Kiro {
         }
         check_channel(channel, input.provider())?;
         match input {
+            OperationInput::Auth { provider, request } => {
+                auth::execute(host, &provider, request).map(OperationOutput::Auth)
+            }
             OperationInput::Allowance { provider, .. } => {
                 allowance::execute(host, &provider).map(OperationOutput::Allowance)
             }
@@ -87,7 +100,12 @@ impl VendorGuest for Kiro {
 stravia_vendor_sdk::export_vendor!(Kiro);
 
 fn check_channel(channel: &str, provider: &ProviderSnapshot) -> Result<(), PluginError> {
-    if channel == CHANNEL_ID && provider.channel == channel && provider.provider_id == VENDOR_ID {
+    if matches!(
+        channel,
+        GOOGLE_CHANNEL | GITHUB_CHANNEL | BUILDER_ID_CHANNEL | IDENTITY_CENTER_CHANNEL
+    ) && provider.channel == channel
+        && provider.provider_id == VENDOR_ID
+    {
         Ok(())
     } else {
         Err(plugin_error(
@@ -122,15 +140,18 @@ fn infer(
     request: &AiRequest,
 ) -> Result<OperationOutput, PluginError> {
     let model = provider.model.as_deref().unwrap_or(&request.model);
-    // KAS 对 ACP 会话使用 sess_UUID；没有对话上下文时原生回退为独立 UUID。
-    let conversation = match scoped_uuid(provider, "client_conversation_id")? {
-        Some(id) => format!("sess_{id}"),
-        None => Uuid::new_v4().to_string(),
-    };
-    let mut body = request::encode(request, model, &conversation)?;
-    if let Some(turn) = scoped_uuid(provider, "user_prompt_id")? {
-        body["conversationState"]["agentContinuationId"] = Value::String(turn.to_string());
-    }
+    // TUI 的主请求令 conversationId 与 rootConversationId 指向同一会话。
+    let session = scoped_uuid(provider, "client_conversation_id")?.unwrap_or_else(Uuid::new_v4);
+    let conversation = format!("sess_{session}");
+    // 工具续接复用宿主的 prompt ID；无宿主上下文的独立调用也携带自己的 ID。
+    let turn = scoped_uuid(provider, "user_prompt_id")?.unwrap_or_else(Uuid::new_v4);
+    let mut body = request::encode(
+        request,
+        model,
+        &conversation,
+        provider.model_metadata.as_ref(),
+    )?;
+    body["conversationState"]["agentContinuationId"] = Value::String(turn.to_string());
     let request = transport::rpc(provider, transport::Action::Generate, &body)?;
     host.emit_started()?;
     let response = transport::send(host, request)?;

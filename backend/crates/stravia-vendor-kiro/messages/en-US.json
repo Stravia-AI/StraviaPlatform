@@ -1,7 +1,15 @@
 {
-  "channel_default": "Default",
-  "channel_description": "Run inference, sync available models, and check your Kiro account’s credit usage.",
+  "channel_google": "Google account",
+  "channel_google_description": "Sign in with Google on Kiro’s verification page to authorize this device.",
+  "channel_github": "GitHub account",
+  "channel_github_description": "Sign in with GitHub on Kiro’s verification page to authorize this device.",
+  "channel_builder_id": "AWS Builder ID",
+  "channel_builder_id_description": "Authorize this device with your personal AWS Builder ID.",
+  "channel_identity_center": "AWS IAM Identity Center",
+  "channel_identity_center_description": "Authorize this device through your organization’s AWS access portal.",
   "authentication": "Authentication",
-  "api_key": "Kiro API key",
-  "api_key_description": "Enter an API key you generated for your Kiro account, not a CLI session ID. This connection does not read local credentials. For the base URL, keep the US East default or enter https://runtime.eu-central-1.kiro.dev for Frankfurt."
+  "start_url": "Start URL",
+  "start_url_description": "Enter the URL of your organization’s AWS access portal, such as https://example.awsapps.com/start.",
+  "region": "AWS region",
+  "region_description": "Enter the region code for your IAM Identity Center instance, such as us-east-1."
 }

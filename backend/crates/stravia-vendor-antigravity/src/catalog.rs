@@ -75,6 +75,11 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
                 let (family, effort) = selector::family_and_effort(slug);
                 families.entry(family.into()).or_default().push(Variant {
                     id: id.into(),
+                    model_enum: details
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
                     slug: slug.into(),
                     effort: effort.map(str::to_owned),
                     metadata,
@@ -305,6 +310,11 @@ fn model_metadata(details: &serde_json::Map<String, Value>) -> Option<BTreeMap<S
         }
     }
     let mut metadata = BTreeMap::new();
+    for field in ["apiProvider", "modelProvider"] {
+        if let Some(value) = details.get(field) {
+            metadata.insert(field.into(), value.clone());
+        }
+    }
     let mut input = vec!["text"];
     for (field, modality) in [
         ("supportsImages", "image"),
@@ -432,8 +442,8 @@ mod tests {
             },
             "imageGenerationModelIds": ["gemini-3.1-flash-image"],
             "models": {
-                "gemini-3.8-flash-high": {"displayName": "Gemini 3.8 Flash (High)", "supportsImages": true, "maxTokens": 1048576},
-                "gemini-3.8-flash-low": {"displayName": "Gemini 3.8 Flash (Low)", "maxTokens": 131072},
+                "gemini-3.8-flash-high": {"displayName": "Gemini 3.8 Flash (High)", "model": "OPAQUE_A", "supportsImages": true, "maxTokens": 1048576, "supportsThinking": true, "thinkingLevel": 2, "apiProvider": 26, "modelProvider": 4},
+                "gemini-3.8-flash-low": {"displayName": "Gemini 3.8 Flash (Low)", "model": "OPAQUE_B", "maxTokens": 131072, "supportsThinking": true, "thinkingLevel": 1, "apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
                 "gemini-pro-agent": {"displayName": "Gemini 3.1 Pro (High)", "model": "MODEL_M16"},
                 "gemini-3.1-pro-low": {"displayName": "Gemini 3.1 Pro (Low)"},
                 "gemini-3.1-pro-high": {"displayName": "Gemini 3.1 Pro (High)", "model": "MODEL_M37"},
@@ -466,15 +476,26 @@ mod tests {
             table["variants"][0]["metadata"]["limit"]["context"],
             1048576
         );
+        let low = selector::resolve(table, None).unwrap();
+        assert_eq!(low.model_enum, Some("OPAQUE_B"));
+        assert_eq!(low.api_provider, Some(&json!("API_PROVIDER_ANTHROPIC_VERTEX")));
+        assert_eq!(low.model_provider, Some(&json!("MODEL_PROVIDER_GOOGLE")));
+        let high = selector::resolve(
+            table,
+            Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "high".into(),
+            }),
+        ).unwrap();
+        assert_eq!(high.model_enum, Some("OPAQUE_A"));
+        assert_eq!(high.api_provider, Some(&json!(26)));
+        assert_eq!(high.model_provider, Some(&json!(4)));
         let pro = &result.models[0];
         assert_eq!(pro.display_name, "Gemini 3.1 Pro");
         assert_eq!(pro.selector.as_deref(), Some("gemini-pro-agent"));
-        assert_eq!(
-            selector::resolve(&pro.metadata[selector::EXTENSION_KEY], None)
-                .unwrap()
-                .id,
-            "gemini-pro-agent"
-        );
+        let legacy = selector::resolve(&pro.metadata[selector::EXTENSION_KEY], None).unwrap();
+        assert_eq!(legacy.id, "gemini-pro-agent");
+        assert_eq!(legacy.api_provider, None);
+        assert_eq!(legacy.model_provider, None);
         let image = &result.models[2];
         assert_eq!(image.selector.as_deref(), Some("gemini-3.1-flash-image"));
         assert_eq!(image.capabilities, ["media_image"]);

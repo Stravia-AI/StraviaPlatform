@@ -316,3 +316,150 @@ antigravity/cli/1.2.17 (aidev_client; os_type=windows; arch=amd64; cl=993434119;
 回归在既有真实 Wasm/HTTP 契约中模拟已观察到的客户端分类：非 CLI 请求不提供新 Flash 的 Agent 档位，断言保护完整家族发现，而不绑定版本、平台或构建号的完整字符串。修复前该断言实际失败，缺少 `gemini-3.8-flash`；重建独立插件后同一用例通过。`task build:vendors:all`、15 个插件单测、真实 Wasm 契约及定向 Clippy 均通过。
 
 另启动全新临时 Server，导入本轮实际构建的 Wasm，仅在隔离存储中预置当前有效 token 与 project，不重新授权、刷新 token 或复制账号其他资料。通过真实管理同步接口访问 Google：HTTP 200，`added=7`，模型列表包含 `gemini-3.7-flash` 与 `gemini-3.8-flash`。没有发送推理请求，也没有修改用户现有实例。验证后的临时 Server、凭据副本、官方调试进程与下载包均清理；使用修复仍需向实际实例导入新组件并同步模型。
+
+## 10. Opus High：上游 429 与原生 CLI 对照（2026-11-18）
+
+下表对照运行实例导出的 Google wire 记录和相隔约 8 分 20 秒的官方 Linux CLI 真实请求。CLI 版本 `1.5.11` 与当时[官方 Linux amd64 更新清单](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json)一致。CLI 在空目录发送一条短提示，捕获仅保留 HTTP 摘要；没有重放用户请求，也没有比较凭据值或 TLS 指纹。
+
+|观测项|Stravia|官方 `agy`|
+|---|---|---|
+|Google 返回（UTC）|15:05:56，HTTP 429 `RESOURCE_EXHAUSTED`|15:14:16，HTTP 200，CLI 输出 `OK`|
+|项目、端点、档位|与 CLI 相同|同一 `project`、daily `streamGenerateContent?alt=sse`、`claude-opus-5-5-high`|
+|生成参数|`HIGH`、`includeThoughts: true`、`maxOutputTokens: 16384`|相同 thinking，`maxOutputTokens: 128000`|
+|请求头与正文|头名、顺序相同；UA 声明 1.5.8；无 `request.labels`，一个工具组声明 12 项|UA 声明 1.5.11；有 `request.labels`，14 个工具组各声明一项|
+
+入站 Responses 请求显式指定 `max_output_tokens: 16384`；不是插件误读目录默认值。运行实例保存的 High 档上限与 CLI 当次目录一致，均为 `128000`。CLI 目录列出该模型，`quotaInfo.remainingFraction: 1`。事故前后两次额度采样中，`3p-5h` 均剩 100%，`3p-weekly` 均剩约 98.98%。在事故前后各一小时的现存记录内，同一 provider 的 Opus 4 次、Gemini 6 次尝试均为上游 429；可见额度不代表所有上游限制。
+
+查询时目标 provider 为 `use_proxy=false`（direct，不继承服务环境代理）；15:14 的 CLI 捕获走 shell 原有的 HTTPS 代理。另做一次同版本、同短提示对照：仅将 daily 端点经本地观测器直连 Google，不经过该 HTTPS 代理。15:19:55 UTC，同一 `project`、Opus High、thinking 和 128000 上限再次返回 HTTP 200，CLI 输出 `OK`。因此原生成功不依赖该代理；未测量公网 IP，也没有事故时的出口快照。两次 CLI 捕获均有本地 TLS 观测器，不能证明 Stravia 与 CLI 的上游 TLS 特征相同。
+
+Google 错误体只有 `code`、`message` 和 `status`，没有限额名称、重试时间或 `Retry-After` 响应头。后续客户端收到 200 是另一 provider 的 fallback 成功，不是 Google 重试成功。对照证明同一项目和模型可以调用，不能把事故归因于某个请求字段；两次的时间、输入、工具和执行路径并未固定。上游响应保留了 `x-cloudaicompanion-trace-id`，可用事故 UTC 时间和该标识向服务方核查具体限制。
+
+## 11. agy 1.5.11：MCP 工具分组、labels 和历史提示词对照
+
+按[官方 MCP 配置](https://antigravity.google/docs/mcp.md)在临时 workspace 启动两个 stdio server：A 提供两个 eager 工具和一个默认 lazy 工具，B 提供一个 eager 工具。两个 server 都实际收到 `tools/list`。在官方 CLI 为 Opus High 发出的第一条推理请求上，于本地捕获 `request.tools` 后截断，不将该请求转发给 Google。此实验验证客户端构造，不验证上游接受或拒绝。
+
+- 20 个 `tools[]` 项均只含一个函数声明。A 的两个 eager 工具占两个不同项，B 的 eager 工具占第三项；不是一个 server 一组。A 的 lazy 工具没有独立函数声明，另有 `call_mcp_tool`。Stravia 对齐已声明函数的分组，不负责把调用方的工具改成 CLI 的 lazy 加载模式。
+- `request.labels` 是**推理正文内的字符串键值表**，不是 MCP 分组字段或 HTTP 头。本次有 9 个键，涉及操作树和轨迹（`cascade_id`、`root_cascade_id`、`trajectory_id`）、请求和步骤（`request_id`、`last_step_index`）、模型标记（`model_enum`、`used_claude`、`used_claude_conservative`、`used_non_gemini_model`）。分类来自字段名及观测类型，不代表已知服务端用途。Google 对[公开 Vertex API 标签](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/add-labels-to-api-calls)另有说明，不能据此外推 Antigravity 私有接口的鉴权、计费或限流行为。
+- 仓库过去记录过特定 OMP 系统提示片段与 429 的复现，但在本次附件可见的入站 `instructions` 和 Google 出站 `systemInstruction` 中，该旧案例的精确文本命中均为 0。本地同 provider、同模型现存 19 次 429，只有 5 次保留了可比较的上游请求：均含 OMP 身份文本，其中 4 次留存的系统指令与事故相同。该组合唯一一次成功没有留存请求正文；换 provider 后有 48 个同模型成功样本也含 OMP 身份文本。提示词、provider、时间等变量未固定，不能判定本次是提示词所致。
+- [OMP #18706](https://github.com/can1357/oh-my-pi/issues/18706) 与 [CLIProxyAPI #5751](https://github.com/router-for-me/CLIProxyAPI/issues/5751) 有类似现象的用户报告，不是 Google 对原因的确认。工具分组是有抓包和 Wasm/loopback HTTP 契约支持的对齐项，不是经过验证的 429 修复。
+
+### 原生 CLI 与插件实测的边界（2026-11-19）
+
+- **官方 CLI 出站观察**：从 `~/.local/bin/agy` 启动的 1.5.11 会话，推理 HTTP 头自报 Antigravity CLI 1.5.11，不含 Stravia 或兼容性字样。这次在本地截断，不以此声称获得上游 200。另一次同版本原生观察中，`labels.model_enum` 与同次目录中所选 wire model 的 `models[id].model` 都是字符串且相等；`labels.request_id` 与外层 `requestId` 都是字符串但不完全相等。未推断官方 ID 的生成算法。
+- **插件真实调用**：隔离加载实验 Wasm，用 Stravia 存量连接读取真实目录并发送一次普通 Opus High 推理。`model_enum` 与该档原始目录值相等，HTTP 200，返回 `OK`。实验版本使用了之后撤回的兼容 UA，使用独立宿主，不是官方 CLI 进程，也不是最终组件的完整线上验证。没有重放故障内容或写入生产库。
+- **上一轮最终插件**保留每次推理的关联号、按所选档位取目录枚举、429 诊断关联，不变更既有 UA、重试策略或文本处理。没有等价 CLI 轨迹时不填充对应标签。[#5751](https://github.com/router-for-me/CLIProxyAPI/issues/5751) 是用户报告，没有证明标签或版本导致 429；其关联[诊断 PR](https://github.com/router-for-me/CLIProxyAPI/pull/5790) 本次核查时未合并。
+
+### OMP 请求验收与九项标签来源
+
+对照其他插件不能直接搬用字段：Codex 使用宿主的 conversation、logical turn 和 context window；Claude Code 使用宿主亲和键与有状态会话；Kiro 使用 conversation 和 user prompt。这些是本地执行事实，不证明它们等同于 Antigravity 的轨迹和步骤。相关实现位于 `model_turn/live.rs`、`stravia-vendor-codex/src/codex.rs`、`stravia-vendor-claudecode/src/lib.rs` 和 `stravia-vendor-kiro/src/lib.rs`。
+
+|原生请求的标签|当前插件来源及覆盖边界|
+|---|---|
+|`request_id`|插件本次尝试的真实关联号，已发送|
+|`model_enum`|所选档位同步目录中的 `model`；仅已有该字段时发送|
+|`cascade_id`、`root_cascade_id`、`trajectory_id`|宿主会话与谱系不等于原生 CLI 轨迹，缺少等价生命周期依据|
+|`last_step_index`|宿主 turn 序号不等于 CLI step，工具执行、重试、压缩的计数口径未验证|
+|`used_claude`、`used_claude_conservative`、`used_non_gemini_model`|没有可证实的原生累计使用状态及 conservative 定义，不按当前模型名猜值|
+
+[OMP 的公开实现](https://github.com/can1357/oh-my-pi/blob/f0200abf/packages/ai/src/providers/google-gemini-cli.ts)维护其自身的会话和步骤状态；[OmniRoute 的身份实现](https://github.com/cheaper-inference/OmniRoute/blob/bf3d1d941633a563351d16f9b8bf315a7e697610/open-sse/services/antigravityIdentity.ts)只构造部分标签。二者做法不同，均不是 Google 对字段语义或 429 原因的协议保证。本轮没有增加伪造轨迹、使用标记或更新客户端身份以规避上游限制。
+
+#### 实际 OMP 验收结果
+
+本机 `omp 18.22.1` 在临时 agent 目录和空 workspace 中执行非交互普通提示。未传 `--system-prompt`、`--tools` 或 `--no-tools`；保留真实 OMP 的 coding system prompt 与默认工具定义，不加载用户扩展、skills、rules 或项目上下文。OMP 经 loopback `/v1/responses`，使用仓库真实协议解码器、新 Antigravity Wasm 和 Stravia 存量连接的只读凭据，向 daily 上游发送一次推理。测试宿主禁用 HTTP 重试及重定向，不 fallback，不部署；生产数据库不写入。
+
+实测出站为 `claude-opus-5-5-high`：系统指令 10,072 字节、11 个函数工具，包含 OMP 身份文本；`labels` 实际仅有 `request_id`，因为测试使用存量 selector 元数据，没有重新同步模型。Google 返回 HTTP **429**，OMP 退出码 **1**，没有 `OK`，工具执行事件为 **0**。因此当前插件对该 OMP 请求仍未修复 429，不以先前短提示成功代替这一验收。
+
+验证边界：测试桥使用真正的插件与协议转换，但不是运行实例的完整 Gateway 路由/网络形态；宿主缓冲上游，再由真实编码器向 OMP 输出 SSE。这次没有加载原事故的用户规则、项目上下文或历史，不能把两次系统指令视为逐字相同。未再尝试修改提示词、标签或客户端身份重放失败请求。临时输入管道、测试入口与 OMP profile 已在验证后清理。
+
+## 12. 1.5.11 身份与 Stravia labels 投影（2026-11-19）
+
+对本机官方 `agy` 1.5.11 二进制做离线版本检查与只读静态分析，没有执行官方在线推理。`codeassistclient.userAgent` 在 `0x9267bd2–0x9267c57` 使用内嵌构建值 `1024248524`，Linux amd64 consumer 的完整身份为：
+
+```text
+antigravity/cli/1.5.11 (aidev_client; os_type=linux; arch=amd64; cl=1024248524; auth_method=consumer)
+```
+
+这补齐第 10–11 节已有 1.5.11 出站观察的构建值证据；不冒充一次新的完整 TLS/HTTP 抓包。连接层夹具保留真实 1.5.8 记录，宿主 shape 未改动。
+
+`GetModelRequestCustomMetadata`（`0x8849dc0`）提供以下可确定规则：
+
+- `request_id = fmt.Sprintf("%s-%d", trajectory.ID(), trajectory.NumGeneratorMetadatas())`。`last_step_index = fmt.Sprintf("%d", trajectory.NumSteps()-1)`；两个接口分别解析至 `0x7b03960` 和 `0x7b026a0`，不是同一个计数。
+- 三个使用标志序列化为小写 `%t`。没有前一次生成元数据时均从 false 开始；有前一次、但缺少相应标志时，`used_claude` 为 false，`used_claude_conservative` 和 `used_non_gemini_model` 保守为 true。当前 `ModelInfo.api_provider = API_PROVIDER_ANTHROPIC_VERTEX`（26）将前两项置 true；`ModelInfo.model_provider != MODEL_PROVIDER_GOOGLE`（4）将第三项置 true。
+- `model_enum` 调用 `Model.String()`。可选 cascade/root/parent 标识只在非空时加入。外层 `computeRequestID`（`0x925e9c0`）另行构造斜杠分隔的 ID；没有操作标识时采用 request type 与随机 UUID，不等于内层标签。
+
+实现按用户要求使用 **Stravia 自己的事实**，并非伪造原生 CLI 的操作历史：链路根映射 cascade，上下文窗口映射 trajectory；生成序号与步骤索引分别投影 canonical assistant 项数和非 system/developer 项数。非 UUID 的宿主亲和键使用固定域 UUIDv8 表示；缺失身份时不生成随机会话。原生累计 metadata 不在输入中时使用上述保守规则，模型判定只读新同步目录中的 provider enums。完整映射与缺项行为见[插件设计](../design/vendor-plugins.md#antigravity-cli-接入)。
+
+另在临时 HOME、agent 目录和空 workspace 内运行本机 `omp 18.22.1`，保留原生系统提示和默认工具，所有模型请求截获于 loopback，不转发 Google。捕获 1 次请求、11 个工具、10,070 字节系统提示；其中没有 `RFC 2119`、`system-conventions`、`system_conventions`、`system-directive` 或 `system_directive`。因此 [#5751](https://github.com/router-for-me/CLIProxyAPI/issues/5751) 的精确触发文本不能解释该输入，未直接套用其 RFC 删除或零宽字符方案；后续改动依据下方本次单变量实测，而非该引用的归因。这个结论仅限该次干净 OMP 输入，不排除其他上游内容规则。
+
+隔离验证：`cargo test --locked -p stravia-vendor-antigravity --lib` 的 40 项测试通过；选择性重建 Antigravity Wasm 后，`oauth_and_inference_enforce_native_wire_at_real_http_boundary` 通过，覆盖实际 HTTP 的 UA、标签字符串格式、下游 labels 排除、目录档位和 429 关联。标签生命周期回归区分生成数与步骤数，并验证重试不改轨迹、跨链路隔离及旧元数据缺失行为。真实 Gateway 的 `antigravity_real_wasm_inference_matches_inference_capture` 也通过，覆盖更新后的 UA 及既有 TLS/HTTP 出站形态。
+
+用户要求用最便宜模型验收。只读当前存量连接及其模型价格，确认 `gemini-3.8-flash` 是有登记价格且支持 infer 的最低价项（输入/输出参考价为每百万 token 0.75/3.75）；Flash Lite 仅支持 search，GPT-OSS 与 orchestrator 价格未知，不能当作零价。读取真实目录确认 Low 档可用后，重放上述本地捕获的原生 OMP 请求，保留 10,070 字节系统提示和 11 个工具，仅选择 Flash Low 并将输出上限设为 128。最终 Wasm 实际发送九个字符串标签、目录 `MODEL_PLACEHOLDER_M320` 和完整 1.5.11 UA，但 Google 仍返回 **HTTP 429**。没有重试、fallback、工具执行、生产写入或部署；该请求由隔离宿主执行，并非完整生产 Gateway，不能据此宣称原 Opus High 已修复。
+
+### 单变量定位与最终验证
+
+用户随后明确授权继续真实对照。固定连接、`gemini-3.8-flash-low`、128 输出上限、11 个原生工具、用户消息、会话标签和 UA，仅改变系统文本；外层 attempt UUID 独立。中性系统提示返回 200 / `OK`，穿插的同一中性对照仍为 200。逐段二分定位出四个能单独触发 429 的完整句子：
+
+```text
+You are omp's trusted coding assistant.
+Write JSON args as `content` to xd://<tool> via `write`. Invalid args return schema in error → fix/retry.
+Read xd://<tool> for full docs + JSON schema before first use.
+To commit your changes, use the eval `commit` namespace (`d = await commit.draft()`, then `await d.commit("subject", ["- body"])`), not `git add`/`git commit`: it selects only the lines you and your subagents wrote and never touches other agents' staged or unstaged work.
+```
+
+只改第一句仍失败；四句全部采用保留含义的改写后，完整系统提示成功。身份句插入 U+200B、单词内 U+034F、以及每个子词内 U+034F 的三个最小案例仍为 429。[CLIProxyAPI #7428](https://github.com/router-for-me/CLIProxyAPI/issues/7428) 和其 [9a7e1e6 修复](https://github.com/router-for-me/CLIProxyAPI/commit/9a7e1e6b412747729dedecefd7e23bd2e3ee1d3d) 也记录 U+200B 的局限并增加 literal replacement；其 U+034F 方案不能代替这里的实测。未采用全局改写、删除系统提示、移到普通消息或增加重试。
+
+最终实现复用 `wire.rs` 的出站系统文本边界，以精确完整匹配执行四项等义替换，保留旧 RFC 片段处理。`system_instruction_compatibility_preserves_messages_and_tools` 先在旧 Wasm 上失败，重建后通过：覆盖多 part、重复出现、近似文本不匹配，以及普通消息和工具描述中相同文本逐字保留。
+
+最终真实验证直接把**未经 Python 改写的原生 OMP 捕获请求**交给新构建的 Wasm：入站系统文本 10,070 字节，插件处理后出站 10,194 字节，仍为 11 个工具、九项字符串 labels 和完整 1.5.11 UA。Google 返回 **HTTP 200**，实际生成文本为 **`OK`**。含二分、中性对照及最终验证的后续实验共 55 次推理调用（20 次 200、35 次 429），加上前述初始失败共 56 次；没有自动重试、fallback 或真实工具执行。临时 host 最初遗漏 gzip 解压，曾在目录 HTTP 200 后本地失败且未发出推理；补齐其解压能力后才执行上述实验，不将该次宿主失败计作 Google 429。
+
+这证明当前账号、Flash Low 和该原生 OMP 输入的内容兼容问题得到修复，不证明 Google 内部检测机制，也不代表所有 429、附加项目上下文、其他历史或 Opus High 都已覆盖。真实测试使用隔离 Wasm 宿主和生产协议 codec，不是生产 Gateway 全路径或 OMP 收到最终 SSE 的端到端验收。未刷新凭据、写入生产库、导入插件或部署；临时测试源码、临时 gzip dev feature 和 OMP profile 已移除，凭据仅通过进程内存/标准输入传递。
+
+### OMP 上游的对应处理（2026-11-19 核查）
+
+- [#19333](https://github.com/can1357/oh-my-pi/issues/19333) 直接报告同一条 `Read xd://<tool> for full docs + JSON schema before first use.`：官方 `antigravity-cli` ACP 路径和第三方 HTTP 路径均有等义改写后成功的用户对照。Issue 已关闭并标为 `wontfix`，并非正式版本已修复；给出的本地方案是通过 `before_agent_start` 或 `before_provider_request` 扩展钩子，在指定供应商路径改写该句。后续评论也报告过改写再次失效，不能当成持久保证。
+- [PR #19570](https://github.com/can1357/oh-my-pi/pull/19570) **仍 open、未合并**，提出把默认身份句中的 `trusted` 删除，并把工具文档句的裸 `xd://<tool>` 改为反引号包裹的 `xd://<name>`。作者报告通过 `antigravity-cli/gemini-3.8-flash` 的真实多轮工具验证；这是作者的验证，不是本仓库复测。最新说明明确撤回渲染后的全局正则和跨包重复改写，仅修改内置默认模板及工具目录生成文案，保留用户自定义模板与源范围追踪。
+- [#19609](https://github.com/can1357/oh-my-pi/issues/19609) **仍 open**，与本次相同的 OMP 18.22.1，使用 agy 1.5.10 ACP；报告短提示成功、默认提示失败，并指出只套用 #19333 的旧单句替换仍不足，#19570 不在 18.22.1 中。其具体模型与路径不同，不能替代本次四句验证。
+- 历史 [PR #13379](https://github.com/can1357/oh-my-pi/pull/13379) 已合并，曾将 RFC 2119 句子改为含 `keywords` 的版本；[#18706](https://github.com/can1357/oh-my-pi/issues/18706) 后来报告新措辞再次触发，目前仍 open 且标有 `wontfix`。因此存在已合并的局部改写，但不存在这些报告所证明的通用、长期稳定的规避算法。
+- [PR #18622](https://github.com/can1357/oh-my-pi/pull/18622) 已合并，因账号受限风险暂停内置 `google-antigravity`。这是 provider 准入策略，不是文本 429 修复；不应与运行官方 CLI 的 `antigravity-cli` 或 Stravia 的 OpenResponses 入口混为一谈。
+
+## 13. agy 1.5.11 labels 生命周期：静态与离线多轮对照（2026-11-19）
+
+> 本节的 Stravia 对照记录的是改造前实现。后续已采用宿主派发 cursor 与 conversation CAS 生命周期状态；现行行为、升级要求和未知历史边界见[插件设计](../design/vendor-plugins.md#antigravity-cli-接入)，不将本节原生实验扩张为未验证路径的兼容承诺。
+
+本节补充而不覆盖上述历史实验。离线静态对象是 `/home/chikage/.local/bin/agy`，`--version` 为 `1.5.11`，SHA-256 为 `01b063665007b7098116ac98015954d97ff49b7e3147086d75849c16e952ee0e`；下列地址为该 ELF 的虚拟地址。使用 Go pclntab 符号和 x86-64 反汇编；地址不适用于未经核对的其他版本。动态矩阵使用官方 CLI、临时隔离会话、假 OAuth 和 loopback TLS 假上游，进程置于断外网网络命名空间；响应是合成 SSE 或受控错误，**没有真实上游推理**。真实服务仅作一次已授权的模型目录读取，隔离夹具只保留模型公开描述字段；初始一次 eligibility fixture 不完整、未产生推理的尝试不计入矩阵。矩阵共 11 次有推理的 CLI 启动、18 次本地推理 HTTP：17 次合成 200 和 1 次受控 400。以下是客户端行为，不证明服务端如何解释 labels。
+
+运行入口使用本机 `--help` 已确认的 `--input-format stream-json --output-format stream-json`，逐行输入 `{"event":"user","message":{"content":"…"}}`；跨进程使用 `--conversation <conversation_id>`，通过 `--model` / `--effort` 选择模型。根据 CLI 实际输出的 `step_update`、`result` 与本地截获的 labels 对照计数；接口说明见[官方 Headless mode 文档](https://antigravity.google/docs/cli/headless/)。临时脚本、隔离会话与 TLS 材料在记录完成后清理。
+
+### 身份与两个请求号
+
+- 样本中 `cascade_id = root_cascade_id = CLI conversation_id`，`trajectory_id` 是另一个 ID；普通三轮、同会话跨进程 resume 和切模型时三者保持稳定。观察到的三个 ID 均为 UUIDv4，仅是样本，不证明所有创建路径。分叉、子 cascade、压缩后的 ID 继承或重建**没有动态验证**，不能由同会话结果推断。静态符号包含 `trajectory.(*protoTrajectory).Clone`（`0x7b05380`）、`dbtrajectory.(*dbTrajectory).Fork`（`0x8c01160`）和 `stepcompactor.(*overlay).NumSteps`（`0x8c33580`）；符号存在本身不证明这些路径的身份语义。
+- `utils.GetModelRequestCustomMetadata`（`0x8849dc0`）构造内层 `request.labels.request_id = fmt.Sprintf("%s-%d", trajectory.ID(), trajectory.NumGeneratorMetadatas())`，以及 `last_step_index = NumSteps()-1`。`trajectory.(*protoTrajectory).NumGeneratorMetadatas`（`0x7b03960`）和 `NumSteps`（`0x7b026a0`）分别经不同底层接口读取，不能视为同一个计数。
+- 外层 `codeassistclient.computeRequestID`（`0x925e9c0`）独立构造斜杠分隔值：有完整参数时格式为 `%v/%v/%v/%v/%v`，某字符串参数为空时为四段，操作 ID 为空时为类型和随机 UUID 两段；类型为空默认 `unknown`。本矩阵完整值形如 `agent/<cascade>/<毫秒时间值>/<trajectory>/<数字>`，末数字在已观察请求中等于请求时的 `NumSteps`，即比 `last_step_index` 大一；这是观察，不将全部调用者或时间字段的静态来源视为已证实。外层和内层不是同一关联号。
+- labels 并非固定九项：普通会话第二轮起可见第十项 `last_execution_id`。`GetModelRequestCustomMetadata` 的 `0x884a136–0x884a193` 读取最后一条 executor metadata，`0x884a668–0x884a6c5` 仅在 execution ID 非空时加入该项；`ExecutorMetadata.GetExecutionId`（`0x7935ca0`）确认字段偏移 `+0x58/+0x60`。工具续接的同一 user turn 中不一定新增该项；跨 turn 的观测中它变化，同一 turn 两次续接则相同。它不是请求 attempt ID，也不是上一条 generator metadata 的 ID。
+
+### 生成计数、step 和模型状态
+
+| 隔离场景 | 本地观测 |
+|---|---|
+| 普通三轮 Google | generator 后缀 `0/1/2`，`last_step_index` `0/2/4`；外层末段 `1/3/5`。三个 used 标记始终为 `false`。 |
+| 单次响应含 thought 和 text | 没有因此额外增加 step：两轮为 user 0、agent 1、user 2、agent 3。不能由此推断所有多 part 响应。 |
+| 一次生成两个并行 `read_file` 工具 | 请求 generator 后缀 `0/1/2`，step 标签 `0/3/5`，外层末段 `1/4/6`；时间线为 user 0、agent response 1、tool 2、tool 3、agent response 4、user 5、agent response 6。两个 functionResponse 合并在一个 wire content 中，仍是两个原生工具 step。 |
+| 同模型或切模型跨进程 resume | 观察到额外 `system_message` step；它不是模型切换专属。故原生 step 不等于用户/assistant 消息数。 |
+| 受控 HTTP 400 后 resume | 失败请求 generator 后缀为 `0`，生成 `error_message` step 1；恢复请求后缀已是 `1`，尽管此前无 assistant 消息，且该请求 `last_step_index=3`、带 `last_execution_id`。恢复 CLI 返回合成 OK、退出 0，但 result 状态保留历史 `ERROR`，不能称整个会话恢复为 SUCCESS。内部 HTTP retry 如何计数未验证。 |
+| Google → Claude Opus low → Google | 续接 Claude 请求后缀 `3`、step `7`，三项标记均为 `true`；再回 Google 时后缀 `4`、step `10`，仍全 `true`。模型切换前后 ID 保持不变。 |
+| 全新 GPT-OSS → Google | 首次 GPT-OSS 为 `false/false/true`；回 Google 后仍 `false/false/true`，后缀 `1`、step `3`。 |
+
+静态上 `GetModelRequestCustomMetadata` 从最近一条 generator metadata 的 labels 继承状态：无前条时三个值均从 false 起；有前条但缺键时 `used_claude` 默认 false，`used_claude_conservative` 和 `used_non_gemini_model` 默认 true。当前 `ModelInfo.api_provider = 26` 将前两项置 true，`model_provider != 4` 将第三项置 true；已为 true 的状态跨模型保留。标记按小写布尔字符串输出。这里的保守缺键分支不等于“只要有 assistant 历史就置 true”；正常 Google 生成的 metadata 有明确 false，下一轮仍为 false。
+
+`AppendGeneratorMetadata`（`trajectory.(*protoTrajectory)` 的 `0x7b03e60`，DB 实现的 `0x8bfe280`）与 `AppendStep`（分别 `0x7b03560`、`0x8bfc360`）是不同操作。失败案例证明计数不能用成功 assistant 项数替代；工具场景证明一次生成和多个 step 也不一一对应。受控 400、成功响应和上述工具续接以外，内部重试、其他失败路径、分叉及压缩是否写入或截断 metadata/step 尚未覆盖，不能外推为每个 HTTP attempt 或每个工具都必然各加一。
+
+### 与现有 Stravia 映射的差异和后续依据
+
+当前设计见[插件设计](../design/vendor-plugins.md#antigravity-cli-接入)，实现 `RequestLabels::new` 见 `wire.rs`。宿主 chain 根用于 cascade/root、context window 用于 trajectory，是宿主事实的投影而非原生 conversation/trajectory 生命周期；尤其不能据此声称支持原生 fork 或 compact。canonical assistant 项数作为生成数、非 system/developer 项数减一作为 step 的公式，与上述失败生成及原生 `system_message` 的事实不等价；不能仅用 wire content 数推断 canonical item 数。
+
+当前 `used_claude` 仅看本次 provider，故 Claude → Google 会从 true 回 false；`used_claude_conservative = used_claude || assistant_item_count > 0`、`used_non_gemini_model = !google_model || assistant_item_count > 0`，故纯 Google 的第二轮会把后两项置 true，而原生样本仍 false。插件没有 `last_execution_id` 对应状态；外层使用独立 attempt UUID 的 fallback，也不等同于原生具有操作元数据时的五段 ID。这些都是可核查的语义差异，不代表已证实服务端依赖或要求它们。
+
+建议后续先明确宿主能否耐久保存生成记录、step 和 executor 生命周期，以及 fork/压缩和失败重试的定义，再决定是否投影或省略无法可靠表达的字段；不可由消息数或模型名冒充原生累计状态。本轮仅研究和记录，不修改生产插件、数据库或部署。
+
+
+

@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 use stravia_runtime_contract::protocol::ir::{
-    AiRequest, CacheParameters, ContentBlock, MessageContent, ResponseFormat, Role, ToolChoice,
-    ToolResultContentKind,
+    AiRequest, CacheParameters, ContentBlock, DocumentSource, MediaSource, MessageContent,
+    ResponseFormat, Role, ToolChoice, ToolResultContentKind,
 };
 use stravia_vendor_common::common;
 use stravia_vendor_sdk::{ErrorKind, PluginError};
@@ -16,6 +16,7 @@ pub(super) fn encode(
     request: &AiRequest,
     model: &str,
     conversation_id: &str,
+    model_metadata: Option<&stravia_vendor_sdk::ModelMetadata>,
 ) -> Result<Value, PluginError> {
     if model.is_empty() || conversation_id.is_empty() {
         return Err(invalid("Kiro requires a model and conversation ID"));
@@ -28,11 +29,7 @@ pub(super) fn encode(
         || g.stop.is_some()
         || g.presence_penalty.is_some()
         || g.frequency_penalty.is_some()
-        || request.reasoning.mode.is_some()
-        || request.reasoning.budget_tokens.is_some()
         || request.reasoning.summary.is_some()
-        || request.reasoning.level.is_some()
-        || request.reasoning.target_control.is_some()
         || !matches!(&request.response_format, None | Some(ResponseFormat::Text))
         || request.parallel_tool_calls.is_some()
         || !matches!(&request.tool_choice, None | Some(ToolChoice::Auto))
@@ -111,10 +108,12 @@ pub(super) fn encode(
                 if item.tool_calls.is_some() || item.tool_call_id.is_some() {
                     return Err(invalid("Invalid user message tool fields"));
                 }
-                if turns
-                    .last()
-                    .is_some_and(|turn| turn.user && !turn.text.is_empty())
-                {
+                if turns.last().is_some_and(|turn| {
+                    turn.user
+                        && (!turn.text.is_empty()
+                            || !turn.images.is_empty()
+                            || !turn.documents.is_empty())
+                }) {
                     return Err(invalid("Kiro cannot preserve consecutive user messages"));
                 }
                 let turn = user_turn(&mut turns);
@@ -221,10 +220,27 @@ pub(super) fn encode(
     let last = turns.len() - 1;
     let mut tools = Some(tools);
     let mut messages = Vec::with_capacity(turns.len());
-    for (index, turn) in turns.into_iter().enumerate() {
+    let mut document_names = std::collections::HashSet::new();
+    for (index, mut turn) in turns.into_iter().enumerate() {
+        for document in &mut turn.documents {
+            let base = document["name"].as_str().expect("document name").to_owned();
+            let mut name = base.clone();
+            let mut suffix = 2;
+            while !document_names.insert(name.clone()) {
+                name = format!("{} ({suffix})", base.chars().take(190).collect::<String>());
+                suffix += 1;
+            }
+            document["name"] = Value::String(name);
+        }
         if turn.user {
             let mut message = json!({"modelId": model, "origin": "KIRO_CLI"});
             message["content"] = Value::String(turn.text);
+            if !turn.images.is_empty() {
+                message["images"] = Value::Array(turn.images);
+            }
+            if !turn.documents.is_empty() {
+                message["documents"] = Value::Array(turn.documents);
+            }
             let mut context = Map::new();
             if !turn.results.is_empty() {
                 context.insert("toolResults".into(), Value::Array(turn.results));
@@ -264,10 +280,59 @@ pub(super) fn encode(
     let mut body = Map::new();
     body.insert("agentMode".into(), Value::String("vibe".into()));
     body.insert("conversationState".into(), state);
+    if let Some((group, effort)) = reasoning_effort(request, model_metadata)? {
+        body.insert(
+            "additionalModelRequestFields".into(),
+            json!({(group): {"effort": effort}}),
+        );
+    }
     if !instructions.is_empty() {
         body.insert("systemPrompt".into(), Value::String(instructions));
     }
     Ok(Value::Object(body))
+}
+
+fn reasoning_effort<'a>(
+    request: &'a AiRequest,
+    metadata: Option<&'a stravia_vendor_sdk::ModelMetadata>,
+) -> Result<Option<(&'a str, &'a str)>, PluginError> {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+    let reasoning = &request.reasoning;
+    let effort = match &reasoning.target_control {
+        Some(TargetThinkingControl::Effort { value }) => Some(value.as_str()),
+        Some(_) => {
+            return Err(invalid(
+                "Kiro does not support the requested thinking control",
+            ));
+        }
+        None if reasoning.mode.is_some() || reasoning.budget_tokens.is_some() => {
+            return Err(invalid(
+                "Kiro does not support the requested thinking mode or budget",
+            ));
+        }
+        None => reasoning.level.map(|level| level.as_str()),
+    };
+    let Some(effort) = effort else {
+        return Ok(None);
+    };
+    let extensions = &metadata
+        .ok_or_else(|| invalid("Kiro reasoning requires model effort metadata"))?
+        .extensions;
+    let group = extensions
+        .get("kiro_effort_group")
+        .and_then(Value::as_str)
+        .filter(|group| matches!(*group, "output_config" | "reasoning"))
+        .ok_or_else(|| invalid("Kiro reasoning requires a known model effort field"))?;
+    let supported = extensions
+        .get("reasoning_efforts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("Kiro reasoning requires declared model effort levels"))?;
+    if !supported.iter().any(|value| value.as_str() == Some(effort)) {
+        return Err(invalid(
+            "Kiro model does not declare the requested reasoning effort",
+        ));
+    }
+    Ok(Some((group, effort)))
 }
 
 fn tool_ids(entries: &[Value]) -> Option<std::collections::HashSet<&str>> {
@@ -285,6 +350,8 @@ fn tool_ids(entries: &[Value]) -> Option<std::collections::HashSet<&str>> {
 struct Turn {
     user: bool,
     text: String,
+    images: Vec<Value>,
+    documents: Vec<Value>,
     uses: Vec<Value>,
     results: Vec<Value>,
 }
@@ -332,6 +399,53 @@ fn append_user_content(turn: &mut Turn, content: &MessageContent) -> Result<(), 
                         text,
                         cache_control: None,
                     } => turn.text.push_str(text),
+                    ContentBlock::Image {
+                        source: MediaSource::Base64 { media_type, data },
+                        detail,
+                        cache_control: None,
+                    } if detail.as_deref().is_none_or(|detail| detail == "auto") => {
+                        let format = match media_type.as_str() {
+                            "image/png" => "png",
+                            "image/jpeg" => "jpeg",
+                            "image/gif" => "gif",
+                            "image/webp" => "webp",
+                            _ => return Err(invalid("Unsupported Kiro image format")),
+                        };
+                        validate_media(media_type, data)?;
+                        turn.images
+                            .push(json!({"format": format, "source": {"bytes": data}}));
+                    }
+                    ContentBlock::Document {
+                        source: DocumentSource::Base64Pdf { data },
+                        title,
+                        context: None,
+                        cache_control: None,
+                    } => {
+                        append_document(turn, "application/pdf", data, title.as_deref())?;
+                    }
+                    ContentBlock::Document {
+                        source: DocumentSource::PlainText { data },
+                        title,
+                        context: None,
+                        cache_control: None,
+                    } => {
+                        let reference = stravia_vendor_sdk::MediaReference {
+                            media_type: "text/plain".into(),
+                            bytes: data.as_bytes().to_vec(),
+                        };
+                        let encoded = serde_json::to_value(reference)
+                            .map_err(|_| invalid("Invalid Kiro text document"))?;
+                        let data = encoded["bytes"]
+                            .as_str()
+                            .ok_or_else(|| invalid("Invalid Kiro text document"))?;
+                        append_document(turn, "text/plain", data, title.as_deref())?;
+                    }
+                    ContentBlock::File {
+                        source: MediaSource::Base64 { media_type, data },
+                        media_type: declared,
+                    } if declared.as_deref().is_none_or(|value| value == media_type) => {
+                        append_document(turn, media_type, data, None)?;
+                    }
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
@@ -356,6 +470,66 @@ fn append_user_content(turn: &mut Turn, content: &MessageContent) -> Result<(), 
     }
     Ok(())
 }
+fn validate_media(media_type: &str, data: &str) -> Result<Vec<u8>, PluginError> {
+    let reference: stravia_vendor_sdk::MediaReference = serde_json::from_value(json!({
+        "media_type": media_type, "bytes": data
+    }))
+    .map_err(|_| invalid("Kiro media requires valid base64"))?;
+    if reference.bytes.is_empty() {
+        return Err(invalid("Kiro media must not be empty"));
+    }
+    Ok(reference.bytes)
+}
+
+fn append_document(
+    turn: &mut Turn,
+    media_type: &str,
+    data: &str,
+    title: Option<&str>,
+) -> Result<(), PluginError> {
+    let (format, magic): (&str, Option<&[u8]>) = match media_type {
+        "application/pdf" => ("pdf", Some(b"%PDF")),
+        "text/csv" => ("csv", None),
+        "application/msword" => ("doc", Some(&[0xd0, 0xcf, 0x11, 0xe0])),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            ("docx", Some(b"PK\x03\x04"))
+        }
+        "application/vnd.ms-excel" => ("xls", Some(&[0xd0, 0xcf, 0x11, 0xe0])),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            ("xlsx", Some(b"PK\x03\x04"))
+        }
+        "text/html" => ("html", None),
+        "text/plain" => ("txt", None),
+        "text/markdown" => ("md", None),
+        _ => return Err(invalid("Unsupported Kiro document format")),
+    };
+    let bytes = validate_media(media_type, data)?;
+    if magic.is_some_and(|prefix| !bytes.starts_with(prefix)) {
+        return Err(invalid("Kiro document content does not match its format"));
+    }
+    if turn.documents.len() >= 5 {
+        return Err(invalid("Kiro supports at most five documents per message"));
+    }
+    let name = title.unwrap_or("document");
+    let name = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '(' | ')' | '[' | ']') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(200)
+        .collect();
+    let name = name.trim();
+    let name = if name.is_empty() { "document" } else { name };
+    turn.documents
+        .push(json!({"name": name, "format": format, "source": {"bytes": data}}));
+    Ok(())
+}
+
 fn result_content(
     value: &Value,
     kind: Option<ToolResultContentKind>,
@@ -432,6 +606,10 @@ fn append_assistant_content(turn: &mut Turn, content: &MessageContent) -> Result
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn encode(request: &AiRequest, model: &str, id: &str) -> Result<Value, PluginError> {
+        super::encode(request, model, id, None)
+    }
 
     fn request(items: Value) -> AiRequest {
         serde_json::from_value(json!({"model":"source", "items": items})).unwrap()
@@ -544,6 +722,94 @@ mod tests {
         assert_eq!(result["content"], json!([{"text":"failed"}]));
         assert_eq!(result["status"], "error");
         assert_eq!(state["conversationId"], "scoped-id");
+    }
+
+    #[test]
+    fn maps_user_media_in_current_and_history() {
+        let req = request(json!([
+            {"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="},"detail":"auto"},
+                {"type":"document","source":{"type":"base64_pdf","data":"JVBERi0x"},"title":"report.pdf"}
+            ]},
+            {"role":"assistant","content":"OK"},
+            {"role":"user","content":[
+                {"type":"file","source":{"type":"base64","media_type":"text/plain","data":"aGk="}},
+                {"type":"file","source":{"type":"base64","media_type":"text/plain","data":"Ynll"}},
+                {"type":"document","source":{"type":"plain_text","data":"hi"},"title":"notes.txt"}
+            ]}
+        ]));
+        let body = encode(&req, "model", "id").unwrap();
+        let state = &body["conversationState"];
+        assert_eq!(
+            state["history"][0]["userInputMessage"]["images"],
+            json!([{"format":"png","source":{"bytes":"aGk="}}])
+        );
+        assert_eq!(
+            state["history"][0]["userInputMessage"]["documents"],
+            json!([{"name":"report","format":"pdf","source":{"bytes":"JVBERi0x"}}])
+        );
+        assert_eq!(
+            state["currentMessage"]["userInputMessage"]["documents"],
+            json!([
+                {"name":"document","format":"txt","source":{"bytes":"aGk="}},
+                {"name":"document (2)","format":"txt","source":{"bytes":"Ynll"}},
+                {"name":"notes","format":"txt","source":{"bytes":"aGk="}}
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_unrepresentable_media() {
+        for block in [
+            json!({"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}),
+            json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"not base64"}}),
+            json!({"type":"document","source":{"type":"base64_pdf","data":"aGk="}}),
+            json!({"type":"document","source":{"type":"base64_pdf","data":"JVBERi0x"},"context":"context"}),
+        ] {
+            assert!(
+                encode(
+                    &request(json!([{"role":"user","content":[block]}])),
+                    "model",
+                    "id"
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn maps_only_declared_effort_to_catalog_field() {
+        use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+        let mut req = request(json!([{"role":"user","content":"hello"}]));
+        req.reasoning.level = Some(ThinkingLevel::Low);
+        let mut meta = stravia_vendor_sdk::ModelMetadata::default();
+        meta.extensions
+            .insert("reasoning_efforts".into(), json!(["low", "high"]));
+        for group in ["output_config", "reasoning"] {
+            meta.extensions
+                .insert("kiro_effort_group".into(), json!(group));
+            let body = super::encode(&req, "model", "id", Some(&meta)).unwrap();
+            assert_eq!(body["additionalModelRequestFields"][group]["effort"], "low");
+            req.reasoning.target_control = Some(TargetThinkingControl::Effort {
+                value: "high".into(),
+            });
+            let body = super::encode(&req, "model", "id", Some(&meta)).unwrap();
+            assert_eq!(
+                body["additionalModelRequestFields"][group]["effort"],
+                "high"
+            );
+            req.reasoning.target_control = None;
+        }
+        assert!(super::encode(&req, "model", "id", None).is_err());
+        meta.extensions
+            .insert("kiro_effort_group".into(), json!("thinking"));
+        assert!(super::encode(&req, "model", "id", Some(&meta)).is_err());
+        meta.extensions
+            .insert("kiro_effort_group".into(), json!("reasoning"));
+        req.reasoning.level = Some(ThinkingLevel::Medium);
+        assert!(super::encode(&req, "model", "id", Some(&meta)).is_err());
+        req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
+        assert!(super::encode(&req, "model", "id", Some(&meta)).is_err());
     }
 
     #[test]
