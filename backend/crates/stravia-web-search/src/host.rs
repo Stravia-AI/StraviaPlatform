@@ -95,6 +95,8 @@ pub struct SearchRoute {
     pub model_id: String,
     pub display_name: String,
     pub is_enabled: bool,
+    pub is_inference: bool,
+    pub is_web_search: bool,
     pub targets: Vec<SearchRouteTarget>,
 }
 impl SearchRoute {

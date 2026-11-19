@@ -317,7 +317,7 @@ async fn acceptance(http: bool) -> anyhow::Result<()> {
     gateway.admin().create_manual_provider_model(&provider.id, MODEL, crate::provider_models::CreateManualProviderModel {
         metadata: json!({"id":MODEL,"name":MODEL,"modalities":{"input":["text"],"output":["text"]}}), template_id: None,
     }).await?;
-    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":ROUTE,"output_modality":"text",
+    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":ROUTE,"purpose":"inference",
         "targets":[{"provider_id":provider.id,"model":MODEL,"enabled":true,"target_retry_budget":1}]}))?).await?;
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({"name":"Codex acceptance", "model_ids":[route.id],"transparent_injection_enabled":false}))?).await?;
     let server = tokio::spawn(serve(listener, acceptor, http));
@@ -478,7 +478,7 @@ async fn legacy_boundary_continuation(
     gateway.admin().create_manual_provider_model(&provider.id, MODEL, crate::provider_models::CreateManualProviderModel {
         metadata: json!({"id":MODEL,"name":MODEL,"use_responses_lite":true,"reasoning_efforts":["xhigh"],"modalities":{"input":["text"],"output":["text"]}}), template_id: None,
     }).await?;
-    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":ROUTE,"output_modality":"text",
+    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":ROUTE,"purpose":"inference",
         "targets":[{"provider_id":provider.id,"model":MODEL,"enabled":true,"target_retry_budget":0}]}))?).await?;
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({"name":"Codex continuation", "model_ids":[route.id],"transparent_injection_enabled":false}))?).await?;
     let (captured, mut requests) = mpsc::unbounded_channel::<Value>();

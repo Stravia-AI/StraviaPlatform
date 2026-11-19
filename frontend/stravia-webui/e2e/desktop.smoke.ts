@@ -27,7 +27,7 @@ interface CreatedResource {
 
 interface CreatedRoute extends CreatedResource {
   model_id: string
-  output_modality: 'text' | 'image'
+  purpose: 'inference' | 'image_generation' | 'web_search'
 }
 
 async function adminRequest(serverPort: number, path: string, init?: RequestInit): Promise<unknown> {
@@ -61,10 +61,13 @@ function createdRoute(value: unknown): CreatedRoute {
   if (typeof value !== 'object' || value === null || !('model_id' in value) || typeof value.model_id !== 'string') {
     throw new Error('Route response did not include a model_id')
   }
-  if (!('output_modality' in value) || (value.output_modality !== 'text' && value.output_modality !== 'image')) {
-    throw new Error('Route response did not include its configured output modality')
+  if (
+    !('purpose' in value) ||
+    (value.purpose !== 'inference' && value.purpose !== 'image_generation' && value.purpose !== 'web_search')
+  ) {
+    throw new Error('Route response did not include its configured purpose')
   }
-  return { ...resource, model_id: value.model_id, output_modality: value.output_modality }
+  return { ...resource, model_id: value.model_id, purpose: value.purpose }
 }
 
 interface DesktopAdminSession {
@@ -142,23 +145,23 @@ describe('Stravia desktop smoke', () => {
     await $('a[href="/vendor-plugins"]').waitForExist({ timeout: 180_000 })
   })
 
-  it('creates an image route through the real editor and enforces Core modality errors', async () => {
+  it('creates an image route through the real editor and enforces Core purpose errors', async () => {
     await browser.execute(() => localStorage.setItem('stravia-locale', 'en-US'))
     await refreshDesktop()
     const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
     const suffix = Date.now().toString(36)
-    const modelId = `native-modality-${suffix}`
+    const modelId = `native-purpose-${suffix}`
     const provider = createdResource(
       await adminRequest(port, '/providers', {
         method: 'POST',
         body: JSON.stringify({
-          name: `Native modality ${suffix}`,
+          name: `Native purpose ${suffix}`,
           source: {
             type: 'custom',
             vendor: 'custom',
             channel: 'default',
             protocol: 'open-responses',
-            base_url: 'https://native-modality.invalid',
+            base_url: 'https://native-purpose.invalid',
           },
           credential: { type: 'none' },
           use_proxy: false,
@@ -182,9 +185,9 @@ describe('Stravia desktop smoke', () => {
       )) as DesktopAdminSession
       const invalidRequests = [
         { targets: [{ provider_id: provider.id, model: 'vision' }] },
-        { output_modality: null, targets: [{ provider_id: provider.id, model: 'vision' }] },
-        { output_modality: 'audio', targets: [{ provider_id: provider.id, model: 'vision' }] },
-        { output_modality: 'image', targets: [{ provider_id: provider.id, model: 'vision' }] },
+        { purpose: null, targets: [{ provider_id: provider.id, model: 'vision' }] },
+        { purpose: 'audio', targets: [{ provider_id: provider.id, model: 'vision' }] },
+        { purpose: 'image_generation', targets: [{ provider_id: provider.id, model: 'vision' }] },
       ]
       for (const input of invalidRequests) {
         // Fetch inside the actual WebView using its native authenticated management listener.
@@ -202,18 +205,18 @@ describe('Stravia desktop smoke', () => {
           input,
           modelId,
         )
-        if (input.output_modality === 'image') {
+        if (input.purpose === 'image_generation') {
           expect(rejected.status).toBe(200)
           const envelope = JSON.parse(rejected.body) as { error: string }
           expect(typeof envelope.error).toBe('string')
           const error = JSON.parse(envelope.error) as {
             code: string
-            params: { provider_id: string; model_id: string; output_modality: string }
+            params: { provider_id: string; model_id: string; purpose: string }
           }
-          expect(error.code).toBe('ROUTE_OUTPUT_MODALITY_MISMATCH')
+          expect(error.code).toBe('ROUTE_PURPOSE_MISMATCH')
           expect(error.params.provider_id).toBe(provider.id)
           expect(error.params.model_id).toBe('vision')
-          expect(error.params.output_modality).toBe('image')
+          expect(error.params.purpose).toBe('image_generation')
         } else {
           expect(rejected.status).toBeGreaterThanOrEqual(400)
           expect(rejected.status).toBeLessThan(500)
@@ -228,25 +231,22 @@ describe('Stravia desktop smoke', () => {
       await $('#route-model-id').waitForDisplayed()
       await expect($('[data-slot="target-card"][data-enabled="true"]')).toHaveText(expect.stringContaining('dual'))
       await expect($('[data-slot="target-card"][data-enabled="true"]')).toHaveText(
-        expect.stringContaining(`Native modality ${suffix}`),
+        expect.stringContaining(`Native purpose ${suffix}`),
       )
-      await expect($('#route-output-modality')).toHaveText('Text')
+      await expect($('#route-purpose')).toHaveText('Inference')
       await $('#route-model-id').setValue(modelId)
-      await $('#route-output-modality').click()
-      await browser.keys('ArrowDown')
-      await expect($('//*[@role="option" and normalize-space()="Image"]')).toBeDisplayed()
-      await browser.keys('Image')
-      await browser.keys('Enter')
-      await expect($('#route-output-modality')).toHaveText('Image')
+      await $('#route-purpose').click()
+      await $('//*[@role="option" and normalize-space()="Image Generation"]').click()
+      await expect($('#route-purpose')).toHaveText('Image Generation')
       await $('button=Save model').click()
       await browser.waitUntil(async () => new URL(await browser.getUrl()).pathname === '/models', {
-        timeoutMsg: 'native route editor did not finish saving the chosen image modality',
+        timeoutMsg: 'native route editor did not finish saving the image generation purpose',
       })
       route = createdRoute(await adminRequest(port, `/models/${encodeURIComponent(modelId)}`))
-      expect(route.output_modality).toBe('image')
+      expect(route.purpose).toBe('image_generation')
       await $(`a[href="/models/${encodeURIComponent(modelId)}"]`).click()
-      await $('#route-output-modality').waitForDisplayed()
-      await expect($('#route-output-modality')).toHaveText('Image')
+      await $('#route-purpose').waitForDisplayed()
+      await expect($('#route-purpose')).toHaveText('Image Generation')
     } finally {
       const modelsLink = await $('a[href="/models"]')
       if (await modelsLink.isExisting()) {
@@ -357,7 +357,7 @@ describe('Stravia desktop smoke', () => {
           method: 'POST',
           body: JSON.stringify({
             model_id: `native-observation-${suffix}`,
-            output_modality: 'text',
+            purpose: 'inference',
             display_name: 'Native observation',
             targets: [{ provider_id: service.id, model: 'synthetic' }],
           }),
@@ -745,7 +745,7 @@ describe('Stravia desktop smoke', () => {
           method: 'POST',
           body: JSON.stringify({
             model_id: `native-chat-${suffix}`,
-            output_modality: 'text',
+            purpose: 'inference',
             display_name: `Native chat ${suffix}`,
             targets: [{ provider_id: service.id, model: 'native-visual' }],
           }),
@@ -1244,7 +1244,7 @@ describe('Stravia desktop smoke', () => {
           body: JSON.stringify({ provider_id: provider.id, provider_model_id: modelId }),
         }),
       )
-      expect(route.output_modality).toBe('text')
+      expect(route.purpose).toBe('inference')
       apiKey = createdResource(
         await adminRequest(serverPort, '/api-keys', {
           method: 'POST',

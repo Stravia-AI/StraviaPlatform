@@ -30,8 +30,9 @@ describe('Connect clients', () => {
   test('falls back to Route ID for display', () => {
     const route = {
       id: 'route',
-      output_modality: 'text',
+      purpose: 'inference',
       image_generation_bound: false,
+      web_search_bound: false,
       model_id: 'shared-model',
       display_name: 'Shared Model',
       balance: 'traffic_equalization',

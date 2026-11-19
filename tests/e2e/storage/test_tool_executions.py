@@ -217,7 +217,7 @@ def test_public_tool_execution_cleanup_and_restart(
         routes = {}
         for modality in ["image", "text"]:
             routes[modality] = admin(session, "POST", "/api/v1/models", {
-                "model_id": "fixture-" + modality, "output_modality": modality,
+                "model_id": "fixture-" + modality, "purpose": {"image": "image_generation", "text": "inference"}[modality],
                 "targets": [{"provider_id": provider["id"], "model": "fixture-model",
                              "first_token_timeout_ms": 200_000}],
             })

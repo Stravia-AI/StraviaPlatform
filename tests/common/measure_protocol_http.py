@@ -408,7 +408,7 @@ def provisioning(session, upstreams: dict[str, Upstream]) -> tuple[str, dict[str
             post(f"/api/v1/providers/{provider['id']}/models", {"model_id": upstream_model, "metadata": {"modalities": {"input": ["text", "image"], "output": ["text"]}, "limit": {"context": 1000000, "output": 10000}}}, 201)
             targets.append({"provider_id": provider["id"], "model": upstream_model, "enabled": enabled,
                             "priority": priority, "target_retry_budget": 0, "first_token_timeout_ms": 90000})
-        route = post("/api/v1/models", {"model_id": model, "output_modality": "text", "targets": targets})
+        route = post("/api/v1/models", {"model_id": model, "purpose": "inference", "targets": targets})
         primary = next(target for target in route["targets"] if target["provider_id"] == targets[0]["provider_id"])
         routes[protocol] = {"route_id": str(route["id"]), "expected_provider_id": targets[0]["provider_id"],
                             "configured_target_id": primary["id"],

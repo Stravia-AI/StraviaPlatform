@@ -10,6 +10,53 @@ mod live;
 mod provider;
 pub(crate) mod support;
 
+/// Whether a Route purpose permits this operation.
+pub(crate) fn route_purpose_supports_capability(
+    purpose: crate::db::models::RoutePurpose,
+    capability: stravia_vendor_sdk::Capability,
+) -> bool {
+    use crate::db::models::RoutePurpose;
+    use stravia_vendor_sdk::Capability;
+    match capability {
+        Capability::Search => purpose == RoutePurpose::WebSearch,
+        Capability::MediaImage => purpose == RoutePurpose::ImageGeneration,
+        _ => purpose != RoutePurpose::WebSearch,
+    }
+}
+
+#[cfg(test)]
+mod route_purpose_tests {
+    use super::route_purpose_supports_capability;
+    use crate::db::models::RoutePurpose;
+    use stravia_vendor_sdk::Capability;
+
+    #[test]
+    fn operation_requires_matching_route_purpose() {
+        for purpose in [
+            RoutePurpose::Inference,
+            RoutePurpose::ImageGeneration,
+            RoutePurpose::WebSearch,
+        ] {
+            assert_eq!(
+                route_purpose_supports_capability(purpose, Capability::Infer),
+                purpose != RoutePurpose::WebSearch
+            );
+            assert_eq!(
+                route_purpose_supports_capability(purpose, Capability::Compact),
+                purpose != RoutePurpose::WebSearch
+            );
+            assert_eq!(
+                route_purpose_supports_capability(purpose, Capability::Search),
+                purpose == RoutePurpose::WebSearch
+            );
+            assert_eq!(
+                route_purpose_supports_capability(purpose, Capability::MediaImage),
+                purpose == RoutePurpose::ImageGeneration
+            );
+        }
+    }
+}
+
 /// Static capability eligibility shared by route validation and the final send gate.
 pub(crate) fn validate_target_capability(
     channel: &stravia_vendor_sdk::ChannelDescriptor,

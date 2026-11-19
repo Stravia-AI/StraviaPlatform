@@ -1829,7 +1829,7 @@ mod responses_option_continuation {
         gateway
             .admin()
             .create_model(CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: MODEL.into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),

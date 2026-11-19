@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use stravia_core::db::models::{PutRoute, RouteConfig, RouteOutputModality};
+use stravia_core::db::models::{PutRoute, RouteConfig, RoutePurpose};
 use stravia_core::storage::sql::config::SqlBackendConfig;
 use stravia_core::storage::{PostgresStorage, SqliteStorage, Storage};
 
@@ -16,12 +16,12 @@ VALUES ('active-target', 'enabled-key', 'provider', 'dual-model', TRUE, 7, 12345
 INSERT INTO settings (name, value) VALUES ('media_generation_config', '{"enabled":false,"image":{"route_id":"disabled-route"}}');
 "#;
 
-fn rewrite(route: &RouteConfig, output_modality: Option<RouteOutputModality>) -> PutRoute {
+fn rewrite(route: &RouteConfig, purpose: Option<RoutePurpose>) -> PutRoute {
     PutRoute {
         id: Some(route.id.clone()),
         model_id: route.model_id.clone(),
         display_name: route.display_name.clone(),
-        output_modality,
+        purpose,
         selection_strategy: route.balance.clone(),
         is_enabled: route.is_enabled,
         targets: None,
@@ -44,8 +44,8 @@ async fn upgrade_and_preserve(storage: &dyn Storage) -> anyhow::Result<()> {
     assert_eq!(enabled.default_thinking_level.as_deref(), Some("high"));
     assert_eq!(disabled.balance, "traffic_equalization");
     assert_eq!(disabled.default_thinking_level, None);
-    assert_eq!(enabled.output_modality, Some(RouteOutputModality::Text));
-    assert_eq!(disabled.output_modality, Some(RouteOutputModality::Text));
+    assert_eq!(enabled.purpose, Some(RoutePurpose::Inference));
+    assert_eq!(disabled.purpose, Some(RoutePurpose::Inference));
     assert_eq!(enabled.targets.len(), 2);
     assert_eq!(disabled.targets.len(), 1);
     for (target, id, model, enabled, priority, timeout, retries, cooldown) in [
@@ -91,25 +91,25 @@ async fn upgrade_and_preserve(storage: &dyn Storage) -> anyhow::Result<()> {
     }
     let original_enabled = serde_json::to_value(&enabled)?;
     let original_disabled = serde_json::to_value(&disabled)?;
-    let mut toggle = rewrite(&enabled, enabled.output_modality);
+    let mut toggle = rewrite(&enabled, enabled.purpose);
     toggle.is_enabled = false;
     let toggled = storage.routes().put(toggle).await?;
-    assert_eq!(toggled.output_modality, Some(RouteOutputModality::Text));
-    let mut ordinary = rewrite(&toggled, toggled.output_modality);
+    assert_eq!(toggled.purpose, Some(RoutePurpose::Inference));
+    let mut ordinary = rewrite(&toggled, toggled.purpose);
     ordinary.is_enabled = true;
     let unchanged = storage.routes().put(ordinary).await?;
     assert_eq!(serde_json::to_value(&unchanged)?, original_enabled);
 
     let repaired = storage
         .routes()
-        .put(rewrite(&disabled, Some(RouteOutputModality::Image)))
+        .put(rewrite(&disabled, Some(RoutePurpose::ImageGeneration)))
         .await?;
     assert!(
         !repaired.is_enabled,
         "reconfiguration must not re-enable a disabled Route"
     );
     let mut expected = original_disabled;
-    expected["output_modality"] = json!("image");
+    expected["purpose"] = json!("image_generation");
     assert_eq!(serde_json::to_value(&repaired)?, expected);
     assert_eq!(
         storage
@@ -117,16 +117,16 @@ async fn upgrade_and_preserve(storage: &dyn Storage) -> anyhow::Result<()> {
             .get("enabled-route")
             .await?
             .unwrap()
-            .output_modality,
-        Some(RouteOutputModality::Text)
+            .purpose,
+        Some(RoutePurpose::Inference)
     );
 
     let repaired = storage
         .routes()
-        .put(rewrite(&enabled, Some(RouteOutputModality::Text)))
+        .put(rewrite(&enabled, Some(RoutePurpose::Inference)))
         .await?;
     let mut expected = original_enabled;
-    expected["output_modality"] = json!("text");
+    expected["purpose"] = json!("inference");
     assert_eq!(serde_json::to_value(&repaired)?, expected);
     assert_reference(storage).await
 }
@@ -149,8 +149,8 @@ async fn assert_reference(storage: &dyn Storage) -> anyhow::Result<()> {
 async fn assert_reconstructed(storage: &dyn Storage) -> anyhow::Result<()> {
     let enabled = storage.routes().get("enabled-route").await?.unwrap();
     let disabled = storage.routes().get("disabled-route").await?.unwrap();
-    assert_eq!(enabled.output_modality, Some(RouteOutputModality::Text));
-    assert_eq!(disabled.output_modality, Some(RouteOutputModality::Image));
+    assert_eq!(enabled.purpose, Some(RoutePurpose::Inference));
+    assert_eq!(disabled.purpose, Some(RoutePurpose::ImageGeneration));
     assert!(enabled.is_enabled);
     assert!(!disabled.is_enabled);
     assert_eq!(enabled.targets[0].id.as_str(), "active-target");
@@ -193,13 +193,13 @@ async fn sqlite_upgrade(version: i64) -> anyhow::Result<()> {
                 .get("configured-image")
                 .await?
                 .unwrap()
-                .output_modality,
-            Some(RouteOutputModality::Image)
+                .purpose,
+            Some(RoutePurpose::ImageGeneration)
         );
     }
     for invalid in ["", "audio", "TEXT"] {
         assert!(
-            sqlx::query("UPDATE models SET output_modality = ? WHERE id = 'enabled-key'")
+            sqlx::query("UPDATE models SET purpose = ? WHERE id = 'enabled-key'")
                 .bind(invalid)
                 .execute(&pool)
                 .await
@@ -269,8 +269,8 @@ async fn postgres_upgrade(version: i64) -> anyhow::Result<()> {
             upgrade_and_preserve(&storage).await?;
             if version >= 21 {
                 assert_eq!(
-                    storage.routes().get("configured-image").await?.unwrap().output_modality,
-                    Some(RouteOutputModality::Image)
+                    storage.routes().get("configured-image").await?.unwrap().purpose,
+                    Some(RoutePurpose::ImageGeneration)
                 );
             }
             anyhow::Ok(())
@@ -279,7 +279,7 @@ async fn postgres_upgrade(version: i64) -> anyhow::Result<()> {
         assertions?;
         for invalid in ["", "audio", "TEXT"] {
             assert!(
-                sqlx::query("UPDATE models SET output_modality = $1 WHERE id = 'enabled-key'")
+                sqlx::query("UPDATE models SET purpose = $1 WHERE id = 'enabled-key'")
                     .bind(invalid)
                     .execute(&pool)
                     .await

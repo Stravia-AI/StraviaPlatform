@@ -20,8 +20,9 @@ import type { Route, ThinkingLevel, ThinkingLevelMapping } from '../src/lib/type
 function routeWithTargets(): Route {
   return {
     id: 'route-id',
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     model_id: 'route',
     display_name: null,
     balance: 'traffic_equalization',
@@ -34,8 +35,8 @@ function routeWithTargets(): Route {
     targets: [
       {
         id: 'target-b',
-        output_modality_mismatch: false,
-        route_output_modalities: ['text'],
+        purpose_mismatch: false,
+        route_purposes: ['inference'],
         model_id: 'route-id',
         provider_id: 'provider-b',
         model: 'model-b',
@@ -49,8 +50,8 @@ function routeWithTargets(): Route {
       },
       {
         id: 'target-a',
-        output_modality_mismatch: false,
-        route_output_modalities: ['text'],
+        purpose_mismatch: false,
+        route_purposes: ['inference'],
         model_id: 'route-id',
         provider_id: 'provider-a',
         model: 'model-a',

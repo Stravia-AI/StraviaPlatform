@@ -13,8 +13,8 @@ import type { MoneyAmount, ProviderCostPlan } from '../src/lib/types/money'
 
 const target = (providerId: string): Target => ({
   id: `target-${providerId}`,
-  output_modality_mismatch: false,
-  route_output_modalities: ['text'],
+  purpose_mismatch: false,
+  route_purposes: ['inference'],
   model_id: 'model',
   provider_id: providerId,
   model: 'upstream',
@@ -29,8 +29,9 @@ const target = (providerId: string): Target => ({
 
 const route = (id: string, ...providerIds: string[]): Route => ({
   id,
-  output_modality: 'text',
+  purpose: 'inference',
   image_generation_bound: false,
+  web_search_bound: false,
   model_id: id,
   balance: 'traffic_equalization',
   target_provider: providerIds[0] ?? '',

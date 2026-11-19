@@ -598,7 +598,7 @@ async fn gateway_with_captured_protocol(
         .expect("Provider Model with declared thinking efforts");
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: model_name.into(),
             display_name: None,
             balance: None,
@@ -622,7 +622,7 @@ async fn gateway_with_captured_protocol(
     } else {
         let other_model = admin
             .create_model(CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: format!("{model_name}-other"),
                 display_name: None,
                 balance: None,
@@ -833,7 +833,7 @@ async fn first_token_timeout_fixture(
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "timeout-model".into(),
             display_name: None,
             balance: None,
@@ -1185,7 +1185,7 @@ async fn run_anthropic_reasoning_rejection(
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "rejection-model".into(),
             display_name: None,
             balance: None,
@@ -1319,7 +1319,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "request-error-model".into(),
             display_name: None,
             balance: None,
@@ -1761,7 +1761,7 @@ mod rpm_admission {
                 gateway
                     .admin()
                     .create_model(CreateRoute {
-                        output_modality: crate::db::models::RouteOutputModality::Text,
+                        purpose: crate::db::models::RoutePurpose::Inference,
                         model_id: name.into(),
                         display_name: None,
                         balance: None,
@@ -2759,7 +2759,7 @@ async fn execute_tools_without_model_capability_declarations() {
     add_test_provider_model(&gateway, &provider.id).await;
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "no-tools-model".into(),
             display_name: None,
             balance: None,
@@ -3571,7 +3571,7 @@ async fn execute_capability_grant_preserves_internal_binding_after_rename_and_co
         .expect("shadow Provider Model");
     admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: model.id.as_str().into(),
             display_name: None,
             balance: None,

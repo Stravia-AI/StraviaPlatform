@@ -119,7 +119,7 @@ Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`�
 
 `LocalSearchBackend` 通过 internal Agent Definition 执行 search/fetch loop：
 
-- 管理员选择一个已启用、支持 tool calls 的逻辑 Model；
+- 管理员选择一个对话推理用途的已启用逻辑 Model；模型执行 Local 研究时需能调用工具；
 - Web Access 设置提供 Local search/fetch Provider 与优先级；
 - `max_turns` 和 `total_time_seconds` 作为 `LocalSearchLimits` 传入；
 - deadline 取调用方 request deadline 与 Local total time 的较早值；
@@ -132,7 +132,9 @@ Local 配置的 `backend.model_id` 保存逻辑模型的内部记录键 `models.
 本节是已实施的插件化契约，取代原 Codex 固定 Provider/账号与 upstream Model 的接入方式。详见 [Vendor 插件设计](vendor-plugins.md)。
 
 - 管理员为外部完整搜索绑定 Route，`backend.route_id` 仍保存公开名称 `models.model_id`，不改为 Local 使用的内部记录键。由宿主选择具备完整搜索能力的 Target；Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
-- Target 必须绑定 Provider 与非空白的上游模型；所选 Provider Model 必须支持完整搜索，不能省略模型或使用虚假模型绕过能力校验。
+- 绑定只接受用途为 `web_search`（联网搜索）的 Route。Target 必须绑定 Provider 与非空白的真实上游模型；所选供应商渠道与模型须符合完整搜索能力，不检查文本、图片输出模态。Route 不参与普通推理目录或 Local Search；同一个供应商模型若也支持推理，可以分别绑定到不同用途的 Route。
+- 两种数据库的 `0057_route_purpose.sql` 保留现有 Route 和其他引用，把已存在的外部搜索目标复制到独立联网搜索 Route 并更新该绑定。曾被原 Route 输出模态排除的 Target 保留为禁用项，避免升级后意外纳入调度；失联绑定不重写，启停状态、预算和其他来源不变。被绑定的 Route 即使在搜索停用时也须先解绑才可切换用途。DDL 和数据转换在同一迁移事务中完成，使用既有不定进度。失败回滚，重启可重试；已完成的迁移不会在启动时重复执行。
+- 迁移验证使用 10,000 条 Route、10,000 条 Target 和 10,000 条 Provider Model 的合成快照，外部绑定有 30 个目标，其中 15 个在升级前符合输出模态。最终迁移保留原数据及这 15 个启用目标。文件型 SQLite（WAL、`synchronous=FULL`）实测迁移事务约 72 ms；PostgreSQL 16 的临时表夹具约 120 ms。SQLite 进程 RSS 高水位未变；PostgreSQL backend 已分配内存上下文约增加 0.2 MB。临时表及简化 schema 不代表生产写盘、内存峰值或完整启动时长。
 - [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。正式接入必须提供可选择的真实 Provider Model；该服务是设计参考，不自动列入本期正式供应商交付清单。
 - Google grounding 的 `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<id>` 来源在生成报告前由宿主还原为重定向链的最终 URL；仅匹配精确来源形态，普通来源不额外请求。同次结果内复用重复地址的解析结果，先执行来源数量与 URL 长度限制，解析失败不删除来源或回退发布跳转 URL。解析复用 Web Access 的无正文安全重定向循环，沿用实际成功 Target 执行时的代理快照、取消与 deadline；直连校验全部 DNS 地址并固定连接，代理继续由代理解析源站，不伪称本地 DNS 固定。最终来源仍通过完整报告的公网 DNS 与允许域名检查。
 - 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。

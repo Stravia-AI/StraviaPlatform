@@ -155,7 +155,7 @@ impl GenerationRouteFixture {
         self.gateway
             .admin()
             .create_model(CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Image,
+                purpose: crate::db::models::RoutePurpose::ImageGeneration,
                 model_id: model_id.into(),
                 display_name: Some("Image Route".into()),
                 balance: Some("latency_preference".into()),
@@ -339,7 +339,7 @@ async fn image_reference_blocks_text_even_when_disabled_until_explicitly_cleared
         .update_model(
             &route.model_id,
             UpdateRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 ..Default::default()
             },
         )
@@ -347,8 +347,8 @@ async fn image_reference_blocks_text_even_when_disabled_until_explicitly_cleared
         .expect_err("disabled image generation still holds its Route reference");
     assert!(error.to_string().contains("ROUTE_IMAGE_GENERATION_BOUND"));
     assert_eq!(
-        admin.get_model(&route.model_id).await?.output_modality,
-        Some(crate::db::models::RouteOutputModality::Image)
+        admin.get_model(&route.model_id).await?.purpose,
+        Some(crate::db::models::RoutePurpose::ImageGeneration)
     );
 
     let cleared = admin
@@ -363,7 +363,7 @@ async fn image_reference_blocks_text_even_when_disabled_until_explicitly_cleared
         .update_model(
             &route.model_id,
             UpdateRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 ..Default::default()
             },
         )
@@ -381,7 +381,7 @@ async fn image_reference_blocks_text_even_when_disabled_until_explicitly_cleared
         .expect_err("a text-output Route cannot be bound as image generation");
     assert_eq!(
         error.code,
-        "media_generation_route_output_modality_mismatch"
+        "media_generation_route_purpose_mismatch"
     );
     assert_eq!(fixture.upstream_calls.load(Ordering::SeqCst), 0);
     Ok(())
@@ -423,7 +423,7 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
             .iter()
             .find(|target| target.provider_id().as_str() == provider_id)
             .unwrap()
-            .output_modality_mismatch
+            .purpose_mismatch
     );
 
     let model = admin.get_provider_model(provider_id, CODEX_MODEL).await?;
@@ -468,7 +468,7 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
     assert!(!drifted.validation.valid);
     assert_eq!(
         drifted.validation.code,
-        Some("media_generation_targets_output_modality_mismatch")
+        Some("media_generation_targets_purpose_mismatch")
     );
     assert!(
         admin
@@ -483,7 +483,7 @@ async fn modality_filter_excludes_only_mismatches_before_real_adapter_validation
         .expect_err("enabled Targets with output drift cannot qualify an image Route");
     assert_eq!(
         error.code,
-        "media_generation_targets_output_modality_mismatch"
+        "media_generation_targets_purpose_mismatch"
     );
     let disabled = admin
         .update_media_generation_config(GenerationRouteFixture::config(&route, false))

@@ -1,5 +1,7 @@
 import * as m from '#lib/paraglide/messages.js'
 import { formatList } from '#lib/format.js'
+import { routePurposeLabels } from '#lib/logical-model.js'
+import { routePurposes } from '#lib/types/route.js'
 import { getLocale, type Locale } from '#lib/paraglide/runtime.js'
 
 type ErrorPayload = { code?: string; message?: string; params?: Record<string, unknown> }
@@ -104,6 +106,11 @@ function resolveErrorPayload(error: unknown): { raw: string; payload: ErrorPaylo
       ? (error as ErrorPayload)
       : null
   return { raw, payload: direct ?? parseErrorPayload(raw) }
+}
+
+export function isRouteBindingError(error: unknown): boolean {
+  const code = resolveErrorPayload(error).payload?.code
+  return code === 'ROUTE_IMAGE_GENERATION_BOUND' || code === 'ROUTE_WEB_SEARCH_BOUND'
 }
 
 export function unrepresentableThinkingTarget(error: unknown): { providerId: string; modelId: string } | null {
@@ -226,42 +233,48 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       const route_id = extractRouteId(payload.params)
       return route_id ? m.backend_error_route_context({ route_id, message }, options) : message
     }
-    case 'ROUTE_OUTPUT_MODALITY_UNCONFIGURED':
-    case 'route_output_modality_unconfigured': {
-      const message = m.backend_error_route_output_modality_unconfigured({}, options)
+    case 'ROUTE_PURPOSE_UNCONFIGURED':
+    case 'route_purpose_unconfigured': {
+      const message = m.backend_error_route_purpose_unconfigured({}, options)
       const route_id = extractRouteId(payload.params)
       return route_id ? m.backend_error_route_context({ route_id, message }, options) : message
     }
-    case 'ROUTE_OUTPUT_MODALITY_UNREGISTERED': {
+    case 'ROUTE_PURPOSE_UNREGISTERED': {
       const provider_id = extractString(payload.params, 'provider_id')
       const model_id = extractString(payload.params, 'model_id')
       return provider_id && model_id
-        ? m.backend_error_route_output_modality_unregistered_target({ provider_id, model_id }, options)
-        : m.backend_error_route_output_modality_unregistered({}, options)
+        ? m.backend_error_route_purpose_unregistered_target({ provider_id, model_id }, options)
+        : m.backend_error_route_purpose_unregistered({}, options)
     }
-    case 'ROUTE_OUTPUT_MODALITY_MISMATCH': {
+    case 'ROUTE_PURPOSE_MISMATCH': {
       const provider_id = extractString(payload.params, 'provider_id')
       const model_id = extractString(payload.params, 'model_id')
-      const modality = extractString(payload.params, 'output_modality')
-      const output =
-        modality === 'image'
-          ? m.route_output_image({}, options)
-          : modality === 'text'
-            ? m.route_output_text({}, options)
-            : modality
-      return provider_id && model_id && output
-        ? m.backend_error_route_output_modality_mismatch_target({ provider_id, model_id, output }, options)
-        : m.backend_error_route_output_modality_mismatch({}, options)
+      const requested = extractString(payload.params, 'purpose')
+      const known = routePurposes.find((value) => value === requested)
+      const purpose = known ? routePurposeLabels[known]({}, options) : requested
+      return provider_id && model_id && purpose
+        ? m.backend_error_route_purpose_mismatch_target({ provider_id, model_id, purpose }, options)
+        : m.backend_error_route_purpose_mismatch({}, options)
     }
-    case 'target_output_modality_mismatch':
-      return m.backend_error_route_output_modality_mismatch({}, options)
-    case 'ROUTE_IMAGE_GENERATION_BOUND': {
-      const message = m.backend_error_route_image_generation_bound({}, options)
+    case 'target_purpose_mismatch':
+      return m.backend_error_route_purpose_mismatch({}, options)
+    case 'ROUTE_IMAGE_GENERATION_BOUND':
+    case 'ROUTE_WEB_SEARCH_BOUND': {
+      const message =
+        payload.code === 'ROUTE_IMAGE_GENERATION_BOUND'
+          ? m.backend_error_route_image_generation_bound({}, options)
+          : m.backend_error_route_web_search_bound({}, options)
       const route_id = extractRouteId(payload.params)
       return route_id ? m.backend_error_route_context({ route_id, message }, options) : message
     }
-    case 'route_output_modality_unavailable':
-      return m.backend_error_route_output_modality_unavailable({}, options)
+    case 'WEB_SEARCH_MODEL_INELIGIBLE':
+      return m.web_search_local_model_unavailable({}, options)
+    case 'WEB_SEARCH_ROUTE_UNAVAILABLE':
+      return m.web_search_external_route_unavailable({}, options)
+    case 'route_purpose_mismatch':
+      return m.backend_error_request_route_purpose_mismatch({}, options)
+    case 'route_purpose_unavailable':
+      return m.backend_error_route_purpose_unavailable({}, options)
     case 'API_KEY_NAME_CONFLICT':
       return m.backend_error_api_key_name_conflict({ name }, options)
     case 'PROVIDER_IN_USE': {
@@ -357,12 +370,12 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.media_generation_route_required({}, options)
     case 'media_generation_route_disabled':
       return m.media_generation_route_disabled({}, options)
-    case 'media_generation_route_output_modality_mismatch':
-      return m.media_generation_route_output_modality_mismatch({}, options)
+    case 'media_generation_route_purpose_mismatch':
+      return m.media_generation_route_purpose_mismatch({}, options)
     case 'media_generation_targets_missing':
       return m.media_generation_targets_missing({}, options)
-    case 'media_generation_targets_output_modality_mismatch':
-      return m.media_generation_targets_output_modality_mismatch({}, options)
+    case 'media_generation_targets_purpose_mismatch':
+      return m.media_generation_targets_purpose_mismatch({}, options)
     case 'media_generation_provider_missing':
       return m.media_generation_provider_missing({}, options)
     case 'media_generation_target_incompatible':

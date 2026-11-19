@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::models::RoutePurpose;
 use crate::provider_models::{
     NewProviderModelRecord, ProviderModelMutation, ProviderModelPresence,
     ProviderModelSelectionPolicy, ProviderModelSourceKind, model_id_match_key, normalize_model_id,
@@ -62,6 +63,19 @@ pub(crate) struct RouteModule<'a> {
     gw: &'a Gateway,
 }
 
+fn provider_supports_web_search(gw: &Gateway, provider: &Provider) -> bool {
+    use stravia_vendor_sdk::Capability;
+
+    provider.vendor.as_deref().map(str::trim).is_some_and(|vendor| {
+        gw.vendor_plugins.descriptor(vendor).is_ok_and(|descriptor| {
+            let channel_id = provider.channel.as_deref().unwrap_or("default");
+            descriptor.channels.iter().any(|channel| {
+                channel.id == channel_id && channel.capabilities.contains(&Capability::Search)
+            })
+        })
+    })
+}
+
 impl<'a> RouteModule<'a> {
     pub(crate) fn new(gw: &'a Gateway) -> Self {
         Self { gw }
@@ -105,7 +119,7 @@ impl<'a> RouteModule<'a> {
         ensure_route_targets_valid(&input.targets)?;
         self.ensure_new_targets_available(&[], &input.targets)
             .await?;
-        self.ensure_targets_match(input.output_modality, &[], &input.targets, true)
+        self.ensure_targets_match(input.purpose, &[], &input.targets, true)
             .await?;
         self.prepare_thinking_maps(&[], &mut input.targets).await?;
         self.ensure_thinking_controls_representable(&input.targets)
@@ -128,19 +142,19 @@ impl<'a> RouteModule<'a> {
         mut input: UpdateRoute,
     ) -> anyhow::Result<RouteConfig> {
         let current = self.get(route_id).await?;
-        if let Some(modality) = input.output_modality {
-            if modality == crate::db::models::RouteOutputModality::Text
-                && crate::media_generation::config::load(self.gw)
-                    .await?
-                    .image
-                    .route_id
-                    .as_deref()
-                    == Some(current.model_id.as_str())
-            {
+        if let Some(purpose) = input.purpose {
+            if purpose != RoutePurpose::ImageGeneration && current.image_generation_bound {
                 return Err(coded_error(
                     "ROUTE_IMAGE_GENERATION_BOUND",
-                    "Unbind this Route in image generation configuration before selecting text output",
+                    "Unbind this Route in image generation configuration before changing its purpose",
                     serde_json::json!({"route_id": route_id, "action": "unbind_image_generation"}),
+                ));
+            }
+            if purpose != RoutePurpose::WebSearch && current.web_search_bound {
+                return Err(coded_error(
+                    "ROUTE_WEB_SEARCH_BOUND",
+                    "Unbind this Route in Web Search before changing its purpose",
+                    serde_json::json!({"route_id": route_id, "action": "unbind_web_search"}),
                 ));
             }
             let retained;
@@ -154,7 +168,7 @@ impl<'a> RouteModule<'a> {
             ensure_route_targets_valid(targets)?;
             self.ensure_new_targets_available(&current.targets, targets)
                 .await?;
-            self.ensure_targets_match(modality, &[], targets, true)
+            self.ensure_targets_match(purpose, &[], targets, true)
                 .await?;
         } else if let Some(targets) = input.targets.as_deref() {
             let adds_target = targets.iter().any(|target| {
@@ -163,15 +177,15 @@ impl<'a> RouteModule<'a> {
                         && existing.model().as_str() == target.model.trim()
                 })
             });
-            if let Some(modality) = current.output_modality {
-                self.ensure_targets_match(modality, &current.targets, targets, false)
+            if let Some(purpose) = current.purpose {
+                self.ensure_targets_match(purpose, &current.targets, targets, false)
                     .await?;
             } else if adds_target {
                 return Err(route_unconfigured_error(route_id));
             }
         }
         if let Some(targets) = input.targets.as_mut() {
-            if input.output_modality.is_none() {
+            if input.purpose.is_none() {
                 ensure_route_targets_valid(targets)?;
                 self.ensure_new_targets_available(&current.targets, targets)
                     .await?;
@@ -185,7 +199,7 @@ impl<'a> RouteModule<'a> {
 
     async fn ensure_targets_match(
         &self,
-        modality: crate::db::models::RouteOutputModality,
+        purpose: RoutePurpose,
         existing: &[TargetConfig],
         proposed: &[CreateTarget],
         validate_all: bool,
@@ -207,15 +221,17 @@ impl<'a> RouteModule<'a> {
                 .provider_models()
                 .find(provider_id, &model_id)
                 .await?;
-            if !record
-                .is_some_and(|record| record.metadata.supports_route_output_modality(modality))
+            let matches = record.is_some_and(|record| record.metadata.supports_route_purpose(purpose));
+            if !matches
+                || (purpose == RoutePurpose::WebSearch
+                    && !provider_supports_web_search(self.gw, &self.get_provider(provider_id).await?))
             {
                 return Err(coded_error(
-                    "ROUTE_OUTPUT_MODALITY_MISMATCH",
-                    "Remove or replace the Target, or register its matching output modality",
+                    "ROUTE_PURPOSE_MISMATCH",
+                    "Select a Target that supports this Route purpose",
                     serde_json::json!({
                         "provider_id": provider_id, "model_id": model_id,
-                        "output_modality": modality, "action": "repair_target_output_modality"
+                        "purpose": purpose, "action": "repair_target_purpose"
                     }),
                 ));
             }
@@ -454,7 +470,7 @@ impl<'a> RouteModule<'a> {
         if existing.is_none() && !one_click {
             return Err(coded_error(
                 "ROUTE_NOT_FOUND",
-                "Create the Route with an explicit output modality before binding a Target",
+                "Create the Route with an explicit purpose before binding a Target",
                 serde_json::json!({"route_id": route_id, "action": "create_route"}),
             ));
         }
@@ -462,7 +478,7 @@ impl<'a> RouteModule<'a> {
             self.refresh_route_target_projections(std::slice::from_mut(route))
                 .await?;
         }
-        self.get_provider(&provider_id).await?;
+        let provider = self.get_provider(&provider_id).await?;
         let provider_model = self
             .gw
             .storage
@@ -479,38 +495,27 @@ impl<'a> RouteModule<'a> {
                     }),
                 )
             })?;
-        let modality = match existing.as_ref() {
-            Some(route) => route
-                .output_modality
-                .ok_or_else(|| route_unconfigured_error(&route_id))?,
-            None => [
-                crate::db::models::RouteOutputModality::Text,
-                crate::db::models::RouteOutputModality::Image,
-            ]
-            .into_iter()
-            .find(|modality| {
-                provider_model
-                    .metadata
-                    .supports_route_output_modality(*modality)
-            })
-            .ok_or_else(|| {
+        let search_channel = provider_supports_web_search(self.gw, &provider);
+        let eligible = || {
+            crate::provider_models::eligible_route_purposes(&provider_model.metadata, search_channel)
+        };
+        let purpose = match existing.as_ref() {
+            Some(route) => route.purpose.ok_or_else(|| route_unconfigured_error(&route_id))?,
+            None => eligible().next().ok_or_else(|| {
                 coded_error(
-                    "ROUTE_OUTPUT_MODALITY_UNREGISTERED",
-                    "Register text or image output before connecting this Provider Model",
+                    "ROUTE_PURPOSE_UNREGISTERED",
+                    "No supported Route purpose is registered for this Provider Model",
                     serde_json::json!({"provider_id": provider_id, "model_id": provider_model_id,
-                        "action": "register_output_modality"}),
+                        "action": "register_route_purpose"}),
                 )
             })?,
         };
-        if !provider_model
-            .metadata
-            .supports_route_output_modality(modality)
-        {
+        if existing.is_some() && !eligible().any(|candidate| candidate == purpose) {
             return Err(coded_error(
-                "ROUTE_OUTPUT_MODALITY_MISMATCH",
-                "Select a matching Route or manually reconfigure its output modality",
+                "ROUTE_PURPOSE_MISMATCH",
+                "Select a matching Route or manually reconfigure its purpose",
                 serde_json::json!({"route_id": route_id, "provider_id": provider_id,
-                    "model_id": provider_model_id, "output_modality": modality,
+                    "model_id": provider_model_id, "purpose": purpose,
                     "action": "reconfigure_route"}),
             ));
         }
@@ -534,7 +539,7 @@ impl<'a> RouteModule<'a> {
             return self
                 .create_locked(CreateRoute {
                     model_id: route_id,
-                    output_modality: modality,
+                    purpose,
                     display_name: provider_model.metadata.name,
                     balance: Some("traffic_equalization".into()),
                     default_thinking_level: None,
@@ -700,7 +705,7 @@ fn same_target_model(left: &str, right: &str) -> bool {
 
 fn route_unconfigured_error(route_id: &str) -> anyhow::Error {
     coded_error(
-        "ROUTE_OUTPUT_MODALITY_UNCONFIGURED",
+        "ROUTE_PURPOSE_UNCONFIGURED",
         "Explicitly select an output modality and repair all Targets before using this Route",
         serde_json::json!({"route_id": route_id, "action": "reconfigure_route"}),
     )

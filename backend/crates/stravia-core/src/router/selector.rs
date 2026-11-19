@@ -1210,8 +1210,8 @@ mod tests {
 
     fn target(provider_id: &str, priority: i32) -> TargetConfig {
         TargetConfig {
-            output_modality_mismatch: false,
-            route_output_modalities: Vec::new(),
+            purpose_mismatch: false,
+            route_purposes: Vec::new(),
             id: format!("target-{provider_id}").into(),
             model_id: "route".into(),
             destination: crate::db::identity::TargetDestination::Model {

@@ -774,7 +774,7 @@ async fn antigravity_independent_image_recovery_case(
         .create_model(crate::db::models::CreateRoute {
             model_id: "synthetic-oauth-image".into(),
             display_name: None,
-            output_modality: crate::db::models::RouteOutputModality::Image,
+            purpose: crate::db::models::RoutePurpose::ImageGeneration,
             balance: Some("latency_preference".into()),
             targets: vec![crate::db::models::CreateTarget {
                 provider_id: provider.id.clone(),

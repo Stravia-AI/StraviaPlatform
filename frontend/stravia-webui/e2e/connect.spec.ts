@@ -7,8 +7,9 @@ const model: Route = {
   model_id: 'upstream-exact',
   display_name: 'My model',
   balance: 'traffic_equalization',
-  output_modality: 'text',
+  purpose: 'inference',
   image_generation_bound: false,
+  web_search_bound: false,
   target_provider: 'provider-one',
   target_model: 'upstream-exact',
   is_enabled: true,
@@ -36,7 +37,8 @@ function key(id: string, overrides: Partial<ApiKey> = {}): ApiKey {
 }
 async function setup(page: Page, keys: ApiKey[]): Promise<void> {
   await prepareApp(page)
-  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [model] } }))
+  const searchRoute = { ...model, id: 'search-route', model_id: 'search-only', purpose: 'web_search' } satisfies Route
+  await page.route('**/api/v1/models', (route) => route.fulfill({ json: { data: [model, searchRoute] } }))
   await page.route('**/api/v1/api-keys', (route) => route.fulfill({ json: { data: keys } }))
   await page.route('**/api/v1/connect-clients/preview', (route) =>
     route.fulfill({
@@ -66,7 +68,11 @@ test('Connect plans image input only for enabled media understanding selection',
     await page.getByRole('option', { name: new RegExp(name) }).click()
     await expect
       .poll(() => planned.at(-1))
-      .toMatchObject({ apiKey: `sk-isolated-${name}`, transparentImageInputEnabled: expected })
+      .toMatchObject({
+        apiKey: `sk-isolated-${name}`,
+        transparentImageInputEnabled: expected,
+        models: [expect.objectContaining({ modelId: model.model_id, purpose: 'inference' })],
+      })
   }
 })
 
@@ -76,7 +82,7 @@ test('Connect selects the sole eligible key, excluding disabled, expired and ina
   await setup(page, [
     key('Disabled', { is_enabled: false }),
     key('Expired', { expires_at: '2000-01-01T00:00:00Z' }),
-    key('Restricted', { model_ids: ['other-route'] }),
+    key('Restricted', { model_ids: ['search-route'] }),
     key('Personal'),
   ])
   await page.goto('/connect')

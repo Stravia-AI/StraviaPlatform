@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::models::{CreateApiKey, CreateRoute, CreateTarget, RouteOutputModality};
+use crate::db::models::{CreateApiKey, CreateRoute, CreateTarget, RoutePurpose};
 use crate::provider_models::CreateManualProviderModel;
 use axum::{
     body::{Body, to_bytes},
@@ -531,7 +531,7 @@ async fn route_key(
         .create_model(CreateRoute {
             model_id: route_name.into(),
             display_name: None,
-            output_modality: RouteOutputModality::Text,
+            purpose: RoutePurpose::Inference,
             balance: None,
             targets: vec![CreateTarget {
                 provider_id: provider_id.into(),

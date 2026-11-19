@@ -156,7 +156,7 @@ async fn configure(
         template_id: None,
     }).await?;
     let route = gateway.admin().create_model(serde_json::from_value(json!({
-        "model_id": CODEX_ROUTE, "output_modality": "text",
+        "model_id": CODEX_ROUTE, "purpose": "inference",
         "targets": [{"provider_id": provider.id, "model": CODEX_MODEL, "enabled": true, "target_retry_budget": 0, "target_cooldown_ms": COOLDOWN_MS}]
     }))?).await?;
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({

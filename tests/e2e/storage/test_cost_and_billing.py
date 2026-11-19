@@ -85,7 +85,7 @@ def priced_route(env, name, *, billing=None, spend_limit=None, rpm_limit=None, r
         },
     })
     route = admin(env, "POST", "models", {
-        "model_id": name, "output_modality": "text", "billing": billing,
+        "model_id": name, "purpose": "inference", "billing": billing,
         "targets": [{"provider_id": provider["id"], "model": "gpt-4o-mini",
                      "target_retry_budget": retry_budget, "target_cooldown_ms": 0}],
     })

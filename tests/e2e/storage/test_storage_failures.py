@@ -521,7 +521,7 @@ def configure_background_media(env, parent_route):
         'modalities': {'input': ['text', 'image'], 'output': ['text']}}}, env['auth'])
     assert status == 201, body
     status, body = http_request('POST', env['admin'] + '/api/v1/models', {
-        'model_id': 'background-vision', 'output_modality': 'text', 'targets': [{'provider_id': provider, 'model': 'vision',
+        'model_id': 'background-vision', 'purpose': 'inference', 'targets': [{'provider_id': provider, 'model': 'vision',
         'first_token_timeout_ms': 120_000, 'target_retry_budget': 0, 'target_cooldown_ms': 0}]}, env['auth'])
     assert status == 200, body
     vision = body['data']['id']

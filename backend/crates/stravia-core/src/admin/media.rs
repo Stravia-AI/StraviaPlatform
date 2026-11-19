@@ -140,7 +140,7 @@ mod tests {
             .expect("text-only Provider Model");
         let model = admin
             .create_model(crate::db::models::CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: "Visual Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
@@ -161,7 +161,7 @@ mod tests {
             .expect("Model");
         let mixed_model = admin
             .create_model(crate::db::models::CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: "Mixed Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
@@ -234,7 +234,7 @@ mod tests {
         };
         let audio_model = admin
             .create_model(crate::db::models::CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: "Audio Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
@@ -246,7 +246,7 @@ mod tests {
             .expect("audio Model");
         let painter_model = admin
             .create_model(crate::db::models::CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Image,
+                purpose: crate::db::models::RoutePurpose::ImageGeneration,
                 model_id: "Painter Route".into(),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),

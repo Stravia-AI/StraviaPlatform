@@ -699,7 +699,6 @@ impl Gateway {
             browser_path: Arc::new(std::sync::RwLock::new(browser_path)),
             browser_preferences: Arc::new(browser_preferences),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
-            web_search_config_lock: Arc::new(tokio::sync::Mutex::new(())),
             route_media_mutation: Arc::new(tokio::sync::Mutex::new(())),
             update_service,
             _sqlite_pool: sqlite_pool,

@@ -48,7 +48,7 @@ async fn local_search_binding_survives_rename_and_cannot_use_a_public_name_colli
         .await
         .expect("Provider Model");
     let draft = |model_id: String| CreateRoute {
-        output_modality: crate::db::models::RouteOutputModality::Text,
+        purpose: crate::db::models::RoutePurpose::Inference,
         model_id,
         display_name: None,
         balance: None,

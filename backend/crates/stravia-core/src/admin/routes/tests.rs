@@ -83,7 +83,7 @@ async fn remote_compaction_requires_a_native_protocol() -> anyhow::Result<()> {
             .create_model(modality_route_input(
                 "compact-route",
                 &provider.id,
-                crate::db::models::RouteOutputModality::Text,
+                crate::db::models::RoutePurpose::Inference,
                 &[("upstream-model", true)],
             ))
             .await?;
@@ -126,7 +126,7 @@ async fn remote_compaction_requires_every_configured_target() -> anyhow::Result<
     }
     let eligible = admin
         .create_model(serde_json::from_value(json!({
-            "model_id":"compact-route", "output_modality":"text", "targets":&targets[..2]
+            "model_id":"compact-route", "purpose":"inference", "targets":&targets[..2]
         }))?)
         .await?;
     assert!(eligible.supports_remote_compaction);
@@ -195,12 +195,12 @@ async fn remote_compaction_requires_every_configured_target() -> anyhow::Result<
 fn modality_route_input(
     route_id: &str,
     provider_id: &str,
-    modality: crate::db::models::RouteOutputModality,
+    modality: crate::db::models::RoutePurpose,
     models: &[(&str, bool)],
 ) -> CreateRoute {
     serde_json::from_value(json!({
         "model_id": route_id,
-        "output_modality": modality,
+        "purpose": modality,
         "targets": models.iter().map(|(model, enabled)| json!({
             "provider_id": provider_id, "model": model, "enabled": enabled
         })).collect::<Vec<_>>()
@@ -230,24 +230,24 @@ async fn register_output_model(
 #[tokio::test]
 async fn route_candidates_and_writes_use_registered_outputs_not_read_fallbacks()
 -> anyhow::Result<()> {
-    use crate::db::models::RouteOutputModality::{Image, Text};
+    use crate::db::models::RoutePurpose::{ImageGeneration, Inference};
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     for (id, metadata, expected) in [
         (
             "text",
             json!({"modalities":{"input":["image"],"output":["text"]}}),
-            vec![Text],
+            vec![Inference],
         ),
         (
             "image",
             json!({"modalities":{"input":["text"],"output":["image"]}}),
-            vec![Image],
+            vec![ImageGeneration],
         ),
         (
             "dual",
             json!({"modalities":{"input":["text"],"output":["text","image"]}}),
-            vec![Text, Image],
+            vec![Inference, ImageGeneration],
         ),
         ("missing", json!({}), vec![]),
         ("null-modalities", json!({"modalities":null}), vec![]),
@@ -269,7 +269,7 @@ async fn route_candidates_and_writes_use_registered_outputs_not_read_fallbacks()
     ] {
         register_output_model(&admin, &provider.id, id, metadata).await?;
         let detail = admin.get_provider_model(&provider.id, id).await?;
-        assert_eq!(detail.route_output_modalities, expected, "{id}");
+        assert_eq!(detail.route_purposes, expected, "{id}");
         let summary = admin
             .list_provider_models(&provider.id)
             .await?
@@ -277,11 +277,11 @@ async fn route_candidates_and_writes_use_registered_outputs_not_read_fallbacks()
             .into_iter()
             .find(|model| model.id == id)
             .expect("registered model");
-        assert_eq!(summary.route_output_modalities, expected, "{id}");
+        assert_eq!(summary.route_purposes, expected, "{id}");
         if id == "missing" {
             assert_eq!(detail.metadata.effective_modalities().output, vec!["text"]);
         }
-        for modality in [Text, Image] {
+        for modality in [Inference, ImageGeneration] {
             let result = admin
                 .create_model(modality_route_input(
                     &format!("{id}-{}", modality.as_str()),
@@ -291,13 +291,13 @@ async fn route_candidates_and_writes_use_registered_outputs_not_read_fallbacks()
                 ))
                 .await;
             if expected.contains(&modality) {
-                assert_eq!(result?.output_modality, Some(modality));
+                assert_eq!(result?.purpose, Some(modality));
             } else {
                 assert!(
                     result
                         .expect_err("unregistered output cannot bind")
                         .to_string()
-                        .contains("ROUTE_OUTPUT_MODALITY_MISMATCH"),
+                        .contains("ROUTE_PURPOSE_MISMATCH"),
                     "{id}"
                 );
             }
@@ -317,7 +317,7 @@ async fn route_candidates_and_writes_use_registered_outputs_not_read_fallbacks()
         .create_model(modality_route_input(
             "prepared",
             &provider.id,
-            Text,
+            Inference,
             &[("prepared", true)],
         ))
         .await?;
@@ -336,25 +336,25 @@ async fn route_candidates_and_writes_use_registered_outputs_not_read_fallbacks()
         admin
             .get_provider_model(&provider.id, "missing")
             .await?
-            .route_output_modalities
+            .route_purposes
             .is_empty()
     );
     let error = admin
         .create_model(modality_route_input(
             "forced-unknown",
             &provider.id,
-            Text,
+            Inference,
             &[("missing", true)],
         ))
         .await
         .expect_err("ForceEnabled cannot invent an output declaration");
-    assert!(error.to_string().contains("ROUTE_OUTPUT_MODALITY_MISMATCH"));
+    assert!(error.to_string().contains("ROUTE_PURPOSE_MISMATCH"));
     Ok(())
 }
 
 #[tokio::test]
 async fn route_modality_switch_validates_disabled_targets_and_is_atomic() -> anyhow::Result<()> {
-    use crate::db::models::RouteOutputModality::{Image, Text};
+    use crate::db::models::RoutePurpose::{ImageGeneration, Inference};
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     for (id, outputs) in [
@@ -373,7 +373,7 @@ async fn route_modality_switch_validates_disabled_targets_and_is_atomic() -> any
         .create_model(modality_route_input(
             "switch",
             &provider.id,
-            Text,
+            Inference,
             &[("dual", true), ("upstream-model", false)],
         ))
         .await?;
@@ -381,13 +381,13 @@ async fn route_modality_switch_validates_disabled_targets_and_is_atomic() -> any
         .update_model(
             "switch",
             UpdateRoute {
-                output_modality: Some(Image),
+                purpose: Some(ImageGeneration),
                 ..Default::default()
             },
         )
         .await
         .expect_err("disabled incompatible Target must block switch");
-    assert!(error.to_string().contains("ROUTE_OUTPUT_MODALITY_MISMATCH"));
+    assert!(error.to_string().contains("ROUTE_PURPOSE_MISMATCH"));
     let unchanged = admin.get_model("switch").await?;
     assert_eq!(
         serde_json::to_value(&unchanged)?,
@@ -403,21 +403,21 @@ async fn route_modality_switch_validates_disabled_targets_and_is_atomic() -> any
     let replacement = modality_route_input(
         "switch",
         &provider.id,
-        Image,
+        ImageGeneration,
         &[("dual", true), ("image", false)],
     );
     let switched = admin
         .update_model(
             "switch",
             UpdateRoute {
-                output_modality: Some(Image),
+                purpose: Some(ImageGeneration),
                 targets: Some(replacement.targets),
                 ..Default::default()
             },
         )
         .await?;
     assert_eq!(switched.id, original.id);
-    assert_eq!(switched.output_modality, Some(Image));
+    assert_eq!(switched.purpose, Some(ImageGeneration));
     assert_eq!(
         switched
             .targets
@@ -432,7 +432,7 @@ async fn route_modality_switch_validates_disabled_targets_and_is_atomic() -> any
 
 #[tokio::test]
 async fn new_target_with_same_model_suffix_must_match_route_output() -> anyhow::Result<()> {
-    use crate::db::models::RouteOutputModality::Text;
+    use crate::db::models::RoutePurpose::Inference;
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     for (model, outputs) in [("a/model", json!(["text"])), ("b/model", json!(["image"]))] {
@@ -448,13 +448,13 @@ async fn new_target_with_same_model_suffix_must_match_route_output() -> anyhow::
         .create_model(modality_route_input(
             "same-suffix",
             &provider.id,
-            Text,
+            Inference,
             &[("a/model", true)],
         ))
         .await?;
     let mut proposed = route_targets_for_update(&original);
     proposed
-        .extend(modality_route_input("unused", &provider.id, Text, &[("b/model", true)]).targets);
+        .extend(modality_route_input("unused", &provider.id, Inference, &[("b/model", true)]).targets);
     let error = admin
         .update_model(
             "same-suffix",
@@ -465,9 +465,9 @@ async fn new_target_with_same_model_suffix_must_match_route_output() -> anyhow::
         )
         .await
         .expect_err("a distinct registered model must not inherit a retained Target exemption");
-    assert!(error.to_string().contains("ROUTE_OUTPUT_MODALITY_MISMATCH"));
+    assert!(error.to_string().contains("ROUTE_PURPOSE_MISMATCH"));
     let persisted = admin.get_model("same-suffix").await?;
-    assert_eq!(persisted.output_modality, Some(Text));
+    assert_eq!(persisted.purpose, Some(Inference));
     assert_eq!(persisted.targets.len(), 1);
     assert_eq!(persisted.targets[0].id, original.targets[0].id);
     assert_eq!(
@@ -482,14 +482,14 @@ async fn new_target_with_same_model_suffix_must_match_route_output() -> anyhow::
 #[tokio::test]
 async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() -> anyhow::Result<()>
 {
-    use crate::db::models::RouteOutputModality::Text;
+    use crate::db::models::RoutePurpose::Inference;
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     let route = admin
         .create_model(modality_route_input(
             "drift",
             &provider.id,
-            Text,
+            Inference,
             &[("upstream-model", true)],
         ))
         .await?;
@@ -511,7 +511,7 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
         .await?;
     let drifted = admin.get_model("drift").await?;
     assert_eq!(drifted.targets[0].id, route.targets[0].id);
-    assert!(drifted.targets[0].output_modality_mismatch);
+    assert!(drifted.targets[0].purpose_mismatch);
     let saved = admin
         .update_model(
             "drift",
@@ -521,7 +521,7 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
             },
         )
         .await?;
-    assert!(saved.targets[0].output_modality_mismatch);
+    assert!(saved.targets[0].purpose_mismatch);
     register_output_model(
         &admin,
         &provider.id,
@@ -531,7 +531,7 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
     .await?;
     let mut proposed = route_targets_for_update(&saved);
     proposed
-        .extend(modality_route_input("unused", &provider.id, Text, &[("image", false)]).targets);
+        .extend(modality_route_input("unused", &provider.id, Inference, &[("image", false)]).targets);
     let error = admin
         .update_model(
             "drift",
@@ -542,7 +542,7 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
         )
         .await
         .expect_err("new disabled Target must still match");
-    assert!(error.to_string().contains("ROUTE_OUTPUT_MODALITY_MISMATCH"));
+    assert!(error.to_string().contains("ROUTE_PURPOSE_MISMATCH"));
     assert_eq!(admin.get_model("drift").await?.targets.len(), 1);
     let detail = admin
         .get_provider_model(&provider.id, "upstream-model")
@@ -562,14 +562,14 @@ async fn unchanged_mismatch_is_retained_but_new_disabled_mismatch_is_rejected() 
         .await?;
     let repaired = admin.get_model("drift").await?;
     assert_eq!(repaired.targets[0].id, route.targets[0].id);
-    assert!(!repaired.targets[0].output_modality_mismatch);
+    assert!(!repaired.targets[0].purpose_mismatch);
     Ok(())
 }
 
 #[tokio::test]
 async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
 -> anyhow::Result<()> {
-    use crate::db::models::RouteOutputModality::{Image, Text};
+    use crate::db::models::RoutePurpose::{ImageGeneration, Inference};
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     let missing_route = admin
@@ -586,9 +586,9 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
         .expect_err("explicit binding cannot implicitly create a Route modality");
     assert!(missing_route.to_string().contains("ROUTE_NOT_FOUND"));
     for (id, outputs, expected) in [
-        ("text", json!(["text"]), Some(Text)),
-        ("dual", json!(["image", "text"]), Some(Text)),
-        ("image", json!(["image"]), Some(Image)),
+        ("text", json!(["text"]), Some(Inference)),
+        ("dual", json!(["image", "text"]), Some(Inference)),
+        ("image", json!(["image"]), Some(ImageGeneration)),
         ("audio", json!(["audio"]), None),
     ] {
         register_output_model(
@@ -610,13 +610,13 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
             })
             .await;
         if let Some(expected) = expected {
-            assert_eq!(result?.output_modality, Some(expected));
+            assert_eq!(result?.purpose, Some(expected));
         } else {
             assert!(
                 result
                     .expect_err("unsupported output must not connect")
                     .to_string()
-                    .contains("ROUTE_OUTPUT_MODALITY_UNREGISTERED")
+                    .contains("ROUTE_PURPOSE_UNREGISTERED")
             );
         }
     }
@@ -646,8 +646,8 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
         })
         .await
         .expect_err("duplicate binding cannot bypass output drift");
-    assert!(error.to_string().contains("ROUTE_OUTPUT_MODALITY_MISMATCH"));
-    assert_eq!(admin.get_model("text").await?.output_modality, Some(Text));
+    assert!(error.to_string().contains("ROUTE_PURPOSE_MISMATCH"));
+    assert_eq!(admin.get_model("text").await?.purpose, Some(Inference));
     let connected = admin
         .bind_route(BindRouteInput {
             route_id: Some("image".into()),
@@ -659,7 +659,7 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
             target_cooldown_ms: None,
         })
         .await?;
-    assert_eq!(connected.output_modality, Some(Image));
+    assert_eq!(connected.purpose, Some(ImageGeneration));
     let error = admin
         .bind_route(BindRouteInput {
             route_id: Some("image".into()),
@@ -672,7 +672,7 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
         })
         .await
         .expect_err("explicit bind must obey existing image route modality");
-    assert!(error.to_string().contains("ROUTE_OUTPUT_MODALITY_MISMATCH"));
+    assert!(error.to_string().contains("ROUTE_PURPOSE_MISMATCH"));
     assert_eq!(admin.get_model("image").await?.targets.len(), 2);
     assert!(
         admin
@@ -687,7 +687,7 @@ async fn one_click_modality_selection_and_duplicate_binding_revalidate_outputs()
 #[tokio::test]
 async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_alias()
 -> anyhow::Result<()> {
-    use crate::db::models::RouteOutputModality::Text;
+    use crate::db::models::RoutePurpose::Inference;
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     for model in ["a/model", "b/model"] {
@@ -705,12 +705,12 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
         .put(PutRoute {
             id: None,
             model_id: "unconfigured-same-suffix".into(),
-            output_modality: None,
+            purpose: None,
             display_name: None,
             selection_strategy: "traffic_equalization".into(),
             is_enabled: true,
             targets: Some(
-                modality_route_input("unused", &provider.id, Text, &[("a/model", true)]).targets,
+                modality_route_input("unused", &provider.id, Inference, &[("a/model", true)]).targets,
             ),
             default_thinking_level: None,
             billing: None,
@@ -726,12 +726,12 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
             },
         )
         .await?;
-    assert!(saved.output_modality.is_none());
+    assert!(saved.purpose.is_none());
     assert_eq!(saved.targets[0].id, original.targets[0].id);
     assert_eq!(saved.targets[0].model().as_str(), "a/model");
     let mut proposed = route_targets_for_update(&saved);
     proposed
-        .extend(modality_route_input("unused", &provider.id, Text, &[("b/model", true)]).targets);
+        .extend(modality_route_input("unused", &provider.id, Inference, &[("b/model", true)]).targets);
     let error = admin
         .update_model(
             "unconfigured-same-suffix",
@@ -745,10 +745,10 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
     assert!(
         error
             .to_string()
-            .contains("ROUTE_OUTPUT_MODALITY_UNCONFIGURED")
+            .contains("ROUTE_PURPOSE_UNCONFIGURED")
     );
     let persisted = admin.get_model("unconfigured-same-suffix").await?;
-    assert!(persisted.output_modality.is_none());
+    assert!(persisted.purpose.is_none());
     assert_eq!(persisted.targets.len(), 1);
     assert_eq!(persisted.targets[0].id, original.targets[0].id);
     assert_eq!(persisted.targets[0].model().as_str(), "a/model");
@@ -758,7 +758,7 @@ async fn unconfigured_route_rejects_new_same_suffix_target_but_retains_legacy_al
 #[tokio::test]
 async fn historical_route_requires_explicit_modality_and_disabled_image_reference_blocks_text()
 -> anyhow::Result<()> {
-    use crate::db::models::RouteOutputModality::{Image, Text};
+    use crate::db::models::RoutePurpose::{ImageGeneration, Inference};
     let (_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     register_output_model(
@@ -774,12 +774,12 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
         .put(PutRoute {
             id: None,
             model_id: "historical".into(),
-            output_modality: None,
+            purpose: None,
             display_name: Some("Legacy".into()),
             selection_strategy: "traffic_equalization".into(),
             is_enabled: false,
             targets: Some(
-                modality_route_input("unused", &provider.id, Text, &[("dual", true)]).targets,
+                modality_route_input("unused", &provider.id, Inference, &[("dual", true)]).targets,
             ),
             default_thinking_level: None,
             billing: None,
@@ -799,7 +799,7 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
             admin
                 .update_model("historical", update)
                 .await?
-                .output_modality
+                .purpose
                 .is_none()
         );
     }
@@ -818,7 +818,7 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
     assert!(
         error
             .to_string()
-            .contains("ROUTE_OUTPUT_MODALITY_UNCONFIGURED")
+            .contains("ROUTE_PURPOSE_UNCONFIGURED")
     );
     gateway
         .storage
@@ -833,7 +833,7 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
         .update_model(
             "historical",
             UpdateRoute {
-                output_modality: Some(Text),
+                purpose: Some(Inference),
                 ..Default::default()
             },
         )
@@ -844,7 +844,7 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
         .update_model(
             "historical",
             UpdateRoute {
-                output_modality: Some(Image),
+                purpose: Some(ImageGeneration),
                 is_enabled: Some(false),
                 ..Default::default()
             },
@@ -863,12 +863,12 @@ async fn historical_route_requires_explicit_modality_and_disabled_image_referenc
         .update_model(
             "historical",
             UpdateRoute {
-                output_modality: Some(Text),
+                purpose: Some(Inference),
                 ..Default::default()
             },
         )
         .await?;
-    assert_eq!(switched.output_modality, Some(Text));
+    assert_eq!(switched.purpose, Some(Inference));
     assert!(!switched.image_generation_bound);
     Ok(())
 }
@@ -945,36 +945,38 @@ async fn missing_model_modalities_default_to_text_without_overriding_declaration
 }
 
 #[test]
-fn route_creation_requires_an_explicit_supported_output_modality() {
+fn route_creation_requires_an_explicit_supported_purpose() {
     for modality in [
         None,
         Some(json!(null)),
         Some(json!("")),
         Some(json!("audio")),
+        Some(json!("text")),
+        Some(json!("image")),
     ] {
         let mut input = json!({
             "model_id": "client-model",
             "targets": [{"provider_id": "provider", "model": "upstream-model"}]
         });
         if let Some(modality) = modality {
-            input["output_modality"] = modality;
+            input["purpose"] = modality;
         }
         assert!(serde_json::from_value::<CreateRoute>(input).is_err());
     }
 }
 
 #[test]
-fn route_output_modality_updates_reject_null_and_unknown_without_defaulting() {
+fn route_purpose_updates_reject_null_and_unknown_without_defaulting() {
     let omitted = serde_json::from_value::<UpdateRoute>(json!({})).expect("ordinary patch");
-    assert!(omitted.output_modality.is_none());
+    assert!(omitted.purpose.is_none());
     for value in [json!(null), json!(""), json!("audio")] {
-        assert!(serde_json::from_value::<UpdateRoute>(json!({"output_modality":value})).is_err());
+        assert!(serde_json::from_value::<UpdateRoute>(json!({"purpose":value})).is_err());
     }
     assert_eq!(
-        serde_json::from_value::<UpdateRoute>(json!({"output_modality":"image"}))
+        serde_json::from_value::<UpdateRoute>(json!({"purpose":"image_generation"}))
             .expect("explicit modality")
-            .output_modality,
-        Some(crate::db::models::RouteOutputModality::Image)
+            .purpose,
+        Some(crate::db::models::RoutePurpose::ImageGeneration)
     );
 }
 
@@ -982,7 +984,7 @@ fn route_output_modality_updates_reject_null_and_unknown_without_defaulting() {
 fn route_wire_inputs_require_targets_and_reject_legacy_fields() {
     let current = serde_json::from_value::<CreateRoute>(json!({
         "model_id": "client-model",
-        "output_modality": "text",
+        "purpose": "inference",
         "display_name": "Friendly model",
         "targets": [{"provider_id": "provider", "model": "upstream-model"}]
     }));
@@ -1001,8 +1003,8 @@ fn route_wire_inputs_require_targets_and_reject_legacy_fields() {
         .is_err()
     );
 
-    for legacy in ["name", "target_provider", "target_model"] {
-        let mut input = json!({"model_id": "client-model", "targets": []});
+    for legacy in ["name", "target_provider", "target_model", "output_modality"] {
+        let mut input = json!({"model_id": "client-model", "purpose": "inference", "targets": []});
         input[legacy] = json!("legacy");
         assert!(serde_json::from_value::<CreateRoute>(input).is_err());
         let mut update = json!({});
@@ -1112,7 +1114,7 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
     let admin = gateway.admin();
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "default-thinking-route".into(),
             display_name: None,
             balance: None,
@@ -1211,7 +1213,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     };
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "layered-route".into(),
             display_name: None,
             balance: None,
@@ -1238,7 +1240,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     for valid in [-1, 100_001, i32::MIN, i32::MAX] {
         let route = admin
             .create_model(CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: format!("signed-priority-{valid}"),
                 display_name: None,
                 balance: Some("traffic_equalization".into()),
@@ -1252,7 +1254,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
     }
     let invalid_strategy = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "invalid-strategy".into(),
             display_name: None,
             balance: Some("weighted_random".into()),
@@ -1299,7 +1301,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "enabled-and-standby".into(),
             display_name: None,
             balance: None,
@@ -1334,7 +1336,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
 
     let error = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "all-disabled".into(),
             display_name: None,
             balance: None,
@@ -1375,7 +1377,7 @@ async fn listed_routes_project_provider_model_names_for_every_target() -> anyhow
     };
     admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "named-targets".into(),
             display_name: None,
             balance: None,
@@ -1460,7 +1462,7 @@ async fn route_ids_are_compared_exactly_when_binding() -> anyhow::Result<()> {
             .create_model(modality_route_input(
                 route_id,
                 &provider.id,
-                crate::db::models::RouteOutputModality::Text,
+                crate::db::models::RoutePurpose::Inference,
                 &[("upstream-model", true)],
             ))
             .await?;
@@ -1522,7 +1524,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
     // Target model 与清单 ID 仅在最右段与大小写上一致时也能命中
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "glm-4.6".into(),
             display_name: None,
             balance: None,
@@ -1535,8 +1537,8 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
     assert_eq!(route.targets.len(), 1);
     assert_eq!(route.targets[0].model().as_str(), "GLM-4.6");
     assert_eq!(
-        route.targets[0].route_output_modalities,
-        vec![crate::db::models::RouteOutputModality::Text]
+        route.targets[0].route_purposes,
+        vec![crate::db::models::RoutePurpose::Inference]
     );
     // 能力元数据经宽松匹配解析成功
     assert_eq!(route.context_window, Some(131_072));
@@ -1553,7 +1555,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
         .put(PutRoute {
             id: None,
             model_id: "historical-glm".into(),
-            output_modality: None,
+            purpose: None,
             display_name: None,
             selection_strategy: "traffic_equalization".into(),
             is_enabled: true,
@@ -1563,16 +1565,16 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
         })
         .await?;
     let projected = admin.get_model("historical-glm").await?;
-    assert!(projected.targets[0].output_modality_mismatch);
+    assert!(projected.targets[0].purpose_mismatch);
     assert_eq!(
-        projected.targets[0].route_output_modalities,
-        vec![crate::db::models::RouteOutputModality::Text]
+        projected.targets[0].route_purposes,
+        vec![crate::db::models::RoutePurpose::Inference]
     );
     let repaired = admin
         .update_model(
             "historical-glm",
             UpdateRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 ..Default::default()
             },
         )
@@ -1591,7 +1593,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
         retained.thinking_level_map,
         historical.targets[0].thinking_level_map
     );
-    assert!(!retained.output_modality_mismatch);
+    assert!(!retained.purpose_mismatch);
     Ok(())
 }
 
@@ -1622,7 +1624,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
         thinking_level_map: Vec::new(),
     };
     let input = |target: CreateTarget| CreateRoute {
-        output_modality: crate::db::models::RouteOutputModality::Text,
+        purpose: crate::db::models::RoutePurpose::Inference,
         model_id: "gpt-4o-route".into(),
         display_name: None,
         balance: None,
@@ -1658,7 +1660,7 @@ async fn bind_treats_case_variants_of_one_inventory_model_as_a_single_target() -
         .create_model(modality_route_input(
             "cased-route",
             &provider.id,
-            crate::db::models::RouteOutputModality::Text,
+            crate::db::models::RoutePurpose::Inference,
             &[("upstream-model", true)],
         ))
         .await?;
@@ -1692,7 +1694,7 @@ async fn route_get_uses_exact_route_id_and_never_storage_id() -> anyhow::Result<
         .create_model(modality_route_input(
             "ExactRoute",
             &provider.id,
-            crate::db::models::RouteOutputModality::Text,
+            crate::db::models::RoutePurpose::Inference,
             &[("upstream-model", true)],
         ))
         .await?;
@@ -1715,7 +1717,7 @@ async fn target_statuses_use_exact_route_id_and_never_storage_id() -> anyhow::Re
         .create_model(modality_route_input(
             "ExactRoute",
             &provider.id,
-            crate::db::models::RouteOutputModality::Text,
+            crate::db::models::RoutePurpose::Inference,
             &[("upstream-model", true)],
         ))
         .await?;
@@ -1742,7 +1744,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
     let (_data_dir, gateway, provider) = route_fixture().await?;
     let admin = gateway.admin();
     let create = |model_id: &str| CreateRoute {
-        output_modality: crate::db::models::RouteOutputModality::Text,
+        purpose: crate::db::models::RoutePurpose::Inference,
         model_id: model_id.into(),
         display_name: Some("  Shared label  ".into()),
         balance: Some("priority".into()),
@@ -1817,7 +1819,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
         admin
             .get_provider_model(&provider.id, "upstream-model")
             .await?
-            .route_output_modalities
+            .route_purposes
             .is_empty()
     );
     assert!(
@@ -1828,7 +1830,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
             .into_iter()
             .find(|model| model.id == "upstream-model")
             .expect("registered model")
-            .route_output_modalities
+            .route_purposes
             .is_empty()
     );
 
@@ -1843,7 +1845,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
     assert!(error.to_string().contains("not available"));
     let change_error = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "manual-route".into(),
             display_name: None,
             balance: None,
@@ -1875,7 +1877,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
 
     let error = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "missing-model-route".into(),
             display_name: None,
             balance: None,
@@ -1945,7 +1947,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
         .await?;
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "thinking-route".into(),
             display_name: None,
             balance: None,
@@ -2054,7 +2056,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
 
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "max-effort-route".into(),
             display_name: None,
             balance: None,
@@ -2131,7 +2133,7 @@ async fn create_toggle_route(
                 template_id: None,
                 metadata: json!({
                     "id": model,
-                    "capabilities": capabilities,
+                    "capabilities": std::iter::once("infer").chain(capabilities.iter().copied()).collect::<Vec<_>>(),
                     "modalities": {"input": ["text"], "output": ["text"]},
                 }),
             },
@@ -2140,7 +2142,7 @@ async fn create_toggle_route(
 
     admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: model.into(),
             display_name: None,
             balance: None,
@@ -2319,7 +2321,7 @@ async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
     use stravia_runtime_contract::thinking::TargetThinkingControl;
     let error = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "submitted-toggle-route".into(),
             display_name: None,
             balance: None,
@@ -2417,7 +2419,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
 
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "gemini-thinking-route".into(),
             display_name: None,
             balance: None,
@@ -2485,7 +2487,7 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
 
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "union-route".into(),
             display_name: None,
             balance: None,
@@ -2567,7 +2569,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .await?;
     let route = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "toggle-route".into(),
             display_name: None,
             balance: None,

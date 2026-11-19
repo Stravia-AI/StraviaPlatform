@@ -114,12 +114,12 @@ impl MediaHost for GatewayHost {
                 code: error.stable_code().into(),
                 message: error.message(),
             })?;
-        if route.output_modality.is_none() {
+        if route.purpose.is_none() {
             return Err(MediaAuthorizationError {
                 status: 503,
-                code: "route_output_modality_unconfigured".into(),
+                code: "route_purpose_unconfigured".into(),
                 message: format!(
-                    "Route {} has no configured output modality; select and save an output modality to reconfigure this Route",
+                    "Route {} has no configured purpose; select and save a purpose to reconfigure this Route",
                     route.model_id
                 ),
             });
@@ -168,10 +168,10 @@ pub(crate) async fn route_metadata(
             .ok()
             .flatten()
             .map(|record| record.metadata);
-        if let Some(modality) = route.output_modality
+        if let Some(modality) = route.purpose
             && !metadata
                 .as_ref()
-                .is_some_and(|metadata| metadata.supports_route_output_modality(modality))
+                .is_some_and(|metadata| metadata.supports_route_purpose(modality))
         {
             continue;
         }
@@ -187,7 +187,7 @@ pub(crate) async fn route_metadata(
     MediaRoute {
         id: route.id.clone().into(),
         is_enabled: route.is_enabled,
-        text_output: route.output_modality == Some(crate::db::models::RouteOutputModality::Text),
+        text_output: route.purpose == Some(crate::db::models::RoutePurpose::Inference),
         targets,
     }
 }

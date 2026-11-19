@@ -92,6 +92,9 @@ impl RouteSelector {
         cooldown: &CooldownAttempts,
         parent_target: &crate::router::GenerationParentTarget,
     ) -> Result<RouteAttemptPolicy, SelectionError> {
+        if route.purpose == Some(crate::db::models::RoutePurpose::WebSearch) {
+            return Err(SelectionError::NoEligibleTarget);
+        }
         let eligible = self.modality_eligible_targets(route, false).await?;
         let conversation = conversation_identity(request);
         let conversation_affinity_target = match (&conversation, parent_target) {
@@ -214,9 +217,7 @@ impl RouteSelector {
         route: &RouteConfig,
         requires_image: bool,
     ) -> Result<std::collections::HashSet<String>, SelectionError> {
-        let modality = route
-            .output_modality
-            .ok_or(SelectionError::UnconfiguredRoute)?;
+        let purpose = route.purpose.ok_or(SelectionError::UnconfiguredRoute)?;
         let mut eligible = std::collections::HashSet::new();
         for target in route.targets.iter().filter(|target| target.enabled) {
             let model = self
@@ -226,7 +227,7 @@ impl RouteSelector {
                 .await
                 .map_err(SelectionError::SchedulingEvidence)?;
             if model.is_some_and(|model| {
-                model.metadata.supports_route_output_modality(modality)
+                model.metadata.supports_route_purpose(purpose)
                     && (!requires_image
                         || model
                             .metadata
@@ -426,8 +427,8 @@ mod tests {
 
     fn target(provider: &str, priority: i32) -> TargetConfig {
         TargetConfig {
-            output_modality_mismatch: false,
-            route_output_modalities: Vec::new(),
+            purpose_mismatch: false,
+            route_purposes: Vec::new(),
             id: format!("target-{provider}").into(),
             model_id: "route".into(),
             destination: crate::db::identity::TargetDestination::Model {
@@ -447,8 +448,9 @@ mod tests {
 
     fn route(targets: Vec<TargetConfig>) -> RouteConfig {
         RouteConfig {
-            output_modality: Some(crate::db::models::RouteOutputModality::Text),
+            purpose: Some(crate::db::models::RoutePurpose::Inference),
             image_generation_bound: false,
+            web_search_bound: false,
             id: "route-id".into(),
             model_id: "route".into(),
             display_name: None,

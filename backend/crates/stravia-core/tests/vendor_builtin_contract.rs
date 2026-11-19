@@ -243,7 +243,7 @@ async fn provider_route_and_key(
     let route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             model_id: format!("{name}-route"),
             display_name: None,
             balance: None,
@@ -2924,7 +2924,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
     let route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             model_id: "devin-contract-route".into(),
             display_name: None,
             balance: None,

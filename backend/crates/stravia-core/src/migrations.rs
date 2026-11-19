@@ -127,10 +127,11 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 重建表及其数据转换（2、7、8、12、24、32、33）仍需 FK-off 和完整审计。
     // 52 只重建没有入站外键的 vendor_plugins，其余为新表，FK 保持开启即可。
     // 56 仅增加可空 cursor 元数据列，不回填数据，也不改动外键。
+    // 57 修改 Route 列并克隆受引用的配置，始终保持外键约束开启。
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55 | 56
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55..=57
     ) {
         return false;
     }
@@ -829,6 +830,157 @@ mod tests {
             ));
         }
         Migrator::with_migrations(migrations)
+    }
+
+    const ROUTE_PURPOSE_FIXTURE: &str = r#"
+        INSERT INTO providers(id,name,protocol,base_url,api_key) VALUES ('p','Provider','openai','https://example.invalid','key');
+        INSERT INTO models(id,model_id,output_modality) VALUES
+            ('route','public','text'), ('collision','public-web-search','image'), ('unknown','unknown',NULL);
+        INSERT INTO settings(name,value) VALUES ('web_search_config',
+            '{"enabled":false,"revision":7,"backend":{"kind":"external","route_id":"public"},"max_turns":4,"extra":"kept"}');
+        INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json) VALUES
+            ('p','text-model','manual','present','{"modalities":{"output":["text"]}}'),
+            ('p','image-model','manual','present','{"modalities":{"output":["image"]}}'),
+            ('p','vendor/Alias','manual','present','{"modalities":{"output":["text"]}}'),
+            ('p','a/ambiguous','manual','present','{"modalities":{"output":["text"]}}'),
+            ('p','b/ambiguous','manual','present','{"modalities":{"output":["text"]}}');
+        INSERT INTO model_backends(id,model_id,provider_id,model) VALUES
+            ('t1','route','p','text-model'), ('t2','route','p','image-model'),
+            ('t3','route','p','other/ALIAS'), ('t4','route','p','ambiguous'),
+            ('t5','route','p','missing'), ('t6','route','p','text-model');
+        UPDATE model_backends SET enabled = false WHERE id = 't6';
+        INSERT INTO model_backends(id,model_id,provider_id,model)
+            VALUES ('web-search-target:7431:0','collision','p','text-model');
+    "#;
+
+    macro_rules! assert_route_purpose_upgrade {
+        ($pool:expr) => {{
+            let config: String = sqlx::query_scalar("SELECT value FROM settings WHERE name='web_search_config'")
+                .fetch_one(&$pool).await.unwrap();
+            let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+            assert_eq!(config["backend"]["route_id"], "public-web-search-1");
+            assert_eq!(config["enabled"], false);
+            assert_eq!(config["revision"], 7);
+            assert_eq!(config["extra"], "kept");
+            let routes: Vec<(String, Option<String>)> = sqlx::query_as(
+                "SELECT model_id, purpose FROM models ORDER BY model_id")
+                .fetch_all(&$pool).await.unwrap();
+            assert_eq!(routes, vec![
+                ("public".into(), Some("inference".into())),
+                ("public-web-search".into(), Some("image_generation".into())),
+                ("public-web-search-1".into(), Some("web_search".into())),
+                ("unknown".into(), None),
+            ]);
+            let targets: Vec<(String, i32)> = sqlx::query_as(
+                "SELECT t.model, CAST(CASE WHEN t.enabled THEN 1 ELSE 0 END AS INTEGER) FROM model_backends t JOIN models m ON m.id=t.model_id WHERE m.model_id='public-web-search-1' ORDER BY t.model, t.enabled")
+                .fetch_all(&$pool).await.unwrap();
+            assert_eq!(targets, vec![("ambiguous".into(), 0), ("image-model".into(), 0),
+                ("missing".into(), 0), ("other/ALIAS".into(), 1),
+                ("text-model".into(), 0), ("text-model".into(), 1)]);
+            let originals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_backends WHERE model_id='route'")
+                .fetch_one(&$pool).await.unwrap();
+            assert_eq!(originals, 6);
+            let collision_copy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_backends WHERE id='web-search-target:7431:1'")
+                .fetch_one(&$pool).await.unwrap();
+            assert_eq!(collision_copy, 1);
+            assert!(sqlx::query("UPDATE models SET purpose='text' WHERE id='route'")
+                .execute(&$pool).await.is_err());
+            assert!(sqlx::query("SELECT output_modality FROM models")
+                .execute(&$pool).await.is_err());
+        }};
+    }
+
+    #[tokio::test]
+    async fn sqlite_route_purpose_upgrade_preserves_search_binding_and_eligibility() {
+        let pool = sqlite_pool().await;
+        let prefix = Migrator::with_migrations(SQLITE_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
+        super::run_sqlite_migrator(&pool, &prefix, None).await.unwrap();
+        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE).execute(&pool).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
+        assert_route_purpose_upgrade!(pool);
+        migrate_sqlite(&pool, None).await.unwrap();
+        assert_route_purpose_upgrade!(pool);
+    }
+
+    #[tokio::test]
+    async fn postgres_route_purpose_upgrade_preserves_search_binding_and_eligibility_when_configured() {
+        let Some(url) = std::env::var("DB_URL").ok().or_else(|| std::env::var("DATABASE_URL").ok()) else { return; };
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("route_purpose_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())])).await.unwrap();
+        let prefix = Migrator::with_migrations(super::POSTGRES_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
+        super::run_postgres_migrator(&pool, &prefix, None).await.unwrap();
+        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE).execute(&pool).await.unwrap();
+        migrate_postgres(&pool, None).await.unwrap();
+        assert_route_purpose_upgrade!(pool);
+        migrate_postgres(&pool, None).await.unwrap();
+        assert_route_purpose_upgrade!(pool);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
+    }
+
+    macro_rules! assert_unresolved_route_binding {
+        ($pool:expr) => {{
+            let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE name='web_search_config'")
+                .fetch_one(&$pool).await.unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&value).unwrap()["backend"]["route_id"], "missing-route");
+            let routes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models").fetch_one(&$pool).await.unwrap();
+            assert_eq!(routes, 1);
+        }};
+    }
+
+    #[tokio::test]
+    async fn sqlite_route_purpose_failure_rolls_back_and_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        let prefix = Migrator::with_migrations(SQLITE_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
+        super::run_sqlite_migrator(&pool, &prefix, None).await.unwrap();
+        sqlx::raw_sql(ROUTE_PURPOSE_FIXTURE).execute(&pool).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER reject_search_copy BEFORE INSERT ON model_backends WHEN NEW.id LIKE 'web-search-target:%' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
+            .execute(&pool).await.unwrap();
+        assert!(migrate_sqlite(&pool, None).await.is_err());
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(version, 56);
+        let old: String = sqlx::query_scalar("SELECT output_modality FROM models WHERE id='route'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(old, "text");
+        sqlx::query("DROP TRIGGER reject_search_copy").execute(&pool).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
+        assert_route_purpose_upgrade!(pool);
+    }
+
+    #[tokio::test]
+    async fn sqlite_route_purpose_keeps_unresolved_binding() {
+        let pool = sqlite_pool().await;
+        let prefix = Migrator::with_migrations(SQLITE_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
+        super::run_sqlite_migrator(&pool, &prefix, None).await.unwrap();
+        sqlx::raw_sql("INSERT INTO models(id,model_id,output_modality) VALUES ('r','public','image'); INSERT INTO settings(name,value) VALUES ('web_search_config','{\"enabled\":true,\"backend\":{\"kind\":\"external\",\"route_id\":\"missing-route\"}}');")
+            .execute(&pool).await.unwrap();
+        migrate_sqlite(&pool, None).await.unwrap();
+        assert_unresolved_route_binding!(pool);
+    }
+
+    #[tokio::test]
+    async fn postgres_route_purpose_keeps_unresolved_binding_when_configured() {
+        let Some(url) = std::env::var("DB_URL").ok().or_else(|| std::env::var("DATABASE_URL").ok()) else { return; };
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("route_purpose_missing_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2)
+            .connect_with(options.options([("search_path", schema.as_str())])).await.unwrap();
+        let prefix = Migrator::with_migrations(super::POSTGRES_MIGRATOR.iter().filter(|m| m.version <= 56).cloned().collect());
+        super::run_postgres_migrator(&pool, &prefix, None).await.unwrap();
+        sqlx::raw_sql("INSERT INTO models(id,model_id,output_modality) VALUES ('r','public','image'); INSERT INTO settings(name,value) VALUES ('web_search_config','{\"enabled\":true,\"backend\":{\"kind\":\"external\",\"route_id\":\"missing-route\"}}');")
+            .execute(&pool).await.unwrap();
+        migrate_postgres(&pool, None).await.unwrap();
+        assert_unresolved_route_binding!(pool);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
     }
 
     async fn sqlite_pool() -> sqlx::SqlitePool {

@@ -137,7 +137,7 @@ def _create_connection(
         "/api/v1/models",
         {
             "model_id": model_id,
-            "output_modality": "text",
+            "purpose": "inference",
             "display_name": f"{name} route",
             "targets": [{"provider_id": provider_id, "model": "fixture-model"}],
         },

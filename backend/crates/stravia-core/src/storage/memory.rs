@@ -818,7 +818,7 @@ impl RouteStore for MemoryStorage {
                 .context("Route not found for update")?;
             route.model_id = input.model_id;
             route.display_name = input.display_name;
-            route.output_modality = input.output_modality;
+            route.purpose = input.purpose;
             route.image_generation_bound = false;
             route.balance = input.selection_strategy;
             route.is_enabled = input.is_enabled;
@@ -872,8 +872,8 @@ impl RouteStore for MemoryStorage {
                         .unwrap_or_else(now_rfc3339),
                     thinking_level_map: target.thinking_level_map,
                     model_name: None,
-                    output_modality_mismatch: false,
-                    route_output_modalities: Vec::new(),
+                    purpose_mismatch: false,
+                    route_purposes: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();
@@ -881,8 +881,9 @@ impl RouteStore for MemoryStorage {
             id: storage_id.clone().into(),
             model_id: input.model_id,
             display_name: input.display_name,
-            output_modality: input.output_modality,
+            purpose: input.purpose,
             image_generation_bound: false,
+            web_search_bound: false,
             balance: input.selection_strategy,
             is_enabled: input.is_enabled,
             created_at,
@@ -1934,7 +1935,7 @@ mod tests {
         let storage = MemoryStorage::new(Vec::new(), Vec::new(), Vec::new());
         let route = storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "CaseRoute".into(),
                 display_name: None,
@@ -1971,7 +1972,7 @@ mod tests {
 
         let renamed = storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: Some(route.id.clone()),
                 model_id: route.model_id.clone(),
                 display_name: Some("Friendly".into()),
@@ -1989,7 +1990,7 @@ mod tests {
         let surviving_created_at = route.targets[1].created_at.clone();
         let updated = storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: Some(route.id),
                 model_id: "CaseRoute".into(),
                 display_name: None,
@@ -2013,7 +2014,7 @@ mod tests {
             MemoryStorage::new(vec![provider("p1"), provider("p2")], Vec::new(), Vec::new());
         storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "empty-after-delete".into(),
                 display_name: None,
@@ -2027,7 +2028,7 @@ mod tests {
             .expect("put disposable Route");
         storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "survives-delete".into(),
                 display_name: None,
@@ -2765,7 +2766,7 @@ mod tests {
         );
         let route = storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "r1".into(),
                 display_name: None,
@@ -2795,7 +2796,7 @@ mod tests {
         // 禁用 Route 的关联 Target 同样刷新，但不进入 active_routes。
         let disabled_route = storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "r2".into(),
                 display_name: None,
@@ -2981,7 +2982,7 @@ mod tests {
             .expect("insert model");
         storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "r1".into(),
                 display_name: None,
@@ -3071,7 +3072,7 @@ mod tests {
             .expect("insert model");
         storage
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "r1".into(),
                 display_name: None,

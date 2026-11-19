@@ -594,7 +594,7 @@ async fn main() -> anyhow::Result<()> {
     let route = admin
         .create_model(CreateRoute {
             model_id: format!("{backend}-model"),
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             display_name: Some(format!("{backend} Model")),
             balance: None,
             targets: vec![CreateTarget {
@@ -733,7 +733,7 @@ async fn main() -> anyhow::Result<()> {
         .put(PutRoute {
             id: Some(route.id.clone()),
             model_id: route.model_id.clone(),
-            output_modality: route.output_modality,
+            purpose: route.purpose,
             display_name: updated.display_name.clone(),
             selection_strategy: "latency_preference".to_string(),
             is_enabled: false,

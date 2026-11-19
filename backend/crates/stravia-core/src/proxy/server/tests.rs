@@ -195,7 +195,7 @@ async fn protected_responses_router_with_base_url(
         .expect("Provider Model");
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "auth-model".into(),
             display_name: None,
             balance: None,

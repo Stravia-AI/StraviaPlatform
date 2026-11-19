@@ -7,20 +7,24 @@ import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import CheckIcon from '@lucide/svelte/icons/check'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
 import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
+import ImageIcon from '@lucide/svelte/icons/image'
+import MessageSquareIcon from '@lucide/svelte/icons/message-square'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
+import SearchIcon from '@lucide/svelte/icons/search'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
-import { admin, currencyQueryOptions } from '#lib/admin-client.js'
+import { admin, currencyQueryOptions, invalidateRouteCatalogs } from '#lib/admin-client.js'
 import { modelIdFromCatalogId } from '#lib/catalog-model-id.js'
-import { localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
+import { isRouteBindingError, localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
 import { startDragAutoscroll } from '#lib/drag-autoscroll.js'
 import { beginTouchDrag, touchDragInProgress } from '#lib/touch-drag.js'
 import { idNameOption, type SearchComboboxOption } from '#lib/search-combobox-option.js'
 import { formatList } from '#lib/format.js'
 import { currencyForKind } from '#lib/money.js'
-import { specificationModality } from '#lib/model-specification.js'
+import { routePurposeLabels } from '#lib/logical-model.js'
+import { routePurposes, type RoutePurpose } from '#lib/types.js'
 import { inputValue } from '#lib/utils.js'
 import PriceEditor from '#lib/components/price-editor.svelte'
 import { buildModelCostJson, emptyPriceForm, priceFormFromCost, type PriceForm } from '#lib/components/price-form.js'
@@ -92,11 +96,12 @@ const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'hig
 const UNSPECIFIED_THINKING_LEVEL = 'unspecified'
 
 let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: Props = $props()
+const purposeIcons = { inference: MessageSquareIcon, image_generation: ImageIcon, web_search: SearchIcon }
 const initialModel = untrack(() => model)
 const queryClient = useQueryClient()
 let form = $state({
   modelId: initialModel?.model_id ?? '',
-  outputModality: initialModel ? (initialModel.output_modality ?? null) : 'text',
+  purpose: initialModel ? initialModel.purpose : 'inference',
   displayName: initialModel?.display_name ?? '',
   balance: initialModel?.balance ?? 'traffic_equalization',
   enabled: initialModel?.is_enabled ?? true,
@@ -276,13 +281,12 @@ $effect(() => {
 })
 
 function modelCandidates(target: RouteTargetForm): ProviderModelSummary[] {
-  return target.inventory.filter(
-    (item) => form.outputModality !== null && item.route_output_modalities?.includes(form.outputModality),
-  )
+  const purpose = form.purpose
+  return purpose ? target.inventory.filter((item) => item.route_purposes?.includes(purpose)) : []
 }
 
-function targetModalityMismatch(target: RouteTargetForm): boolean {
-  if (!form.outputModality || !target.model) return false
+function targetPurposeMismatch(target: RouteTargetForm): boolean {
+  if (!form.purpose || !target.model) return false
   const savedTarget = initialModel?.targets.find(
     (item) =>
       target.persisted &&
@@ -291,16 +295,20 @@ function targetModalityMismatch(target: RouteTargetForm): boolean {
       item.model === target.model,
   )
   if (savedTarget) {
-    return !savedTarget.route_output_modalities.includes(form.outputModality)
+    return !savedTarget.route_purposes.includes(form.purpose)
   }
   if (target.loading) return false
   const summary = selectedSummary(target)
-  if (summary) return !summary.route_output_modalities?.includes(form.outputModality)
+  if (summary) return !summary.route_purposes?.includes(form.purpose)
   return false
 }
 
-const modalityBlockers = $derived(targets.filter(targetModalityMismatch))
-const imageBindingBlocksSwitch = $derived(Boolean(model?.image_generation_bound && form.outputModality === 'text'))
+const purposeBlockers = $derived(targets.filter(targetPurposeMismatch))
+const bindingBlocker = $derived.by(() => {
+  if (!form.purpose || form.purpose === model?.purpose) return
+  if (model?.image_generation_bound && form.purpose !== 'image_generation') return 'image_generation'
+  if (model?.web_search_bound && form.purpose !== 'web_search') return 'web_search'
+})
 
 function selectedSummary(target: RouteTargetForm): ProviderModelSummary | undefined {
   return target.inventory.find((item) => item.id === target.model)
@@ -784,18 +792,21 @@ async function saveModel(): Promise<void> {
     }
     billing = { mode: 'per_token', price: result.value }
   }
-  if (!form.outputModality) {
-    saveError = m.route_output_reconfigure()
+  if (!form.purpose) {
+    saveError = m.route_purpose_reconfigure()
     return
   }
-  if (imageBindingBlocksSwitch) {
-    saveError = m.route_output_unlink_first()
+  if (bindingBlocker) {
+    saveError =
+      bindingBlocker === 'image_generation'
+        ? m.backend_error_route_image_generation_bound()
+        : m.backend_error_route_web_search_bound()
     return
   }
-  const modalityChanged = initialModel?.output_modality !== form.outputModality
-  if (modalityChanged && modalityBlockers.length > 0) {
-    saveError = `${m.route_output_blockers()} ${formatList(
-      modalityBlockers.map((target) => `${targetProviderLabel(target)} · ${target.model}`),
+  const purposeChanged = initialModel?.purpose !== form.purpose
+  if (purposeChanged && purposeBlockers.length > 0) {
+    saveError = `${m.route_purpose_blockers()} ${formatList(
+      purposeBlockers.map((target) => `${targetProviderLabel(target)} · ${target.model}`),
     )}`
     toast.error(saveError)
     return
@@ -840,7 +851,7 @@ async function saveModel(): Promise<void> {
 
     const input = {
       model_id: form.modelId.trim(),
-      output_modality: form.outputModality,
+      purpose: form.purpose,
       display_name: form.displayName.trim() || null,
       balance: form.balance,
       default_thinking_level:
@@ -851,7 +862,7 @@ async function saveModel(): Promise<void> {
     if (initialModel) {
       await admin.models.update(initialModel.model_id, {
         ...input,
-        ...(modalityChanged ? {} : { output_modality: undefined }),
+        ...(purposeChanged ? {} : { purpose: undefined }),
         is_enabled: form.enabled,
         ...(targetsChanged ? { targets: cleanTargets! } : {}),
       })
@@ -861,7 +872,7 @@ async function saveModel(): Promise<void> {
         try {
           await admin.models.update(created.model_id, { is_enabled: false })
         } catch {
-          await queryClient.invalidateQueries({ queryKey: ['models'] })
+          await invalidateRouteCatalogs(queryClient)
           toast.error(m.model_editor_model_was_added_but_not_disabled_review_status())
           savedDraft = draftSnapshot()
           await tick()
@@ -871,7 +882,7 @@ async function saveModel(): Promise<void> {
       }
     }
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['models'] }),
+      invalidateRouteCatalogs(queryClient),
       queryClient.invalidateQueries({ queryKey: ['api-keys'] }),
       queryClient.invalidateQueries({ queryKey: ['providers'] }),
     ])
@@ -882,7 +893,10 @@ async function saveModel(): Promise<void> {
     if (!onSaved) await goto(resolve('models'))
   } catch (error) {
     saveError = localizeBackendErrorMessage(error)
-    toast.error(localizeBackendErrorMessage(error))
+    toast.error(saveError)
+    if (initialModel && isRouteBindingError(error)) {
+      void queryClient.invalidateQueries({ queryKey: ['models', initialModel.model_id] })
+    }
     const failed = unrepresentableThinkingTarget(error)
     const target = failed
       ? targets.find((candidate) => candidate.providerId === failed.providerId && candidate.model === failed.modelId)
@@ -967,7 +981,7 @@ async function saveModel(): Promise<void> {
           <Field.Help hint={m.model_editor_set_model_name_request_type_client_apps_use()} />
         </div>
       </div>
-      <!-- 设置列够宽（≥42rem）时两两并排：Model ID｜显示名称、输出类型｜请求发送方式；开关行独占一行。 -->
+      <!-- 设置列够宽（≥42rem）时两两并排：Model ID｜显示名称、用途｜请求发送方式；开关行独占一行。 -->
       <Field.Group class="@2xl/model-contract:grid @2xl/model-contract:grid-cols-2 @2xl/model-contract:gap-x-6">
         <SettingRow title={m.common_enable_action()} layout="inline" class="py-0 @2xl/model-contract:col-span-2">
           {#snippet children({ titleId })}
@@ -1005,33 +1019,31 @@ async function saveModel(): Promise<void> {
             placeholder={m.model_editor_model_name_placeholder()} />
         </Field.Field>
         <Field.Field size="setting">
-          <Field.Label for="route-output-modality">{m.route_output_label()}</Field.Label>
+          <Field.Label for="route-purpose">{m.route_purpose_label()}</Field.Label>
           <Select.Root
             type="single"
             bind:value={
-              () => form.outputModality ?? undefined,
-              (value: Route['output_modality'] | undefined) => (form.outputModality = value ?? null)
+              () => form.purpose ?? undefined,
+              (value: RoutePurpose | undefined) => (form.purpose = value ?? null)
             }>
-            <Select.Trigger id="route-output-modality" class="w-full" aria-label={m.route_output_label()}>
-              {#if form.outputModality}
-                {@const modality = specificationModality(form.outputModality)}
+            <Select.Trigger id="route-purpose" class="w-full" aria-label={m.route_purpose_label()}>
+              {#if form.purpose}
+                {@const Icon = purposeIcons[form.purpose]}
                 <span class="flex min-w-0 items-center gap-2">
-                  <modality.icon class="text-muted-foreground" aria-hidden="true" />
-                  {modality.label()}
+                  <Icon class="text-muted-foreground" aria-hidden="true" />
+                  {routePurposeLabels[form.purpose]()}
                 </span>
               {:else}
-                {m.route_output_placeholder()}
+                {m.route_purpose_placeholder()}
               {/if}
             </Select.Trigger>
             <Select.Content>
               <Select.Group>
-                {#each ['text', 'image'] as value (value)}
-                  {@const modality = specificationModality(value)}
-                  <Select.Item
-                    {value}
-                    label={modality.label()}
-                    class="pr-1.5 [&_.cn-select-item-indicator-icon]:hidden">
-                    <modality.icon class="text-muted-foreground" aria-hidden="true" />{modality.label()}
+                {#each routePurposes as value (value)}
+                  {@const Icon = purposeIcons[value]}
+                  {@const label = routePurposeLabels[value]()}
+                  <Select.Item {value} {label} class="pr-1.5 [&_.cn-select-item-indicator-icon]:hidden">
+                    <Icon class="text-muted-foreground" aria-hidden="true" />{label}
                   </Select.Item>
                 {/each}
               </Select.Group>
@@ -1055,14 +1067,18 @@ async function saveModel(): Promise<void> {
           </Select.Root>
         </Field.Field>
       </Field.Group>
-      {#if initialModel && !initialModel.output_modality}
-        <p class="mt-3 text-sm text-warning" role="status">{m.route_output_reconfigure()}</p>
+      {#if initialModel && !initialModel.purpose}
+        <p class="mt-3 text-sm text-warning" role="status">{m.route_purpose_reconfigure()}</p>
       {/if}
-      {#if imageBindingBlocksSwitch}
+      {#if bindingBlocker}
         <p class="mt-3 text-sm text-warning" role="status">
-          {m.route_output_unlink_first()}
-
-          <a class="underline underline-offset-2" href={resolve('media-generation')}>{m.route_output_open_media()}</a>
+          {#if bindingBlocker === 'image_generation'}
+            {m.backend_error_route_image_generation_bound()}
+            <a class="underline underline-offset-2" href={resolve('media-generation')}>{m.route_purpose_open_media()}</a>
+          {:else}
+            {m.backend_error_route_web_search_bound()}
+            <a class="underline underline-offset-2" href={resolve('web-search')}>{m.route_purpose_open_search()}</a>
+          {/if}
         </p>
       {/if}
       {#if saveError}<p class="mt-3 text-sm text-destructive" role="alert">{saveError}</p>{/if}
@@ -1277,11 +1293,11 @@ async function saveModel(): Promise<void> {
                             <div
                               class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
                               {@render targetIdentity(target, summary)}
-                              {#if targetModalityMismatch(target)}
+                              {#if targetPurposeMismatch(target)}
                                 <StatusIndicator
                                   compact
                                   class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                                  label={m.route_output_mismatch()}
+                                  label={m.route_purpose_mismatch()}
                                   tone="error" />
                               {:else if status}
                                 <StatusIndicator
@@ -1378,11 +1394,11 @@ async function saveModel(): Promise<void> {
                       <div
                         class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
                         {@render targetIdentity(target, summary)}
-                        {#if targetModalityMismatch(target)}
+                        {#if targetPurposeMismatch(target)}
                           <StatusIndicator
                             compact
                             class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                            label={m.route_output_mismatch()}
+                            label={m.route_purpose_mismatch()}
                             tone="error" />
                         {/if}
                       </div>
@@ -1482,17 +1498,24 @@ async function saveModel(): Promise<void> {
                     <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}
                       >{m.model_editor_choose_synced_model()}</Button>
                   {:else}
+                    {@const candidates = modelCandidates(target)}
                     <SearchCombobox
                       id={`target-model-${target.key}`}
                       value={target.model}
-                      options={modelCandidates(target).map(idNameOption)}
+                      options={candidates.map(idNameOption)}
                       placeholder={m.model_editor_choose_model()}
                       emptyText={m.common_no_matching_models()}
                       ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
-                      disabled={!target.providerId || target.loading}
+                      disabled={!target.providerId || target.loading || candidates.length === 0}
                       onValueChange={(value: string) => void selectModel(target, value)} />
-                    {#if target.providerId && !target.loading && modelCandidates(target).length === 0}
-                      <p class="text-sm text-warning" role="status">{m.route_output_no_candidates()}</p>
+                    {#if target.providerId && !target.loading && !target.validationError && candidates.length === 0}
+                      <p class="text-sm text-warning" role="status">
+                        {form.purpose ? m.route_purpose_no_candidates() : m.route_purpose_placeholder()}
+                      </p>
+                    {:else if form.purpose && candidates.length > 0 && candidates.length < target.inventory.length}
+                      <Field.Description>
+                        {m.route_purpose_candidates_filtered({ purpose: routePurposeLabels[form.purpose]() })}
+                      </Field.Description>
                     {/if}
                   {/if}
                 </Field.Field>

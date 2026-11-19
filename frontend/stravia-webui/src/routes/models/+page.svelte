@@ -8,10 +8,10 @@ import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import SearchIcon from '@lucide/svelte/icons/search'
 import { toast } from 'svelte-sonner'
-import { admin } from '#lib/admin-client.js'
+import { admin, invalidateRouteCatalogs } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
-import { effectiveModelDisplayName, sortLogicalModels } from '#lib/logical-model.js'
+import { effectiveModelDisplayName, routePurposeLabels, sortLogicalModels } from '#lib/logical-model.js'
 import { formatSpecificationTokens } from '#lib/model-specification.js'
 
 import {
@@ -142,10 +142,8 @@ const modelColumns = modelColumnHelper.columns([
   }),
 ])
 
-function outputLabel(model: Route): string {
-  if (model.output_modality === 'image') return m.route_output_image()
-  if (model.output_modality === 'text') return m.route_output_text()
-  return m.route_output_reconfigure()
+function purposeLabel(model: Route): string {
+  return model.purpose ? routePurposeLabels[model.purpose]() : m.route_purpose_missing()
 }
 
 function modelSearchText(model: Route): string {
@@ -154,8 +152,8 @@ function modelSearchText(model: Route): string {
     model.model_id,
     model.id,
     model.is_enabled ? m.common_enabled_status() : m.common_disabled_status(),
-    model.output_modality,
-    outputLabel(model),
+    model.purpose,
+    purposeLabel(model),
   ]
   for (const target of model.targets) {
     fields.push(target.model, target.model_name ?? '', target.provider_id, providerNames.get(target.provider_id) ?? '')
@@ -183,8 +181,8 @@ const deleteApiKeyReferences = $derived(
 const deletesWebSearchRoute = $derived(
   Boolean(
     deleteTarget &&
-    webSearchQuery.data?.backend?.kind === 'local' &&
-    webSearchQuery.data.backend.model_id === deleteTarget.id,
+    (deleteTarget.web_search_bound ||
+      (webSearchQuery.data?.backend?.kind === 'local' && webSearchQuery.data.backend.model_id === deleteTarget.id)),
   ),
 )
 const deletesImageUnderstandingRoute = $derived(
@@ -216,7 +214,7 @@ async function toggleModel(model: Route): Promise<void> {
   actingModelId = model.id
   try {
     await admin.models.update(model.model_id, { is_enabled: !model.is_enabled })
-    await queryClient.invalidateQueries({ queryKey: ['models'] })
+    await invalidateRouteCatalogs(queryClient)
   } catch (error) {
     toast.error(localizeBackendErrorMessage(error))
   } finally {
@@ -230,7 +228,7 @@ async function deleteModel(): Promise<void> {
   try {
     await admin.models.delete(deleteTarget.model_id)
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['models'] }),
+      invalidateRouteCatalogs(queryClient),
       queryClient.invalidateQueries({ queryKey: ['api-keys'] }),
       queryClient.invalidateQueries({ queryKey: ['web-search-config'] }),
       queryClient.invalidateQueries({ queryKey: ['media-understanding-config'] }),
@@ -284,15 +282,15 @@ async function deleteModel(): Promise<void> {
 
 {#snippet modelDisplayNameCell(context: DataTableCellContext<Route>)}
   <span class="block truncate font-medium">{effectiveModelDisplayName(context.row.original)}</span>
-  {@render outputState(context.row.original)}
+  {@render purposeState(context.row.original)}
 {/snippet}
 
-{#snippet outputState(model: Route)}
-  <span class={['block text-xs', !model.output_modality && 'text-warning']}>
-    {outputLabel(model)}
+{#snippet purposeState(model: Route)}
+  <span class={['block text-xs', !model.purpose && 'text-warning']}>
+    {purposeLabel(model)}
   </span>
-  {#if model.targets.some((target) => target.output_modality_mismatch)}
-    <span class="block text-xs text-warning">{m.route_output_mismatch()}</span>
+  {#if model.targets.some((target) => target.purpose_mismatch)}
+    <span class="block text-xs text-warning">{m.route_purpose_mismatch()}</span>
   {/if}
 {/snippet}
 
@@ -416,7 +414,7 @@ async function deleteModel(): Promise<void> {
                 >{effectiveModelDisplayName(model)}</a>
 
               <TechnicalValue value={model.model_id} copyable />
-              {@render outputState(model)}
+              {@render purposeState(model)}
               <p class="mt-1 text-xs text-muted-foreground">
                 {m.model_specification_context()}:
                 <span class="font-technical tabular-nums">

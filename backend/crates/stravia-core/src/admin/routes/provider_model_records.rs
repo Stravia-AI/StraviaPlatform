@@ -204,7 +204,8 @@ impl RouteModule<'_> {
         &self,
         provider_id: &str,
     ) -> anyhow::Result<ProviderModelList> {
-        self.get_provider(provider_id).await?;
+        let provider = self.get_provider(provider_id).await?;
+        let search_channel = provider_supports_web_search(self.gw, &provider);
         let mut models: Vec<_> = self
             .gw
             .storage
@@ -212,7 +213,7 @@ impl RouteModule<'_> {
             .list_for_provider(provider_id)
             .await?
             .iter()
-            .map(ProviderModelSummary::from)
+            .map(|record| ProviderModelSummary::from_record(record, search_channel))
             .collect();
         models.sort_by(|left, right| {
             left.name
@@ -236,7 +237,7 @@ impl RouteModule<'_> {
             .provider_models()
             .get(provider_id, &model_id)
             .await?
-            .map(ProviderModelDetail::from)
+            .map(|record| ProviderModelDetail::from_record(record, provider_supports_web_search(self.gw, &provider)))
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
         super::thinking_map::hide_unwritable_generated_controls(
             self.gw,
@@ -613,7 +614,7 @@ impl RouteModule<'_> {
                     models: active_routes,
                 };
                 self.gw.route_policy_state.clear_pricing();
-                ProviderModelDetail::from(*model)
+                ProviderModelDetail::from_record(*model, provider_supports_web_search(self.gw, &provider))
             }
             ProviderModelRestore::NotFound => {
                 return Err(provider_model_not_found(provider_id, &model_id));
@@ -1419,7 +1420,7 @@ fn apply_provider_model_mutation(
             // The write committed: drop this Gateway's cached prices before
             // returning so the next selection sees the new values.
             gw.route_policy_state.clear_pricing();
-            let mut detail = ProviderModelDetail::from(*model);
+            let mut detail = ProviderModelDetail::from_record(*model, provider_supports_web_search(gw, provider));
             super::thinking_map::hide_unwritable_generated_controls(
                 gw,
                 provider,

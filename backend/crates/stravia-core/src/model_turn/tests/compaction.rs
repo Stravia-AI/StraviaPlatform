@@ -204,7 +204,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
     let route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "compact-codex".into(),
             display_name: None,
             balance: None,

@@ -199,7 +199,7 @@ def provision(session, port, suffix):
         }, 201)
         targets.append({"provider_id": provider["id"], "model": "native-model", "enabled": True, "priority": index, "target_retry_budget": 0})
     model = "history-" + suffix
-    route = admin(session, "POST", "/api/v1/models", {"model_id": model, "output_modality": "text", "targets": targets})
+    route = admin(session, "POST", "/api/v1/models", {"model_id": model, "purpose": "inference", "targets": targets})
     key = admin(session, "POST", "/api/v1/api-keys", {"name": model, "model_ids": [route["id"]]})["key"]
     return model, route["id"], key
 

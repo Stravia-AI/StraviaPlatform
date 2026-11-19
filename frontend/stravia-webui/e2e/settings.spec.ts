@@ -647,6 +647,17 @@ test('unconfigured web search defaults to External Route without enabling search
   await page.getByRole('button', { name: 'Edit search method', exact: true }).click()
   await expect(sheet.locator('#search-backend')).toHaveText('External Route')
   await expect(sheet.locator('#search-external-route')).toHaveValue('External search')
+  await sheet.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await enable.click()
+  await expect(enable).toBeChecked()
+  await page.getByRole('button', { name: 'Edit search method', exact: true }).click()
+  await sheet.getByRole('button', { name: 'Unlink external route', exact: true }).click()
+  await expect(sheet.getByText('Saving will unlink this route and turn off web search.')).toBeVisible()
+  await sheet.getByRole('button', { name: 'Save search method', exact: true }).click()
+  await expect(sheet).toHaveCount(0)
+  expect(searchSaves.at(-1)).toMatchObject({ enabled: false, backend: { kind: 'external', route_id: null } })
+  await expect(enable).not.toBeChecked()
+  await expect(enable).toBeDisabled()
 })
 
 test('advanced features keep separate media and web search surfaces', async ({ page }) => {

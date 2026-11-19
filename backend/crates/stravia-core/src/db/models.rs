@@ -294,16 +294,20 @@ pub struct UpsertOAuthCredential {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
-pub enum RouteOutputModality {
-    Text,
-    Image,
+pub enum RoutePurpose {
+    Inference,
+    ImageGeneration,
+    WebSearch,
 }
 
-impl RouteOutputModality {
+impl RoutePurpose {
+    pub const ALL: [Self; 3] = [Self::Inference, Self::ImageGeneration, Self::WebSearch];
+
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Text => "text",
-            Self::Image => "image",
+            Self::Inference => "inference",
+            Self::ImageGeneration => "image_generation",
+            Self::WebSearch => "web_search",
         }
     }
 }
@@ -314,9 +318,10 @@ pub struct RouteConfig {
     pub model_id: super::identity::RouteId,
     pub display_name: Option<String>,
     /// `None` identifies a historical Route awaiting explicit reconfiguration.
-    pub output_modality: Option<RouteOutputModality>,
+    pub purpose: Option<RoutePurpose>,
     /// Read-only management projection; never persisted with the Route.
     pub image_generation_bound: bool,
+    pub web_search_bound: bool,
     /// 客户端未表达任何推理意图时应用的 Canonical Thinking Level；
     /// `None` 表示不加控制，由上游模型自行决定。
     pub default_thinking_level: Option<String>,
@@ -379,8 +384,9 @@ pub struct RouteView<'a> {
     pub id: &'a str,
     pub model_id: &'a str,
     pub display_name: Option<&'a str>,
-    pub output_modality: Option<RouteOutputModality>,
+    pub purpose: Option<RoutePurpose>,
     pub image_generation_bound: bool,
+    pub web_search_bound: bool,
     pub default_thinking_level: Option<&'a str>,
     pub billing: Option<&'a crate::pricing::BillingConfig>,
     pub balance: &'a str,
@@ -410,8 +416,9 @@ impl<'a> From<&'a RouteConfig> for RouteView<'a> {
             id: &route.id,
             model_id: &route.model_id,
             display_name: route.display_name.as_deref(),
-            output_modality: route.output_modality,
+            purpose: route.purpose,
             image_generation_bound: route.image_generation_bound,
+            web_search_bound: route.web_search_bound,
             default_thinking_level: route.default_thinking_level.as_deref(),
             billing: route.billing.as_ref(),
             balance: &route.balance,
@@ -459,10 +466,10 @@ pub struct TargetConfig {
     /// 快照缺失或未登记名称时也为 `None`，由展示方回退到上游模型 ID。
     pub model_name: Option<String>,
     /// Read-only management projection; storage loads default to `false`.
-    pub output_modality_mismatch: bool,
+    pub purpose_mismatch: bool,
     /// Raw output declarations resolved for this saved Target, independent of availability.
     /// Read-only management projection; storage loads leave this empty.
-    pub route_output_modalities: Vec<RouteOutputModality>,
+    pub route_purposes: Vec<RoutePurpose>,
 }
 
 impl TargetConfig {
@@ -482,8 +489,8 @@ pub struct TargetView<'a> {
     pub provider_id: &'a str,
     pub model: &'a str,
     pub model_name: Option<&'a str>,
-    pub output_modality_mismatch: bool,
-    pub route_output_modalities: &'a [RouteOutputModality],
+    pub purpose_mismatch: bool,
+    pub route_purposes: &'a [RoutePurpose],
     pub enabled: bool,
     pub priority: i32,
     pub first_token_timeout_ms: i64,
@@ -501,8 +508,8 @@ impl<'a> From<&'a TargetConfig> for TargetView<'a> {
             provider_id: target.provider_id().as_str(),
             model: target.model().as_str(),
             model_name: target.model_name.as_deref(),
-            output_modality_mismatch: target.output_modality_mismatch,
-            route_output_modalities: &target.route_output_modalities,
+            purpose_mismatch: target.purpose_mismatch,
+            route_purposes: &target.route_purposes,
             enabled: target.enabled,
             priority: target.priority,
             first_token_timeout_ms: target.first_token_timeout_ms,
@@ -724,7 +731,7 @@ pub struct UpdateRoute {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_present"
     )]
-    pub output_modality: Option<RouteOutputModality>,
+    pub purpose: Option<RoutePurpose>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -772,7 +779,7 @@ pub struct UpdateRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRoute {
-    pub output_modality: RouteOutputModality,
+    pub purpose: RoutePurpose,
     pub model_id: String,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -801,7 +808,7 @@ pub struct CreateTarget {
 
 #[derive(Debug, Clone)]
 pub struct PutRoute {
-    pub output_modality: Option<RouteOutputModality>,
+    pub purpose: Option<RoutePurpose>,
     pub id: Option<super::identity::RouteKey>,
     pub model_id: super::identity::RouteId,
     pub display_name: Option<String>,

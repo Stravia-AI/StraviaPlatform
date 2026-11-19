@@ -1156,7 +1156,7 @@ def _route_with_targets(
         f"{env['admin']}/api/v1/models",
         payload={
             "model_id": model,
-            "output_modality": "text",
+            "purpose": "inference",
             "display_name": f"{model} display",
             "targets": targets,
         },
@@ -2018,7 +2018,7 @@ def test_upstream_errors_include_capability_attempts(admin_env: dict[str, Any]) 
             f"{admin_env['admin']}/api/v1/models",
             payload={
                 "model_id": vision_model,
-                "output_modality": "text",
+                "purpose": "inference",
                 "targets": [
                     {
                         "provider_id": vision_provider,

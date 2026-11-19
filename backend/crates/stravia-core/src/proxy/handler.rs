@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use crate::Gateway;
 use crate::admin::routes::RouteModule;
 use crate::connect_client_apply::{ConnectClientModel, codex_catalog};
-use crate::db::models::RouteOutputModality;
+use crate::db::models::RoutePurpose;
 use crate::error::GatewayError;
 use crate::proxy::security::{ClientCredential, Security};
 
@@ -41,6 +41,7 @@ pub async fn models_list(State(gw): State<Gateway>, headers: HeaderMap) -> Respo
         .filter(|model| {
             unrestricted_model_access || accessible_route_ids.contains(model.id.as_str())
         })
+        .filter(|model| model.purpose != Some(RoutePurpose::WebSearch))
         .filter(|model| !model.model_id.trim().is_empty())
         .map(|model| {
             (
@@ -99,7 +100,7 @@ pub async fn codex_models_list(State(gw): State<Gateway>, headers: HeaderMap) ->
         .models
         .iter()
         .filter(|route| {
-            route.output_modality == Some(RouteOutputModality::Text)
+            route.purpose == Some(RoutePurpose::Inference)
                 && !route.model_id.trim().is_empty()
                 && access.allows(&route.id)
         })
@@ -203,7 +204,7 @@ mod tests {
             .await
             .expect("Provider Model");
         let create_model = |model_id: &str, display_name: Option<&str>| CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: model_id.into(),
             display_name: display_name.map(ToOwned::to_owned),
             balance: Some("traffic_equalization".into()),
@@ -413,8 +414,9 @@ mod tests {
         let storage = std::sync::Arc::new(crate::storage::MemoryStorage::new(
             Vec::new(),
             vec![RouteConfig {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 image_generation_bound: false,
+            web_search_bound: false,
                 id: "model-id".into(),
                 model_id: "model".into(),
                 display_name: None,
@@ -529,31 +531,31 @@ mod tests {
                 "vision-route",
                 Some("Vision"),
                 "vision-upstream",
-                crate::db::models::RouteOutputModality::Text,
+                crate::db::models::RoutePurpose::Inference,
             ),
             (
                 "text-route",
                 None,
                 "text-upstream",
-                crate::db::models::RouteOutputModality::Text,
+                crate::db::models::RoutePurpose::Inference,
             ),
             (
                 "image-route",
                 None,
                 "image-upstream",
-                crate::db::models::RouteOutputModality::Image,
+                crate::db::models::RoutePurpose::ImageGeneration,
             ),
             (
                 "unbound-route",
                 None,
                 "text-upstream",
-                crate::db::models::RouteOutputModality::Text,
+                crate::db::models::RoutePurpose::Inference,
             ),
         ] {
             let route = gateway
                 .admin()
                 .create_model(CreateRoute {
-                    output_modality: modality,
+                    purpose: modality,
                     model_id: model_id.into(),
                     display_name: display_name.map(ToOwned::to_owned),
                     balance: Some("traffic_equalization".into()),

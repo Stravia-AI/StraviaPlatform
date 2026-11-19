@@ -20,7 +20,7 @@ use stravia_core::Gateway;
 use stravia_core::config::GatewayConfig;
 use stravia_core::data_paths::DataPaths;
 use stravia_core::db::models::{
-    CreateApiKey, CreateProviderRecord, CreateRoute, CreateTarget, RouteOutputModality,
+    CreateApiKey, CreateProviderRecord, CreateRoute, CreateTarget, RoutePurpose,
     UpsertOAuthCredential,
 };
 use stravia_core::provider_models::CreateManualProviderModel;
@@ -236,7 +236,7 @@ impl Harness {
         let route = gateway
             .admin()
             .create_model(CreateRoute {
-                output_modality: RouteOutputModality::Text,
+                purpose: RoutePurpose::Inference,
                 model_id: ROUTE.into(),
                 display_name: None,
                 balance: None,

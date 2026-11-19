@@ -248,10 +248,7 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
         }
         let mut metadata = match details {
             Some(details) => model_metadata(details)?,
-            None => BTreeMap::from([(
-                "modalities".into(),
-                json!({"input": ["text"], "output": ["text"]}),
-            )]),
+            None => BTreeMap::new(),
         };
         let mut search_metadata = serde_json::Map::new();
         search_metadata.insert("model_id".into(), json!(id));
@@ -267,6 +264,7 @@ fn parse(payload: &Value) -> Option<DiscoverResponse> {
                 .insert("antigravity_search".into(), search_metadata);
             continue;
         }
+        metadata.remove("modalities");
         metadata.insert("antigravity_search".into(), search_metadata);
         let name = match details.and_then(|details| details.get("displayName")) {
             Some(value) => value.as_str()?.trim(),

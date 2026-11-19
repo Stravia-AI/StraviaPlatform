@@ -81,7 +81,8 @@ pub(crate) fn provider_snapshot(provider: &crate::db::models::Provider) -> Searc
 }
 fn model_snapshot(model: crate::provider_models::ProviderModelRecord) -> SearchModel {
     SearchModel {
-        available: model.effective_available(),
+        available: model.effective_available()
+            && model.metadata.supports_route_purpose(crate::db::models::RoutePurpose::Inference),
         model_id: model.model_id,
     }
 }
@@ -107,6 +108,9 @@ impl ExternalSearchHost for SearchHost {
             .ok_or_else(|| {
                 external_error("route_unavailable", "External Search Route is unavailable")
             })?;
+        if route.purpose != Some(crate::db::models::RoutePurpose::WebSearch) {
+            return Err(external_error("route_unavailable", "External Search Route is incompatible"));
+        }
         let mut context = crate::plugin::VendorCallContext::new(
             cancellation.clone(),
             stravia_runtime_contract::Deadline::fixed(deadline),
@@ -267,7 +271,7 @@ impl SearchAdminHost for SearchHost {
         Arc::new(SearchSettings(self.0.storage.clone()))
     }
     fn config_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
-        self.0.web_search_config_lock.clone()
+        self.0.route_media_mutation.clone()
     }
     async fn models(&self) -> Result<Vec<SearchRoute>, ()> {
         self.0
@@ -284,6 +288,8 @@ impl SearchAdminHost for SearchHost {
                             model_id: model.model_id.into(),
                             display_name,
                             is_enabled: model.is_enabled,
+                            is_inference: model.purpose == Some(crate::db::models::RoutePurpose::Inference),
+                            is_web_search: model.purpose == Some(crate::db::models::RoutePurpose::WebSearch),
                             targets: model
                                 .targets
                                 .into_iter()
@@ -342,6 +348,9 @@ impl SearchAdminHost for SearchHost {
             .await
             .map_err(|_| ())?
             .ok_or(())?;
+        if route.purpose != Some(crate::db::models::RoutePurpose::WebSearch) {
+            return Err(());
+        }
         self.0
             .validate_vendor_route_capability(&route, stravia_vendor_sdk::Capability::Search)
             .await

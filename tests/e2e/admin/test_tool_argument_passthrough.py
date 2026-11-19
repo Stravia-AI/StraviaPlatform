@@ -54,7 +54,7 @@ def _create_route(env: dict[str, Any], name: str) -> tuple[str, str]:
         f"{env['admin']}/api/v1/models",
         payload={
             "model_id": name,
-            "output_modality": "text",
+            "purpose": "inference",
             "display_name": f"{name} display",
             "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
         },

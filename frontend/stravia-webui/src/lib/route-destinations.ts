@@ -3,7 +3,7 @@ import { priorityLanes } from '#lib/components/route-targets-form.js'
 import type { Provider, Route, RouteSelectionStrategy, Target } from '#lib/types.js'
 
 export type TargetUnavailableReason =
-  'provider_disabled' | 'credential_invalid' | 'allowance_suspended' | 'output_modality_mismatch'
+  'provider_disabled' | 'credential_invalid' | 'allowance_suspended' | 'purpose_mismatch'
 
 export type PreferredDestination =
   | { kind: 'single'; modelName: string; providerName: string }
@@ -33,7 +33,7 @@ function unavailableReason(
   target: Target,
   providers: ReadonlyMap<string, Provider>,
 ): TargetUnavailableReason | 'provider_missing' | null {
-  if (target.output_modality_mismatch) return 'output_modality_mismatch'
+  if (target.purpose_mismatch) return 'purpose_mismatch'
   const provider = providers.get(target.provider_id)
   // 两个查询之间 Provider 被删除时，目标已无法路由，但没有可向用户陈述的原因。
   if (!provider) return 'provider_missing'
@@ -52,7 +52,7 @@ export function summarizeRouteDestinations(route: Route, providers: readonly Pro
     provider_disabled: 0,
     credential_invalid: 0,
     allowance_suspended: 0,
-    output_modality_mismatch: 0,
+    purpose_mismatch: 0,
   }
   const preferredIndex = lanes.findIndex((lane) => lane.some(({ reason }) => reason === null))
 
@@ -120,7 +120,7 @@ function strategyLabel(strategy: RouteSelectionStrategy): string {
 export function formatRouteDestinations(summary: RouteDestinationSummary): RouteDestinationText {
   const { preferred } = summary
   if (!preferred) {
-    const { credential_invalid, provider_disabled, allowance_suspended, output_modality_mismatch } =
+    const { credential_invalid, provider_disabled, allowance_suspended, purpose_mismatch } =
       summary.unavailableReasons
     const details: RouteDestinationText['details'] = []
     if (credential_invalid > 0) {
@@ -132,8 +132,8 @@ export function formatRouteDestinations(summary: RouteDestinationSummary): Route
     if (allowance_suspended > 0) {
       details.push({ text: m.models_destinations_allowance_suspended({ count: allowance_suspended }), tone: 'muted' })
     }
-    if (output_modality_mismatch > 0) {
-      details.push({ text: m.route_output_mismatch(), tone: 'warning' })
+    if (purpose_mismatch > 0) {
+      details.push({ text: m.route_purpose_mismatch(), tone: 'warning' })
     }
     return { primary: m.models_destinations_none_available(), details }
   }

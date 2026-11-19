@@ -77,16 +77,19 @@ const externalRoutes = $derived.by(() => {
   ]
 })
 const selectedExternalRoute = $derived(externalRoutes.find((route) => route.model_id === externalRouteId))
+const clearingExternalRoute = $derived(
+  backendKind === 'external' && backend?.kind === 'external' && Boolean(backend.route_id) && !externalRouteId,
+)
 const bindingReady = $derived(
   backendKind === 'local'
-    ? Boolean(localModelId)
-    : Boolean(externalRouteId) && Boolean(selectedExternalRoute?.available),
+    ? eligibleModels.some((model) => model.id === localModelId)
+    : clearingExternalRoute || Boolean(selectedExternalRoute?.available),
 )
 
 function draftBackend(): WebSearchBackend {
   return backendKind === 'local'
     ? { kind: 'local', model_id: localModelId }
-    : { kind: 'external', route_id: externalRouteId }
+    : { kind: 'external', route_id: externalRouteId || null }
 }
 
 async function submit(): Promise<void> {
@@ -153,6 +156,9 @@ async function submit(): Promise<void> {
                 emptyText={m.common_no_matching_models()}
                 disabled={saving || eligibleModelsQuery.isPending || eligibleModelsQuery.isError}
                 onValueChange={(value: string) => (localModelId = value)} />
+              {#if eligibleModelsQuery.isSuccess && localModelId && !bindingReady}
+                <Field.Error>{m.web_search_local_model_unavailable()}</Field.Error>
+              {/if}
             </Field.Field>
             {#if eligibleModelsQuery.isError}
               <RequestFailure
@@ -182,11 +188,14 @@ async function submit(): Promise<void> {
                   }),
                   disabled: !route.available,
                 }))}
+                clearLabel={backend?.kind === 'external' && backend.route_id ? m.web_search_unlink_external_route() : undefined}
                 placeholder={m.web_search_select_external_route()}
                 emptyText={m.common_no_matching_models()}
                 disabled={saving || externalRoutesQuery.isPending || externalRoutesQuery.isError}
                 onValueChange={(value: string) => (externalRouteId = value)} />
-              {#if externalRouteId && !selectedExternalRoute?.available}
+              {#if clearingExternalRoute}
+                <Field.Description>{m.web_search_unlink_external_impact()}</Field.Description>
+              {:else if externalRoutesQuery.isSuccess && externalRouteId && !selectedExternalRoute?.available}
                 <Field.Error>{m.web_search_external_route_unavailable()}</Field.Error>
               {/if}
             </Field.Field>
@@ -198,6 +207,12 @@ async function submit(): Promise<void> {
                 retrying={externalRoutesQuery.isFetching} />
             {:else if externalRoutesQuery.isPending}
               <p class="text-sm text-muted-foreground" role="status">{m.common_settings_loading()}</p>
+            {:else if !externalRoutes.some((route) => route.available)}
+              <div class="flex flex-wrap items-center gap-x-2" role="status">
+                <span class="text-sm text-muted-foreground">{m.web_search_no_eligible_routes()}</span>
+                <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}
+                  >{m.web_search_manage_models()}</a>
+              </div>
             {/if}
           {/if}
         </Field.Group>

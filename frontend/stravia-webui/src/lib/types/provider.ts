@@ -1,6 +1,6 @@
 import type { ProviderCostPlan } from './money'
 import type { ProviderOAuthStatus } from './oauth'
-import type { RouteOutputModality, ThinkingLevelMapping } from './route'
+import type { RoutePurpose, ThinkingLevelMapping } from './route'
 
 export interface Provider {
   id: string
@@ -201,7 +201,7 @@ export interface ProviderModelMetadata extends ModelSpecification {
 
 export interface ProviderModelSummary {
   id: string
-  route_output_modalities: RouteOutputModality[]
+  route_purposes: RoutePurpose[]
   name: string
   available: boolean
   source_kind: ProviderModelSourceKind
@@ -217,7 +217,7 @@ export interface ProviderModelList {
 
 export interface ProviderModelDetail {
   id: string
-  route_output_modalities: RouteOutputModality[]
+  route_purposes: RoutePurpose[]
   available: boolean
   source_kind: ProviderModelSourceKind
   snapshot_state: SnapshotState

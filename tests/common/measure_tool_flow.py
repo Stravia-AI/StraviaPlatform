@@ -257,7 +257,7 @@ def create_route(session, upstream: str, name: str, protocol: str) -> tuple[str,
         "metadata": {"name": name, "modalities": {"input": ["text"], "output": ["text"]}},
     }, expected=201)
     route = admin_data(session, "POST", "/api/v1/models", {
-        "model_id": name, "output_modality": "text", "display_name": f"{name} display",
+        "model_id": name, "purpose": "inference", "display_name": f"{name} display",
         "targets": [{"provider_id": provider["id"], "model": "gpt-4o-mini", "enabled": True,
                      "priority": 0, "target_retry_budget": 0, "target_cooldown_ms": 0}],
     })

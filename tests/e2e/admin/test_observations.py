@@ -71,7 +71,7 @@ def _create_route(
 
     route_payload: dict[str, Any] = {
         "model_id": name,
-        "output_modality": "text",
+        "purpose": "inference",
         "display_name": f"{name} display",
         "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
     }

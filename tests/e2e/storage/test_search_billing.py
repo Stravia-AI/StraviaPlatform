@@ -92,7 +92,7 @@ def _search_route(env: dict[str, Any], base_url: str) -> tuple[dict[str, Any], d
     })
     route = admin(env, "POST", "models", {
         "model_id": "search-billing",
-        "output_modality": "text",
+        "purpose": "web_search",
         "billing": {"mode": "per_call", "amount": "0.01", "currency": "usd"},
         "targets": [{"provider_id": provider["id"], "model": "fixture-model",
                      "target_retry_budget": 0, "target_cooldown_ms": 0}],

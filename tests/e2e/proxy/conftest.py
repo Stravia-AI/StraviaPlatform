@@ -160,7 +160,7 @@ def _configure_proxy_routes(
                 f"{admin_base}/api/v1/models",
                 payload={
                     "model_id": replay_model,
-                    "output_modality": "text",
+                    "purpose": "inference",
                     "targets": [{"provider_id": provider_ids[protocol], "model": replay_model}],
                 },
                 headers=admin_headers,

@@ -361,7 +361,7 @@ async fn generation_http_fixture_with_usage(
     let generation_route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Image,
+            purpose: crate::db::models::RoutePurpose::ImageGeneration,
             model_id: "local-image-generation".into(),
             display_name: Some("Local image generation".into()),
             balance: None,

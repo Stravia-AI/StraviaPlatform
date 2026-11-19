@@ -82,7 +82,7 @@ async fn configure_opencode(gateway: &Gateway, url: String) -> anyhow::Result<(S
         template_id:None,
     }).await?;
     let route = gateway.admin().create_model(serde_json::from_value(json!({
-        "model_id":"opencode-identity-fixture","output_modality":"text",
+        "model_id":"opencode-identity-fixture","purpose":"inference",
         "targets":[{"provider_id":provider.id,"model":"big-pickle","enabled":true,"target_retry_budget":0}]
     }))?).await?;
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({
@@ -402,7 +402,7 @@ async fn configure_grok(gateway: &Gateway, url: String) -> anyhow::Result<(Strin
     gateway.admin().create_manual_provider_model(&provider.id, "grok-4.6", CreateManualProviderModel {
         metadata:json!({"id":"grok-4.6","name":"grok-4.6","modalities":{"input":["text"],"output":["text"]}}), template_id:None,
     }).await?;
-    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"grok-ordinal-fixture","output_modality":"text",
+    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"grok-ordinal-fixture","purpose":"inference",
         "targets":[{"provider_id":provider.id,"model":"grok-4.6","enabled":true,"target_retry_budget":0,"target_cooldown_ms":1}]}))?).await?;
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({"name":"Grok owner","model_ids":[route.id],"transparent_injection_enabled":false}))?).await?;
     let other = gateway.admin().create_api_key(serde_json::from_value(json!({"name":"Grok other principal","model_ids":[route.id],"transparent_injection_enabled":false}))?).await?;

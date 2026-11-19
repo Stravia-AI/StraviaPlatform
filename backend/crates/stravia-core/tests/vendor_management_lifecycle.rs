@@ -390,7 +390,7 @@ async fn create_route(
     gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             model_id: route_id.into(),
             display_name: Some("Management Lifecycle Route".into()),
             balance: None,
@@ -1357,7 +1357,7 @@ async fn suspended_provider_fails_over_without_upstream_attempt_and_returns_afte
     let route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             model_id: "guard-failover".into(),
             display_name: None,
             balance: None,
@@ -2413,7 +2413,7 @@ async fn inference_oauth_refresh_outage_preserves_credentials_and_recovers_on_ne
     let route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             model_id: "management-retryable-oauth-inference".into(),
             display_name: Some("Retryable OAuth inference route".into()),
             balance: None,

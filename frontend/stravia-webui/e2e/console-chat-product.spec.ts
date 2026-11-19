@@ -281,7 +281,7 @@ test('real gateway accepts original images and persisted reasoning replay under 
     const modelId = identifier(
       await api('/models', 'POST', {
         model_id: 'browser-reasoner',
-        output_modality: 'text',
+        purpose: 'inference',
         display_name: 'Browser reasoner',
         targets: [{ provider_id: serviceId, model: 'synthetic-reasoner' }],
       }),

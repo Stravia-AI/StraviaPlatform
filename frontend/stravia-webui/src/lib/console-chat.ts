@@ -506,7 +506,7 @@ export class ConsoleChatController {
       const catalog = await this.options.catalog.read()
       if (epoch !== this.catalogEpoch) return
       this.apiKeys = catalog.apiKeys
-      this.models = catalog.models.filter((model) => model.output_modality === 'text')
+      this.models = catalog.models.filter((model) => model.purpose === 'inference')
       this.providers = catalog.providers
       this.catalogLoaded = true
       this.catalogError = null

@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::models::{
-    CreateApiKey, CreateRoute, CreateTarget, RouteOutputModality, TransparentInjection,
+    CreateApiKey, CreateRoute, CreateTarget, RoutePurpose, TransparentInjection,
     TransparentInjectionSet,
 };
 use stravia_runtime_contract::{
@@ -64,7 +64,7 @@ async fn antigravity_discovered_search_route_through_stravia_read() -> anyhow::R
         .create_model(CreateRoute {
             model_id: "antigravity-public-search".into(),
             display_name: None,
-            output_modality: RouteOutputModality::Text,
+            purpose: RoutePurpose::WebSearch,
             balance: None,
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),

@@ -1386,7 +1386,7 @@ async fn configure_route_with_protocol(
     gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: model.into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),

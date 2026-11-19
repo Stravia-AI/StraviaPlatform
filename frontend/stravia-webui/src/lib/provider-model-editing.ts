@@ -240,7 +240,7 @@ export class ProviderModelEditingController {
             source_kind: 'manual',
             pinned_fields: [],
             restorable_fields: [],
-            route_output_modalities: [],
+            route_purposes: [],
             selection_policy: 'auto',
             revision: 0,
             created_at: '',
@@ -312,7 +312,7 @@ export class ProviderModelEditingController {
                 detail: {
                   ...detail,
                   available: saved.available,
-                  route_output_modalities: saved.route_output_modalities,
+                  route_purposes: saved.route_purposes,
                   selection_policy: saved.selection_policy,
                   revision: saved.revision,
                 },

@@ -352,7 +352,7 @@ def route_with_targets(env, model, targets):
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/models",
         payload={
-            "model_id": model, "output_modality": "text",
+            "model_id": model, "purpose": "inference",
             "display_name": f"{model} display", "targets": targets,
         },
         headers=env["auth"],
@@ -1157,7 +1157,7 @@ def test_capability_upstream_failure_counts_as_upstream_error(usage_env):
         status, body = http_request(
             "POST", f"{env['admin']}/api/v1/models",
             payload={
-                "model_id": vision_model, "output_modality": "text",
+                "model_id": vision_model, "purpose": "inference",
                 "targets": [{
                     "provider_id": vision_provider, "model": "gpt-4o-mini",
                     "first_token_timeout_ms": 120_000, "target_retry_budget": 0,

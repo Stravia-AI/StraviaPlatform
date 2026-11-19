@@ -6,9 +6,10 @@ export type RouteBilling =
 
 export interface Route {
   id: string
-  output_modality: RouteOutputModality | null
+  purpose: RoutePurpose | null
   image_generation_bound: boolean
   model_id: string
+  web_search_bound: boolean
   display_name?: string | null
   balance: RouteSelectionStrategy
   target_provider: string
@@ -25,13 +26,14 @@ export interface Route {
 }
 
 export type RouteSelectionStrategy = 'traffic_equalization' | 'latency_preference'
-export type RouteOutputModality = 'text' | 'image'
+export const routePurposes = ['inference', 'image_generation', 'web_search'] as const
+export type RoutePurpose = (typeof routePurposes)[number]
 
 export interface Target {
   id: string
-  output_modality_mismatch: boolean
-  /** Raw output declarations resolved by Core for this saved destination, regardless of availability. */
-  route_output_modalities: RouteOutputModality[]
+  purpose_mismatch: boolean
+  /** Purposes resolved by Core for this saved destination, regardless of availability. */
+  route_purposes: RoutePurpose[]
   model_id: string
   provider_id: string
   model: string
@@ -63,7 +65,7 @@ export interface ThinkingLevelMapping {
 
 export interface CreateRoute {
   model_id: string
-  output_modality: RouteOutputModality
+  purpose: RoutePurpose
   display_name?: string | null
   balance?: RouteSelectionStrategy
   targets: CreateTarget[]
@@ -89,7 +91,7 @@ export interface UnbindRouteInput {
 
 export interface UpdateRoute {
   model_id?: string
-  output_modality?: RouteOutputModality
+  purpose?: RoutePurpose
   display_name?: string | null
   balance?: RouteSelectionStrategy
   targets?: CreateTarget[]

@@ -896,7 +896,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
     }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "vision".into(),
             display_name: None,
             balance: None,
@@ -1186,7 +1186,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
     admin.create_manual_provider_model(&provider.id, "painter", crate::provider_models::CreateManualProviderModel { metadata: serde_json::json!({"id":"painter","name":"Painter","modalities":{"input":["text","image"],"output":["text","image"]}}), template_id: None }).await.unwrap();
     let route = admin
         .create_model(crate::db::models::CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "painter".into(),
             display_name: None,
             balance: None,

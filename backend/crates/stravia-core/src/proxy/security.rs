@@ -512,8 +512,9 @@ mod tests {
 
     fn protected_model() -> RouteConfig {
         RouteConfig {
-            output_modality: Some(crate::db::models::RouteOutputModality::Text),
+            purpose: Some(crate::db::models::RoutePurpose::Inference),
             image_generation_bound: false,
+            web_search_bound: false,
             id: "protected-model-id".into(),
             model_id: "protected-model".into(),
             display_name: None,

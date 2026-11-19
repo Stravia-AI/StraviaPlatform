@@ -1407,7 +1407,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
         .admin()
         .create_model(CreateRoute {
             model_id: "statused-model".into(),
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             display_name: None,
             balance: None,
             targets: vec![stravia_core::db::models::CreateTarget {
@@ -1466,7 +1466,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writes()
+async fn route_purpose_http_contract_rejects_invalid_and_mismatched_writes()
 -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;
@@ -1510,10 +1510,12 @@ async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writ
         None,
         Some(serde_json::Value::Null),
         Some(serde_json::json!("audio")),
+        Some(serde_json::json!("text")),
+        Some(serde_json::json!("image")),
     ] {
         let mut input = base.clone();
         if let Some(modality) = modality {
-            input["output_modality"] = modality;
+            input["purpose"] = modality;
         }
         let response = app
             .clone()
@@ -1527,7 +1529,7 @@ async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writ
     }
 
     let mut input = base;
-    input["output_modality"] = serde_json::json!("image");
+    input["purpose"] = serde_json::json!("image_generation");
     let mismatch = app
         .clone()
         .oneshot(
@@ -1541,10 +1543,10 @@ async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writ
         serde_json::from_slice(&to_bytes(mismatch.into_body(), usize::MAX).await?)?;
     let error: serde_json::Value =
         serde_json::from_str(envelope["error"].as_str().expect("Core error envelope"))?;
-    assert_eq!(error["code"], "ROUTE_OUTPUT_MODALITY_MISMATCH");
+    assert_eq!(error["code"], "ROUTE_PURPOSE_MISMATCH");
     assert_eq!(error["params"]["provider_id"], provider.id);
     assert_eq!(error["params"]["model_id"], "vision");
-    assert_eq!(error["params"]["output_modality"], "image");
+    assert_eq!(error["params"]["purpose"], "image_generation");
 
     let listed = app
         .clone()
@@ -1561,7 +1563,7 @@ async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writ
             .all(|route| route["model_id"] != "modality-contract")
     );
 
-    input["output_modality"] = serde_json::json!("text");
+    input["purpose"] = serde_json::json!("inference");
     let created = app
         .clone()
         .oneshot(
@@ -1581,10 +1583,10 @@ async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writ
     assert_eq!(read.status(), StatusCode::OK);
     let read: serde_json::Value =
         serde_json::from_slice(&to_bytes(read.into_body(), usize::MAX).await?)?;
-    assert_eq!(read["data"]["output_modality"], "text");
+    assert_eq!(read["data"]["purpose"], "inference");
     assert_eq!(read["data"]["image_generation_bound"], false);
     assert_eq!(
-        read["data"]["targets"][0]["output_modality_mismatch"],
+        read["data"]["targets"][0]["purpose_mismatch"],
         false
     );
 
@@ -1592,7 +1594,7 @@ async fn route_output_modality_http_contract_rejects_invalid_and_mismatched_writ
         .oneshot(
             Request::put(format!("/api/v1/models/{route_id}"))
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"output_modality":null}"#))?,
+                .body(Body::from(r#"{"purpose":null}"#))?,
         )
         .await?;
     assert!(null_update.status().is_client_error());
@@ -1660,7 +1662,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
     let routes: serde_json::Value = serde_json::from_slice(&response_body)?;
     assert_eq!(routes["data"].as_array().map(Vec::len), Some(1));
     assert_eq!(routes["data"][0]["model_id"], "route-model");
-    assert_eq!(routes["data"][0]["output_modality"], "text");
+    assert_eq!(routes["data"][0]["purpose"], "inference");
     assert_eq!(
         routes["data"][0]["targets"].as_array().map(Vec::len),
         Some(1)

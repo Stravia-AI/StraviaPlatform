@@ -324,12 +324,12 @@ CREATE TABLE models (
     priority     INTEGER DEFAULT 0,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     display_name TEXT
-, default_thinking_level TEXT, output_modality TEXT
-    CHECK (output_modality IS NULL OR output_modality IN ('text', 'image')), billing_json TEXT
+, default_thinking_level TEXT, billing_json TEXT
     CHECK (
         billing_json IS NULL
         OR CASE WHEN json_valid(billing_json) THEN json_type(billing_json) = 'object' ELSE 0 END
-    ));
+    ), purpose TEXT
+    CHECK (purpose IS NULL OR purpose IN ('inference', 'image_generation', 'web_search')));
 
 CREATE TABLE native_compaction_atomic_checkpoints (record_id TEXT PRIMARY KEY REFERENCES native_compactions(id) ON DELETE CASCADE, principal TEXT NOT NULL, checkpoint_id TEXT NOT NULL, FOREIGN KEY(principal, checkpoint_id) REFERENCES vendor_atomic_checkpoints(principal, checkpoint_id));
 

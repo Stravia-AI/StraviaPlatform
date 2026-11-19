@@ -30,8 +30,9 @@ mod tests {
 
     fn route(id: &str, model_id: &str) -> RouteConfig {
         RouteConfig {
-            output_modality: Some(crate::db::models::RouteOutputModality::Text),
+            purpose: Some(crate::db::models::RoutePurpose::Inference),
             image_generation_bound: false,
+            web_search_bound: false,
             id: id.into(),
             model_id: model_id.into(),
             display_name: None,

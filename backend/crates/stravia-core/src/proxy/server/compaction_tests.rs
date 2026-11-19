@@ -215,7 +215,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
             metadata: json!({"id":"upstream-model","name":"upstream-model","modalities":{"input":["text"],"output":["text"]}}),
             template_id: None,
         }).await.unwrap();
-        let route = admin.create_model(CreateRoute { output_modality: crate::db::models::RouteOutputModality::Text, model_id: "native-publication".into(), display_name: None, balance: None,
+        let route = admin.create_model(CreateRoute { purpose: crate::db::models::RoutePurpose::Inference, model_id: "native-publication".into(), display_name: None, balance: None,
         targets: vec![crate::db::models::CreateTarget {
                         provider_id: provider.id,
                         model: "upstream-model".into(),
@@ -425,7 +425,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             metadata: json!({"id":"upstream-model","name":"upstream-model","modalities":{"input":["text"],"output":["text"]}}),
             template_id: None,
         }).await.unwrap();
-        let route = admin.create_model(CreateRoute { output_modality: crate::db::models::RouteOutputModality::Text, model_id: "native-ws".into(),
+        let route = admin.create_model(CreateRoute { purpose: crate::db::models::RoutePurpose::Inference, model_id: "native-ws".into(),
         display_name: None,
         balance: None,
         targets: vec![crate::db::models::CreateTarget {
@@ -852,7 +852,7 @@ impl Harness {
             .unwrap();
         let route = admin
             .create_model(CreateRoute {
-                output_modality: crate::db::models::RouteOutputModality::Text,
+                purpose: crate::db::models::RoutePurpose::Inference,
                 model_id: "cross".into(),
                 display_name: None,
                 balance: None,

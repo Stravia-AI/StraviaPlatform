@@ -301,7 +301,7 @@ async fn connection(
     let route = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: stravia_core::db::models::RouteOutputModality::Text,
+            purpose: stravia_core::db::models::RoutePurpose::Inference,
             model_id: route_id.into(),
             display_name: None,
             balance: None,

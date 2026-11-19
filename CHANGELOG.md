@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Models now select a single purpose: Inference, Image Generation, or Web Search. Search-only models can be used without declaring text output and do not appear in conversation or client model selectors. External Web Search binds a Web Search route; Local Search still uses an inference route. Migration preserves existing route IDs and moves an existing external binding to a dedicated search route with the same eligible targets. The admin API now uses `purpose` instead of `output_modality`.
+
 ## [0.7.3] - 2026-11-19
 
 ### Verification

@@ -117,7 +117,7 @@ impl SearchAdmin {
             )
         })?;
         let mut eligible = Vec::new();
-        for model in models.into_iter().filter(|model| model.is_enabled) {
+        for model in models.into_iter().filter(|model| model.is_enabled && model.is_inference) {
             if self.validate_local_targets(&model).await.is_ok() {
                 let display_name = model.effective_display_name().to_string();
                 eligible.push(EligibleSearchModel {
@@ -144,9 +144,17 @@ impl SearchAdmin {
                 "External Search Routes are unavailable",
             )
         })?;
+        let config = self.get_web_search_config().await?;
+        let configured_route = match config.backend.as_ref() {
+            Some(WebSearchBackendDraft::External { route_id }) => route_id.as_deref(),
+            _ => None,
+        };
         let mut external = Vec::new();
-        for route in routes.into_iter().filter(|route| route.is_enabled) {
-            let available = self
+        for route in routes.into_iter().filter(|route| {
+            (route.is_enabled && route.is_web_search)
+                || configured_route == Some(route.model_id.as_str())
+        }) {
+            let available = route.is_enabled && route.is_web_search && self
                 .host
                 .validate_external_route(&route.model_id)
                 .await
@@ -157,6 +165,16 @@ impl SearchAdmin {
                 display_name: route.display_name,
                 available,
             });
+        }
+        if let Some(route_id) = configured_route {
+            if !external.iter().any(|route| route.model_id == route_id) {
+                external.push(ExternalSearchRoute {
+                    id: route_id.to_owned(),
+                    model_id: route_id.to_owned(),
+                    display_name: route_id.to_owned(),
+                    available: false,
+                });
+            }
         }
         external.sort_by(|left, right| {
             left.display_name
@@ -178,9 +196,6 @@ impl SearchAdmin {
         ) {
             validate_limits(&config)?;
         }
-        if config.enabled {
-            self.validate_enabled_web_search(&config).await?;
-        }
         let store = SettingsWebSearchConfigStore::new(self.host.settings());
         let current = store.load().await.map_err(|_| {
             WebSearchConfigError::new(
@@ -188,6 +203,30 @@ impl SearchAdmin {
                 "Web Search configuration is unavailable",
             )
         })?;
+        if config.backend != current.backend {
+            let binding = match config.backend.as_ref() {
+                Some(WebSearchBackendDraft::Local { model_id: Some(id) }) => Some((id, true)),
+                Some(WebSearchBackendDraft::External { route_id: Some(id) }) => Some((id, false)),
+                _ => None,
+            };
+            if let Some((id, local)) = binding {
+                let routes = self.host.models().await.map_err(|_| {
+                    WebSearchConfigError::new("WEB_SEARCH_CONFIG_UNAVAILABLE", "Web Search Routes are unavailable")
+                })?;
+                if !routes.iter().any(|route| {
+                    if local { route.id == *id && route.is_inference }
+                    else { route.model_id == *id && route.is_web_search }
+                }) {
+                    return Err(WebSearchConfigError::new(
+                        if local { "WEB_SEARCH_MODEL_INELIGIBLE" } else { "WEB_SEARCH_ROUTE_UNAVAILABLE" },
+                        "Web Search binding has an incompatible Route purpose",
+                    ));
+                }
+            }
+        }
+        if config.enabled {
+            self.validate_enabled_web_search(&config).await?;
+        }
         config.revision = current.revision.saturating_add(1);
         config.updated_at = chrono::Utc::now().to_rfc3339();
         store.save(&config).await.map_err(|_| {
@@ -235,7 +274,7 @@ impl SearchAdmin {
                 )
             })?
             .into_iter()
-            .find(|model| model.id == model_id && model.is_enabled)
+            .find(|model| model.id == model_id && model.is_enabled && model.is_inference)
             .ok_or_else(|| {
                 WebSearchConfigError::new(
                     "WEB_SEARCH_MODEL_INELIGIBLE",
@@ -368,6 +407,7 @@ mod tests {
     struct TestAdminHost {
         settings: Arc<TestSettings>,
         config_lock: Arc<Mutex<()>>,
+        routes: Vec<SearchRoute>,
     }
 
     impl TestAdminHost {
@@ -375,6 +415,7 @@ mod tests {
             SearchAdmin::new(Arc::new(Self {
                 settings: Arc::new(TestSettings::default()),
                 config_lock: Arc::new(Mutex::new(())),
+                routes: Vec::new(),
             }))
         }
     }
@@ -390,32 +431,94 @@ mod tests {
         }
 
         async fn models(&self) -> Result<Vec<SearchRoute>, ()> {
-            panic!("unexpected models lookup")
+            Ok(self.routes.clone())
         }
 
         async fn providers(&self) -> Result<Vec<SearchProvider>, ()> {
             panic!("unexpected providers lookup")
         }
 
-        async fn provider(&self, _id: &str) -> Result<Option<SearchProvider>, ()> {
-            panic!("unexpected provider lookup")
+        async fn provider(&self, id: &str) -> Result<Option<SearchProvider>, ()> {
+            Ok(Some(SearchProvider { id: id.into(), name: id.into(), is_enabled: true }))
         }
 
         async fn provider_model(
             &self,
             _provider_id: &str,
-            _model: &str,
+            model: &str,
         ) -> Result<Option<SearchModel>, ()> {
-            panic!("unexpected provider model lookup")
+            Ok(Some(SearchModel { model_id: model.into(), available: model == "infer-ok" }))
         }
 
-        async fn validate_external_route(&self, _route_id: &str) -> Result<(), ()> {
-            panic!("unexpected external route validation")
+        async fn validate_external_route(&self, route_id: &str) -> Result<(), ()> {
+            self.routes.iter().any(|route| route.model_id == route_id && route.is_web_search && route.is_enabled).then_some(()).ok_or(())
         }
 
         async fn sources(&self) -> Result<Option<SearchSources>, ()> {
-            panic!("unexpected sources lookup")
+            Ok(Some(SearchSources {
+                settings: crate::host::SearchSourceSettings {
+                    search_provider_ids: vec!["source".into()],
+                    fetch_provider_ids: vec!["source".into()],
+                },
+                providers: vec![crate::host::SearchSourceProvider {
+                    id: "source".into(), search: true, fetch: true,
+                }],
+            }))
         }
+    }
+
+    #[tokio::test]
+    async fn local_list_and_binding_share_inference_eligibility() {
+        let route = |id: &str, model: &str| SearchRoute {
+            id: id.into(), model_id: id.into(), display_name: id.into(), is_enabled: true,
+            is_inference: true, is_web_search: false,
+            targets: vec![crate::host::SearchRouteTarget {
+                provider_id: "provider".into(), model: model.into(), enabled: true,
+            }],
+        };
+        let admin = SearchAdmin::new(Arc::new(TestAdminHost {
+            settings: Arc::new(TestSettings::default()), config_lock: Arc::new(Mutex::new(())),
+            routes: vec![route("good", "infer-ok"), route("bad", "search-only")],
+        }));
+        let eligible = admin.list_eligible_web_search_models().await.unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].id, "good");
+        let mut config = WebSearchConfig::default();
+        config.enabled = true;
+        config.backend = Some(WebSearchBackendDraft::Local { model_id: Some("bad".into()) });
+        assert_eq!(admin.update_web_search_config(config.clone()).await.unwrap_err().code, "WEB_SEARCH_MODEL_INELIGIBLE");
+        config.backend = Some(WebSearchBackendDraft::Local { model_id: Some("good".into()) });
+        admin.update_web_search_config(config).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_purpose_filters_and_invalid_binding_remains_recoverable() {
+        let settings = Arc::new(TestSettings::default());
+        let routes = vec![
+            SearchRoute { id: "local-key".into(), model_id: "local".into(), display_name: "Local".into(), is_enabled: true, is_inference: true, is_web_search: false, targets: vec![] },
+            SearchRoute { id: "search-key".into(), model_id: "search".into(), display_name: "Search".into(), is_enabled: true, is_inference: false, is_web_search: true, targets: vec![] },
+        ];
+        let admin = SearchAdmin::new(Arc::new(TestAdminHost {
+            settings: settings.clone(), config_lock: Arc::new(Mutex::new(())), routes,
+        }));
+        let mut config = WebSearchConfig::default();
+        config.backend = Some(WebSearchBackendDraft::External { route_id: Some("local".into()) });
+        assert_eq!(admin.update_web_search_config(config.clone()).await.unwrap_err().code, "WEB_SEARCH_ROUTE_UNAVAILABLE");
+        config.backend = Some(WebSearchBackendDraft::Local { model_id: Some("search-key".into()) });
+        assert_eq!(admin.update_web_search_config(config.clone()).await.unwrap_err().code, "WEB_SEARCH_MODEL_INELIGIBLE");
+
+        // A stale binding may predate purpose enforcement; it can still be displayed and disabled.
+        config.enabled = true;
+        config.backend = Some(WebSearchBackendDraft::External { route_id: Some("missing".into()) });
+        SettingsWebSearchConfigStore::new(settings).save(&config).await.unwrap();
+        let routes = admin.list_external_search_routes().await.unwrap();
+        assert!(routes.iter().any(|route| route.model_id == "search" && route.available));
+        assert!(routes.iter().any(|route| route.model_id == "missing" && !route.available));
+        assert!(!routes.iter().any(|route| route.model_id == "local"));
+        config.enabled = false;
+        admin.update_web_search_config(config.clone()).await.unwrap();
+        config.backend = None;
+        admin.update_web_search_config(config).await.unwrap();
     }
 
     #[tokio::test]

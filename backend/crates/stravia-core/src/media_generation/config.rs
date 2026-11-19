@@ -73,17 +73,19 @@ pub(crate) async fn validate_route(
 }
 
 async fn validate_targets(gateway: &Gateway, route: &RouteConfig) -> Result<(), GenerationError> {
-    match route.output_modality {
-        Some(crate::db::models::RouteOutputModality::Image) => {}
-        Some(crate::db::models::RouteOutputModality::Text) => {
+    match route.purpose {
+        Some(crate::db::models::RoutePurpose::ImageGeneration) => {}
+        Some(
+            crate::db::models::RoutePurpose::Inference | crate::db::models::RoutePurpose::WebSearch,
+        ) => {
             return Err(GenerationError::new(
-                "media_generation_route_output_modality_mismatch",
+                "media_generation_route_purpose_mismatch",
                 "Select a Route configured for image output",
             ));
         }
         None => {
             return Err(GenerationError::new(
-                "route_output_modality_unconfigured",
+                "route_purpose_unconfigured",
                 "Select and save image output to reconfigure this Route",
             ));
         }
@@ -110,7 +112,7 @@ async fn validate_targets(gateway: &Gateway, route: &RouteConfig) -> Result<(), 
             .is_some_and(|model| {
                 model
                     .metadata
-                    .supports_route_output_modality(crate::db::models::RouteOutputModality::Image)
+                    .supports_route_purpose(crate::db::models::RoutePurpose::ImageGeneration)
             })
         {
             matching = true;
@@ -119,7 +121,7 @@ async fn validate_targets(gateway: &Gateway, route: &RouteConfig) -> Result<(), 
     }
     if !matching {
         return Err(GenerationError::new(
-            "media_generation_targets_output_modality_mismatch",
+            "media_generation_targets_purpose_mismatch",
             "The selected Route has no enabled image-output Target; repair the registered model output",
         ));
     }

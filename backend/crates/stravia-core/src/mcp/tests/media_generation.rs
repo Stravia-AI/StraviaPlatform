@@ -184,7 +184,7 @@ async fn generation_app() -> GenerationApp {
         .gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Image,
+            purpose: crate::db::models::RoutePurpose::ImageGeneration,
             model_id: "image-generation".into(),
             display_name: Some("Image generation".into()),
             balance: None,
@@ -965,7 +965,7 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
         .iter()
         .find(|target| target.id == original_target_id)
         .unwrap();
-    assert!(original.output_modality_mismatch);
+    assert!(original.purpose_mismatch);
 
     let model = admin
         .get_provider_model(provider_id, "gpt-5.4")
@@ -999,7 +999,7 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
         .iter()
         .find(|target| target.id == original_target_id)
         .unwrap();
-    assert!(!original.output_modality_mismatch);
+    assert!(!original.purpose_mismatch);
 }
 
 async fn upload_image(app: &TestApp, bytes: Vec<u8>, mime: &str) -> String {

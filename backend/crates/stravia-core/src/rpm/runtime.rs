@@ -397,18 +397,21 @@ impl SendEligibility {
             .iter()
             .find(|route| route.id == self.route_id && route.is_enabled)
             .ok_or_else(rejected)?;
-        let output_modality = route.output_modality.ok_or_else(|| {
+        let purpose = route.purpose.ok_or_else(|| {
             AdmissionError::Rejected(ModelTurnError::new(
-                "route_output_modality_unconfigured",
-                "Select and save an output modality to reconfigure this Route",
+                "route_purpose_unconfigured",
+                "Select and save a purpose to reconfigure this Route",
             ))
         })?;
-        if self.capability == stravia_vendor_sdk::Capability::MediaImage
-            && output_modality != crate::db::models::RouteOutputModality::Image
-        {
+        if !crate::model_turn::route_purpose_supports_capability(purpose, self.capability) {
+            let code = if self.capability == stravia_vendor_sdk::Capability::MediaImage {
+                "media_generation_route_purpose_mismatch"
+            } else {
+                "route_purpose_mismatch"
+            };
             return Err(AdmissionError::Rejected(ModelTurnError::new(
-                "media_generation_route_output_modality_mismatch",
-                "Image generation requires an image-output Route",
+                code,
+                "Route purpose does not support this operation",
             )));
         }
         let target = route
@@ -486,11 +489,11 @@ impl SendEligibility {
         if !model.as_ref().is_some_and(|model| {
             model
                 .metadata
-                .supports_route_output_modality(output_modality)
+                .supports_route_purpose(purpose)
         }) {
             return Err(AdmissionError::Rejected(ModelTurnError::new(
-                "target_output_modality_mismatch",
-                "Target no longer registers the Route output modality",
+                "target_purpose_mismatch",
+                "Target no longer supports the Route purpose",
             )));
         }
         crate::model_turn::validate_target_capability(

@@ -36,7 +36,7 @@ pub enum ConnectClientId {
 pub struct ConnectClientModel {
     pub model_id: String,
     pub display_name: String,
-    pub output_modality: Option<crate::db::models::RouteOutputModality>,
+    pub purpose: Option<crate::db::models::RoutePurpose>,
     #[serde(default)]
     pub supported_thinking_levels: Vec<String>,
     pub default_thinking_level: Option<String>,
@@ -53,7 +53,7 @@ impl From<&crate::db::models::RouteConfig> for ConnectClientModel {
         Self {
             model_id: route.model_id.as_str().to_owned(),
             display_name: route.effective_display_name().to_owned(),
-            output_modality: route.output_modality,
+            purpose: route.purpose,
             supported_thinking_levels: route
                 .supported_thinking_levels
                 .iter()
@@ -156,6 +156,18 @@ fn plan_client_config(
     paths: ConfigPaths<'_>,
     existing_files: &BTreeMap<PathBuf, Vec<u8>>,
 ) -> Result<ConnectClientApplyPlan, ConnectClientApplyError> {
+    let mut filtered_input;
+    let input = if input.models.iter().any(|model| {
+        model.purpose == Some(crate::db::models::RoutePurpose::WebSearch)
+    }) {
+        filtered_input = input.clone();
+        filtered_input.models.retain(|model| {
+            model.purpose != Some(crate::db::models::RoutePurpose::WebSearch)
+        });
+        &filtered_input
+    } else {
+        input
+    };
     if input.models.is_empty() {
         return Err(error(
             "invalid_input",
@@ -716,7 +728,13 @@ fn plan_codex(
         .models
         .iter()
         .filter(|model| {
-            model.output_modality != Some(crate::db::models::RouteOutputModality::Image)
+            !matches!(
+                model.purpose,
+                Some(
+                    crate::db::models::RoutePurpose::ImageGeneration
+                        | crate::db::models::RoutePurpose::WebSearch
+                )
+            )
         })
         .peekable();
     if codex_models.peek().is_some() && codex_models.all(|model| model.supports_remote_compaction) {
@@ -1346,7 +1364,13 @@ pub fn codex_catalog(
     let models = models
         .iter()
         .filter(|model| {
-            model.output_modality != Some(crate::db::models::RouteOutputModality::Image)
+            !matches!(
+                model.purpose,
+                Some(
+                    crate::db::models::RoutePurpose::ImageGeneration
+                        | crate::db::models::RoutePurpose::WebSearch
+                )
+            )
         })
         .enumerate()
         .map(|(priority, model)| {
@@ -1420,11 +1444,11 @@ fn thinking_level_description(level: &str) -> &str {
 }
 
 fn output_modalities(model: &ConnectClientModel) -> &'static [&'static str] {
-    use crate::db::models::RouteOutputModality;
-    match model.output_modality {
-        Some(RouteOutputModality::Text) => &["text"],
-        Some(RouteOutputModality::Image) => &["image"],
-        None => &[],
+    use crate::db::models::RoutePurpose;
+    match model.purpose {
+        Some(RoutePurpose::Inference) => &["text"],
+        Some(RoutePurpose::ImageGeneration) => &["image"],
+        Some(RoutePurpose::WebSearch) | None => &[],
     }
 }
 
@@ -1466,7 +1490,7 @@ mod tests {
         ConnectClientModel {
             model_id: id.to_owned(),
             display_name: display_name.to_owned(),
-            output_modality: Some(crate::db::models::RouteOutputModality::Text),
+            purpose: Some(crate::db::models::RoutePurpose::Inference),
             supported_thinking_levels: vec!["off".to_owned(), "medium".to_owned()],
             default_thinking_level: None,
             supports_image_input: true,
@@ -1482,6 +1506,21 @@ mod tests {
             home.display().to_string(),
         );
         environment
+    }
+
+    #[test]
+    fn web_search_routes_are_excluded_from_client_bindings() {
+        let mut input = standard_input(ConnectClientId::Opencode);
+        input.models.push(ConnectClientModel {
+            purpose: Some(crate::db::models::RoutePurpose::WebSearch),
+            ..model("search-only", "Search only")
+        });
+        let plan = preview_connect_client_apply(&input).expect("client preview");
+        assert!(!plan.preview.contains("search-only"));
+        let catalog = super::codex_catalog(&input.models, false);
+        assert!(!catalog.to_string().contains("search-only"));
+        input.models.retain(|model| model.model_id == "search-only");
+        assert_eq!(preview_connect_client_apply(&input).unwrap_err().code, "invalid_input");
     }
 
     #[test]
@@ -1618,7 +1657,7 @@ name = "Other"
         input.models[0].default_thinking_level = Some("high".to_owned());
         input.models[1].supports_image_input = false;
         let image = ConnectClientModel {
-            output_modality: Some(crate::db::models::RouteOutputModality::Image),
+            purpose: Some(crate::db::models::RoutePurpose::ImageGeneration),
             ..model("image-only", "Image only")
         };
         input.models.insert(0, image);
@@ -1742,7 +1781,7 @@ name = "Other"
         assert!(mixed.get("capabilities").is_none());
 
         let image_route = ConnectClientModel {
-            output_modality: Some(crate::db::models::RouteOutputModality::Image),
+            purpose: Some(crate::db::models::RoutePurpose::ImageGeneration),
             ..model("image", "image")
         };
         let with_image = apply(vec![capable("a"), image_route.clone()]);

@@ -148,7 +148,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     let admin = gateway.admin();
     let parent = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "read-scope-parent".into(),
             display_name: None,
             balance: None,
@@ -304,7 +304,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("parent Provider Model");
     let parent_model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "text-parent".into(),
             display_name: None,
             balance: None,
@@ -359,7 +359,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
         .expect("Media Provider Model");
     let media_model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "media-vision".into(),
             display_name: None,
             balance: None,
@@ -660,7 +660,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
     let mixed_model = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "mixed-media".into(),
             display_name: None,
             balance: Some("traffic_equalization".into()),
@@ -694,7 +694,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
     let unsupported_model = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "unsupported-media".into(),
             display_name: None,
             balance: None,
@@ -732,7 +732,7 @@ async fn mixed_media_route_prefers_eligible_native_then_bridges_after_output_dri
     let media_model = gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "drift-media-reader".into(),
             display_name: None,
             balance: None,
@@ -952,7 +952,7 @@ async fn historical_route_with_image_input_requires_reconfiguration_before_media
         .storage
         .routes()
         .put(crate::db::models::PutRoute {
-            output_modality: None,
+            purpose: None,
             id: Some(route.id),
             model_id: route.model_id,
             display_name: route.display_name,
@@ -1003,7 +1003,7 @@ async fn historical_route_with_image_input_requires_reconfiguration_before_media
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON rejection");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(
-        body["error"]["code"], "route_output_modality_unconfigured",
+        body["error"]["code"], "route_purpose_unconfigured",
         "{body}"
     );
     assert!(

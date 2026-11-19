@@ -1,4 +1,4 @@
-use crate::db::models::RouteOutputModality;
+use crate::db::models::RoutePurpose;
 use stravia_runtime_contract::thinking::ThinkingLevel;
 
 use super::*;
@@ -8,7 +8,7 @@ struct RouteRow {
     id: String,
     model_id: String,
     display_name: Option<String>,
-    output_modality: Option<RouteOutputModality>,
+    purpose: Option<RoutePurpose>,
     default_thinking_level: Option<String>,
     billing_json: Option<sqlx::types::Json<crate::pricing::BillingConfig>>,
     balance: String,
@@ -22,8 +22,9 @@ impl RouteRow {
             id: self.id.into(),
             model_id: self.model_id.into(),
             display_name: self.display_name,
-            output_modality: self.output_modality,
+            purpose: self.purpose,
             image_generation_bound: false,
+            web_search_bound: false,
             default_thinking_level: self.default_thinking_level,
             billing: self.billing_json.map(|billing| billing.0),
             balance: self.balance,
@@ -70,8 +71,8 @@ impl TargetRow {
             created_at: self.created_at,
             thinking_level_map: self.thinking_level_map.0,
             model_name: None,
-            output_modality_mismatch: false,
-            route_output_modalities: Vec::new(),
+            purpose_mismatch: false,
+            route_purposes: Vec::new(),
         }
     }
 }
@@ -100,7 +101,7 @@ impl SqliteRouteStore {
             ""
         };
         let sql = format!(
-            "SELECT id, model_id, display_name, output_modality, default_thinking_level, \
+            "SELECT id, model_id, display_name, purpose, default_thinking_level, \
              billing_json, balance, is_enabled, created_at \
              FROM models{where_clause} ORDER BY created_at DESC"
         );
@@ -135,7 +136,7 @@ impl SqliteRouteStore {
         route_id: &str,
     ) -> anyhow::Result<Option<RouteConfig>> {
         let route = sqlx::query_as::<_, RouteRow>(
-            "SELECT id, model_id, display_name, output_modality, default_thinking_level, \
+            "SELECT id, model_id, display_name, purpose, default_thinking_level, \
              billing_json, balance, is_enabled, created_at \
              FROM models WHERE model_id = ?",
         )
@@ -244,14 +245,14 @@ impl RouteStore for SqliteRouteStore {
 
         if route.id.is_some() {
             let updated = sqlx::query(
-                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ?, default_thinking_level = ?, output_modality = ?, billing_json = CASE WHEN ? THEN ? ELSE billing_json END WHERE id = ?",
+                "UPDATE models SET model_id = ?, display_name = ?, balance = ?, is_enabled = ?, default_thinking_level = ?, purpose = ?, billing_json = CASE WHEN ? THEN ? ELSE billing_json END WHERE id = ?",
             )
             .bind(route.model_id.as_str().trim())
             .bind(route.display_name.as_deref())
             .bind(route.selection_strategy.trim())
             .bind(route.is_enabled)
             .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
-            .bind(route.output_modality.map(RouteOutputModality::as_str))
+            .bind(route.purpose.map(RoutePurpose::as_str))
             .bind(billing_present)
             .bind(billing_json)
             .bind(&route_storage_id)
@@ -262,7 +263,7 @@ impl RouteStore for SqliteRouteStore {
             }
         } else {
             sqlx::query(
-                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level, output_modality, billing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO models (id, model_id, display_name, balance, is_enabled, default_thinking_level, purpose, billing_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
                 .bind(&route_storage_id)
                 .bind(route.model_id.as_str().trim())
@@ -270,7 +271,7 @@ impl RouteStore for SqliteRouteStore {
                 .bind(route.selection_strategy.trim())
                 .bind(route.is_enabled)
                 .bind(route.default_thinking_level.map(ThinkingLevel::as_str))
-                .bind(route.output_modality.map(RouteOutputModality::as_str))
+                .bind(route.purpose.map(RoutePurpose::as_str))
                 .bind(billing_json.flatten())
                 .execute(&mut *tx)
                 .await?;
@@ -397,7 +398,7 @@ mod tests {
         let store = SqliteRouteStore { pool };
         let route = store
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: None,
                 model_id: "atomic-route".into(),
                 display_name: None,
@@ -412,7 +413,7 @@ mod tests {
 
         let failed = store
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: Some(route.id),
                 model_id: "atomic-route".into(),
                 display_name: None,
@@ -441,7 +442,7 @@ mod tests {
             .execute(&store.pool).await.expect("insert guard");
         let updated = store
             .put(PutRoute {
-                output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                purpose: Some(crate::db::models::RoutePurpose::Inference),
                 id: Some(persisted.id.clone()),
                 model_id: persisted.model_id.clone(),
                 display_name: Some("Renamed".into()),
@@ -494,7 +495,7 @@ mod tests {
             started_tx.send(()).expect("signal Route put start");
             store
                 .put(PutRoute {
-                    output_modality: Some(crate::db::models::RouteOutputModality::Text),
+                    purpose: Some(crate::db::models::RoutePurpose::Inference),
                     id: None,
                     model_id: "concurrent-route".into(),
                     display_name: None,

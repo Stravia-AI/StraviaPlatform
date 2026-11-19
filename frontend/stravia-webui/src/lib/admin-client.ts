@@ -1,3 +1,4 @@
+import type { QueryClient } from '@tanstack/svelte-query'
 import type { StatsFilter, StatsWindow } from '#lib/types/stats.js'
 import { apiBase, authenticatedFetch, decodeAdmin, isTauri } from '#lib/auth.js'
 import type { ConnectClientApplyPlan } from '#lib/connect-client-apply.js'
@@ -597,6 +598,16 @@ export const admin = {
     check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
     skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
+}
+
+/** Changing a route can also change which routes can be bound in the advanced settings. */
+export function invalidateRouteCatalogs(client: QueryClient) {
+  return Promise.all([
+    client.invalidateQueries({ queryKey: ['models'] }),
+    client.invalidateQueries({ queryKey: ['media-generation-eligible-routes'] }),
+    client.invalidateQueries({ queryKey: ['web-search-external-routes'] }),
+    client.invalidateQueries({ queryKey: ['web-search-eligible-models'] }),
+  ])
 }
 
 export const currencyQueryKey = ['currency'] as const

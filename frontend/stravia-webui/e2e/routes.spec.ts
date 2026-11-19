@@ -5,13 +5,13 @@ import { prepareApp } from './prepare-app'
 const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 for (const locale of ['en-US', 'zh-CN'] as const) {
-  test(`model type changes preserve destinations and failed drafts (${locale}, 320px)`, async ({ page }) => {
+  test(`purpose changes preserve destinations and failed drafts (${locale}, 320px)`, async ({ page }) => {
     await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
     await page.setViewportSize({ width: 320, height: 800 })
     const zh = locale === 'zh-CN'
     const service = {
-      id: 'modality-provider',
-      name: 'Modality service',
+      id: 'purpose-provider',
+      name: 'Purpose service',
       protocol: 'openai-compatible',
       base_url: 'https://example.invalid',
       use_proxy: false,
@@ -30,8 +30,8 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
       target_retry_budget: 2,
       target_cooldown_ms: 91000,
       thinking_level_map: [],
-      output_modality_mismatch: false,
-      route_output_modalities: model === 'dual' ? ['text', 'image'] : ['text'],
+      purpose_mismatch: false,
+      route_purposes: model === 'dual' ? ['inference', 'image_generation'] : ['inference'],
       created_at: '',
     })
     const saved = {
@@ -39,8 +39,9 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
       model_id: 'legacy',
       display_name: 'Retained route',
       balance: 'traffic_equalization',
-      output_modality: 'text',
+      purpose: 'inference',
       image_generation_bound: false,
+      web_search_bound: false,
       is_enabled: true,
       supported_thinking_levels: [],
       billing: {
@@ -56,23 +57,23 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     let attempts = 0
     let body: Record<string, unknown> | undefined
     await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [service] } }))
-    await page.route('**/api/v1/providers/modality-provider/models', (route) =>
+    await page.route('**/api/v1/providers/purpose-provider/models', (route) =>
       route.fulfill({
         json: {
           data: {
             models: [
               {
                 id: 'dual',
-                name: 'Dual output',
+                name: 'Dual purpose',
                 available: true,
-                route_output_modalities: ['text', 'image'],
+                route_purposes: ['inference', 'image_generation'],
                 specification: {},
               },
               {
                 id: 'text-only',
                 name: 'Text only',
                 available: true,
-                route_output_modalities: ['text'],
+                route_purposes: ['inference'],
                 specification: {},
               },
             ],
@@ -94,22 +95,22 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     })
 
     await page.goto('/models/new')
-    const modelType = page.getByRole('button', { name: zh ? '输出类型' : 'Output type', exact: true })
-    await expect(modelType).toHaveText(zh ? '文本' : 'Text')
+    const purposeSelect = page.getByRole('button', { name: zh ? '用途' : 'Purpose', exact: true })
+    await expect(purposeSelect).toHaveText(zh ? '对话推理' : 'Inference')
     await page.goto('/models/legacy')
-    await expect(modelType).toHaveText(zh ? '文本' : 'Text')
-    await modelType.focus()
+    await expect(purposeSelect).toHaveText(zh ? '对话推理' : 'Inference')
+    await purposeSelect.focus()
     await page.keyboard.press('Enter')
     await page.keyboard.press('ArrowDown')
     await page.keyboard.press('Enter')
-    await expect(modelType).toHaveText(zh ? '图片' : 'Image')
-    await modelType.click()
-    await expect(page.getByRole('option', { selected: true })).toHaveText(zh ? '图片' : 'Image')
+    await expect(purposeSelect).toHaveText(zh ? '图片生成' : 'Image Generation')
+    await purposeSelect.click()
+    await expect(page.getByRole('option', { selected: true })).toHaveText(zh ? '图片生成' : 'Image Generation')
     await page.keyboard.press('Escape')
     await expect(page.getByRole('alert')).toHaveCount(0)
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText(zh ? '以下请求目标' : 'These destinations')
-    await expect(page.getByRole('alert')).toContainText('Modality service · text-only')
+    await expect(page.getByRole('alert')).toContainText('Purpose service · text-only')
     expect(attempts).toBe(0)
     // A disabled incompatible destination still blocks switching; remove it explicitly.
     await page.getByRole('button', { name: zh ? '移除请求目标 2' : 'Remove destination 2', exact: true }).click()
@@ -120,7 +121,7 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     await multiplier.fill('0')
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('Configuration changed')
-    await expect(modelType).toHaveText(zh ? '图片' : 'Image')
+    await expect(purposeSelect).toHaveText(zh ? '图片生成' : 'Image Generation')
     await expect(page.locator('#route-display-name')).toHaveValue('Retained failure draft')
     await expect(page.locator('[data-slot="target-card"]')).toHaveCount(1)
     await expect(timezone).toHaveValue('Invalid/Timezone')
@@ -129,7 +130,7 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     await multiplier.fill('1')
     await page.getByRole('button', { name: zh ? '保存模型' : 'Save model', exact: true }).click()
     await expect.poll(() => attempts).toBe(2)
-    expect(body?.output_modality).toBe('image')
+    expect(body?.purpose).toBe('image_generation')
     expect(body?.targets).toEqual([
       expect.objectContaining({
         provider_id: service.id,
@@ -144,7 +145,7 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
   })
 }
 
-test('historical model alias can repair output without replacing its destination or schedule', async ({ page }) => {
+test('historical model alias can repair its purpose without replacing its destination or schedule', async ({ page }) => {
   const service = {
     id: 'alias-provider',
     name: 'Alias service',
@@ -166,8 +167,8 @@ test('historical model alias can repair output without replacing its destination
     target_retry_budget: 2,
     target_cooldown_ms: 91000,
     thinking_level_map: [],
-    output_modality_mismatch: true,
-    route_output_modalities: ['text'],
+    purpose_mismatch: true,
+    route_purposes: ['inference'],
     created_at: '',
   }
   const saved = {
@@ -175,8 +176,9 @@ test('historical model alias can repair output without replacing its destination
     model_id: 'historical-alias',
     display_name: 'Historical alias',
     balance: 'traffic_equalization',
-    output_modality: null,
+    purpose: null,
     image_generation_bound: false,
+    web_search_bound: false,
     is_enabled: true,
     supported_thinking_levels: [],
     targets: [destination],
@@ -193,7 +195,7 @@ test('historical model alias can repair output without replacing its destination
               id: 'zhipuai/glm-4.6',
               name: 'GLM-4.6',
               available: true,
-              route_output_modalities: ['text'],
+              route_purposes: ['inference'],
               specification: { modalities: { input: ['text'], output: ['text'] } },
             },
           ],
@@ -215,45 +217,51 @@ test('historical model alias can repair output without replacing its destination
 
   await page.goto('/models/historical-alias')
   await expect.poll(() => inventoryLoaded).toBe(true)
-  await expect(page.getByRole('button', { name: 'Output type', exact: true })).toHaveText('Select an output type')
+  await expect(page.getByRole('button', { name: 'Purpose', exact: true })).toHaveText('Select a purpose')
   await expect(page.locator('[data-slot="target-card"]')).toHaveCount(1)
-  await page.getByRole('button', { name: 'Output type', exact: true }).click()
-  await page.getByRole('option', { name: 'Text', exact: true }).click()
+  await page.getByRole('button', { name: 'Purpose', exact: true }).click()
+  await page.getByRole('option', { name: 'Inference', exact: true }).click()
   await expect(page.getByText(/These destinations/)).toHaveCount(0)
   await page.getByRole('button', { name: 'Save model', exact: true }).click()
   await expect.poll(() => body).toBeDefined()
-  expect(body?.output_modality).toBe('text')
+  expect(body?.purpose).toBe('inference')
   // An unchanged destination is omitted from PATCH, preserving its original alias,
   // identity, priority, timeout, retry budget, cooldown and thinking mappings.
   expect(body).not.toHaveProperty('targets')
 })
 
-test('image-bound route switching exposes a visible unlink path without losing its draft', async ({ page }) => {
-  const saved = {
-    id: 'bound-image',
-    model_id: 'bound-image',
-    display_name: 'Image route',
-    balance: 'traffic_equalization',
-    output_modality: 'image',
-    image_generation_bound: true,
-    is_enabled: true,
-    supported_thinking_levels: [],
-    targets: [],
-  }
-  await page.route('**/api/v1/models/bound-image', (route) => route.fulfill({ json: { data: saved } }))
-  await page.route('**/api/v1/models/bound-image/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
-  await page.goto('/models/bound-image')
-  await page.getByRole('button', { name: 'Output type', exact: true }).click()
-  await page.getByRole('option', { name: 'Text', exact: true }).click()
-  await page.locator('#route-display-name').fill('Unsaved switch')
-  const recovery = page.getByRole('link', { name: 'Open media generation', exact: true })
-  await expect(recovery).toHaveAttribute('href', '/media-generation')
-  await expect(recovery).toBeVisible()
-  await page.getByRole('button', { name: 'Save model', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('Clear that reference')
-  await expect(page.locator('#route-display-name')).toHaveValue('Unsaved switch')
-  await expect(page.getByRole('button', { name: 'Output type', exact: true })).toHaveText('Text')
-})
+for (const [purpose, next, settings, linkLabel, reason] of [
+  ['image_generation', 'Inference', 'media-generation', 'Open media generation', 'Media generation still uses'],
+  ['web_search', 'Image Generation', 'web-search', 'Open web search settings', 'Web search still uses'],
+] as const) {
+  test(`${purpose}-bound route switching exposes a rebind link without losing its draft`, async ({ page }) => {
+    const saved = {
+      id: 'bound-route',
+      model_id: 'bound-route',
+      balance: 'traffic_equalization',
+      purpose,
+      image_generation_bound: purpose === 'image_generation',
+      web_search_bound: purpose === 'web_search',
+      is_enabled: true,
+      supported_thinking_levels: [],
+      targets: [],
+    }
+    await page.route('**/api/v1/models/bound-route', (route) => route.fulfill({ json: { data: saved } }))
+    await page.route('**/api/v1/models/bound-route/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
+    await page.goto('/models/bound-route')
+    const selector = page.getByRole('button', { name: 'Purpose', exact: true })
+    await selector.click()
+    await page.getByRole('option', { name: next, exact: true }).click()
+    await page.locator('#route-display-name').fill('Unsaved switch')
+    const recovery = page.getByRole('link', { name: linkLabel, exact: true })
+    await expect(recovery).toHaveAttribute('href', `/${settings}`)
+    await expect(recovery).toBeVisible()
+    await page.getByRole('button', { name: 'Save model', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText(reason)
+    await expect(page.locator('#route-display-name')).toHaveValue('Unsaved switch')
+    await expect(selector).toHaveText(next)
+  })
+}
 
 test('prefilled model metadata stays clean without erasing a user draft', async ({ page }) => {
   let holdDetails = false
@@ -293,7 +301,7 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
               source_kind: 'discovered',
               snapshot_state: { type: 'unregistered' },
               selection_policy: 'auto',
-              route_output_modalities: ['text'],
+              route_purposes: ['inference'],
               specification: { limit: null, modalities: null },
               revision: 1,
             },
@@ -382,8 +390,9 @@ test('Models table fits the desktop content width without horizontal scrolling',
           model_id: modelId,
           display_name: modelId === 'gpt-5.6-sol' ? 'GPT 5.6 Sol' : null,
           balance: 'weighted',
-          output_modality: 'text',
+          purpose: 'inference',
           image_generation_bound: false,
+          web_search_bound: false,
           is_enabled: true,
           targets: [
             {
@@ -391,7 +400,7 @@ test('Models table fits the desktop content width without horizontal scrolling',
               model_id: modelId,
               provider_id: 'codex',
               model: modelId,
-              route_output_modalities: ['text'],
+              route_purposes: ['inference'],
               enabled: true,
               priority: 1,
             },
@@ -402,7 +411,7 @@ test('Models table fits the desktop content width without horizontal scrolling',
                     model_id: modelId,
                     provider_id: 'codex',
                     model: 'disabled-shadow-model',
-                    route_output_modalities: ['text'],
+                    route_purposes: ['inference'],
                     enabled: false,
                     priority: 0,
                   },
@@ -461,7 +470,7 @@ for (const { width, locale } of [
       provider_id: provider,
       model,
       model_name: name,
-      route_output_modalities: ['text'],
+      route_purposes: ['inference'],
       enabled: true,
       priority,
       thinking_level_map: [],
@@ -474,8 +483,9 @@ for (const { width, locale } of [
               id: 'internal-writing-route',
               model_id: 'writing-client',
               display_name: 'Writing assistant',
-              output_modality: 'text',
+              purpose: 'inference',
               image_generation_bound: false,
+              web_search_bound: false,
               balance: 'traffic_equalization',
               is_enabled: true,
               targets: [
@@ -487,8 +497,9 @@ for (const { width, locale } of [
               id: 'internal-art-route',
               model_id: 'art-client',
               display_name: 'Art studio',
-              output_modality: 'image',
+              purpose: 'image_generation',
               image_generation_bound: false,
+              web_search_bound: false,
               balance: 'traffic_equalization',
               is_enabled: false,
               targets: [],
@@ -516,7 +527,7 @@ for (const { width, locale } of [
       'Reserve service',
       'reserve-provider-id',
       zh ? '已启用' : 'Enabled',
-      zh ? '文本' : 'Text',
+      zh ? '对话推理' : 'Inference',
     ]) {
       await search.fill(query)
       await expect(results.getByText('Writing assistant', { exact: true })).toBeVisible()
@@ -563,7 +574,7 @@ test('Model destinations summarize the preferred layer across any number of laye
     provider_id: providerId,
     model,
     model_name: modelName,
-    route_output_modalities: ['text'],
+    route_purposes: ['inference'],
     enabled: true,
     priority,
     thinking_level_map: [],
@@ -573,8 +584,9 @@ test('Model destinations summarize the preferred layer across any number of laye
     model_id: modelId,
     display_name: null,
     balance: 'traffic_equalization',
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     is_enabled: true,
     targets,
   })
@@ -656,8 +668,9 @@ test('Mobile model links preserve new-tab navigation and keep row actions indepe
             model_id: 'mobile-model',
             display_name: 'Mobile model',
             balance: 'traffic_equalization',
-            output_modality: 'text',
+            purpose: 'inference',
             image_generation_bound: false,
+            web_search_bound: false,
             is_enabled: true,
             targets: [],
           },
@@ -702,8 +715,9 @@ test('Model Route curl always includes the selected API Key', async ({ page }) =
             model_id: 'gpt-5.4',
             display_name: 'GPT 5.4',
             balance: 'priority',
-            output_modality: 'text',
+            purpose: 'inference',
             image_generation_bound: false,
+            web_search_bound: false,
             target_provider: 'provider',
             target_model: 'gpt-5.4',
             is_enabled: true,
@@ -752,8 +766,9 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
     model_id: 'gpt-5.4',
     display_name: 'Team GPT',
     balance: 'priority',
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     target_provider: 'provider',
     target_model: 'gpt-5.4',
     is_enabled: true,
@@ -764,7 +779,7 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
         model_id: 'model-gpt',
         provider_id: 'provider',
         model: 'gpt-5.4',
-        route_output_modalities: ['text'],
+        route_purposes: ['inference'],
         weight: 100,
         priority: 1,
         created_at: '2026-08-17T00:00:00Z',
@@ -867,8 +882,9 @@ test('Model Route editor derives thinking levels and identifies blocking destina
     target_provider: 'provider',
     target_model: 'wide-model',
     is_enabled: true,
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     created_at: '2026-08-17T00:00:00Z',
     supported_thinking_levels: ['off', 'low', 'high', 'xhigh'],
     targets: [
@@ -877,7 +893,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
         model_id: 'thinking-route',
         provider_id: 'provider',
         model: 'wide-model',
-        route_output_modalities: ['text'],
+        route_purposes: ['inference'],
         enabled: true,
         priority: 1,
         first_token_timeout_ms: 60_000,
@@ -891,7 +907,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
         model_id: 'thinking-route',
         provider_id: 'provider',
         model: 'narrow-model',
-        route_output_modalities: ['text'],
+        route_purposes: ['inference'],
         enabled: true,
         priority: 2,
         first_token_timeout_ms: 60_000,
@@ -905,7 +921,7 @@ test('Model Route editor derives thinking levels and identifies blocking destina
         model_id: 'thinking-route',
         provider_id: 'provider',
         model: 'retired-model',
-        route_output_modalities: ['text'],
+        route_purposes: ['inference'],
         enabled: false,
         priority: 3,
         first_token_timeout_ms: 60_000,
@@ -952,8 +968,9 @@ test('Model Route editor derives thinking levels and identifies blocking destina
           model_id: 'thinking-route',
           display_name: null,
           balance: 'priority',
-          output_modality: 'text',
+          purpose: 'inference',
           image_generation_bound: false,
+          web_search_bound: false,
           target_provider: 'provider',
           target_model: 'wide-model',
           is_enabled: updateBody.is_enabled,
@@ -990,14 +1007,14 @@ test('Model Route editor derives thinking levels and identifies blocking destina
       return Math.abs(display!.y - name!.y) <= 1 && display!.x > name!.x
     })
     .toBe(true)
-  const [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox] = await Promise.all([
+  const [nameInputBox, displayInputBox, purposeTriggerBox, balanceTriggerBox, columnBox] = await Promise.all([
     page.locator('#route-model-id').boundingBox(),
     page.locator('#route-display-name').boundingBox(),
-    page.locator('#route-output-modality').boundingBox(),
+    page.locator('#route-purpose').boundingBox(),
     page.locator('#route-balance').boundingBox(),
     page.getByRole('region', { name: 'Client model', exact: true }).boundingBox(),
   ])
-  for (const box of [nameInputBox, displayInputBox, outputTriggerBox, balanceTriggerBox, columnBox]) {
+  for (const box of [nameInputBox, displayInputBox, purposeTriggerBox, balanceTriggerBox, columnBox]) {
     expect(box).not.toBeNull()
   }
   // 设置列（48rem）在内容容器内居中；列宽足够时字段两两并排，短选项保持 16rem 并靠各自单元格左缘。
@@ -1016,10 +1033,10 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   expect(Math.abs(displayInputBox!.width - cellWidth)).toBeLessThanOrEqual(1)
   expect(displayInputBox!.x + displayInputBox!.width).toBeLessThanOrEqual(columnRight + 1)
   expect(Math.abs(displayInputBox!.y - nameInputBox!.y)).toBeLessThanOrEqual(1)
-  expect(Math.abs(outputTriggerBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(purposeTriggerBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
   expect(Math.abs(balanceTriggerBox!.x - rightCellX)).toBeLessThanOrEqual(1)
-  expect(Math.abs(balanceTriggerBox!.y - outputTriggerBox!.y)).toBeLessThanOrEqual(1)
-  for (const box of [outputTriggerBox!, balanceTriggerBox!]) {
+  expect(Math.abs(balanceTriggerBox!.y - purposeTriggerBox!.y)).toBeLessThanOrEqual(1)
+  for (const box of [purposeTriggerBox!, balanceTriggerBox!]) {
     expect(Math.abs(box.width - 16 * rem)).toBeLessThanOrEqual(2)
   }
 
@@ -1117,7 +1134,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     source_kind: 'discovered',
     snapshot_state: { type: 'imported', source: { type: 'discovery' }, pinned: [] },
     selection_policy: 'auto',
-    route_output_modalities: ['text'],
+    route_purposes: ['inference'],
     specification: {
       limit: { context: 1050000 },
       modalities: { input: ['image', 'pdf'], output: ['text'] },
@@ -1130,9 +1147,10 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
     id: 'gpt-unavailable',
     name: 'GPT Unavailable',
     available: false,
-    route_output_modalities: [],
+    route_purposes: [],
   }
-  const imageModel = { ...available, id: 'image-model', name: 'Image Model', route_output_modalities: ['image'] }
+  const imageModel = { ...available, id: 'image-model', name: 'Image Model', route_purposes: ['image_generation'] }
+  const searchModel = { ...available, id: 'search-model', name: 'Search only', route_purposes: ['web_search'] }
   let createAttempts = 0
   let createBody: Record<string, unknown> | undefined
   let disableBody: Record<string, unknown> | undefined
@@ -1149,17 +1167,18 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
       return
     }
     if (path.endsWith('/models')) {
-      await route.fulfill({ json: { data: { models: [available, unavailable, imageModel] } } })
+      await route.fulfill({ json: { data: { models: [available, unavailable, imageModel, searchModel] } } })
       return
     }
     if (path === '/providers/provider-a/model' && request.method() === 'GET') {
+      const selected = new URL(request.url()).searchParams.get('model') === searchModel.id ? searchModel : available
       await route.fulfill({
         json: {
           data: {
-            ...available,
+            ...selected,
             metadata: {
-              id: available.id,
-              name: available.name,
+              id: selected.id,
+              name: selected.name,
               limit: available.specification.limit,
               modalities: available.specification.modalities,
               reasoning_efforts: available.specification.reasoning_efforts,
@@ -1236,7 +1255,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
 
   await page.goto('/models/new')
   await expect(page.getByRole('heading', { name: 'Add model' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Output type', exact: true })).toHaveText('Text')
+  await expect(page.getByRole('button', { name: 'Purpose', exact: true })).toHaveText('Inference')
   const createRouteBreadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' })
   await expect(createRouteBreadcrumb.getByRole('link', { name: 'Models' })).toHaveAttribute('href', '/models')
   await expect(createRouteBreadcrumb.getByText('Create', { exact: true })).toHaveAttribute('aria-current', 'page')
@@ -1272,6 +1291,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByRole('option', { name: /GPT Available.*gpt-available/ })).toBeVisible()
   await expect(page.getByRole('option', { name: /GPT Unavailable/ })).toHaveCount(0)
   await expect(page.getByRole('option', { name: /Image Model/ })).toHaveCount(0)
+  await expect(page.getByRole('option', { name: /Search only/ })).toHaveCount(0)
   await page.getByRole('option', { name: /GPT Available.*gpt-available/ }).click()
   await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeEnabled()
   const dialogSpecification = page.getByRole('dialog').getByRole('group', { name: 'Model specification' })
@@ -1364,7 +1384,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await page.getByRole('button', { name: 'Save model' }).click()
   await expect.poll(() => createAttempts).toBe(2)
   expect(createBody?.model_id).toBe('gpt-5.4')
-  expect(createBody?.output_modality).toBe('text')
+  expect(createBody?.purpose).toBe('inference')
   expect(createBody?.display_name).toBeNull()
   expect(createBody?.targets).toEqual([
     expect.objectContaining({ provider_id: 'provider-b', model: 'gpt-available' }),
@@ -1373,6 +1393,30 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect.poll(() => disableBody?.is_enabled).toBe(false)
   await expect(page).toHaveURL(/\/models$/)
   await expect(page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })).toHaveCount(0)
+
+  await page.goto('/models/new')
+  await modelSearch.fill('research-search')
+  await modelSearch.press('Enter')
+  await page.getByRole('button', { name: 'Purpose', exact: true }).click()
+  await page.getByRole('option', { name: 'Web Search', exact: true }).click()
+  await page.getByRole('button', { name: 'Add destination' }).click()
+  await page.getByLabel('Destination 1 provider', { exact: true }).click()
+  await page.getByRole('option', { name: 'Provider A' }).click()
+  await page.getByLabel('Destination 1 model', { exact: true }).click()
+  await expect(page.getByRole('option', { name: /GPT Available|Image Model/ })).toHaveCount(0)
+  await page.getByRole('option', { name: /Search only/ }).click()
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Edit destination 1' })
+    .dragTo(page.locator('[data-slot="target-priority-connector"][data-position="empty"]'))
+  await expect(page.getByLabel('Layer 1')).toContainText('Search only')
+  await page.getByRole('button', { name: 'Save model' }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  expect(createBody).toMatchObject({
+    model_id: 'research-search',
+    purpose: 'web_search',
+    targets: [expect.objectContaining({ provider_id: 'provider-a', model: 'search-model', enabled: true })],
+  })
 })
 
 test('Model ID remains editable while the Canonical Model catalog fails to load', async ({ page }) => {
@@ -1417,8 +1461,9 @@ test('Destination status reflects runtime state without overwriting the editor d
     target_provider: 'provider',
     target_model: 'upstream-model',
     is_enabled: true,
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     created_at: '2026-08-17T00:00:00Z',
     supported_thinking_levels: [],
     targets: [
@@ -1427,7 +1472,7 @@ test('Destination status reflects runtime state without overwriting the editor d
         model_id: 'status-route',
         provider_id: 'provider',
         model: 'upstream-model',
-        route_output_modalities: ['text'],
+        route_purposes: ['inference'],
         enabled: true,
         priority: 1,
         first_token_timeout_ms: 60_000,
@@ -1505,17 +1550,17 @@ test('Destination status reflects runtime state without overwriting the editor d
   await expect(card.getByRole('status')).toHaveText('Available')
   await expect(page.locator('#route-display-name')).toHaveValue('My unsaved label')
 
-  const outputType = page.getByRole('button', { name: 'Output type', exact: true })
-  await outputType.click()
-  await page.getByRole('option', { name: 'Image', exact: true }).click()
-  await expect(card.getByRole('status')).toHaveText('Output does not match this route')
+  const purposeSelect = page.getByRole('button', { name: 'Purpose', exact: true })
+  await purposeSelect.click()
+  await page.getByRole('option', { name: 'Image Generation', exact: true }).click()
+  await expect(card.getByRole('status')).toHaveText('Destination does not support this purpose')
   await expect(card.getByRole('status')).toHaveAttribute('data-tone', 'error')
   await expect(page.getByRole('alert')).toHaveCount(0)
   await page.getByRole('button', { name: 'Save model', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('Provider · upstream-model')
   expect(writes).toBe(0)
-  await outputType.click()
-  await page.getByRole('option', { name: 'Text', exact: true }).click()
+  await purposeSelect.click()
+  await page.getByRole('option', { name: 'Inference', exact: true }).click()
   await expect(card.getByRole('status')).toHaveText('Available')
 
   statusMode = 'error'
@@ -1650,7 +1695,7 @@ test('Model editor keeps lanes, disabled area and footer on the form column at e
     model_id: 'wide-route',
     provider_id: 'geo',
     model: `upstream-${id}`,
-    route_output_modalities: ['text'],
+    route_purposes: ['inference'],
     enabled,
     priority,
     first_token_timeout_ms: 60_000,
@@ -1664,8 +1709,9 @@ test('Model editor keeps lanes, disabled area and footer on the form column at e
     model_id: 'wide-route',
     display_name: 'Wide route',
     balance: 'traffic_equalization',
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     is_enabled: true,
     supported_thinking_levels: [],
     created_at: '2026-08-17T00:00:00Z',
@@ -1737,7 +1783,7 @@ async function mockScrollRoute(page: Page): Promise<void> {
     model_id: 'scroll-route',
     provider_id: 'geo',
     model: `upstream-${id}`,
-    route_output_modalities: ['text'],
+    route_purposes: ['inference'],
     enabled,
     priority,
     first_token_timeout_ms: 60_000,
@@ -1751,8 +1797,9 @@ async function mockScrollRoute(page: Page): Promise<void> {
     model_id: 'scroll-route',
     display_name: 'Scroll route',
     balance: 'traffic_equalization',
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     is_enabled: true,
     supported_thinking_levels: [],
     created_at: '2026-08-17T00:00:00Z',

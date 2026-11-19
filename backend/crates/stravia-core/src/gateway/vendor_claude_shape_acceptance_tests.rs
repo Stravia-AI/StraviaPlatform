@@ -201,7 +201,7 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
         .create_model(crate::db::models::CreateRoute {
             model_id: "local-claude".into(),
             display_name: None,
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             balance: None,
             targets: vec![crate::db::models::CreateTarget {
                 provider_id: provider.id,

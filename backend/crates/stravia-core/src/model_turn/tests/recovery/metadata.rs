@@ -127,7 +127,7 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
         .unwrap();
     let model = admin
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "zdr-model".into(),
             display_name: None,
             balance: None,

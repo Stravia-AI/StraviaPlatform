@@ -186,7 +186,11 @@ async function toggleEnabled(enabled: boolean): Promise<void> {
 }
 
 async function saveBinding(next: WebSearchBackend): Promise<void> {
-  await writeConfig({ backend: next })
+  await writeConfig({ backend: next, ...(next.kind === 'external' && !next.route_id ? { enabled: false } : {}) })
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['models'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-search-external-routes'] }),
+  ])
 }
 
 async function saveMaxTurns(next: string): Promise<string> {

@@ -22,7 +22,7 @@ const model = {
   id: 'console-model',
   model_id: 'console-model',
   display_name: 'Console model',
-  output_modality: 'text',
+  purpose: 'inference',
   is_enabled: true,
   supported_thinking_levels: ['low', 'high'],
   default_thinking_level: 'low',
@@ -1262,7 +1262,8 @@ test('keyboard selection determines the identity, model and reasoning used for a
   catalog.models = [
     model,
     { ...model, id: 'second-model', model_id: 'second-model', display_name: 'Second model' },
-    { ...model, id: 'image-model', model_id: 'image-model', display_name: 'Image model', output_modality: 'image' },
+    { ...model, id: 'image-model', model_id: 'image-model', display_name: 'Image model', purpose: 'image_generation' },
+    { ...model, id: 'search-model', model_id: 'search-model', display_name: 'Search model', purpose: 'web_search' },
   ]
   await page.goto('/')
   const keySelector = page.getByRole('button', { name: 'API Key', exact: true })

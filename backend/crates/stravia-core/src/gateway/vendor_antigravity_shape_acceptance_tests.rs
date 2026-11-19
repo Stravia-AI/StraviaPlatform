@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::models::{CreateApiKey, CreateRoute, CreateTarget, RouteOutputModality};
+use crate::db::models::{CreateApiKey, CreateRoute, CreateTarget, RoutePurpose};
 use crate::provider_models::CreateManualProviderModel;
 use axum::{
     body::{Body, to_bytes},
@@ -104,7 +104,7 @@ async fn antigravity_real_wasm_inference_matches_inference_capture() -> anyhow::
         .create_model(CreateRoute {
             model_id: "antigravity-shape-test".into(),
             display_name: None,
-            output_modality: RouteOutputModality::Text,
+            purpose: RoutePurpose::Inference,
             balance: None,
             targets: vec![CreateTarget {
                 provider_id: provider.id.clone(),
@@ -350,7 +350,7 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
             "antigravity":{"default":model,"variants":[{"id":model,"metadata":{"apiProvider":1,"modelProvider":4}}]}}),
         template_id: None,
     }).await?;
-    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"agy-lifecycle", "output_modality":"text", "targets":[{"provider_id":provider.id,"model":model,"enabled":true,"target_retry_budget":0}]}))?).await?;
+    let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"agy-lifecycle", "purpose":"inference", "targets":[{"provider_id":provider.id,"model":model,"enabled":true,"target_retry_budget":0}]}))?).await?;
     let mut route_ids = vec![route.id];
     gateway
         .admin()
@@ -370,7 +370,7 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
             "antigravity":{"default":fallback_model,"variants":[{"id":fallback_model,"metadata":{"apiProvider":1,"modelProvider":4}}]}}),
         template_id: None,
     }).await?;
-    let fallback_route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"agy-mixed-fallback","output_modality":"text","targets":[
+    let fallback_route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"agy-mixed-fallback","purpose":"inference","targets":[
         {"provider_id":provider.id,"model":model,"enabled":true,"priority":100,"target_retry_budget":0,"target_cooldown_ms":0},
         {"provider_id":fallback_provider.id,"model":fallback_model,"enabled":true,"priority":0,"target_retry_budget":0,"target_cooldown_ms":0}
     ]}))?).await?;
@@ -384,10 +384,10 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
                 "antigravity":{"default":model,"variants":[{"id":model,"metadata":{"apiProvider":api_provider,"modelProvider":1}}]}}),
             template_id: None,
         }).await?;
-        let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":route,"output_modality":"text","targets":[{"provider_id":provider.id,"model":model,"enabled":true,"target_retry_budget":0}]}))?).await?;
+        let route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":route,"purpose":"inference","targets":[{"provider_id":provider.id,"model":model,"enabled":true,"target_retry_budget":0}]}))?).await?;
         route_ids.push(route.id);
     }
-    let retry_route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"agy-retry","output_modality":"text","targets":[{"provider_id":provider.id,"model":model,"enabled":true,"target_retry_budget":1,"target_cooldown_ms":0}]}))?).await?;
+    let retry_route = gateway.admin().create_model(serde_json::from_value(json!({"model_id":"agy-retry","purpose":"inference","targets":[{"provider_id":provider.id,"model":model,"enabled":true,"target_retry_budget":1,"target_cooldown_ms":0}]}))?).await?;
     route_ids.push(retry_route.id);
     let key = gateway.admin().create_api_key(serde_json::from_value(json!({"name":"lifecycle", "model_ids":route_ids, "transparent_injection_enabled":false}))?).await?;
     let root = lifecycle_response(

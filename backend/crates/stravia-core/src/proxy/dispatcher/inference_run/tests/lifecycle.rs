@@ -1488,7 +1488,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
     gateway
         .admin()
         .create_model(CreateRoute {
-            output_modality: crate::db::models::RouteOutputModality::Text,
+            purpose: crate::db::models::RoutePurpose::Inference,
             model_id: "gpt-5.4".into(),
             display_name: None,
             balance: None,
@@ -1712,7 +1712,7 @@ async fn unrepresentable_thinking_mapping_uses_nearest_protocol_supported_level(
         .storage
         .routes()
         .put(crate::db::models::PutRoute {
-            output_modality: route.output_modality,
+            purpose: route.purpose,
             id: Some(route.id.clone()),
             model_id: route.model_id.clone(),
             display_name: route.display_name.clone(),

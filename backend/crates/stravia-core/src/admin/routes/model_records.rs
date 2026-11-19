@@ -7,8 +7,7 @@ struct TargetModelProjection {
     name: Option<String>,
     context_window: Option<u64>,
     supports_image_input: bool,
-    supports_text_output: bool,
-    supports_image_output: bool,
+    route_purposes: [Option<RoutePurpose>; RoutePurpose::ALL.len()],
     supports_remote_compaction: bool,
 }
 
@@ -149,7 +148,7 @@ impl RouteModule<'_> {
             .put(PutRoute {
                 id: None,
                 model_id: route_id.into(),
-                output_modality: Some(input.output_modality),
+                purpose: Some(input.purpose),
                 display_name,
                 selection_strategy,
                 is_enabled: true,
@@ -198,7 +197,7 @@ impl RouteModule<'_> {
             .put(PutRoute {
                 id: Some(current.id),
                 model_id: next_route_id.into(),
-                output_modality: input.output_modality.or(current.output_modality),
+                purpose: input.purpose.or(current.purpose),
                 display_name,
                 selection_strategy,
                 is_enabled: input.is_enabled.unwrap_or(current.is_enabled),
@@ -258,10 +257,19 @@ impl RouteModule<'_> {
         probe_remote_compaction: bool,
     ) -> anyhow::Result<()> {
         let mut projections = BTreeMap::<String, TargetModelProjection>::new();
-        let image_route_id = crate::media_generation::config::load(self.gw)
-            .await?
-            .image
-            .route_id;
+        let (image_route_id, search_route_id) = if probe_remote_compaction {
+            let image = crate::media_generation::config::load(self.gw).await?.image.route_id;
+            let search = self.gw.admin().get_web_search_config().await?.config.backend.and_then(|backend| {
+                match backend {
+                    stravia_web_search::WebSearchBackendDraft::External { route_id } => route_id,
+                    _ => None,
+                }
+            });
+            (image, search)
+        } else {
+            (None, None)
+        };
+        let mut search_channels = BTreeMap::<String, bool>::new();
         let context = crate::plugin::VendorCallContext::new(
             self.gw.lifecycle.cancellation.clone(),
             stravia_runtime_contract::Deadline::fixed(
@@ -274,9 +282,10 @@ impl RouteModule<'_> {
         for route in &mut *routes {
             route.image_generation_bound =
                 image_route_id.as_deref() == Some(route.model_id.as_str());
+            route.web_search_bound = search_route_id.as_deref() == Some(route.model_id.as_str());
             for target in &mut route.targets {
-                target.output_modality_mismatch = true;
-                target.route_output_modalities.clear();
+                target.purpose_mismatch = true;
+                target.route_purposes.clear();
                 let model = target.model().as_str();
                 let key = format!("{}\u{0}{model}", target.provider_id());
                 if !projections.contains_key(&key) {
@@ -295,6 +304,22 @@ impl RouteModule<'_> {
                         .as_ref()
                         .and_then(|limit| limit.context);
                     let modalities = record.metadata.effective_modalities();
+                    let search_channel = if probe_remote_compaction
+                        && record.metadata.supports_route_purpose(RoutePurpose::WebSearch)
+                    {
+                        let provider_id = target.provider_id().as_str();
+                        match search_channels.get(provider_id) {
+                            Some(&supported) => supported,
+                            None => {
+                                let supported = self.gw.storage.providers().get(provider_id).await?
+                                    .is_some_and(|provider| provider_supports_web_search(self.gw, &provider));
+                                search_channels.insert(provider_id.to_owned(), supported);
+                                supported
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     let supports_remote_compaction = probe_remote_compaction
                         && self
                             .target_supports_remote_compaction(
@@ -304,6 +329,9 @@ impl RouteModule<'_> {
                                 &context,
                             )
                             .await;
+                    let mut purposes = crate::provider_models::eligible_route_purposes(
+                        &record.metadata, search_channel,
+                    );
                     projections.insert(
                         key.clone(),
                         TargetModelProjection {
@@ -313,42 +341,17 @@ impl RouteModule<'_> {
                                 .input
                                 .iter()
                                 .any(|modality| modality == "image"),
-                            supports_text_output: record.metadata.supports_route_output_modality(
-                                crate::db::models::RouteOutputModality::Text,
-                            ),
-                            supports_image_output: record.metadata.supports_route_output_modality(
-                                crate::db::models::RouteOutputModality::Image,
-                            ),
+                            route_purposes: std::array::from_fn(|_| purposes.next()),
                             supports_remote_compaction,
                         },
                     );
                 }
-                target.model_name = projections
-                    .get(&key)
-                    .and_then(|projection| projection.name.clone());
                 if let Some(projection) = projections.get(&key) {
-                    if projection.supports_text_output {
-                        target
-                            .route_output_modalities
-                            .push(crate::db::models::RouteOutputModality::Text);
-                    }
-                    if projection.supports_image_output {
-                        target
-                            .route_output_modalities
-                            .push(crate::db::models::RouteOutputModality::Image);
-                    }
+                    target.model_name.clone_from(&projection.name);
+                    target.route_purposes.extend(projection.route_purposes.into_iter().flatten());
                 }
-                target.output_modality_mismatch = route.output_modality.is_none_or(|modality| {
-                    !projections
-                        .get(&key)
-                        .is_some_and(|projection| match modality {
-                            crate::db::models::RouteOutputModality::Text => {
-                                projection.supports_text_output
-                            }
-                            crate::db::models::RouteOutputModality::Image => {
-                                projection.supports_image_output
-                            }
-                        })
+                target.purpose_mismatch = route.purpose.is_none_or(|purpose| {
+                    !target.route_purposes.contains(&purpose)
                 });
             }
         }

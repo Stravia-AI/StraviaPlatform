@@ -95,8 +95,9 @@ function key(id = 'key-a', overrides: Partial<ConsoleApiKey> = {}): ConsoleApiKe
 function model(id = 'route-a', overrides: Partial<Route> = {}): Route {
   return {
     id,
-    output_modality: 'text',
+    purpose: 'inference',
     image_generation_bound: false,
+    web_search_bound: false,
     model_id: id === 'route-a' ? 'model-a' : 'model-b',
     balance: 'traffic_equalization',
     target_provider: 'provider',
@@ -108,8 +109,8 @@ function model(id = 'route-a', overrides: Partial<Route> = {}): Route {
     targets: [
       {
         id: 'target',
-        output_modality_mismatch: false,
-        route_output_modalities: ['text'],
+        purpose_mismatch: false,
+        route_purposes: ['inference'],
         model_id: id,
         provider_id: 'provider',
         model: 'upstream',
@@ -229,15 +230,16 @@ function harness(
 }
 
 describe('selection and onboarding', () => {
-  test('only text output is selectable, including when a remembered choice is an image route', async () => {
+  test('only inference is selectable, including when a remembered choice is an image route', async () => {
     const store = new MemoryStore()
     store.preferences = { apiKeyId: 'key-a', modelId: 'image-route' }
     const h = harness({
       store,
       models: [
         model('route-a', { supports_image_input: true }),
-        model('image-route', { output_modality: 'image' }),
-        model('unknown-route', { output_modality: null }),
+        model('image-route', { purpose: 'image_generation' }),
+        model('search-route', { purpose: 'web_search' }),
+        model('unknown-route', { purpose: null }),
       ],
     })
     await h.controller.start()
@@ -251,10 +253,10 @@ describe('selection and onboarding', () => {
     expect(await h.controller.send('Text response')).toBe(true)
     expect(h.requests[0].request.model).toBe('model-a')
   })
-  test('an image-only or unconfigured catalog requires a text model before requesting a Key', async () => {
+  test('a catalog without inference requires an inference model before requesting a Key', async () => {
     const h = harness({
       keys: [],
-      models: [model('image-route', { output_modality: 'image' }), model('unknown', { output_modality: null })],
+      models: [model('image-route', { purpose: 'image_generation' }), model('unknown', { purpose: null })],
     })
     await h.controller.start()
     expect(h.controller.snapshot.blocker).toBe('no-models')
@@ -262,7 +264,7 @@ describe('selection and onboarding', () => {
     expect(await h.controller.send('No text model')).toBe(false)
     expect(h.requests).toEqual([])
   })
-  test('a persisted conversation cannot retry a route converted to image output', async () => {
+  test('a persisted conversation cannot retry a route converted to image generation', async () => {
     const original = harness({
       models: [model('route-a'), model('route-b')],
       script: () => [
@@ -275,7 +277,7 @@ describe('selection and onboarding', () => {
     const id = original.controller.snapshot.currentConversationId!
     const restored = harness({
       store: original.store,
-      models: [model('route-a', { output_modality: 'image' }), model('route-b')],
+      models: [model('route-a', { purpose: 'image_generation' }), model('route-b')],
     })
     await restored.controller.start()
     restored.controller.openConversation(id)

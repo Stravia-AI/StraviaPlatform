@@ -267,7 +267,7 @@ test('real management persists root and destination RPM limits and queue setting
   })
   await api<Route>(page, '/models', 'POST', {
     model_id: 'rpm-browser-model',
-    output_modality: 'text',
+    purpose: 'inference',
     targets: [
       {
         provider_id: provider.id,

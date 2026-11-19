@@ -14,8 +14,9 @@ for (const enabled of [false, true]) {
       model_id: 'historical-image-route',
       display_name: 'Historical image route',
       balance: 'traffic_equalization',
-      output_modality: null,
+      purpose: null,
       image_generation_bound: true,
+      web_search_bound: false,
       is_enabled: true,
       supported_thinking_levels: [],
       targets: [
@@ -29,12 +30,12 @@ for (const enabled of [false, true]) {
           target_retry_budget: 0,
           target_cooldown_ms: 60000,
           thinking_level_map: [],
-          route_output_modalities: ['text'],
-          output_modality_mismatch: true,
+          route_purposes: ['inference'],
+          purpose_mismatch: true,
         },
       ],
     }
-    let savedOutput: string | undefined
+    let savedPurpose: string | undefined
     let modelReads = 0
     let releaseModelRefresh!: () => void
     const modelRefresh = new Promise<void>((resolve) => {
@@ -51,7 +52,7 @@ for (const enabled of [false, true]) {
       route.fulfill({
         json: {
           data: {
-            models: [{ id: 'text-model', name: 'Text model', available: true, route_output_modalities: ['text'] }],
+            models: [{ id: 'text-model', name: 'Text model', available: true, route_purposes: ['inference'] }],
           },
         },
       }),
@@ -70,7 +71,7 @@ for (const enabled of [false, true]) {
           await route.fulfill({ status: 400, json: { code: 'ROUTE_IMAGE_GENERATION_BOUND' } })
           return
         }
-        savedOutput = input.output_modality
+        savedPurpose = input.purpose
       }
       await route.fulfill({
         json: { data: { ...model, image_generation_bound: config.image.route_id === model.model_id } },
@@ -87,7 +88,7 @@ for (const enabled of [false, true]) {
             config,
             validation: {
               valid: false,
-              code: config.image.route_id ? 'route_output_modality_unconfigured' : 'media_generation_route_missing',
+              code: config.image.route_id ? 'route_purpose_unconfigured' : 'media_generation_route_missing',
               message: null,
             },
           },
@@ -97,8 +98,8 @@ for (const enabled of [false, true]) {
     await page.route('**/api/v1/media-generation/eligible-routes', (route) => route.fulfill({ json: { data: [] } }))
 
     await page.goto('/models/historical-image-route')
-    await page.getByRole('button', { name: 'Output type', exact: true }).click()
-    await page.getByRole('option', { name: 'Text', exact: true }).click()
+    await page.getByRole('button', { name: 'Purpose', exact: true }).click()
+    await page.getByRole('option', { name: 'Inference', exact: true }).click()
     await page.getByRole('link', { name: 'Open media generation', exact: true }).click()
     await page.getByRole('button', { name: 'Discard changes', exact: true }).click()
     await expect(page.getByRole('combobox', { name: 'Image route', exact: true })).toHaveValue('historical-image-route')
@@ -120,15 +121,15 @@ for (const enabled of [false, true]) {
       .getByRole('link', { name: 'Models', exact: true })
       .click()
     await page.getByRole('row').filter({ hasText: 'Historical image route' }).click()
-    await page.getByRole('button', { name: 'Output type', exact: true }).click()
-    await page.getByRole('option', { name: 'Text', exact: true }).click()
+    await page.getByRole('button', { name: 'Purpose', exact: true }).click()
+    await page.getByRole('option', { name: 'Inference', exact: true }).click()
     await page.getByRole('textbox', { name: 'Display name', exact: true }).fill('Recovered draft')
     releaseModelRefresh()
     await expect(page.getByRole('link', { name: 'Open media generation', exact: true })).toHaveCount(0)
     await expect(page.getByRole('textbox', { name: 'Display name', exact: true })).toHaveValue('Recovered draft')
-    await expect(page.getByRole('button', { name: 'Output type', exact: true })).toHaveText('Text')
+    await expect(page.getByRole('button', { name: 'Purpose', exact: true })).toHaveText('Inference')
     await page.getByRole('button', { name: 'Save model', exact: true }).click()
-    await expect.poll(() => savedOutput).toBe('text')
+    await expect.poll(() => savedPurpose).toBe('inference')
   })
 }
 
@@ -150,7 +151,7 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
             config,
             validation: {
               valid: false,
-              code: 'route_output_modality_unconfigured',
+              code: 'route_purpose_unconfigured',
               message: 'Route requires reconfiguration.',
             },
           },

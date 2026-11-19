@@ -527,7 +527,7 @@ def _create_model(
 ) -> str:
     payload: dict[str, Any] = {
         "model_id": model_id,
-        "output_modality": "text",
+        "purpose": "inference",
         "targets": [{"provider_id": provider_id, "model": target_model}],
     }
     if display_name is not None:
@@ -1069,7 +1069,7 @@ def test_model_crud(admin_env: dict[str, str]) -> None:
         f"{admin_env['admin']}/api/v1/models",
         payload={
             "name": "legacy-model",
-            "output_modality": "text",
+            "purpose": "inference",
             "targets": [{"provider_id": provider_id, "model": "gpt-4o-mini"}],
         },
         headers=admin_env["auth"],

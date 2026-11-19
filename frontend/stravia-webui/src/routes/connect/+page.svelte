@@ -66,7 +66,13 @@ let claudeModelIds = $state<Record<keyof ClaudeModelMappings, string>>(
   initial?.claudeModelIds ?? { defaultModel: '', haikuModel: '', sonnetModel: '', opusModel: '' },
 )
 
-const models = $derived(sortLogicalModels((modelsQuery.data ?? []).filter((model) => model.is_enabled)))
+const models = $derived(
+  sortLogicalModels(
+    (modelsQuery.data ?? []).filter(
+      (model) => model.is_enabled && (model.purpose === 'inference' || model.purpose === 'image_generation'),
+    ),
+  ),
+)
 const apiKeys = $derived(keysQuery.data ?? [])
 const cliKeys = $derived(eligibleConnectKeys(apiKeys, models))
 const host = $derived(proxyQuery.data ?? window.location.origin)

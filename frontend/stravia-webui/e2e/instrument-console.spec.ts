@@ -919,7 +919,7 @@ async function stubConnectableConfiguration(page: Page): Promise<void> {
             id: 'gpt-5',
             model_id: 'gpt-5',
             display_name: 'GPT-5',
-            output_modality: 'text',
+            purpose: 'inference',
             balance: 'traffic_equalization',
             target_provider: 'provider-openai',
             target_model: 'gpt-5',

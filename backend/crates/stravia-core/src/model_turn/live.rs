@@ -879,11 +879,12 @@ fn execute_inner(
                                 &route.model_id,
                                 target.provider_id().as_str(),
                                 target.model().as_str(),
+                                stravia_vendor_sdk::Capability::Infer,
                             )
                             .await
                             .map_err(|error| {
                                 ModelTurnError::new(
-                                    "route_output_modality_unavailable",
+                                    "route_purpose_unavailable",
                                     error.to_string(),
                                 )
                             })?
@@ -937,7 +938,7 @@ fn execute_inner(
                 }
                 if matches!(
                     failure.error.code.as_str(),
-                    "target_ineligible" | "target_output_modality_mismatch"
+                    "target_ineligible" | "target_purpose_mismatch"
                 ) {
                     if !sent
                         .as_ref()
@@ -1095,8 +1096,8 @@ async fn select_with_rpm(
                     format!("Route scheduling snapshot is unavailable: {source}"),
                 ),
                 crate::router::SelectionError::UnconfiguredRoute => ModelTurnError::new(
-                    "route_output_modality_unconfigured",
-                    "Select and save an output modality to reconfigure this Route",
+                    "route_purpose_unconfigured",
+                    "Select and save a purpose to reconfigure this Route",
                 ),
                 crate::router::SelectionError::MediaPlanExhausted => ModelTurnError::new(
                     "input_modality_unsupported",

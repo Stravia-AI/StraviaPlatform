@@ -85,7 +85,7 @@ def wire_route(env: dict[str, Any], url: str, protocol: str, model: str) -> str:
     assert status == 201, body
     status, body = http_request(
         "POST", f"{env['admin']}/api/v1/models", headers=env["auth"],
-        payload={"model_id": model, "output_modality": "text", "targets": [{"provider_id": provider_id, "model": "wire-model"}]},
+        payload={"model_id": model, "purpose": "inference", "targets": [{"provider_id": provider_id, "model": "wire-model"}]},
     )
     assert status == 200, body
     route_id = body["data"]["id"]

@@ -4,6 +4,8 @@ status: accepted
 
 # 媒体生成绑定 Route 而非单个 Provider
 
+> Route 的文字／图片输出类型已经替换为单一路由用途：对话推理、图片生成、联网搜索。图片生成仍只能绑定相应的图片生成用途，见 [媒体生成设计](../design/media-generation.md) 与 [联网搜索设计](../design/web-search.md)。
+
 媒体生成作为高级能力，通过统一的 `generate` 工具按 `type` 与类型专属 `input` 执行，首个支持的类型为图片，首个接入后端为 Codex。管理员按生成类型分别绑定 Route，当前只配置图片生成绑定；未来音频、视频沿各自类型增加绑定，不共用一条能力级 Route。`generate` 根据 `type` 选择管理员绑定，调用方不能通过工具参数自行指定 Route。每个绑定由 Route 的 Target 选择机制选择上游账号，不仿照现有 Codex 搜索将能力固定绑定到一个 OAuth Provider。
 
 媒体生成沿用 [ADR-0016](0016-gate-advanced-capabilities-and-separate-transparent-injection.md) 的平台总开关与透明注入分离规则：总开关开启后，所有有效 API Key 均可显式调用；MCP 另受现有 MCP 开关约束；平台总开关关闭时所有入口都不能执行。API Key 的透明注入增加独立的“媒体生成”可选项，默认不勾选，包括已有 Key；勾选只允许自动向模型暴露 `generate`，不充当显式调用或 MCP 的授权条件。该选择使普通对话可按需生成媒体，同时避免升级后自动扩大已有 Key 的工具暴露范围。

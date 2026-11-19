@@ -570,15 +570,14 @@ _避免使用_：Provider Status、Model Status
 
 Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。一条 Route 必须至少有一个已启用 Target。
 
-## 路由输出模态（Route Output Modality）
+## 路由用途（Route Purpose）
 
-路由输出模态是一条 Route 的单一输出用途，取文字或图片之一；它不同于 Provider Model 可以同时具备的多种输出能力，也不表示模型的输入模态。该 Route 的候选与绑定资格要求 Provider Model 已登记支持相应输出模态，未登记输出模态的模型不具备资格；绑定后的规格变化可以使资格失效，失效不删除绑定，也不允许该 Target 执行。
-历史 Route 未配置输出用途时，升级统一迁移为文字；已明确保存的用途不变。迁移保留身份、绑定和启停偏好，不替代 Provider Model 的输出登记，也不绕过执行资格校验。
-_避免使用_：输入模态、模型全部能力、路由多选模态
+路由用途是一条 Route 执行的单一任务：对话推理、图片生成或联网搜索。与 Provider Model 的能力不同，同一个 Provider Model 可以具备多种能力，并分别用作不同用途的 Target。输入输出模态仍是模型规格；联网搜索用途要求能执行完整外部搜索，不要求登记文字输出。
+_避免使用_：路由输出模态、模型全部能力、路由多选模态
 
 ## 图片生成绑定
 
-图片生成绑定是媒体生成配置对一条图片输出 Route 的引用，不是 Route 内对 Provider Model 的 Target 绑定。被引用的 Route 在解除图片生成绑定前，不得将输出模态改为文字。
+图片生成绑定是媒体生成配置对一条图片生成用途 Route 的引用，不是 Route 内对 Provider Model 的 Target 绑定。被引用的 Route 在解除图片生成绑定前，不得改为其他用途。
 _避免使用_：图片模型绑定（未区分配置引用与 Target 绑定时）
 
 ## Route Scheduling Strategy

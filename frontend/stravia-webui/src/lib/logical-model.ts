@@ -1,5 +1,12 @@
+import * as m from '#lib/paraglide/messages.js'
 import type { SearchComboboxOption } from '#lib/search-combobox-option.js'
-import type { Route } from '#lib/types.js'
+import type { Route, RoutePurpose } from '#lib/types.js'
+
+export const routePurposeLabels = {
+  inference: m.route_purpose_inference,
+  image_generation: m.route_purpose_image_generation,
+  web_search: m.route_purpose_web_search,
+} satisfies Record<RoutePurpose, () => string>
 
 export type LogicalModelIdentity = Pick<Route, 'model_id' | 'display_name'>
 
