@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::json;
+use stravia_vendor_common::account::first_account_label;
 use stravia_vendor_common::connection_check::invalid_response;
 use stravia_vendor_sdk::{
     AllowanceAmount, AllowanceItem, AllowanceResponse, GuestHost, PluginError, ProviderSnapshot,
@@ -21,7 +22,10 @@ pub(super) fn execute(
     let request = transport::rpc(
         provider,
         Action::GetUsageLimits,
-        &json!({"origin": "KIRO_CLI"}),
+        &json!({
+            "origin": "KIRO_CLI",
+            "isEmailRequired": true,
+        }),
     )?;
     let response = transport::send(host, request)?;
     let now = SystemTime::now()
@@ -202,7 +206,10 @@ fn parse(bytes: &[u8], now: Option<i64>) -> Result<AllowanceResponse, PluginErro
         plan_label: usage
             .subscription_info
             .and_then(|s| nonempty(s.subscription_title)),
-        account_label: usage.user_info.and_then(|u| nonempty(u.email)),
+        account_label: first_account_label([usage
+            .user_info
+            .as_ref()
+            .and_then(|u| u.email.as_deref())]),
         billing: None,
     })
 }
@@ -366,5 +373,27 @@ mod tests {
         assert!(parse(br#"{"usageBreakdownList":"bad"}"#, NOW).is_err());
         assert_eq!(timestamp_millis(1750000000.125), Some(1750000000125));
         assert_eq!(timestamp_millis(-1.0), None);
+    }
+
+    #[test]
+    fn extracts_trimmed_user_email_or_none() {
+        let with_email = parse(
+            br#"{"usageBreakdownList":[],"userInfo":{"userId":"opaque-id","email":"  alice@example.test  "}}"#,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            with_email.account_label.as_deref(),
+            Some("alice@example.test")
+        );
+
+        for body in [
+            br#"{"usageBreakdownList":[],"userInfo":{"userId":"opaque-id","email":"   "}}"#.as_slice(),
+            br#"{"usageBreakdownList":[],"userInfo":{"userId":"opaque-id"}}"#.as_slice(),
+            br#"{"usageBreakdownList":[]}"#.as_slice(),
+        ] {
+            let parsed = parse(body, NOW).unwrap();
+            assert_eq!(parsed.account_label, None);
+        }
     }
 }

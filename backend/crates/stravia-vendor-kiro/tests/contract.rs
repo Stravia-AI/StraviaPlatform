@@ -149,9 +149,17 @@ impl HostServices for FakeServices {
                     {"modelId":"claude-sonnet-4.6","supportedInputTypes":["TEXT","IMAGE"],"additionalModelRequestFieldsSchema":{"properties":{"output_config":{"properties":{"effort":{"enum":["low","medium","high","max"],"default":"high"}}}}}}
                 ]}"#.as_slice(),
             ),
-            _ if request.headers.get("x-amz-target") == Some(b"KiroControlPlaneBearerService.GetUsageLimits".as_slice()) => Some(
-                br#"{"usageBreakdownList":[{"resourceType":"CREDIT","unit":"INVOCATIONS","usageLimit":10,"currentUsageWithPrecision":9.99}]}"#.as_slice(),
-            ),
+            _ if request.headers.get("x-amz-target") == Some(b"KiroControlPlaneBearerService.GetUsageLimits".as_slice()) => {
+                let email_required = serde_json::from_slice::<Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body.get("isEmailRequired").and_then(Value::as_bool))
+                    == Some(true);
+                Some(if email_required {
+                    br#"{"usageBreakdownList":[{"resourceType":"CREDIT","unit":"INVOCATIONS","usageLimit":10,"currentUsageWithPrecision":9.99}],"userInfo":{"userId":"synthetic-user","email":" kiro@example.test "}}"#.as_slice()
+                } else {
+                    br#"{"usageBreakdownList":[{"resourceType":"CREDIT","unit":"INVOCATIONS","usageLimit":10,"currentUsageWithPrecision":9.99}],"userInfo":{"userId":"synthetic-user"}}"#.as_slice()
+                })
+            }
             _ => None,
         };
         requests.push(request);
@@ -415,6 +423,7 @@ async fn device_sign_in_omits_the_hint_and_authenticates_the_profile() {
     }
     assert_eq!(body(discover)["origin"], "KIRO_CLI");
     assert_eq!(body(quota)["origin"], "KIRO_CLI");
+    assert_eq!(body(quota)["isEmailRequired"], true);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -445,6 +454,7 @@ async fn allowance_reads_the_regional_management_endpoint_without_generating() {
     else {
         panic!("expected allowance output")
     };
+    assert_eq!(result.account_label.as_deref(), Some("kiro@example.test"));
     let remaining = result.allowances[0].remaining.as_ref().unwrap();
     assert_eq!(remaining.value, "0.01");
     assert_eq!(remaining.unit, "credits");
@@ -455,7 +465,7 @@ async fn allowance_reads_the_regional_management_endpoint_without_generating() {
     assert_eq!(request.url, "https://management.eu-central-1.kiro.dev/");
     assert_eq!(
         serde_json::from_slice::<Value>(&request.body).unwrap(),
-        json!({"origin":"KIRO_CLI", "profileArn":"arn:aws:codewhisperer:eu-central-1:123456789012:profile/synthetic"})
+        json!({"origin":"KIRO_CLI", "isEmailRequired":true, "profileArn":"arn:aws:codewhisperer:eu-central-1:123456789012:profile/synthetic"})
     );
     assert!(request.headers.get("x-amzn-kiro-mode-identifier").is_none());
 }
