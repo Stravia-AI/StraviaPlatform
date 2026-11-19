@@ -247,7 +247,7 @@ pub(crate) fn infer(
         for tool in tools {
             let mut declaration = serde_json::Map::new();
             declaration.insert("name".into(), Value::String(tool.name));
-            declaration.insert("parametersJsonSchema".into(), tool.parameters);
+            declaration.insert("parameters".into(), tool.parameters);
             if let Some(description) = tool.description {
                 declaration.insert("description".into(), Value::String(description));
             }
@@ -914,8 +914,15 @@ fn tool(value: &mut Value) -> Result<(), PluginError> {
                     "response",
                 ],
             )?;
+            // The Gemini decoder gives parametersJsonSchema precedence when both are set.
+            let declaration = function
+                .as_object_mut()
+                .expect("validated function declaration");
+            if let Some(schema) = declaration.remove("parametersJsonSchema") {
+                declaration.insert("parameters".into(), schema);
+            }
             if let Some(parameters) = function.get_mut("parameters") {
-                schema_projection(parameters)?;
+                tool_schema_projection(parameters)?;
             }
             if let Some(response) = function.get_mut("response") {
                 schema_projection(response)?;
@@ -951,6 +958,74 @@ fn tool(value: &mut Value) -> Result<(), PluginError> {
     }
     Ok(())
 }
+// Tool parameters use the CLI's narrower Schema subset, independently of response schemas.
+fn tool_schema_projection(value: &mut Value) -> Result<(), PluginError> {
+    if value.is_boolean() {
+        *value = json!({});
+    }
+    project(
+        value,
+        &[
+            "type",
+            "format",
+            "description",
+            "default",
+            "enum",
+            "properties",
+            "required",
+            "items",
+            "minimum",
+            "maximum",
+            "minItems",
+            "maxItems",
+            "minLength",
+            "maxLength",
+            "pattern",
+        ],
+    )?;
+    let object = value.as_object_mut().expect("validated schema");
+    match object.get_mut("type") {
+        Some(Value::String(kind)) => kind.make_ascii_uppercase(),
+        Some(_) => {
+            object.remove("type");
+        }
+        None => {}
+    }
+    // Native enum members must be nonempty strings. The CLI incorrectly emits empty
+    // strings for numeric members, which upstream rejects; omit the whole enum rather
+    // than narrowing its accepted values.
+    if object.get("enum").is_some_and(|value| {
+        value.as_array().is_none_or(|values| {
+            values
+                .iter()
+                .any(|value| value.as_str().is_none_or(str::is_empty))
+        })
+    }) {
+        object.remove("enum");
+    }
+    for key in ["minItems", "maxItems", "minLength", "maxLength"] {
+        if let Some(value @ Value::Number(_)) = object.get_mut(key) {
+            *value = Value::String(value.to_string());
+        }
+    }
+    if let Some(properties) = object.get_mut("properties") {
+        let properties = properties
+            .as_object_mut()
+            .ok_or_else(|| invalid("schema properties must be an object"))?;
+        properties.retain(|_, schema| !schema.is_boolean());
+        for schema in properties.values_mut() {
+            tool_schema_projection(schema)?;
+        }
+    }
+    if object.get("items").is_some_and(Value::is_boolean) {
+        object.remove("items");
+    }
+    if let Some(items) = object.get_mut("items") {
+        tool_schema_projection(items)?;
+    }
+    Ok(())
+}
+
 fn schema_projection(value: &mut Value) -> Result<(), PluginError> {
     if let Value::Bool(allowed) = value {
         // CLI 只接受 Schema 对象；等价转换保留布尔 schema 的允许/禁止语义。

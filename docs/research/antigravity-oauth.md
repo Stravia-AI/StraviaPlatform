@@ -6,7 +6,7 @@
 
 Stravia 使用独立 `antigravity` Vendor Plugin 提供 consumer Google OAuth、账号模型发现、Gemini 形态的模型推理及账号共享额度监控。默认构建仍只内嵌 `base`；管理员本地导入专属 Wasm 后才有此接入。
 
-**公开 CLI 仓库不是 CLI 网络层的开源源码。** [Antigravity CLI 仓库固定提交](https://github.com/google-antigravity/antigravity-cli/tree/65a3c69e388148c9327f307efe82ddb1c0c8d7d4) 提供 README、CHANGELOG、examples 和 demo，未提供所需的 OAuth、HTTP client 或序列化实现。初次调研先分析开源代理与监控源码，再静态分析实际 CLI 1.2.16 发布包：恢复 Go 函数名、反汇编 OAuth/请求头/序列化函数，解码内嵌 protobuf `FileDescriptorProto`。初次静态调研没有执行下载的 CLI 或读取本机凭据；此后的经授权真实运行、隔离 Stravia 验证和证据边界分别记录于第 6 节及[模型映射调研](antigravity-model-mapping.md)。本文不能替代未公开的官方 CLI 源码或原生 CLI 授权抓包。
+**公开 CLI 仓库不是 CLI 网络层的开源源码。** [Antigravity CLI 仓库固定提交](https://github.com/google-antigravity/antigravity-cli/tree/65a3c69e388148c9327f307efe82ddb1c0c8d7d4) 提供 README、CHANGELOG、examples 和 demo，未提供所需的 OAuth、HTTP client 或序列化实现。初次调研先分析开源代理与监控源码，再静态分析实际 CLI 1.2.16 发布包：恢复 Go 函数名、反汇编 OAuth/请求头/序列化函数，解码内嵌 protobuf `FileDescriptorProto`。初次静态调研没有执行下载的 CLI 或读取本机凭据；此后的经授权真实运行、官方 CLI 抓包、隔离 Stravia 验证和证据边界分别记录于第 6 节及[模型映射调研](antigravity-model-mapping.md)。本文不能替代未公开的官方 CLI 源码或证明未采集版本的行为。
 
 证据分层：
 
@@ -145,13 +145,23 @@ operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注�
 | GenerationConfig | `temperature`、`topP`、`topK`、`candidateCount`、`maxOutputTokens`、`stopSequences`、`thinkingConfig`、`responseMimeType`、`responseSchema` |
 | ThinkingConfig | `includeThoughts`、`thinkingBudget`、`thinkingLevel` |
 | Tool | `functionDeclarations`、`googleSearch`、`googleSearchRetrieval`、`codeExecution`、`urlContext`；这些结构继续分别投影，不透传任意嵌套对象 |
-| FunctionDeclaration | `name`、`description`、`parameters`、`parametersJsonSchema`、`response` |
+| FunctionDeclaration | `name`、`description`、`parameters`、`response`；canonical 参数的官方样本投影见下方 |
 | ToolConfig | 仅 `functionCallingConfig` 的 `mode`、`allowedFunctionNames` |
 | SafetySetting | `category`、`threshold`、`method` |
 
-同协议原生 `parameters`/`response` 和生成配置的 `responseSchema` 依据实际 `openapi.proto` 投影 type/format/title/description/nullable/default、数组与对象约束、enum、properties/propertyOrdering/required、数值与字符串约束、example、oneOf/anyOf/allOf/not、additionalProperties/additionalPropertiesSchema、ref/defs。properties/defs 的业务属性名保留，其 schema 值递归投影；type 规范化为 proto enum 名称，类型数组转换为原生组合约束，不把数组发送到 enum 字段。标准 JSON Schema 的 `$ref`/`$defs` 转换为 `ref`/`defs`，本地引用前缀转换为 `#/defs/`；int64 长度/数量约束按 protojson 转为字符串。枚举词汇与引用格式另对照 [Google Schema 官方文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/Schema)，该公开文档不等于私有 RPC 的实测证明。具体允许字段以 `wire.rs` 为实现来源。
+同协议原生 `response`、生成配置的 `responseSchema` 与函数 `parameters` 的具体允许字段以 `wire.rs` 为实现来源。canonical 函数参数按下述官方样本投影到 typed `parameters`，不将类型数组、组合或引用臆造为等价约束；官方样本显示这一转换有损。枚举词汇与引用格式另对照 [Google Schema 官方文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/Schema)，该公开文档不等于私有 RPC 的实测证明。
 
-CLI 1.5.11 的 master `tool.proto` 描述符将 `parametersJsonSchema` 声明为 `google.protobuf.Value`，与 typed `parameters` 互斥。canonical 函数参数使用前者，作为标准 JSON Schema 原样保留，不经过 typed Schema 投影，因此保留小写类型、类型数组、`anyOf`、`$defs`/`$ref` 和其他约束；同协议原生 typed 字段仍按原合同投影。官方 1.5.11 的 MCP 转换会丢弃 `anyOf`，不能作为复杂联合类型的保真路径。对同一原始 OMP bash schema 的上游代理实测，原 typed `parameters` 返回 HTTP 400，仅把子类型改为小写仍为 400；只将标准 schema 改放 `parametersJsonSchema`，Claude Opus High 返回 HTTP 200 / `OK`。这只证明该请求和账号的实测结果，不保证所有 schema 或模型均获上游接受。
+CLI 1.5.11 的 master `tool.proto` 描述符也声明 `parametersJsonSchema` 为 `google.protobuf.Value`，与 typed `parameters` 互斥。它的存在及若干上游 HTTP 200 不能证明官方 eager MCP 使用此字段或完成了工具闭环；官方实测使用 typed `parameters`，并对输入 schema 做有损投影，如下所述。
+
+**CLI 1.5.11：Schema 与 print 模式的证据边界**
+
+- [Google 公开 FunctionDeclaration proto](https://github.com/googleapis/googleapis/blob/master/google/ai/generativelanguage/v1beta/content.proto) 将 `parameters` 定义为 OpenAPI typed `Schema`，`parameters_json_schema` 定义为描述参数对象的 `google.protobuf.Value`，文档要求两者互斥；这说明可表达的协议形状，**不说明 CLI 实际选用哪一个，也不保证私有接口或所有模型接受任意关键字**。同一 proto 对 `response` 与 `response_json_schema` 也描述互斥；不要混淆响应 schema 与工具参数 schema。
+- [官方 CLI 1.5.11 Linux 二进制](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.5.11) 本地 Go 符号字符串包含 `mcp.loadRefJSONSchema`、`mcpcore.isValidJSONSchema` 和 `mcpToolWrapper.ParameterSchema`，但符号本身不能证明出站转换。2026-11-19 对同一诊断 schema 分别使用 Claude Opus 5.5 High、Gemini 3.8 Flash High、Gemini 4 Hydrogen High，三者的 typed `parameters` 投影逐字段一致，并非按模型分支：样本保留 `type`（大写 enum）、`description`、`default`、字符串 `enum`、`properties`、`required`、`items`、`minItems`/`maxItems`、`minLength`/`maxLength`（protojson 字符串）、`minimum`/`maximum` 和 `pattern`；删除 `$schema`、`$defs`、`$ref`、`anyOf`、`oneOf`、`not`、type 数组、`nullable`、`title`、`additionalProperties`、`minProperties`/`maxProperties`、`propertyOrdering`、`uniqueItems`、`exclusiveMinimum`、`multipleOf`、`examples`/`example`、`const`。样本中的 `anyOf`、引用和 type 数组属性留下 `{}`，没有把 `NULL` 转为 `nullable`；不能据此推断未覆盖关键字和其他输入形状。CLI eager MCP 额外提供 `toolSummary` 和包装后的 MCP description，执行时移除 `toolSummary`；不能将其伪造为 Stravia 用户工具元数据。
+- 官方 MCP `inputSchema` 是 JSON Schema，样本中的 `nullable: true` 只是非标准 annotation；CLI 删除它但保留 `type: STRING`。Gemini 原生 typed `parameters` 的 `nullable: true` 则具有真实可空语义，经 GoogleDecoder 先规范为 `type: [string, null]`，再按相同 CLI 子集投影得到 `{}`；不能为字节匹配前者而把 native 可空参数错误收紧成 `STRING`，也不依赖 source dialect 或逆推原 schema 的框架。raw-native 回归应按此合同预期，canonical OpenResponses 与 raw `parametersJsonSchema` 仍按官方 corpus 对照；生产投影无需该场景特判。
+- 扩展样本第一次得到 Google HTTP 400，不能计作成功闭环：官方将布尔 schema 属性 `allowed: true`、`forbidden: false` 从 `properties` 移除，直接 `{type: "null"}` 输出 `type: "NULL"`，保留 `format`，`allOf` 留 `{}`。`integer` 的 `enum: [0, 1]` 被官方输出为 `enum: ["", ""]`，上游以 `INVALID_ARGUMENT` / `enum[i]: cannot be empty` 拒绝。插件遵循 typed enum 的字符串数组合同，对包含空字符串或非字符串的 enum 整条省略，不复制官方空字符串缺陷，也不将值字符串化；模型侧投影有损，执行侧参数校验不因此改变，原 schema 的约束被省略不等于参数禁止 `null`。先前 canonical 参数改用 Value 无损透传的方案已由此共同 typed 子集策略取代，先前的 HTTP 200 只保留作上游接受性对照。
+- 同次用会话 `permissions.allow=["mcp(schema/nullable_probe)"]` 精确授权后，三模型均实际完成 MCP `tools/call`、`functionResponse` 和最终 `OK`，各两次推理 HTTP 200；服务端参数精确保留 `flag: null`、`ready: {port: null}` 及诊断 `task`。对官方投影仅做 typed enum 不可表达选项省略的 native-safe 对照，Flash 3.8 High、Hydrogen High、Claude Opus 5.5 High 也各有两次主推理 HTTP 200，实际 MCP 收到相同的 null 结构和各自 `[aligned-<model>]` task，最终均返回 `OK`。Hydrogen 工具流程还观察到一个同 `streamGenerateContent` 端点的 `gemini-3.5-flash-lite` 辅助调用，`thinkingLevel=MINIMAL`，无 tools/labels；未捕获 prompt，不能断言是权限审查或摘要，也不属于下述空闲启动窗口。先前把标准 schema 放进 `parametersJsonSchema` 的 HTTP 200 样本没有授权 MCP、没有发生 `tools/call`，不能称为该字段的工具闭环。基线 `maxOutputTokens` / thinking level 分别为 Flash `65536` / `HIGH`、Hydrogen `262144` / `HIGH`、Claude `128000` / `HIGH`；新会话采集的三个生命周期 flags，前两者均为 false，Claude 均为 true，不能因此全局固定。脱敏证据位于 `/tmp/stravia-gemini-schema.OK09BPos/evidence.jsonl`，结论仅覆盖该账号、版本和构造的样本。
+- `agy --help` 的 `--print` 是非交互单轮，`--settings` 接受仅作用于当前会话的 JSON 对象或文件；[官方权限文档](https://antigravity.google/docs/permissions?tab=cli)规定 MCP 默认 Ask，支持按 `mcp(server/tool)` 精确授权，`deny > ask > allow`。例如在隔离会话使用 `--settings '{"permissions":{"allow":["mcp(example_server/example_tool)"]}}'`，以实际 MCP 注册的 server 名和 `tools/list` 返回的原始 tool 名替换示例，并确保没有更高优先级冲突规则；它不是对所有工具的授权。[官方项目问题 #650](https://github.com/google-antigravity/antigravity-cli/issues/650)记录 print/headless 无法提示时自动拒绝 MCP 权限，但未指明被拒工具；该问题是用户报告，不是本次运行的证明。无需默认启用会自动批准**全部**工具的 `--dangerously-skip-permissions`。
+- **待抓包证实**：HTTP 200 只表明推理请求被接受，不等于模型产生 function call、更不等于 MCP server 收到 `tools/call`。未收到调用可能是未选择工具、名称匹配错误或 headless 权限拒绝；应同时记录声明名称、模型 function call、权限诊断、server `tools/call` 和结果回填，再判断闭环及原因。不得把其他模型或旧版客户端的成功外推到本次测试。
 
 CLI 1.5.8 的 master 描述符声明 `thinkingLevel` enum：`THINKING_LEVEL_UNSPECIFIED=0`、`LOW=1`、`MEDIUM=2`、`HIGH=3`、`MINIMAL=4`、`EXTRA_HIGH=5`、`MAX=6`、`XHIGH=7`。已知数字按 protojson 写为符号，未知 int32 数值原样保留；不能将目录未知数值推测成某个已知符号。`thinkingBudget` 保留真实 int32 预算（`-1` 表示上游动态预算），不从 Effort 硬编码预算。
 
@@ -165,9 +175,9 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 
 `functionResponse.parts` 中的 inlineData/fileData 在 Gemini 解码时转成与业务 ToolResult 同属一个调用的 canonical 媒体块；编码时重新放回该 functionResponse，连续的并行工具结果合并到同一轮 content。上下文重写保持复合结果原子性，Observation 记录完整结果；转换为 Anthropic 或 Responses 时，业务 JSON 与支持的附件仍绑定同一个工具调用。URL 图片沿用现有 canonical 载体，只保证 URL 身份，不承诺保留其可选 MIME 提示；不为仅支持文本工具结果的 Chat Completions 增加多模态扩展。
 
-**删除边界**：cachedContent、labels、metadata、外部 project/session/request 身份、未知 Content/Part/Tool/typed Schema 字段，以及未纳入子集的 seed、presence/frequency penalty、logprobs、routingConfig、parallel-tool 控制等均不送上游；`parametersJsonSchema` 内的 JSON Schema 原样保留。标准协议编码前先清除不支持的 canonical generation 控制和非 Google 协议扩展，编码后再投影 Google raw 扩展，防止同协议透传绕过白名单；不伪造原始协议标记来绕过共享 codec 校验。
+**删除边界**：cachedContent、labels、metadata、外部 project/session/request 身份、未知 Content/Part/Tool/typed Schema 字段，以及未纳入子集的 seed、presence/frequency penalty、logprobs、routingConfig、parallel-tool 控制等均不送上游。标准协议编码前先清除不支持的 canonical generation 控制和非 Google 协议扩展，编码后再投影 Google raw 扩展，防止同协议透传绕过白名单；不伪造原始协议标记来绕过共享 codec 校验。
 
-可携带的工具定义、工具选择、stop 和响应格式由插件按 private master 边界构造；canonical 工具 JSON Schema 原样保留，其余字段按上述白名单投影。工具选择映射为 AUTO/NONE/ANY，具名选择附带 allowedFunctionNames；同协议原始工具配置保留后再清理。函数 `strict`、响应格式的 name/strict 不进入 CLI 请求，实际 schema 约束与业务 default/example 保留。此处理避免公开 Gemini codec 拒绝已经清除的外来控制，或删除私有 Schema 已有的字段；其他插件和共享 codec 校验不变。
+可携带的工具定义、工具选择、stop 和响应格式由插件按 private master 边界构造；canonical 工具 JSON Schema 按官方样本投影，并非原样保留。工具选择映射为 AUTO/NONE/ANY，具名选择附带 allowedFunctionNames；同协议原始工具配置保留后再清理。函数 `strict`、响应格式的 name/strict 不进入 CLI 请求。其他插件和共享 codec 校验不变。
 
 ### 2026-11-19：Hydrogen 503 对照
 
@@ -185,6 +195,41 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 依据 [Protobuf field presence](https://protobuf.dev/programming-guides/field_presence/)，上述已存在消息中的隐式 presence 标量省略等于零；缺失整个消息并不等于存在且全零。插件因此仅在已见终态、`usageMetadata` 为对象且报告有效 prompt 与 output/total 计数时，将省略的 `cachedContentTokenCount` 归一化为零。终态前的部分 usage、缺失 usage、无效计数与显式缓存值保持原样。共享 Gemini codec 不采用该私有规则；`thoughtsTokenCount` 独立保留，累计输出包含思考一次，后续累计修订覆盖已有快照。
 
 ## 6. 本地及真实账号验证与限制
+
+### 2026-11-19：官方 CLI 1.5.11 空闲 TUI 启动抓包
+
+使用 [官方 CLI 1.5.11](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.5.11)，经授权在空临时工作目录启动交互 TUI（不是 `--print`），不输入提示，不手动触发工具、模型或额度操作。沿用用户登录态；用户 HOME 的写入用用户命名空间中的 tmpfs overlay 隔离，接受的仅是该空目录的信任提示，不改真实配置、认证或权限，未启用危险权限跳过。独立本地 mitmproxy 同时配置大小写 HTTP(S) 代理、localhost NO_PROXY 和临时 CA；不持久化头值、完整正文、响应、终端原文或凭据，JSON 只留键及长度。界面固定词脱敏证据：0.816 秒出现 `Yes, I trust … folder`，接受后出现 `Antigravity`、`for shortcuts`、`Gemini`、`Auto mode`、`shift … to cycle`；6.456 秒出现 `esc`。这证实信任提示后已绘制交互界面，但单靠这些词不能证明输入框状态或每项后台初始化均已完成。30.019 秒发首次 Ctrl-C、两秒后第二次 Ctrl-C，进程退出码 0；代理继续观察关闭过程，不将其计入空闲启动。界面原文、邮箱及路径均未保存。
+
+下表按**请求发出时刻**（相对启动秒）汇总本次 30.019 秒窗口。每行的次数、状态与大小逐次对应；大小为 JSON 解压后字节数，非 JSON 为捕获的原始内容字节数，空体记 0。`<segment>` 表示采集时即删除的路径段，不代表确切路径；`—` 表示无 JSON 顶层键或空 query。表仅是实际经过代理的流量，不能证明不存在直连或绕过代理的流量；多次相同操作也不能据此判断重试或依赖关系。
+
+| 方法、主机与脱敏路径 | 请求秒 / HTTP 状态 | 请求键与字节 | 响应顶层键与字节 | query key |
+| --- | --- | --- | --- | --- |
+| GET `www.googleapis.com/oauth2/v2/userinfo` | 1.256、5.389 / 200、200 | — / 0 | `email`, `family_name`, `given_name`, `id`, `name`, `picture`, `verified_email` / 277、277 | — |
+| POST `daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` | 2.588、4.663、5.390、6.967 / 全 200 | `metadata`（子键 `ideType`）/ 各 38 | `allowedTiers`, `cloudaicompanionProject`, `currentTier`, `gcpManaged`, `paidTier`, `upgradeSubscriptionUri` / 各 3869 | — |
+| GET `lh3.googleusercontent.com/<segment>/<segment>` | 2.955、5.867 / 200、200 | — / 0 | 非 JSON / 各 6182 | — |
+| POST `daily-cloudcode-pa.googleapis.com/v1internal:fetchAdminControls` | 3.338 / 200 | `project` / 30 | 空对象 / 3 | — |
+| POST `daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` | 3.638 / 200 | `project` / 30 | `agentModelSorts`, `audioTranscriptionModelIds`, `commandModelIds`, `commitMessageModelIds`, `defaultAgentModelId`, `experimentIds`, `imageGenerationModelIds`, `models`, `mqueryModelIds`, `sharedModelExperiments`, `tieredModelIds`, `webSearchModelIds` / 338645 | — |
+| POST `daily-cloudcode-pa.googleapis.com/v1internal:fetchUserInfo` | 4.112、6.257 / 200、200 | `project` / 各 30 | `regionCode`, `userSettings` / 各 79 | — |
+| POST `daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` | 4.129、6.971、7.481 / 全 200 | `project` / 各 30 | `description`, `groups` / 2756、2755、2755 | — |
+| POST `daily-cloudcode-pa.googleapis.com/v1internal:listExperiments` | 4.668 / 200 | `project` / 30 | `experimentIds`, `flags` / 65388 | — |
+| GET `aicode.googleapis.com/<segment>` | 5.686、6.088、6.964 / 200、未见响应、200 | — / 0 | `agySurfaceConfig`, `availableExperiences`, `experimentConfig` / 80281、未知、80281 | — |
+| GET `daily-cloudcode-pa.googleapis.com/v1internal/<segment>` | 6.170 / 200 | — / 0 | `cascadeNuxes` / 1570 | `page_size` |
+| POST `play.googleapis.com/log` | 6.723、11.944 / 200、200 | 非 JSON / 7817、1032 | 非 JSON / 各 100 | — |
+| GET `www.gstatic.com/<segment>/<segment>/<segment>` | 6.900、6.901 / 304、304 | — / 0 | 空体 / 0 | — |
+
+空闲窗口内共 24 请求，23 次观察到响应；另一次 `aicode` 请求未观察到响应，不推断其结果。关闭过程另见 `play.googleapis.com/log` 两次（32.030、32.218 秒；分别 200、未见响应），不算启动。账号身份与 project/admin/user 信息、模型目录、自动额度、实验配置及日志上报均在不发提示时发生；gstatic 与 googleusercontent 只按实际主机记录，不能从域名推断其完整用途。日志端点可归为 telemetry，但仅凭空闲抓包不能判定这些请求是否启动所必需、用户可否关闭或全部 payload 语义。未见 OAuth 刷新、onboard、模型推理；已有有效登录与缓存、窗口长度和代理覆盖限制均会影响结果，不能推广为其他账号或启动必然不发生。官方 [CLI 文档](https://github.com/google-antigravity/antigravity-cli) 与 [权限文档](https://antigravity.google/docs/permissions?tab=cli) 为客户端与权限背景，不是这些私有请求的公开契约。
+
+同日再做独立的定向 TUI 采集，修正上表为避免泄露而过度遮盖路径的证据缺口：两次 `GET aicode.googleapis.com/v1alpha:fetchConfig` 在 4.747、4.877 秒发出，第一条 5.180 秒 HTTP 200，另一条未见响应；5.821 秒第三条同路径 GET，5.971 秒 HTTP 200。`GET daily-cloudcode-pa.googleapis.com/v1internal/cascadeNuxes?page_size=<redacted>` 在 5.211 秒发出，5.547 秒 HTTP 200；只保留 query key。`www.gstatic.com/antigravity/…` 两个资源 GET 分别于 5.540、5.541 秒发出，均 304；CLI 二进制固定 URL 与后续定向抓包确认两条路径为 `/antigravity/plugins/marketplace.json` 和 `/antigravity/plugins-partners/marketplace.json`（分别于 5.870、5.868 秒发出，均 304）。[官方 Marketplace 文档](https://antigravity.google/docs/marketplace)说明 CLI 插件市场功能，但不规定该内部 URL。这是独立运行的路径实测，不能反向假定前次被遮盖的每条路径都相同。
+
+定向采集在同样的 tmpfs HOME overlay 与空工作目录中运行，0.753 秒接受隔离目录信任提示后，不输入提示；25.079 秒用 ANSI 终端模拟器得到以下**实际屏幕行**，用户名、URL、工作区、模型具体名称及未列入固定词表的内容用 `█` 遮盖；可见光标位于 `>` 后、该行第 3 列。该快照显示交互输入行及快捷键，支持 TUI 已就绪；不说明后台所有网络任务均结束。双 Ctrl-C 正常退出码 0。
+
+```text
+ ┃ esc to █
+────────────────────────────────────────────────────────────────────
+> Auto mode: █ & █ █ █ (shift+tab to cycle)
+────────────────────────────────────────────────────────────────────
+? for shortcuts                           auto · Gemini █ █ · █
+```
 
 ### 2026-11-06：agy 1.5.1 请求头与工具附件
 

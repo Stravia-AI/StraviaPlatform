@@ -1244,7 +1244,7 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires task build:vendors:all"]
-async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
+async fn tool_schemas_match_official_projection_at_real_http_boundary() {
     let fixture = Arc::new(Fixture::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let app = Router::new()
@@ -1274,100 +1274,78 @@ async fn boolean_tool_schemas_preserve_constraints_at_real_http_boundary() {
         ("access_token".into(), json!("test-token")),
         ("project_id".into(), json!("test-project")),
     ]);
-    let schema = json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "$defs": {"Port": {"type": ["integer", "null"], "minimum": 1}},
-        "properties": {
-            "ready": {"anyOf": [
-                {"type": "object", "properties": {"port": {"$ref": "#/$defs/Port"}},
-                 "required": ["port"], "additionalProperties": false},
-                {"type": "null"}
-            ]},
-            "toggle": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
-            "task": {"anyOf": [
-                {"type": "string"}, {"type": "array", "items": {"type": "string"}},
-                {"type": "null"}
-            ]},
-            "model": {"not": true},
-            "allowed": true,
-            "forbidden": false,
-            "values": {"items": false},
-            "choice": {"anyOf": [false, {"not": false}]}
-        },
-        "required": ["values"],
-        "additionalProperties": false,
-        "default": {"not": true, "flag": false}
-    });
-    let endpoint = stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
-    let request = ProtocolTransform::global()
-        .bind(endpoint, GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA)
+    let corpus: Value = serde_json::from_str(include_str!("tool-schema-cli-1.5.11.json")).unwrap();
+    let mut schema = corpus["source"].clone();
+    schema["properties"]["mixedEnum"] = json!({"type":"string", "enum":["a", 1]});
+    schema["properties"]["emptyEnumMember"] = json!({"type":"string", "enum":["a", ""]});
+    schema["default"] = json!({"not": true, "flag": false, "type": "business"});
+    let mut expected = corpus["official_projection"].clone();
+    expected["properties"]["numericEnum"]
+        .as_object_mut()
         .unwrap()
-        .decode_request(json!({
-            "model": "account-model",
-            "input": "Use task without a model override",
-            "tools": [{"type": "function", "name": "task", "parameters": schema}]
-        }))
-        .unwrap();
-    let result = run(
-        &runtime,
-        &plugin,
-        &services,
-        OperationInput::Infer { provider, request },
-    )
-    .await;
-    server.abort();
-    let OperationOutput::Infer(output) = result.unwrap() else {
-        panic!("inference output")
-    };
-    assert_eq!(output.output_text(), "真实 HTTP 冒烟");
-    let received = fixture.received.lock();
-    let (_, _, bytes) = received
-        .iter()
-        .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
-        .unwrap();
-    let envelope: Value = serde_json::from_slice(bytes).unwrap();
-    let declaration = &envelope["request"]["tools"][0]["functionDeclarations"][0];
-    assert!(declaration.get("parameters").is_none());
-    let parameters = &declaration["parametersJsonSchema"];
-    assert_eq!(parameters, &schema);
-    let validator = jsonschema::validator_for(parameters).unwrap();
-    for (arguments, valid) in [
-        (json!({"values": []}), true),
-        (json!({"values": [], "allowed": {"flag": false}}), true),
-        (json!({"values": [], "choice": false}), true),
-        (
-            json!({"values": [], "ready": null, "toggle": null, "task": null}),
-            true,
-        ),
-        (
-            json!({"values": [], "ready": {"port": null}, "toggle": false, "task": "read"}),
-            true,
-        ),
-        (
-            json!({"values": [], "ready": {"port": 8080}, "task": ["read", "edit"]}),
-            true,
-        ),
-        (json!({"values": [], "ready": {"port": 0}}), false),
-        (json!({"values": [], "ready": {"port": "8080"}}), false),
-        (
-            json!({"values": [], "ready": {"port": 8080, "extra": true}}),
-            false,
-        ),
-        (json!({"values": [], "ready": {}}), false),
-        (json!({"values": [], "toggle": "false"}), false),
-        (json!({"values": [], "task": [false]}), false),
-        (json!({"values": [], "task": 1}), false),
-        (json!({"values": [], "model": "override"}), false),
-        (json!({"values": [], "model": null}), false),
-        (json!({"values": [], "forbidden": false}), false),
-        (json!({"values": [null]}), false),
-        (json!({"values": [], "unknown": true}), false),
-        (json!({}), false),
+        .remove("enum");
+    expected["properties"]["mixedEnum"] = json!({"type":"STRING"});
+    expected["properties"]["emptyEnumMember"] = json!({"type":"STRING"});
+    expected["default"] = schema["default"].clone();
+    let endpoint = stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+    let google = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
+    let raw_native =
+        json!({"name":"task", "description":"caller description", "parameters":schema});
+    let raw_json = json!({"name":"task", "description":"caller description", "parameters":{"type":"boolean"}, "parametersJsonSchema":schema});
+    for (source, declaration) in [
+        ("canonical", None),
+        ("native", Some(raw_native)),
+        ("json_schema", Some(raw_json)),
     ] {
-        assert_eq!(validator.is_valid(&arguments), valid, "{arguments}");
+        let request = match declaration {
+            None => ProtocolTransform::global()
+                .bind(endpoint, google).unwrap()
+                .decode_request(json!({
+                    "model":"account-model", "input":"Use task",
+                    "tools":[{"type":"function", "name":"task", "description":"caller description", "parameters":schema}]
+                })).unwrap(),
+            Some(declaration) => ProtocolTransform::global()
+                .bind(google, google).unwrap()
+                .decode_request(json!({
+                    "contents":[{"role":"user", "parts":[{"text":"Use task"}]}],
+                    "tools":[{"functionDeclarations":[declaration]}]
+                })).unwrap(),
+        };
+        let OperationOutput::Infer(output) = run(
+            &runtime,
+            &plugin,
+            &services,
+            OperationInput::Infer {
+                provider: provider.clone(),
+                request,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("inference output")
+        };
+        assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+        let received = fixture.received.lock();
+        let (_, _, bytes) = received
+            .iter()
+            .rev()
+            .find(|(url, _, _)| url.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(bytes).unwrap();
+        let declaration = &envelope["request"]["tools"][0]["functionDeclarations"][0];
+        assert!(declaration.get("parametersJsonSchema").is_none());
+        assert_eq!(declaration["name"], "task");
+        assert_eq!(declaration["description"], "caller description");
+        // Native nullable is a union, normalized by the Gemini decoder to a type
+        // array. Unlike the JSON Schema annotation in the captured corpus, that
+        // union has no representable native tool type and is omitted in full.
+        let mut source_expected = expected.clone();
+        if source == "native" {
+            source_expected["properties"]["nullable"] = json!({});
+        }
+        assert_eq!(declaration["parameters"], source_expected, "{source}");
     }
-    assert_eq!(parameters["default"], json!({"not": true, "flag": false}));
+    server.abort();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1863,23 +1841,15 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             json!({"mode":"ANY","allowedFunctionNames":["read"]})
         );
         let declaration = &body["request"]["tools"][0]["functionDeclarations"][0];
-        assert!(declaration.get("parameters").is_none());
-        let parameters = &declaration["parametersJsonSchema"];
-        assert_eq!(parameters["additionalProperties"], false);
+        assert!(declaration.get("parametersJsonSchema").is_none());
         assert_eq!(
-            parameters["properties"]["metadata"]["properties"]["seed"]["$ref"],
-            "#/$defs/Seed"
+            declaration["parameters"],
+            json!({
+                "type":"OBJECT", "properties":{
+                    "metadata":{"type":"OBJECT", "properties":{"seed":{}}}
+                }
+            })
         );
-        assert_eq!(parameters["$defs"]["Seed"]["default"], 7);
-        let validator = jsonschema::validator_for(parameters).unwrap();
-        for (arguments, valid) in [
-            (json!({"metadata": {"seed": 7}}), true),
-            (json!({"metadata": {"seed": null}}), true),
-            (json!({"metadata": {"seed": "7"}}), false),
-            (json!({"extra": true}), false),
-        ] {
-            assert_eq!(validator.is_valid(&arguments), valid, "{arguments}");
-        }
         let output_schema = &body["request"]["generationConfig"]["responseSchema"];
         assert_eq!(output_schema["additionalProperties"], false);
         assert_eq!(
