@@ -96,6 +96,7 @@ pub fn descriptor() -> VendorDescriptor {
                         description: Some(crate::messages::callback_description()),
                         secret: false,
                     }),
+                    supports_refresh_token: true,
                 }),
                 protocol: Some("open-responses".into()),
                 protocols: Vec::new(),

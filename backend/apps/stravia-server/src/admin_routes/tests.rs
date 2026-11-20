@@ -1103,6 +1103,54 @@ async fn oauth_init_rejects_the_removed_claude_code_channel() -> anyhow::Result<
 }
 
 #[tokio::test]
+async fn oauth_refresh_token_route_rejects_missing_token_and_unsupported_channel()
+-> anyhow::Result<()> {
+    let data_dir = tempfile::tempdir()?;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "kiro").await?;
+    let app = create_unprotected_router(gateway);
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/oauth/sessions/refresh-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"vendor_id":"kiro","channel":"oauth","base_url":"https://runtime.us-east-1.kiro.dev","use_proxy":false,"refresh_token":"  "}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    let missing_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(missing.into_body(), usize::MAX).await?)?;
+    assert!(
+        missing_body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("AUTH_REFRESH_TOKEN_REQUIRED"))
+    );
+
+    let unsupported = app
+        .oneshot(
+            Request::post("/api/v1/oauth/sessions/refresh-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"vendor_id":"kiro","channel":"oauth","base_url":"https://runtime.us-east-1.kiro.dev","use_proxy":false,"refresh_token":"rt-kiro"}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+    let unsupported_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(unsupported.into_body(), usize::MAX).await?)?;
+    assert!(
+        unsupported_body["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("AUTH_REFRESH_TOKEN_NOT_SUPPORTED"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn catalog_routes_replace_the_legacy_provider_presets_route() -> anyhow::Result<()> {
     let data_dir = tempfile::tempdir()?;
     let gateway = memory_gateway(data_dir.path()).await?;

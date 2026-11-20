@@ -65,6 +65,7 @@ import type {
   OAuthCallbackMode,
   OAuthCandidateConfiguration,
   OAuthSessionInitData,
+  OAuthSessionReadyData,
   OAuthSessionStatusData,
   Provider,
   ProviderOAuthStatusData,
@@ -443,6 +444,20 @@ export const admin = {
         callback_mode: callbackMode,
         locale,
         ...configuration,
+      }),
+    authenticateRefreshToken: (
+      vendorId: string,
+      channel: string,
+      configuration: OAuthCandidateConfiguration,
+      useProxy: boolean,
+      refreshToken: string,
+    ) =>
+      request<OAuthSessionReadyData>('POST', '/oauth/sessions/refresh-token', {
+        vendor_id: vendorId,
+        channel,
+        use_proxy: useProxy,
+        ...configuration,
+        refresh_token: refreshToken,
       }),
     status: (sessionId: string) => request<OAuthSessionStatusData>('GET', `/oauth/sessions/${sessionId}/status`),
     cancel: (sessionId: string) => request<void>('POST', `/oauth/sessions/${sessionId}/cancel`),

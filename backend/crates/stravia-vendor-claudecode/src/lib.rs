@@ -232,6 +232,7 @@ pub fn descriptor() -> VendorDescriptor {
                         description: Some(crate::messages::callback_description()),
                         secret: false,
                     }),
+                    supports_refresh_token: true,
                 }),
                 protocol: Some("anthropic-messages".into()),
                 protocols: Vec::new(),

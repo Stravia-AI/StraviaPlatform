@@ -136,6 +136,69 @@ impl AdminService {
         Ok(session)
     }
 
+    pub(super) async fn create_ready_auth_session_record(
+        &self,
+        candidate: AuthSessionCandidate,
+        auth_descriptor: stravia_vendor_sdk::AuthDescriptor,
+        bundle: CredentialBundle,
+        scope: crate::plugin::VendorSessionScope,
+        cancellation: stravia_runtime_contract::CancellationToken,
+        publication: crate::plugin::VendorPublicationFence,
+    ) -> anyhow::Result<AuthSession> {
+        if !self.gw.config.config_poll_interval.is_zero() {
+            tracing::debug!(
+                "creating oauth session in multi-replica mode \
+                 — ensure the callback reaches this replica (session affinity required)"
+            );
+        }
+        let now = Utc::now();
+        let scheme = match auth_descriptor.flow {
+            stravia_vendor_sdk::AuthFlow::AuthorizationCode => AuthScheme::OAuthAuthCodePkce,
+            stravia_vendor_sdk::AuthFlow::DeviceCode => AuthScheme::OAuthDeviceCode,
+            stravia_vendor_sdk::AuthFlow::Manual => AuthScheme::SetupToken,
+        };
+        let session = AuthSession {
+            callback_mode: OAuthCallbackMode::Manual,
+            listener_state: "not_required".to_string(),
+            listener_port: None,
+            redirect_uri: String::new(),
+            fallback_reason: None,
+            id: stravia_runtime_contract::identifier::new_id(),
+            provider_id: candidate.provider_id,
+            driver_key: candidate.vendor_id,
+            channel: candidate.channel,
+            auth_descriptor,
+            scheme: scheme.as_str().to_string(),
+            status: AuthSessionStatus::Ready.as_str().to_string(),
+            use_proxy: candidate.use_proxy,
+            user_code: None,
+            verification_uri: None,
+            verification_uri_complete: None,
+            state_json: None,
+            context_json: None,
+            result_json: Some(serde_json::to_string(&bundle)?),
+            expires_at: Some((now + chrono::Duration::minutes(10)).to_rfc3339()),
+            poll_interval_seconds: None,
+            last_error: None,
+            error_code: None,
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+            vendor_runtime: Some(std::sync::Arc::new(
+                crate::auth::types::VendorAuthSessionRuntime {
+                    scope: std::sync::Arc::new(scope),
+                    cancellation,
+                    publication: std::sync::Arc::new(tokio::sync::Mutex::new(Some(publication))),
+                },
+            )),
+        };
+        self.gw
+            .auth_sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+        Ok(session)
+    }
+
     pub(in crate::admin) async fn get_auth_session_record(
         &self,
         id: &str,

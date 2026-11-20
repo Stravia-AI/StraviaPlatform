@@ -187,6 +187,25 @@ pub(super) fn build_auth_session_ready_data(
     }
 }
 
+pub(super) fn build_auth_session_ready_summary(
+    session: &AuthSession,
+    bundle: &CredentialBundle,
+) -> AuthSessionReadyData {
+    AuthSessionReadyData {
+        session_id: session.id.clone(),
+        vendor_id: session.driver_key.clone(),
+        channel: session.channel.clone(),
+        status: AuthSessionStatus::Ready,
+        expires_in: remaining_seconds_until(
+            bundle
+                .expires_at
+                .as_deref()
+                .or(session.expires_at.as_deref()),
+        ),
+        resource_url: bundle.resource_url.clone(),
+    }
+}
+
 pub(super) fn remaining_seconds_until(expires_at: Option<&str>) -> i64 {
     expires_at
         .map(str::trim)

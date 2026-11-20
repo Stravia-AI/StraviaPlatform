@@ -59,6 +59,9 @@ pub(crate) fn execute(
             let session = load(host, provider)?;
             exchange(host, provider, session, value.trim())
         }
+        AuthStep::RefreshToken { refresh_token } => {
+            refresh_with_token(host, provider, &refresh_token)
+        }
         AuthStep::Refresh => refresh(host, provider),
         AuthStep::Poll | AuthStep::Revoke => Err(plugin_error(
             ErrorKind::Unsupported,
@@ -188,6 +191,54 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
     Ok(AuthResponse::Credentials {
         values,
         expires_at_unix_ms,
+    })
+}
+
+fn refresh_with_token(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    refresh_token: &str,
+) -> Result<AuthResponse, PluginError> {
+    let refresh = refresh_token.trim();
+    if refresh.is_empty() || refresh.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(invalid(
+            "Google OAuth refresh token is missing or malformed",
+        ));
+    }
+    let token = token_request(
+        host,
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", CLIENT_ID),
+            ("client_secret", CLIENT_SECRET),
+            ("refresh_token", refresh),
+        ],
+    )?;
+    let (values, expires_at_unix_ms) = token_values(
+        &token,
+        BTreeMap::from([("refresh_token".into(), json!(refresh))]),
+        true,
+    )?;
+    let mut session = Session {
+        version: 1,
+        state: String::new(),
+        verifier: String::new(),
+        redirect_uri: REDIRECT_URI.into(),
+        values,
+        expires_at_unix_ms,
+        operation: None,
+        provider_id: provider.provider_id.clone(),
+    };
+    save(host, &session)?;
+    let mut account = provider.clone();
+    account.credentials = session.values.clone();
+    if let Some(project) = client::discover_project(host, &account, &mut session)? {
+        session.values.insert("project_id".into(), json!(project));
+    }
+    save(host, &session)?;
+    Ok(AuthResponse::Credentials {
+        values: session.values,
+        expires_at_unix_ms: session.expires_at_unix_ms,
     })
 }
 

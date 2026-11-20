@@ -152,6 +152,7 @@ impl VendorGuest for ManagementContractVendor {
                             description: None,
                             secret: false,
                         }),
+                        supports_refresh_token: false,
                     }),
                     protocol: Some("fixture-management".into()),
                     protocols: Vec::new(),
@@ -351,7 +352,10 @@ fn auth(
             advance_state(host)?;
             Ok(credentials(wire))
         }
-        AuthStep::ManualInput { .. } | AuthStep::Poll | AuthStep::Revoke => Err(error(
+        AuthStep::ManualInput { .. }
+        | AuthStep::RefreshToken { .. }
+        | AuthStep::Poll
+        | AuthStep::Revoke => Err(error(
             ErrorKind::Unsupported,
             "management fixture only supports authorization-code completion and refresh",
         )),

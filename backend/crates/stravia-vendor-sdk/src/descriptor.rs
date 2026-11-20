@@ -199,6 +199,8 @@ pub struct AuthDescriptor {
     pub callback: Option<AuthCallback>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_input: Option<AuthManualInput>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_refresh_token: bool,
 }
 
 /// Canonical declaration that the guest can encode an enabled/disabled
@@ -761,6 +763,7 @@ impl ProviderDescriptor {
                         .is_some_and(|input| input.input_type == AuthManualInputType::Text);
                 if (callback_expected != auth.callback.is_some() && !manual_code)
                     || (matches!(auth.flow, AuthFlow::Manual) && auth.manual_input.is_none())
+                    || (matches!(auth.flow, AuthFlow::Manual) && auth.supports_refresh_token)
                     || (matches!(auth.flow, AuthFlow::DeviceCode) && auth.manual_input.is_some())
                     || auth.manual_input.as_ref().is_some_and(|input| {
                         input.label.english_text().trim().is_empty()
@@ -1180,8 +1183,49 @@ mod tests {
                 description: None,
                 secret: true,
             }),
+            supports_refresh_token: false,
         });
         assert!(profile.validate().is_ok());
+        profile.channels[0]
+            .auth
+            .as_mut()
+            .unwrap()
+            .supports_refresh_token = true;
+        assert!(profile.validate().is_ok());
+        let encoded = serde_json::to_value(profile.channels[0].auth.as_ref().unwrap()).unwrap();
+        assert_eq!(encoded["supports_refresh_token"], serde_json::json!(true));
+        let mut legacy = encoded.clone();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("supports_refresh_token");
+        let decoded: AuthDescriptor = serde_json::from_value(legacy).unwrap();
+        assert!(!decoded.supports_refresh_token);
+        let manual_only = AuthDescriptor {
+            flow: AuthFlow::Manual,
+            callback: None,
+            manual_input: Some(AuthManualInput {
+                input_type: AuthManualInputType::Text,
+                label: LocalizedText::english("Token"),
+                description: None,
+                secret: true,
+            }),
+            supports_refresh_token: true,
+        };
+        profile.channels[0].auth = Some(manual_only);
+        assert!(profile.validate().is_err());
+
+        profile.channels[0].auth = Some(AuthDescriptor {
+            flow: AuthFlow::AuthorizationCode,
+            callback: None,
+            manual_input: Some(AuthManualInput {
+                input_type: AuthManualInputType::Text,
+                label: LocalizedText::english("Authorization code"),
+                description: None,
+                secret: true,
+            }),
+            supports_refresh_token: false,
+        });
         profile.channels[0].auth.as_mut().unwrap().manual_input = None;
         assert!(profile.validate().is_err());
         profile.channels[0].auth.as_mut().unwrap().manual_input = Some(AuthManualInput {

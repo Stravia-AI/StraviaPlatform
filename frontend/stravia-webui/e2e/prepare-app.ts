@@ -67,6 +67,7 @@ const providerDescriptors = [
             cancel_path: '/cancel',
           },
           manual_input: codexManualInput,
+          supports_refresh_token: true,
         },
         protocol: 'open-responses',
         default_base_url: 'https://chatgpt.com/backend-api/codex',
@@ -293,6 +294,21 @@ export async function prepareApp(page: Page): Promise<void> {
             manual_input: codexManualInput,
             expires_in: 600,
             interval: 2,
+          },
+        },
+      })
+      return
+    }
+    if (path === '/oauth/sessions/refresh-token') {
+      await route.fulfill({
+        json: {
+          data: {
+            session_id: 'oauth-session-refresh-1',
+            vendor_id: 'openai-codex',
+            channel: 'codex',
+            status: 'ready',
+            expires_in: 600,
+            resource_url: null,
           },
         },
       })

@@ -362,6 +362,16 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.backend_error_auth_session_required({}, options)
     case 'AUTH_COMPLETION_IN_PROGRESS':
       return m.backend_error_auth_completion_in_progress({}, options)
+    case 'AUTH_EXCHANGE_REJECTED':
+      return m.backend_error_auth_exchange_rejected({}, options)
+    case 'AUTH_EXCHANGE_RETRYABLE':
+      return m.backend_error_auth_exchange_retryable({}, options)
+    case 'AUTH_REFRESH_TOKEN_REQUIRED':
+      return m.backend_error_auth_refresh_token_required({}, options)
+    case 'AUTH_REFRESH_TOKEN_INVALID':
+      return m.backend_error_auth_refresh_token_invalid({}, options)
+    case 'AUTH_REFRESH_TOKEN_NOT_SUPPORTED':
+      return m.backend_error_auth_refresh_token_not_supported({}, options)
     case 'media_generation_config_invalid':
       return m.media_generation_config_invalid({}, options)
     case 'media_generation_config_unavailable':

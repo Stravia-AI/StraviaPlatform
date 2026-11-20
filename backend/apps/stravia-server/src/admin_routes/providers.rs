@@ -613,6 +613,22 @@ pub(super) struct InitOAuthSessionRequest {
 }
 
 #[derive(Deserialize)]
+pub(super) struct RefreshTokenOAuthSessionRequest {
+    vendor_id: String,
+    channel: String,
+    #[serde(default)]
+    use_proxy: bool,
+    provider_id: Option<String>,
+    base_url: String,
+    protocol: Option<String>,
+    #[serde(default)]
+    options: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    credentials: std::collections::BTreeMap<String, serde_json::Value>,
+    refresh_token: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct CreateOAuthProviderRequest {
     session_id: String,
     input: CreateProvider,
@@ -636,6 +652,32 @@ pub(super) async fn init_oauth_session_handler(
             },
             input.callback_mode,
             input.locale.as_deref(),
+        )
+        .await
+    {
+        Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),
+        Err(e) => oauth_err(e),
+    }
+}
+
+pub(super) async fn refresh_token_oauth_session_handler(
+    State(gw): State<Gateway>,
+    Json(input): Json<RefreshTokenOAuthSessionRequest>,
+) -> impl IntoResponse {
+    match gw
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: input.vendor_id,
+                channel: input.channel,
+                provider_id: input.provider_id,
+                base_url: input.base_url,
+                protocol: input.protocol,
+                options: input.options,
+                credentials: input.credentials,
+                use_proxy: input.use_proxy,
+            },
+            input.refresh_token,
         )
         .await
     {

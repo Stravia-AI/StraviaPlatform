@@ -337,6 +337,7 @@ async function testConnection(): Promise<void> {
             vendorId={descriptor.provider_id}
             channel={channel.id}
             flow={channel.auth!.flow}
+            supportsRefreshToken={Boolean(channel.auth?.supports_refresh_token)}
             configuration={draft.oauthConfiguration}
             useProxy={draft.fields.useProxy}
             mode="reconnect"

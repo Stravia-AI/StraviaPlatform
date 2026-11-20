@@ -169,6 +169,7 @@ impl crate::plugin::network::transport::Resolver for LoopbackOnlyResolver {
                     | "claude.ai"
                     | "opencode.ai"
                     | "api.commandcode.ai"
+                    | "auth.x.ai"
                     | "api.x.ai"
                     | "runtime.us-east-1.kiro.dev"
                     | "management.us-east-1.kiro.dev"
@@ -206,6 +207,7 @@ async fn local_tls_server(
             "chatgpt.com",
             "api.anthropic.com",
             "claude.ai",
+            "auth.x.ai",
             "localhost",
         ]
         .into_iter()
@@ -3086,6 +3088,530 @@ async fn cancelling_a_devin_exchange_prevents_a_late_tls_callback_from_restoring
             .await
             .is_err()
     );
+    server.task.await??;
+    Ok(())
+}
+
+fn jwt_with_payload(payload: Value) -> String {
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+    let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).expect("JWT payload"));
+    format!("{header}.{body}.")
+}
+
+#[tokio::test]
+async fn codex_refresh_token_login_creates_and_binds_provider() -> anyhow::Result<()> {
+    let initial_access = jwt_with_payload(json!({
+        "https://api.openai.com/auth": { "chatgpt_account_id": "acct_direct_1" }
+    }));
+    let reauth_access = jwt_with_payload(json!({
+        "https://api.openai.com/auth": { "chatgpt_account_id": "acct_direct_2" }
+    }));
+    let server = local_tls_server(2, move |request| {
+        assert_eq!(request.path, "/oauth/token");
+        let form: BTreeMap<String, String> = url::form_urlencoded::parse(&request.body)
+            .into_owned()
+            .collect();
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        let refresh = form.get("refresh_token").map(String::as_str);
+        if refresh == Some("rt-codex-1") {
+            LocalResponse::json(json!({
+                "access_token": initial_access,
+                "refresh_token": "rt-codex-rotated",
+                "expires_in": 3600,
+                "scope": "openid offline_access"
+            }))
+        } else if refresh == Some("rt-codex-2") {
+            LocalResponse::json(json!({
+                "access_token": reauth_access,
+                "expires_in": 3600
+            }))
+        } else {
+            panic!("unexpected codex refresh token: {refresh:?}");
+        }
+    })
+    .await?;
+    let (_directory, gateway) = gateway_for(&server, &["openai-codex"]).await?;
+
+    let ready = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: None,
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: Some("open-responses".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            " rt-codex-1 ".into(),
+        )
+        .await?;
+    assert_eq!(ready.status, crate::auth::AuthSessionStatus::Ready);
+
+    let provider = gateway
+        .admin()
+        .create_provider_with_oauth_session(
+            &ready.session_id,
+            CreateProvider {
+                name: Some("Codex Refresh".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "openai-codex".into(),
+                    channel: "codex".into(),
+                    protocol: Some("open-responses".into()),
+                    base_url: "https://chatgpt.com/backend-api/codex".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            },
+        )
+        .await?;
+    let stored = gateway
+        .storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("saved codex credential");
+    assert_eq!(stored.refresh_token.as_deref(), Some("rt-codex-rotated"));
+    let meta: Value = serde_json::from_str(&stored.meta)?;
+    assert_eq!(meta["account_id"], "acct_direct_1");
+
+    let reauth = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: Some(provider.id.clone()),
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: Some("open-responses".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-codex-2".into(),
+        )
+        .await?;
+    gateway
+        .admin()
+        .bind_provider_with_oauth_session(&provider.id, &reauth.session_id)
+        .await?;
+    let updated = gateway
+        .storage
+        .oauth_credentials()
+        .get(&provider.id)
+        .await?
+        .expect("rebound codex credential");
+    assert_eq!(updated.refresh_token.as_deref(), Some("rt-codex-2"));
+    let updated_meta: Value = serde_json::from_str(&updated.meta)?;
+    assert_eq!(updated_meta["account_id"], "acct_direct_2");
+
+    gateway.shutdown().await;
+    server.task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_login()
+-> anyhow::Result<()> {
+    let server = local_tls_server(6, move |request| {
+        let host = request
+            .headers
+            .get("host")
+            .map(String::as_str)
+            .unwrap_or("");
+        match (host, request.path.as_str()) {
+            ("api.anthropic.com", "/v1/oauth/token") => {
+                let body: Value = serde_json::from_slice(&request.body).expect("claude token JSON");
+                assert_eq!(body["grant_type"], "refresh_token");
+                assert_eq!(body["refresh_token"], "rt-claude");
+                LocalResponse::json(json!({
+                    "access_token": "sk-ant-oat01-new",
+                    "refresh_token": "rt-claude-rotated",
+                    "expires_in": 3600,
+                    "scope": "user:inference user:profile"
+                }))
+            }
+            ("api.anthropic.com", path) if path.starts_with("/api/claude_cli/bootstrap") => {
+                LocalResponse::json(json!({
+                    "oauth_account": {
+                        "account_uuid": "acc-claude",
+                        "account_email": "claude@example.com",
+                        "organization_uuid": "org-claude",
+                        "organization_name": "Claude Org"
+                    }
+                }))
+            }
+            ("oauth2.googleapis.com", "/token") => {
+                let form: BTreeMap<String, String> = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+                assert_eq!(
+                    form.get("grant_type").map(String::as_str),
+                    Some("refresh_token")
+                );
+                assert_eq!(
+                    form.get("refresh_token").map(String::as_str),
+                    Some("rt-antigravity")
+                );
+                LocalResponse::json(json!({
+                    "access_token": "ag-access",
+                    "expires_in": 3600,
+                    "token_type": "Bearer"
+                }))
+            }
+            ("daily-cloudcode-pa.googleapis.com", "/v1internal:loadCodeAssist") => {
+                LocalResponse::json(json!({
+                    "cloudaicompanionProject": "ag-project-123",
+                    "currentTier": { "id": "standard-tier" }
+                }))
+            }
+            ("auth.x.ai", "/oauth2/token") => {
+                let form: BTreeMap<String, String> = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+                assert_eq!(
+                    form.get("grant_type").map(String::as_str),
+                    Some("refresh_token")
+                );
+                assert_eq!(
+                    form.get("refresh_token").map(String::as_str),
+                    Some("rt-grok")
+                );
+                LocalResponse::json(json!({
+                    "access_token": "grok-access",
+                    "refresh_token": "rt-grok-rotated",
+                    "expires_in": 3600,
+                    "token_type": "Bearer"
+                }))
+            }
+            (DEVIN_HOST, path) if path == DEVIN_TOKEN_PATH => {
+                let body: Value = serde_json::from_slice(&request.body).expect("devin token JSON");
+                assert_eq!(body["grant_type"], "refresh_token");
+                assert_eq!(body["refresh_token"], "rt-devin");
+                LocalResponse::json(json!({
+                    "sessionToken": "devin-access",
+                    "refreshToken": "rt-devin-rotated",
+                    "expiresIn": 3600,
+                    "apiServerUrl": DEVIN_BASE_URL
+                }))
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    })
+    .await?;
+    let (_directory, gateway) = gateway_for(
+        &server,
+        &["claude-code", "antigravity", "xai-grok", "devin"],
+    )
+    .await?;
+
+    let claude_ready = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "claude-code".into(),
+                channel: "oauth".into(),
+                provider_id: None,
+                base_url: "https://api.anthropic.com".into(),
+                protocol: Some("anthropic-messages".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-claude".into(),
+        )
+        .await?;
+    let claude_provider = gateway
+        .admin()
+        .create_provider_with_oauth_session(
+            &claude_ready.session_id,
+            CreateProvider {
+                name: Some("Claude Refresh".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "claude-code".into(),
+                    channel: "oauth".into(),
+                    protocol: Some("anthropic-messages".into()),
+                    base_url: "https://api.anthropic.com".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            },
+        )
+        .await?;
+    let claude_cred = gateway
+        .storage
+        .oauth_credentials()
+        .get(&claude_provider.id)
+        .await?
+        .expect("claude cred");
+    assert_eq!(claude_cred.access_token, "sk-ant-oat01-new");
+    assert_eq!(
+        claude_cred.refresh_token.as_deref(),
+        Some("rt-claude-rotated")
+    );
+    let claude_meta: Value = serde_json::from_str(&claude_cred.meta)?;
+    assert_eq!(claude_meta["email"], "claude@example.com");
+    assert_eq!(claude_meta["organization_uuid"], "org-claude");
+
+    let ag_ready = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "antigravity".into(),
+                channel: "oauth".into(),
+                provider_id: None,
+                base_url: "https://daily-cloudcode-pa.googleapis.com".into(),
+                protocol: Some("google-gemini".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-antigravity".into(),
+        )
+        .await?;
+    let ag_provider = gateway
+        .admin()
+        .create_provider_with_oauth_session(
+            &ag_ready.session_id,
+            CreateProvider {
+                name: Some("Antigravity Refresh".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "antigravity".into(),
+                    channel: "oauth".into(),
+                    protocol: Some("google-gemini".into()),
+                    base_url: "https://daily-cloudcode-pa.googleapis.com".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            },
+        )
+        .await?;
+    let ag_cred = gateway
+        .storage
+        .oauth_credentials()
+        .get(&ag_provider.id)
+        .await?
+        .expect("antigravity cred");
+    assert_eq!(ag_cred.access_token, "ag-access");
+    assert_eq!(ag_cred.refresh_token.as_deref(), Some("rt-antigravity"));
+    let ag_meta: Value = serde_json::from_str(&ag_cred.meta)?;
+    assert_eq!(ag_meta["project_id"], "ag-project-123");
+
+    let grok_ready = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "xai-grok".into(),
+                channel: "grok".into(),
+                provider_id: None,
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                protocol: Some("open-responses".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-grok".into(),
+        )
+        .await?;
+    let grok_provider = gateway
+        .admin()
+        .create_provider_with_oauth_session(
+            &grok_ready.session_id,
+            CreateProvider {
+                name: Some("Grok Refresh".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "xai-grok".into(),
+                    channel: "grok".into(),
+                    protocol: Some("open-responses".into()),
+                    base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            },
+        )
+        .await?;
+    let grok_cred = gateway
+        .storage
+        .oauth_credentials()
+        .get(&grok_provider.id)
+        .await?
+        .expect("grok cred");
+    assert_eq!(grok_cred.access_token, "grok-access");
+    assert_eq!(grok_cred.refresh_token.as_deref(), Some("rt-grok-rotated"));
+
+    let devin_ready = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "devin".into(),
+                channel: "devin".into(),
+                provider_id: None,
+                base_url: DEVIN_BASE_URL.into(),
+                protocol: Some("devin-connect".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-devin".into(),
+        )
+        .await?;
+    let devin_provider = gateway
+        .admin()
+        .create_provider_with_oauth_session(
+            &devin_ready.session_id,
+            CreateProvider {
+                name: Some("Devin Refresh".into()),
+                source: ProviderSourceInput::Custom {
+                    vendor: "devin".into(),
+                    channel: "devin".into(),
+                    protocol: Some("devin-connect".into()),
+                    base_url: DEVIN_BASE_URL.into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                use_proxy: false,
+            },
+        )
+        .await?;
+    let devin_cred = gateway
+        .storage
+        .oauth_credentials()
+        .get(&devin_provider.id)
+        .await?
+        .expect("devin cred");
+    assert_eq!(devin_cred.access_token, "devin-access");
+    assert_eq!(
+        devin_cred.refresh_token.as_deref(),
+        Some("rt-devin-rotated")
+    );
+
+    gateway.shutdown().await;
+    server.task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_token_login_rejects_kiro_and_invalid_tokens_without_leaking_sessions()
+-> anyhow::Result<()> {
+    let server = local_tls_server(1, move |_| LocalResponse {
+        status: "400 Bad Request",
+        content_type: "application/json",
+        body: serde_json::to_vec(&json!({ "error": "invalid_grant" })).expect("error JSON"),
+        release: None,
+    })
+    .await?;
+    let (_directory, gateway) = gateway_for(&server, &["kiro", "openai-codex"]).await?;
+
+    let blank_err = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: None,
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: Some("open-responses".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "   ".into(),
+        )
+        .await
+        .expect_err("blank token must fail");
+    assert!(
+        blank_err
+            .to_string()
+            .contains("AUTH_REFRESH_TOKEN_REQUIRED")
+    );
+
+    let control_err = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: None,
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: Some("open-responses".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "bad\ntoken".into(),
+        )
+        .await
+        .expect_err("control chars must fail");
+    assert!(
+        control_err
+            .to_string()
+            .contains("AUTH_REFRESH_TOKEN_INVALID")
+    );
+
+    let kiro_err = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "kiro".into(),
+                channel: "oauth".into(),
+                provider_id: None,
+                base_url: "https://runtime.us-east-1.kiro.dev".into(),
+                protocol: Some("kiro-generate-assistant-response-oauth".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-kiro".into(),
+        )
+        .await
+        .expect_err("kiro must not support refresh-token-only login");
+    assert!(
+        kiro_err
+            .to_string()
+            .contains("AUTH_REFRESH_TOKEN_NOT_SUPPORTED")
+    );
+
+    let upstream_err = gateway
+        .admin()
+        .init_oauth_session_with_refresh_token(
+            AuthSessionCandidate {
+                vendor_id: "openai-codex".into(),
+                channel: "codex".into(),
+                provider_id: None,
+                base_url: "https://chatgpt.com/backend-api/codex".into(),
+                protocol: Some("open-responses".into()),
+                options: Default::default(),
+                credentials: Default::default(),
+                use_proxy: false,
+            },
+            "rt-revoked".into(),
+        )
+        .await
+        .expect_err("invalid_grant must fail");
+    assert!(upstream_err.to_string().contains("AUTH_EXCHANGE_REJECTED"));
+    assert!(gateway.auth_sessions.read().await.is_empty());
+
+    gateway.shutdown().await;
     server.task.await??;
     Ok(())
 }

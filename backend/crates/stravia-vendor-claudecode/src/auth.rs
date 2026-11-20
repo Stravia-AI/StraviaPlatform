@@ -102,6 +102,7 @@ pub(crate) fn execute(
     match request.step {
         AuthStep::Start { redirect_uri, .. } => start(host, redirect_uri),
         AuthStep::Exchange { callback_url } => exchange(host, callback_url),
+        AuthStep::RefreshToken { refresh_token } => refresh_with_token(host, &refresh_token, None),
         AuthStep::Refresh => refresh(host, provider),
         AuthStep::ManualInput { .. } => Err(unsupported("Claude OAuth requires a callback URL")),
         AuthStep::Poll => Err(unsupported("Claude OAuth is not a device-code flow")),
@@ -199,6 +200,20 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| auth_error("Claude OAuth refresh token is missing"))?;
+    refresh_with_token(host, refresh_token, Some(&provider.credentials))
+}
+
+fn refresh_with_token(
+    host: &GuestHost,
+    refresh_token: &str,
+    previous: Option<&BTreeMap<String, Value>>,
+) -> Result<AuthResponse, PluginError> {
+    let refresh_token = refresh_token.trim();
+    if refresh_token.is_empty() || refresh_token.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(invalid(
+            "Claude OAuth refresh token is missing or malformed",
+        ));
+    }
     let body = serde_json::to_vec(&RefreshGrant {
         grant_type: "refresh_token",
         client_id: CLIENT_ID,
@@ -218,13 +233,11 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
     )?;
     let (mut values, expires_at_unix_ms) = token_values(token, Some(refresh_token))?;
     // 令牌所属组织在登录时确定；刷新只补齐缺失字段，不改写已保存身份。
-    for key in INHERITED_FIELDS {
-        if let Some(value) = provider
-            .credentials
-            .get(key)
-            .filter(|value| !value.is_null())
-        {
-            values.insert(key.into(), value.clone());
+    if let Some(previous) = previous {
+        for key in INHERITED_FIELDS {
+            if let Some(value) = previous.get(key).filter(|value| !value.is_null()) {
+                values.insert(key.into(), value.clone());
+            }
         }
     }
     complete_identity(host, &mut values);

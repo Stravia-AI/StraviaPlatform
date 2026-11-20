@@ -28,6 +28,16 @@ export interface OAuthSessionInitData {
   manual_input?: VendorAuthManualInput | null
 }
 
+export interface OAuthSessionReadyData {
+  session_id: string
+  /** Supplier profile type ID; the wire field name remains `vendor_id`. */
+  vendor_id: string
+  channel: string
+  status: 'ready'
+  expires_in: number
+  resource_url?: string | null
+}
+
 export type OAuthSessionStatusData =
   | {
       status: 'pending'

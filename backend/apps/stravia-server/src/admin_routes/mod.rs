@@ -205,6 +205,10 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/providers/oauth", post(create_oauth_provider_handler))
         .route("/oauth/sessions/init", post(init_oauth_session_handler))
         .route(
+            "/oauth/sessions/refresh-token",
+            post(refresh_token_oauth_session_handler),
+        )
+        .route(
             "/oauth/sessions/{id}/status",
             get(get_oauth_session_status_handler),
         )

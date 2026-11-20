@@ -356,6 +356,7 @@ export interface VendorAuthDescriptor {
   flow: 'authorization_code' | 'device_code' | 'manual'
   callback?: VendorAuthCallback | null
   manual_input?: VendorAuthManualInput | null
+  supports_refresh_token?: boolean
 }
 
 export interface VendorChannelDescriptor {

@@ -52,6 +52,7 @@ pub(super) fn execute(
         AuthStep::ManualInput { .. } => {
             Err(unsupported("OpenAI Codex OAuth requires a callback URL"))
         }
+        AuthStep::RefreshToken { refresh_token } => refresh_with_token(host, &refresh_token, None),
         AuthStep::Refresh => refresh(host, provider),
         AuthStep::Poll => Err(unsupported("OpenAI Codex OAuth is not a device-code flow")),
         AuthStep::Revoke => Err(unsupported(
@@ -151,6 +152,20 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| auth_error("OpenAI OAuth refresh token is missing"))?;
+    refresh_with_token(host, refresh_token, Some(&provider.credentials))
+}
+
+fn refresh_with_token(
+    host: &GuestHost,
+    refresh_token: &str,
+    previous: Option<&BTreeMap<String, Value>>,
+) -> Result<AuthResponse, PluginError> {
+    let refresh_token = refresh_token.trim();
+    if refresh_token.is_empty() || refresh_token.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(invalid(
+            "OpenAI OAuth refresh token is missing or malformed",
+        ));
+    }
     let form = encode_form(&[
         ("grant_type", "refresh_token"),
         ("client_id", CLIENT_ID),
@@ -158,8 +173,8 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
         ("scope", SCOPE),
     ]);
     let mut response = credentials_response(token_request(host, form)?, Some(refresh_token))?;
-    if let AuthResponse::Credentials { values, .. } = &mut response {
-        inherit_id_token(values, &provider.credentials);
+    if let (Some(previous), AuthResponse::Credentials { values, .. }) = (previous, &mut response) {
+        inherit_id_token(values, previous);
     }
     Ok(response)
 }
