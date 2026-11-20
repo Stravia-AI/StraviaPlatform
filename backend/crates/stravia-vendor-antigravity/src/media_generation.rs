@@ -56,7 +56,7 @@ pub(crate) fn generate(
     let headers = response.headers()?;
     if !(200..300).contains(&status) {
         let body = read_http_body(&response, client::MAX_JSON_BODY)?;
-        return Err(common::upstream_error(status, &headers, &body));
+        return Err(client::upstream_error(status, &headers, &body));
     }
     let body = read_http_body(&response, MAX_RESPONSE_BYTES)?;
     let response = serde_json::from_slice(&body)

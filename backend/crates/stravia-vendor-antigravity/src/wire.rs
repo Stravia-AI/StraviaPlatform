@@ -451,7 +451,7 @@ fn read_inference_response(
     let headers = response.headers()?;
     if !(200..300).contains(&status) {
         let bytes = read_http_body(&response, MAX_EVENT)?;
-        return Err(common::upstream_error(status, &headers, &bytes));
+        return Err(client::upstream_error(status, &headers, &bytes));
     }
     let streaming = headers.iter().any(|field| {
         field.name.eq_ignore_ascii_case("content-type")
@@ -626,7 +626,7 @@ pub(crate) fn response_error(
         .and_then(|value| u16::try_from(value).ok())
         .filter(|value| (400..600).contains(value))
         .unwrap_or(502);
-    Some(common::upstream_error(
+    Some(client::upstream_error(
         status,
         headers,
         &serde_json::to_vec(&json!({"error": error})).expect("JSON value encodes"),
