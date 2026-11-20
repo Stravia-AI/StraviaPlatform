@@ -21,13 +21,14 @@ use stravia_vendor_common::common;
 use stravia_vendor_sdk::VendorGuest;
 use stravia_vendor_sdk::{
     AuthDescriptor, AuthFlow, AuthManualInput, AuthManualInputType, CANONICAL_FORMAT_VERSION,
-    Capability, ChannelDescriptor, DataCompatibility, ErrorKind, GuestHost, NetworkDeclaration,
-    Operation, OperationInput, OperationOutput, OriginDeclaration, PluginError, ProviderDescriptor,
-    ProviderSnapshot, VendorDescriptor, VendorKind,
+    Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, DataCompatibility, ErrorKind,
+    GuestHost, NetworkDeclaration, Operation, OperationInput, OperationOutput, OriginDeclaration,
+    PluginError, ProviderDescriptor, ProviderSnapshot, VendorDescriptor, VendorKind,
 };
 
 const VENDOR_ID: &str = "antigravity";
 const CHANNEL: &str = "oauth";
+const SYSTEM_PROMPT_PREFIX_OPTION: &str = "system_prompt_prefix";
 const BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 const CLI_USER_AGENT: &str = "antigravity/cli/1.5.11 (aidev_client; os_type=linux; arch=amd64; cl=1024248524; auth_method=consumer)";
 
@@ -82,7 +83,21 @@ pub fn descriptor() -> VendorDescriptor {
             website: Some("https://antigravity.google".into()),
             implementation: None,
             config_groups: Vec::new(),
-            config_fields: Vec::new(),
+            config_fields: vec![ConfigField {
+                key: SYSTEM_PROMPT_PREFIX_OPTION.into(),
+                label: messages::system_prompt_prefix(),
+                description: Some(messages::system_prompt_prefix_description()),
+                kind: ConfigFieldKind::Bool,
+                required: false,
+                default_json: Some(serde_json::Value::Bool(true)),
+                group: None,
+                secret: false,
+                min: None,
+                max: None,
+                max_length: None,
+                pattern: None,
+                visible_when: None,
+            }],
             network: NetworkDeclaration {
                 base_url_field: None,
                 extra_origins: ["oauth2.googleapis.com"]
