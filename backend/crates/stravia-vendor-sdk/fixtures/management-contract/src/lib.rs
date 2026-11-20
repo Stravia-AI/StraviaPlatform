@@ -395,7 +395,7 @@ fn discover(
             display_name: model.display_name,
             family: model.family,
             selector: model.selector,
-            capabilities: vec!["tools".into()],
+            capabilities: vec!["infer".into(), "tools".into()],
             metadata: BTreeMap::from([
                 (
                     "modalities".into(),

@@ -450,10 +450,11 @@ async fn synced_records_follow_upstream_reasoning_efforts() -> anyhow::Result<()
     let (data_dir, gw) = build_gateway().await?;
     let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
     // context 与 modalities 已构成完整规格，无 effort 不得推测档位。
-    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
+    // MiniMax discovery fetches live image schemas; Groq consumes the seeded catalog offline.
+    seed_provider_scope(data_dir.path(), "groq", &serde_json::to_vec(&scope)?)?;
     let provider = gw
         .admin()
-        .create_provider(catalog_provider_input_for(&gw, "spec-provider", "minimax").await?)
+        .create_provider(catalog_provider_input_for(&gw, "spec-provider", "groq").await?)
         .await?;
     gw.admin().sync_provider_models(&provider.id).await?;
     let imported = gw
@@ -463,7 +464,7 @@ async fn synced_records_follow_upstream_reasoning_efforts() -> anyhow::Result<()
     assert!(imported.metadata.reasoning_efforts.is_none());
 
     scope["gpt-5.4"]["reasoning_efforts"] = serde_json::json!(["low", "high", "max"]);
-    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
+    seed_provider_scope(data_dir.path(), "groq", &serde_json::to_vec(&scope)?)?;
     gw.admin().sync_provider_models(&provider.id).await?;
 
     let refreshed = gw
@@ -486,10 +487,10 @@ async fn provider_models_persist_direct_edits_and_cost_rules() -> anyhow::Result
     let (data_dir, gw) = build_gateway().await?;
     let mut scope: serde_json::Value = serde_json::from_slice(OPENAI_SCOPE)?;
     scope["gpt-5.4"]["reasoning_efforts"] = serde_json::json!(["none", "low", "max"]);
-    seed_provider_scope(data_dir.path(), "minimax", &serde_json::to_vec(&scope)?)?;
+    seed_provider_scope(data_dir.path(), "groq", &serde_json::to_vec(&scope)?)?;
     let provider = gw
         .admin()
-        .create_provider(catalog_provider_input_for(&gw, "snapshot-provider", "minimax").await?)
+        .create_provider(catalog_provider_input_for(&gw, "snapshot-provider", "groq").await?)
         .await?;
 
     let synced = gw.admin().sync_provider_models(&provider.id).await?;
