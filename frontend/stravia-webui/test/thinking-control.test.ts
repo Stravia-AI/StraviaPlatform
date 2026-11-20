@@ -19,12 +19,51 @@ const toggleMap: ThinkingLevelMapping[] = [
 ]
 
 describe('thinking control representability', () => {
+  test('Kiro Builder ID accepts the declared Sonnet 5.5 efforts without granting a toggle', () => {
+    const levels = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+    const context = {
+      protocol: 'kiro-generate-assistant-response-oauth',
+      vendor: 'kiro',
+      model: 'claude-sonnet-5.5',
+      reasoningEfforts: levels,
+    }
+    const rows: ThinkingLevelMapping[] = levels.map((level) => ({
+      level,
+      control: { type: 'effort', value: level },
+      source: 'generated',
+    }))
+
+    expect(unrepresentableThinkingLevels(rows, context)).toEqual([])
+    expect(writableThinkingControlKinds(context)).toEqual(['effort', 'hidden'])
+    expect(thinkingControlWritable({ type: 'effort', value: 'HIGH' }, context)).toBe(true)
+    for (const value of ['', 'none', 'minimal']) {
+      expect(thinkingControlWritable({ type: 'effort', value }, context)).toBe(false)
+    }
+    expect(thinkingControlWritable({ type: 'disabled' }, context)).toBe(false)
+    expect(unrepresentableThinkingLevels(rows, { ...context, reasoningEfforts: null })).toEqual([...levels])
+    for (const reasoningEfforts of [[], ['']]) {
+      expect(writableThinkingControlKinds({ ...context, reasoningEfforts })).toEqual(['hidden'])
+    }
+  })
+
+  test('a proprietary model can map off to a declared none effort without a toggle', () => {
+    const context = { protocol: 'kiro-generate-assistant-response-oauth', reasoningEfforts: ['none', 'high'] }
+    const off: ThinkingLevelMapping = { level: 'off', control: { type: 'effort', value: 'none' }, source: 'generated' }
+
+    expect(unrepresentableThinkingLevels([off], context)).toEqual([])
+    expect(thinkingControlWritable({ type: 'effort', value: 'off' }, context)).toBe(false)
+    expect(thinkingControlWritable({ type: 'disabled' }, context)).toBe(false)
+  })
+
   test('openai-compatible without a known toggle shape only writes effort', () => {
     const context = { protocol: 'openai-compatible', presetKey: 'ollama-cloud', model: 'gemma4:31b' }
 
     expect(writableThinkingControlKinds(context)).toEqual(['effort', 'hidden'])
     expect(unrepresentableThinkingLevels(toggleMap, context)).toEqual(['off', 'medium'])
     expect(thinkingControlWritable({ type: 'effort', value: 'none' }, context)).toBe(true)
+    expect(thinkingControlWritable({ type: 'effort', value: 'high' }, { ...context, reasoningEfforts: ['low'] })).toBe(
+      true,
+    )
   })
 
   test('xiaomi can write the generated toggle map over openai-compatible', () => {

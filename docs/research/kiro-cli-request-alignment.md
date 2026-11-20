@@ -2,6 +2,15 @@
 
 调研日期：2026-11-18。下文分开记录官方 SDK 的合成请求、完整 KAS 的隔离执行、2.35.1 的线上成功以及 3.4.0 重新授权前后的线上请求。它们不能相互替代。
 
+## 2026-11-20 effort 与思考开关抓包
+
+指定的 `kiro-cli` 路径在本次运行时报告版本为 **3.5.0**，不是目录名中的 3.4.0。使用本机 loopback HTTPS 解密代理，只保存模型 ID、能力 schema 和推理控制；不保存认证头、profile、会话 ID、提示正文或完整流量。后续生成探针在代理收到请求时返回本地错误，不转发生成请求；这些捕获证明客户端发出的字段，不证明上游接受或成功生成。
+
+- `ListAvailableModels` 实际返回 HTTP 200。`claude-sonnet-5.5` 的 effort 为 `low/medium/high/xhigh/max`，`thinking.type` 仅声明 `adaptive/between_tools`，不能据此提供关闭档。`claude-haiku-5.5` 声明同样的 effort 和 `adaptive/disabled`；`claude-sonnet-5` 等模型也声明开关。能力按 schema 判断，不硬编码型号。
+- CLI 的 `--effort high` 在 `GenerateAssistantResponse` 分支发出 `additionalModelRequestFields: {"output_config":{"effort":"high"},"thinking":{"type":"adaptive"}}`。同次调查还观察到新版 `/v1/responses` 分支，控制为 `reasoning: {"type":"adaptive","effort":"high"}`，`--effort max` 发出 `effort: "max"`。插件本次仍使用原有 `GenerateAssistantResponse`，没有切换传输协议。
+- 真正的 TUI 中执行 `/reasoning claude-haiku-5.5 thinking=off` 后提交短提示，捕获到 `/v1/responses` 的 `reasoning: {"type":"disabled","effort":"medium"}`。`chat.enableThinking` 不是该模型的推理开关；不能用它替代 `/reasoning` 验证。
+- Stravia 沿用统一规范：可关闭的模型在 `reasoning_efforts` 中加入 canonical `none`，Core 自动生成 `off → Effort("none")`。私有编码器将该值转为 `thinking.type: "disabled"`，而非非法的 `output_config.effort: "none"`；仅原生声明 `reasoning.effort: "none"` 的模型才按原字段发送。前端与 Core 一样认可模型显式声明的 effort，不再仅因协议为私有值而拒绝映射。
+
 ## 交互式 TUI 实测
 
 在伪终端中启动原版 Linux x86_64 CLI，打开真正的 TUI 后用键盘提交两个短提示。没有调用 `kiro-cli acp`，也没有使用 `--no-interactive` 或 `--output-format stream-json`。CLI 内部启动 KAS（进程入口名仍是 `acp-server.js`，UA 包含 `acp-client/kiro-cli`）；这不表示测试外部 ACP 客户端。在 Node 序列化的 HTTP/1.1 请求头和请求体边界读取字段，保留头名、顺序、允许列出的值与请求形状；不保存 bearer、账号、会话 ID 原值、工具文件正文或系统提示。运行使用临时工作区与 copy-on-write 登录目录，登录由官方 CLI 处理。

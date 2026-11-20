@@ -352,6 +352,99 @@ function thinkingMap(visible: ReadonlySet<string>) {
   }))
 }
 
+test('Kiro Builder ID destination validates Sonnet 5.5 efforts against its own model declaration', async ({ page }) => {
+  const modelId = 'claude-sonnet-5.5'
+  const efforts = ['low', 'medium', 'high', 'xhigh', 'max']
+  const provider = {
+    id: 'kiro-builder',
+    name: 'Kiro AWS Builder ID',
+    vendor: 'kiro',
+    channel: 'builder-id',
+    protocol: 'kiro-generate-assistant-response-oauth',
+    base_url: 'https://kiro.example',
+    use_proxy: false,
+    is_enabled: true,
+    created_at: '',
+    updated_at: '',
+  }
+  const saved = {
+    id: 'sonnet-route',
+    model_id: 'sonnet-route',
+    purpose: 'inference',
+    balance: 'traffic_equalization',
+    is_enabled: true,
+    supported_thinking_levels: efforts,
+    targets: [
+      {
+        id: 'sonnet-target',
+        model_id: 'sonnet-route',
+        model: modelId,
+        provider_id: provider.id,
+        route_purposes: ['inference'],
+        enabled: true,
+        priority: 1,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
+        thinking_level_map: thinkingMap(new Set(efforts)),
+      },
+    ],
+  }
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  const summary = {
+    id: modelId,
+    name: 'Claude Sonnet 5.5',
+    available: true,
+    route_purposes: ['inference'],
+    specification: { reasoning_efforts: efforts },
+  }
+  await page.route('**/api/v1/providers/kiro-builder/models', (route) =>
+    route.fulfill({ json: { data: { models: [summary] } } }),
+  )
+  let update: Record<string, unknown> | undefined
+  await page.route('**/api/v1/models/sonnet-route', (route) => {
+    if (route.request().method() !== 'GET') update = route.request().postDataJSON()
+    return route.fulfill({ json: { data: saved } })
+  })
+
+  await page.goto('/models/sonnet-route')
+  await expect(page.locator('[data-slot="target-card"]')).toContainText('Claude Sonnet 5.5')
+  await page.getByRole('button', { name: 'Edit destination 1' }).click()
+  const dialog = page.getByRole('dialog')
+  for (const effort of efforts) {
+    await expect(dialog.getByRole('textbox', { name: `${effort} Effort value`, exact: true })).toHaveValue(effort)
+  }
+  await expect(dialog.locator('[aria-invalid="true"]')).toHaveCount(0)
+  await expect(dialog.getByText('This provider cannot send', { exact: false })).toHaveCount(0)
+  const off = dialog.getByRole('button', { name: 'off Target Thinking Control', exact: true })
+  await expect(off).toHaveText('Level unsupported')
+  await off.click()
+  await expect(page.getByRole('option')).toHaveText(['Effort value', 'Level unsupported'])
+  await page.keyboard.press('Escape')
+
+  await page.setViewportSize({ width: 375, height: 800 })
+  const low = dialog.getByRole('textbox', { name: 'low Effort value', exact: true })
+  await low.fill('minimal')
+  await expect(low).toHaveAttribute('aria-invalid', 'true')
+  await expect(low).toHaveAccessibleDescription(/low.*medium.*high.*xhigh.*max/)
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(dialog).toBeVisible()
+  await low.fill('medium')
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await page.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect
+    .poll(() => update?.targets)
+    .toEqual([
+      expect.objectContaining({
+        model: modelId,
+        thinking_level_map: expect.arrayContaining([
+          { level: 'low', control: { type: 'effort', value: 'medium' }, source: 'overridden' },
+        ]),
+      }),
+    ])
+})
+
 test.beforeEach(async ({ page }) => {
   await prepareApp(page)
 })

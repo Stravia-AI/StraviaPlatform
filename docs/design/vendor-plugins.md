@@ -157,7 +157,7 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 2. 新建 Kiro 连接，选择 Google、GitHub、AWS Builder ID 或 AWS IAM Identity Center，然后打开授权链接并按页面提示使用设备码。Google 的链接不预选登录方式；GitHub 使用自己的授权会话。IAM Identity Center 需要管理员给出的 Start URL 和身份目录 AWS Region；如果组织禁止设备码登录，必须由管理员启用。身份目录区域不一定是 Kiro profile 的区域，推理、模型目录和额度按 profile 路由（美东或法兰克福）。
    - 原 API 密钥通道已移除。已有 API 密钥连接不会自动转换；新建设备码连接，同步模型并重新绑定 Route。插件不读取 CLI 登录文件，也不接受 `--resume-id` 作为凭据。
    - 连接检查访问受保护的模型目录，不消耗生成额度，也不证明某个模型可生成。
-3. 同步模型，将账号目录中的目标模型（例如 `qwen3-coder-next`）绑定到 Route。目录声明的文本、图像输入和可用推理强度随同步更新；未声明具体档位时，插件不补填推理强度。当前流只投影文本输出。推理使用所选模型，不回退、不加载 CLI 自带工具，也不访问 CLI 的工作区、历史或记忆。
+3. 同步模型，将账号目录中的目标模型（例如 `qwen3-coder-next`）绑定到 Route。目录声明的文本、图像输入和可用推理强度随同步更新；未声明具体档位时，插件不补填推理强度。请求目标编辑器按模型声明校验 effort，不因 Kiro 使用私有协议而拒绝已声明的档位。只有 schema 同时允许 `thinking.type` 为 `adaptive` 与 `disabled` 时，才把关闭思考发布为 canonical effort `none`，生成 `off` 档映射；推理时转换为 `additionalModelRequestFields.thinking.type: "disabled"`，不将合成的 `none` 发入 `output_config.effort`。原生 `reasoning.effort: "none"` 则保持原字段。升级插件后重新同步模型；手工固定的规格和手改映射仍由管理员决定是否恢复同步或重新生成。当前流只投影文本输出。推理使用所选模型，不回退、不加载 CLI 自带工具，也不访问 CLI 的工作区、历史或记忆。
 4. 在「额度」刷新该连接。只读 `GetUsageLimits` 不生成文本；月度、有效试用及各笔赠送独立显示，不合并成虚构的总余额。部分字段、未知单位与读取失败不视为零。额度来自账号区域的 management 服务，详见[计量规则](../research/kiro-cli-credits.md)。
 
 Google、GitHub 使用 Kiro 设备端点；Builder ID 和 IAM Identity Center 使用对应区域的 AWS SSO OIDC 端点。IAM Identity Center 只选允许设备码登录的可用 profile，网络与组织策略错误会阻止连接。推理、目录和额度以 Kiro CLI 3.4.0 交互式 `chat --tui --v3` 主请求为基准；IAM Identity Center 按 KAS 的身份类型映射附带 `TokenType: SSO_OIDC`。插件不补发 CLI 的遥测、启动或标题生成请求，不复制内置工具或提示。私有协议留在 Wasm 内；账号、区域、配额和协议可用性受 Kiro 控制。详见[交互式 TUI 实测](../research/kiro-cli-request-alignment.md#交互式-tui-实测)。

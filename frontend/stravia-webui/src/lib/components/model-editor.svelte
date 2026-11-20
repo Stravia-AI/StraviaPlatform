@@ -34,7 +34,6 @@ import {
   thinkingControlWritable,
   unrepresentableThinkingLevels,
   writableThinkingControlKinds,
-  type ThinkingControlKind,
 } from '#lib/thinking-control.js'
 import type {
   CurrencyKind,
@@ -394,7 +393,9 @@ function editTarget(target: RouteTargetForm, isNew = false): void {
   targetEditorTarget = cloneTarget(target)
   targetEditorIsNew = isNew
   targetEditorOpen = true
-  if (targetEditorTarget.providerId && targetEditorTarget.inventory.length === 0) void loadInventory(targetEditorTarget)
+  if (targetEditorTarget.providerId && (target.loading || targetEditorTarget.inventory.length === 0)) {
+    void loadInventory(targetEditorTarget)
+  }
 }
 
 function closeTargetEditor(save: boolean): void {
@@ -492,7 +493,9 @@ function targetModelIdentity(
 function targetIssueLabels(target: RouteTargetForm, summary: ProviderModelSummary | undefined): string[] {
   const labels: string[] = []
   if (target.persisted && summary && !summary.available) labels.push(m.model_editor_model_no_longer_available())
-  if (unwritableThinkingLevels(target).length > 0) labels.push(m.model_editor_thinking_map_unwritable())
+  if (!target.loading && unwritableThinkingLevels(target, summary).length > 0) {
+    labels.push(m.model_editor_thinking_map_unwritable())
+  }
   return labels
 }
 
@@ -693,6 +696,7 @@ function changeThinkingControlValue(row: ThinkingLevelMapping, value: string | n
   if (row.control.type === 'effort') row.control.value = String(value)
   if (row.control.type === 'budget') row.control.value = Math.max(0, Math.trunc(Number(value) || 0))
   row.source = 'overridden'
+  if (targetEditorTarget) targetEditorTarget.validationError = ''
 }
 
 function thinkingControlLabel(type: TargetThinkingControl['type']): string {
@@ -705,31 +709,16 @@ function thinkingControlLabel(type: TargetThinkingControl['type']): string {
   }[type]
 }
 
-function targetThinkingContext(target: RouteTargetForm) {
+function targetThinkingContext(target: RouteTargetForm, summary: ProviderModelSummary | undefined) {
   return thinkingControlContext(
     providers.find((provider) => provider.id === target.providerId),
     target.model,
+    summary?.specification?.reasoning_efforts,
   )
 }
 
-function unwritableThinkingLevels(target: RouteTargetForm): ThinkingLevel[] {
-  return unrepresentableThinkingLevels(target.thinkingLevelMap, targetThinkingContext(target))
-}
-
-function thinkingRowWritable(target: RouteTargetForm, row: ThinkingLevelMapping): boolean {
-  return thinkingControlWritable(row.control, targetThinkingContext(target))
-}
-
-function thinkingControlOptions(target: RouteTargetForm, row: ThinkingLevelMapping): ThinkingControlKind[] {
-  const writable = writableThinkingControlKinds(targetThinkingContext(target))
-  return writable.includes(row.control.type) ? writable : [row.control.type, ...writable]
-}
-
-function thinkingRowHint(target: RouteTargetForm, row: ThinkingLevelMapping): string {
-  return m.model_editor_thinking_row_unwritable({
-    control: thinkingControlLabel(row.control.type),
-    supported: formatList(writableThinkingControlKinds(targetThinkingContext(target)).map(thinkingControlLabel)),
-  })
+function unwritableThinkingLevels(target: RouteTargetForm, summary = selectedSummary(target)): ThinkingLevel[] {
+  return unrepresentableThinkingLevels(target.thinkingLevelMap, targetThinkingContext(target, summary))
 }
 
 async function blockEnableForUnwritableThinking(target: RouteTargetForm): Promise<boolean> {
@@ -1600,7 +1589,9 @@ async function saveModel(): Promise<void> {
                     triggerLabel={m.model_editor_view_model_details()} />
                 </div>
               {/if}
-              {#if target.providerId && target.model?.trim() && target.thinkingLevelMap.length > 0}
+              {#if !target.loading && target.providerId && target.model?.trim() && target.thinkingLevelMap.length > 0}
+                {@const context = targetThinkingContext(target, summary)}
+                {@const writableKinds = writableThinkingControlKinds(context)}
                 <div class="mt-4 border-t pt-4">
                   <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
                     <div class="min-w-0">
@@ -1624,7 +1615,9 @@ async function saveModel(): Promise<void> {
                   </div>
                   <div data-slot="thinking-map" class="divide-y border-y">
                     {#each target.thinkingLevelMap as row (row.level)}
-                      {@const rowWritable = thinkingRowWritable(target, row)}
+                      {@const kindWritable = writableKinds.includes(row.control.type)}
+                      {@const rowWritable = thinkingControlWritable(row.control, context)}
+                      {@const errorId = `thinking-error-${target.key}-${row.level}`}
                       <div
                         data-slot="thinking-map-row"
                         class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 py-2 sm:grid-cols-[minmax(8rem,0.8fr)_minmax(0,2.2fr)_auto]">
@@ -1643,14 +1636,15 @@ async function saveModel(): Promise<void> {
                             onValueChange={(value: string) =>
                               value && changeThinkingControlKind(row, value as TargetThinkingControl['type'])}>
                             <Select.Trigger
-                              class={['w-28 shrink-0 sm:w-32', !rowWritable && 'border-destructive']}
-                              aria-invalid={!rowWritable}
+                              class={['w-28 shrink-0 sm:w-32', !kindWritable && 'border-destructive']}
+                              aria-invalid={!kindWritable}
+                              aria-describedby={!kindWritable ? errorId : undefined}
                               aria-label={`${row.level} ${m.model_editor_thinking_control()}`}>
                               {thinkingControlLabel(row.control.type)}
                             </Select.Trigger>
                             <Select.Content>
                               <Select.Group>
-                                {#each thinkingControlOptions(target, row) as type (type)}
+                                {#each kindWritable ? writableKinds : [row.control.type, ...writableKinds] as type (type)}
                                   <Select.Item value={type}>{thinkingControlLabel(type)}</Select.Item>
                                 {/each}
                               </Select.Group>
@@ -1661,6 +1655,8 @@ async function saveModel(): Promise<void> {
                               class="min-w-0 flex-1"
                               value={row.control.value}
                               aria-label={`${row.level} ${m.model_editor_thinking_effort()}`}
+                              aria-invalid={kindWritable && !rowWritable}
+                              aria-describedby={kindWritable && !rowWritable ? errorId : undefined}
                               oninput={(event: Event) => changeThinkingControlValue(row, inputValue(event))} />
                           {:else if row.control.type === 'budget'}
                             <Input
@@ -1686,8 +1682,15 @@ async function saveModel(): Promise<void> {
                           </Button>
                         {/if}
                         {#if !rowWritable}
-                          <p class="col-span-full text-sm text-destructive" role="status">
-                            {thinkingRowHint(target, row)}
+                          <p id={errorId} class="col-span-full text-sm text-destructive" role="status">
+                            {kindWritable && row.control.type === 'effort'
+                              ? m.model_editor_thinking_effort_undeclared({
+                                  efforts: formatList(context.reasoningEfforts ?? []),
+                                })
+                              : m.model_editor_thinking_row_unwritable({
+                                  control: thinkingControlLabel(row.control.type),
+                                  supported: formatList(writableKinds.map(thinkingControlLabel)),
+                                })}
                           </p>
                         {/if}
                       </div>
@@ -1705,7 +1708,7 @@ async function saveModel(): Promise<void> {
 
               <Button
                 type="button"
-                disabled={target.enabled && !targetConfigured(target)}
+                disabled={target.loading || (target.enabled && !targetConfigured(target))}
                 onclick={() => closeTargetEditor(true)}>{m.common_confirm()}</Button>
               <p class="text-sm text-muted-foreground sm:order-first sm:mr-auto sm:self-center">
                 {m.model_editor_target_draft_note()}

@@ -1837,6 +1837,7 @@
   "model_editor_thinking_enabled": "仅开启思考",
   "model_editor_thinking_disabled": "明确关闭思考",
   "model_editor_thinking_hidden": "此等级不支持",
+  "model_editor_thinking_effort_undeclared": "请输入此模型支持的强度值：{efforts}。",
   "model_editor_thinking_row_unwritable": "此供应商无法发送「{control}」。请改成：{supported}。",
   "model_editor_thinking_enable_blocked": "无法启用：思考等级 {levels} 的控制此供应商无法发送。请先改思考等级映射。",
   "model_editor_thinking_map_unwritable": "思考映射需修改",

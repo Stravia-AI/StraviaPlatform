@@ -332,7 +332,7 @@ fn additional_model_request_fields(
             ));
         }
     };
-    let (mut effort, thinking_type) = match &reasoning.target_control {
+    let (mut effort, mut thinking_type) = match &reasoning.target_control {
         Some(TargetThinkingControl::Effort { value }) => (Some(value.as_str()), mode_thinking),
         Some(TargetThinkingControl::Enabled) => (None, Some("adaptive")),
         Some(TargetThinkingControl::Disabled) => (None, Some("disabled")),
@@ -347,7 +347,8 @@ fn additional_model_request_fields(
             ));
         }
         None => match reasoning.level {
-            Some(ThinkingLevel::Off) => (None, Some(mode_thinking.unwrap_or("disabled"))),
+            Some(ThinkingLevel::Off) if mode_thinking.is_some() => (None, mode_thinking),
+            Some(ThinkingLevel::Off) => (Some("none"), None),
             Some(level) => (Some(level.as_str()), mode_thinking),
             None => (None, mode_thinking),
         },
@@ -358,6 +359,14 @@ fn additional_model_request_fields(
     let extensions = &metadata
         .ok_or_else(|| invalid("Kiro reasoning requires model effort metadata"))?
         .extensions;
+    let toggleable = extensions
+        .get("kiro_thinking_toggleable")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if effort == Some("none") && toggleable {
+        effort = None;
+        thinking_type = Some("disabled");
+    }
     let mut fields = Map::new();
     if let Some(requested_effort) = effort.take() {
         let group = extensions
@@ -384,7 +393,7 @@ fn additional_model_request_fields(
                 supported
                     .iter()
                     .filter_map(Value::as_str)
-                    .rfind(|v| !matches!(*v, "xhigh" | "max"))
+                    .rfind(|v| !matches!(*v, "none" | "xhigh" | "max"))
             } else {
                 Some(requested_effort)
             };
@@ -393,11 +402,7 @@ fn additional_model_request_fields(
         }
     }
     if let Some(thinking_type) = thinking_type {
-        if extensions
-            .get("kiro_thinking_toggleable")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if !toggleable {
             return Err(invalid("Kiro model does not support thinking toggle"));
         }
         fields.insert("thinking".into(), json!({"type": thinking_type}));
@@ -926,6 +931,15 @@ mod tests {
             .insert("kiro_effort_group".into(), json!("reasoning"));
         req.reasoning.level = Some(ThinkingLevel::Medium);
         assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
+        req.reasoning.level = Some(ThinkingLevel::Off);
+        assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
+        meta.extensions
+            .insert("reasoning_efforts".into(), json!(["none", "low", "high"]));
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"reasoning": {"effort": "none"}})
+        );
         req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
         assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
     }
@@ -943,6 +957,30 @@ mod tests {
         );
         meta.extensions
             .insert("kiro_thinking_toggleable".into(), json!(true));
+
+        // Route 的 off 等级使用 canonical effort none；不能把 none 发进 output_config。
+        req.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "none".into(),
+        });
+        for mode in [None, Some("adaptive".into())] {
+            req.reasoning.mode = mode;
+            let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+            assert_eq!(
+                body["additionalModelRequestFields"],
+                json!({"thinking": {"type": "disabled"}})
+            );
+        }
+        req.reasoning.mode = None;
+        req.reasoning.target_control = None;
+        req.reasoning.level = Some(ThinkingLevel::Off);
+        let group = meta.extensions.remove("kiro_effort_group").unwrap();
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"thinking": {"type": "disabled"}})
+        );
+        meta.extensions.insert("kiro_effort_group".into(), group);
+        req.reasoning.level = None;
 
         req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
         let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
@@ -969,6 +1007,13 @@ mod tests {
                 "output_config": {"effort": "high"},
                 "thinking": {"type": "disabled"}
             })
+        );
+        meta.extensions
+            .insert("reasoning_efforts".into(), json!(["none", "max"]));
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"thinking": {"type": "disabled"}})
         );
     }
 

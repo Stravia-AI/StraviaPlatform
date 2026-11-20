@@ -111,10 +111,9 @@ fn decode(bytes: &[u8]) -> Result<DiscoverResponse, PluginError> {
                     (group, values)
                 })
                 .find(|(_, values)| !values.is_empty());
-                if let Some((group, efforts)) = efforts {
-                    metadata.insert("kiro_effort_group".into(), group.into());
-                    metadata.insert("reasoning_efforts".into(), serde_json::json!(efforts));
-                }
+                let (group, mut efforts) = efforts
+                    .map(|(group, efforts)| (Some(group), efforts))
+                    .unwrap_or_default();
                 // Match KAS 3.4.0 KFu: thinking is toggleable iff enum includes both disabled and adaptive.
                 let thinking_toggleable = schema
                     .pointer("/properties/thinking/properties/type/enum")
@@ -125,6 +124,17 @@ fn decode(bytes: &[u8]) -> Result<DiscoverResponse, PluginError> {
                     });
                 if thinking_toggleable {
                     metadata.insert("kiro_thinking_toggleable".into(), serde_json::json!(true));
+                    // Core 用 canonical none 生成 off 档；编码时转换为 thinking.disabled。
+                    if !efforts.contains(&"none") {
+                        efforts.truncate(127);
+                        efforts.insert(0, "none");
+                    }
+                }
+                if let Some(group) = group {
+                    metadata.insert("kiro_effort_group".into(), group.into());
+                }
+                if !efforts.is_empty() {
+                    metadata.insert("reasoning_efforts".into(), serde_json::json!(efforts));
                 }
             }
             if let Some(context) = m
@@ -224,17 +234,30 @@ mod tests {
     }
 
     #[test]
-    fn detects_thinking_toggleable_schema_without_polluting_efforts() {
+    fn exposes_off_effort_only_for_toggleable_models() {
         let page = decode(br#"{"models":[
             {"modelId":"toggle-model","additionalModelRequestFieldsSchema":{"properties":{"thinking":{"properties":{"type":{"enum":["disabled","adaptive"],"default":"adaptive"}}}}}},
-            {"modelId":"partial-model","additionalModelRequestFieldsSchema":{"properties":{"thinking":{"properties":{"type":{"enum":["adaptive"]}}}}}}
+            {"modelId":"partial-model","additionalModelRequestFieldsSchema":{"properties":{"thinking":{"properties":{"type":{"enum":["adaptive","between_tools"]}}},"output_config":{"properties":{"effort":{"enum":["low","medium","high","xhigh","max"]}}}}}},
+            {"modelId":"toggle-effort-model","additionalModelRequestFieldsSchema":{"properties":{"thinking":{"properties":{"type":{"enum":["disabled","adaptive"]}}},"output_config":{"properties":{"effort":{"enum":["low","high","max"]}}}}}}
         ]}"#).unwrap();
         assert_eq!(page.models[0].metadata["kiro_thinking_toggleable"], true);
-        assert!(!page.models[0].metadata.contains_key("reasoning_efforts"));
+        assert_eq!(
+            page.models[0].metadata["reasoning_efforts"],
+            serde_json::json!(["none"])
+        );
+        assert!(!page.models[0].metadata.contains_key("kiro_effort_group"));
         assert!(
             !page.models[1]
                 .metadata
                 .contains_key("kiro_thinking_toggleable")
+        );
+        assert_eq!(
+            page.models[1].metadata["reasoning_efforts"],
+            serde_json::json!(["low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(
+            page.models[2].metadata["reasoning_efforts"],
+            serde_json::json!(["none", "low", "high", "max"])
         );
     }
 

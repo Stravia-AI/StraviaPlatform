@@ -9,20 +9,37 @@ export interface ThinkingControlContext {
   presetKey?: string | null
   vendor?: string | null
   model?: string | null
+  reasoningEfforts?: readonly string[] | null
 }
 
 const CONTROL_KINDS: ThinkingControlKind[] = ['effort', 'budget', 'enabled', 'disabled', 'hidden']
 
-export function thinkingControlContext(provider: Provider | undefined, model: string): ThinkingControlContext {
-  return { protocol: provider?.protocol, presetKey: provider?.preset_key, vendor: provider?.vendor, model }
+export function thinkingControlContext(
+  provider: Provider | undefined,
+  model: string,
+  reasoningEfforts: ThinkingControlContext['reasoningEfforts'],
+): ThinkingControlContext {
+  return {
+    protocol: provider?.protocol,
+    presetKey: provider?.preset_key,
+    vendor: provider?.vendor,
+    model,
+    reasoningEfforts,
+  }
 }
 
 export function writableThinkingControlKinds(context: ThinkingControlContext): ThinkingControlKind[] {
-  return CONTROL_KINDS.filter((kind) => thinkingControlKindWritable(kind, context))
+  return CONTROL_KINDS.filter(
+    (kind) => protocolWritesKind(kind, context) || (kind === 'effort' && context.reasoningEfforts?.some(Boolean)),
+  )
 }
 
 export function thinkingControlWritable(control: TargetThinkingControl, context: ThinkingControlContext): boolean {
-  return thinkingControlKindWritable(control.type, context)
+  if (protocolWritesKind(control.type, context)) return true
+  if (control.type !== 'effort' || !control.value || !context.reasoningEfforts?.length) return false
+  // The host compares native effort identifiers with Rust's eq_ignore_ascii_case.
+  const value = asciiLowercase(control.value)
+  return context.reasoningEfforts.some((candidate) => asciiLowercase(candidate) === value)
 }
 
 export function unrepresentableThinkingLevels(
@@ -32,7 +49,11 @@ export function unrepresentableThinkingLevels(
   return mappings.filter((row) => !thinkingControlWritable(row.control, context)).map((row) => row.level)
 }
 
-export function thinkingControlKindWritable(kind: ThinkingControlKind, context: ThinkingControlContext): boolean {
+function asciiLowercase(value: string): string {
+  return value.replace(/[A-Z]/g, (char) => char.toLowerCase())
+}
+
+function protocolWritesKind(kind: ThinkingControlKind, context: ThinkingControlContext): boolean {
   if (kind === 'hidden') return true
   const protocol = resolveProtocol(context.protocol)
   switch (protocol) {

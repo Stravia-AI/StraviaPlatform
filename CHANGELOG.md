@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Kiro request targets now accept model-declared reasoning efforts in the editor instead of rejecting its private protocol. Models whose schema supports disabling thinking expose an `off` mapping through canonical effort `none`; the plugin translates it to the native thinking switch without sending an invalid effort. Models without that switch remain unsupported for `off`. Rebuild and re-import the Kiro plugin, then sync models to refresh generated mappings; pinned specifications and manually overridden mappings are preserved.
+
 ### Changed
 
 - The desktop Models table shows each model's purpose in a separate column instead of below its display name.
