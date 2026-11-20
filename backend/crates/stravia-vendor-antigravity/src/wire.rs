@@ -659,7 +659,9 @@ fn take_top_level_instruction_parts(request: &mut AiRequest) -> Result<Vec<Value
         && let Some(text) = instructions.as_deref()
     {
         content(&mut raw, true)?;
-        if let Some(Value::Array(parts)) = raw.as_object_mut().and_then(|system| system.remove("parts"))
+        if let Some(Value::Array(parts)) = raw
+            .as_object_mut()
+            .and_then(|system| system.remove("parts"))
             && raw_instructions_match(&parts, text)
         {
             return Ok(parts);
@@ -705,7 +707,11 @@ fn text_part(text: String) -> Value {
 
 fn apply_system_prompt_prefix(request: &mut Value, parts: Vec<Value>) {
     let object = request.as_object_mut().expect("validated inference object");
-    let bridge = if parts.is_empty() { "" } else { USE_FIRST_USER_AS_INSTRUCTIONS };
+    let bridge = if parts.is_empty() {
+        ""
+    } else {
+        USE_FIRST_USER_AS_INSTRUCTIONS
+    };
     let mut text = String::with_capacity(AGY_SYSTEM_PREFIX.len() + bridge.len());
     text.push_str(AGY_SYSTEM_PREFIX);
     text.push_str(bridge);

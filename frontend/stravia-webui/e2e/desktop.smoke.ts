@@ -236,7 +236,11 @@ describe('Stravia desktop smoke', () => {
       await expect($('#route-purpose')).toHaveText('Inference')
       await $('#route-model-id').setValue(modelId)
       await $('#route-purpose').click()
-      await $('//*[@role="option" and normalize-space()="Image Generation"]').click()
+      // WebDriver 桥的合成 click 不产生 Select 所需的 pointer 事件，使用键盘交互打开并选择。
+      await browser.keys('ArrowDown')
+      await expect($('//*[@role="option" and normalize-space()="Image Generation"]')).toBeDisplayed()
+      await browser.keys('Image')
+      await browser.keys('Enter')
       await expect($('#route-purpose')).toHaveText('Image Generation')
       await $('button=Save model').click()
       await browser.waitUntil(async () => new URL(await browser.getUrl()).pathname === '/models', {

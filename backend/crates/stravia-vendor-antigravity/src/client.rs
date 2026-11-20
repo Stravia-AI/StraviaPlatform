@@ -379,10 +379,9 @@ fn parse_go_duration(raw: &str) -> Option<Duration> {
             (1_000_000_000_u128, r)
         } else if let Some(r) = after_num.strip_prefix('m') {
             (60_u128 * 1_000_000_000, r)
-        } else if let Some(r) = after_num.strip_prefix('h') {
-            (3_600_u128 * 1_000_000_000, r)
         } else {
-            return None;
+            let r = after_num.strip_prefix('h')?;
+            (3_600_u128 * 1_000_000_000, r)
         };
         let mut part_nanos = int_val.saturating_mul(unit_ns);
         if !frac_str.is_empty() {
@@ -415,10 +414,7 @@ mod tests {
             Some(Duration::from_nanos(201_506_475))
         );
         assert_eq!(parse_go_duration("2m30s"), Some(Duration::from_secs(150)));
-        assert_eq!(
-            parse_go_duration("1h30m"),
-            Some(Duration::from_secs(5_400))
-        );
+        assert_eq!(parse_go_duration("1h30m"), Some(Duration::from_secs(5_400)));
         assert_eq!(parse_go_duration("200ms"), Some(Duration::from_millis(200)));
         assert_eq!(parse_go_duration("0s"), None);
         assert_eq!(parse_go_duration("-5s"), None);
@@ -441,7 +437,10 @@ mod tests {
         }))
         .unwrap();
         let error = upstream_error(429, &headers, &body);
-        assert_eq!(error.kind.model_error_kind(), Some(AiErrorKind::QuotaExceeded));
+        assert_eq!(
+            error.kind.model_error_kind(),
+            Some(AiErrorKind::QuotaExceeded)
+        );
         assert_eq!(error.kind.retry_after(), None);
     }
 
@@ -467,7 +466,10 @@ mod tests {
         }))
         .unwrap();
         let error = upstream_error(429, &headers, &body);
-        assert_eq!(error.kind.model_error_kind(), Some(AiErrorKind::RateLimitError));
+        assert_eq!(
+            error.kind.model_error_kind(),
+            Some(AiErrorKind::RateLimitError)
+        );
         assert_eq!(error.kind.retry_after(), Some(Duration::from_millis(4_500)));
     }
 
@@ -490,7 +492,10 @@ mod tests {
         }))
         .unwrap();
         let error = upstream_error(429, &headers, &body);
-        assert_eq!(error.kind.model_error_kind(), Some(AiErrorKind::QuotaExceeded));
+        assert_eq!(
+            error.kind.model_error_kind(),
+            Some(AiErrorKind::QuotaExceeded)
+        );
         assert_eq!(error.kind.retry_after(), Some(Duration::from_secs(8_100)));
     }
 

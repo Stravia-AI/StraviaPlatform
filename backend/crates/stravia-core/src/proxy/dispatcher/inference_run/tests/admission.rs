@@ -138,8 +138,10 @@ async fn ambiguous_failed_admissions_preserve_trusted_lifecycle_identity() {
         async fn execute(
             &self,
             input: crate::model_turn::TurnInput,
-        ) -> Result<crate::model_turn::ModelTurn, stravia_runtime_contract::model_turn::ModelTurnError>
-        {
+        ) -> Result<
+            crate::model_turn::ModelTurn,
+            stravia_runtime_contract::model_turn::ModelTurnError,
+        > {
             self.recorded.lock().push((
                 input.user_prompt_index,
                 input.client_conversation_id.clone(),
@@ -210,21 +212,22 @@ async fn ambiguous_failed_admissions_preserve_trusted_lifecycle_identity() {
         assert_eq!(response.status(), StatusCode::OK);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let recorded = recorded.lock();
-    assert_eq!(recorded.len(), 1);
-    let (prompt_index, conversation_id, conversation_created_at_ms, window_id, logical_turn_id) =
-        &recorded[0];
-    assert_eq!(*prompt_index, None);
-    assert!(
-        conversation_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty()),
-        "ambiguous prefix admission must still propagate client_conversation_id"
-    );
-    assert!(conversation_created_at_ms.is_some());
-    assert!(window_id.is_some());
-    assert!(logical_turn_id.is_some());
-    drop(recorded);
+    {
+        let recorded = recorded.lock();
+        assert_eq!(recorded.len(), 1);
+        let (prompt_index, conversation_id, conversation_created_at_ms, window_id, logical_turn_id) =
+            &recorded[0];
+        assert_eq!(*prompt_index, None);
+        assert!(
+            conversation_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()),
+            "ambiguous prefix admission must still propagate client_conversation_id"
+        );
+        assert!(conversation_created_at_ms.is_some());
+        assert!(window_id.is_some());
+        assert!(logical_turn_id.is_some());
+    }
     close_test_gateway(gateway, data_dir).await;
 }
 

@@ -1380,7 +1380,9 @@ async fn system_instruction_without_prefix_preserves_text_history_and_tools() {
         ("access_token".into(), json!("test-token")),
         ("project_id".into(), json!("test-project")),
     ]);
-    provider.options.insert("system_prompt_prefix".into(), json!(false));
+    provider
+        .options
+        .insert("system_prompt_prefix".into(), json!(false));
     let fragment = "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.";
     let identity = "You are omp's trusted coding assistant.";
     let dispatch = "Write JSON args as `content` to xd://<tool> via `write`. Invalid args return schema in error → fix/retry.";
@@ -1493,7 +1495,8 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         ("project_id".into(), json!("test-project")),
     ]);
     let omp = "You are omp's trusted coding assistant.\nRead xd://<tool> for full docs + JSON schema before first use.\nKeep this third line.";
-    let ordinary = "Another client.\nRead xd://<tool> for full docs + JSON schema before first use.";
+    let ordinary =
+        "Another client.\nRead xd://<tool> for full docs + JSON schema before first use.";
     let system_policy = "Independent system policy\nYou are omp's trusted coding assistant.";
     let developer_policy = "Independent developer policy\nRFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\nRead xd://<tool> for full docs + JSON schema before first use.";
     let history = [
@@ -1509,17 +1512,20 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
             .unwrap()
     };
     let responses = |instructions: &str| {
-        decode(OPEN_RESPONSES_2026_04_24, json!({
-            "model": "test-route",
-            "instructions": instructions,
-            "input": [
-                {"role":"developer","content":developer_policy},
-                {"role":"user","content":"First task"},
-                {"role":"assistant","content":"Prior reply"},
-                {"role":"user","content":"Second task"}
-            ],
-            "tools": [{"type":"function","name":"inspect","description":"Inspect a file.","parameters":{"type":"object"}}]
-        }))
+        decode(
+            OPEN_RESPONSES_2026_04_24,
+            json!({
+                "model": "test-route",
+                "instructions": instructions,
+                "input": [
+                    {"role":"developer","content":developer_policy},
+                    {"role":"user","content":"First task"},
+                    {"role":"assistant","content":"Prior reply"},
+                    {"role":"user","content":"Second task"}
+                ],
+                "tools": [{"type":"function","name":"inspect","description":"Inspect a file.","parameters":{"type":"object"}}]
+            }),
+        )
     };
     let developer = responses(ordinary).items.remove(0);
     let messages = json!([
@@ -1527,24 +1533,33 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         {"role":"assistant","content":"Prior reply"},
         {"role":"user","content":"Second task"}
     ]);
-    let chat = decode(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1, json!({
-        "model": "test-route",
-        "messages": [
-            {"role":"system","content":system_policy},
-            {"role":"developer","content":developer_policy},
-            messages[0], messages[1], messages[2]
-        ]
-    }));
-    let mut anthropic = decode(ANTHROPIC_MESSAGES_2023_06_01, json!({
-        "model": "test-route", "max_tokens": 128,
-        "system": [{"type":"text","text":"Anthropic top-level policy"}],
-        "messages": messages
-    }));
+    let chat = decode(
+        OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+        json!({
+            "model": "test-route",
+            "messages": [
+                {"role":"system","content":system_policy},
+                {"role":"developer","content":developer_policy},
+                messages[0], messages[1], messages[2]
+            ]
+        }),
+    );
+    let mut anthropic = decode(
+        ANTHROPIC_MESSAGES_2023_06_01,
+        json!({
+            "model": "test-route", "max_tokens": 128,
+            "system": [{"type":"text","text":"Anthropic top-level policy"}],
+            "messages": messages
+        }),
+    );
     anthropic.items.insert(0, developer.clone());
     let gemini_parts = json!([{"text":"Gemini first part"},{"text":"Gemini second part"}]);
-    let mut gemini = decode(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, json!({
-        "systemInstruction": {"parts": gemini_parts}, "contents": history
-    }));
+    let mut gemini = decode(
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        json!({
+            "systemInstruction": {"parts": gemini_parts}, "contents": history
+        }),
+    );
     gemini.items.insert(0, developer);
     let mut edited_gemini = gemini.clone();
     edited_gemini.instructions = Some("Replaced effective policy".into());
@@ -1553,23 +1568,43 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
 
     for (name, request, enabled, expected_moved) in [
         ("OMP", responses(omp), None, json!([{"text":omp}])),
-        ("Responses", responses(ordinary), None, json!([{"text":ordinary}])),
+        (
+            "Responses",
+            responses(ordinary),
+            None,
+            json!([{"text":ordinary}]),
+        ),
         ("Chat", chat, None, Value::Null),
-        ("Anthropic", anthropic, None, json!([{"text":"Anthropic top-level policy"}])),
+        (
+            "Anthropic",
+            anthropic,
+            None,
+            json!([{"text":"Anthropic top-level policy"}]),
+        ),
         ("Gemini", gemini, None, gemini_parts),
-        ("edited Gemini", edited_gemini, None, json!([{"text":"Replaced effective policy"}])),
+        (
+            "edited Gemini",
+            edited_gemini,
+            None,
+            json!([{"text":"Replaced effective policy"}]),
+        ),
         ("cleared Gemini", cleared_gemini, None, Value::Null),
         ("disabled", responses(omp), Some(false), Value::Null),
     ] {
         if let Some(enabled) = enabled {
-            provider.options.insert("system_prompt_prefix".into(), json!(enabled));
+            provider
+                .options
+                .insert("system_prompt_prefix".into(), json!(enabled));
         }
         let has_tools = request.tools.is_some();
         let result = run(
             &runtime,
             &plugin,
             &services,
-            OperationInput::Infer { provider: provider.clone(), request },
+            OperationInput::Infer {
+                provider: provider.clone(),
+                request,
+            },
         )
         .await
         .unwrap();
@@ -1586,7 +1621,10 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
             assert_eq!(parts[1]["text"], developer_policy, "{name}");
         }
         if has_tools {
-            assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "inspect");
+            assert_eq!(
+                body["tools"][0]["functionDeclarations"][0]["name"],
+                "inspect"
+            );
         }
         let contents = body["contents"].as_array().unwrap();
         let system = parts[0]["text"].as_str().unwrap();
@@ -1595,17 +1633,24 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
             assert_eq!(
                 sha2::Sha256::digest(prefix)[..],
                 [
-                    0xac, 0xea, 0x37, 0x99, 0xfe, 0x9d, 0x52, 0xbc, 0x0f, 0xba, 0xbb, 0x26,
-                    0x12, 0x19, 0x49, 0x1f, 0x2e, 0x70, 0x7e, 0x87, 0xf1, 0x2a, 0x33, 0x7a,
-                    0x6d, 0x1c, 0x81, 0xaa, 0x71, 0x7b, 0xcd, 0x39,
+                    0xac, 0xea, 0x37, 0x99, 0xfe, 0x9d, 0x52, 0xbc, 0x0f, 0xba, 0xbb, 0x26, 0x12,
+                    0x19, 0x49, 0x1f, 0x2e, 0x70, 0x7e, 0x87, 0xf1, 0x2a, 0x33, 0x7a, 0x6d, 0x1c,
+                    0x81, 0xaa, 0x71, 0x7b, 0xcd, 0x39,
                 ]
             );
             if expected_moved.is_null() {
                 assert_eq!(system.len(), 296, "{name} added an instruction bridge");
                 assert_eq!(contents, &history, "{name} changed conversation history");
             } else {
-                assert_eq!(contents[0], json!({"role":"user","parts":expected_moved}), "{name}");
-                assert_eq!(contents[1], json!({"role":"model","parts":[{"text":"收到，我会使用该提示词作为系统提示。"}]}));
+                assert_eq!(
+                    contents[0],
+                    json!({"role":"user","parts":expected_moved}),
+                    "{name}"
+                );
+                assert_eq!(
+                    contents[1],
+                    json!({"role":"model","parts":[{"text":"收到，我会使用该提示词作为系统提示。"}]})
+                );
                 assert_eq!(contents[2..], history, "{name}");
             }
         } else {

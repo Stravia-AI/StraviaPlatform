@@ -984,8 +984,8 @@ pub(super) async fn orchestrate(
             let window = prepared.source_window_for_admission(uuid::Uuid::new_v4());
             turn_input.context_window_id = Some(window.id);
             turn_input.context_window_index = Some(window.index);
-            let (conversation_id, conversation_created_at_ms) =
-                prepared.client_conversation_for_admission(atomic_admission_id, atomic_created_at_ms);
+            let (conversation_id, conversation_created_at_ms) = prepared
+                .client_conversation_for_admission(atomic_admission_id, atomic_created_at_ms);
             turn_input.client_conversation_id = Some(conversation_id);
             turn_input.client_conversation_created_at_ms = Some(conversation_created_at_ms);
         }
