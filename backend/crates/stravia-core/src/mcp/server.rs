@@ -68,6 +68,12 @@ pub(crate) fn router(gateway: Gateway) -> Router {
         // DNS-rebinding requests without breaking legitimate non-loopback deployments.
         .disable_allowed_hosts()
         .disable_allowed_origins();
+    let mcp_cancellation = config.cancellation_token.clone();
+    let gateway_cancellation = gateway.lifecycle.cancellation.clone();
+    gateway.lifecycle.spawn(async move {
+        gateway_cancellation.cancelled().await;
+        mcp_cancellation.cancel();
+    });
     let service = StreamableHttpService::new(
         move || Ok::<_, std::io::Error>(server.clone()),
         LocalSessionManager::default().into(),

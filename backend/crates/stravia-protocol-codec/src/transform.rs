@@ -224,6 +224,32 @@ impl ProtocolTransform {
     }
 }
 
+/// Fast-path soundness witness for `OpenResponses20260424`: returns `true` only
+/// when `prune_request` + `ResponsesEncoder::encode_request` are guaranteed to
+/// emit at least one non-empty `input` item regardless of other items or ingress
+/// protocol.
+fn item_unconditionally_encodes_for_open_responses(
+    item: &stravia_runtime_contract::protocol::ir::AiItem,
+) -> bool {
+    use stravia_runtime_contract::protocol::ir::{ContentBlock, MessageContent, Role};
+    if item.is_compaction() || item.is_compaction_trigger() || item.item_reference().is_some() {
+        return true;
+    }
+    if !matches!(
+        item.role,
+        Role::System | Role::Developer | Role::User | Role::Assistant
+    ) {
+        return false;
+    }
+    match &item.content {
+        MessageContent::Text(text) => !text.is_empty(),
+        MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => !text.is_empty(),
+            _ => false,
+        }),
+    }
+}
+
 impl ProtocolPair {
     pub fn thinking_carrier_facts(self) -> ThinkingCarrierFacts {
         let indexed = self.egress.protocol == Protocol::OpenResponses;
@@ -284,6 +310,23 @@ impl ProtocolPair {
             headers,
             path,
         })
+    }
+
+    /// Borrow-only check equivalent to `self.encode_request(canonical.clone()).is_ok()`.
+    /// Avoids cloning large multi-turn requests and building throwaway wire JSON
+    /// during protocol selection.
+    pub fn can_encode_request(self, canonical: &AiRequest) -> bool {
+        if self.egress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+            && ProtocolRegistry::global().adapter(&self.egress).is_some()
+            && (canonical.parameters.continuation.is_some()
+                || canonical
+                    .items
+                    .iter()
+                    .any(item_unconditionally_encodes_for_open_responses))
+        {
+            return true;
+        }
+        self.encode_request(canonical.clone()).is_ok()
     }
 
     pub fn decode_response(self, body: Value) -> Result<AiResponse, TransformError> {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Release builds use thin LTO, a single codegen unit and stripped symbols. SQLite read paths use an in-memory temporary store, a 16 MiB per-connection page-cache target and a 128 MiB mapping window; `synchronous=FULL` and write durability are unchanged.
+- Vendor execution uses epoch-based cooperative interruption instead of fuel instrumentation, with a sleeping idle ticker and pooled Wasm instances on supported 64-bit hosts. The pool can reserve about 1 TiB of virtual address space, not physical RAM; pool initialization failure falls back to on-demand allocation. Channels can opt into static protocol selection to avoid a separate guest call; OpenAI and Azure retain dynamic selection. Rebuild and re-import standalone plugins to apply descriptor and codec optimizations; the bundled Base component updates with the host.
+- SQLite API-key lookups reuse positive, digest-indexed configuration snapshots with mutation invalidation; PostgreSQL keeps authoritative storage reads. Authorization continues to check current key state after asynchronous preparation; non-OAuth connections skip OAuth credential reads, and vendor-profile JSON is reused per admitted plugin. Observation subscriptions evict the oldest cached root IDs instead of clearing the entire cache.
+
 ## [0.7.4] - 2026-11-20
 
 This release also includes the changes listed under [0.7.3](https://github.com/Stravia-AI/StraviaPlatform/blob/v0.7.4/CHANGELOG.md#073---2026-11-19), whose publication was cancelled.

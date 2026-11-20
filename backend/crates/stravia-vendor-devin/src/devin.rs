@@ -134,6 +134,9 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                 }),
                 protocol: Some("devin-connect".into()),
                 protocols: Vec::new(),
+                static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Fixed(
+                    "devin-connect".into(),
+                )),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
                 consumes_catalog_models: false,

@@ -32,13 +32,41 @@ const PREVIEW_LIFETIME: Duration = Duration::from_secs(15 * 60);
 pub(crate) struct AdmittedPlugin {
     pub(crate) component: LoadedPlugin,
     pub(crate) shapes: Arc<ShapeRegistry>,
+    vendor_profile_json: Arc<parking_lot::Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 impl AdmittedPlugin {
     fn new(component: LoadedPlugin, builtins: &Arc<ShapeRegistry>) -> anyhow::Result<Self> {
         let shapes =
             builtins.with_plugin(component.identity(), &component.descriptor().egress_shapes)?;
-        Ok(Self { component, shapes })
+        Ok(Self {
+            component,
+            shapes,
+            vendor_profile_json: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Lazily serializes a `ProviderDescriptor` into `serde_json::Value` once
+    /// per `(admitted plugin, provider_id)` instead of re-converting large
+    /// descriptors (icons, localized config fields) on every inference call.
+    pub(crate) fn vendor_profile_json(
+        &self,
+        descriptor: &stravia_vendor_sdk::ProviderDescriptor,
+    ) -> anyhow::Result<serde_json::Value> {
+        if let Some(cached) = self
+            .vendor_profile_json
+            .lock()
+            .get(&descriptor.provider_id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let encoded = serde_json::to_value(descriptor)
+            .map_err(|_| anyhow::anyhow!("vendor profile descriptor is not serializable"))?;
+        self.vendor_profile_json
+            .lock()
+            .insert(descriptor.provider_id.clone(), encoded.clone());
+        Ok(encoded)
     }
 }
 
@@ -325,6 +353,7 @@ impl VendorPlugins {
         entry.loaded = Some(AdmittedPlugin {
             component: loaded.component.with_descriptor(descriptor.clone()),
             shapes: Arc::clone(&loaded.shapes),
+            vendor_profile_json: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         });
         entry.record.descriptor = serde_json::to_string(&descriptor)?;
         Ok(retired.into_values().collect())

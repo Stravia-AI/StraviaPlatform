@@ -1064,6 +1064,7 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
                     .map(|capability| channel.capabilities.contains(&capability));
             }
             let (snapshot, use_proxy, origins) = provider_snapshot(
+                &plugin,
                 descriptor,
                 &connection,
                 input.model.as_deref(),

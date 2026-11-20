@@ -152,6 +152,7 @@ struct Inner {
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
     ephemeral_root: Option<PathBuf>,
+    shutdown: stravia_runtime_contract::CancellationToken,
     stopped: AtomicBool,
 }
 
@@ -259,6 +260,7 @@ impl InteractionObservation {
                 active_traces,
                 partial_trace_count,
                 ephemeral_root,
+                shutdown: stravia_runtime_contract::CancellationToken::new(),
                 stopped: AtomicBool::new(false),
             }),
         }
@@ -474,27 +476,48 @@ impl InteractionObservation {
         )
     }
 
+    pub(crate) fn close_subscriptions(&self) {
+        self.inner.shutdown.cancel();
+        self.inner.live_content.close();
+    }
+
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
+        if self.inner.shutdown.is_cancelled() {
+            return Box::pin(futures::stream::empty());
+        }
         let store = self.inner.store.clone();
         let mut live = self.inner.updates.subscribe();
+        let shutdown = self.inner.shutdown.clone();
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
-            let max = match store.max_sequence().await {
-                Ok(max) => max,
-                Err(error) => {
-                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription sequence unavailable");
-                    let _ = tx
-                        .send(ObservationUpdate::ResetRequired {
-                            snapshot_sequence: 0,
-                        })
-                        .await;
-                    return;
-                }
-            };
-            let min = match store.min_sequence().await {
-                Ok(min) => min,
-                Err(error) => {
-                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription cursor unavailable");
+            let producer = async move {
+                let max = match store.max_sequence().await {
+                    Ok(max) => max,
+                    Err(error) => {
+                        tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription sequence unavailable");
+                        let _ = tx
+                            .send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: 0,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                let min = match store.min_sequence().await {
+                    Ok(min) => min,
+                    Err(error) => {
+                        tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription cursor unavailable");
+                        let _ = tx
+                            .send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: max,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                if after > max
+                    || (after > 0 && min.map_or(after < max, |min| after < min.saturating_sub(1)))
+                {
                     let _ = tx
                         .send(ObservationUpdate::ResetRequired {
                             snapshot_sequence: max,
@@ -502,47 +525,53 @@ impl InteractionObservation {
                         .await;
                     return;
                 }
-            };
-            if after > max
-                || (after > 0 && min.map_or(after < max, |min| after < min.saturating_sub(1)))
-            {
-                let _ = tx
-                    .send(ObservationUpdate::ResetRequired {
-                        snapshot_sequence: max,
-                    })
-                    .await;
-                return;
-            }
-            let mut last = after;
-            let mut roots = HashMap::new();
-            if let Err(error) = replay_to(&store, &tx, &mut last, max, &mut roots).await {
-                if tx.is_closed() {
+                let mut last = after;
+                let mut roots = RootIdCache::new(ROOT_ID_CACHE_CAPACITY);
+                if let Err(error) = replay_to(&store, &tx, &mut last, max, &mut roots).await {
+                    if tx.is_closed() {
+                        return;
+                    }
+                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription replay unavailable");
+                    let _ = tx
+                        .send(ObservationUpdate::ResetRequired {
+                            snapshot_sequence: max,
+                        })
+                        .await;
                     return;
                 }
-                tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription replay unavailable");
-                let _ = tx
-                    .send(ObservationUpdate::ResetRequired {
-                        snapshot_sequence: max,
-                    })
-                    .await;
-                return;
-            }
-            loop {
-                match live.recv().await {
-                    Ok(ObservationUpdate::Event(event)) => {
-                        if event.sequence <= last {
-                            continue;
-                        }
-                        if event.sequence > last.saturating_add(1) {
-                            let replay =
-                                replay_to(&store, &tx, &mut last, event.sequence, &mut roots).await;
-                            if let Err(error) = &replay {
+                loop {
+                    match live.recv().await {
+                        Ok(ObservationUpdate::Event(event)) => {
+                            if event.sequence <= last {
+                                continue;
+                            }
+                            if event.sequence > last.saturating_add(1) {
+                                let replay =
+                                    replay_to(&store, &tx, &mut last, event.sequence, &mut roots)
+                                        .await;
+                                if let Err(error) = &replay {
+                                    if tx.is_closed() {
+                                        return;
+                                    }
+                                    tracing::warn!(cause=%writer::redacted_persist_cause(error), "observation subscription recovery unavailable");
+                                }
+                                if replay.is_err() || last < event.sequence {
+                                    let _ = tx
+                                        .send(ObservationUpdate::ResetRequired {
+                                            snapshot_sequence: subscription_sequence(&store, last)
+                                                .await,
+                                        })
+                                        .await;
+                                    return;
+                                }
+                                continue;
+                            }
+                            last = event.sequence;
+                            if let Err(error) = send_change(&store, &tx, event, &mut roots).await {
                                 if tx.is_closed() {
                                     return;
                                 }
-                                tracing::warn!(cause=%writer::redacted_persist_cause(error), "observation subscription recovery unavailable");
-                            }
-                            if replay.is_err() || last < event.sequence {
+                                tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation change lookup unavailable");
                                 let _ = tx
                                     .send(ObservationUpdate::ResetRequired {
                                         snapshot_sequence: subscription_sequence(&store, last)
@@ -551,49 +580,40 @@ impl InteractionObservation {
                                     .await;
                                 return;
                             }
-                            continue;
                         }
-                        last = event.sequence;
-                        if let Err(error) = send_change(&store, &tx, event, &mut roots).await {
-                            if tx.is_closed() {
+                        Ok(ObservationUpdate::ResetRequired { snapshot_sequence }) => {
+                            if tx
+                                .send(ObservationUpdate::ResetRequired { snapshot_sequence })
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
-                            tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation change lookup unavailable");
+                        }
+                        Ok(
+                            ObservationUpdate::Change(_)
+                            | ObservationUpdate::LiveContent(_)
+                            | ObservationUpdate::LiveSnapshot { .. }
+                            | ObservationUpdate::LiveGap { .. }
+                            | ObservationUpdate::LiveFinished { .. },
+                        ) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let snapshot = subscription_sequence(&store, max).await;
                             let _ = tx
                                 .send(ObservationUpdate::ResetRequired {
-                                    snapshot_sequence: subscription_sequence(&store, last).await,
+                                    snapshot_sequence: snapshot,
                                 })
                                 .await;
                             return;
                         }
+                        Err(_) => return,
                     }
-                    Ok(ObservationUpdate::ResetRequired { snapshot_sequence }) => {
-                        if tx
-                            .send(ObservationUpdate::ResetRequired { snapshot_sequence })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(
-                        ObservationUpdate::Change(_)
-                        | ObservationUpdate::LiveContent(_)
-                        | ObservationUpdate::LiveSnapshot { .. }
-                        | ObservationUpdate::LiveGap { .. }
-                        | ObservationUpdate::LiveFinished { .. },
-                    ) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let snapshot = subscription_sequence(&store, max).await;
-                        let _ = tx
-                            .send(ObservationUpdate::ResetRequired {
-                                snapshot_sequence: snapshot,
-                            })
-                            .await;
-                        return;
-                    }
-                    Err(_) => return,
                 }
+            };
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                () = producer => {}
             }
         });
         Box::pin(ReceiverStream::new(rx))
@@ -651,6 +671,7 @@ impl InteractionObservation {
             .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?
     }
     pub(crate) fn stop_background(&self) {
+        self.close_subscriptions();
         crate::performance::set_debug(&self.inner.debug, false);
         if let Some(task) = self.inner.metrics_upkeep.lock().take() {
             task.abort();
@@ -661,6 +682,7 @@ impl InteractionObservation {
         }
     }
     pub(crate) async fn shutdown(&self) {
+        self.close_subscriptions();
         crate::performance::set_debug(&self.inner.debug, false);
         if let Some(task) = self.inner.metrics_upkeep.lock().take() {
             task.abort();
@@ -702,12 +724,53 @@ async fn subscription_sequence(store: &ObservationStore, fallback: i64) -> i64 {
     }
 }
 
+const ROOT_ID_CACHE_CAPACITY: usize = 2048;
+
+struct RootIdCache {
+    capacity: usize,
+    entries: HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl RootIdCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::with_capacity(capacity.min(64)),
+            order: std::collections::VecDeque::with_capacity(capacity.min(64)),
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<&str> {
+        self.entries.get(id).map(String::as_str)
+    }
+
+    fn insert(&mut self, id: String, root: String) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(existing) = self.entries.get_mut(&id) {
+            *existing = root;
+            return;
+        }
+        while self.entries.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(id.clone());
+        self.entries.insert(id, root);
+    }
+}
+
 async fn replay_to(
     store: &ObservationStore,
     sender: &mpsc::Sender<ObservationUpdate>,
     last: &mut i64,
     through: i64,
-    roots: &mut HashMap<String, String>,
+    roots: &mut RootIdCache,
 ) -> anyhow::Result<()> {
     while *last < through {
         let before = *last;
@@ -729,15 +792,12 @@ async fn send_change(
     store: &ObservationStore,
     sender: &mpsc::Sender<ObservationUpdate>,
     event: ObservationEvent,
-    roots: &mut HashMap<String, String>,
+    roots: &mut RootIdCache,
 ) -> anyhow::Result<()> {
     let root_id = match event.interaction_id.as_deref() {
         Some(id) => {
-            if roots.len() >= 2048 {
-                roots.clear();
-            }
             if let Some(root) = roots.get(id) {
-                Some(root.clone())
+                Some(root.to_owned())
             } else {
                 let root = store.observation_root_id(id).await?;
                 if let Some(root) = &root {
@@ -8162,5 +8222,25 @@ mod snapshot_tests {
         observation.shutdown().await;
         pool.close().await;
         Ok(())
+    }
+
+    #[test]
+    fn root_id_cache_evicts_oldest_entry_without_clearing_hot_entries() {
+        let mut cache = RootIdCache::new(3);
+        cache.insert("a".into(), "root-a".into());
+        cache.insert("b".into(), "root-b".into());
+        cache.insert("c".into(), "root-c".into());
+        cache.insert("d".into(), "root-d".into());
+
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("b"), Some("root-b"));
+        assert_eq!(cache.get("c"), Some("root-c"));
+        assert_eq!(cache.get("d"), Some("root-d"));
+
+        // Updating an existing entry must not evict another key.
+        cache.insert("b".into(), "root-b2".into());
+        assert_eq!(cache.get("b"), Some("root-b2"));
+        assert_eq!(cache.get("c"), Some("root-c"));
+        assert_eq!(cache.get("d"), Some("root-d"));
     }
 }

@@ -42,6 +42,7 @@ fn anthropic_descriptor() -> ProviderDescriptor {
             auth: None,
             protocol: Some("anthropic-messages".into()),
             protocols: Vec::new(),
+            static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Configured),
             default_base_url: Some("https://api.anthropic.com".into()),
             default_models_source: None,
             consumes_catalog_models: false,

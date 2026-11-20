@@ -73,17 +73,36 @@ fn update_bytes(update: &ObservationUpdate) -> usize {
         _ => 0,
     }
 }
-#[derive(Default)]
-pub(super) struct LiveState(Mutex<Mirror>);
+pub(super) struct LiveState {
+    mirror: Mutex<Mirror>,
+    shutdown: stravia_runtime_contract::CancellationToken,
+}
+
+impl Default for LiveState {
+    fn default() -> Self {
+        Self {
+            mirror: Mutex::new(Mirror::default()),
+            shutdown: stravia_runtime_contract::CancellationToken::new(),
+        }
+    }
+}
+
 impl LiveState {
+    pub(super) fn close(&self) {
+        self.shutdown.cancel();
+    }
+
     pub(super) fn subscribe(&self, interaction: String) -> ObservationStream {
+        if self.shutdown.is_cancelled() {
+            return Box::pin(futures::stream::empty());
+        }
         let (signal, receiver) = watch::channel(0);
         let mailbox = Arc::new(Mailbox {
             pending: Mutex::new(VecDeque::new()),
             signal,
         });
         {
-            let mut mirror = self.0.lock();
+            let mut mirror = self.mirror.lock();
             mirror.subscribers.retain(|_, subscribers| {
                 subscribers.retain(|weak| weak.strong_count() > 0);
                 !subscribers.is_empty()
@@ -116,17 +135,27 @@ impl LiveState {
                 .or_default()
                 .push(Arc::downgrade(&mailbox));
         }
+        let shutdown = self.shutdown.clone();
         Box::pin(futures::stream::unfold(
-            (mailbox, receiver),
-            |(mailbox, mut receiver)| async move {
+            (mailbox, receiver, shutdown),
+            |(mailbox, mut receiver, shutdown)| async move {
                 loop {
+                    if shutdown.is_cancelled() {
+                        return None;
+                    }
                     receiver.borrow_and_update();
                     let next = mailbox.pending.lock().pop_front();
                     if let Some(update) = next {
-                        return Some((update, (mailbox, receiver)));
+                        return Some((update, (mailbox, receiver, shutdown)));
                     }
-                    if receiver.changed().await.is_err() {
-                        return None;
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.cancelled() => return None,
+                        changed = receiver.changed() => {
+                            if changed.is_err() {
+                                return None;
+                            }
+                        }
                     }
                 }
             },
@@ -142,7 +171,7 @@ impl LiveState {
             | ObservationUpdate::ResetRequired { .. }
             | ObservationUpdate::LiveSnapshot { .. } => return,
         };
-        let mut mirror = self.0.lock();
+        let mut mirror = self.mirror.lock();
         match &update {
             ObservationUpdate::LiveGap {
                 interaction_id,
@@ -179,7 +208,7 @@ impl LiveState {
         }
     }
     pub(super) fn publish(&self, id: &str) {
-        let mirror = self.0.lock();
+        let mirror = self.mirror.lock();
         let Some((_, block)) = mirror.blocks.get(id) else {
             return;
         };
@@ -190,7 +219,7 @@ impl LiveState {
         }
     }
     pub(super) fn invalidate(&self, interactions: &[String]) {
-        let mut mirror = self.0.lock();
+        let mut mirror = self.mirror.lock();
         mirror
             .blocks
             .retain(|_, (_, block)| !interactions.contains(&block.interaction_id));
@@ -217,7 +246,7 @@ impl LiveState {
         }
     }
     pub(super) fn replace(&self, block: LiveContentBlock) -> bool {
-        let mut mirror = self.0.lock();
+        let mut mirror = self.mirror.lock();
         let previous = mirror
             .blocks
             .get(&block.block_id)
@@ -238,7 +267,7 @@ impl LiveState {
         true
     }
     pub(super) fn append(&self, id: &str, text: &str, revision: u64) -> bool {
-        let mut mirror = self.0.lock();
+        let mut mirror = self.mirror.lock();
         if mirror.bytes.saturating_add(text.len()) > MAX_LIVE_BYTES {
             return false;
         }
@@ -251,7 +280,7 @@ impl LiveState {
         true
     }
     pub(super) fn remove(&self, id: &str) {
-        let mut mirror = self.0.lock();
+        let mut mirror = self.mirror.lock();
         if let Some((_, block)) = mirror.blocks.remove(id) {
             mirror.bytes -= block.text.len();
         }
@@ -344,5 +373,23 @@ mod tests {
         assert!(
             matches!(stream.next().await, Some(ObservationUpdate::LiveGap { reason, .. }) if reason == "history_invalidated")
         );
+    }
+
+    #[tokio::test]
+    async fn close_terminates_active_and_subsequent_subscriptions() {
+        let state = LiveState::default();
+        let mut active = state.subscribe("a".into());
+        assert!(matches!(
+            active.next().await,
+            Some(ObservationUpdate::LiveSnapshot { blocks }) if blocks.is_empty()
+        ));
+        state.close();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(1), active.next())
+            .await
+            .expect("live subscription must end promptly on close");
+        assert!(ended.is_none());
+
+        let mut subsequent = state.subscribe("a".into());
+        assert!(subsequent.next().await.is_none());
     }
 }

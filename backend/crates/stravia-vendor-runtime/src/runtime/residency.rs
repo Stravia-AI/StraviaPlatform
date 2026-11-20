@@ -95,6 +95,12 @@ pub(super) struct ResidentLease {
     residency: Arc<Residency>,
 }
 
+impl ResidentLease {
+    pub(super) fn runtime(&self) -> &VendorRuntime {
+        &self.residency.runtime
+    }
+}
+
 impl Deref for ResidentLease {
     type Target = Resident;
 

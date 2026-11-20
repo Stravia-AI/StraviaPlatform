@@ -100,6 +100,9 @@ pub fn descriptor() -> VendorDescriptor {
                 }),
                 protocol: Some("open-responses".into()),
                 protocols: Vec::new(),
+                static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Fixed(
+                    stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24.to_string(),
+                )),
                 default_base_url: Some("https://chatgpt.com/backend-api/codex".into()),
                 default_models_source: None,
                 consumes_catalog_models: false,

@@ -7,6 +7,10 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 const SQLITE_WAL_CHECKPOINT_BYTES: i64 = 32 * 1024 * 1024;
+/// 16 MiB per-connection SQLite page cache (allocated lazily on read).
+const SQLITE_CACHE_SIZE_KIB: i64 = -16_384;
+/// 128 MiB memory-mapped read I/O (OS page cache backed; avoids per-page `pread`).
+const SQLITE_MMAP_SIZE_BYTES: i64 = 128 * 1024 * 1024;
 
 pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
     let root = crate::data_paths::resolve_data_dir(data_dir)?;
@@ -37,7 +41,21 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
                 let pages = (SQLITE_WAL_CHECKPOINT_BYTES / page_size).max(1);
                 let mut query =
                     sqlx::QueryBuilder::<sqlx::Sqlite>::new("PRAGMA wal_autocheckpoint=");
-                query.push(pages).build().execute(connection).await?;
+                query.push(pages).build().execute(&mut *connection).await?;
+                sqlx::query("PRAGMA temp_store = MEMORY")
+                    .execute(&mut *connection)
+                    .await?;
+                let mut cache = sqlx::QueryBuilder::<sqlx::Sqlite>::new("PRAGMA cache_size=");
+                cache
+                    .push(SQLITE_CACHE_SIZE_KIB)
+                    .build()
+                    .execute(&mut *connection)
+                    .await?;
+                let mut mmap = sqlx::QueryBuilder::<sqlx::Sqlite>::new("PRAGMA mmap_size=");
+                mmap.push(SQLITE_MMAP_SIZE_BYTES)
+                    .build()
+                    .execute(connection)
+                    .await?;
                 Ok(())
             })
         })
@@ -45,4 +63,43 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
         .require_write_lease()
         .connect_with(options)
         .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SQLITE_CACHE_SIZE_KIB, SQLITE_MMAP_SIZE_BYTES, init_pool};
+
+    #[tokio::test]
+    async fn init_pool_applies_read_path_pragmas_without_relaxing_synchronous() -> anyhow::Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let pool = init_pool(root.path()).await?;
+
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await?;
+        let temp_store: i64 = sqlx::query_scalar("PRAGMA temp_store")
+            .fetch_one(&pool)
+            .await?;
+        let cache_size: i64 = sqlx::query_scalar("PRAGMA cache_size")
+            .fetch_one(&pool)
+            .await?;
+        let mmap_size: i64 = sqlx::query_scalar("PRAGMA mmap_size")
+            .fetch_one(&pool)
+            .await?;
+        let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(&pool)
+            .await?;
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(temp_store, 2, "temp_store should be MEMORY");
+        assert_eq!(cache_size, SQLITE_CACHE_SIZE_KIB);
+        assert!(
+            mmap_size == SQLITE_MMAP_SIZE_BYTES || mmap_size == 0,
+            "mmap_size should match requested limit (or 0 if unsupported): {mmap_size}"
+        );
+        assert_eq!(synchronous, 2, "synchronous must remain FULL");
+        pool.close().await;
+        Ok(())
+    }
 }

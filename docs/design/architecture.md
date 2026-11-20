@@ -1086,6 +1086,8 @@ MCP session、discovery、工具列表等非执行入口不计数。
 内部轮次及工具共享 RootRequest；独立客户端续接或重发各计新根请求。
 ```
 
+SQLite 的 `RuntimeConfig` 在本实例中缓存已存在 Key 的认证记录与模型绑定；token 索引仅保存 SHA-256 摘要，不保存 token 明文，不缓存不存在的 token。Key 增删改、Route 删除引起的绑定级联与币种切换引起的消费上限换算，均在变更期间停用投影读取，并按 generation 清除旧值；与变更重叠的读取不得重新填入旧代次。投影不可信时走权威存储，跨异步准备后的授权仍按当前 Key 状态检查，不复用首次认证快照。PostgreSQL 不启用此本地配置投影，以保留跨实例读取语义；实时消费金额与 RPM 状态不进入该配置缓存。
+
 消费上限只约束新的根请求，不取消已准入请求，也不停止其隐藏轮次、工具调用或故障切换。金额异步落库及并发准入允许超额；达到上限不禁用 Key，调高上限或清零后立即恢复。每次完成且归属 API Key 的模型尝试按被调用 Route 计费，Chat 使用所选 API Key 的相同规则。清零不重写历史计费或统计，在途金额之后落库时计入清零后的累计值。币种、冻结金额与订阅摊销规则见[成本与计费](cost-and-billing.md)。
 
 窗口为单调时间的 `(t - 60s, t]`，恰好满 60 秒的记录已离窗；允许瞬时使用剩余额度，不使用固定发送间隔或令牌桶。`rpm_limit` 缺省／`null` 为不限，正整数为上限，零及负数无效；更新省略保持、`null` 清除、正数设置。入口超限不排队、不运行 Hook 或工具，不增加记录。已准入后失败、取消或完成不退回记录；流仍活跃时记录也会在 60 秒离窗，chunk、token、心跳不重复计数。WebSocket upgrade 不作为执行请求计数，每次独立生成事件分别计根请求；复用客户端或上游连接都不合并请求。配置更新影响后续准入而不取消活跃流；已有受限窗口在改限后保留，从不限改为有限不重建未记录历史。
@@ -1281,7 +1283,7 @@ SQLite 与 PostgreSQL 以冻结的 `0001_baseline.sql` 为受支持起点，后�
 
 `Gateway::prepare(config)` 解析数据根并建立存储、迁移及连接池，返回持有这些资源的 `PreparedGateway`，尚不启动 Gateway 后台任务。宿主通过 `storage()` 检查管理员和完成初始化，再消费同一个对象调用 `start()`；`Gateway::new` 也组合这两个阶段。Server 的正常启动和首次设置完成都沿用同一份准备结果，不再次建池或执行迁移。
 
-Core 的共享 SQLite 连接池在每条新连接初始化时读取实际 `page_size`，把自动 checkpoint 触发窗口设为 32 MiB 对应的页数；默认 4 KiB 页为 8,192 页。这样让有界小事务对相同索引页的修改合并回写，不扩大写事务或延后其 WAL 提交同步。页缓存、`synchronous`、写协调和 `busy_timeout` 保持不变。32 MiB 是页负载触发阈值，不是缓存容量或 WAL 文件硬上限：事务可以越过阈值，长期 reader 也可能阻止回收。离线复制与维护的专用连接池不因此改变。测量与代价见[存储性能设计](data-layout-performance.md#sqlite-checkpoint-窗口决策)。
+Core 的共享 SQLite 连接池在每条新连接初始化时读取实际 `page_size`，把自动 checkpoint 触发窗口设为 32 MiB 对应的页数；默认 4 KiB 页为 8,192 页。这样让有界小事务对相同索引页的修改合并回写，不扩大写事务或延后其 WAL 提交同步。读路径使用 `temp_store=MEMORY`、每连接最多约 16 MiB 的页缓存（`cache_size=-16384`）和最多 128 MiB 的文件映射窗口（`mmap_size=134217728`）；这是上限，不是启动时预分配，实际内存随并发连接和工作集增长。`synchronous=FULL`、写协调和 `busy_timeout` 保持不变。32 MiB 是页负载触发阈值，不是缓存容量或 WAL 文件硬上限：事务可以越过阈值，长期 reader 也可能阻止回收。离线复制与维护的专用连接池不因此改变。测量与代价见[存储性能设计](data-layout-performance.md#sqlite-checkpoint-窗口决策)。
 
 两后端均由 `sqlx::migrate!` 嵌入迁移列表，版本号必须唯一。`0006_model_specification` 保持模型规格升级；`0007_history_items` 建立历史新结构后由 Rust 转换历史内容；`0008_observation_storage` 执行前先导出旧 Debug manifest，执行后再转换观测事件。SQL 宏不代替这些数据转换阶段，迁移编号与 `migrations.rs` 的阶段边界必须同步。
 

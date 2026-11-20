@@ -14,6 +14,7 @@ use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tungstenite_deflate::protocol::frame::{CloseFrame, coding::CloseCode};
 use tungstenite_deflate::{Message, Utf8Bytes};
 
 use crate::Gateway;
@@ -307,6 +308,7 @@ async fn serve(
         None::<crate::interaction_observation::RunObserver>,
     ));
     let active_delivery: SharedRunDelivery = Arc::new(Mutex::new(None));
+    let shutdown = gateway.lifecycle.cancellation.clone();
     let connection_observation = crate::interaction_observation::ClientConnectionObservation::new(
         gateway.observation.clone(),
     );
@@ -674,25 +676,70 @@ async fn serve(
         }
     };
 
-    let expired = tokio::time::timeout(CONNECTION_TTL, read_loop)
-        .await
-        .is_err();
+    enum LoopExit {
+        Closed,
+        Expired,
+        Shutdown,
+    }
+    let exit = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => LoopExit::Shutdown,
+        result = tokio::time::timeout(CONNECTION_TTL, read_loop) => {
+            if result.is_err() {
+                LoopExit::Expired
+            } else {
+                LoopExit::Closed
+            }
+        }
+    };
     connection_observation.close();
-    if expired {
-        terminate_expired_connection(
-            &outgoing,
-            &cancellation,
-            &active_observer,
-            &active_delivery,
-            &writer,
-            WRITER_SHUTDOWN_GRACE,
-        )
-        .await;
-    } else if let Some(token) = cancellation.lock().take() {
-        token.cancel();
+    match exit {
+        LoopExit::Expired => {
+            terminate_expired_connection(
+                &outgoing,
+                &cancellation,
+                &active_observer,
+                &active_delivery,
+                &writer,
+                WRITER_SHUTDOWN_GRACE,
+            )
+            .await;
+        }
+        LoopExit::Shutdown => {
+            if let Some(token) = cancellation.lock().take() {
+                token.cancel();
+            }
+            // 停机时尽量发送 GoingAway 关闭帧并限时等待写任务退出，避免空闲连接拖住排空。
+            let _ = tokio::time::timeout(
+                WRITER_SHUTDOWN_GRACE,
+                outgoing.send(OutgoingMessage {
+                    message: Message::Close(Some(CloseFrame {
+                        code: CloseCode::Away,
+                        reason: Utf8Bytes::from_static("Server shutting down"),
+                    })),
+                    delivered: None,
+                    run_delivery: None,
+                }),
+            )
+            .await;
+        }
+        LoopExit::Closed => {
+            if let Some(token) = cancellation.lock().take() {
+                token.cancel();
+            }
+        }
     }
     drop(outgoing);
-    if let Err(error) = writer.await {
+    let mut writer = writer;
+    if matches!(exit, LoopExit::Shutdown) {
+        if tokio::time::timeout(WRITER_SHUTDOWN_GRACE, &mut writer)
+            .await
+            .is_err()
+        {
+            writer.abort();
+            let _ = writer.await;
+        }
+    } else if let Err(error) = writer.await {
         tracing::debug!(%error, "outgoing writer task failed during shutdown");
     }
 }

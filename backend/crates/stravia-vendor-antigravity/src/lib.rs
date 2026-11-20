@@ -73,6 +73,10 @@ pub fn descriptor() -> VendorDescriptor {
                 }),
                 protocol: Some("google-gemini".into()),
                 protocols: Vec::new(),
+                static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Fixed(
+                    stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA
+                        .to_string(),
+                )),
                 default_base_url: Some(BASE_URL.into()),
                 default_models_source: None,
                 consumes_catalog_models: false,

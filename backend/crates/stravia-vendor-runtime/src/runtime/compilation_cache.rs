@@ -62,7 +62,8 @@ impl CompilationCache {
             Ok(lock) => lock,
             Err(error) => {
                 tracing::warn!(%error, "compiled image cache unavailable; compiling without persistence");
-                return Component::from_binary(engine, wasm).map_err(invalid_component);
+                return super::compile_in_ephemeral_pool(|| Component::from_binary(engine, wasm))
+                    .map_err(invalid_component);
             }
         };
         match self.read(engine, &image) {
@@ -75,17 +76,20 @@ impl CompilationCache {
             Err(error) => {
                 // 不可信文件不得通过修权限或覆盖恢复信任；只使用已提供的源 Wasm。
                 tracing::warn!(%error, "compiled image cache cannot be read safely; compiling without persistence");
-                return Component::from_binary(engine, wasm).map_err(invalid_component);
+                return super::compile_in_ephemeral_pool(|| Component::from_binary(engine, wasm))
+                    .map_err(invalid_component);
             }
         }
         #[cfg(test)]
         self.misses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // 保持 load 的 binary-only 契约，并直接生成镜像，不先装入匿名执行副本。
-        let serialized = CodeBuilder::new(engine)
-            .wasm_binary(wasm, None)
-            .and_then(|builder| builder.compile_component_serialized())
-            .map_err(invalid_component)?;
+        let serialized = super::compile_in_ephemeral_pool(|| {
+            CodeBuilder::new(engine)
+                .wasm_binary(wasm, None)
+                .and_then(|builder| builder.compile_component_serialized())
+        })
+        .map_err(invalid_component)?;
         let mut record = [0_u8; 40];
         record[..8].copy_from_slice(&(serialized.len() as u64).to_le_bytes());
         record[8..].copy_from_slice(&Sha256::digest(&serialized));

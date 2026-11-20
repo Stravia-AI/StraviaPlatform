@@ -381,6 +381,7 @@ pub fn descriptor() -> VendorDescriptor {
                 auth: None,
                 protocol: Some("openai-compatible".into()),
                 protocols: Vec::new(),
+                static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Fixed(PROTOCOL.into())),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
                 consumes_catalog_models: false,

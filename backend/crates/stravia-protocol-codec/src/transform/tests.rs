@@ -4680,3 +4680,81 @@ fn gemini_stream_encode_passes_valid_tool_arguments() {
     );
     assert!(events.iter().any(|event| event.data.contains("STOP")));
 }
+
+#[test]
+fn can_encode_request_matches_encode_request_across_shapes() {
+    use stravia_runtime_contract::protocol::ir::{
+        AiItem, AiRequest, ContentBlock, MessageContent, Role,
+    };
+
+    let pair = ProtocolTransform::global()
+        .bind(
+            OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
+            OPEN_RESPONSES_2026_04_24,
+        )
+        .expect("registered protocol pair");
+
+    let empty = AiRequest::new("gpt-4o", Vec::new());
+    let mut with_continuation = AiRequest::new("gpt-4o", Vec::new());
+    with_continuation.parameters.continuation = Some(
+        stravia_runtime_contract::protocol::ir::Continuation::PreviousResponse("resp_1".into()),
+    );
+    let text_item = |text: &str| AiItem {
+        role: Role::User,
+        content: MessageContent::Text(std::sync::Arc::new(text.to_owned())),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let blocks_item = |blocks| AiItem {
+        role: Role::User,
+        content: MessageContent::Blocks(blocks),
+        tool_calls: None,
+        tool_call_id: None,
+        meta: None,
+    };
+    let empty_text = AiRequest::new("gpt-4o", vec![text_item("")]);
+    let normal_text = AiRequest::new("gpt-4o", vec![text_item("hello")]);
+    let blocks_empty = AiRequest::new(
+        "gpt-4o",
+        vec![blocks_item(vec![ContentBlock::Text {
+            text: std::sync::Arc::new(String::new()),
+            cache_control: None,
+        }])],
+    );
+    let blocks_text = AiRequest::new(
+        "gpt-4o",
+        vec![blocks_item(vec![ContentBlock::Text {
+            text: std::sync::Arc::new("payload".into()),
+            cache_control: None,
+        }])],
+    );
+    let unknown_only = AiRequest::new(
+        "gpt-4o",
+        vec![AiItem {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::Unknown {
+                raw: json!({"type": "custom_unknown"}),
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            meta: None,
+        }],
+    );
+
+    for case in [
+        empty,
+        with_continuation,
+        empty_text,
+        normal_text,
+        blocks_empty,
+        blocks_text,
+        unknown_only,
+    ] {
+        assert_eq!(
+            pair.can_encode_request(&case),
+            pair.encode_request(case.clone()).is_ok(),
+            "can_encode_request disagreed with encode_request for {case:?}"
+        );
+    }
+}

@@ -722,6 +722,59 @@ async fn responses_websocket_rejects_unknown_event_types() {
     fixture.close().await;
 }
 
+#[tokio::test]
+async fn responses_websocket_closes_promptly_when_gateway_requests_shutdown() {
+    use futures::StreamExt;
+    use reqwest_websocket::Upgrade as _;
+
+    let (fixture, token) = protected_responses_router_with_hook(true, None).await;
+    let router = fixture.router.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WebSocket shutdown test listener");
+    let address = listener.local_addr().expect("WebSocket test address");
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.changed().await;
+            })
+            .await
+            .expect("serve WebSocket test router");
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/v1/responses"))
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .upgrade()
+        .send()
+        .await
+        .expect("WebSocket handshake");
+    let mut socket = response.into_websocket().await.expect("WebSocket upgrade");
+
+    let _ = shutdown_tx.send(());
+    fixture.gateway.request_shutdown();
+
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(frame) = socket.next().await {
+            if matches!(frame, Ok(reqwest_websocket::Message::Close { .. }) | Err(_)) {
+                return true;
+            }
+        }
+        true
+    })
+    .await
+    .expect("WebSocket must close promptly on gateway shutdown");
+    assert!(closed);
+    drop(socket);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), server)
+        .await
+        .expect("graceful HTTP server must drain once WebSocket closes")
+        .expect("WebSocket test server task");
+    fixture.close().await;
+}
+
 struct ArtifactUploadFixture {
     router: Router,
     auth: String,

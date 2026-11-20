@@ -579,6 +579,7 @@ impl Gateway {
                     .map(|credential| credential.status_version),
             };
             let (mut provider, use_proxy, origins) = provider_snapshot(
+                &plugin,
                 descriptor,
                 &connection,
                 model,
@@ -638,6 +639,7 @@ impl Gateway {
                     .operation_metadata
                     .remove("catalog_models");
                 let (mut provider, use_proxy, origins) = provider_snapshot(
+                    &prepared.plugin,
                     prepared.descriptor(),
                     &current,
                     model,
@@ -966,7 +968,11 @@ impl Gateway {
             provider.vendor.as_deref() == Some(vendor_id),
             "provider vendor changed during vendor admission"
         );
-        let oauth = self.storage.oauth_credentials().get(provider_id).await?;
+        let oauth = if provider.auth_mode.trim() == "oauth" {
+            self.storage.oauth_credentials().get(provider_id).await?
+        } else {
+            None
+        };
         let model_record = match model {
             Some(model) => {
                 self.storage
@@ -986,7 +992,11 @@ impl Gateway {
             .get(provider_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("provider was removed during connection snapshot"))?;
-        let current_oauth = self.storage.oauth_credentials().get(provider_id).await?;
+        let current_oauth = if current_provider.auth_mode.trim() == "oauth" {
+            self.storage.oauth_credentials().get(provider_id).await?
+        } else {
+            None
+        };
         let current_model = match model {
             Some(model) => {
                 self.storage
@@ -1228,7 +1238,9 @@ fn client_installation_identity(installation_id: &str, saved_provider_id: Option
         .to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_snapshot(
+    plugin: &AdmittedPlugin,
     descriptor: &stravia_vendor_sdk::ProviderDescriptor,
     connection: &ConnectionSnapshot,
     model: Option<&str>,
@@ -1289,8 +1301,7 @@ fn provider_snapshot(
     // accept them without catalog access.
     operation_metadata.insert(
         "vendor_profile".into(),
-        serde_json::to_value(descriptor)
-            .map_err(|_| anyhow::anyhow!("vendor profile descriptor is not serializable"))?,
+        plugin.vendor_profile_json(descriptor)?,
     );
     if kind == Operation::Discover {
         if let Some(source) = discovery_source {
@@ -2012,6 +2023,7 @@ mod tests {
             auth: None,
             protocol: None,
             protocols: Vec::new(),
+            static_protocol: None,
             default_base_url: None,
             default_models_source: None,
             consumes_catalog_models: false,

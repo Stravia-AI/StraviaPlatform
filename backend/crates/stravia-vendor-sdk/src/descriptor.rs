@@ -226,6 +226,18 @@ impl DefaultModelsSource {
     }
 }
 
+/// Static egress protocol policy when `select-protocol` does not depend on
+/// request contents. Allows the host to skip guest instantiation and full
+/// request serialization during protocol selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum StaticProtocol {
+    /// Always returns the provider snapshot's configured `protocol` string.
+    Configured,
+    /// Always returns this fixed egress protocol endpoint identifier.
+    Fixed(String),
+}
+
 /// One channel = one auth/service entry point under the same vendor identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelDescriptor {
@@ -247,6 +259,10 @@ pub struct ChannelDescriptor {
     /// select and the host rejects protocol values outside this set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub protocols: Vec<EnumOption>,
+    /// Optional static egress protocol declaration allowing the host to skip
+    /// invoking guest `select-protocol` when protocol choice is request-independent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_protocol: Option<StaticProtocol>,
     /// Vendor-declared initial base URL presented when creating a connection.
     /// Runtime authority still comes from the saved provider snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1252,6 +1268,7 @@ mod tests {
                 auth: None,
                 protocol: Some("test".into()),
                 protocols: Vec::new(),
+                static_protocol: None,
                 default_base_url: None,
                 default_models_source: None,
                 consumes_catalog_models: false,

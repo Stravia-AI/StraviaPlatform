@@ -72,6 +72,7 @@ impl VendorGuest for LifecycleContractVendor {
                             .into(),
                     ),
                     protocols: Vec::new(),
+                    static_protocol: None,
                     default_base_url: None,
                     default_models_source: None,
                     consumes_catalog_models: false,

@@ -1893,10 +1893,15 @@ fn watsonx_descriptor() -> ProviderDescriptor {
 fn descriptor_base(
     vendor_id: &str,
     display_name: &str,
-    channels: Vec<ChannelDescriptor>,
+    mut channels: Vec<ChannelDescriptor>,
     config_fields: Vec<ConfigField>,
     network: NetworkDeclaration,
 ) -> ProviderDescriptor {
+    if !matches!(vendor_id, "azure" | "azure-cognitive-services") {
+        for channel in &mut channels {
+            channel.static_protocol = Some(stravia_vendor_sdk::StaticProtocol::Configured);
+        }
+    }
     let capabilities = channels
         .iter()
         .flat_map(|channel| channel.capabilities.iter().copied())
@@ -1942,6 +1947,7 @@ fn channel(
         auth: None,
         protocol: Some(protocol.into()),
         protocols: Vec::new(),
+        static_protocol: None,
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source,
         consumes_catalog_models: false,

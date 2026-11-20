@@ -624,4 +624,93 @@ mod tests {
             json.len()
         );
     }
+
+    #[test]
+    fn static_protocol_declarations_match_select_protocol_behavior() {
+        let mut manifest = descriptor();
+        // Catalog packages may reuse a dynamic provider ID. ID dispatch takes
+        // precedence over the borrowed package's configured protocol.
+        manifest
+            .providers
+            .extend(["openai", "azure", "azure-cognitive-services"].map(|id| {
+                metadata::catalog_profile_descriptor(id, id, "@ai-sdk/gateway", None)
+                    .expect("catalog gateway profile")
+            }));
+        let request = AiRequest::new(
+            "gpt-4o",
+            vec![stravia_runtime_contract::protocol::ir::AiItem::output_text(
+                "hello",
+            )],
+        );
+
+        assert!(
+            manifest.provider("openai").expect("openai").channels[0]
+                .static_protocol
+                .is_none(),
+            "openai must stay dynamic so Responses auto-upgrade still runs"
+        );
+        assert!(
+            manifest.provider("azure").expect("azure").channels[0]
+                .static_protocol
+                .is_none(),
+            "azure must stay dynamic"
+        );
+
+        let mut verified = 0usize;
+        for profile in &manifest.providers {
+            for channel in &profile.channels {
+                let Some(policy) = &channel.static_protocol else {
+                    continue;
+                };
+                let configured = channel
+                    .protocol
+                    .clone()
+                    .or_else(|| channel.protocols.first().map(|opt| opt.value.clone()))
+                    .unwrap_or_else(|| "openai-compatible".into());
+                let mut options = std::collections::BTreeMap::new();
+                if let Some(npm) = &profile.implementation {
+                    options.insert(
+                        "catalog_implementation".into(),
+                        serde_json::Value::String(npm.clone()),
+                    );
+                }
+                let snapshot = ProviderSnapshot {
+                    provider_id: profile.provider_id.clone(),
+                    channel: channel.id.clone(),
+                    base_url: channel
+                        .default_base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://example.invalid".into()),
+                    protocol: configured.clone(),
+                    credentials: std::collections::BTreeMap::new(),
+                    options,
+                    operation_metadata: std::collections::BTreeMap::new(),
+                    client_headers: Vec::new(),
+                    model: None,
+                    model_metadata: None,
+                };
+                let expected = match policy {
+                    stravia_vendor_sdk::StaticProtocol::Configured => configured.clone(),
+                    stravia_vendor_sdk::StaticProtocol::Fixed(fixed) => fixed.clone(),
+                };
+                let actual = select_protocol(Operation::Infer, &channel.id, &snapshot, &request)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "select_protocol failed for {}/{}: {err:?}",
+                            profile.provider_id, channel.id
+                        )
+                    });
+                assert_eq!(
+                    actual, expected,
+                    "static_protocol drifted for {}/{}",
+                    profile.provider_id, channel.id
+                );
+                verified += 1;
+            }
+        }
+        assert!(
+            verified > 20,
+            "expected static base profiles, got {verified}"
+        );
+    }
 }
