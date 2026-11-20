@@ -14,6 +14,51 @@ use stravia_server::{
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// mimalloc v2/v3 的 `mi_option_purge_delay` 枚举值均为 15（v3 默认 1000ms）。
+// 空闲 worker 不再触发惰性回收时会长期滞留已释放页；在多线程启动前将默认延迟设为 0，
+// 同时保留用户通过 `MIMALLOC_PURGE_DELAY` 显式覆盖的能力。
+const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
+const DEFAULT_MAX_WORKER_THREADS: usize = 8;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+unsafe extern "C" {
+    fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
+    #[cfg(test)]
+    fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
+}
+
+fn configure_allocator() {
+    // SAFETY: 在 `main` 单线程入口、尚未启动 Tokio 线程前调用，且 `libmimalloc-sys` 已随
+    // `MiMalloc` 静态链接；`mi_option_set_default` 仅在未设置环境变量时更新默认值。
+    unsafe {
+        mi_option_set_default(MI_OPTION_PURGE_DELAY, 0);
+    }
+}
+
+fn resolve_worker_threads(env_override: Option<&str>, available_parallelism: usize) -> usize {
+    if let Some(threads) = env_override
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&count| count > 0)
+    {
+        return threads;
+    }
+    available_parallelism.clamp(1, DEFAULT_MAX_WORKER_THREADS)
+}
+
+fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let workers = resolve_worker_threads(
+        std::env::var("TOKIO_WORKER_THREADS").ok().as_deref(),
+        available,
+    );
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()?)
+}
+
 #[derive(Parser)]
 #[command(name = "stravia-server", version, about = "Stravia Agent infra")]
 struct Args {
@@ -149,11 +194,15 @@ enum Command {
     RecoverAdmin,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    configure_allocator();
     load_dotenv()?;
     let args = Args::parse();
+    let runtime = build_runtime()?;
+    runtime.block_on(async_main(args))
+}
 
+async fn async_main(args: Args) -> anyhow::Result<()> {
     let data_dir = resolve_data_dir(Path::new(&args.data_dir))?;
     let paths = DataPaths::new(&data_dir);
     paths.prepare()?;
@@ -226,13 +275,14 @@ async fn run_server(
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    // 后台同步可能被 HTTP 请求等待；先取消后台，再排空请求和清理 Gateway。
+    // 后台同步与长连接监听同一关闭信号；先停接新连接并取消后台与订阅，再限时排空，
+    // 确保即便存在未结束的长流请求也能进入 Gateway 持久化清理。
     server.handle().shutdown();
     startup.request_shutdown().await;
     let stopped = if result.is_err() {
         server.shutdown_with_timeout(Duration::ZERO).await
     } else {
-        server.shutdown().await
+        server.shutdown_with_timeout(SHUTDOWN_DRAIN_TIMEOUT).await
     };
     startup.shutdown().await;
     match result {
@@ -341,7 +391,10 @@ fn repository_root() -> &'static Path {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_data_dir_for_build, repository_root};
+    use super::{
+        DEFAULT_MAX_WORKER_THREADS, MI_OPTION_PURGE_DELAY, configure_allocator,
+        default_data_dir_for_build, mi_option_get, repository_root, resolve_worker_threads,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -358,5 +411,30 @@ mod tests {
             default_data_dir_for_build(false),
             PathBuf::from("~/.stravia")
         );
+    }
+
+    #[test]
+    fn resolve_worker_threads_caps_default_and_respects_override() {
+        assert_eq!(resolve_worker_threads(None, 64), DEFAULT_MAX_WORKER_THREADS);
+        assert_eq!(resolve_worker_threads(None, 4), 4);
+        assert_eq!(resolve_worker_threads(None, 0), 1);
+        assert_eq!(resolve_worker_threads(Some("16"), 64), 16);
+        assert_eq!(
+            resolve_worker_threads(Some("0"), 64),
+            DEFAULT_MAX_WORKER_THREADS
+        );
+        assert_eq!(
+            resolve_worker_threads(Some("bad"), 64),
+            DEFAULT_MAX_WORKER_THREADS
+        );
+    }
+
+    #[test]
+    fn configure_allocator_sets_immediate_purge_delay_by_default() {
+        configure_allocator();
+        if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
+            let delay = unsafe { mi_option_get(MI_OPTION_PURGE_DELAY) };
+            assert_eq!(delay, 0);
+        }
     }
 }

@@ -268,10 +268,11 @@ impl Gateway {
         GatewayBuilder::new(config)
     }
 
-    /// 请求后台任务协作停止，不排空 HTTP 请求或关闭观测写入与缓存。
+    /// 请求后台任务与长连接订阅协作停止，不关闭观测写入与缓存，确保排空中的请求仍能落盘。
     /// 宿主停止接收请求后调用，排空请求后仍须等待 `shutdown` 完成清理。
     pub fn request_shutdown(&self) {
         self.lifecycle.cancellation.cancel();
+        self.observation.close_subscriptions();
     }
 
     #[cfg(test)]

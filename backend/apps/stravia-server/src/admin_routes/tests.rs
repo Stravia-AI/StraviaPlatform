@@ -2663,3 +2663,58 @@ async fn observation_contents_rejects_invalid_ids_with_stable_code() -> anyhow::
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn observation_sse_streams_close_promptly_on_request_shutdown() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let tokens = auth.login_native().await?;
+    let app = create_router(
+        gateway.clone(),
+        AdminHttpState {
+            auth,
+            mode: AdminMode::Desktop,
+        },
+    );
+    let server = crate::start_http_server(("127.0.0.1", 0), app).await?;
+    let base = format!("http://{}", server.local_addr());
+    let client = reqwest::Client::builder().no_proxy().build()?;
+
+    let events = client
+        .get(format!("{base}/api/v1/observations/events?after=0"))
+        .header("authorization", format!("Bearer {}", tokens.access_token))
+        .send()
+        .await?;
+    assert_eq!(events.status(), StatusCode::OK);
+
+    let live = client
+        .get(format!(
+            "{base}/api/v1/observations/interactions/missing/live"
+        ))
+        .header("authorization", format!("Bearer {}", tokens.access_token))
+        .send()
+        .await?;
+    assert_eq!(live.status(), StatusCode::OK);
+
+    server.handle().shutdown();
+    gateway.request_shutdown();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), server.shutdown())
+        .await
+        .expect("HTTP server must drain promptly once observation SSE streams close")?;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), events.text())
+        .await
+        .expect("observation events SSE must reach EOF")?;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), live.text())
+        .await
+        .expect("interaction live SSE must reach EOF")?;
+
+    gateway.shutdown().await;
+    Ok(())
+}

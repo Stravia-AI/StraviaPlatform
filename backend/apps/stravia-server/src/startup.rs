@@ -35,6 +35,7 @@ struct StartupSnapshot {
 struct Runtime {
     current: RwLock<Router>,
     snapshot: watch::Sender<StartupSnapshot>,
+    shutdown: watch::Sender<bool>,
 }
 
 #[derive(Clone)]
@@ -58,6 +59,7 @@ impl StartupHttpApp {
             status: StartupStatus::Starting,
             progress: None,
         });
+        let (shutdown, _) = watch::channel(false);
         let boot = config.admin_entry.protect(
             Router::new()
                 .route("/healthz", get(unavailable))
@@ -71,6 +73,7 @@ impl StartupHttpApp {
         let runtime = Arc::new(Runtime {
             current: RwLock::new(boot),
             snapshot,
+            shutdown,
         });
         let progress_routes = config.admin_entry.protect(
             Router::new()
@@ -134,8 +137,9 @@ impl StartupHttpApp {
         }
     }
 
-    /// 停止接收 HTTP 请求后，请求当前 Gateway 的后台操作协作停止。
+    /// 停止接收 HTTP 请求后，请求当前 Gateway 的后台操作与启动期 SSE 协作停止。
     pub async fn request_shutdown(&self) {
+        let _ = self.runtime.shutdown.send(true);
         if let Some(prepared) = &self.prepared {
             prepared.request_shutdown().await;
         }
@@ -143,6 +147,7 @@ impl StartupHttpApp {
 
     /// HTTP 监听器排空后由宿主显式等待关闭；准备失败时无需业务清理。
     pub async fn shutdown(self) {
+        let _ = self.runtime.shutdown.send(true);
         if let Some(prepared) = self.prepared {
             prepared.shutdown().await;
         }
@@ -158,11 +163,27 @@ async fn startup_snapshot(State(runtime): State<Arc<Runtime>>) -> impl IntoRespo
 
 async fn events(State(runtime): State<Arc<Runtime>>) -> impl IntoResponse {
     let receiver = runtime.snapshot.subscribe();
+    let shutdown = runtime.shutdown.subscribe();
     let stream = stream::unfold(
-        (receiver, true, false),
-        |(mut receiver, first, finished)| async move {
-            if finished || (!first && receiver.changed().await.is_err()) {
+        (receiver, shutdown, true, false),
+        |(mut receiver, mut shutdown, first, finished)| async move {
+            if finished || *shutdown.borrow() {
                 return None;
+            }
+            if !first {
+                tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return None;
+                        }
+                    }
+                    changed = receiver.changed() => {
+                        if changed.is_err() {
+                            return None;
+                        }
+                    }
+                }
             }
             let snapshot = *receiver.borrow_and_update();
             let finished = snapshot.status != StartupStatus::Starting;
@@ -170,7 +191,10 @@ async fn events(State(runtime): State<Arc<Runtime>>) -> impl IntoResponse {
                 .event("startup")
                 .json_data(snapshot)
                 .expect("startup snapshot contains only serializable fields");
-            Some((Ok::<_, Infallible>(event), (receiver, false, finished)))
+            Some((
+                Ok::<_, Infallible>(event),
+                (receiver, shutdown, false, finished),
+            ))
         },
     );
     (
@@ -414,6 +438,34 @@ mod tests {
             b"preserve-invalid-database: sensitive fixture"
         );
         server.shutdown().await?;
+        startup.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_shutdown_closes_startup_events_stream_before_prepare_finishes()
+    -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let policy = AdminEntryPolicy::default();
+        let startup = StartupHttpApp::new(configured_sqlite(root.path(), policy));
+        let server = crate::start_http_server(("127.0.0.1", 0), startup.router()).await?;
+        let base = format!("http://{}", server.local_addr());
+        let mut events = reqwest::get(format!("{base}/api/v1/startup/events")).await?;
+        assert!(
+            first_event(&mut events)
+                .await?
+                .contains("\"status\":\"starting\"")
+        );
+
+        server.handle().shutdown();
+        startup.request_shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), server.shutdown())
+            .await
+            .expect("HTTP server must finish draining once startup SSE closes")?;
+        let remaining = tokio::time::timeout(std::time::Duration::from_secs(2), events.text())
+            .await
+            .expect("startup SSE body must reach EOF")?;
+        assert!(remaining.is_empty());
         startup.shutdown().await;
         Ok(())
     }

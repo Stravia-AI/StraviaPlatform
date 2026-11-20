@@ -48,6 +48,8 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
 wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation"] }
+# 复用 wasmtime parallel-compilation 已引入的 rayon，在临时线程池编译并在结束后退出线程归还内存。
+rayon = "1.12.0"
 wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p2"] }
 wasmprinter = "=0.258.3"
 wat = "=1.258.3"

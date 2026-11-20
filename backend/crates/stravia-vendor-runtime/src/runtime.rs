@@ -132,6 +132,44 @@ struct CompiledEntry {
 }
 
 const MAX_COMPILED_ENTRIES: usize = 16;
+const MAX_COMPILE_THREADS: usize = 4;
+
+fn compile_thread_count(env_override: Option<&str>, available_parallelism: usize) -> usize {
+    if let Some(threads) = env_override
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&count| count > 0)
+    {
+        return threads;
+    }
+    available_parallelism.clamp(1, MAX_COMPILE_THREADS)
+}
+
+/// 在临时 Rayon 线程池中运行 Wasmtime 并行编译，避免初始化永不退出的全局 Rayon 池
+/// 导致高核数主机在冷编译后长期滞留数百 MiB 至 GiB 级分配器线程堆。
+pub(super) fn compile_in_ephemeral_pool<T, F>(compile: F) -> T
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let threads = compile_thread_count(
+        std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
+        available,
+    );
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|index| format!("stravia-wasm-compile-{index}"))
+        .build()
+    {
+        Ok(pool) => pool.install(compile),
+        Err(error) => {
+            tracing::warn!(%error, "ephemeral wasm compile pool unavailable; compiling on calling thread");
+            compile()
+        }
+    }
+}
 
 impl VendorRuntime {
     /// 不使用持久编译缓存。Engine、编译结果仍由调用方共享。
@@ -235,7 +273,7 @@ impl VendorRuntime {
     ) -> Result<Arc<Component>, LoadError> {
         match &self.cache {
             Some(cache) => cache.load(&self.engine, bytes, digest),
-            None => Component::from_binary(&self.engine, bytes)
+            None => compile_in_ephemeral_pool(|| Component::from_binary(&self.engine, bytes))
                 .map_err(|error| LoadError::InvalidComponent(error.to_string())),
         }
         .map(Arc::new)
@@ -2198,5 +2236,33 @@ mod profile_admission_tests {
         )
         .expect_err("execute channel must match the signed snapshot");
         assert!(matches!(error, RuntimeError::InvalidOutput));
+    }
+
+    #[test]
+    fn compile_thread_count_caps_high_core_hosts_and_respects_override() {
+        assert_eq!(compile_thread_count(None, 64), MAX_COMPILE_THREADS);
+        assert_eq!(compile_thread_count(None, 2), 2);
+        assert_eq!(compile_thread_count(None, 0), 1);
+        assert_eq!(compile_thread_count(Some("12"), 64), 12);
+        assert_eq!(compile_thread_count(Some(" 3 "), 64), 3);
+        assert_eq!(compile_thread_count(Some("0"), 64), MAX_COMPILE_THREADS);
+        assert_eq!(
+            compile_thread_count(Some("invalid"), 64),
+            MAX_COMPILE_THREADS
+        );
+    }
+
+    #[test]
+    fn ephemeral_compile_pool_runs_on_named_worker_threads() {
+        let worker_name = compile_in_ephemeral_pool(|| {
+            std::thread::current()
+                .name()
+                .map(str::to_owned)
+                .unwrap_or_default()
+        });
+        assert!(
+            worker_name.starts_with("stravia-wasm-compile-"),
+            "expected ephemeral compile worker thread, got {worker_name:?}"
+        );
     }
 }

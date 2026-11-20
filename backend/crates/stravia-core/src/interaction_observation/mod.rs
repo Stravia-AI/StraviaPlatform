@@ -152,6 +152,7 @@ struct Inner {
     active_traces: Arc<Mutex<HashMap<String, TraceHandle>>>,
     partial_trace_count: Arc<AtomicU64>,
     ephemeral_root: Option<PathBuf>,
+    shutdown: stravia_runtime_contract::CancellationToken,
     stopped: AtomicBool,
 }
 
@@ -259,6 +260,7 @@ impl InteractionObservation {
                 active_traces,
                 partial_trace_count,
                 ephemeral_root,
+                shutdown: stravia_runtime_contract::CancellationToken::new(),
                 stopped: AtomicBool::new(false),
             }),
         }
@@ -474,27 +476,48 @@ impl InteractionObservation {
         )
     }
 
+    pub(crate) fn close_subscriptions(&self) {
+        self.inner.shutdown.cancel();
+        self.inner.live_content.close();
+    }
+
     pub(crate) fn subscribe(&self, after: i64) -> ObservationStream {
+        if self.inner.shutdown.is_cancelled() {
+            return Box::pin(futures::stream::empty());
+        }
         let store = self.inner.store.clone();
         let mut live = self.inner.updates.subscribe();
+        let shutdown = self.inner.shutdown.clone();
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
-            let max = match store.max_sequence().await {
-                Ok(max) => max,
-                Err(error) => {
-                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription sequence unavailable");
-                    let _ = tx
-                        .send(ObservationUpdate::ResetRequired {
-                            snapshot_sequence: 0,
-                        })
-                        .await;
-                    return;
-                }
-            };
-            let min = match store.min_sequence().await {
-                Ok(min) => min,
-                Err(error) => {
-                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription cursor unavailable");
+            let producer = async move {
+                let max = match store.max_sequence().await {
+                    Ok(max) => max,
+                    Err(error) => {
+                        tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription sequence unavailable");
+                        let _ = tx
+                            .send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: 0,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                let min = match store.min_sequence().await {
+                    Ok(min) => min,
+                    Err(error) => {
+                        tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription cursor unavailable");
+                        let _ = tx
+                            .send(ObservationUpdate::ResetRequired {
+                                snapshot_sequence: max,
+                            })
+                            .await;
+                        return;
+                    }
+                };
+                if after > max
+                    || (after > 0 && min.map_or(after < max, |min| after < min.saturating_sub(1)))
+                {
                     let _ = tx
                         .send(ObservationUpdate::ResetRequired {
                             snapshot_sequence: max,
@@ -502,47 +525,53 @@ impl InteractionObservation {
                         .await;
                     return;
                 }
-            };
-            if after > max
-                || (after > 0 && min.map_or(after < max, |min| after < min.saturating_sub(1)))
-            {
-                let _ = tx
-                    .send(ObservationUpdate::ResetRequired {
-                        snapshot_sequence: max,
-                    })
-                    .await;
-                return;
-            }
-            let mut last = after;
-            let mut roots = HashMap::new();
-            if let Err(error) = replay_to(&store, &tx, &mut last, max, &mut roots).await {
-                if tx.is_closed() {
+                let mut last = after;
+                let mut roots = HashMap::new();
+                if let Err(error) = replay_to(&store, &tx, &mut last, max, &mut roots).await {
+                    if tx.is_closed() {
+                        return;
+                    }
+                    tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription replay unavailable");
+                    let _ = tx
+                        .send(ObservationUpdate::ResetRequired {
+                            snapshot_sequence: max,
+                        })
+                        .await;
                     return;
                 }
-                tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation subscription replay unavailable");
-                let _ = tx
-                    .send(ObservationUpdate::ResetRequired {
-                        snapshot_sequence: max,
-                    })
-                    .await;
-                return;
-            }
-            loop {
-                match live.recv().await {
-                    Ok(ObservationUpdate::Event(event)) => {
-                        if event.sequence <= last {
-                            continue;
-                        }
-                        if event.sequence > last.saturating_add(1) {
-                            let replay =
-                                replay_to(&store, &tx, &mut last, event.sequence, &mut roots).await;
-                            if let Err(error) = &replay {
+                loop {
+                    match live.recv().await {
+                        Ok(ObservationUpdate::Event(event)) => {
+                            if event.sequence <= last {
+                                continue;
+                            }
+                            if event.sequence > last.saturating_add(1) {
+                                let replay =
+                                    replay_to(&store, &tx, &mut last, event.sequence, &mut roots)
+                                        .await;
+                                if let Err(error) = &replay {
+                                    if tx.is_closed() {
+                                        return;
+                                    }
+                                    tracing::warn!(cause=%writer::redacted_persist_cause(error), "observation subscription recovery unavailable");
+                                }
+                                if replay.is_err() || last < event.sequence {
+                                    let _ = tx
+                                        .send(ObservationUpdate::ResetRequired {
+                                            snapshot_sequence: subscription_sequence(&store, last)
+                                                .await,
+                                        })
+                                        .await;
+                                    return;
+                                }
+                                continue;
+                            }
+                            last = event.sequence;
+                            if let Err(error) = send_change(&store, &tx, event, &mut roots).await {
                                 if tx.is_closed() {
                                     return;
                                 }
-                                tracing::warn!(cause=%writer::redacted_persist_cause(error), "observation subscription recovery unavailable");
-                            }
-                            if replay.is_err() || last < event.sequence {
+                                tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation change lookup unavailable");
                                 let _ = tx
                                     .send(ObservationUpdate::ResetRequired {
                                         snapshot_sequence: subscription_sequence(&store, last)
@@ -551,49 +580,40 @@ impl InteractionObservation {
                                     .await;
                                 return;
                             }
-                            continue;
                         }
-                        last = event.sequence;
-                        if let Err(error) = send_change(&store, &tx, event, &mut roots).await {
-                            if tx.is_closed() {
+                        Ok(ObservationUpdate::ResetRequired { snapshot_sequence }) => {
+                            if tx
+                                .send(ObservationUpdate::ResetRequired { snapshot_sequence })
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
-                            tracing::warn!(cause=%writer::redacted_persist_cause(&error), "observation change lookup unavailable");
+                        }
+                        Ok(
+                            ObservationUpdate::Change(_)
+                            | ObservationUpdate::LiveContent(_)
+                            | ObservationUpdate::LiveSnapshot { .. }
+                            | ObservationUpdate::LiveGap { .. }
+                            | ObservationUpdate::LiveFinished { .. },
+                        ) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let snapshot = subscription_sequence(&store, max).await;
                             let _ = tx
                                 .send(ObservationUpdate::ResetRequired {
-                                    snapshot_sequence: subscription_sequence(&store, last).await,
+                                    snapshot_sequence: snapshot,
                                 })
                                 .await;
                             return;
                         }
+                        Err(_) => return,
                     }
-                    Ok(ObservationUpdate::ResetRequired { snapshot_sequence }) => {
-                        if tx
-                            .send(ObservationUpdate::ResetRequired { snapshot_sequence })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Ok(
-                        ObservationUpdate::Change(_)
-                        | ObservationUpdate::LiveContent(_)
-                        | ObservationUpdate::LiveSnapshot { .. }
-                        | ObservationUpdate::LiveGap { .. }
-                        | ObservationUpdate::LiveFinished { .. },
-                    ) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let snapshot = subscription_sequence(&store, max).await;
-                        let _ = tx
-                            .send(ObservationUpdate::ResetRequired {
-                                snapshot_sequence: snapshot,
-                            })
-                            .await;
-                        return;
-                    }
-                    Err(_) => return,
                 }
+            };
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                () = producer => {}
             }
         });
         Box::pin(ReceiverStream::new(rx))
@@ -651,6 +671,7 @@ impl InteractionObservation {
             .map_err(|_| anyhow::anyhow!("observation writer unavailable"))?
     }
     pub(crate) fn stop_background(&self) {
+        self.close_subscriptions();
         crate::performance::set_debug(&self.inner.debug, false);
         if let Some(task) = self.inner.metrics_upkeep.lock().take() {
             task.abort();
@@ -661,6 +682,7 @@ impl InteractionObservation {
         }
     }
     pub(crate) async fn shutdown(&self) {
+        self.close_subscriptions();
         crate::performance::set_debug(&self.inner.debug, false);
         if let Some(task) = self.inner.metrics_upkeep.lock().take() {
             task.abort();

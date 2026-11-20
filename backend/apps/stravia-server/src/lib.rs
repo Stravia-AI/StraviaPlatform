@@ -169,6 +169,12 @@ impl RunningHttpServer {
             match tokio::time::timeout(timeout, &mut task).await {
                 Ok(result) => result.context("HTTP server task panicked")??,
                 Err(_) => {
+                    if !timeout.is_zero() {
+                        tracing::warn!(
+                            timeout_secs = timeout.as_secs(),
+                            "HTTP server drain timed out; aborting remaining connections"
+                        );
+                    }
                     task.abort();
                     let _ = task.await;
                 }
