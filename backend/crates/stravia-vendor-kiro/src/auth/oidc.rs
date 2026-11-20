@@ -11,7 +11,8 @@ use stravia_vendor_sdk::{
 use super::{
     add_ms, invalid_response, now_ms, positive_integer, post_json, required_string, seconds_ceil,
 };
-use crate::transport::profile_origins;
+use crate::transport::{SDK_USER_AGENT, SDK_X_AMZ_USER_AGENT, profile_origins};
+use uuid::Uuid;
 
 // Commercial SSO OIDC endpoints: https://docs.aws.amazon.com/general/latest/gr/sso.html
 pub(crate) const OIDC_REGIONS: &[&str] = &[
@@ -86,7 +87,10 @@ pub(super) fn execute(
 fn headers() -> Fields {
     let mut headers = Fields::new();
     headers.append("Content-Type", "application/x-amz-json-1.1");
-    headers.append("User-Agent", "Kiro-CLI");
+    headers.append("x-amz-user-agent", SDK_X_AMZ_USER_AGENT);
+    headers.append("user-agent", SDK_USER_AGENT);
+    headers.append("amz-sdk-invocation-id", Uuid::new_v4().to_string());
+    headers.append("amz-sdk-request", "attempt=1; max=3");
     headers
 }
 
@@ -426,8 +430,12 @@ fn find_profile(host: &GuestHost, region: &str, access: &str) -> Result<String, 
                 "X-Amz-Target",
                 "AmazonCodeWhispererService.ListAvailableProfiles",
             );
+            headers.append("TokenType", "SSO_OIDC");
+            headers.append("x-amz-user-agent", SDK_X_AMZ_USER_AGENT);
+            headers.append("user-agent", SDK_USER_AGENT);
+            headers.append("amz-sdk-invocation-id", Uuid::new_v4().to_string());
+            headers.append("amz-sdk-request", "attempt=1; max=3");
             headers.append("Authorization", format!("Bearer {access}"));
-            headers.append("User-Agent", "Kiro-CLI");
             let mut body = json!({"maxResults": 10});
             if let Some(token) = &next {
                 body["nextToken"] = Value::String(token.clone());

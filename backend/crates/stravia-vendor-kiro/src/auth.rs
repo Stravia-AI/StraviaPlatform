@@ -248,7 +248,11 @@ fn post_json(
         headers,
         body: serde_json::to_vec(&body).map_err(|_| invalid_response())?,
     };
-    let response = host.http_start(request, &Options::new())?;
+    let mut options = Options::new();
+    options
+        .shape(crate::transport::CLI_EGRESS_SHAPE)
+        .expect("valid Kiro CLI egress shape selector");
+    let response = host.http_start(request, &options)?;
     let status = response.status()?;
     let bytes = read_http_body(&response, MAX_BODY)?;
     let value = match serde_json::from_slice(&bytes) {

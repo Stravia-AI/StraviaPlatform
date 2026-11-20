@@ -145,8 +145,8 @@ impl HostServices for FakeServices {
             ),
             _ if request.headers.get("x-amz-target") == Some(b"KiroControlPlaneBearerService.ListAvailableModels".as_slice()) => Some(
                 br#"{"models":[
-                    {"modelId":"qwen3-coder-next","modelName":"Qwen3 Coder Next"},
-                    {"modelId":"claude-sonnet-4.6","supportedInputTypes":["TEXT","IMAGE"],"additionalModelRequestFieldsSchema":{"properties":{"output_config":{"properties":{"effort":{"enum":["low","medium","high","max"],"default":"high"}}}}}}
+                    {"modelId":"qwen3-coder-next","modelName":"Qwen3 Coder Next","tokenLimits":{"maxInputTokens":256000,"maxOutputTokens":64000}},
+                    {"modelId":"claude-sonnet-4.6","supportedInputTypes":["TEXT","IMAGE"],"tokenLimits":{"maxInputTokens":200000,"maxOutputTokens":64000},"additionalModelRequestFieldsSchema":{"properties":{"output_config":{"properties":{"effort":{"enum":["low","medium","high","max"],"default":"high"}}}}}}
                 ]}"#.as_slice(),
             ),
             _ if request.headers.get("x-amz-target") == Some(b"KiroControlPlaneBearerService.GetUsageLimits".as_slice()) => {
@@ -352,8 +352,10 @@ async fn device_sign_in_omits_the_hint_and_authenticates_the_profile() {
         panic!("expected both catalog models")
     };
     assert_eq!(without_effort.id, "qwen3-coder-next");
+    assert_eq!(without_effort.metadata["limit"], json!({"context": 256000}));
     assert!(!without_effort.metadata.contains_key("reasoning_efforts"));
     assert_eq!(with_effort.id, "claude-sonnet-4.6");
+    assert_eq!(with_effort.metadata["limit"], json!({"context": 200000}));
     assert_eq!(
         with_effort.metadata["reasoning_efforts"],
         json!(["low", "medium", "high", "max"])
@@ -659,6 +661,14 @@ async fn descriptor_exposes_four_device_channels_and_enterprise_fields() {
             })
         );
     }
+    let injection = provider
+        .config_fields
+        .iter()
+        .find(|f| f.key == "system_prompt_user_injection")
+        .expect("system_prompt_user_injection setting");
+    assert!(!injection.required);
+    assert_eq!(injection.default_json, Some(json!(true)));
+    assert!(injection.visible_when.is_none());
     for key in ["start_url", "region"] {
         let field = provider
             .config_fields
@@ -892,12 +902,10 @@ async fn oidc_device_registration_refresh_and_profile_routing() {
         }) {
             assert!(request.url.contains(destination_region));
             assert_eq!(body(request)["profileArn"], arn);
-            if channel == "identity-center" {
-                assert_eq!(
-                    request.headers.get("TokenType"),
-                    Some(b"SSO_OIDC".as_slice())
-                );
-            }
+            assert_eq!(
+                request.headers.get("TokenType"),
+                Some(b"SSO_OIDC".as_slice())
+            );
             assert!(!String::from_utf8_lossy(&request.body).contains("synthetic-client-secret"));
         }
         if channel == "identity-center" {
@@ -977,4 +985,70 @@ async fn enterprise_device_sign_in_rejects_organization_opt_out() {
     assert_eq!(lookups.len(), 2);
     assert_eq!(lookups[0].url, "https://management.eu-central-1.kiro.dev/");
     assert_eq!(lookups[1].url, "https://management.us-east-1.kiro.dev/");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a built Kiro component; run task build:vendors:all"]
+async fn system_prompt_user_injection_defaults_on_and_can_be_disabled() {
+    let runtime = VendorRuntime::new().unwrap();
+    let plugin = runtime
+        .load(&std::fs::read(artifact()).unwrap())
+        .await
+        .unwrap();
+    let services = Arc::new(FakeServices::default());
+
+    let mut req = request("qwen3-coder-next");
+    req.instructions = Some("You are a custom agent.".into());
+
+    for (option, expect_injected) in [(None, true), (Some(false), false)] {
+        let mut profile = provider("qwen3-coder-next", "synthetic-key", "us-east-1");
+        if let Some(enabled) = option {
+            profile
+                .options
+                .insert("system_prompt_user_injection".into(), json!(enabled));
+        }
+        let (op, input) = OperationInput::Infer {
+            provider: profile,
+            request: req.clone(),
+        }
+        .encode_for_host()
+        .unwrap();
+        let scope = OperationScope::new(
+            services.clone(),
+            CancellationToken::new(),
+            Deadline::from_now(Duration::from_secs(10)),
+            0,
+        );
+        let output = runtime
+            .execute(&plugin, "oauth", op, input, scope)
+            .await
+            .unwrap();
+        assert!(matches!(output, OperationOutput::Infer(_)));
+
+        let requests = services.requests.lock();
+        let body: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        let state = &body["conversationState"];
+        if expect_injected {
+            assert!(body.get("systemPrompt").is_none());
+            assert_eq!(
+                state["history"][0]["userInputMessage"]["content"],
+                "You are a custom agent."
+            );
+            assert_eq!(
+                state["history"][1]["assistantResponseMessage"]["content"],
+                "I will follow these instructions."
+            );
+            assert_eq!(
+                state["currentMessage"]["userInputMessage"]["content"],
+                "say hello"
+            );
+        } else {
+            assert_eq!(body["systemPrompt"], "You are a custom agent.");
+            assert_eq!(state["history"], json!([]));
+            assert_eq!(
+                state["currentMessage"]["userInputMessage"]["content"],
+                "say hello"
+            );
+        }
+    }
 }
