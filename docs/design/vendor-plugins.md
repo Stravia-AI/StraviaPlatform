@@ -77,7 +77,7 @@ Core 以「目录身份 + channel ID」处理选择器中的替代关系：目�
 | Command Code | `1.82.1` | [官方 npm latest](https://registry.npmjs.org/command-code/latest) |
 | Devin CLI / chisel | `3000.11.3` | [官方 stable changelog](https://docs.devin.ai/cli/changelog/stable) |
 | OpenCode Zen Free | `1.18.25`；provider-utils `4.0.23`、Bun `1.3.14` | 本机官方 CLI 隔离抓包与真实 Wasm 实调；[固定发行源码](https://github.com/anomalyco/opencode/tree/cb7d8b2f5e44876ef98b661dc10590c915af3a9f) |
-| Antigravity CLI | `1.5.2`，`cl=1015175089`，保留 `/cli/` 身份路径 | 本次隔离采集的官方 Linux/amd64 consumer 推理连接，见 `shape/fixtures/antigravity-inference.json`；[官方 CLI 更新 manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) |
+| Antigravity CLI | `1.5.13`，`cl=1025641825`，保留 `/cli/` 身份路径 | [官方 Linux/amd64 consumer 隔离捕获](../../backend/crates/stravia-vendor-antigravity/tests/cli-request-1.5.13.json)的推理请求在本地截断，不证明 Google 接受推理；[官方 CLI 更新 manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) |
 | base / GitHub Copilot 额度 | `editor-version: vscode/1.141.1` | [微软 stable 更新 API](https://update.code.visualstudio.com/api/update/win32-x64/stable/latest) |
 
 Claude Code 当前默认版本为 2.1.319，使用普通交互式身份 `claude-cli/2.1.319 (external, cli)`。当前黄金样本来自真实 PTY 的主推理请求，同一 socket 关联 TLS 与 HTTP，已替换此前 `-p`／`sdk-cli` 样本；其余请求在隔离环境中收到本地 401，因此只证明无远端 GrowthBook 配置时的默认行为，不证明账号分配的灰度功能。Linux/x64、Node `v26.12.1` 与 Stainless SDK `0.128.0` 是所模拟的请求身份，不声称 Wasm 在运行 Node。此前 2.1.317 的真实账号、多轮与 Read 工具结果保留为[历史协议研究](../research/claude-code-message-threads.md)，不重新标成 2.1.319 的上游接受证据。OpenCode 保留已捕获的完整 UA 组合，并选择对应 Bun 1.3.14 形态；此前 `1.19.0` 组合被拒，不能仅凭 npm latest 推定可用。Command Code 的额度、初始化与推理使用同一版本常量。
@@ -256,7 +256,7 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 2. 保存连接并同步账号模型。项目异步接入未完成时，保留凭据与 operation，后续真实发现请求检查一次进度并明确报告 pending；不猜 project/tier 或自动重试。
 3. 将发现的模型绑定到 Route。额度页读取账号共享池、剩余比例和重置时间；缺失额度不显示为零，未知窗口保留，disabled 不自动等于 exhausted。
 
-**Antigravity 系统提示词前缀**（配置键 `system_prompt_prefix`）默认开启，已有连接未保存该选项时也按开启处理。它适用于所有经插件发出的推理请求，不按客户端、模型或入口协议筛选，不影响生图、搜索、模型同步和额度查询。首个系统 part 逐字节保留 agy 1.5.11 开头的 296 字节（原生 `<identity>` 块与尾随换行）。
+**Antigravity 系统提示词前缀**（配置键 `system_prompt_prefix`）默认开启，已有连接未保存该选项时也按开启处理。它适用于所有经插件发出的推理请求，不按客户端、模型或入口协议筛选，不影响生图、搜索、模型同步和额度查询。首个系统 part 逐字节保留 agy 1.5.11 开头的 296 字节（原生 `<identity>` 块与尾随换行）；[1.5.13 隔离捕获](../../backend/crates/stravia-vendor-antigravity/tests/cli-request-1.5.13.json)复核相同前缀长度与 SHA-256。
 
 有顶层指令时，在前缀后追加引导语，并将顶层指令移到合成首条 user 消息，后接合成 model 确认。引导语明确：该合成消息与前面的 Antigravity 身份前缀冲突时，以合成消息为准；其他 system/developer 约束仍有效，后续真实 user 消息仅作为任务。Responses `instructions`、Anthropic `system` 和 Gemini `systemInstruction` 都经此路径。Gemini 原生多 part 在仍匹配有效指令时保持分段；已替换或清除的旧快照不参与重排。没有顶层指令时只加前缀，不插入合成消息，也不把第一条真实 user 消息当作指令。独立 system/developer 消息仍进入系统区；实际历史、工具、会话身份与本地持久化内容不变。
 
@@ -307,7 +307,7 @@ Antigravity 推理把每个已声明的函数作为单独的 `tools[]` 项，每
 
 OAuth 使用 CLI 1.2.16 静态核对的 `https://accounts.google.com/o/oauth2/auth`、`https://oauth2.googleapis.com/token`、固定网站回调 `https://antigravity.google/oauth-callback` 与 consumer 七个 scope。宿主通用契约允许 `AuthorizationCode + callback=None + manual_input.type=text`，有效模式为 `manual`、listener 为 `not_required`；缺少手动 text 输入的无 callback 授权码描述符仍拒绝。现有 WebUI 按描述符渲染，不增加供应商分支。
 
-推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头由插件构造 Bearer、JSON Content-Type 与 agy 1.5.11 Linux/amd64 consumer 的完整 CLI User-Agent（含 `cl=1024248524`）；通过宿主压缩策略协商 `Accept-Encoding: gzip` 并解压响应，不只手工添加声明。不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client，也不为 SSE 额外添加官方未发送的 Accept。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON、`functionResponse.parts` 中的附件和真实签名保留，不制造签名或伪成功。工具结果与附件共用调用边界，跨协议转换、上下文重写和 Observation 不再只留下业务 JSON。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
+推理采用 daily Cloud Code 的 `streamGenerateContent?alt=sse`，解包 response 后复用 Gemini codec。请求头由插件构造 Bearer、JSON Content-Type 与 agy 1.5.13 Linux/amd64 consumer 的完整 CLI User-Agent（含 `cl=1025641825`，见[脱敏捕获](../../backend/crates/stravia-vendor-antigravity/tests/cli-request-1.5.13.json)）；通过宿主压缩策略协商 `Accept-Encoding: gzip` 并解压响应，不只手工添加声明。不转发下游头，不注入社区代理自选的 Client-Metadata/X-Goog-Api-Client，也不为 SSE 额外添加官方未发送的 Accept。编码前清除非 Google 扩展及未核实的 canonical 控制；工具定义、工具选择与响应 Schema 按 CLI private master 构造，避免公开 Gemini codec 丢失其已有约束。最终请求体经递归白名单投影；工具业务 JSON、`functionResponse.parts` 中的附件和真实签名保留，不制造签名或伪成功。工具结果与附件共用调用边界，跨协议转换、上下文重写和 Observation 不再只留下业务 JSON。完整字段、开源代码分析、CLI 二进制证据、验证边界及条款风险见 [Antigravity OAuth 调研](../research/antigravity-oauth.md)。
 
 Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false` 等价转换为 `{"not": {}}`，因此 `{"not": true}` 仍表示禁止任意值，不通过删除约束绕过本地校验。`additionalProperties` 的原生布尔开关，以及 `default`、`example`、工具参数与结果中的业务布尔值保持原样。
 

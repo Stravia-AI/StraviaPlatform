@@ -178,8 +178,8 @@ async fn antigravity_real_wasm_inference_matches_inference_capture() -> anyhow::
     for ((name, value), expected) in fields.iter().zip(expected) {
         assert_eq!(*name, expected["name"].as_str().unwrap());
         let expected_value = if name.eq_ignore_ascii_case("user-agent") {
-            // 连接层夹具保留真实 1.5.8 抓包；请求身份已按 1.5.11 的构建值更新。
-            "antigravity/cli/1.5.11 (aidev_client; os_type=linux; arch=amd64; cl=1024248524; auth_method=consumer)"
+            // 连接层夹具保留真实 1.5.8 抓包；1.5.13 同连接采集的已记录 TLS 字段未变。
+            "antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)"
         } else {
             expected["value"].as_str().unwrap()
         };

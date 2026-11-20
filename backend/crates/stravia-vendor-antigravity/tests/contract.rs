@@ -1853,7 +1853,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         assert_eq!(headers["accept-encoding"], "gzip");
         assert_eq!(
             headers["user-agent"],
-            "antigravity/cli/1.5.11 (aidev_client; os_type=linux; arch=amd64; cl=1024248524; auth_method=consumer)"
+            "antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)"
         );
         let body: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(body["project"], "test-project");

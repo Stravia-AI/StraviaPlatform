@@ -1,6 +1,6 @@
 # Antigravity CLI OAuth 与模型协议调研
 
-初始调研日期：2026-10-04；工具附件实测更新：2026-11-06；CLI 1.5.8 与 Hydrogen 请求更新：2026-11-13。对应实现：`backend/crates/stravia-vendor-antigravity/`。
+初始调研日期：2026-10-04；工具附件实测更新：2026-11-06；CLI 1.5.8 与 Hydrogen 请求更新：2026-11-13；CLI 1.5.13 隔离抓包：2026-11-20。对应实现：`backend/crates/stravia-vendor-antigravity/`。
 
 ## 结论与证据边界
 
@@ -109,20 +109,20 @@ openid
 
 ### 请求头
 
-模型、项目与额度 POST 采用 2026-11-13 实际捕获的 agy 1.5.8 Linux/amd64 profile，由插件固定构造身份与内容类型，宿主协商响应压缩：
+模型、项目与额度 POST 采用 2026-11-20 实际捕获的 agy 1.5.13 Linux/amd64 consumer 身份，由插件固定构造身份与内容类型，宿主协商响应压缩：
 
 ```text
 Authorization: Bearer <this connection's access token>
 Content-Type: application/json
-User-Agent: antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=amd64; cl=1020628950; auth_method=consumer)
+User-Agent: antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)
 Accept-Encoding: gzip
 ```
 
-`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。早期最小差分验证表明仅补回 `/cli/` 即可恢复清单，见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。当前版本与构建号取自官方 1.5.8 实际请求，不从发布标签或其它平台的二进制推测。
+`/cli/` 不是可省略的展示片段：同一账号、project、端点和请求体下，缺少它时上游仅返回 8 个 Agent 档位；补回后返回 14 个，包含 Gemini 3.7／3.8 Flash。早期最小差分验证表明仅补回 `/cli/` 即可恢复清单，见 [模型映射调研第 9 节](antigravity-model-mapping.md#9-官方有-3738-而-stravia-缺项的根因)。当前版本与构建号取自官方 1.5.13 实际请求，不从发布标签或其它平台的二进制推测；旧版样本仍按其原始版本保留。
 
 这里的模型后端指 agy 实际访问的 `daily-cloudcode-pa.googleapis.com`，不是另一种客户端。本插件的模型后端操作选择 HTTP/1.1；请求体不压缩，响应只声明 gzip 压缩，未压缩响应也可读取。推理声明唯一 `Transfer-Encoding: chunked` 作为宿主传输选项，由宿主实际分帧，不把已编码 JSON 字节伪装成分块正文。模型目录、项目、额度和生图使用定长 JSON。当前宿主网络层不补 `Accept`，推理请求头顺序与同连接 ClientHello 由原生采集 fixture 校验；不是早期 reqwest 默认头路径。1.5.8 的 HTTP ClientHello 新增 `http/1.1` ALPN，内置 `antigravity` shape 升为 revision 2。JSON 排列、TCP 时序及未采集的平台不在一致性承诺内。
 
-OAuth 使用独立的 `oauth2.googleapis.com/token` profile：`Content-Type: application/x-www-form-urlencoded`、`User-Agent: Go-http-client/2.0`、`Accept-Encoding: gzip`，由传输层计算正文长度，当前宿主不补 `Accept`。它不使用模型后端的 CLI UA 或 HTTP/1-only 选项；保持默认 HTTP 协商，历史官方刷新样本使用 HTTP/2。2026-11-13 没有重新验证授权交换或刷新。管理员的代理和强制 HTTP/1 配置仍按现有契约生效，不承诺这种非捕获配置下的协议／UA 组合与官方逐字一致。交换和刷新继续使用原有表单认证方式，不新增 Basic 探测或自动重试。
+OAuth 使用独立的 `oauth2.googleapis.com/token` profile：`Content-Type: application/x-www-form-urlencoded`、`User-Agent: Go-http-client/2.0`、`Accept-Encoding: gzip`，由传输层计算正文长度，当前宿主不补 `Accept`。它不使用模型后端的 CLI UA 或 HTTP/1-only 选项；保持默认 HTTP 协商，历史官方刷新样本使用 HTTP/2。2026-11-13 没有重新验证授权交换或刷新；1.5.13 捕获中的 OAuth HTTP/1.1 与 `Go-http-client/1.1` 受代理强制 HTTP/1.1 限制，不能证明原生默认协议改变。管理员的代理和强制 HTTP/1 配置仍按现有契约生效，不承诺这种非捕获配置下的协议／UA 组合与官方逐字一致。交换和刷新继续使用原有表单认证方式，不新增 Basic 探测或自动重试。
 
 operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注入社区代理常见的 `X-Goog-Api-Client` 或 `Client-Metadata`；本插件也不注入它们。不读取或合并 ProviderSnapshot.client_headers，不允许下游替换 Bearer、User-Agent 或增加供应商自定义头。Host、Content-Length、HTTP/2 framing 等传输层必需信息由宿主 HTTP 实现负责，不宣称是完整 CLI transport fingerprint。
 
@@ -195,6 +195,18 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 依据 [Protobuf field presence](https://protobuf.dev/programming-guides/field_presence/)，上述已存在消息中的隐式 presence 标量省略等于零；缺失整个消息并不等于存在且全零。插件因此仅在已见终态、`usageMetadata` 为对象且报告有效 prompt 与 output/total 计数时，将省略的 `cachedContentTokenCount` 归一化为零。终态前的部分 usage、缺失 usage、无效计数与显式缓存值保持原样。共享 Gemini codec 不采用该私有规则；`thoughtsTokenCount` 独立保留，累计输出包含思考一次，后续累计修订覆盖已有快照。
 
 ## 6. 本地及真实账号验证与限制
+
+### 2026-11-20：CLI 1.5.13 官方发行证据
+
+当日核对，[GitHub 官方 latest release API](https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest) 的稳定版与 [Linux amd64 官方 updater manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) 的版本一致，均为 `1.5.13`；GitHub 发布于 2026-11-19 21:48:43 UTC，非预发布。[Linux x64 GitHub 发行包](https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.13/agy_cli_linux_x64.tar.gz)的 asset SHA-256 为 `7fa9cc6df0d09562693d637c406a86c1b0f52ab3364714b1fd2d79cc6060d4b2`；manifest 指向另一个下载地址并提供 SHA-512，不能仅凭版本一致断言两个归档字节相同。[发行说明](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.5.13)称在 ADC 登录和企业模型网关下新增 Gemini 4 Neon 模型支持，并修复自定义模型的 `modelFeatures=false` 被忽略等问题。这些是官方发布元数据与说明，不是网络抓包，也不是上游接受 Stravia 请求的证据。
+
+### 2026-11-20：CLI 1.5.13 隔离推理抓包
+
+在临时 HOME/XDG、空工作区、隔离 OAuth 状态副本、进程级 CA 与 loopback TLS 代理下执行 `agy --model gemini-3.8-flash-low --disable-slash-commands --print "Reply exactly with OK."`。启动阶段 OAuth、项目、模型目录和额度请求转发 Google 并返回 HTTP 200；推理请求在本地截断，代理返回合成的 OK SSE，CLI 退出码为 0。没有向 Google 发出真实推理请求，不能据此声称 Google 接受推理。原始 HOME 未写入；未保留凭据、账号或项目 ID、提示正文等私密值。代理强制 HTTP/1.1，OAuth 观察到的 `Go-http-client/1.1` 不证明原生默认协议改变；旁路辅助连接出现 TLS 错误与 broken pipes，不能声称全部流量成功。完整脱敏结构见 [CLI 1.5.13 fixture](../../backend/crates/stravia-vendor-antigravity/tests/cli-request-1.5.13.json)。
+
+推理为 `POST /v1internal:streamGenerateContent?alt=sse`，HTTP/1.1 chunked，声明响应 gzip；头顺序为 `Host`、`User-Agent`、`Transfer-Encoding`、`Authorization`、`Content-Type`、`Accept-Encoding`。UA 为 `antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)`。外层键为 `model`、`project`、`request`、`requestId`、`requestType`、`userAgent`；内层键为 `contents`、`generationConfig`、`labels`、`sessionId`、`systemInstruction`、`tools`。14 个工具组各有一个 function declaration；labels 键与 1.5.11 相同：`cascade_id`、`last_step_index`、`model_enum`、`request_id`、`root_cascade_id`、`trajectory_id`、`used_claude`、`used_claude_conservative`、`used_non_gemini_model`。请求 ID 为五段 `agent/<uuid>/<decimal>/<uuid>/<decimal>`，单次样本不证明多轮生命周期。
+
+CLI 系统文本为 20557 UTF-8 字节，不保留正文；身份前缀为 296 字节，SHA-256 `acea3799fe9d52bc0fbabb261219491f2e707e87f12a337a6d1c81aa717bcd39`，与 1.5.11 相同。仅采集的 ClientHello 字段：legacy version、cipher suites、SNI 是否存在、EC point formats、supported groups、signature algorithms、ALPN、supported versions、key share groups、extensions，均与 1.5.8 样本相等；因此不修改宿主 shape revision，不将这部分字段相等外推为完整 TLS/TCP 等价。
 
 ### 2026-11-19：官方 CLI 1.5.11 空闲 TUI 启动抓包
 
