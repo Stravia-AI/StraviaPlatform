@@ -2245,7 +2245,7 @@ async fn mixed_capability_channel_keeps_image_only_models_out_of_chat() -> anyho
         ),
         (
             "image-output-only",
-            json!(["image_output"]),
+            json!(["infer", "media_image"]),
             json!({"input":["text","image"],"output":["text","image"]}),
         ),
     ] {
@@ -3949,6 +3949,14 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
         stravia_core::db::models::RoutePurpose::Inference,
     )
     .await?;
+    let search_route = create_route(
+        &harness.gateway,
+        "codex-search-capability",
+        vec![(&provider, "gpt-5.4", 10)],
+        0,
+        stravia_core::db::models::RoutePurpose::WebSearch,
+    )
+    .await?;
     let image_route = create_route(
         &harness.gateway,
         "codex-image-capability",
@@ -3957,7 +3965,7 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
         stravia_core::db::models::RoutePurpose::ImageGeneration,
     )
     .await?;
-    configure_external_search(&harness.gateway, &route.model_id).await?;
+    configure_external_search(&harness.gateway, &search_route.model_id).await?;
     configure_image_generation(&harness.gateway, &image_route.model_id).await?;
     harness
         .gateway
