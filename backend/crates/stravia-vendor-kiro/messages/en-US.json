@@ -11,5 +11,7 @@
   "start_url": "Start URL",
   "start_url_description": "Enter the URL of your organization’s AWS access portal, such as https://example.awsapps.com/start.",
   "region": "AWS region",
-  "region_description": "Enter the region code for your IAM Identity Center instance, such as us-east-1."
+  "region_description": "Enter the region code for your IAM Identity Center instance, such as us-east-1.",
+  "system_prompt_user_injection": "Inject system prompt via user turn",
+  "system_prompt_user_injection_description": "By default, instructions are injected as the first user message followed by an assistant acknowledgment, matching Kiro CLI 3.4.0 Custom Agent behavior without using the top-level systemPrompt field. Turn this off to send instructions in the top-level systemPrompt field."
 }

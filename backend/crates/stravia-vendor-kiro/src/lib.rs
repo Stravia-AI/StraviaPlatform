@@ -24,6 +24,7 @@ const GOOGLE_CHANNEL: &str = "oauth";
 const GITHUB_CHANNEL: &str = "github";
 const BUILDER_ID_CHANNEL: &str = "builder-id";
 const IDENTITY_CENTER_CHANNEL: &str = "identity-center";
+const SYSTEM_PROMPT_USER_INJECTION_OPTION: &str = "system_prompt_user_injection";
 const OAUTH_PROTOCOL: &str = "kiro-generate-assistant-response-oauth";
 const IDENTITY_CENTER_PROTOCOL: &str = "kiro-generate-assistant-response-sso-oidc";
 const DEFAULT_BASE_URL: &str = "https://runtime.us-east-1.kiro.dev";
@@ -145,11 +146,16 @@ fn infer(
     let conversation = format!("sess_{session}");
     // 工具续接复用宿主的 prompt ID；无宿主上下文的独立调用也携带自己的 ID。
     let turn = scoped_uuid(provider, "user_prompt_id")?.unwrap_or_else(Uuid::new_v4);
+    let inject_system_prompt_as_user = matches!(
+        provider.options.get(SYSTEM_PROMPT_USER_INJECTION_OPTION),
+        None | Some(Value::Bool(true))
+    );
     let mut body = request::encode(
         request,
         model,
         &conversation,
         provider.model_metadata.as_ref(),
+        inject_system_prompt_as_user,
     )?;
     body["conversationState"]["agentContinuationId"] = Value::String(turn.to_string());
     let request = transport::rpc(provider, transport::Action::Generate, &body)?;

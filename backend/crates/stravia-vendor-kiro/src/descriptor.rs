@@ -8,7 +8,8 @@ use stravia_vendor_sdk::{
 
 use crate::{
     BUILDER_ID_CHANNEL, DEFAULT_BASE_URL, GITHUB_CHANNEL, GOOGLE_CHANNEL, IDENTITY_CENTER_CHANNEL,
-    IDENTITY_CENTER_PROTOCOL, OAUTH_PROTOCOL, VENDOR_ID, auth, messages,
+    IDENTITY_CENTER_PROTOCOL, OAUTH_PROTOCOL, SYSTEM_PROMPT_USER_INJECTION_OPTION, VENDOR_ID, auth,
+    messages,
 };
 
 fn oidc_origin() -> OriginDeclaration {
@@ -134,6 +135,21 @@ pub(super) fn descriptor() -> VendorDescriptor {
                 label: messages::authentication(),
             }],
             config_fields: vec![
+                ConfigField {
+                    key: SYSTEM_PROMPT_USER_INJECTION_OPTION.into(),
+                    label: messages::system_prompt_user_injection(),
+                    description: Some(messages::system_prompt_user_injection_description()),
+                    kind: ConfigFieldKind::Bool,
+                    required: false,
+                    default_json: Some(serde_json::Value::Bool(true)),
+                    group: None,
+                    secret: false,
+                    min: None,
+                    max: None,
+                    max_length: None,
+                    pattern: None,
+                    visible_when: None,
+                },
                 field(
                     "start_url",
                     messages::start_url(),

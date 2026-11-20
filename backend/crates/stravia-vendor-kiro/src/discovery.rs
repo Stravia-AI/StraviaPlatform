@@ -35,7 +35,6 @@ struct Model {
 #[serde(rename_all = "camelCase")]
 struct Limits {
     max_input_tokens: Option<u64>,
-    max_output_tokens: Option<u64>,
 }
 
 pub(super) fn page(
@@ -116,14 +115,24 @@ fn decode(bytes: &[u8]) -> Result<DiscoverResponse, PluginError> {
                     metadata.insert("kiro_effort_group".into(), group.into());
                     metadata.insert("reasoning_efforts".into(), serde_json::json!(efforts));
                 }
+                // Match KAS 3.4.0 KFu: thinking is toggleable iff enum includes both disabled and adaptive.
+                let thinking_toggleable = schema
+                    .pointer("/properties/thinking/properties/type/enum")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|values| {
+                        values.iter().any(|v| v.as_str() == Some("disabled"))
+                            && values.iter().any(|v| v.as_str() == Some("adaptive"))
+                    });
+                if thinking_toggleable {
+                    metadata.insert("kiro_thinking_toggleable".into(), serde_json::json!(true));
+                }
             }
-            if let Some(limits) = m.token_limits {
-                if let Some(n) = limits.max_input_tokens {
-                    metadata.insert("max_input_tokens".into(), n.into());
-                }
-                if let Some(n) = limits.max_output_tokens {
-                    metadata.insert("max_output_tokens".into(), n.into());
-                }
+            if let Some(context) = m
+                .token_limits
+                .and_then(|limits| limits.max_input_tokens)
+                .filter(|&n| n > 0)
+            {
+                metadata.insert("limit".into(), serde_json::json!({ "context": context }));
             }
             Ok(DiscoveredModel {
                 display_name: m
@@ -207,15 +216,44 @@ mod tests {
             page.models[0].metadata["kiro_effort_group"],
             "output_config"
         );
+        assert!(
+            !page.models[0]
+                .metadata
+                .contains_key("kiro_thinking_toggleable")
+        );
+    }
+
+    #[test]
+    fn detects_thinking_toggleable_schema_without_polluting_efforts() {
+        let page = decode(br#"{"models":[
+            {"modelId":"toggle-model","additionalModelRequestFieldsSchema":{"properties":{"thinking":{"properties":{"type":{"enum":["disabled","adaptive"],"default":"adaptive"}}}}}},
+            {"modelId":"partial-model","additionalModelRequestFieldsSchema":{"properties":{"thinking":{"properties":{"type":{"enum":["adaptive"]}}}}}}
+        ]}"#).unwrap();
+        assert_eq!(page.models[0].metadata["kiro_thinking_toggleable"], true);
+        assert!(!page.models[0].metadata.contains_key("reasoning_efforts"));
+        assert!(
+            !page.models[1]
+                .metadata
+                .contains_key("kiro_thinking_toggleable")
+        );
     }
 
     #[test]
     fn maps_account_inventory_without_substituting_a_model_or_dropping_the_cursor() {
-        let page = decode(br#"{"models":[{"modelId":"plan-model","tokenLimits":{"maxInputTokens":4096}}],"nextToken":"next/page"}"#).unwrap();
+        let page = decode(br#"{"models":[
+            {"modelId":"plan-model","tokenLimits":{"maxInputTokens":4096,"maxOutputTokens":64000}},
+            {"modelId":"zero-limit-model","tokenLimits":{"maxInputTokens":0,"maxOutputTokens":64000}}
+        ],"nextToken":"next/page"}"#).unwrap();
         assert_eq!(page.next_cursor.as_deref(), Some("next/page"));
         assert_eq!(page.models[0].id, "plan-model");
         assert_eq!(page.models[0].display_name, "plan-model");
-        assert_eq!(page.models[0].metadata["max_input_tokens"], 4096);
+        assert_eq!(
+            page.models[0].metadata["limit"],
+            serde_json::json!({"context": 4096})
+        );
+        assert!(!page.models[0].metadata.contains_key("max_input_tokens"));
+        assert!(!page.models[0].metadata.contains_key("max_output_tokens"));
+        assert!(!page.models[1].metadata.contains_key("limit"));
         assert!(decode(br#"{"error":"denied"}"#).is_err());
     }
 }

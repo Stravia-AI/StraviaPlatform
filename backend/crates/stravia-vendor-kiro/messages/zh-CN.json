@@ -11,5 +11,7 @@
   "start_url": "起始 URL（Start URL）",
   "start_url_description": "填写组织的 AWS 访问门户地址，例如 https://example.awsapps.com/start。",
   "region": "AWS 区域",
-  "region_description": "填写 IAM Identity Center 实例所在的区域代码，例如 us-east-1。"
+  "region_description": "填写 IAM Identity Center 实例所在的区域代码，例如 us-east-1。",
+  "system_prompt_user_injection": "通过用户消息注入系统提示词",
+  "system_prompt_user_injection_description": "默认按 Kiro CLI 3.4.0 Custom Agent 方式，将系统提示词作为首条用户消息并配对助手确认注入会话历史，不使用顶层 systemPrompt 字段。关闭后改为通过顶层 systemPrompt 字段发送。"
 }

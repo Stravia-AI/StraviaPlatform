@@ -10,13 +10,18 @@ fn invalid(message: &str) -> PluginError {
     common::plugin_error(ErrorKind::Invalid, message)
 }
 
-// Kiro's system-field injection path passes the initial instruction message
-// as systemPrompt, separately from conversation history.
+// Matches KAS 3.4.0 insertMsg0Separator (pV / IKe) in CustomAgentExecutionDefinition.
+const SYSTEM_PROMPT_ACK: &str = "I will follow these instructions.";
+
+// By default, injects leading instructions as history[0] (userInputMessage) +
+// history[1] (assistantResponseMessage) without using the top-level systemPrompt field,
+// matching Kiro CLI 3.4.0 Custom Agent behavior when system_field_injection is false.
 pub(super) fn encode(
     request: &AiRequest,
     model: &str,
     conversation_id: &str,
     model_metadata: Option<&stravia_vendor_sdk::ModelMetadata>,
+    inject_system_prompt_as_user: bool,
 ) -> Result<Value, PluginError> {
     if model.is_empty() || conversation_id.is_empty() {
         return Err(invalid("Kiro requires a model and conversation ID"));
@@ -262,12 +267,35 @@ pub(super) fn encode(
             if !turn.uses.is_empty() {
                 message.insert("toolUses".into(), Value::Array(turn.uses));
             }
+            if let Some(reasoning) = turn.reasoning {
+                message.insert("reasoningContent".into(), reasoning);
+            }
             let mut wrapper = Map::new();
             wrapper.insert("assistantResponseMessage".into(), Value::Object(message));
             messages.push(Value::Object(wrapper));
         }
     }
     let current = messages.pop().expect("nonempty turns");
+    let has_instructions = !instructions.trim().is_empty();
+    if inject_system_prompt_as_user && has_instructions {
+        messages.splice(
+            0..0,
+            [
+                json!({
+                    "userInputMessage": {
+                        "modelId": model,
+                        "origin": "KIRO_CLI",
+                        "content": instructions
+                    }
+                }),
+                json!({
+                    "assistantResponseMessage": {
+                        "content": SYSTEM_PROMPT_ACK
+                    }
+                }),
+            ],
+        );
+    }
     let mut state = json!({
         "chatTriggerType": "MANUAL",
         "conversationId": conversation_id,
@@ -279,59 +307,106 @@ pub(super) fn encode(
     let mut body = Map::new();
     body.insert("agentMode".into(), Value::String("vibe".into()));
     body.insert("conversationState".into(), state);
-    if let Some((group, effort)) = reasoning_effort(request, model_metadata)? {
-        body.insert(
-            "additionalModelRequestFields".into(),
-            json!({(group): {"effort": effort}}),
-        );
+    if let Some(fields) = additional_model_request_fields(request, model_metadata)? {
+        body.insert("additionalModelRequestFields".into(), fields);
     }
-    if !instructions.is_empty() {
+    if !inject_system_prompt_as_user && has_instructions {
         body.insert("systemPrompt".into(), Value::String(instructions));
     }
     Ok(Value::Object(body))
 }
 
-fn reasoning_effort<'a>(
-    request: &'a AiRequest,
-    metadata: Option<&'a stravia_vendor_sdk::ModelMetadata>,
-) -> Result<Option<(&'a str, &'a str)>, PluginError> {
-    use stravia_runtime_contract::thinking::TargetThinkingControl;
+fn additional_model_request_fields(
+    request: &AiRequest,
+    metadata: Option<&stravia_vendor_sdk::ModelMetadata>,
+) -> Result<Option<Value>, PluginError> {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
     let reasoning = &request.reasoning;
-    let effort = match &reasoning.target_control {
-        Some(TargetThinkingControl::Effort { value }) => Some(value.as_str()),
+    let mode_thinking = match reasoning.mode.as_deref() {
+        None => None,
+        Some("disabled") => Some("disabled"),
+        Some("adaptive" | "enabled") => Some("adaptive"),
+        Some(_) => {
+            return Err(invalid(
+                "Kiro does not support the requested thinking mode or budget",
+            ));
+        }
+    };
+    let (mut effort, thinking_type) = match &reasoning.target_control {
+        Some(TargetThinkingControl::Effort { value }) => (Some(value.as_str()), mode_thinking),
+        Some(TargetThinkingControl::Enabled) => (None, Some("adaptive")),
+        Some(TargetThinkingControl::Disabled) => (None, Some("disabled")),
         Some(_) => {
             return Err(invalid(
                 "Kiro does not support the requested thinking control",
             ));
         }
-        None if reasoning.mode.is_some() || reasoning.budget_tokens.is_some() => {
+        None if reasoning.budget_tokens.is_some() => {
             return Err(invalid(
                 "Kiro does not support the requested thinking mode or budget",
             ));
         }
-        None => reasoning.level.map(|level| level.as_str()),
+        None => match reasoning.level {
+            Some(ThinkingLevel::Off) => (None, Some(mode_thinking.unwrap_or("disabled"))),
+            Some(level) => (Some(level.as_str()), mode_thinking),
+            None => (None, mode_thinking),
+        },
     };
-    let Some(effort) = effort else {
+    if effort.is_none() && thinking_type.is_none() {
         return Ok(None);
-    };
+    }
     let extensions = &metadata
         .ok_or_else(|| invalid("Kiro reasoning requires model effort metadata"))?
         .extensions;
-    let group = extensions
-        .get("kiro_effort_group")
-        .and_then(Value::as_str)
-        .filter(|group| matches!(*group, "output_config" | "reasoning"))
-        .ok_or_else(|| invalid("Kiro reasoning requires a known model effort field"))?;
-    let supported = extensions
-        .get("reasoning_efforts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("Kiro reasoning requires declared model effort levels"))?;
-    if !supported.iter().any(|value| value.as_str() == Some(effort)) {
-        return Err(invalid(
-            "Kiro model does not declare the requested reasoning effort",
-        ));
+    let mut fields = Map::new();
+    if let Some(requested_effort) = effort.take() {
+        let group = extensions
+            .get("kiro_effort_group")
+            .and_then(Value::as_str)
+            .filter(|group| matches!(*group, "output_config" | "reasoning"))
+            .ok_or_else(|| invalid("Kiro reasoning requires a known model effort field"))?;
+        let supported = extensions
+            .get("reasoning_efforts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("Kiro reasoning requires declared model effort levels"))?;
+        if !supported
+            .iter()
+            .any(|value| value.as_str() == Some(requested_effort))
+        {
+            return Err(invalid(
+                "Kiro model does not declare the requested reasoning effort",
+            ));
+        }
+        // Match KAS 3.4.0 R4t/cme: when thinking is disabled, cap xhigh/max to the
+        // highest non-capped declared effort level (or omit if none exists).
+        let applied =
+            if thinking_type == Some("disabled") && matches!(requested_effort, "xhigh" | "max") {
+                supported
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .rfind(|v| !matches!(*v, "xhigh" | "max"))
+            } else {
+                Some(requested_effort)
+            };
+        if let Some(applied) = applied {
+            fields.insert(group.into(), json!({"effort": applied}));
+        }
     }
-    Ok(Some((group, effort)))
+    if let Some(thinking_type) = thinking_type {
+        if extensions
+            .get("kiro_thinking_toggleable")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            return Err(invalid("Kiro model does not support thinking toggle"));
+        }
+        fields.insert("thinking".into(), json!({"type": thinking_type}));
+    }
+    if fields.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Value::Object(fields)))
+    }
 }
 
 fn tool_ids(entries: &[Value]) -> Option<std::collections::HashSet<&str>> {
@@ -353,6 +428,7 @@ struct Turn {
     documents: Vec<Value>,
     uses: Vec<Value>,
     results: Vec<Value>,
+    reasoning: Option<Value>,
 }
 
 fn user_turn(turns: &mut Vec<Turn>) -> &mut Turn {
@@ -585,6 +661,25 @@ fn append_assistant_content(turn: &mut Turn, content: &MessageContent) -> Result
                         text,
                         cache_control: None,
                     } if turn.uses.is_empty() || text.is_empty() => turn.text.push_str(text),
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        // Match KAS 3.4.0 n0l: replay signed reasoning; drop unsigned reasoning.
+                        if !thinking.is_empty()
+                            && let Some(sig) = signature.as_deref().filter(|s| !s.is_empty())
+                            && turn.reasoning.is_none()
+                        {
+                            turn.reasoning = Some(json!({
+                                "reasoningText": { "text": thinking, "signature": sig }
+                            }));
+                        }
+                    }
+                    ContentBlock::RedactedThinking { data } => {
+                        if !data.is_empty() {
+                            turn.reasoning = Some(json!({ "redactedContent": data }));
+                        }
+                    }
                     ContentBlock::ToolUse {
                         id,
                         name,
@@ -607,7 +702,7 @@ mod tests {
     use serde_json::json;
 
     fn encode(request: &AiRequest, model: &str, id: &str) -> Result<Value, PluginError> {
-        super::encode(request, model, id, None)
+        super::encode(request, model, id, None, true)
     }
 
     fn request(items: Value) -> AiRequest {
@@ -624,16 +719,32 @@ mod tests {
         ]));
         req.instructions = Some("Instruction".into());
         let body = encode(&req, "qwen3-coder-next", "scoped-id").unwrap();
-        assert_eq!(body["systemPrompt"], "Instruction\n\nSystem");
+        assert!(body.get("systemPrompt").is_none());
         let state = &body["conversationState"];
-        assert_eq!(state["history"][0]["userInputMessage"]["content"], "Hello");
+        assert_eq!(
+            state["history"][0]["userInputMessage"]["content"],
+            "Instruction\n\nSystem"
+        );
+        assert_eq!(
+            state["history"][0]["userInputMessage"]["modelId"],
+            "qwen3-coder-next"
+        );
         assert_eq!(
             state["history"][0]["userInputMessage"]["origin"],
             "KIRO_CLI"
         );
-        assert_eq!(state["agentTaskType"], "vibe");
         assert_eq!(
             state["history"][1]["assistantResponseMessage"]["content"],
+            "I will follow these instructions."
+        );
+        assert_eq!(state["history"][2]["userInputMessage"]["content"], "Hello");
+        assert_eq!(
+            state["history"][2]["userInputMessage"]["origin"],
+            "KIRO_CLI"
+        );
+        assert_eq!(state["agentTaskType"], "vibe");
+        assert_eq!(
+            state["history"][3]["assistantResponseMessage"]["content"],
             "Hi"
         );
         assert_eq!(
@@ -642,6 +753,14 @@ mod tests {
         );
         assert_eq!(state["conversationId"], "scoped-id");
         assert_eq!(state["rootConversationId"], "scoped-id");
+
+        // When user injection is disabled, instructions stay in top-level systemPrompt.
+        let legacy = super::encode(&req, "qwen3-coder-next", "scoped-id", None, false).unwrap();
+        assert_eq!(legacy["systemPrompt"], "Instruction\n\nSystem");
+        assert_eq!(
+            legacy["conversationState"]["history"][0]["userInputMessage"]["content"],
+            "Hello"
+        );
     }
 
     #[test]
@@ -787,28 +906,107 @@ mod tests {
         for group in ["output_config", "reasoning"] {
             meta.extensions
                 .insert("kiro_effort_group".into(), json!(group));
-            let body = super::encode(&req, "model", "id", Some(&meta)).unwrap();
+            let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
             assert_eq!(body["additionalModelRequestFields"][group]["effort"], "low");
             req.reasoning.target_control = Some(TargetThinkingControl::Effort {
                 value: "high".into(),
             });
-            let body = super::encode(&req, "model", "id", Some(&meta)).unwrap();
+            let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
             assert_eq!(
                 body["additionalModelRequestFields"][group]["effort"],
                 "high"
             );
             req.reasoning.target_control = None;
         }
-        assert!(super::encode(&req, "model", "id", None).is_err());
+        assert!(super::encode(&req, "model", "id", None, true).is_err());
         meta.extensions
             .insert("kiro_effort_group".into(), json!("thinking"));
-        assert!(super::encode(&req, "model", "id", Some(&meta)).is_err());
+        assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
         meta.extensions
             .insert("kiro_effort_group".into(), json!("reasoning"));
         req.reasoning.level = Some(ThinkingLevel::Medium);
-        assert!(super::encode(&req, "model", "id", Some(&meta)).is_err());
+        assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
         req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
-        assert!(super::encode(&req, "model", "id", Some(&meta)).is_err());
+        assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
+    }
+
+    #[test]
+    fn maps_thinking_toggle_and_caps_effort_when_disabled() {
+        use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+        let mut req = request(json!([{"role":"user","content":"hello"}]));
+        let mut meta = stravia_vendor_sdk::ModelMetadata::default();
+        meta.extensions
+            .insert("kiro_effort_group".into(), json!("output_config"));
+        meta.extensions.insert(
+            "reasoning_efforts".into(),
+            json!(["low", "medium", "high", "max"]),
+        );
+        meta.extensions
+            .insert("kiro_thinking_toggleable".into(), json!(true));
+
+        req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"thinking": {"type": "adaptive"}})
+        );
+
+        req.reasoning.target_control = Some(TargetThinkingControl::Disabled);
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"thinking": {"type": "disabled"}})
+        );
+
+        // When thinking is disabled with max effort, KAS 3.4.0 cme caps to highest non-capped level (high).
+        req.reasoning.target_control = None;
+        req.reasoning.mode = Some("disabled".into());
+        req.reasoning.level = Some(ThinkingLevel::Max);
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({
+                "output_config": {"effort": "high"},
+                "thinking": {"type": "disabled"}
+            })
+        );
+    }
+
+    #[test]
+    fn replays_signed_and_redacted_assistant_reasoning_and_drops_unsigned() {
+        let req = request(json!([
+            {"role":"user","content":"q1"},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"step 1","signature":"sig-1"},
+                {"type":"text","text":"a1"}
+            ]},
+            {"role":"user","content":"q2"},
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"unsigned step"},
+                {"type":"text","text":"a2"}
+            ]},
+            {"role":"user","content":"q3"},
+            {"role":"assistant","content":[
+                {"type":"redacted_thinking","data":"c2VjcmV0"},
+                {"type":"text","text":"a3"}
+            ]},
+            {"role":"user","content":"q4"}
+        ]));
+        let body = encode(&req, "model", "id").unwrap();
+        let history = body["conversationState"]["history"].as_array().unwrap();
+        assert_eq!(
+            history[1]["assistantResponseMessage"]["reasoningContent"],
+            json!({"reasoningText": {"text": "step 1", "signature": "sig-1"}})
+        );
+        assert!(
+            history[3]["assistantResponseMessage"]
+                .get("reasoningContent")
+                .is_none()
+        );
+        assert_eq!(
+            history[5]["assistantResponseMessage"]["reasoningContent"],
+            json!({"redactedContent": "c2VjcmV0"})
+        );
     }
 
     #[test]
