@@ -256,6 +256,14 @@ Antigravity 由专属 `antigravity` 插件提供，不内嵌、不复用普通 G
 2. 保存连接并同步账号模型。项目异步接入未完成时，保留凭据与 operation，后续真实发现请求检查一次进度并明确报告 pending；不猜 project/tier 或自动重试。
 3. 将发现的模型绑定到 Route。额度页读取账号共享池、剩余比例和重置时间；缺失额度不显示为零，未知窗口保留，disabled 不自动等于 exhausted。
 
+**Antigravity 系统提示词前缀**（配置键 `system_prompt_prefix`）默认开启，已有连接未保存该选项时也按开启处理。它适用于所有经插件发出的推理请求，不按客户端、模型或入口协议筛选，不影响生图、搜索、模型同步和额度查询。首个系统 part 逐字节保留 agy 1.5.11 开头的 296 字节（原生 `<identity>` 块与尾随换行）。
+
+有顶层指令时，在前缀后追加引导语，并将顶层指令移到合成首条 user 消息，后接合成 model 确认。引导语明确：该合成消息与前面的 Antigravity 身份前缀冲突时，以合成消息为准；其他 system/developer 约束仍有效，后续真实 user 消息仅作为任务。Responses `instructions`、Anthropic `system` 和 Gemini `systemInstruction` 都经此路径。Gemini 原生多 part 在仍匹配有效指令时保持分段；已替换或清除的旧快照不参与重排。没有顶层指令时只加前缀，不插入合成消息，也不把第一条真实 user 消息当作指令。独立 system/developer 消息仍进入系统区；实际历史、工具、会话身份与本地持久化内容不变。
+
+关闭该选项时不添加前缀、不插入合成历史，顶层指令留在系统区。无论开关状态，插件均不再删除 RFC 2119 片段或改写 OMP 关键句。若 Request Hook 把必须留在系统区的约束合并进顶层指令，应关闭选项，或把约束作为独立 developer 消息传入。前缀对齐不等于原生全文对齐、不提升普通用户消息的权限，也不保证消除 HTTP 429。重新构建并导入独立插件即可，不需要数据库迁移。见[抓样与实验记录](../research/antigravity-cli-system-prompt.md)。
+
+若连接曾用旧实验版保存 `omp_prompt_prefix`，重新配置时须在 `vendor_options` 中用 `system_prompt_prefix` 替换它；新版不识别旧键，也不迁移旧值。
+
 额度页为 Claude/GPT 与 Gemini 模型组的已知五小时、每周标签提供中英文显示，以及已知标签的 disabled 提示。翻译只在既有展示层识别明确标签，不检测 Vendor 身份、不改持久化 bucket/guard key；未知名称与窗口完整保留上游原文。
 
 推理清单只采用 `agentModelSorts[].groups[].modelIds` 引用的 Agent 选项，不把完整 `models` 目录或搜索等其他用途清单当作可推理模型。解析真实 `deprecatedModelIds` 重定向并排除 disabled 后，按官方显示 slug 的家族与明确档位合并：例如 Gemini 3.1 Pro 登记为 `gemini-3.1-pro`，支持 `low`、`high`，默认实际 selector 为 `gemini-pro-agent`。同名或同 enum 不构成合并依据，Thinking 标签不自动生成离散档位。筛选和映射证据见 [模型映射调研](../research/antigravity-model-mapping.md)。
@@ -272,9 +280,7 @@ Google grounding 跳转来源由宿主安全解析，普通来源不额外请求
 
 推理未指定输出上限时发送 `generationConfig.maxOutputTokens: 65536`，显式上限保持优先。目录的数值 `thinkingLevel` 在最终 wire 投影为 CLI 枚举名：`0`–`6` 分别为 `UNSPECIFIED`、`LOW`、`MEDIUM`、`HIGH`、`MINIMAL`、`EXTRA_HIGH`、`MAX`；只改变表示，不改变已选档位。显式扩展档位不再被公开 Gemini codec 折叠为 HIGH；预算路径及 `includeThoughts` 语义不变，非法目录档位仍在发送前失败。
 
-插件在最终出站 `systemInstruction.parts[].text` 中删除完整匹配的 `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`，包括同一段或多段中的重复出现。真实调用确认该片段与 `requestType: agent` 的组合可触发上游 `429 RESOURCE_EXHAUSTED`；此兼容处理保留 `requestType`，不改写其余 system 文本、普通消息、工具业务数据或权威历史，也不匹配大小写、空白或措辞不同的声明。仅因删除该片段而变为空白的 text 字段会被移除；不再含任何字段的 part 和因此清空的 systemInstruction 一并省略。该行为属于独立插件，须重建并重新导入后生效。
-
-同一出站系统文本边界还对四个经单变量实验确认的 OMP 18.22.1 完整句子做等义改写：OMP 身份句、向 `xd://<tool>` 写入 JSON 的说明、首次读取工具文档的说明、使用 eval `commit` 命名空间的提交说明。只匹配固定完整文本；保留身份含义、JSON 字段名、URI、代码示例和禁止手工 `git add`/`git commit` 的约束，不删除这些指令、不改普通消息/工具定义/权威历史，也不改变 Stravia 脱敏标记。不存在匹配时不分配新字符串；重复匹配逐个处理。U+200B 与 U+034F 的实测最小案例仍被拒绝，因此不采用不可见字符插入。精确匹配与验证证据见[模型映射调研第 12 节](../research/antigravity-model-mapping.md#12-1511-身份与-stravia-labels-投影2026-11-19)。这是已证实内容触发的兼容处理，不能把所有 429 归为提示词问题；未知内容规则、真实限流和账号限制仍可能存在。
+历史 RFC 片段与 OMP 四句改写实验见[模型映射调研第 11–12 节](../research/antigravity-model-mapping.md#11-agy-1511mcp-工具分组labels-和历史提示词对照)。当前插件不再采用这些内容替换；不能把所有 429 归为提示词问题，未知内容规则、真实限流和账号限制仍可能存在。
 
 Antigravity 推理把每个已声明的函数作为单独的 `tools[]` 项，每项只有一个 `functionDeclarations` 元素。多个 MCP 函数不按 server 合并；声明顺序、schema 和具名 `tool_choice` 保持不变，`googleSearch` 等原生工具不复制。这是本插件的出站约定，不改变公共 Gemini codec，也不为下游注入 CLI 的 lazy 工具。实测见[模型映射调研第 11 节](../research/antigravity-model-mapping.md#11-agy-1511mcp-工具分组labels-和历史提示词对照)。
 

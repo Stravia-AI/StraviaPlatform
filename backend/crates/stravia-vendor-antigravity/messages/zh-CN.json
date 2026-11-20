@@ -1,6 +1,8 @@
 {
   "channel_oauth": "Antigravity OAuth",
   "channel_description": "使用 Antigravity 订阅模型、网页搜索与账户额度监控。",
+  "system_prompt_prefix": "Antigravity 系统提示词前缀",
+  "system_prompt_prefix_description": "所有推理客户端的请求默认使用 agy 1.5.11 原生前缀。开启时会重排顶层指令，但独立的 system 和 developer 消息仍留在系统区。关闭时不添加前缀，顶层指令按原顺序留在系统区。使用前缀后仍可能出现 HTTP 429 错误。",
   "authorization_code": "授权码",
   "authorization_description": "通过 Google 登录后，粘贴 Antigravity 回调页面显示的授权码。第三方 OAuth 接入可能违反 Google 条款并导致账号暂停。"
 }
