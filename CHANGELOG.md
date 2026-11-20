@@ -5,7 +5,7 @@
 ### Changed
 
 - The desktop Models table shows each model's purpose in a separate column instead of below its display name.
-
+- Antigravity now uses the first 296 bytes of the agy 1.5.11 system prompt for all inference clients by default. Top-level instructions move into synthetic history and take precedence over conflicting native identity text; separate system and developer messages stay in force. Requests without top-level instructions get only the prefix. Turn `system_prompt_prefix` off to keep top-level instructions in the system prompt without a prefix or synthetic history. RFC 2119 and OMP prompt text is no longer removed or rewritten with either setting. Rebuild and re-import the standalone plugin to upgrade. This is not a guarantee against HTTP 429.
 - Nix builds cache compiled Rust dependencies for the Server and bundled Wasm vendors separately from application sources. Source-only updates can reuse the cache; a persistent result link keeps it across Nix garbage collection.
 
 ## [0.7.3] - 2026-11-19

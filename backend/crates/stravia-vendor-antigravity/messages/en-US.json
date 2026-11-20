@@ -1,6 +1,8 @@
 {
   "channel_oauth": "Antigravity OAuth",
   "channel_description": "Use Antigravity subscription models, web search, and account quota monitoring.",
+  "system_prompt_prefix": "Antigravity system prompt prefix",
+  "system_prompt_prefix_description": "By default, requests from all inference clients use the native agy 1.5.11 prefix. Top-level instructions are rearranged, but standalone system and developer messages stay in the system section. With this setting off, no prefix is added, and top-level instructions stay in the system section in their original order. HTTP 429 errors can still occur with the prefix.",
   "authorization_code": "Authorization code",
   "authorization_description": "Sign in through Google, then paste the code displayed by the Antigravity callback page. Third-party OAuth access may violate Google's terms and lead to account suspension."
 }

@@ -3,7 +3,8 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use stravia_runtime_contract::protocol::ir::{
-    AiError, AiErrorKind, AiStreamDelta, ToolCall, Usage,
+    AiError, AiErrorKind, AiItem, AiStreamDelta, ContentBlock, MessageContent, Role, ToolCall,
+    Usage,
 };
 use stravia_vendor_common::common;
 use stravia_vendor_sdk::{ErrorKind, PluginError};
@@ -252,6 +253,22 @@ impl KiroStream {
                     && !signature.is_empty()
                 {
                     emit(AiStreamDelta::ThinkingSignature(signature.to_owned()))?;
+                }
+                if let Some(redacted) = optional_string(&payload, "redactedContent")?
+                    && !redacted.is_empty()
+                {
+                    emit(AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: AiItem {
+                            role: Role::Assistant,
+                            content: MessageContent::Blocks(vec![ContentBlock::RedactedThinking {
+                                data: redacted.to_owned(),
+                            }]),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            meta: None,
+                        },
+                    })?;
                 }
             }
             "toolUseEvent" => self.tool_event(&payload, emit)?,
@@ -659,5 +676,48 @@ mod tests {
         assert!(
             matches!(&deltas[..], [AiStreamDelta::StreamError { error }] if error.kind == AiErrorKind::RateLimitError)
         );
+    }
+
+    #[test]
+    fn decodes_redacted_reasoning_content_event() {
+        let mut wire = frame(
+            "event",
+            "reasoningContentEvent",
+            json!({"redactedContent": "c2VjcmV0"}),
+        );
+        wire.extend(frame(
+            "event",
+            "metadataEvent",
+            json!({"stopReason": "END_TURN"}),
+        ));
+        let mut decoder = KiroStream::new();
+        let mut deltas = Vec::new();
+        decoder
+            .feed(&wire, &mut |d| {
+                deltas.push(d);
+                Ok(())
+            })
+            .unwrap();
+        decoder
+            .finish(&mut |d| {
+                deltas.push(d);
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            &deltas[..],
+            [
+                AiStreamDelta::ItemDone {
+                    item: AiItem {
+                        role: Role::Assistant,
+                        content: MessageContent::Blocks(blocks),
+                        ..
+                    },
+                    ..
+                },
+                AiStreamDelta::Done { stop_reason }
+            ] if matches!(blocks.as_slice(), [ContentBlock::RedactedThinking { data }] if data == "c2VjcmV0")
+                && stop_reason == "stop"
+        ));
     }
 }

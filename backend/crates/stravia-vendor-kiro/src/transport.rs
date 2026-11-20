@@ -6,7 +6,12 @@ use stravia_vendor_sdk::{
 };
 use uuid::Uuid;
 
-use crate::{DEFAULT_BASE_URL, IDENTITY_CENTER_CHANNEL};
+use crate::{BUILDER_ID_CHANNEL, DEFAULT_BASE_URL, IDENTITY_CENTER_CHANNEL};
+
+pub(crate) const CLI_EGRESS_SHAPE: &str = "plugin:kiro-cli-3-4-0";
+pub(crate) const SDK_X_AMZ_USER_AGENT: &str =
+    "aws-sdk-js/1.0.0 KiroCLI/3.4.0 KAS/0.66.111 os/linux app/AmazonQ-For-CLI acp-client/kiro-cli";
+pub(crate) const SDK_USER_AGENT: &str = "aws-sdk-js/1.0.0 lang/js m/N KiroCLI/3.4.0 KAS/0.66.111 os/linux app/AmazonQ-For-CLI acp-client/kiro-cli";
 
 #[derive(Clone, Copy)]
 pub(super) enum Action {
@@ -47,7 +52,10 @@ pub(super) fn rpc(
     // Node 的 HTTP/1 sender 在固定位置填写长度和 authority。值由宿主根据最终请求填写。
     headers.append("content-length", "");
     let inference = matches!(action, Action::Generate);
-    if provider.channel == IDENTITY_CENTER_CHANNEL {
+    if matches!(
+        provider.channel.as_str(),
+        BUILDER_ID_CHANNEL | IDENTITY_CENTER_CHANNEL
+    ) {
         headers.append("TokenType", "SSO_OIDC");
     }
     if inference {
@@ -55,16 +63,8 @@ pub(super) fn rpc(
         headers.append("x-amzn-kiro-mode-identifier", "vibe");
         headers.append("x-amzn-kiro-fallback", "0;max=0");
     }
-    macro_rules! sdk_ua {
-        ($prefix:literal) => {
-            concat!(
-                $prefix,
-                "KiroCLI/3.4.0 KAS/0.66.111 os/linux app/AmazonQ-For-CLI acp-client/kiro-cli"
-            )
-        };
-    }
-    headers.append("x-amz-user-agent", sdk_ua!("aws-sdk-js/1.0.0 "));
-    headers.append("user-agent", sdk_ua!("aws-sdk-js/1.0.0 lang/js m/N "));
+    headers.append("x-amz-user-agent", SDK_X_AMZ_USER_AGENT);
+    headers.append("user-agent", SDK_USER_AGENT);
     headers.append("host", "");
     headers.append("amz-sdk-invocation-id", Uuid::new_v4().to_string());
     headers.append("amz-sdk-request", "attempt=1; max=3");
@@ -134,7 +134,7 @@ pub(super) fn profile_origins(profile: &str) -> Result<(&'static str, &'static s
 pub(super) fn send(host: &GuestHost, request: Request) -> Result<HttpResponse, PluginError> {
     let mut options = Options::new();
     options
-        .shape("plugin:kiro-cli-3-4-0")
+        .shape(CLI_EGRESS_SHAPE)
         .expect("valid Kiro CLI egress shape selector");
     let response = host.http_start(request, &options)?;
     let status = response.status()?;
@@ -210,28 +210,30 @@ mod tests {
     }
 
     #[test]
-    fn identity_center_uses_sso_token_type_and_never_accepts_api_keys() {
-        let mut provider = provider(IDENTITY_CENTER_CHANNEL);
-        provider
-            .credentials
-            .insert("apiKey".into(), json!("api-key"));
-        assert!(rpc(&provider, Action::Generate, &json!({})).is_err());
-        provider
-            .credentials
-            .insert("access_token".into(), json!("oauth-token"));
-        provider.credentials.insert(
-            "profileArn".into(),
-            json!("arn:aws:codewhisperer:us-east-1:123456789012:profile/test"),
-        );
-        let request = rpc(&provider, Action::Generate, &json!({})).unwrap();
-        assert_eq!(
-            request.headers.get("TokenType"),
-            Some(b"SSO_OIDC".as_slice())
-        );
-        assert_eq!(
-            request.headers.get("Authorization"),
-            Some(b"Bearer oauth-token".as_slice())
-        );
+    fn identity_center_and_builder_id_use_sso_token_type_and_never_accept_api_keys() {
+        for channel in [BUILDER_ID_CHANNEL, IDENTITY_CENTER_CHANNEL] {
+            let mut provider = provider(channel);
+            provider
+                .credentials
+                .insert("apiKey".into(), json!("api-key"));
+            assert!(rpc(&provider, Action::Generate, &json!({})).is_err());
+            provider
+                .credentials
+                .insert("access_token".into(), json!("oauth-token"));
+            provider.credentials.insert(
+                "profileArn".into(),
+                json!("arn:aws:codewhisperer:us-east-1:123456789012:profile/test"),
+            );
+            let request = rpc(&provider, Action::Generate, &json!({})).unwrap();
+            assert_eq!(
+                request.headers.get("TokenType"),
+                Some(b"SSO_OIDC".as_slice())
+            );
+            assert_eq!(
+                request.headers.get("Authorization"),
+                Some(b"Bearer oauth-token".as_slice())
+            );
+        }
     }
 
     #[test]
