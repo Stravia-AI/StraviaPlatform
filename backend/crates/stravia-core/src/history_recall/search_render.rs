@@ -163,7 +163,7 @@ impl Recall<'_> {
     /// 工具文件只为入选的命中读取。
     pub(super) async fn render_hits<'s>(
         &self,
-        interaction: &RecallInteraction,
+        interaction: &RecallInteraction<'_>,
         segments: &'s [SearchSegment],
         query: &ParsedQuery,
     ) -> Result<Vec<(&'s SearchSegment, RenderedHit)>, PlatformToolError> {
@@ -172,12 +172,16 @@ impl Recall<'_> {
         if remaining == 0 {
             return Ok(Vec::new());
         }
-        let base = format!("{HISTORY_ROOT}{}/{}", interaction.root_id, interaction.id);
+        let base = format!(
+            "{HISTORY_ROOT}{}/{}",
+            interaction.root_id(),
+            interaction.id()
+        );
         // 转录摘要只能在遍历到对应事件时生成，按位置缓存；工具文件在选定后再读取。
         let mut transcript_hits: HashMap<HitSpot, RenderedHit> = HashMap::new();
         let transcript = Transcript::new(interaction, &self.secrets);
         let mut walker = self
-            .walker(transcript, &interaction.id, &ChunkMark::header())
+            .walker(transcript, interaction, &ChunkMark::header())
             .await?;
         while let Some(mut chunk) = walker.next().await? {
             let Some(event) = chunk.event.take() else {
@@ -235,9 +239,8 @@ impl Recall<'_> {
                     let lines = match tool_files.entry(number) {
                         Entry::Occupied(entry) => entry.into_mut(),
                         Entry::Vacant(entry) => {
-                            let tool = self
-                                .observation
-                                .recall_tool(&interaction.id, number)
+                            let tool = interaction
+                                .tool(number)
                                 .await
                                 .map_err(storage)?
                                 .ok_or_else(changed_during_search)?;

@@ -431,12 +431,12 @@ impl TranscriptState {
 
 #[derive(Clone, Copy)]
 pub(super) struct Transcript<'a> {
-    interaction: &'a RecallInteraction,
+    interaction: &'a RecallInteraction<'a>,
     secrets: &'a KnownSecrets,
 }
 
 impl<'a> Transcript<'a> {
-    pub(super) fn new(interaction: &'a RecallInteraction, secrets: &'a KnownSecrets) -> Self {
+    pub(super) fn new(interaction: &'a RecallInteraction<'a>, secrets: &'a KnownSecrets) -> Self {
         Self {
             interaction,
             secrets,
@@ -446,25 +446,26 @@ impl<'a> Transcript<'a> {
     fn address(&self) -> String {
         format!(
             "{HISTORY_ROOT}{}/{}",
-            self.interaction.root_id, self.interaction.id
+            self.interaction.root_id(),
+            self.interaction.id()
         )
     }
 
     /// 父 Interaction 被清理后 `parent` 行写 `none`，行数不变。
     pub(super) fn header(&self) -> Vec<String> {
         let interaction = self.interaction;
-        let parent = interaction.parent_id.as_deref().map_or_else(
+        let parent = interaction.parent_id().map_or_else(
             || "none".to_owned(),
-            |parent| format!("{HISTORY_ROOT}{}/{parent}", interaction.root_id),
+            |parent| format!("{HISTORY_ROOT}{}/{parent}", interaction.root_id()),
         );
         vec![
-            format!("# Interaction {}", interaction.id),
-            format!("- chain: {HISTORY_ROOT}{}/", interaction.root_id),
+            format!("# Interaction {}", interaction.id()),
+            format!("- chain: {HISTORY_ROOT}{}/", interaction.root_id()),
             format!("- parent: {parent}"),
             format!(
                 "- started: {} · protocol: {}",
-                timestamp(interaction.started_at),
-                single_line(&interaction.protocol),
+                timestamp(interaction.started_at()),
+                single_line(interaction.protocol()),
             ),
             String::new(),
         ]
@@ -580,7 +581,7 @@ impl<'a> Transcript<'a> {
         if let Some(run_id) = event.run_id.as_deref()
             && state.run.as_deref() != Some(run_id)
         {
-            let run = self.interaction.runs.get(run_id);
+            let run = self.interaction.runs().get(run_id);
             lines.push(format!(
                 "--- run · {} · {}",
                 single_line(model_name(run.and_then(|run| run.model.as_deref()))),
@@ -622,7 +623,7 @@ pub(super) const TOOL_FILE_HEADER_LINES: u64 = 5;
 
 /// 工具文件：头部、完整参数，再按出现顺序追加每个结果段。
 pub(super) fn tool_file(
-    interaction: &RecallInteraction,
+    interaction: &RecallInteraction<'_>,
     index: u32,
     tool: &RecallTool,
     secrets: &KnownSecrets,
@@ -640,7 +641,8 @@ pub(super) fn tool_file(
         format!("# Tool call {index} · {} · {side}", single_line(&name)),
         format!(
             "- interaction: {HISTORY_ROOT}{}/{}",
-            interaction.root_id, interaction.id
+            interaction.root_id(),
+            interaction.id()
         ),
         format!("- started: {}", timestamp(call.occurred_at)),
         String::new(),

@@ -19,7 +19,9 @@ use stravia_credential_protection::KnownSecrets;
 use stravia_runtime_contract::{Principal, hook::PlatformToolError};
 use stravia_web_access_contract::read_path::{HISTORY_ROOT, HistoryNode, HistoryPath};
 
-use crate::interaction_observation::{InteractionObservation, ObservationEvent, RecallInteraction};
+use crate::interaction_observation::{
+    InteractionObservation, ObservationEvent, RecallInteraction, RecallScope,
+};
 use page::{ChunkMark, FileCursor, Offer, Page, Position, invalid_cursor, outside, stale_cursor};
 use render::{Transcript, TranscriptState};
 
@@ -101,6 +103,7 @@ struct Recall<'a> {
 
 impl Recall<'_> {
     async fn read(&self, principal: &str, path: &HistoryPath) -> Result<Value, PlatformToolError> {
+        let scope = self.observation.recall(principal, self.active_since);
         let address = path.node.address();
         let search_cursor = match &path.cursor {
             Some(encoded) => {
@@ -118,16 +121,18 @@ impl Recall<'_> {
             None => None,
         };
         if path.question.is_some() || search_cursor.is_some() {
-            return self.search(principal, &address, path, search_cursor).await;
+            return self
+                .search(scope, principal, &address, path, search_cursor)
+                .await;
         }
         match &path.node {
-            HistoryNode::Root => self.root(principal, &address, path).await,
-            HistoryNode::Chain { root_id } => self.chain(principal, &address, path, root_id).await,
+            HistoryNode::Root => self.root(scope, &address, path).await,
+            HistoryNode::Chain { root_id } => self.chain(scope, &address, path, root_id).await,
             HistoryNode::Transcript {
                 root_id,
                 interaction_id,
             } => {
-                let interaction = self.interaction(principal, root_id, interaction_id).await?;
+                let interaction = self.interaction(scope, root_id, interaction_id).await?;
                 self.transcript(&address, path, &interaction).await
             }
             HistoryNode::Tool {
@@ -135,7 +140,7 @@ impl Recall<'_> {
                 interaction_id,
                 index,
             } => {
-                let interaction = self.interaction(principal, root_id, interaction_id).await?;
+                let interaction = self.interaction(scope, root_id, interaction_id).await?;
                 self.tool(&address, path, &interaction, *index).await
             }
         }
@@ -143,17 +148,18 @@ impl Recall<'_> {
 
     async fn search(
         &self,
+        scope: RecallScope<'_>,
         principal: &str,
         address: &str,
         path: &HistoryPath,
         cursor: Option<SearchPageCursor>,
     ) -> Result<Value, PlatformToolError> {
         use search_store::SearchScope;
-        let scope = match &path.node {
+        let search_scope = match &path.node {
             HistoryNode::Root => SearchScope::Root,
             HistoryNode::Chain { root_id } => {
-                self.observation
-                    .recall_members(principal, root_id, self.active_since, None, 1)
+                scope
+                    .members(root_id, None, 1)
                     .await
                     .map_err(storage)?
                     .ok_or_else(unavailable)?;
@@ -163,7 +169,7 @@ impl Recall<'_> {
                 root_id,
                 interaction_id,
             } => {
-                self.interaction(principal, root_id, interaction_id).await?;
+                self.interaction(scope, root_id, interaction_id).await?;
                 SearchScope::Interaction(root_id, interaction_id)
             }
             HistoryNode::Tool { .. } => return Err(invalid_cursor()),
@@ -192,7 +198,7 @@ impl Recall<'_> {
             self.observation,
             principal,
             self.active_since,
-            scope,
+            search_scope,
             &query,
             after,
             &excluded,
@@ -248,19 +254,14 @@ impl Recall<'_> {
             .iter()
             .map(|hit| hit.id.clone())
             .collect::<Vec<_>>();
-        let previews = self
-            .observation
-            .recall_previews(principal, &ids)
-            .await
-            .map_err(storage)?;
+        let previews = scope.previews(&ids).await.map_err(storage)?;
         let mut oversized_line = false;
         let mut removed = false;
         let mut number = 0;
         for hit in &results.interactions {
             // 检索之后该轮可能被清除历史或移出保留期；跳过并在 limitations 说明，整页不因此失败。
-            let Some(interaction) = self
-                .observation
-                .recall_interaction(principal, &hit.root_id, &hit.id, self.active_since)
+            let Some(interaction) = scope
+                .interaction(&hit.root_id, &hit.id)
                 .await
                 .map_err(storage)?
             else {
@@ -272,7 +273,7 @@ impl Recall<'_> {
             let preview = render::preview(previews.get(&hit.id).map(String::as_str), &self.secrets);
             content.push_str(&format!(
                 "{number}. {transcript} · {} · {preview}\n",
-                render::timestamp(interaction.started_at)
+                render::timestamp(interaction.started_at())
             ));
             let rendered = self
                 .render_hits(&interaction, &hit.segments, &query)
@@ -324,14 +325,14 @@ impl Recall<'_> {
         Ok(output)
     }
 
-    async fn interaction(
+    async fn interaction<'s>(
         &self,
-        principal: &str,
+        scope: RecallScope<'s>,
         root_id: &str,
         interaction_id: &str,
-    ) -> Result<RecallInteraction, PlatformToolError> {
-        self.observation
-            .recall_interaction(principal, root_id, interaction_id, self.active_since)
+    ) -> Result<RecallInteraction<'s>, PlatformToolError> {
+        scope
+            .interaction(root_id, interaction_id)
             .await
             .map_err(storage)?
             .ok_or_else(unavailable)
@@ -368,14 +369,13 @@ impl Recall<'_> {
 
     async fn root(
         &self,
-        principal: &str,
+        scope: RecallScope<'_>,
         address: &str,
         path: &HistoryPath,
     ) -> Result<Value, PlatformToolError> {
         let after = Self::directory_after(address, path)?;
-        let listing = self
-            .observation
-            .recall_chains(principal, self.active_since, after.as_ref(), CHAIN_PAGE)
+        let listing = scope
+            .chains(after.as_ref(), CHAIN_PAGE)
             .await
             .map_err(storage)?;
         let heads: Vec<String> = listing
@@ -383,11 +383,7 @@ impl Recall<'_> {
             .iter()
             .map(|chain| chain.head_id.clone())
             .collect();
-        let previews = self
-            .observation
-            .recall_previews(principal, &heads)
-            .await
-            .map_err(storage)?;
+        let previews = scope.previews(&heads).await.map_err(storage)?;
         let mut content = render::root_header(listing.total, self.retention_days);
         content.push('\n');
         for chain in &listing.chains {
@@ -411,21 +407,14 @@ impl Recall<'_> {
 
     async fn chain(
         &self,
-        principal: &str,
+        scope: RecallScope<'_>,
         address: &str,
         path: &HistoryPath,
         root_id: &str,
     ) -> Result<Value, PlatformToolError> {
         let after = Self::directory_after(address, path)?;
-        let listing = self
-            .observation
-            .recall_members(
-                principal,
-                root_id,
-                self.active_since,
-                after.as_ref(),
-                MEMBER_PAGE,
-            )
+        let listing = scope
+            .members(root_id, after.as_ref(), MEMBER_PAGE)
             .await
             .map_err(storage)?
             .ok_or_else(unavailable)?;
@@ -434,11 +423,7 @@ impl Recall<'_> {
             .iter()
             .map(|member| member.id.clone())
             .collect();
-        let previews = self
-            .observation
-            .recall_previews(principal, &ids)
-            .await
-            .map_err(storage)?;
+        let previews = scope.previews(&ids).await.map_err(storage)?;
         let mut content = render::chain_header(root_id, listing.total, listing.started_at);
         content.push('\n');
         // 分叉标记看上一行；新页的上一行就是游标里上一页的最后一行。
@@ -465,12 +450,11 @@ impl Recall<'_> {
         &self,
         address: &str,
         path: &HistoryPath,
-        interaction: &RecallInteraction,
+        interaction: &RecallInteraction<'_>,
         index: u32,
     ) -> Result<Value, PlatformToolError> {
-        let tool = self
-            .observation
-            .recall_tool(&interaction.id, index)
+        let tool = interaction
+            .tool(index)
             .await
             .map_err(storage)?
             .ok_or_else(unavailable)?;
@@ -527,7 +511,7 @@ impl Recall<'_> {
         &self,
         address: &str,
         path: &HistoryPath,
-        interaction: &RecallInteraction,
+        interaction: &RecallInteraction<'_>,
     ) -> Result<Value, PlatformToolError> {
         let transcript = Transcript::new(interaction, &self.secrets);
         let (position, mark, check_through) = match &path.cursor {
@@ -543,7 +527,7 @@ impl Recall<'_> {
             }
             None => {
                 let total = if page::needs_total(path.lines.as_deref()) {
-                    Some(self.count_lines(transcript, &interaction.id).await?)
+                    Some(self.count_lines(transcript, interaction).await?)
                 } else {
                     None
                 };
@@ -552,7 +536,7 @@ impl Recall<'_> {
                 (position, ChunkMark::header(), check_through)
             }
         };
-        let mut walker = self.walker(transcript, &interaction.id, &mark).await?;
+        let mut walker = self.walker(transcript, interaction, &mark).await?;
         let mut page = Page::new(position);
         let (resume_line, resume_offset) = page.resume_at();
         let mut stopped_in = None;
@@ -600,13 +584,13 @@ impl Recall<'_> {
     }
 
     /// `:-K` 需要总行数：完整渲染一遍只计数。
-    async fn count_lines(
+    async fn count_lines<'w>(
         &self,
-        transcript: Transcript<'_>,
-        interaction_id: &str,
+        transcript: Transcript<'w>,
+        interaction: &'w RecallInteraction<'w>,
     ) -> Result<u64, PlatformToolError> {
         let mut walker = self
-            .walker(transcript, interaction_id, &ChunkMark::header())
+            .walker(transcript, interaction, &ChunkMark::header())
             .await?;
         let mut total = 0;
         while let Some(chunk) = walker.next().await? {
@@ -617,16 +601,15 @@ impl Recall<'_> {
 
     /// 从游标记录的块开始渲染：工具编号由此前的工具开始事件重建，上一个 Run 取自游标。
     async fn walker<'w>(
-        &'w self,
+        &self,
         transcript: Transcript<'w>,
-        interaction_id: &'w str,
+        interaction: &'w RecallInteraction<'w>,
         mark: &ChunkMark,
     ) -> Result<Walker<'w>, PlatformToolError> {
         let Some(event) = mark.event else {
             return Ok(Walker {
-                observation: self.observation,
+                interaction,
                 transcript,
-                interaction_id,
                 state: TranscriptState::default(),
                 next_line: 1,
                 header_pending: true,
@@ -636,18 +619,13 @@ impl Recall<'_> {
                 exhausted: false,
             });
         };
-        let tool_ids = self
-            .observation
-            .recall_tool_ids(interaction_id, event)
-            .await
-            .map_err(storage)?;
+        let tool_ids = interaction.tool_ids(event).await.map_err(storage)?;
         if tool_ids.len() != mark.tools as usize {
             return Err(stale_cursor());
         }
         Ok(Walker {
-            observation: self.observation,
+            interaction,
             transcript,
-            interaction_id,
             state: TranscriptState::resume(tool_ids, mark.run.clone()),
             next_line: mark.line,
             header_pending: false,
@@ -668,9 +646,8 @@ struct Chunk {
 
 /// 按事件序号分批读取并渲染转录；不渲染的事件不产生块。
 struct Walker<'w> {
-    observation: &'w InteractionObservation,
+    interaction: &'w RecallInteraction<'w>,
     transcript: Transcript<'w>,
-    interaction_id: &'w str,
     state: TranscriptState,
     next_line: u64,
     header_pending: bool,
@@ -696,8 +673,8 @@ impl Walker<'_> {
                     };
                 }
                 let batch = self
-                    .observation
-                    .recall_events(self.interaction_id, self.after, EVENT_BATCH)
+                    .interaction
+                    .events(self.after, EVENT_BATCH)
                     .await
                     .map_err(storage)?;
                 self.exhausted = batch.len() < EVENT_BATCH;

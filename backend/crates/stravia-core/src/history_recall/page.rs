@@ -185,14 +185,14 @@ impl ChunkMark {
     /// 事件归属与工具编号在重建时另行校验；这里只校验与续读行、Interaction 的一致性。
     pub(super) fn validate(
         &self,
-        interaction: &RecallInteraction,
+        interaction: &RecallInteraction<'_>,
         line: u64,
     ) -> Result<(), PlatformToolError> {
         if self.line == 0 || self.line > line || (self.event.is_none() && *self != Self::header()) {
             return Err(invalid_cursor());
         }
         if let Some(run) = &self.run
-            && !interaction.runs.contains_key(run)
+            && !interaction.runs().contains_key(run)
         {
             return Err(invalid_cursor());
         }

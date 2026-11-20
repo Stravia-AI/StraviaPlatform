@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use super::{InteractionObservation, ObservationEvent, hydrate, query, store::ObservationStore};
 
@@ -41,18 +41,69 @@ pub(crate) struct RecallRun {
     pub started_at: i64,
 }
 #[derive(Debug, Clone)]
-pub(crate) struct RecallInteraction {
-    pub id: String,
-    pub root_id: String,
-    pub parent_id: Option<String>,
-    pub started_at: i64,
-    pub protocol: String,
-    pub runs: HashMap<String, RecallRun>,
-}
-#[derive(Debug, Clone)]
 pub(crate) struct RecallTool {
     pub call: ObservationEvent,
     pub results: Vec<ObservationEvent>,
+}
+
+/// 绑定单个 Principal 与保留期截止时间的只读回看作用域。
+#[derive(Clone, Copy)]
+pub(crate) struct RecallScope<'a> {
+    store: &'a ObservationStore,
+    principal: &'a str,
+    active_since: i64,
+}
+
+/// 已通过 Principal、链路根、保留期与成员资格校验的 Interaction 回看句柄。
+/// 所有事件与工具读取均挂在该句柄上，无法对未校验的裸 ID 发起读取。
+#[derive(Clone)]
+pub(crate) struct RecallInteraction<'a> {
+    store: &'a ObservationStore,
+    id: String,
+    root_id: String,
+    parent_id: Option<String>,
+    started_at: i64,
+    protocol: String,
+    runs: HashMap<String, RecallRun>,
+}
+
+impl fmt::Debug for RecallInteraction<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecallInteraction")
+            .field("id", &self.id)
+            .field("root_id", &self.root_id)
+            .field("parent_id", &self.parent_id)
+            .field("started_at", &self.started_at)
+            .field("protocol", &self.protocol)
+            .field("runs", &self.runs)
+            .finish()
+    }
+}
+
+impl RecallInteraction<'_> {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    pub(crate) fn parent_id(&self) -> Option<&str> {
+        self.parent_id.as_deref()
+    }
+
+    pub(crate) fn started_at(&self) -> i64 {
+        self.started_at
+    }
+
+    pub(crate) fn protocol(&self) -> &str {
+        &self.protocol
+    }
+
+    pub(crate) fn runs(&self) -> &HashMap<String, RecallRun> {
+        &self.runs
+    }
 }
 
 // Interaction 的 `status` 由 Run 汇总而来，永远不是 `failed`：最终失败的交互停在 `interrupted`
@@ -174,25 +225,65 @@ macro_rules! fetch_optional {
     }};
 }
 
+pub(super) fn build_previews_query<'a, DB>(
+    principal: &'a str,
+    active_since: i64,
+    chunk: &'a [String],
+) -> sqlx::QueryBuilder<DB>
+where
+    DB: sqlx::Database,
+    &'a str: sqlx::Encode<'a, DB> + sqlx::Type<DB>,
+    &'a String: sqlx::Encode<'a, DB> + sqlx::Type<DB>,
+    i64: sqlx::Encode<'a, DB> + sqlx::Type<DB>,
+{
+    let mut sql = sqlx::QueryBuilder::<DB>::new("WITH requested(id) AS (VALUES ");
+    let mut ids = sql.separated(",");
+    for id in chunk {
+        ids.push("(CAST(")
+            .push_bind_unseparated(id)
+            .push_unseparated(" AS TEXT))");
+    }
+    ids.push_unseparated(
+        "), eligible_ids AS MATERIALIZED (SELECT DISTINCT i.id FROM requested req CROSS JOIN interaction_observations i WHERE i.id=req.id AND i.principal=",
+    );
+    sql.push_bind(principal)
+        .push(" AND i.last_active_at>")
+        .push_bind(active_since)
+        .push(" AND (")
+        .push(eligible("i"))
+        .push(")) SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM (SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,e.rejection_id,e.kind,e.attrs,ROW_NUMBER() OVER (PARTITION BY e.interaction_id ORDER BY CASE WHEN e.kind='user_input_recorded' THEN 0 ELSE 1 END,e.sequence) AS rn FROM eligible_ids m JOIN observation_events e ON e.interaction_id=m.id LEFT JOIN observation_blocks b ON b.sequence=e.sequence WHERE e.kind='user_input_recorded' OR (e.kind='client_visible_content' AND b.channel='visible' AND b.complete)) ranked WHERE rn=1");
+    sql
+}
+
 impl InteractionObservation {
-    pub(crate) async fn recall_chains(
+    /// 打开绑定单个 Principal 与保留期截止时间的只读回看作用域。
+    pub(crate) fn recall<'a>(&'a self, principal: &'a str, active_since: i64) -> RecallScope<'a> {
+        RecallScope {
+            store: &self.inner.store,
+            principal,
+            active_since,
+        }
+    }
+}
+
+impl<'a> RecallScope<'a> {
+    pub(crate) async fn chains(
         &self,
-        principal: &str,
-        active_since: i64,
         after: Option<&(i64, String)>,
         limit: usize,
     ) -> anyhow::Result<RecallChainPage> {
-        let store = &self.inner.store;
+        let store = self.store;
         let count_sql = chain_count_sql();
-        let counts: Option<(i64,)> = fetch_optional!(store, count_sql, principal, active_since);
+        let counts: Option<(i64,)> =
+            fetch_optional!(store, count_sql, self.principal, self.active_since);
         let (total,) =
             counts.ok_or_else(|| anyhow::anyhow!("recall chain count returned no row"))?;
         let sql = chain_page_sql();
         let rows: Vec<ChainRow> = fetch_all!(
             store,
             sql,
-            principal,
-            active_since,
+            self.principal,
+            self.active_since,
             after.map(|a| a.0),
             after.map(|a| a.1.as_str()),
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
@@ -222,18 +313,16 @@ impl InteractionObservation {
         })
     }
 
-    pub(crate) async fn recall_members(
+    pub(crate) async fn members(
         &self,
-        principal: &str,
         root_id: &str,
-        active_since: i64,
         after: Option<&(i64, String)>,
         limit: usize,
     ) -> anyhow::Result<Option<RecallMemberPage>> {
-        let store = &self.inner.store;
+        let store = self.store;
         let sql = member_count_sql();
         let counts: Option<(i64, Option<i64>)> =
-            fetch_optional!(store, sql, principal, active_since, root_id);
+            fetch_optional!(store, sql, self.principal, self.active_since, root_id);
         let (total, started_at) =
             counts.ok_or_else(|| anyhow::anyhow!("recall member count returned no row"))?;
         let Some(started_at) = started_at else {
@@ -243,8 +332,8 @@ impl InteractionObservation {
         let rows: Vec<MemberRow> = fetch_all!(
             store,
             sql,
-            principal,
-            active_since,
+            self.principal,
+            self.active_since,
             root_id,
             after.map(|a| a.0),
             after.map(|a| a.1.as_str()),
@@ -273,17 +362,21 @@ impl InteractionObservation {
         }))
     }
 
-    pub(crate) async fn recall_interaction(
+    pub(crate) async fn interaction(
         &self,
-        principal: &str,
         root_id: &str,
         interaction_id: &str,
-        active_since: i64,
-    ) -> anyhow::Result<Option<RecallInteraction>> {
-        let store = &self.inner.store;
+    ) -> anyhow::Result<Option<RecallInteraction<'a>>> {
+        let store = self.store;
         let sql = interaction_sql();
-        let row: Option<(String, String, Option<String>, i64, String)> =
-            fetch_optional!(store, sql, principal, active_since, root_id, interaction_id);
+        let row: Option<(String, String, Option<String>, i64, String)> = fetch_optional!(
+            store,
+            sql,
+            self.principal,
+            self.active_since,
+            root_id,
+            interaction_id
+        );
         let Some((id, root_id, parent_id, started_at, protocol)) = row else {
             return Ok(None);
         };
@@ -294,6 +387,7 @@ impl InteractionObservation {
             .map(|(id, model, started_at)| (id, RecallRun { model, started_at }))
             .collect();
         Ok(Some(RecallInteraction {
+            store,
             id,
             root_id,
             parent_id,
@@ -303,19 +397,57 @@ impl InteractionObservation {
         }))
     }
 
-    /// 调用方必须先通过 `recall_interaction` 确认该 Interaction 属于同一 Principal。
-    pub(crate) async fn recall_events(
+    pub(crate) async fn previews(
         &self,
-        interaction_id: &str,
+        interaction_ids: &[String],
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let store = self.store;
+        let mut previews = HashMap::new();
+        for chunk in interaction_ids.chunks(400) {
+            let mut events = match store {
+                ObservationStore::Sqlite(pool, _) => {
+                    let mut sql = build_previews_query::<sqlx::Sqlite>(
+                        self.principal,
+                        self.active_since,
+                        chunk,
+                    );
+                    query::map_sqlite_events(sql.build().fetch_all(pool).await?)?
+                }
+                ObservationStore::Postgres(pool, _) => {
+                    let mut sql = build_previews_query::<sqlx::Postgres>(
+                        self.principal,
+                        self.active_since,
+                        chunk,
+                    );
+                    query::map_postgres_events(sql.build().fetch_all(pool).await?)?
+                }
+            };
+            hydrate::hydrate(store, &mut events).await?;
+            for event in events {
+                if let (Some(id), Some(text)) = (
+                    event.interaction_id,
+                    event.payload.get("text").and_then(|v| v.as_str()),
+                ) {
+                    previews.insert(id, text.to_string());
+                }
+            }
+        }
+        Ok(previews)
+    }
+}
+
+impl RecallInteraction<'_> {
+    pub(crate) async fn events(
+        &self,
         after_sequence: i64,
         limit: usize,
     ) -> anyhow::Result<Vec<ObservationEvent>> {
         let sql = "SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,e.rejection_id,e.kind,e.attrs FROM observation_events e LEFT JOIN observation_blocks b ON b.sequence=e.sequence WHERE e.interaction_id=$1 AND e.sequence>$2 AND (e.kind IN ('user_input_recorded','client_tool_handoff','platform_tool_started','client_tool_result','platform_tool_finished','observation_gap','request_failed') OR (e.kind='client_visible_content' AND b.channel='visible' AND b.complete)) ORDER BY e.sequence LIMIT $3";
-        let store = &self.inner.store;
+        let store = self.store;
         let mut events = match store {
             ObservationStore::Sqlite(pool, _) => query::map_sqlite_events(
                 sqlx::query(sql)
-                    .bind(interaction_id)
+                    .bind(&self.id)
                     .bind(after_sequence)
                     .bind(i64::try_from(limit).unwrap_or(i64::MAX))
                     .fetch_all(pool)
@@ -323,7 +455,7 @@ impl InteractionObservation {
             )?,
             ObservationStore::Postgres(pool, _) => query::map_postgres_events(
                 sqlx::query(sql)
-                    .bind(interaction_id)
+                    .bind(&self.id)
                     .bind(after_sequence)
                     .bind(i64::try_from(limit).unwrap_or(i64::MAX))
                     .fetch_all(pool)
@@ -334,32 +466,24 @@ impl InteractionObservation {
         Ok(events)
     }
 
-    /// 调用方必须先通过 `recall_interaction` 确认该 Interaction 属于同一 Principal。
-    /// 每个工具开始事件占一个编号，与 `recall_tool` 的 OFFSET 计数一致；缺少 tool_id 的事件为 `None`。
-    pub(crate) async fn recall_tool_ids(
+    /// 每个工具开始事件占一个编号，与 `tool` 的 OFFSET 计数一致；缺少 tool_id 的事件为 `None`。
+    pub(crate) async fn tool_ids(
         &self,
-        interaction_id: &str,
         before_sequence: i64,
     ) -> anyhow::Result<Vec<Option<String>>> {
         let sql = "SELECT tool_id FROM observation_events WHERE interaction_id=$1 AND sequence<$2 AND kind IN ('client_tool_handoff','platform_tool_started') ORDER BY sequence".to_string();
-        let rows: Vec<(Option<String>,)> =
-            fetch_all!(&self.inner.store, sql, interaction_id, before_sequence);
+        let rows: Vec<(Option<String>,)> = fetch_all!(self.store, sql, &self.id, before_sequence);
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    /// 调用方必须先通过 `recall_interaction` 确认该 Interaction 属于同一 Principal。
-    pub(crate) async fn recall_tool(
-        &self,
-        interaction_id: &str,
-        index: u32,
-    ) -> anyhow::Result<Option<RecallTool>> {
+    pub(crate) async fn tool(&self, index: u32) -> anyhow::Result<Option<RecallTool>> {
         if index == 0 {
             return Ok(None);
         }
-        let store = &self.inner.store;
+        let store = self.store;
         let sql = "SELECT sequence,tool_id FROM observation_events WHERE interaction_id=$1 AND kind IN ('client_tool_handoff','platform_tool_started') ORDER BY sequence LIMIT 1 OFFSET $2".to_string();
         let row: Option<(i64, Option<String>)> =
-            fetch_optional!(store, sql, interaction_id, i64::from(index - 1));
+            fetch_optional!(store, sql, &self.id, i64::from(index - 1));
         let Some((sequence, tool_id)) = row else {
             return Ok(None);
         };
@@ -367,7 +491,7 @@ impl InteractionObservation {
         let mut events = match store {
             ObservationStore::Sqlite(pool, _) => query::map_sqlite_events(
                 sqlx::query(sql)
-                    .bind(interaction_id)
+                    .bind(&self.id)
                     .bind(sequence)
                     .bind(tool_id.as_deref())
                     .fetch_all(pool)
@@ -375,7 +499,7 @@ impl InteractionObservation {
             )?,
             ObservationStore::Postgres(pool, _) => query::map_postgres_events(
                 sqlx::query(sql)
-                    .bind(interaction_id)
+                    .bind(&self.id)
                     .bind(sequence)
                     .bind(tool_id.as_deref())
                     .fetch_all(pool)
@@ -391,45 +515,5 @@ impl InteractionObservation {
             call,
             results: events.collect(),
         }))
-    }
-
-    pub(crate) async fn recall_previews(
-        &self,
-        principal: &str,
-        interaction_ids: &[String],
-    ) -> anyhow::Result<HashMap<String, String>> {
-        let store = &self.inner.store;
-        let mut previews = HashMap::new();
-        for chunk in interaction_ids.chunks(400) {
-            macro_rules! preview_rows {
-                ($db:ty, $pool:expr, $mapper:path) => {{
-                    let mut sql = sqlx::QueryBuilder::<$db>::new("SELECT sequence,occurred_at,interaction_id,run_id,rejection_id,kind,attrs FROM (SELECT e.sequence,e.occurred_at,e.interaction_id,e.run_id,e.rejection_id,e.kind,e.attrs,ROW_NUMBER() OVER (PARTITION BY e.interaction_id ORDER BY CASE WHEN e.kind='user_input_recorded' THEN 0 ELSE 1 END,e.sequence) AS rn FROM observation_events e JOIN interaction_observations i ON i.id=e.interaction_id LEFT JOIN observation_blocks b ON b.sequence=e.sequence WHERE i.principal=");
-                    sql.push_bind(principal).push(" AND i.id IN (");
-                    let mut ids = sql.separated(",");
-                    for id in chunk { ids.push_bind(id); }
-                    ids.push_unseparated(")");
-                    sql.push(" AND (e.kind='user_input_recorded' OR (e.kind='client_visible_content' AND b.channel='visible' AND b.complete))) ranked WHERE rn=1");
-                    $mapper(sql.build().fetch_all($pool).await?)?
-                }};
-            }
-            let mut events = match store {
-                ObservationStore::Sqlite(pool, _) => {
-                    preview_rows!(sqlx::Sqlite, pool, query::map_sqlite_events)
-                }
-                ObservationStore::Postgres(pool, _) => {
-                    preview_rows!(sqlx::Postgres, pool, query::map_postgres_events)
-                }
-            };
-            hydrate::hydrate(store, &mut events).await?;
-            for event in events {
-                if let (Some(id), Some(text)) = (
-                    event.interaction_id,
-                    event.payload.get("text").and_then(|v| v.as_str()),
-                ) {
-                    previews.insert(id, text.to_string());
-                }
-            }
-        }
-        Ok(previews)
     }
 }

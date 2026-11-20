@@ -351,12 +351,14 @@ async fn index_all_sqlite(fixture: &Fixture) -> anyhow::Result<()> {
     for principal in [OWNER, OTHER] {
         let chains = fixture
             .observation
-            .recall_chains(principal, 0, None, 100)
+            .recall(principal, 0)
+            .chains(None, 100)
             .await?;
         for chain in chains.chains {
             let members = fixture
                 .observation
-                .recall_members(principal, &chain.root_id, 0, None, 100)
+                .recall(principal, 0)
+                .members(&chain.root_id, None, 100)
                 .await?
                 .unwrap();
             for member in members.members {
@@ -395,12 +397,14 @@ async fn history_search_orders_scopes_and_reads_hits() -> anyhow::Result<()> {
     }
     let chains = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?;
     let root = &chains.chains[0].root_id;
     let members = fixture
         .observation
-        .recall_members(OWNER, root, 0, None, 10)
+        .recall(OWNER, 0)
+        .members(root, None, 10)
         .await?
         .unwrap();
     let child = &members.members[1].id;
@@ -440,7 +444,8 @@ async fn history_search_ranks_roles_and_intersects_distinct_messages() -> anyhow
         fixture.observation.flush().await?;
         let chains = fixture
             .observation
-            .recall_chains(OWNER, 0, None, 20)
+            .recall(OWNER, 0)
+            .chains(None, 20)
             .await?;
         let chain = chains
             .chains
@@ -600,7 +605,7 @@ async fn shared_search_corpus(
         observer.record(visible(run, output, true));
         finish(&observer, "completed", now(), None);
         observation.flush().await?;
-        let chains = observation.recall_chains(OWNER, 0, None, 10).await?;
+        let chains = observation.recall(OWNER, 0).chains(None, 10).await?;
         let chain = chains
             .chains
             .iter()
@@ -619,7 +624,7 @@ async fn shared_search_corpus(
     other.record(visible("foreign", "foreign", true));
     finish(&other, "completed", now(), None);
     observation.flush().await?;
-    let foreign = observation.recall_chains(OTHER, 0, None, 10).await?.chains[0]
+    let foreign = observation.recall(OTHER, 0).chains(None, 10).await?.chains[0]
         .head_id
         .clone();
     for id in ids.iter().chain(std::iter::once(&foreign)) {
@@ -754,7 +759,8 @@ async fn history_search_paginates_without_duplicate_interactions() -> anyhow::Re
     tx.commit().await?;
     let mut expected: Vec<_> = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 100)
+        .recall(OWNER, 0)
+        .chains(None, 100)
         .await?
         .chains
         .into_iter()
@@ -873,7 +879,8 @@ async fn history_search_foreign_segments_cannot_starve_owner() -> anyhow::Result
     fixture.observation.flush().await?;
     let owner_id = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?
         .chains[0]
         .head_id
@@ -893,7 +900,8 @@ async fn history_search_foreign_segments_cannot_starve_owner() -> anyhow::Result
     fixture.observation.flush().await?;
     let foreign_id = fixture
         .observation
-        .recall_chains(OTHER, 0, None, 10)
+        .recall(OTHER, 0)
+        .chains(None, 10)
         .await?
         .chains[0]
         .head_id
@@ -1103,12 +1111,14 @@ async fn history_parent_expiration_preserves_child_line_count() -> anyhow::Resul
     seed(&fixture).await?;
     let chains = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?;
     let root = &chains.chains[0].root_id;
     let members = fixture
         .observation
-        .recall_members(OWNER, root, 0, None, 10)
+        .recall(OWNER, 0)
+        .members(root, None, 10)
         .await?
         .unwrap();
     let parent = &members.members[0].id;
@@ -1161,12 +1171,14 @@ async fn history_retention_sweep_and_clear_remove_readable_entries() -> anyhow::
         fixture.observation.flush().await?;
         let chains = fixture
             .observation
-            .recall_chains(OWNER, 0, None, 10)
+            .recall(OWNER, 0)
+            .chains(None, 10)
             .await?;
         let root = &chains.chains[0].root_id;
         let members = fixture
             .observation
-            .recall_members(OWNER, root, 0, None, 10)
+            .recall(OWNER, 0)
+            .members(root, None, 10)
             .await?
             .unwrap();
         let chain = format!("stravia://history/{root}/");
@@ -1246,12 +1258,14 @@ async fn history_renders_unmatched_tool_results_gaps_and_failures() -> anyhow::R
     fixture.observation.flush().await?;
     let chains = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?;
     let root = &chains.chains[0].root_id;
     let members = fixture
         .observation
-        .recall_members(OWNER, root, 0, None, 10)
+        .recall(OWNER, 0)
+        .members(root, None, 10)
         .await?
         .unwrap();
     let path = format!("stravia://history/{root}/{}", members.members[0].id);
@@ -1297,12 +1311,14 @@ async fn history_transcript_prefix_and_line_numbers_survive_appended_events() ->
     fixture.observation.flush().await?;
     let chains = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?;
     let root = &chains.chains[0].root_id;
     let members = fixture
         .observation
-        .recall_members(OWNER, root, 0, None, 10)
+        .recall(OWNER, 0)
+        .members(root, None, 10)
         .await?
         .unwrap();
     let path = format!("stravia://history/{root}/{}", members.members[0].id);
@@ -1359,12 +1375,14 @@ async fn history_reads_owner_chains_transcripts_and_tool_files() -> anyhow::Resu
 
     let chains = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?;
     let root_id = chains.chains[0].root_id.clone();
     let members = fixture
         .observation
-        .recall_members(OWNER, &root_id, 0, None, 10)
+        .recall(OWNER, 0)
+        .members(&root_id, None, 10)
         .await?
         .expect("chain");
     let ids: Vec<&str> = members
@@ -1472,12 +1490,14 @@ async fn history_hides_foreign_missing_and_mismatched_entries_uniformly() -> any
     let other = fixture.recall(OTHER).await;
     let chains = fixture
         .observation
-        .recall_chains(OWNER, 0, None, 10)
+        .recall(OWNER, 0)
+        .chains(None, 10)
         .await?;
     let root_id = chains.chains[0].root_id.clone();
     let members = fixture
         .observation
-        .recall_members(OWNER, &root_id, 0, None, 10)
+        .recall(OWNER, 0)
+        .members(&root_id, None, 10)
         .await?
         .expect("chain");
     let a = members.members[0].id.clone();
