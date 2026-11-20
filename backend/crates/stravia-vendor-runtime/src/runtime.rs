@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,9 +10,9 @@ use stravia_vendor_sdk::{
     AiRequest, CANONICAL_FORMAT_VERSION, ErrorKind, Operation, OperationOutput, ProviderSnapshot,
     VendorDescriptor,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::bindings;
@@ -124,6 +124,183 @@ pub struct VendorRuntime {
     /// 已通过准入校验的组件记录，让启动可以跳过对这些组件的实例化校验。
     admissions: Option<Arc<AdmissionRecords>>,
     cache: Option<Arc<CompilationCache>>,
+    /// 启用 Wasmtime 池化分配器时用于排队控制并发槽位，避免突发并发触发池满报错。
+    pool_slots: Option<Arc<Semaphore>>,
+    /// 仅在存在活动 Store 时以固定间隔递增 epoch，空闲零唤醒；随最后一个引用退出并回收线程。
+    epoch_ticker: Arc<EpochTicker>,
+}
+
+const POOL_CONCURRENCY_LIMIT: u32 = 64;
+const POOL_CORE_INSTANCES_PER_COMPONENT: u32 = 64;
+const POOL_MEMORIES_PER_COMPONENT: u32 = 4;
+const POOL_TABLES_PER_COMPONENT: u32 = 16;
+// Preserve the full wasm32 address space; pooling must not impose a new
+// per-request memory ceiling when canonical payloads contain large media.
+const POOL_MAX_MEMORY_BYTES: u64 = 1 << 32;
+const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
+
+struct EpochTickerState {
+    active: usize,
+    closed: bool,
+}
+
+struct EpochTicker {
+    state: Arc<(Mutex<EpochTickerState>, Condvar)>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl EpochTicker {
+    fn start(engine: Engine) -> Result<Self, LoadError> {
+        let state = Arc::new((
+            Mutex::new(EpochTickerState {
+                active: 0,
+                closed: false,
+            }),
+            Condvar::new(),
+        ));
+        let shared = Arc::clone(&state);
+        let handle = std::thread::Builder::new()
+            .name("stravia-wasm-epoch".into())
+            .spawn(move || {
+                let (lock, condvar) = &*shared;
+                let mut guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                loop {
+                    while !guard.closed && guard.active == 0 {
+                        guard = condvar
+                            .wait(guard)
+                            .unwrap_or_else(|poison| poison.into_inner());
+                    }
+                    if guard.closed {
+                        break;
+                    }
+                    let (next_guard, _) = condvar
+                        .wait_timeout(guard, EPOCH_TICK_INTERVAL)
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    guard = next_guard;
+                    if guard.closed {
+                        break;
+                    }
+                    if guard.active > 0 {
+                        engine.increment_epoch();
+                    }
+                }
+            })
+            .map_err(|error| {
+                LoadError::InvalidComponent(format!("failed to start wasm epoch ticker: {error}"))
+            })?;
+        Ok(Self {
+            state,
+            thread: Mutex::new(Some(handle)),
+        })
+    }
+
+    fn lease(self: &Arc<Self>) -> EpochLease {
+        let (lock, condvar) = &*self.state;
+        let mut guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.active += 1;
+        if guard.active == 1 {
+            condvar.notify_one();
+        }
+        EpochLease {
+            ticker: Arc::clone(self),
+        }
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        {
+            let (lock, condvar) = &*self.state;
+            let mut guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+            guard.closed = true;
+            condvar.notify_all();
+        }
+        if let Some(handle) = self
+            .thread
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct EpochLease {
+    ticker: Arc<EpochTicker>,
+}
+
+impl Drop for EpochLease {
+    fn drop(&mut self) {
+        let (lock, _) = &*self.ticker.state;
+        let mut guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.active = guard.active.saturating_sub(1);
+    }
+}
+
+/// 持有池化并发许可与 epoch 计时租约。调用方须在 `Store` 之前声明此守卫，
+/// 使 `Store` 先析构归还池槽位后再释放并发许可。
+struct ExecutionSlot {
+    _pool_permit: Option<OwnedSemaphorePermit>,
+    _epoch_lease: EpochLease,
+}
+
+fn base_engine_config() -> Config {
+    let mut engine_config = Config::new();
+    engine_config.wasm_component_model(true);
+    // Owned host calls release lowered payloads before awaiting the guest.
+    // This scheduler does not expand the guest's component feature surface.
+    engine_config.concurrency_support(true);
+    engine_config.wasm_component_model_async(false);
+    engine_config.wasm_component_model_more_async_builtins(false);
+    engine_config.wasm_component_model_async_stackful(false);
+    engine_config.wasm_component_model_threading(false);
+    engine_config.epoch_interruption(true);
+    engine_config
+}
+
+fn build_engine() -> Result<(Engine, Option<Arc<Semaphore>>), LoadError> {
+    if cfg!(target_pointer_width = "64") {
+        let mut pooled_config = base_engine_config();
+        pooled_config.memory_reservation(POOL_MAX_MEMORY_BYTES);
+        let mut pooling = PoolingAllocationConfig::new();
+        pooling
+            .total_component_instances(POOL_CONCURRENCY_LIMIT)
+            .total_core_instances(POOL_CONCURRENCY_LIMIT * POOL_CORE_INSTANCES_PER_COMPONENT)
+            .max_core_instances_per_component(POOL_CORE_INSTANCES_PER_COMPONENT)
+            .total_memories(POOL_CONCURRENCY_LIMIT * POOL_MEMORIES_PER_COMPONENT)
+            .max_memories_per_component(POOL_MEMORIES_PER_COMPONENT)
+            .max_memories_per_module(2)
+            .total_tables(POOL_CONCURRENCY_LIMIT * POOL_TABLES_PER_COMPONENT)
+            .max_tables_per_component(POOL_TABLES_PER_COMPONENT)
+            .max_tables_per_module(4)
+            .table_elements(65_536)
+            .total_stacks(POOL_CONCURRENCY_LIMIT)
+            .max_memory_size(POOL_MAX_MEMORY_BYTES as usize)
+            .max_unused_warm_slots(16)
+            .linear_memory_keep_resident(0)
+            .table_keep_resident(0)
+            .async_stack_keep_resident(0);
+        pooled_config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
+        match Engine::new(&pooled_config) {
+            Ok(engine) => {
+                return Ok((
+                    engine,
+                    Some(Arc::new(Semaphore::new(POOL_CONCURRENCY_LIMIT as usize))),
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "wasm pooling allocator unavailable; falling back to on-demand allocation"
+                );
+            }
+        }
+    }
+    let config = base_engine_config();
+    let engine =
+        Engine::new(&config).map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
+    Ok((engine, None))
 }
 
 struct CompiledEntry {
@@ -187,18 +364,8 @@ impl VendorRuntime {
 
     fn build(cache_directory: Option<PathBuf>) -> Result<Self, LoadError> {
         let idle_unload = cache_directory.is_some().then_some(IDLE_UNLOAD);
-        let mut engine_config = Config::new();
-        engine_config.wasm_component_model(true);
-        // Owned host calls release lowered payloads before awaiting the guest.
-        // This scheduler does not expand the guest's component feature surface.
-        engine_config.concurrency_support(true);
-        engine_config.wasm_component_model_async(false);
-        engine_config.wasm_component_model_more_async_builtins(false);
-        engine_config.wasm_component_model_async_stackful(false);
-        engine_config.wasm_component_model_threading(false);
-        engine_config.consume_fuel(true);
-        let engine = Engine::new(&engine_config)
-            .map_err(|error| LoadError::InvalidComponent(error.to_string()))?;
+        let (engine, pool_slots) = build_engine()?;
+        let epoch_ticker = Arc::new(EpochTicker::start(engine.clone())?);
         let cache = cache_directory
             .map(|directory| CompilationCache::new(&directory, &engine).map(Arc::new))
             .transpose()?;
@@ -208,6 +375,32 @@ impl VendorRuntime {
             idle_unload,
             admissions: None,
             cache,
+            pool_slots,
+            epoch_ticker,
+        })
+    }
+
+    async fn acquire_execution_slot(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: &Deadline,
+    ) -> Result<ExecutionSlot, RuntimeError> {
+        let permit = match &self.pool_slots {
+            Some(semaphore) => {
+                let acquire = Arc::clone(semaphore).acquire_owned();
+                let permit = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(RuntimeError::Cancelled),
+                    () = deadline.wait() => return Err(RuntimeError::DeadlineExceeded),
+                    result = acquire => result.map_err(|_| RuntimeError::Cancelled)?,
+                };
+                Some(permit)
+            }
+            None => None,
+        };
+        Ok(ExecutionSlot {
+            _pool_permit: permit,
+            _epoch_lease: self.epoch_ticker.lease(),
         })
     }
 
@@ -356,6 +549,14 @@ impl VendorRuntime {
         if deadline.is_exceeded() {
             return Err(RuntimeError::DeadlineExceeded);
         }
+        if let Some(protocol) = static_selected_protocol(
+            plugin.descriptor(),
+            &provider.provider_id,
+            &provider.channel,
+            &provider.protocol,
+        ) {
+            return Ok(protocol);
+        }
 
         let (sdk_provider, sdk_request) =
             stravia_vendor_sdk::guest::encode_protocol_selection(provider, request)
@@ -365,6 +566,10 @@ impl VendorRuntime {
         let wit_request = convert_payload(sdk_request);
 
         let resident = residency::lease(plugin, &cancellation, &deadline).await?;
+        let _slot = resident
+            .runtime()
+            .acquire_execution_slot(&cancellation, &deadline)
+            .await?;
         let scope = OperationScope {
             services: Arc::new(DenyServices),
             cancellation,
@@ -452,6 +657,10 @@ impl VendorRuntime {
         let wit_operation = convert_operation(operation.into());
         let wit_input = convert_input(sdk_input);
         let resident = residency::lease(plugin, &scope.cancellation, &scope.deadline).await?;
+        let _slot = resident
+            .runtime()
+            .acquire_execution_slot(&scope.cancellation, &scope.deadline)
+            .await?;
         let engine = resident.prepared.engine();
         let mut store = Self::new_store(engine, scope, Some(operation), false);
         let cancel = store.data().cancellation.clone();
@@ -535,6 +744,10 @@ impl VendorRuntime {
             body: input,
         };
         let resident = residency::lease(plugin, &scope.cancellation, &scope.deadline).await?;
+        let _slot = resident
+            .runtime()
+            .acquire_execution_slot(&scope.cancellation, &scope.deadline)
+            .await?;
         let engine = resident.prepared.engine();
         let mut store = Self::new_store(engine, scope, None, true);
         let cancel = store.data().cancellation.clone();
@@ -717,6 +930,10 @@ impl VendorRuntime {
             deadline: Deadline::from_now(Duration::from_secs(2)),
             generation: 0,
         };
+        let _slot = self
+            .acquire_execution_slot(&scope.cancellation, &scope.deadline)
+            .await
+            .map_err(|error| LoadError::DescriptorExecution(error.to_string()))?;
         let engine = prepared.engine();
         let mut store = Self::new_store(engine, scope, None, false);
         let deadline = store.data().deadline.clone();
@@ -777,17 +994,10 @@ impl VendorRuntime {
                 received_check_response: false,
             },
         );
-        // Fuel stays enabled only so the async yield interval can preempt
-        // CPU-bound guest work for cancellation and deadlines; the budget
-        // itself is unlimited.
-        store
-            .set_fuel(u64::MAX)
-            .expect("fuel consumption is enabled for vendor runtime");
-        // 大载荷的 JSON 编解码不应为每个短循环切换 fiber；仍定期让出执行，
-        // 使纯 CPU guest 的取消与 deadline 不依赖它调用宿主服务。
-        store
-            .fuel_async_yield_interval(Some(1_000_000))
-            .expect("async support and fuel consumption are enabled for vendor runtime");
+        // Epoch interruption preempts CPU-bound guest loops for cancellation
+        // and deadlines without per-instruction fuel instrumentation overhead.
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_async_yield_and_update(1);
         store
     }
 }
@@ -1888,6 +2098,29 @@ fn cache_directory_error(directory: &Path, action: &str, error: std::io::Error) 
     ))
 }
 
+fn static_selected_protocol(
+    descriptor: &VendorDescriptor,
+    provider_id: &str,
+    channel_id: &str,
+    configured_protocol: &str,
+) -> Option<String> {
+    let channel = descriptor
+        .providers
+        .iter()
+        .find(|profile| profile.provider_id == provider_id)?
+        .channels
+        .iter()
+        .find(|candidate| candidate.id == channel_id)?;
+    match channel.static_protocol.as_ref()? {
+        stravia_vendor_sdk::StaticProtocol::Configured => {
+            (!configured_protocol.is_empty()).then(|| configured_protocol.to_owned())
+        }
+        stravia_vendor_sdk::StaticProtocol::Fixed(protocol) => {
+            (!protocol.is_empty()).then(|| protocol.clone())
+        }
+    }
+}
+
 fn classify_trap(error: &wasmtime::Error) -> RuntimeError {
     if error
         .downcast_ref::<wasmtime::Trap>()
@@ -2092,6 +2325,7 @@ mod profile_admission_tests {
                 auth: None,
                 protocol: Some("test".into()),
                 protocols: Vec::new(),
+                static_protocol: None,
                 default_base_url: None,
                 default_models_source: None,
                 consumes_catalog_models: false,
@@ -2263,6 +2497,183 @@ mod profile_admission_tests {
         assert!(
             worker_name.starts_with("stravia-wasm-compile-"),
             "expected ephemeral compile worker thread, got {worker_name:?}"
+        );
+    }
+
+    #[test]
+    fn static_selected_protocol_resolves_configured_fixed_and_dynamic_modes() {
+        let mut manifest = descriptor();
+        assert_eq!(
+            static_selected_protocol(&manifest, "alpha", "default", "openai-compatible"),
+            None
+        );
+
+        manifest.providers[0].channels[0].static_protocol =
+            Some(stravia_vendor_sdk::StaticProtocol::Configured);
+        assert_eq!(
+            static_selected_protocol(&manifest, "alpha", "default", "openai-compatible"),
+            Some("openai-compatible".into())
+        );
+        assert_eq!(
+            static_selected_protocol(&manifest, "alpha", "default", ""),
+            None
+        );
+
+        manifest.providers[0].channels[0].static_protocol = Some(
+            stravia_vendor_sdk::StaticProtocol::Fixed("open-responses/responses/2026-04-24".into()),
+        );
+        assert_eq!(
+            static_selected_protocol(&manifest, "alpha", "default", "ignored-hint"),
+            Some("open-responses/responses/2026-04-24".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn pooling_preserves_memory_growth_beyond_256_mib() {
+        let runtime = VendorRuntime::new().expect("runtime");
+        let bytes = wat::parse_str(
+            r#"(component
+                (core module $m
+                    (memory 1)
+                    (func (export "grow") (result i32)
+                        i32.const 4096
+                        memory.grow))
+                (core instance $i (instantiate $m))
+                (func (export "grow") (result u32)
+                    (canon lift (core func $i "grow"))))"#,
+        )
+        .expect("valid growth component");
+        let component = Component::new(&runtime.engine, &bytes).expect("compile growth component");
+        let pre = Linker::<StoreState>::new(&runtime.engine)
+            .instantiate_pre(&component)
+            .expect("instantiate_pre");
+        let cancel = CancellationToken::new();
+        let deadline = Deadline::from_now(Duration::from_secs(30));
+        let _slot = runtime
+            .acquire_execution_slot(&cancel, &deadline)
+            .await
+            .expect("slot");
+        let scope = OperationScope::new(Arc::new(DenyServices), cancel, deadline, 0);
+        let mut store = VendorRuntime::new_store(&runtime.engine, scope, None, false);
+        let instance = pre
+            .instantiate_async(&mut store)
+            .await
+            .expect("instantiate");
+        let grow = instance
+            .get_typed_func::<(), (u32,)>(&mut store, "grow")
+            .expect("grow export");
+        let (previous_pages,) = grow.call_async(&mut store, ()).await.expect("grow call");
+        assert_eq!(
+            previous_pages, 1,
+            "memory.grow must not acquire a new 256 MiB ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn pooling_capacity_covers_every_admitted_execution_slot() {
+        let runtime = VendorRuntime::new().expect("runtime");
+        // Each permitted component uses its full per-component allowance. All
+        // instances stay live so aggregate pool exhaustion cannot hide in reuse.
+        let mut source = String::from(
+            "(component (core module $resources (memory 0) \
+             (table 0 funcref) (table 0 funcref) \
+             (table 0 funcref) (table 0 funcref)) (core module $empty)",
+        );
+        for _ in 0..4 {
+            source.push_str("(core instance (instantiate $resources))");
+        }
+        for _ in 4..64 {
+            source.push_str("(core instance (instantiate $empty))");
+        }
+        source.push(')');
+        let bytes = wat::parse_str(&source).expect("valid resource component");
+        let component =
+            Component::new(&runtime.engine, &bytes).expect("compile resource component");
+        let pre = Linker::<StoreState>::new(&runtime.engine)
+            .instantiate_pre(&component)
+            .expect("instantiate_pre");
+        let cancel = CancellationToken::new();
+        let deadline = Deadline::from_now(Duration::from_secs(30));
+        let mut live = Vec::with_capacity(POOL_CONCURRENCY_LIMIT as usize);
+        for index in 0..POOL_CONCURRENCY_LIMIT {
+            let slot = runtime
+                .acquire_execution_slot(&cancel, &deadline)
+                .await
+                .expect("slot");
+            let scope =
+                OperationScope::new(Arc::new(DenyServices), cancel.clone(), deadline.clone(), 0);
+            let mut store = VendorRuntime::new_store(&runtime.engine, scope, None, false);
+            pre.instantiate_async(&mut store)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("admitted execution slot {index} exhausted the pool: {error:#}")
+                });
+            live.push((store, slot));
+        }
+    }
+
+    #[tokio::test]
+    async fn epoch_interruption_preempts_cpu_bound_guest_on_deadline() {
+        let runtime = VendorRuntime::new().expect("runtime");
+        if cfg!(target_pointer_width = "64") {
+            assert!(
+                runtime.pool_slots.is_some(),
+                "64-bit host should initialize pooling allocator"
+            );
+        }
+
+        // Pure core loop inside a component: never calls host imports, so only
+        // epoch interruption can yield control back to the deadline select.
+        let bytes = wat::parse_str(
+            r#"
+            (component
+                (core module $m
+                    (func (export "spin") (loop $l (br $l)))
+                )
+                (core instance $i (instantiate $m))
+                (func (export "spin") (canon lift (core func $i "spin")))
+            )
+            "#,
+        )
+        .expect("valid spin component");
+        let component = Component::new(&runtime.engine, &bytes).expect("compile spin component");
+        let linker = Linker::<StoreState>::new(&runtime.engine);
+        let pre = linker.instantiate_pre(&component).expect("instantiate_pre");
+
+        let deadline = Deadline::from_now(Duration::from_millis(80));
+        let cancel = CancellationToken::new();
+        let _slot = runtime
+            .acquire_execution_slot(&cancel, &deadline)
+            .await
+            .expect("slot");
+        let scope = OperationScope {
+            services: Arc::new(DenyServices),
+            cancellation: cancel,
+            deadline: deadline.clone(),
+            generation: 0,
+        };
+        let mut store = VendorRuntime::new_store(&runtime.engine, scope, None, false);
+        let instance = pre
+            .instantiate_async(&mut store)
+            .await
+            .expect("instantiate");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin export");
+
+        let start = std::time::Instant::now();
+        let timed_out = tokio::select! {
+            biased;
+            () = deadline.wait() => true,
+            res = spin.call_async(&mut store, ()) => {
+                panic!("infinite loop unexpectedly returned: {res:?}");
+            }
+        };
+        assert!(timed_out);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "epoch preemption took too long: {:?}",
+            start.elapsed()
         );
     }
 }

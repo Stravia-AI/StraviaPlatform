@@ -415,6 +415,11 @@ pub(crate) fn catalog_profile_descriptor(
     descriptor.description = Some(format!("Built-in {name} vendor component"));
     descriptor.implementation = Some(npm.to_owned());
     for channel in &mut descriptor.channels {
+        if matches!(npm, "@ai-sdk/openai" | "@ai-sdk/azure")
+            || matches!(id, "openai" | "azure" | "azure-cognitive-services")
+        {
+            channel.static_protocol = None;
+        }
         if channel.id != "default" {
             continue;
         }
@@ -668,6 +673,7 @@ fn channel(
         auth: None,
         protocol: protocol.map(str::to_owned),
         protocols: Vec::new(),
+        static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Configured),
         default_base_url: default_base_url.map(str::to_owned),
         default_models_source: None,
         consumes_catalog_models: false,

@@ -47,6 +47,7 @@ fn openai_descriptor() -> ProviderDescriptor {
             auth: None,
             protocol: Some("openai-compatible".into()),
             protocols: Vec::new(),
+            static_protocol: None,
             default_base_url: Some("https://api.openai.com/v1".into()),
             default_models_source: None,
             consumes_catalog_models: false,
@@ -127,7 +128,7 @@ pub(crate) fn select_protocol(
     };
     // 思考块无论来源都可由 Responses codec 表示（受保护载荷由 Core 按来源剥离），
     // 这里的严格编码只拒绝其它硬要求。
-    if pair.encode_request(request.clone()).is_ok() {
+    if pair.can_encode_request(request) {
         return Ok(OPEN_RESPONSES_2026_04_24.to_string());
     }
 

@@ -474,13 +474,29 @@ base 插件为 `custom` Profile 的 OpenAI-compatible Chat Completions 声明固
 - SDK 的 WASI WIT 依赖统一为 `0.2.12`，来自 [Wasmtime v49.0.1 的 WASIp2 定义](https://github.com/bytecodealliance/wasmtime/tree/v49.0.1/crates/wasi/src/p2/wit/deps)。宿主接受稳定版 WASI `0.2.x` 的既定受限接口，包括 `0.2.9`、`0.2.12` 及同一 Component 内不同 patch 的混合导入。WASI patch 兼容不放宽 Vendor、Net 与 State 的独立接口准入：Vendor 支持稳定 `1.0.x`；Net 与 State 的已知接口支持至 `1.1.x`，新增接口不能反向声明在较早 minor 下。其他主版本、预发布版与未知接口拒绝，同主版本但更高 minor 返回需要升级宿主。build metadata 不影响判断，函数、类型和资源仍必须通过 Linker 校验。
 - WASI 准入按完整接口名称与稳定版本系列校验：仅允许既有的 stdio、terminal、空 environment、exit、clocks、random 与 io 支持接口；拒绝相似名称、无版本、预发布版及其他 major/minor 系列。SemVer build metadata 不影响稳定版判定。版本系列匹配不承诺未来所有功能可用：[Wasmtime Linker](https://docs.rs/wasmtime/49.0.1/wasmtime/component/struct.Linker.html) 仍校验所需函数签名和资源类型，宿主缺少函数或类型不兼容时明确加载失败。`WasiCtx` 不继承宿主 stdio、环境或目录；filesystem、sockets 与 WASI HTTP imports 始终拒绝，插件网络仍只能使用受控的 `stravia:net` 接口。
 - 当前 Rust 预编译标准库仍导入 WASI `0.2.9`，因此新构建的插件可以同时包含 SDK 的 `0.2.12` 与标准库的 `0.2.9` imports。更新项目 `wasip2` 依赖不会替换工具链的标准库；本次不更换 Rust 工具链或自建标准库。构建产物的实际 imports 可用 `wasm-tools component wit <component.wasm>` 检查。
-- 推理与原生压缩在执行前调用同一固定版本的 `select-protocol` 导出，由插件根据连接快照与 canonical 请求选择实际上游协议。该阶段只允许纯计算，禁止网络、私有状态和事件副作用，并受相同的取消与截止时间约束。宿主随后基于返回协议确定回放身份和语义转换，不维护 OpenAI 等供应商的协议偏好分支。
+- 推理与原生压缩在执行前按同一固定版本选择实际上游协议。默认调用插件的 `select-protocol` 导出；channel 也可显式声明可选 `static_protocol`：`{"kind":"configured"}` 等价于原样返回 `ProviderSnapshot.protocol`，`{"kind":"fixed","value":"<protocol>"}` 等价于返回固定协议字符串。仅当结果不依赖请求、模型或其他连接字段时才能声明；宿主在 profile/channel 准入及取消、deadline 检查之后短路，既不实例化 guest，也不序列化完整请求。未声明的旧插件保持原导出路径；OpenAI／Azure 的自动协议选择仍为动态。该阶段只允许纯计算，禁止网络、私有状态和事件副作用，并受相同的取消与截止时间约束。宿主随后基于返回协议确定回放身份和语义转换，不维护 OpenAI 等供应商的协议偏好分支。
 
 Rust 运行时执行入口接收 SDK 的操作类型与已编码输入，准入直接检查连接快照与 channel，不将完整 canonical payload 再解码为第二份 Native IR。请求准备、模型覆盖与续接使用共享 `Arc<AiRequest>`，只在真实修改时分离；文本叶子 `MessageContent::Text` 与 `ContentBlock::Text.text` 使用 `Arc<String>`。Rust 调用方从 `String` 构造时使用 `.into()`，从字符串字面量构造时使用 `.to_owned().into()`，编辑共享文本时使用 `Arc::make_mut` 或既有的 `output_text_mut()`。这些共享所有权调整只改变 Rust 源码接口，本身不改变 canonical JSON、格式版本或 WIT 布局；当前 Vendor ABI 切换的重建要求仍按本节执行。
 
 `ProtocolAdapter::encode_request`、`ProtocolPair::encode_request`、`ProtocolTransform::encode_request_with` 和 `vendor_common::common::encode_inference_request` 消费 `AiRequest`，不再提供借用请求的编码入口。标准协议经共享准备入口按目标能力省略不可表达部分，私有 wire 由所属插件准备，再消费此次编码的 canonical 视图，不损坏共享历史快照；真实编码、解析与安全错误仍返回，目标表达能力不足不再整体拒绝。调用方先保留消费后仍需要的 model、stream、display 或 compaction 字段；确实需要继续使用完整请求时才显式克隆。四类标准 codec 在文本唯一归属时取出底层 `String`，共享文本仍保持只读；已拥有的原生字段、工具定义、工具结果和数组/对象直接移入 wire JSON，避免父对象再次序列化整段正文。已安装插件的性能优化需要重建并重新导入；内嵌 `base` 随宿主构建更新。
 
-SDK 私有 canonical 编码与 base provider 请求体编码对不可变快照先计数，再按序列化长度分配 JSON 缓冲区，避免大文本触发容量翻倍；公开 generic payload 编码仍保持单次序列化，不额外调用外部实现的 `Serialize`。Wasmtime 继续启用 fuel 与操作取消/deadline，异步让出间隔为每 1,000,000 fuel；不减少总执行预算、不关闭沙箱，也不改用 Native 执行。
+SDK 私有 canonical 编码与 base provider 请求体编码对不可变快照先计数，再按序列化长度分配 JSON 缓冲区，避免大文本触发容量翻倍；公开 generic payload 编码仍保持单次序列化，不额外调用外部实现的 `Serialize`。Wasmtime 使用 epoch interruption 代替 fuel 指令计数：有活跃 guest 时每 10 ms 推进 Engine epoch，guest 在 epoch 到期时异步让出，继续使用既有的操作取消与可续期 deadline；空闲时 ticker 在条件变量上休眠。epoch 周期不是执行总预算或超时时间，纯 CPU 循环也必须响应取消与 deadline；不关闭沙箱，也不改用 Native 执行。
+
+64 位宿主优先使用 Wasmtime pooling allocator，并通过运行时并发许可限制活跃 Store；等待池槽同样服从操作取消与 deadline。每个调用仍有独立 Store、线性内存、资源表和 HostServices；先销毁 Store 归还池槽，再释放并发许可。池创建失败时记录警告并使用按需分配，其他平台直接按需分配。池会预留较大的虚拟地址范围，不能把 `VmSize` 当作物理内存分配或 RSS；空闲槽不保留常驻线性内存。当前池允许 64 个活跃 Store，总 core instance、memory 和 table 数按单组件允许量乘以 64 配置；线性内存保留完整 wasm32 的 4 GiB 增长范围，不另设 256 MiB 请求上限。该配置在本机预留约 1 TiB 虚拟地址空间；设置严格地址空间限制的部署可能无法启用池化。
+
+本地 release 对照使用隔离 SQLite、新建 data-dir 和 loopback 合成上游，保持 `synchronous=FULL`。以优化后→优化前→优化前→优化后的顺序共测四次，下面为每个版本两次的均值。每次预热两条 Route 各 5 次，再执行 120 次串行短请求、160 次并发 16 短请求，以及 Custom 60 轮／动态 OpenAI 40 轮全量历史重放（每轮新增约 1.8 KB user 正文）；共 380 次测量请求。CPU 是 Server PID 的 user+system 时间差，RSS 为负载结束后的采样，不是峰值。
+
+|指标|优化前|优化后|
+|---|---:|---:|
+|Server 二进制|192.3 MiB|116.1 MiB|
+|380 次请求的 Server CPU 时间|42.77 s|37.95 s|
+|负载后 RSS|208.6 MiB|193.5 MiB|
+|串行短请求 p50|101.5 ms|104.2 ms|
+|并发 16 的完成吞吐|47.6 req/s|47.7 req/s|
+|Custom 长对话 p50|177.9 ms|166.0 ms|
+|动态 OpenAI 长对话 p50|172.2 ms|159.7 ms|
+
+短请求没有稳定提速，单轮尾延迟波动明显，不能用这些结果承诺普遍吞吐提升。独立的真实 Base `select_protocol` 探针保持相同 epoch 配置，排除编译／装载并预热后，短请求和 150 KiB 多轮请求各做两轮交错、每组 250 次；池化与按需分配 p50 约 1.3–2.2 ms，未显示稳定的池化回退。HTTP 探针仅确认 HTTP 200 与 SSE 成功终态，不等于完整历史链审计或生产上游验收；PostgreSQL 和多实例不在此性能测量内。对照二进制 SHA-256：优化前 `8059c583adba725739b35a1570e9b2663c26513fe61ea126a0cda10ca4667719`，优化后 `70a2c127e1b06dccbc84f656f9f32e035003607926c2cfdfe8a09e85f544aaef`。
 
 Canonical `MessageContent` 与 Chat 文本/parts 解码直接接收 owned string 或 typed sequence，不经 untagged 缓冲的借用分支复制整段正文；wire 字节的文本拥有成本仍保留。字符串/数组形状、原生工具 JSON、任意精度 wire 数字与非法内容拒绝契约不变；JSON backend 仍为 `serde_json`。
 

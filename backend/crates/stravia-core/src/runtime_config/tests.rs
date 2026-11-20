@@ -113,3 +113,135 @@ async fn conditional_credential_and_allowance_changes_preserve_storage_contract(
     )
     .await
 }
+
+#[tokio::test]
+async fn api_key_auth_projection_caches_reads_and_invalidates_immediately() -> anyhow::Result<()> {
+    use crate::db::models::{CreateApiKey, CreateTarget, PutRoute, RoutePurpose, UpdateApiKey};
+
+    let (_directory, _pool, source) = source().await?;
+    let config = RuntimeConfig::attach(source).await?;
+    let target_provider = config.providers().create(provider()).await?;
+    let route = config
+        .routes()
+        .put(PutRoute {
+            id: None,
+            model_id: "route-a".into(),
+            display_name: Some("Route A".into()),
+            purpose: Some(RoutePurpose::Inference),
+            is_enabled: true,
+            selection_strategy: "traffic_equalization".into(),
+            targets: Some(vec![CreateTarget {
+                provider_id: target_provider.id.clone(),
+                model: "gpt-4o-mini".into(),
+                enabled: true,
+                priority: Some(1),
+                first_token_timeout_ms: None,
+                target_retry_budget: None,
+                target_cooldown_ms: None,
+                thinking_level_map: Vec::new(),
+            }]),
+            default_thinking_level: None,
+            billing: None,
+        })
+        .await?;
+    let route_id = route.id.to_string();
+
+    let api_keys = config.api_keys().expect("api keys");
+    let auth = config.auth().expect("auth");
+    let created = api_keys
+        .create(CreateApiKey {
+            name: "hot-key".into(),
+            key: Some("sk-hot-secret-1".into()),
+            rpm_limit: Some(60),
+            spend_limit: Some("10.00".into()),
+            mcp_access_enabled: false,
+            transparent_injection_enabled: false,
+            transparent_injections: Default::default(),
+            expires_at: None,
+            model_ids: vec![route_id.clone()],
+        })
+        .await?;
+
+    // Warm caches by token, id, and bound models.
+    let found = auth
+        .find_api_key("sk-hot-secret-1")
+        .await?
+        .expect("key found by token");
+    assert_eq!(found.id, created.id);
+    assert!(found.is_enabled);
+    assert_eq!(
+        auth.find_api_key_by_id(&created.id)
+            .await?
+            .expect("key found by id")
+            .name,
+        "hot-key"
+    );
+    assert!(auth.model_access_allowed(&created.id, &route_id).await?);
+    assert!(
+        !auth
+            .model_access_allowed(&created.id, "other-route")
+            .await?
+    );
+    assert_eq!(
+        auth.list_bound_model_ids(&created.id).await?,
+        vec![route_id.clone()]
+    );
+
+    // Random unknown tokens must not pollute or grow the positive cache.
+    for i in 0..32 {
+        assert!(
+            auth.find_api_key(&format!("sk-invalid-{i}"))
+                .await?
+                .is_none()
+        );
+    }
+
+    // Disabling and rotating key must invalidate immediately (0ms staleness).
+    api_keys
+        .update(
+            &created.id,
+            UpdateApiKey {
+                key: Some("sk-hot-secret-2".into()),
+                name: None,
+                rpm_limit: None,
+                spend_limit: None,
+                is_enabled: Some(false),
+                mcp_access_enabled: None,
+                transparent_injection_enabled: None,
+                transparent_injections: None,
+                expires_at: None,
+                model_ids: None,
+            },
+        )
+        .await?;
+    assert!(auth.find_api_key("sk-hot-secret-1").await?.is_none());
+    let rotated = auth
+        .find_api_key("sk-hot-secret-2")
+        .await?
+        .expect("rotated key found");
+    assert!(!rotated.is_enabled);
+
+    // Custom currency setup converts spend_limit_nanos in DB and must invalidate cached records.
+    let original_limit = rotated.spend_limit_nanos.expect("spend limit");
+    config
+        .money()
+        .save_custom_currency("CNY", rust_decimal::Decimal::new(72, 1))
+        .await?;
+    let converted = auth
+        .find_api_key("sk-hot-secret-2")
+        .await?
+        .expect("key after currency conversion");
+    assert_ne!(converted.spend_limit_nanos, Some(original_limit));
+
+    // Deleting the bound route cascades into api_key_models; cache must invalidate immediately.
+    config.routes().delete("route-a").await?;
+    assert!(auth.list_bound_model_ids(&created.id).await?.is_empty());
+    assert!(auth.model_access_allowed(&created.id, "any-route").await?);
+
+    // Deleting key must invalidate immediately across every lookup.
+    api_keys.delete(&created.id).await?;
+    assert!(auth.find_api_key("sk-hot-secret-2").await?.is_none());
+    assert!(auth.find_api_key_by_id(&created.id).await?.is_none());
+    assert!(!auth.model_access_allowed(&created.id, "any-route").await?);
+    Ok(())
+}

@@ -106,6 +106,9 @@ pub fn descriptor() -> VendorDescriptor {
                 auth: None,
                 protocol: Some("command-code".into()),
                 protocols: Vec::new(),
+                static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Fixed(
+                    "command-code/generate/v1".into(),
+                )),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
                 consumes_catalog_models: false,

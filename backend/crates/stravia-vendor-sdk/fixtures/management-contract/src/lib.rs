@@ -156,6 +156,7 @@ impl VendorGuest for ManagementContractVendor {
                     }),
                     protocol: Some("fixture-management".into()),
                     protocols: Vec::new(),
+                    static_protocol: None,
                     default_base_url: None,
                     default_models_source: None,
                     consumes_catalog_models: false,

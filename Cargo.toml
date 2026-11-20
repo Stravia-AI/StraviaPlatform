@@ -47,7 +47,7 @@ sqlx-core = { version = "=0.9.0", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation"] }
+wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation", "pooling-allocator"] }
 # 复用 wasmtime parallel-compilation 已引入的 rayon，在临时线程池编译并在结束后退出线程归还内存。
 rayon = "1.12.0"
 wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p2"] }
@@ -187,6 +187,11 @@ stable_deref_trait = "1.2.1"
 # `let _ =` 丢弃锁 guard 或未驱动的 future 属于真实 bug 类别，直接 deny。
 let_underscore_lock = "deny"
 let_underscore_future = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
 
 [profile.dev]
 opt-level = 0

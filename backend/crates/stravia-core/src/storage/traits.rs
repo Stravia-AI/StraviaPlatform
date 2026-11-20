@@ -38,7 +38,7 @@ pub struct ProviderConnectionCheckWrite {
     pub credentials_verified: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiKeyAccessRecord {
     pub id: String,
     pub name: String,

@@ -236,6 +236,10 @@ pub fn descriptor() -> VendorDescriptor {
                 }),
                 protocol: Some("anthropic-messages".into()),
                 protocols: Vec::new(),
+                static_protocol: Some(stravia_vendor_sdk::StaticProtocol::Fixed(
+                    stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01
+                        .to_string(),
+                )),
                 default_base_url: Some(DEFAULT_BASE_URL.into()),
                 default_models_source: None,
                 consumes_catalog_models: false,

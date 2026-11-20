@@ -526,7 +526,7 @@ impl InteractionObservation {
                     return;
                 }
                 let mut last = after;
-                let mut roots = HashMap::new();
+                let mut roots = RootIdCache::new(ROOT_ID_CACHE_CAPACITY);
                 if let Err(error) = replay_to(&store, &tx, &mut last, max, &mut roots).await {
                     if tx.is_closed() {
                         return;
@@ -724,12 +724,53 @@ async fn subscription_sequence(store: &ObservationStore, fallback: i64) -> i64 {
     }
 }
 
+const ROOT_ID_CACHE_CAPACITY: usize = 2048;
+
+struct RootIdCache {
+    capacity: usize,
+    entries: HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl RootIdCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::with_capacity(capacity.min(64)),
+            order: std::collections::VecDeque::with_capacity(capacity.min(64)),
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<&str> {
+        self.entries.get(id).map(String::as_str)
+    }
+
+    fn insert(&mut self, id: String, root: String) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(existing) = self.entries.get_mut(&id) {
+            *existing = root;
+            return;
+        }
+        while self.entries.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(id.clone());
+        self.entries.insert(id, root);
+    }
+}
+
 async fn replay_to(
     store: &ObservationStore,
     sender: &mpsc::Sender<ObservationUpdate>,
     last: &mut i64,
     through: i64,
-    roots: &mut HashMap<String, String>,
+    roots: &mut RootIdCache,
 ) -> anyhow::Result<()> {
     while *last < through {
         let before = *last;
@@ -751,15 +792,12 @@ async fn send_change(
     store: &ObservationStore,
     sender: &mpsc::Sender<ObservationUpdate>,
     event: ObservationEvent,
-    roots: &mut HashMap<String, String>,
+    roots: &mut RootIdCache,
 ) -> anyhow::Result<()> {
     let root_id = match event.interaction_id.as_deref() {
         Some(id) => {
-            if roots.len() >= 2048 {
-                roots.clear();
-            }
             if let Some(root) = roots.get(id) {
-                Some(root.clone())
+                Some(root.to_owned())
             } else {
                 let root = store.observation_root_id(id).await?;
                 if let Some(root) = &root {
@@ -8184,5 +8222,25 @@ mod snapshot_tests {
         observation.shutdown().await;
         pool.close().await;
         Ok(())
+    }
+
+    #[test]
+    fn root_id_cache_evicts_oldest_entry_without_clearing_hot_entries() {
+        let mut cache = RootIdCache::new(3);
+        cache.insert("a".into(), "root-a".into());
+        cache.insert("b".into(), "root-b".into());
+        cache.insert("c".into(), "root-c".into());
+        cache.insert("d".into(), "root-d".into());
+
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("b"), Some("root-b"));
+        assert_eq!(cache.get("c"), Some("root-c"));
+        assert_eq!(cache.get("d"), Some("root-d"));
+
+        // Updating an existing entry must not evict another key.
+        cache.insert("b".into(), "root-b2".into());
+        assert_eq!(cache.get("b"), Some("root-b2"));
+        assert_eq!(cache.get("c"), Some("root-c"));
+        assert_eq!(cache.get("d"), Some("root-d"));
     }
 }

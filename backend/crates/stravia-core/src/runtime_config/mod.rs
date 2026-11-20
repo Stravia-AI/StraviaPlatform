@@ -1,5 +1,6 @@
 //! 常驻配置投影；集中处理预加载、负查询、写入代际与取消后的权威读取。
-//! SQL 仍拥有事实和事务，权限、OAuth、历史与执行状态不进入本投影。
+//! SQL 仍拥有事实和事务，OAuth、历史与执行状态不进入本投影；单实例 SQLite
+//! 下的 API Key 认证投影仅以令牌 SHA-256 摘要索引并在所有变更入口同步失效。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -15,6 +16,7 @@ use crate::{
     storage::{DynStorage, traits::*},
 };
 
+mod auth;
 #[cfg(test)]
 mod concurrency_tests;
 mod models;
@@ -38,6 +40,9 @@ struct Values {
     settings: HashMap<String, Option<String>>,
     invalid_providers: Option<HashSet<String>>,
     suspended_providers: Option<HashSet<String>>,
+    auth_by_token_hash: HashMap<[u8; 32], ApiKeyAccessRecord>,
+    auth_by_id: HashMap<String, ApiKeyAccessRecord>,
+    bound_models: HashMap<String, Arc<Vec<String>>>,
 }
 
 struct State {
@@ -178,7 +183,7 @@ impl Storage for RuntimeConfig {
         self.source.web_providers()
     }
     fn routes(&self) -> &dyn RouteStore {
-        self.source.routes()
+        self
     }
     fn provider_models(&self) -> &dyn ProviderModelStore {
         self
@@ -187,13 +192,13 @@ impl Storage for RuntimeConfig {
         self
     }
     fn money(&self) -> &dyn crate::storage::traits::MoneyStore {
-        self.source.money()
+        self
     }
     fn api_keys(&self) -> Option<&dyn ApiKeyStore> {
-        self.source.api_keys()
+        self.source.api_keys().map(|_| self as &dyn ApiKeyStore)
     }
     fn auth(&self) -> Option<&dyn AuthAccessStore> {
-        self.source.auth()
+        self.source.auth().map(|_| self as &dyn AuthAccessStore)
     }
     fn admin_identity(&self) -> Option<&dyn AdminIdentityStore> {
         self.source.admin_identity()
