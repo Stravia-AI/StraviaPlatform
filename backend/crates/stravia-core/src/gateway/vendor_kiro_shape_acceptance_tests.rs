@@ -80,7 +80,19 @@ async fn kiro_real_wasm_inference_matches_http_wire() -> anyhow::Result<()> {
                 .header("authorization", format!("Bearer {key}"))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    json!({"model":"kiro-wire", "input":"Reply local Kiro answer"}).to_string(),
+                    json!({
+                        "model": "kiro-wire", "input": "Reply local Kiro answer",
+                        "reasoning": {"summary": "auto"}, "store": false,
+                        "prompt_cache_key": "synthetic-cache",
+                        "tools": [{
+                            "type": "function", "name": "lookup", "strict": true,
+                            "parameters": {
+                                "type": "object", "properties": {"store": {"type": "boolean"}},
+                                "required": ["store"], "additionalProperties": false
+                            }
+                        }]
+                    })
+                    .to_string(),
                 ))?,
         ),
     )
@@ -167,6 +179,18 @@ async fn kiro_real_wasm_inference_matches_http_wire() -> anyhow::Result<()> {
     assert_eq!(message["origin"], tui["origin"]);
     assert_eq!(message["modelId"], "qwen3-coder-next");
     assert_eq!(message["content"], "Reply local Kiro answer");
+    assert_eq!(
+        message["userInputMessageContext"]["tools"],
+        json!([{
+            "toolSpecification": {
+                "name": "lookup", "description": "lookup",
+                "inputSchema": {"json": {
+                    "type": "object", "properties": {"store": {"type": "boolean"}},
+                    "required": ["store"], "additionalProperties": false
+                }}
+            }
+        }])
+    );
     with_real_time_limit(server.task).await???;
     Ok(())
 }

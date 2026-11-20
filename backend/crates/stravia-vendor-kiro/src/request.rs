@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 use stravia_runtime_contract::protocol::ir::{
-    AiRequest, CacheParameters, ContentBlock, DocumentSource, MediaSource, MessageContent,
-    ResponseFormat, Role, ToolChoice, ToolResultContentKind,
+    AiRequest, ContentBlock, DocumentSource, MediaSource, MessageContent, Role,
+    ToolResultContentKind,
 };
 use stravia_vendor_common::common;
 use stravia_vendor_sdk::{ErrorKind, PluginError};
@@ -26,52 +26,8 @@ pub(super) fn encode(
     if model.is_empty() || conversation_id.is_empty() {
         return Err(invalid("Kiro requires a model and conversation ID"));
     }
-    let g = &request.generation;
-    if g.temperature.is_some()
-        || g.max_tokens.is_some()
-        || g.top_p.is_some()
-        || g.seed.is_some()
-        || g.stop.is_some()
-        || g.presence_penalty.is_some()
-        || g.frequency_penalty.is_some()
-        || request.reasoning.summary.is_some()
-        || !matches!(&request.response_format, None | Some(ResponseFormat::Text))
-        || request.parallel_tool_calls.is_some()
-        || !matches!(&request.tool_choice, None | Some(ToolChoice::Auto))
-    {
-        return Err(invalid(
-            "Kiro GenerateAssistantResponse does not support the requested controls",
-        ));
-    }
-    // Session identifiers and resets are host-side bookkeeping, not generation
-    // controls. The only upstream identity is the host-scoped conversation ID.
-    let p = &request.parameters;
-    if p.top_k.is_some()
-        || p.min_p.is_some()
-        || p.repetition_penalty.is_some()
-        || p.candidate_count.is_some()
-        || p.logit_bias.is_some()
-        || p.logprobs.is_some()
-        || p.modalities.is_some()
-        || p.audio.is_some()
-        || p.verbosity.is_some()
-        || p.max_tool_calls.is_some()
-        || p.store.is_some()
-        || p.background.is_some()
-        || p.generate.is_some()
-        || p.truncation.is_some()
-        || p.compaction.is_some()
-        || p.metadata.is_some()
-        || p.end_user_id.is_some()
-        || p.service_tier.is_some()
-        || p.continuation.is_some()
-        || !p.native_tools.is_empty()
-        || p.cache != CacheParameters::default()
-    {
-        return Err(invalid(
-            "Kiro GenerateAssistantResponse does not support the requested parameters",
-        ));
-    }
+    // 私有 wire 只编码 Kiro 支持的字段；其余 canonical 控制在此省略，
+    // 不因客户端携带 summary、store 或缓存提示而拒绝整个请求。
 
     let mut instructions = String::new();
     if let Some(text) = &request.instructions {
@@ -199,9 +155,6 @@ pub(super) fn encode(
     }
     let mut tools = Vec::new();
     for tool in request.tools.iter().flatten() {
-        if tool.strict == Some(true) || tool.defer_loading == Some(true) {
-            return Err(invalid("Kiro does not support strict or deferred tools"));
-        }
         let mut spec = Map::new();
         spec.insert("name".into(), json!(tool.name));
         spec.insert("inputSchema".into(), json!({"json": tool.parameters}));
@@ -705,6 +658,7 @@ fn append_assistant_content(turn: &mut Turn, content: &MessageContent) -> Result
 mod tests {
     use super::*;
     use serde_json::json;
+    use stravia_runtime_contract::protocol::ir::ResponseFormat;
 
     fn encode(request: &AiRequest, model: &str, id: &str) -> Result<Value, PluginError> {
         super::encode(request, model, id, None, true)
@@ -712,6 +666,108 @@ mod tests {
 
     fn request(items: Value) -> AiRequest {
         serde_json::from_value(json!({"model":"source", "items": items})).unwrap()
+    }
+
+    #[test]
+    fn projects_responses_client_options_to_kiro_fields() {
+        use stravia_protocol_codec::registry::ProtocolRegistry;
+
+        let registry = ProtocolRegistry::global();
+        let endpoint = registry
+            .resolve_ingress_route("POST", "/v1/responses")
+            .unwrap();
+        let adapter = registry.adapter(&endpoint).unwrap();
+        let mut metadata = stravia_vendor_sdk::ModelMetadata::default();
+        metadata
+            .extensions
+            .insert("kiro_effort_group".into(), json!("output_config"));
+        metadata
+            .extensions
+            .insert("reasoning_efforts".into(), json!(["high", "xhigh"]));
+        let tool = json!({
+            "type": "function", "name": "read_file", "strict": true,
+            "parameters": {
+                "type": "object", "properties": {"path": {"type": "string"}},
+                "required": ["path"], "additionalProperties": false
+            }
+        });
+        for options in [
+            json!({"reasoning": {"effort": "xhigh", "summary": "auto"}}),
+            json!({"store": false}),
+            json!({"prompt_cache_key": "synthetic-cache"}),
+            json!({"tools": [tool.clone()]}),
+            json!({
+                "temperature": 0.2, "max_output_tokens": 100,
+                "tool_choice": "required", "parallel_tool_calls": false,
+                "text": {"format": {
+                    "type": "json_schema", "name": "answer", "strict": true,
+                    "schema": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"], "additionalProperties": false}
+                }},
+                "tools": [{"type": "function", "name": "read_file", "defer_loading": true, "parameters": tool["parameters"]}]
+            }),
+            json!({
+                "reasoning": {"effort": "xhigh", "summary": "auto"},
+                "store": false, "prompt_cache_key": "synthetic-cache", "tools": [tool.clone()]
+            }),
+        ] {
+            let mut source = json!({
+                "model": "default", "input": "Hello", "instructions": "Be concise.",
+                "stream": true, "include": ["reasoning.encrypted_content"]
+            });
+            source
+                .as_object_mut()
+                .unwrap()
+                .extend(options.as_object().unwrap().clone());
+            let request = adapter.decode_request(source).unwrap();
+            let body = super::encode(
+                &request,
+                "claude-sonnet-5.5",
+                "scoped-id",
+                Some(&metadata),
+                true,
+            )
+            .unwrap_or_else(|error| panic!("options {options}: {error:?}"));
+            let state = &body["conversationState"];
+            assert_eq!(
+                state["history"][0]["userInputMessage"]["content"],
+                "Be concise."
+            );
+            assert_eq!(
+                state["currentMessage"]["userInputMessage"]["content"],
+                "Hello"
+            );
+            if options.get("reasoning").is_some() {
+                assert_eq!(
+                    body["additionalModelRequestFields"],
+                    json!({"output_config": {"effort": "xhigh"}})
+                );
+            }
+            if options.get("tools").is_some() {
+                let context =
+                    &state["currentMessage"]["userInputMessage"]["userInputMessageContext"];
+                assert_eq!(
+                    context["tools"],
+                    json!([{
+                        "toolSpecification": {
+                            "name": "read_file", "description": "read_file",
+                            "inputSchema": {"json": tool["parameters"]}
+                        }
+                    }])
+                );
+            }
+            for field in [
+                "store",
+                "prompt_cache_key",
+                "reasoning",
+                "temperature",
+                "max_output_tokens",
+                "tool_choice",
+                "parallel_tool_calls",
+                "text",
+            ] {
+                assert!(body.get(field).is_none(), "unexpected Kiro field {field}");
+            }
+        }
     }
 
     #[test]
@@ -1055,13 +1111,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_media_controls_and_bad_tool_arguments() {
+    fn rejects_unsupported_media_and_bad_tool_arguments() {
         let req = request(
             json!([{"role":"user","content":[{"type":"audio","source":{"type":"url","url":"https://example.test"}}]}]),
         );
-        assert!(encode(&req, "model", "id").is_err());
-        let mut req = request(json!([{"role":"user","content":"hello"}]));
-        req.generation.temperature = Some(0.2);
         assert!(encode(&req, "model", "id").is_err());
         let req = request(json!([
             {"role":"user","content":"hello"},

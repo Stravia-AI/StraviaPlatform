@@ -160,6 +160,8 @@ Devin 的两个固定 namespace 区分原有两种独立身份，不是字段级
 3. 同步模型，将账号目录中的目标模型（例如 `qwen3-coder-next`）绑定到 Route。目录声明的文本、图像输入和可用推理强度随同步更新；未声明具体档位时，插件不补填推理强度。请求目标编辑器按模型声明校验 effort，不因 Kiro 使用私有协议而拒绝已声明的档位。只有 schema 同时允许 `thinking.type` 为 `adaptive` 与 `disabled` 时，才把关闭思考发布为 canonical effort `none`，生成 `off` 档映射；推理时转换为 `additionalModelRequestFields.thinking.type: "disabled"`，不将合成的 `none` 发入 `output_config.effort`。原生 `reasoning.effort: "none"` 则保持原字段。升级插件后重新同步模型；手工固定的规格和手改映射仍由管理员决定是否恢复同步或重新生成。当前流只投影文本输出。推理使用所选模型，不回退、不加载 CLI 自带工具，也不访问 CLI 的工作区、历史或记忆。
 4. 在「额度」刷新该连接。只读 `GetUsageLimits` 不生成文本；月度、有效试用及各笔赠送独立显示，不合并成虚构的总余额。部分字段、未知单位与读取失败不视为零。额度来自账号区域的 management 服务，详见[计量规则](../research/kiro-cli-credits.md)。
 
+Kiro 请求按官方工具字段正向投影：`reasoning.summary`、`store`、prompt-cache 提示等未映射的通用控制，以及工具的 `strict`／`defer_loading` 标志，只在本次目标请求中省略，不再导致 `vendor_request_invalid`。工具名、说明、JSON Schema（含业务字段与约束）和模型已声明的 effort 投影保持原值；省略标志不表示 Kiro 会执行严格输出或延迟加载约束，也不修改客户端请求或历史。升级需重新构建并导入独立 Kiro 插件，无数据库迁移。
+
 Google、GitHub 使用 Kiro 设备端点；Builder ID 和 IAM Identity Center 使用对应区域的 AWS SSO OIDC 端点。IAM Identity Center 只选允许设备码登录的可用 profile，网络与组织策略错误会阻止连接。推理、目录和额度以 Kiro CLI 3.4.0 交互式 `chat --tui --v3` 主请求为基准；IAM Identity Center 按 KAS 的身份类型映射附带 `TokenType: SSO_OIDC`。插件不补发 CLI 的遥测、启动或标题生成请求，不复制内置工具或提示。私有协议留在 Wasm 内；账号、区域、配额和协议可用性受 Kiro 控制。详见[交互式 TUI 实测](../research/kiro-cli-request-alignment.md#交互式-tui-实测)。
 
 ### Command Code 模型发现

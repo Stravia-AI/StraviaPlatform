@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Kiro no longer rejects otherwise valid requests carrying unsupported client controls such as `reasoning.summary`, `store`, prompt-cache hints, or tool `strict` / `defer_loading`. Unsupported controls are omitted from the native request; tool names and JSON schemas remain intact, and model-declared reasoning efforts keep their native mapping. Rebuild and re-import the standalone Kiro plugin to apply the fix; no database migration is required.
+
 - Kiro request targets now accept model-declared reasoning efforts in the editor instead of rejecting its private protocol. Models whose schema supports disabling thinking expose an `off` mapping through canonical effort `none`; the plugin translates it to the native thinking switch without sending an invalid effort. Models without that switch remain unsupported for `off`. Rebuild and re-import the Kiro plugin, then sync models to refresh generated mappings; pinned specifications and manually overridden mappings are preserved.
 
 ### Changed
