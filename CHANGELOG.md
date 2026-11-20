@@ -2,13 +2,13 @@
 
 ## Unreleased
 
+## [0.7.4] - 2026-11-20
+
+This release also includes the changes listed under [0.7.3](https://github.com/Stravia-AI/StraviaPlatform/blob/v0.7.4/CHANGELOG.md#073---2026-11-19), whose publication was cancelled.
+
 ### Added
 
 - OpenAI Codex, Claude Code, Antigravity, xAI Grok, and Devin offer a Refresh token tab alongside OAuth sign-in when adding, editing, or reauthorizing a connection. Tokens are exchanged with the provider before credentials can be saved. Update the host and rebuild/re-import the standalone plugins to enable the option; older plugins keep the existing sign-in flow. Kiro is unchanged. No database migration is required.
-
-## [0.7.4] - 2026-11-20
-
-This release also includes the changes listed under [0.7.3](#073---2026-11-19), whose publication was cancelled.
 
 ### Verification
 
