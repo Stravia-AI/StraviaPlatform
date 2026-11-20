@@ -802,6 +802,7 @@ async function copyProvider(): Promise<void> {
           vendorId={reauthorizationTarget.vendor}
           channel={channel.id}
           flow={channel.auth.flow}
+          supportsRefreshToken={Boolean(channel.auth?.supports_refresh_token)}
           configuration={{
             provider_id: reauthorizationTarget.id,
             base_url: reauthorizationTarget.base_url,

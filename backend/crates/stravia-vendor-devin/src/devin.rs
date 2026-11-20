@@ -130,6 +130,7 @@ pub(crate) fn descriptor() -> VendorDescriptor {
                         description: Some(crate::messages::manual_code_description()),
                         secret: true,
                     }),
+                    supports_refresh_token: true,
                 }),
                 protocol: Some("devin-connect".into()),
                 protocols: Vec::new(),

@@ -22,6 +22,10 @@ pub(crate) enum ProviderReconnectStart {
         candidate: Box<AuthSessionCandidate>,
         options: OAuthSessionStartOptions,
     },
+    RefreshToken {
+        candidate: Box<AuthSessionCandidate>,
+        refresh_token: String,
+    },
     Existing {
         provider_id: String,
     },
@@ -40,6 +44,7 @@ pub(crate) enum ProviderReconnectCallback {
 
 pub(crate) enum ProviderReconnectResult {
     Redirect(AuthSessionInitData),
+    Ready(AuthSessionReadyData),
     Complete(AuthSessionStatusData),
     Provider(Provider),
     Status(ProviderOAuthStatusData),
@@ -165,6 +170,14 @@ impl<'a> ProviderConnection<'a> {
                 .init_oauth_session_record(*candidate, options)
                 .await
                 .map(ProviderReconnectResult::Redirect),
+            ProviderReconnect::Start(ProviderReconnectStart::RefreshToken {
+                candidate,
+                refresh_token,
+            }) => self
+                .admin
+                .init_oauth_session_with_refresh_token_record(*candidate, refresh_token)
+                .await
+                .map(ProviderReconnectResult::Ready),
             ProviderReconnect::Start(ProviderReconnectStart::Existing { provider_id }) => self
                 .admin
                 .reconnect_provider_oauth_record(&provider_id)

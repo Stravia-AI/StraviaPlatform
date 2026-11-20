@@ -564,6 +564,7 @@ pub enum AuthStep {
     Start { redirect_uri: String, state: String },
     Exchange { callback_url: String },
     ManualInput { value: String },
+    RefreshToken { refresh_token: String },
     Poll,
     Refresh,
     Revoke,

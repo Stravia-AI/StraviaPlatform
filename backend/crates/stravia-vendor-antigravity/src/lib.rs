@@ -69,6 +69,7 @@ pub fn descriptor() -> VendorDescriptor {
                         description: Some(messages::authorization_description()),
                         secret: true,
                     }),
+                    supports_refresh_token: true,
                 }),
                 protocol: Some("google-gemini".into()),
                 protocols: Vec::new(),

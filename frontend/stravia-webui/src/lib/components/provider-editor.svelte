@@ -447,6 +447,7 @@ function saveProvider(): void {
               vendorId={selectedOption.metadata.provider_id}
               channel={selectedOption.channel.id}
               flow={selectedOption.channel.auth!.flow}
+              supportsRefreshToken={Boolean(selectedOption.channel.auth?.supports_refresh_token)}
               configuration={draft.oauthConfiguration}
               useProxy={draft.fields.useProxy}
               mode="connect"

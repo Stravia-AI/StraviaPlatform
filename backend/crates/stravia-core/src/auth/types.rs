@@ -206,6 +206,16 @@ pub struct AuthSessionInitData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthSessionReadyData {
+    pub session_id: String,
+    pub vendor_id: String,
+    pub channel: String,
+    pub status: AuthSessionStatus,
+    pub expires_in: i64,
+    pub resource_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AuthSessionStatusData {
     Pending {

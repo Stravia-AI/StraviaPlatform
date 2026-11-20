@@ -7,9 +7,9 @@ use serde_json::Value;
 use crate::Gateway;
 use crate::auth::types::{
     AuthBindingStatus, AuthCompletionInput, AuthCompletionValue, AuthScheme, AuthSession,
-    AuthSessionCandidate, AuthSessionInitData, AuthSessionStatus, AuthSessionStatusData,
-    CredentialBundle, OAuthCallbackMode, OAuthSessionStartOptions, StoredCredential,
-    UpdateAuthSession,
+    AuthSessionCandidate, AuthSessionInitData, AuthSessionReadyData, AuthSessionStatus,
+    AuthSessionStatusData, CredentialBundle, OAuthCallbackMode, OAuthSessionStartOptions,
+    StoredCredential, UpdateAuthSession,
 };
 use crate::db::models::*;
 

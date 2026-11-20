@@ -228,6 +228,119 @@ impl AdminService {
         }
     }
 
+    pub async fn init_oauth_session_with_refresh_token(
+        &self,
+        candidate: AuthSessionCandidate,
+        refresh_token: String,
+    ) -> anyhow::Result<AuthSessionReadyData> {
+        match super::provider_connection::ProviderConnection::new(self)
+            .reconnect(super::provider_connection::ProviderReconnect::Start(
+                super::provider_connection::ProviderReconnectStart::RefreshToken {
+                    candidate: Box::new(candidate),
+                    refresh_token,
+                },
+            ))
+            .await?
+        {
+            super::provider_connection::ProviderReconnectResult::Ready(ready) => Ok(ready),
+            _ => anyhow::bail!("refresh token authentication returned an unexpected result"),
+        }
+    }
+
+    pub(super) async fn init_oauth_session_with_refresh_token_record(
+        &self,
+        candidate: AuthSessionCandidate,
+        refresh_token: String,
+    ) -> anyhow::Result<AuthSessionReadyData> {
+        let refresh_token = refresh_token.trim().to_owned();
+        if refresh_token.is_empty() {
+            return Err(coded_error(
+                "AUTH_REFRESH_TOKEN_REQUIRED",
+                "refresh token is required",
+                serde_json::json!({}),
+            ));
+        }
+        if refresh_token.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(coded_error(
+                "AUTH_REFRESH_TOKEN_INVALID",
+                "refresh token contains invalid characters",
+                serde_json::json!({}),
+            ));
+        }
+        let (mut provider, auth_descriptor) =
+            self.provider_auth_candidate_snapshot(&candidate).await?;
+        if !auth_descriptor.supports_refresh_token
+            || auth_descriptor.flow == stravia_vendor_sdk::AuthFlow::Manual
+        {
+            return Err(coded_error(
+                "AUTH_REFRESH_TOKEN_NOT_SUPPORTED",
+                "this authentication channel does not support refresh token sign-in",
+                serde_json::json!({}),
+            ));
+        }
+        provider
+            .operation_metadata
+            .insert("use_proxy".into(), Value::Bool(candidate.use_proxy));
+        let scope = self.gw.create_vendor_session_scope(
+            &candidate.vendor_id,
+            candidate.provider_id.as_deref(),
+            provider,
+        )?;
+        let cancellation = stravia_runtime_contract::CancellationToken::new();
+        let execution = match self
+            .gw
+            .execute_vendor_session(
+                &scope,
+                crate::plugin::VendorRequest::Auth(stravia_vendor_sdk::AuthRequest {
+                    step: stravia_vendor_sdk::AuthStep::RefreshToken { refresh_token },
+                }),
+                crate::plugin::VendorCallContext::new(
+                    cancellation.clone(),
+                    stravia_runtime_contract::Deadline::fixed(
+                        std::time::Instant::now() + std::time::Duration::from_secs(120),
+                    ),
+                ),
+            )
+            .await
+        {
+            Ok(execution) => execution,
+            Err(error) => {
+                cancellation.cancel();
+                let (code, _) = classify_auth_execution_error(&error);
+                return Err(coded_error(code, &error.to_string(), serde_json::json!({})));
+            }
+        };
+        let publication_token = execution.publication.clone();
+        let publication = publication_token.write_fence().await?;
+        let stravia_vendor_sdk::OperationOutput::Auth(
+            response @ stravia_vendor_sdk::AuthResponse::Credentials { .. },
+        ) = execution.output
+        else {
+            cancellation.cancel();
+            anyhow::bail!("vendor returned an invalid authentication result")
+        };
+        let bundle = match credential_bundle_from_response(response) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                cancellation.cancel();
+                let (code, _) = classify_auth_execution_error(&error);
+                return Err(coded_error(code, &error.to_string(), serde_json::json!({})));
+            }
+        };
+        let session = self
+            .create_ready_auth_session_record(
+                candidate,
+                auth_descriptor,
+                bundle.clone(),
+                scope,
+                cancellation,
+                publication_token,
+            )
+            .await?;
+        drop(publication);
+        Ok(build_auth_session_ready_summary(&session, &bundle))
+    }
+
     pub(super) async fn init_oauth_session_record(
         &self,
         candidate: AuthSessionCandidate,

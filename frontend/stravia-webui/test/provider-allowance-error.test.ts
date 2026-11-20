@@ -64,4 +64,25 @@ describe('route purpose recovery errors', () => {
       expect(drift).not.toBe(missing)
     }
   })
+
+  test('localizes refresh-token and exchange auth error codes in English and Chinese', () => {
+    const authCodes = [
+      'AUTH_EXCHANGE_REJECTED',
+      'AUTH_EXCHANGE_RETRYABLE',
+      'AUTH_REFRESH_TOKEN_REQUIRED',
+      'AUTH_REFRESH_TOKEN_INVALID',
+      'AUTH_REFRESH_TOKEN_NOT_SUPPORTED',
+    ]
+    for (const locale of ['en-US', 'zh-CN'] as const) {
+      const rendered = new Set<string>()
+      for (const code of authCodes) {
+        const error = new Error(JSON.stringify({ code, message: `RAW_AUTH_INTERNAL_${code}` }))
+        const message = localizeBackendErrorMessage(error, locale)
+        expect(message).not.toContain(`RAW_AUTH_INTERNAL_${code}`)
+        expect(message.length).toBeGreaterThan(0)
+        rendered.add(message)
+      }
+      expect(rendered.size).toBe(authCodes.length)
+    }
+  })
 })

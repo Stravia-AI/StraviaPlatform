@@ -5,7 +5,7 @@ import CopyIcon from '@lucide/svelte/icons/copy'
 import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
 import LinkIcon from '@lucide/svelte/icons/link'
 import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
-import { onDestroy } from 'svelte'
+import { onDestroy, untrack } from 'svelte'
 import type { FocusEventHandler, MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
 
@@ -15,12 +15,18 @@ import { copyText } from '#lib/clipboard.js'
 import { localeState } from '#lib/localization.svelte.js'
 import { openExternalUrl } from '#lib/open-external.js'
 import { resolvePluginText } from '#lib/plugin-text.js'
-import type { OAuthCallbackMode, OAuthCandidateConfiguration, OAuthSessionInitData } from '#lib/types.js'
+import type {
+  OAuthCallbackMode,
+  OAuthCandidateConfiguration,
+  OAuthSessionInitData,
+  OAuthSessionReadyData,
+} from '#lib/types.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import SecretInput from '#lib/components/secret-input.svelte'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
+import * as Tabs from '#lib/components/ui/tabs/index.js'
 
 interface Props {
   vendorId: string
@@ -28,6 +34,7 @@ interface Props {
   flow: 'authorization_code' | 'device_code' | 'manual'
   configuration: OAuthCandidateConfiguration
   useProxy: boolean
+  supportsRefreshToken?: boolean
   mode: 'connect' | 'reconnect'
   providerName?: string
   disabled?: boolean
@@ -44,11 +51,17 @@ let {
   configuration,
   useProxy,
   mode,
+  supportsRefreshToken = false,
   providerName = '',
   disabled = false,
   onStateChange,
   class: className = '',
 }: Props = $props()
+let authTab = $state<'oauth' | 'refresh_token'>('oauth')
+let refreshToken = $state('')
+let refreshTokenError = $state('')
+let authorizingRefreshToken = $state(false)
+let refreshTokenSession = $state<OAuthSessionReadyData>()
 let oauthSession = $state<OAuthSessionInitData>()
 let callbackUrl = $state('')
 let manualValue = $state('')
@@ -56,6 +69,8 @@ let callbackError = $state('')
 let starting = $state<StartAction>()
 let showSignInLink = $state(false)
 let completing = $state(false)
+let previousVendorId: string | undefined
+let previousChannel: string | undefined
 let sessionGeneration = 0
 let reportedSessionId: string | undefined
 let reportedReady = false
@@ -96,18 +111,42 @@ const supportsManualCallback = $derived(
   flow === 'authorization_code' && oauthSession?.callback_mode === 'manual' && !manualInput,
 )
 const supportsManualInput = $derived(Boolean(manualInput) && oauthInProgress)
+const showAuthTabs = $derived(supportsRefreshToken && flow !== 'manual')
+const activeSessionId = $derived(refreshTokenSession?.session_id ?? oauthSession?.session_id)
+const activeReady = $derived(Boolean(refreshTokenSession || (oauthSession && oauthStatus?.status === 'ready')))
 const signInLinkInputId = $props.id()
+const refreshTokenInputId = `${signInLinkInputId}-refresh-token`
+const refreshTokenErrorId = `${refreshTokenInputId}-error`
 const callbackInputId = $derived(mode === 'connect' ? 'oauth-callback-url' : 'provider-oauth-callback-url')
 const manualInputId = $derived(mode === 'connect' ? 'oauth-manual-value' : 'provider-oauth-manual-value')
 
+$effect.pre(() => {
+  const targetChanged = vendorId !== previousVendorId || channel !== previousChannel
+  previousVendorId = vendorId
+  previousChannel = channel
+  if (showAuthTabs && !targetChanged) return
+  untrack(() => {
+    if (targetChanged || authTab === 'refresh_token') void cancel()
+    authTab = 'oauth'
+    refreshToken = ''
+    refreshTokenError = ''
+  })
+})
+
 $effect(() => {
-  const sessionId = oauthSession?.session_id
-  const ready = Boolean(sessionId) && oauthStatus?.status === 'ready'
+  const sessionId = activeSessionId
+  const ready = activeReady
   if (sessionId === reportedSessionId && ready === reportedReady) return
   reportedSessionId = sessionId
   reportedReady = ready
   onStateChange?.(sessionId, ready)
 })
+
+function changeAuthTab(value: string): void {
+  if ((value !== 'oauth' && value !== 'refresh_token') || value === authTab) return
+  authTab = value
+  void cancel()
+}
 
 function callbackMode(): OAuthCallbackMode {
   if (isTauri) return 'auto'
@@ -121,8 +160,12 @@ function callbackMode(): OAuthCallbackMode {
 }
 
 function resetLocalSession(): string | undefined {
-  const sessionId = oauthSession?.session_id
+  const sessionId = activeSessionId
   oauthSession = undefined
+  refreshTokenSession = undefined
+  refreshTokenError = ''
+  authorizingRefreshToken = false
+  starting = undefined
   callbackUrl = ''
   manualValue = ''
   callbackError = ''
@@ -135,15 +178,40 @@ function isCurrentSession(generation: number, sessionId: string): boolean {
   return sessionGeneration === generation && oauthSession?.session_id === sessionId
 }
 
-export async function cancel(): Promise<void> {
-  sessionGeneration += 1
-  starting = undefined
-  const sessionId = resetLocalSession()
-  if (!sessionId) return
+async function cancelSession(sessionId: string, generation?: number): Promise<void> {
   try {
     await admin.oauth.cancel(sessionId)
   } catch (error) {
-    toast.error(localizeBackendErrorMessage(error))
+    if (generation === undefined || generation === sessionGeneration) toast.error(localizeBackendErrorMessage(error))
+  }
+}
+
+export async function cancel(): Promise<void> {
+  sessionGeneration += 1
+  const sessionId = resetLocalSession()
+  if (sessionId) await cancelSession(sessionId)
+}
+
+async function authorizeWithRefreshToken(): Promise<void> {
+  const trimmed = refreshToken.trim()
+  if (disabled || authorizingRefreshToken || !trimmed) return
+  const generation = ++sessionGeneration
+  const previousSessionId = resetLocalSession()
+  authorizingRefreshToken = true
+  try {
+    if (previousSessionId) await cancelSession(previousSessionId, generation)
+    if (generation !== sessionGeneration) return
+    const ready = await admin.oauth.authenticateRefreshToken(vendorId, channel, configuration, useProxy, trimmed)
+    if (generation !== sessionGeneration) {
+      void cancelSession(ready.session_id)
+      return
+    }
+    refreshToken = ''
+    refreshTokenSession = ready
+  } catch (error) {
+    if (generation === sessionGeneration) refreshTokenError = localizeBackendErrorMessage(error)
+  } finally {
+    if (generation === sessionGeneration) authorizingRefreshToken = false
   }
 }
 
@@ -164,13 +232,7 @@ async function startSession(action: StartAction): Promise<void> {
   const generation = ++sessionGeneration
   const previousSessionId = resetLocalSession()
   starting = action
-  if (previousSessionId) {
-    try {
-      await admin.oauth.cancel(previousSessionId)
-    } catch (error) {
-      if (generation === sessionGeneration) toast.error(localizeBackendErrorMessage(error))
-    }
-  }
+  if (previousSessionId) await cancelSession(previousSessionId, generation)
   if (generation !== sessionGeneration) {
     popup?.close()
     return
@@ -186,7 +248,7 @@ async function startSession(action: StartAction): Promise<void> {
     )
     if (generation !== sessionGeneration) {
       popup?.close()
-      void admin.oauth.cancel(session.session_id).catch((error) => toast.error(localizeBackendErrorMessage(error)))
+      void cancelSession(session.session_id)
       return
     }
     oauthSession = session
@@ -284,8 +346,8 @@ async function completeManualInput(): Promise<void> {
 
 export async function updateProxy(nextUseProxy: boolean): Promise<void> {
   if (disabled) return
-  // 初始化尚未返回时没有可更新的会话；废弃以旧代理发起的授权。
-  if (starting && !oauthSession) {
+  // 初始化或验证令牌使用的是旧代理；只有进行中的交互授权可以改用新代理。
+  if ((starting && !oauthSession) || authorizingRefreshToken || refreshTokenSession) {
     await cancel()
     return
   }
@@ -307,216 +369,278 @@ export async function updateProxy(nextUseProxy: boolean): Promise<void> {
 
 export function consume(): void {
   sessionGeneration += 1
-  starting = undefined
+  refreshToken = ''
   resetLocalSession()
 }
 
-onDestroy(() => {
-  sessionGeneration += 1
-  starting = undefined
-  const sessionId = resetLocalSession()
-  if (sessionId) void admin.oauth.cancel(sessionId).catch((error) => toast.error(localizeBackendErrorMessage(error)))
-})
+onDestroy(() => void cancel())
 </script>
+
+{#snippet oauthPanel()}
+  {#if !oauthSession}
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <p class="font-medium">
+          {mode === 'connect' ? `${providerName} OAuth` : m.common_oauth_account()}
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {flow === 'manual'
+            ? m.provider_oauth_authorization_manual_help()
+            : mode === 'connect'
+              ? m.provider_oauth_authorization_sign_service_browser()
+              : m.provider_oauth_authorization_reconnect_warning()}
+        </p>
+      </div>
+      <div class="flex max-w-full flex-wrap gap-2">
+        <Button
+          type="button"
+          onclick={() => void begin()}
+          disabled={disabled || Boolean(starting)}
+          aria-busy={starting === 'sign-in'}>
+          {#if starting === 'sign-in'}<Spinner data-icon="inline-start" />{:else if flow !== 'manual'}<ExternalLinkIcon
+              data-icon="inline-start" />{/if}
+          {flow === 'manual'
+            ? m.provider_oauth_authorization_begin_manual()
+            : mode === 'connect'
+              ? m.provider_oauth_authorization_sign_oauth()
+              : m.provider_oauth_authorization_sign_again()}
+        </Button>
+        {#if flow !== 'manual'}
+          <Button
+            type="button"
+            variant="outline"
+            onclick={() => void startSession('get-link')}
+            disabled={disabled || Boolean(starting)}
+            aria-busy={starting === 'get-link'}>
+            {#if starting === 'get-link'}<Spinner data-icon="inline-start" />{:else}<LinkIcon
+                data-icon="inline-start" />{/if}
+            {m.provider_oauth_authorization_get_sign_in_link()}
+          </Button>
+        {/if}
+      </div>
+    </div>
+  {:else}
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <p class="font-medium">
+          {oauthStatus?.status === 'ready'
+            ? m.provider_oauth_authorization_authorization_complete()
+            : oauthStatus?.status === 'error' || oauthStatusQuery.isError
+              ? m.provider_oauth_authorization_authorization_failed()
+              : m.provider_oauth_authorization_waiting_authorization()}
+        </p>
+        {#if oauthStatusQuery.isError}
+          <p class="mt-1 text-sm text-destructive">
+            {localizeBackendErrorMessage(oauthStatusQuery.error)}
+          </p>
+        {:else if oauthStatus?.status === 'error'}
+          <p class="mt-1 text-sm text-destructive">
+            {localizeBackendErrorMessage(oauthStatus)}
+          </p>
+        {:else if oauthStatus?.status === 'pending' && oauthStatus.last_error}
+          <p class="mt-1 text-sm text-destructive">
+            {localizeBackendErrorMessage({ code: oauthStatus.error_code, message: oauthStatus.last_error })}
+          </p>
+        {:else if oauthInProgress}
+          <p class="mt-1 text-sm text-muted-foreground">
+            {flow === 'manual'
+              ? m.provider_oauth_authorization_manual_waiting_help()
+              : m.provider_oauth_authorization_browser_help()}
+          </p>
+          {#if fallbackReason}
+            <p class="mt-1 text-sm text-muted-foreground">
+              {m.provider_oauth_authorization_fallback_reason({ reason: fallbackReason })}
+            </p>
+          {/if}
+        {/if}
+      </div>
+      <div class="flex max-w-full flex-wrap justify-end gap-2">
+        {#if oauthStatus?.status === 'error' || oauthStatusQuery.isError}
+          <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
+            <RefreshCwIcon data-icon="inline-start" />{m.common_try_again()}
+          </Button>
+        {:else if oauthStatus?.status === 'ready'}
+          <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
+            {m.provider_oauth_authorization_use_another_account()}
+          </Button>
+        {:else}
+          {#if currentAuthUrl}
+            <Button type="button" variant="outline" {disabled} onclick={openCurrentSignInPage}>
+              <ExternalLinkIcon data-icon="inline-start" />{m.provider_oauth_authorization_open_sign_in_page()}
+            </Button>
+            <Button type="button" variant="outline" {disabled} onclick={handleCopySignInLink}>
+              <CopyIcon data-icon="inline-start" />{m.provider_oauth_authorization_copy_sign_in_link()}
+            </Button>
+          {/if}
+          <Button type="button" variant="ghost" {disabled} onclick={() => void cancel()}>
+            {m.provider_oauth_authorization_cancel_sign()}
+          </Button>
+        {/if}
+      </div>
+    </div>
+
+    {#if showSignInLink && !disabled && oauthInProgress && currentAuthUrl}
+      <Field.Field class="mt-4">
+        <Field.Label for={signInLinkInputId}>{m.provider_oauth_authorization_sign_in_link()}</Field.Label>
+        <Input
+          id={signInLinkInputId}
+          class="font-technical"
+          readonly
+          spellcheck={false}
+          value={currentAuthUrl}
+          onfocus={selectSignInLink} />
+      </Field.Field>
+    {/if}
+
+    {#if userCode && oauthInProgress}
+      <div class="mt-4 rounded-lg border bg-background px-4 py-3">
+        <p class="text-xs font-medium text-muted-foreground">
+          {m.provider_oauth_authorization_device_code()}
+        </p>
+        <code class="mt-1 block font-technical text-lg font-semibold tracking-widest">{userCode}</code>
+        <p class="mt-1 text-xs text-muted-foreground">
+          {m.provider_oauth_authorization_device_code_help()}
+        </p>
+      </div>
+    {/if}
+
+    {#if supportsManualInput && manualInput}
+      <Field.Field class="mt-4">
+        <Field.Label
+          for={manualInputId}
+          hint={manualInput.description ? resolvePluginText(manualInput.description, localeState.current) : undefined}>
+          {resolvePluginText(manualInput.label, localeState.current)}
+        </Field.Label>
+        <div class="flex gap-2">
+          <div class="min-w-0 flex-1">
+            {#if manualInput.secret}
+              <SecretInput
+                id={manualInputId}
+                class="font-technical"
+                bind:value={manualValue}
+                {disabled}
+                resetKey={oauthSession.session_id}
+                autocomplete="off"
+                oninput={() => (callbackError = '')} />
+            {:else}
+              <Input
+                id={manualInputId}
+                class="font-technical"
+                bind:value={manualValue}
+                {disabled}
+                autocomplete="off"
+                oninput={() => (callbackError = '')} />
+            {/if}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onclick={() => void completeManualInput()}
+            disabled={disabled || completing || !manualValue.trim()}>
+            {#if completing}<Spinner data-icon="inline-start" />{/if}
+            {m.provider_oauth_authorization_complete()}
+          </Button>
+        </div>
+        {#if callbackError}<Field.Error>{callbackError}</Field.Error>{/if}
+      </Field.Field>
+    {/if}
+
+    {#if supportsManualCallback && oauthInProgress}
+      <Field.Field class="mt-4">
+        <Field.Label for={callbackInputId}>{m.provider_oauth_authorization_callback_url()}</Field.Label>
+        <Field.Description>{m.provider_oauth_authorization_manual_callback_help()}</Field.Description>
+        <div class="flex gap-2">
+          <Input
+            id={callbackInputId}
+            class="font-technical"
+            bind:value={callbackUrl}
+            {disabled}
+            oninput={() => (callbackError = '')}
+            placeholder="http://localhost:1457/auth/callback?code=…&state=…" />
+          <Button
+            type="button"
+            variant="outline"
+            onclick={() => void completeManual()}
+            disabled={disabled || completing || !callbackUrl.trim()}>
+            {#if completing}<Spinner data-icon="inline-start" />{/if}
+            {m.provider_oauth_authorization_complete()}
+          </Button>
+        </div>
+        {#if callbackError}<Field.Error>{callbackError}</Field.Error>{/if}
+      </Field.Field>
+    {/if}
+  {/if}
+{/snippet}
 
 <Field.Set class={className}>
   <Field.Legend>{m.provider_oauth_authorization_account_authorization()}</Field.Legend>
   <div class="rounded-xl border bg-muted/20 p-4">
-    {#if !oauthSession}
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p class="font-medium">
-            {mode === 'connect' ? `${providerName} OAuth` : m.common_oauth_account()}
-          </p>
-          <p class="mt-1 text-sm text-muted-foreground">
-            {flow === 'manual'
-              ? m.provider_oauth_authorization_manual_help()
-              : mode === 'connect'
-                ? m.provider_oauth_authorization_sign_service_browser()
-                : m.provider_oauth_authorization_reconnect_warning()}
-          </p>
-        </div>
-        <div class="flex max-w-full flex-wrap gap-2">
-          <Button
-            type="button"
-            onclick={() => void begin()}
-            disabled={disabled || Boolean(starting)}
-            aria-busy={starting === 'sign-in'}>
-            {#if starting === 'sign-in'}<Spinner
-                data-icon="inline-start" />{:else if flow !== 'manual'}<ExternalLinkIcon
-                data-icon="inline-start" />{/if}
-            {flow === 'manual'
-              ? m.provider_oauth_authorization_begin_manual()
-              : mode === 'connect'
-                ? m.provider_oauth_authorization_sign_oauth()
-                : m.provider_oauth_authorization_sign_again()}
-          </Button>
-          {#if flow !== 'manual'}
-            <Button
-              type="button"
-              variant="outline"
-              onclick={() => void startSession('get-link')}
-              disabled={disabled || Boolean(starting)}
-              aria-busy={starting === 'get-link'}>
-              {#if starting === 'get-link'}<Spinner data-icon="inline-start" />{:else}<LinkIcon
-                  data-icon="inline-start" />{/if}
-              {m.provider_oauth_authorization_get_sign_in_link()}
-            </Button>
-          {/if}
-        </div>
-      </div>
-    {:else}
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p class="font-medium">
-            {oauthStatus?.status === 'ready'
-              ? m.provider_oauth_authorization_authorization_complete()
-              : oauthStatus?.status === 'error' || oauthStatusQuery.isError
-                ? m.provider_oauth_authorization_authorization_failed()
-                : m.provider_oauth_authorization_waiting_authorization()}
-          </p>
-          {#if oauthStatusQuery.isError}
-            <p class="mt-1 text-sm text-destructive">
-              {localizeBackendErrorMessage(oauthStatusQuery.error)}
-            </p>
-          {:else if oauthStatus?.status === 'error'}
-            <p class="mt-1 text-sm text-destructive">
-              {localizeBackendErrorMessage(oauthStatus)}
-            </p>
-          {:else if oauthStatus?.status === 'pending' && oauthStatus.last_error}
-            <p class="mt-1 text-sm text-destructive">
-              {localizeBackendErrorMessage({ code: oauthStatus.error_code, message: oauthStatus.last_error })}
-            </p>
-          {:else if oauthInProgress}
-            <p class="mt-1 text-sm text-muted-foreground">
-              {flow === 'manual'
-                ? m.provider_oauth_authorization_manual_waiting_help()
-                : m.provider_oauth_authorization_browser_help()}
-            </p>
-            {#if fallbackReason}
-              <p class="mt-1 text-sm text-muted-foreground">
-                {m.provider_oauth_authorization_fallback_reason({ reason: fallbackReason })}
-              </p>
-            {/if}
-          {/if}
-        </div>
-        <div class="flex max-w-full flex-wrap justify-end gap-2">
-          {#if oauthStatus?.status === 'error' || oauthStatusQuery.isError}
-            <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
-              <RefreshCwIcon data-icon="inline-start" />{m.common_try_again()}
-            </Button>
-          {:else if oauthStatus?.status === 'ready'}
-            <Button type="button" variant="outline" {disabled} onclick={() => void begin()}>
-              {m.provider_oauth_authorization_use_another_account()}
-            </Button>
-          {:else}
-            {#if currentAuthUrl}
-              <Button type="button" variant="outline" {disabled} onclick={openCurrentSignInPage}>
-                <ExternalLinkIcon data-icon="inline-start" />{m.provider_oauth_authorization_open_sign_in_page()}
+    {#if showAuthTabs}
+      <Tabs.Root value={authTab} onValueChange={changeAuthTab} class="gap-4">
+        <Tabs.List aria-label={m.provider_oauth_authorization_method_label()}>
+          <Tabs.Trigger value="oauth" disabled={disabled || authorizingRefreshToken || completing}>
+            {m.provider_oauth_authorization_tab_oauth()}
+          </Tabs.Trigger>
+          <Tabs.Trigger value="refresh_token" disabled={disabled || authorizingRefreshToken || completing}>
+            {m.provider_oauth_authorization_tab_refresh_token()}
+          </Tabs.Trigger>
+        </Tabs.List>
+        <Tabs.Content value="oauth">{@render oauthPanel()}</Tabs.Content>
+        <Tabs.Content value="refresh_token">
+          {#if refreshTokenSession}
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div role="status">
+                <p class="font-medium">{m.provider_oauth_authorization_authorization_complete()}</p>
+                <p class="mt-1 text-sm text-muted-foreground">
+                  {m.provider_oauth_authorization_refresh_token_complete_help()}
+                </p>
+              </div>
+              <Button type="button" variant="outline" {disabled} onclick={() => void cancel()}>
+                {m.provider_oauth_authorization_use_another_token()}
               </Button>
-              <Button type="button" variant="outline" {disabled} onclick={handleCopySignInLink}>
-                <CopyIcon data-icon="inline-start" />{m.provider_oauth_authorization_copy_sign_in_link()}
-              </Button>
-            {/if}
-            <Button type="button" variant="ghost" {disabled} onclick={() => void cancel()}>
-              {m.provider_oauth_authorization_cancel_sign()}
-            </Button>
-          {/if}
-        </div>
-      </div>
-
-      {#if showSignInLink && !disabled && oauthInProgress && currentAuthUrl}
-        <Field.Field class="mt-4">
-          <Field.Label for={signInLinkInputId}>{m.provider_oauth_authorization_sign_in_link()}</Field.Label>
-          <Input
-            id={signInLinkInputId}
-            class="font-technical"
-            readonly
-            spellcheck={false}
-            value={currentAuthUrl}
-            onfocus={selectSignInLink} />
-        </Field.Field>
-      {/if}
-
-      {#if userCode && oauthInProgress}
-        <div class="mt-4 rounded-lg border bg-background px-4 py-3">
-          <p class="text-xs font-medium text-muted-foreground">
-            {m.provider_oauth_authorization_device_code()}
-          </p>
-          <code class="mt-1 block font-technical text-lg font-semibold tracking-widest">{userCode}</code>
-          <p class="mt-1 text-xs text-muted-foreground">
-            {m.provider_oauth_authorization_device_code_help()}
-          </p>
-        </div>
-      {/if}
-
-      {#if supportsManualInput && manualInput}
-        <Field.Field class="mt-4">
-          <Field.Label
-            for={manualInputId}
-            hint={manualInput.description
-              ? resolvePluginText(manualInput.description, localeState.current)
-              : undefined}>
-            {resolvePluginText(manualInput.label, localeState.current)}
-          </Field.Label>
-          <div class="flex gap-2">
-            <div class="min-w-0 flex-1">
-              {#if manualInput.secret}
-                <SecretInput
-                  id={manualInputId}
-                  class="font-technical"
-                  bind:value={manualValue}
-                  {disabled}
-                  resetKey={oauthSession.session_id}
-                  autocomplete="off"
-                  oninput={() => (callbackError = '')} />
-              {:else}
-                <Input
-                  id={manualInputId}
-                  class="font-technical"
-                  bind:value={manualValue}
-                  {disabled}
-                  autocomplete="off"
-                  oninput={() => (callbackError = '')} />
-              {/if}
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              onclick={() => void completeManualInput()}
-              disabled={disabled || completing || !manualValue.trim()}>
-              {#if completing}<Spinner data-icon="inline-start" />{/if}
-              {m.provider_oauth_authorization_complete()}
-            </Button>
-          </div>
-          {#if callbackError}<Field.Error>{callbackError}</Field.Error>{/if}
-        </Field.Field>
-      {/if}
-
-      {#if supportsManualCallback && oauthInProgress}
-        <Field.Field class="mt-4">
-          <Field.Label for={callbackInputId}>{m.provider_oauth_authorization_callback_url()}</Field.Label>
-          <Field.Description>{m.provider_oauth_authorization_manual_callback_help()}</Field.Description>
-          <div class="flex gap-2">
-            <Input
-              id={callbackInputId}
-              class="font-technical"
-              bind:value={callbackUrl}
-              {disabled}
-              oninput={() => (callbackError = '')}
-              placeholder="http://localhost:1457/auth/callback?code=…&state=…" />
-            <Button
-              type="button"
-              variant="outline"
-              onclick={() => void completeManual()}
-              disabled={disabled || completing || !callbackUrl.trim()}>
-              {#if completing}<Spinner data-icon="inline-start" />{/if}
-              {m.provider_oauth_authorization_complete()}
-            </Button>
-          </div>
-          {#if callbackError}<Field.Error>{callbackError}</Field.Error>{/if}
-        </Field.Field>
-      {/if}
+          {:else}
+            <Field.Field data-invalid={Boolean(refreshTokenError)}>
+              <Field.Label for={refreshTokenInputId} hint={m.provider_oauth_authorization_refresh_token_hint()}>
+                {m.provider_oauth_authorization_refresh_token_label()}
+              </Field.Label>
+              <Field.Description>{m.provider_oauth_authorization_refresh_token_description()}</Field.Description>
+              <div class="flex flex-wrap gap-2 sm:flex-nowrap">
+                <div class="min-w-0 flex-1 basis-48">
+                  <SecretInput
+                    id={refreshTokenInputId}
+                    class="font-technical"
+                    bind:value={refreshToken}
+                    disabled={disabled || authorizingRefreshToken}
+                    resetKey={authTab}
+                    autocomplete="off"
+                    aria-invalid={Boolean(refreshTokenError)}
+                    aria-describedby={refreshTokenError ? refreshTokenErrorId : undefined}
+                    oninput={() => (refreshTokenError = '')}
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === 'Enter') {
+                        // Verify this token without submitting the surrounding provider form.
+                        event.preventDefault()
+                        void authorizeWithRefreshToken()
+                      }
+                    }} />
+                </div>
+                <Button
+                  type="button"
+                  onclick={() => void authorizeWithRefreshToken()}
+                  disabled={disabled || authorizingRefreshToken || !refreshToken.trim()}
+                  aria-busy={authorizingRefreshToken}>
+                  {#if authorizingRefreshToken}<Spinner data-icon="inline-start" />{/if}
+                  {m.provider_oauth_authorization_refresh_token_submit()}
+                </Button>
+              </div>
+              {#if refreshTokenError}<Field.Error id={refreshTokenErrorId}>{refreshTokenError}</Field.Error>{/if}
+            </Field.Field>
+          {/if}
+        </Tabs.Content>
+      </Tabs.Root>
+    {:else}
+      {@render oauthPanel()}
     {/if}
   </div>
 </Field.Set>

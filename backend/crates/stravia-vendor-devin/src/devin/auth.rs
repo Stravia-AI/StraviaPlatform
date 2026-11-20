@@ -49,6 +49,9 @@ pub(crate) fn execute(
             state,
         } => start(host, redirect_uri, state),
         AuthStep::Exchange { callback_url } => exchange(host, provider, &callback_url),
+        AuthStep::RefreshToken { refresh_token } => {
+            refresh_with_token(host, provider, &refresh_token)
+        }
         AuthStep::Refresh => refresh(host, provider),
         AuthStep::ManualInput { value } => exchange(host, provider, &value),
         AuthStep::Poll => Err(error(
@@ -211,6 +214,21 @@ fn refresh(host: &GuestHost, provider: &ProviderSnapshot) -> Result<AuthResponse
                 "Devin session token is not refreshable; authenticate again",
             )
         })?;
+    refresh_with_token(host, provider, refresh_token)
+}
+
+fn refresh_with_token(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    refresh_token: &str,
+) -> Result<AuthResponse, PluginError> {
+    let refresh_token = refresh_token.trim();
+    if refresh_token.is_empty() || refresh_token.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(error(
+            ErrorKind::Invalid,
+            "Devin refresh token is missing or malformed",
+        ));
+    }
     let body = serde_json::to_vec(&serde_json::json!({
         "grant_type": "refresh_token",
         "client_id": CLIENT_ID,

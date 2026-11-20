@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- OpenAI Codex, Claude Code, Antigravity, xAI Grok, and Devin offer a Refresh token tab alongside OAuth sign-in when adding, editing, or reauthorizing a connection. Tokens are exchanged with the provider before credentials can be saved. Update the host and rebuild/re-import the standalone plugins to enable the option; older plugins keep the existing sign-in flow. Kiro is unchanged. No database migration is required.
+
 ### Fixed
 
 - Kiro no longer rejects otherwise valid requests carrying unsupported client controls such as `reasoning.summary`, `store`, prompt-cache hints, or tool `strict` / `defer_loading`. Unsupported controls are omitted from the native request; tool names and JSON schemas remain intact, and model-declared reasoning efforts keep their native mapping. Rebuild and re-import the standalone Kiro plugin to apply the fix; no database migration is required.

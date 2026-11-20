@@ -1914,6 +1914,151 @@ test('OAuth Provider configuration allows manual completion while the localhost 
   createGate.resolve()
 })
 
+test('OAuth refresh-token tab verifies a token, preserves input on error, and cancels active OAuth sessions', async ({
+  page,
+}) => {
+  const cancelledSessions: string[] = []
+  let createBody: Record<string, unknown> | undefined
+  let rejectExchange = true
+  await page.route('**/api/v1/oauth/sessions/*/cancel', async (route) => {
+    const segments = new URL(route.request().url()).pathname.split('/')
+    cancelledSessions.push(segments.at(-2) ?? '')
+    await route.fulfill({ json: { data: null } })
+  })
+  await page.route('**/api/v1/oauth/sessions/refresh-token', async (route) => {
+    if (rejectExchange) {
+      await route.fulfill({
+        status: 400,
+        json: { error: JSON.stringify({ code: 'AUTH_EXCHANGE_REJECTED', message: 'invalid_grant' }) },
+      })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: {
+          session_id: 'oauth-session-refresh-1',
+          vendor_id: 'openai-codex',
+          channel: 'codex',
+          status: 'ready',
+          expires_in: 600,
+          resource_url: null,
+        },
+      },
+    })
+  })
+  await page.route('**/api/v1/providers/oauth', async (route) => {
+    createBody = route.request().postDataJSON()
+    await route.fulfill({ json: { data: {} } })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /Add (your first )?provider/ }).click()
+  await page.getByRole('button', { name: /Codex.*OAuth account/ }).click()
+
+  await expect(page.getByRole('tab', { name: 'OAuth sign-in', exact: true })).toHaveAttribute('aria-selected', 'true')
+  const refreshTab = page.getByRole('tab', { name: 'Refresh token', exact: true })
+  await expect(refreshTab).toBeVisible()
+
+  // Start an OAuth link first, then switch to Refresh token; the active OAuth session must cancel.
+  await page.getByRole('button', { name: 'Get sign-in link', exact: true }).click()
+  await expect(page.getByText('Waiting for authorization…')).toBeVisible()
+  await refreshTab.click()
+  await expect.poll(() => cancelledSessions).toContain('oauth-session-1')
+
+  const tokenInput = page.getByRole('textbox', { name: 'Refresh token', exact: true })
+  await tokenInput.fill('rt-invalid-token')
+  // Pressing Enter verifies the token instead of submitting the outer provider form prematurely.
+  await tokenInput.press('Enter')
+  await expect(
+    page.getByText('Authorization or refresh token was rejected. Check the token or sign in again.'),
+  ).toBeVisible()
+  await expect(tokenInput).toHaveValue('rt-invalid-token')
+  expect(createBody).toBeUndefined()
+
+  rejectExchange = false
+  await tokenInput.fill('  rt-valid-token  ')
+  const refreshRequest = page.waitForRequest(
+    (request) => request.url().endsWith('/api/v1/oauth/sessions/refresh-token') && request.method() === 'POST',
+  )
+  await page.getByRole('button', { name: 'Verify & authorize', exact: true }).click()
+  expect((await refreshRequest).postDataJSON()).toMatchObject({
+    vendor_id: 'openai-codex',
+    channel: 'codex',
+    use_proxy: false,
+    refresh_token: 'rt-valid-token',
+  })
+  await expect.poll(() => createBody).toMatchObject({ session_id: 'oauth-session-refresh-1' })
+})
+
+test('OAuth reauthorize dialog and connection view support refresh-token authorization', async ({ page }) => {
+  const provider = {
+    id: 'oauth-refresh-provider',
+    name: 'Codex Refresh Account',
+    vendor: 'openai-codex',
+    protocol: 'open-responses',
+    base_url: 'https://fixture.invalid/codex',
+    use_proxy: false,
+    channel: 'codex',
+    vendor_options: {},
+    configured_credential_fields: [],
+    credential_status: 'invalid',
+    is_enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+  const cancelledSessions: string[] = []
+  let bindBody: Record<string, unknown> | undefined
+  let updateBody: Record<string, unknown> | undefined
+  await page.route('**/api/v1/providers**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    if (path === '/providers' && request.method() === 'GET') {
+      await route.fulfill({ json: { data: [provider] } })
+      return
+    }
+    if (path === `/providers/${provider.id}` && request.method() === 'PUT') {
+      updateBody = request.postDataJSON()
+      await route.fulfill({ json: { data: provider } })
+      return
+    }
+    if (path === `/providers/${provider.id}/oauth/bind` && request.method() === 'POST') {
+      bindBody = request.postDataJSON()
+      provider.credential_status = 'ok'
+      await route.fulfill({ json: { data: null } })
+      return
+    }
+    await route.fallback()
+  })
+  await page.route('**/api/v1/oauth/sessions/*/cancel', async (route) => {
+    const segments = new URL(route.request().url()).pathname.split('/')
+    cancelledSessions.push(segments.at(-2) ?? '')
+    await route.fulfill({ json: { data: null } })
+  })
+
+  await page.goto('/providers')
+  await page.getByRole('button', { name: `More actions for ${provider.name}` }).click()
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('menuitem', { name: 'Reauthorize', exact: true }).click()
+  await (await popup).close()
+
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('tab', { name: 'Refresh token', exact: true }).click()
+  await expect.poll(() => cancelledSessions).toContain('oauth-session-1')
+  await dialog.getByRole('textbox', { name: 'Refresh token', exact: true }).fill('rt-reauth-token')
+  await dialog.getByRole('button', { name: 'Verify & authorize', exact: true }).click()
+  await expect.poll(() => bindBody).toEqual({ session_id: 'oauth-session-refresh-1' })
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  bindBody = undefined
+  await page.goto(`/providers/${provider.id}?view=connection`)
+  await page.getByRole('tab', { name: 'Refresh token', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Refresh token', exact: true }).fill('rt-reconnect-token')
+  await page.getByRole('button', { name: 'Verify & authorize', exact: true }).click()
+  await expect.poll(() => updateBody).toMatchObject({ base_url: provider.base_url })
+  await expect.poll(() => bindBody).toEqual({ session_id: 'oauth-session-refresh-1' })
+  await expect(page.locator('[data-sonner-toast]')).toContainText('Connection settings saved')
+})
+
 test('completed OAuth satisfies session credential fields and submits the provider form', async ({ page }) => {
   const manualInput = {
     type: 'text',

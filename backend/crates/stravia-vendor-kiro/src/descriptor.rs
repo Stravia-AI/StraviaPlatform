@@ -53,6 +53,7 @@ pub(super) fn descriptor() -> VendorDescriptor {
             flow: AuthFlow::DeviceCode,
             callback: None,
             manual_input: None,
+            supports_refresh_token: false,
         }),
         protocol: Some(protocol.into()),
         protocols: Vec::new(),

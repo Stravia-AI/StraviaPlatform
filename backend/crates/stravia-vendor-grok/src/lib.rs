@@ -120,6 +120,7 @@ pub fn descriptor() -> VendorDescriptor {
                     flow: AuthFlow::DeviceCode,
                     callback: None,
                     manual_input: None,
+                    supports_refresh_token: true,
                 }),
                 protocol: Some("open-responses".into()),
                 protocols: Vec::new(),
@@ -681,6 +682,9 @@ fn xai_auth(
     match request.step {
         AuthStep::Start { .. } => xai_auth_start(host),
         AuthStep::Poll => xai_auth_poll(host),
+        AuthStep::RefreshToken { refresh_token } => {
+            xai_auth_refresh_with_token(host, provider, &refresh_token, false)
+        }
         AuthStep::Refresh => xai_auth_refresh(host, provider),
         AuthStep::Exchange { .. } | AuthStep::ManualInput { .. } | AuthStep::Revoke => {
             Err(common::plugin_error(
@@ -785,6 +789,22 @@ fn xai_auth_refresh(
     let refresh_token = setting(provider, "refreshToken")
         .or_else(|| setting(provider, "refresh_token"))
         .ok_or_else(|| common::plugin_error(ErrorKind::Auth, "xAI refresh token is missing"))?;
+    xai_auth_refresh_with_token(host, provider, refresh_token, true)
+}
+
+fn xai_auth_refresh_with_token(
+    host: &GuestHost,
+    provider: &ProviderSnapshot,
+    refresh_token: &str,
+    inherit_previous: bool,
+) -> Result<AuthResponse, PluginError> {
+    let refresh_token = refresh_token.trim();
+    if refresh_token.is_empty() || refresh_token.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(common::plugin_error(
+            ErrorKind::Invalid,
+            "xAI refresh token is missing or malformed",
+        ));
+    }
     let token_endpoint =
         setting(provider, "token_endpoint").unwrap_or("https://auth.x.ai/oauth2/token");
     validate_xai_url(token_endpoint)?;
@@ -796,7 +816,7 @@ fn xai_auth_refresh(
         .into_bytes();
     match token_request(host, token_endpoint, body, Some(refresh_token))? {
         TokenResult::Ready(mut response) => {
-            if let AuthResponse::Credentials { values, .. } = &mut response {
+            if inherit_previous && let AuthResponse::Credentials { values, .. } = &mut response {
                 inherit_email(values, &provider.credentials);
                 if !values.contains_key("user_id")
                     && let Some(user_id) = oauth_user_id(provider)
