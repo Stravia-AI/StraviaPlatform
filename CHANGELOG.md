@@ -2,19 +2,31 @@
 
 ## Unreleased
 
-### Fixed
+## [0.7.4] - 2026-11-20
 
-- Kiro no longer rejects otherwise valid requests carrying unsupported client controls such as `reasoning.summary`, `store`, prompt-cache hints, or tool `strict` / `defer_loading`. Unsupported controls are omitted from the native request; tool names and JSON schemas remain intact, and model-declared reasoning efforts keep their native mapping. Rebuild and re-import the standalone Kiro plugin to apply the fix; no database migration is required.
+This release also includes the changes listed under [0.7.3](#073---2026-11-19), whose publication was cancelled.
 
-- Kiro request targets now accept model-declared reasoning efforts in the editor instead of rejecting its private protocol. Models whose schema supports disabling thinking expose an `off` mapping through canonical effort `none`; the plugin translates it to the native thinking switch without sending an invalid effort. Models without that switch remain unsupported for `off`. Rebuild and re-import the Kiro plugin, then sync models to refresh generated mappings; pinned specifications and manually overridden mappings are preserved.
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
 
 ### Changed
 
+- Kiro now matches Kiro CLI 3.4.0 session behavior by default: leading instructions are injected as the first user turn followed by an assistant acknowledgment instead of the top-level `systemPrompt` field (`system_prompt_user_injection`, on by default). Discovery records `limit.context` and thinking toggleability (`disabled` / `adaptive`), auth requests use the CLI 3.4.0 SDK headers and `plugin:kiro-cli-3-4-0` egress shape (with `TokenType: SSO_OIDC` for Builder ID and Identity Center), and signed or redacted reasoning blocks are decoded and replayed. Rebuild and re-import the standalone Kiro plugin, then sync models.
 - Update the Antigravity CLI identity to 1.5.13 / build 1025641825. Rebuild and re-import the standalone plugin; no database migration is required. The locally intercepted capture does not prove Google accepts inference requests.
 
 - The desktop Models table shows each model's purpose in a separate column instead of below its display name.
 - Antigravity now uses the first 296 bytes of the agy 1.5.11 system prompt for all inference clients by default. Top-level instructions move into synthetic history and take precedence over conflicting native identity text; separate system and developer messages stay in force. Requests without top-level instructions get only the prefix. Turn `system_prompt_prefix` off to keep top-level instructions in the system prompt without a prefix or synthetic history. RFC 2119 and OMP prompt text is no longer removed or rewritten with either setting. Rebuild and re-import the standalone plugin to upgrade. This is not a guarantee against HTTP 429.
 - Nix builds cache compiled Rust dependencies for the Server and bundled Wasm vendors separately from application sources. Source-only updates can reuse the cache; a persistent result link keeps it across Nix garbage collection.
+
+### Fixed
+
+- Kiro no longer rejects otherwise valid requests carrying unsupported client controls such as `reasoning.summary`, `store`, prompt-cache hints, or tool `strict` / `defer_loading`. Unsupported controls are omitted from the native request; tool names and JSON schemas remain intact, and model-declared reasoning efforts keep their native mapping. Rebuild and re-import the standalone Kiro plugin to apply the fix; no database migration is required.
+
+- Kiro request targets now accept model-declared reasoning efforts in the editor instead of rejecting its private protocol. Models whose schema supports disabling thinking expose an `off` mapping through canonical effort `none`; the plugin translates it to the native thinking switch without sending an invalid effort. Models without that switch remain unsupported for `off`. Rebuild and re-import the Kiro plugin, then sync models to refresh generated mappings; pinned specifications and manually overridden mappings are preserved.
+- Antigravity now parses Google RPC `RetryInfo` (`retryDelay`) and `ErrorInfo` (`reason` and `metadata.quotaResetDelay`) on upstream errors across inference, search, media generation, and streaming responses. Explicit retry delays are preserved; `QUOTA_EXHAUSTED` / `INSUFFICIENT_G1_CREDITS_BALANCE` responses and HTTP 429 errors without an HTTP `Retry-After` or Google retry delay are reported as quota exhaustion instead of retrying the same target. Rebuild and re-import the standalone Antigravity plugin.
+- Ambiguous prompt admissions in a Generation Chain now preserve the client conversation identity (`client_conversation_id` and timestamp, falling back to the admission identity) and expose vendor-rejected `Invalid` diagnostic details on `vendor_request_invalid`.
+- Media-generation admin fixtures now declare the `infer` capability on dual text/image test models, desktop smoke selects the Route purpose with keyboard navigation matching the Tauri WebDriver bridge, and Antigravity/Core files match repository Clippy and formatting rules.
 
 ## [0.7.3] - 2026-11-19
 
