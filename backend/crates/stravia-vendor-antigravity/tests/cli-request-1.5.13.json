@@ -1,0 +1,62 @@
+{
+  "provenance": {
+    "client": "official Antigravity CLI",
+    "version": "1.5.13",
+    "platform": "linux/amd64",
+    "captured_at": "2026-11-20T04:54:15.340323+00:00",
+    "release": "https://github.com/google-antigravity/antigravity-cli/releases/tag/1.5.13",
+    "artifact_sha256": "7fa9cc6df0d09562693d637c406a86c1b0f52ab3364714b1fd2d79cc6060d4b2",
+    "invocation": "agy --model gemini-3.8-flash-low --disable-slash-commands --print \"Reply exactly with OK.\"",
+    "capture": "Temporary HOME/XDG and empty workspace; isolated copy of existing OAuth state; process-local CA and loopback HTTPS proxy. Bootstrap forwarded to Google. Inference terminated locally with synthetic OK SSE, never forwarded. No credentials, account/project ID, system prompt, user content or response body retained.",
+    "limitations": "One consumer print request on Linux amd64; not evidence of Google inference acceptance, other operations, platforms, multi-turn behavior, or full TLS/TCP equivalence. Proxy ALPN restricted to HTTP/1.1; bootstrap OAuth protocol is not a native default-protocol observation. Ancillary connections reported TLS errors and broken pipes; no complete startup-network coverage claimed.",
+    "cli_exit_code": 0,
+    "synthetic_ok_observed": true
+  },
+  "inference": {
+    "method": "POST",
+    "path": "/v1internal:streamGenerateContent?alt=sse",
+    "http_version": "HTTP/1.1",
+    "headers": [
+      {"name": "Host", "value": "<redacted>"},
+      {"name": "User-Agent", "value": "antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)"},
+      {"name": "Transfer-Encoding", "value": "chunked"},
+      {"name": "Authorization", "value": "<redacted>"},
+      {"name": "Content-Type", "value": "application/json"},
+      {"name": "Accept-Encoding", "value": "gzip"}
+    ],
+    "clienthello": {
+      "legacy_version": 771,
+      "cipher_suites": [49195, 49199, 49196, 49200, 52393, 52392, 49161, 49171, 49162, 49172, 4865, 4866, 4867],
+      "sni_present": true,
+      "ec_point_formats": [0],
+      "supported_groups": [4588, 4587, 4589, 29, 23, 24, 25],
+      "signature_algorithms": [2308, 2309, 2310, 2052, 1027, 2055, 2053, 2054, 1025, 1281, 1537, 1283, 1539],
+      "alpn": ["http/1.1"],
+      "supported_versions": [772, 771],
+      "key_share_groups": [4588, 29],
+      "extensions": [0, 11, 65281, 23, 18, 5, 10, 13, 50, 16, 43, 51]
+    },
+    "body": {
+      "envelope_keys": ["model", "project", "request", "requestId", "requestType", "userAgent"],
+      "model": "gemini-3.8-flash-low",
+      "userAgent": "antigravity",
+      "requestType": "agent",
+      "request_id_shape": "agent/<uuid>/<decimal>/<uuid>/<decimal>",
+      "request_keys": ["contents", "generationConfig", "labels", "sessionId", "systemInstruction", "tools"],
+      "system_instruction": {
+        "keys": ["parts", "role"],
+        "role": "user",
+        "part_keys": [["text"]],
+        "text_utf8_bytes": 20557,
+        "identity_prefix_utf8_bytes": 296,
+        "identity_prefix_sha256": "acea3799fe9d52bc0fbabb261219491f2e707e87f12a337a6d1c81aa717bcd39"
+      },
+      "contents": [{"role": "user", "part_keys": [["text"]]}],
+      "tools_count": 14,
+      "function_declarations_per_tool": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "labels_keys": ["cascade_id", "last_step_index", "model_enum", "request_id", "root_cascade_id", "trajectory_id", "used_claude", "used_claude_conservative", "used_non_gemini_model"],
+      "labels_static_values": {"last_step_index": "0", "model_enum": "MODEL_PLACEHOLDER_M320", "used_claude": "false"},
+      "generationConfig": {"maxOutputTokens": 65536, "thinkingConfig": {"includeThoughts": true, "thinkingLevel": "LOW"}}
+    }
+  }
+}
