@@ -51,7 +51,7 @@ pub(crate) fn execute(
     let headers = response.headers()?;
     let body = read_http_body(&response, client::MAX_JSON_BODY)?;
     if !(200..300).contains(&status) {
-        return Err(common::upstream_error(status, &headers, &body));
+        return Err(client::upstream_error(status, &headers, &body));
     }
     let value = serde_json::from_slice(&body)
         .map_err(|_| upstream("Antigravity search response is not valid JSON"))?;
