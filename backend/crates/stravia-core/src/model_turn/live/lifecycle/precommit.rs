@@ -1,5 +1,6 @@
 use super::{AiStreamDelta, AttemptFailure, VendorPublicationFence};
 use crate::memory::json_heap_bytes;
+use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent};
 
 const PRECOMMIT_BUFFER_BUDGET: usize = 16 * 1024 * 1024;
 // 包含事件槽及 Vec 初始/倍增预留空间；预算是保守占用估算，不是进程 RSS。
@@ -84,15 +85,83 @@ fn precommit_payload_bytes(delta: &AiStreamDelta) -> usize {
             .saturating_add(obfuscation.as_ref().map_or(0, String::capacity)),
         D::Unknown { raw } => raw.capacity(),
         D::ProtectedThinkingStart { .. } | D::Usage(_) => 0,
+        D::ItemDone { item, .. } => item_payload_bytes(item),
         // These variants always commit, and are never subject to this budget.
         D::ToolCallStart { .. }
         | D::ToolCallDelta { .. }
         | D::ToolCallComplete { .. }
-        | D::ItemDone { .. }
         | D::ResponseTerminal { .. }
         | D::Done { .. }
         | D::StreamError { .. }
         | D::UnexpectedEof => 0,
+    }
+}
+
+fn item_payload_bytes(item: &AiItem) -> usize {
+    match &item.content {
+        MessageContent::Text(text) => text.capacity(),
+        MessageContent::Blocks(blocks) => blocks
+            .capacity()
+            .saturating_mul(std::mem::size_of::<ContentBlock>())
+            .saturating_add(
+                blocks
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::Text { text, .. } => text.capacity(),
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature,
+                        } => thinking
+                            .capacity()
+                            .saturating_add(signature.as_ref().map_or(0, String::capacity)),
+                        ContentBlock::Reasoning {
+                            summary,
+                            content,
+                            encrypted_content,
+                        } => summary
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<String>())
+                            .saturating_add(
+                                summary
+                                    .iter()
+                                    .map(String::capacity)
+                                    .fold(0usize, usize::saturating_add),
+                            )
+                            .saturating_add(
+                                content
+                                    .capacity()
+                                    .saturating_mul(std::mem::size_of::<String>()),
+                            )
+                            .saturating_add(
+                                content
+                                    .iter()
+                                    .map(String::capacity)
+                                    .fold(0usize, usize::saturating_add),
+                            )
+                            .saturating_add(encrypted_content.as_ref().map_or(0, String::capacity)),
+                        ContentBlock::Refusal { refusal } => refusal.capacity(),
+                        _ => 0,
+                    })
+                    .fold(0usize, usize::saturating_add),
+            ),
+    }
+}
+
+fn item_has_first_output(item: &AiItem) -> bool {
+    match &item.content {
+        MessageContent::Text(text) => !text.is_empty(),
+        MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => !text.is_empty(),
+            ContentBlock::Thinking { thinking, .. } => !thinking.is_empty(),
+            ContentBlock::Reasoning {
+                summary, content, ..
+            } => {
+                summary.iter().any(|part| !part.is_empty())
+                    || content.iter().any(|part| !part.is_empty())
+            }
+            ContentBlock::Refusal { refusal } => !refusal.is_empty(),
+            _ => true,
+        }),
     }
 }
 
@@ -107,8 +176,8 @@ fn is_first_output(delta: &AiStreamDelta) -> bool {
         | AiStreamDelta::ReasoningSummaryDelta { text, .. } => !text.is_empty(),
         AiStreamDelta::ToolCallStart { .. }
         | AiStreamDelta::ToolCallDelta { .. }
-        | AiStreamDelta::ToolCallComplete { .. }
-        | AiStreamDelta::ItemDone { .. } => true,
+        | AiStreamDelta::ToolCallComplete { .. } => true,
+        AiStreamDelta::ItemDone { item, .. } => item_has_first_output(item),
         _ => false,
     }
 }
@@ -339,5 +408,111 @@ mod tests {
                     || matches!(&events[1].0, AiStreamDelta::Done { stop_reason } if stop_reason.starts_with("done"))
             );
         }
+    }
+
+    #[test]
+    fn signature_only_thinking_item_done_stays_buffered_until_real_output_or_terminal() {
+        let mut buffer = PrecommitBuffer::default();
+        assert!(
+            !buffer
+                .push(
+                    AiStreamDelta::MessageStart {
+                        id: "resp-1".into(),
+                        model: "gemini-4-hydrogen".into(),
+                    },
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert!(
+            !buffer
+                .push(AiStreamDelta::ThinkingDelta(String::new()), publication())
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert!(
+            !buffer
+                .push(
+                    AiStreamDelta::ThinkingSignature("opaque-sig".into()),
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert!(
+            !buffer
+                .push(
+                    AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: AiItem::thinking("", Some("opaque-sig".into())),
+                    },
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert!(
+            buffer
+                .push(AiStreamDelta::TextDelta("answer".into()), publication())
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        let events = buffer.take();
+        assert_eq!(events.len(), 5);
+        assert!(matches!(&events[3].0, AiStreamDelta::ItemDone { .. }));
+        assert!(matches!(&events[4].0, AiStreamDelta::TextDelta(text) if text == "answer"));
+
+        let mut terminal_buffer = PrecommitBuffer::default();
+        assert!(
+            !terminal_buffer
+                .push(
+                    AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: AiItem::thinking("", Some("opaque-sig".into())),
+                    },
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert!(
+            terminal_buffer
+                .push(
+                    AiStreamDelta::Done {
+                        stop_reason: "stop".into(),
+                    },
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+        assert_eq!(terminal_buffer.take().len(), 2);
+
+        let mut visible_buffer = PrecommitBuffer::default();
+        assert!(
+            visible_buffer
+                .push(
+                    AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: AiItem::thinking("real thought", Some("opaque-sig".into())),
+                    },
+                    publication(),
+                )
+                .unwrap_or_else(|failure| panic!("{}", failure.error.code))
+        );
+    }
+
+    #[test]
+    fn signature_only_item_done_consumes_precommit_budget() {
+        let mut buffer = PrecommitBuffer::default();
+        assert_eq!(
+            buffer
+                .push(
+                    AiStreamDelta::ItemDone {
+                        index: 0,
+                        item: AiItem::thinking("", Some("x".repeat(PRECOMMIT_BUFFER_BUDGET))),
+                    },
+                    publication(),
+                )
+                .unwrap_err()
+                .error
+                .code,
+            "vendor_event_limit_exceeded"
+        );
+        assert!(buffer.take().is_empty());
     }
 }

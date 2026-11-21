@@ -2,7 +2,9 @@ use serde_json::{Value, json};
 use stravia_protocol_codec::accumulator::StreamResponseAccumulator;
 use stravia_protocol_codec::transform::{ProtocolTransform, StreamDecodeStage};
 use stravia_runtime_contract::protocol::ids::GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
-use stravia_runtime_contract::protocol::ir::{AiErrorKind, AiRequest, AiResponse, ToolChoice};
+use stravia_runtime_contract::protocol::ir::{
+    AiErrorKind, AiRequest, AiResponse, ContentBlock, MessageContent, ToolChoice,
+};
 use stravia_vendor_common::{common, gemini};
 use stravia_vendor_sdk::{ErrorKind, GuestHost, PluginError, ProviderSnapshot, read_http_body};
 
@@ -509,13 +511,37 @@ fn read_inference_response(
         .finish()
         .map_err(common::map_response_transform_error)?;
     emit_nonterminal_deltas(host, &mut accumulator, &deltas, &mut terminal_deltas)?;
+    let response = accumulator.into_ai_response();
     if !terminal {
-        return Err(common::model_error(
-            AiErrorKind::UnexpectedEof,
-            "Antigravity stream ended before a finish reason",
-        ));
+        let message = if response.usage.completion_tokens == 0
+            && response.usage.reasoning_tokens.unwrap_or(0) == 0
+            && !response_has_substantive_content(&response)
+        {
+            "Antigravity stream ended with no output before a finish reason"
+        } else {
+            "Antigravity stream ended before a finish reason"
+        };
+        return Err(common::model_error(AiErrorKind::UnexpectedEof, message));
     }
-    Ok((accumulator.into_ai_response(), terminal_deltas))
+    Ok((response, terminal_deltas))
+}
+
+fn response_has_substantive_content(response: &AiResponse) -> bool {
+    response.items.iter().any(|item| match &item.content {
+        MessageContent::Text(text) => !text.is_empty(),
+        MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
+            ContentBlock::Text { text, .. } => !text.is_empty(),
+            ContentBlock::Thinking { thinking, .. } => !thinking.is_empty(),
+            ContentBlock::Reasoning {
+                summary, content, ..
+            } => {
+                summary.iter().any(|part| !part.is_empty())
+                    || content.iter().any(|part| !part.is_empty())
+            }
+            ContentBlock::Refusal { refusal } => !refusal.is_empty(),
+            _ => true,
+        }),
+    })
 }
 
 fn decode_event(
@@ -1476,5 +1502,25 @@ mod tests {
                 b"[DONE]".to_vec()
             ]
         );
+    }
+
+    #[test]
+    fn signature_only_thinking_is_not_substantive_content() {
+        let mut response = AiResponse::new("resp-1", "gemini-4-hydrogen");
+        response
+            .items
+            .push(stravia_runtime_contract::protocol::ir::AiItem::thinking(
+                "",
+                Some("opaque-sig".into()),
+            ));
+        assert!(!response_has_substantive_content(&response));
+
+        response
+            .items
+            .push(stravia_runtime_contract::protocol::ir::AiItem::thinking(
+                "real thought",
+                Some("opaque-sig".into()),
+            ));
+        assert!(response_has_substantive_content(&response));
     }
 }
