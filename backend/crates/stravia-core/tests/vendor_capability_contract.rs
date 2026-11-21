@@ -180,6 +180,7 @@ struct UpstreamState {
 
 enum UpstreamReply {
     Json(StatusCode, Value),
+    Bytes(StatusCode, String, Vec<u8>),
     ResponsesStream(Value),
     Barrier {
         entered: oneshot::Sender<()>,
@@ -200,7 +201,7 @@ impl LocalUpstream {
             requests: Mutex::new(Vec::new()),
         });
         let app = Router::new()
-            .route("/{*path}", post(upstream_handler))
+            .route("/{*path}", post(upstream_handler).get(upstream_handler))
             .with_state(Arc::clone(&state));
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -222,6 +223,16 @@ impl LocalUpstream {
             .entry(path.into())
             .or_default()
             .push_back(UpstreamReply::Json(status, body));
+    }
+
+    async fn push_bytes(&self, path: &str, status: StatusCode, content_type: &str, body: Vec<u8>) {
+        self.state
+            .replies
+            .lock()
+            .await
+            .entry(path.into())
+            .or_default()
+            .push_back(UpstreamReply::Bytes(status, content_type.into(), body));
     }
 
     async fn push_responses_stream(&self, body: Value) {
@@ -336,6 +347,12 @@ async fn upstream_handler(
         .and_then(VecDeque::pop_front);
     match reply {
         Some(UpstreamReply::Json(status, body)) => (status, Json(body)).into_response(),
+        Some(UpstreamReply::Bytes(status, content_type, body)) => (
+            status,
+            [(axum::http::header::CONTENT_TYPE, content_type)],
+            body,
+        )
+            .into_response(),
         Some(UpstreamReply::ResponsesStream(body)) => {
             if !streaming {
                 return (
@@ -1840,6 +1857,429 @@ async fn minimax_profiles_generate_and_edit_owned_images_through_base() -> anyho
             .iter()
             .all(|request| request.path == "/gateway/v1/images/generations")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn alibaba_profiles_discover_generate_and_edit_owned_images_through_base()
+-> anyhow::Result<()> {
+    let harness = TestHarness::new().await?;
+    let upstream = LocalUpstream::start().await?;
+    let client = harness.connect().await;
+    let expected_bytes = base64::engine::general_purpose::STANDARD.decode(PNG_BASE64)?;
+    let mut second_png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 3).write_to(&mut second_png, image::ImageFormat::Png)?;
+    let second_base64 = base64::engine::general_purpose::STANDARD.encode(second_png.into_inner());
+
+    // Seed offline catalog scopes for alibaba-cn (text only) and alibaba-token-plan-cn
+    // (text + catalog-declared image model).
+    seed_provider_scope(
+        harness._data_dir.path(),
+        "alibaba-cn",
+        &serde_json::to_vec(&json!({
+            "qwen-plus": {
+                "id": "qwen-plus",
+                "name": "Qwen Plus",
+                "modalities": { "input": ["text"], "output": ["text"] }
+            }
+        }))?,
+    )?;
+    seed_provider_scope(
+        harness._data_dir.path(),
+        "alibaba-token-plan-cn",
+        &serde_json::to_vec(&json!({
+            "qwen3.8-max": {
+                "id": "qwen3.8-max",
+                "name": "Qwen 3.8 Max",
+                "modalities": { "input": ["text"], "output": ["text"] }
+            },
+            "qwen-image-2.0-pro": {
+                "id": "qwen-image-2.0-pro",
+                "name": "Qwen Image 2.0 Pro",
+                "modalities": { "input": ["text", "image"], "output": ["image"] }
+            }
+        }))?,
+    )?;
+
+    // 1) Standard Alibaba (China) discovery merges dynamic /api/v1/models image models
+    //    with catalog text models and preserves image input capability from request_modality.
+    let cn_provider = create_provider(
+        &harness.gateway,
+        "alibaba-cn-discovery",
+        "alibaba-cn",
+        &format!("{}/bailian/compatible-mode/v1", upstream.url),
+        "openai-compatible",
+    )
+    .await?;
+    upstream
+        .push_json(
+            "/bailian/api/v1/models",
+            StatusCode::OK,
+            json!({
+                "output": {
+                    "total": 4,
+                    "page_size": 100,
+                    "models": [
+                        {
+                            "model": "qwen-image-3.0-pro",
+                            "name": "Qwen-Image-3.0-Pro",
+                            "capabilities": ["IG"],
+                            "inference_metadata": {
+                                "request_modality": ["Image", "Text"],
+                                "response_modality": ["Image"]
+                            },
+                            "inference_offline_info": null
+                        },
+                        {
+                            "model": "z-image-turbo",
+                            "name": "Z-Image-Turbo",
+                            "capabilities": ["IG"],
+                            "inference_metadata": {
+                                "request_modality": ["Text"],
+                                "response_modality": ["Text", "Image"]
+                            },
+                            "inference_offline_info": null
+                        },
+                        {
+                            "model": "wanx-v1",
+                            "name": "wanx-t2i",
+                            "capabilities": ["IG"],
+                            "inference_metadata": {
+                                "request_modality": ["Text"],
+                                "response_modality": ["Image"]
+                            },
+                            "inference_offline_info": null
+                        },
+                        {
+                            "model": "kling/kling-v3-image-generation",
+                            "name": "Kling Image 3.0",
+                            "capabilities": ["IG"],
+                            "inference_metadata": {
+                                "request_modality": ["Text", "Image"],
+                                "response_modality": ["Image"]
+                            },
+                            "inference_offline_info": null
+                        }
+                    ]
+                }
+            }),
+        )
+        .await;
+    harness
+        .gateway
+        .admin()
+        .sync_provider_models(&cn_provider.id)
+        .await?;
+    let cn_models = harness
+        .gateway
+        .admin()
+        .list_provider_models(&cn_provider.id)
+        .await?
+        .models;
+    assert!(cn_models.iter().any(|m| m.id == "qwen-image-3.0-pro"));
+    let qwen_img = harness
+        .gateway
+        .admin()
+        .get_provider_model(&cn_provider.id, "qwen-image-3.0-pro")
+        .await?;
+    assert_eq!(
+        serde_json::to_value(&qwen_img.metadata.modalities)?,
+        json!({"input": ["text", "image"], "output": ["image"]})
+    );
+    assert!(cn_models.iter().any(|m| m.id == "z-image-turbo"));
+    let z_img = harness
+        .gateway
+        .admin()
+        .get_provider_model(&cn_provider.id, "z-image-turbo")
+        .await?;
+    assert_eq!(
+        serde_json::to_value(&z_img.metadata.modalities)?,
+        json!({"input": ["text"], "output": ["image"]})
+    );
+    assert!(
+        cn_models.iter().any(|m| m.id == "qwen-plus"),
+        "existing catalog text model must remain"
+    );
+    assert!(
+        !cn_models
+            .iter()
+            .any(|m| m.id == "wanx-v1" || m.id == "kling/kling-v3-image-generation"),
+        "legacy async and partner models must not be advertised"
+    );
+
+    // 2) Token Plan tolerates HTTP 404 on /api/v1/models and preserves catalog image models
+    //    with media_image capability attached.
+    let token_plan_provider = create_provider(
+        &harness.gateway,
+        "alibaba-token-plan-cn-discovery",
+        "alibaba-token-plan-cn",
+        &format!("{}/token-plan/compatible-mode/v1", upstream.url),
+        "openai-compatible",
+    )
+    .await?;
+    upstream
+        .push_json(
+            "/token-plan/api/v1/models",
+            StatusCode::NOT_FOUND,
+            json!({"error": "Not Found"}),
+        )
+        .await;
+    harness
+        .gateway
+        .admin()
+        .sync_provider_models(&token_plan_provider.id)
+        .await?;
+    let tp_models = harness
+        .gateway
+        .admin()
+        .list_provider_models(&token_plan_provider.id)
+        .await?
+        .models;
+    assert!(tp_models.iter().any(|m| m.id == "qwen3.8-max"));
+    assert!(tp_models.iter().any(|m| m.id == "qwen-image-2.0-pro"));
+    let tp_img = harness
+        .gateway
+        .admin()
+        .get_provider_model(&token_plan_provider.id, "qwen-image-2.0-pro")
+        .await?;
+    assert!(
+        tp_img
+            .route_purposes
+            .contains(&stravia_core::db::models::RoutePurpose::ImageGeneration),
+        "catalog image model must be eligible for image_generation route purpose"
+    );
+
+    // 3) End-to-end text-to-image (URL download + data URL) and reference-image editing
+    //    across all four supported Alibaba profiles.
+    let mut first_reference = None;
+    for profile in [
+        "alibaba",
+        "alibaba-cn",
+        "alibaba-token-plan",
+        "alibaba-token-plan-cn",
+    ] {
+        let model = if profile == "alibaba-token-plan-cn" {
+            "wan2.7-image-pro"
+        } else {
+            "qwen-image-3.0-pro"
+        };
+        let provider = create_provider(
+            &harness.gateway,
+            profile,
+            profile,
+            &format!("{}/gateway/compatible-mode/v1", upstream.url),
+            "openai-compatible",
+        )
+        .await?;
+        harness
+            .gateway
+            .admin()
+            .create_manual_provider_model(
+                &provider.id,
+                model,
+                CreateManualProviderModel {
+                    metadata: json!({
+                        "id": model,
+                        "capabilities": ["media_image"],
+                        "modalities": {"input": ["text", "image"], "output": ["image"]}
+                    }),
+                    template_id: None,
+                },
+            )
+            .await?;
+        let route = create_route(
+            &harness.gateway,
+            &format!("{profile}-image-route"),
+            vec![(&provider, model, 0)],
+            0,
+            stravia_core::db::models::RoutePurpose::ImageGeneration,
+        )
+        .await?;
+        configure_image_generation(&harness.gateway, &route.model_id).await?;
+
+        // First call returns an image URL on the same mock origin to verify unauthenticated
+        // GET image download + Artifact storage.
+        let image_download_path = format!("/oss-result/{profile}.png");
+        upstream
+            .push_json(
+                "/gateway/api/v1/services/aigc/multimodal-generation/generation",
+                StatusCode::OK,
+                json!({
+                    "output": {
+                        "choices": [{
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{
+                                    "image": format!("{}{}", upstream.url, image_download_path),
+                                    "type": "image"
+                                }]
+                            }
+                        }]
+                    },
+                    "usage": {"image_count": 1, "width": 1, "height": 1},
+                    "request_id": format!("req-{profile}")
+                }),
+            )
+            .await;
+        upstream
+            .push_bytes(
+                &image_download_path,
+                StatusCode::OK,
+                "image/png",
+                expected_bytes.clone(),
+            )
+            .await;
+
+        let generated = call_generate(
+            &client,
+            json!({
+                "type": "image",
+                "input": {
+                    "prompt": "a controlled alibaba image",
+                    "aspect_ratio": "16:9",
+                    "resolution": "4K"
+                }
+            }),
+        )
+        .await;
+        assert_ne!(generated.is_error, Some(true), "{profile}: {generated:?}");
+        let output = generated.structured_content.expect("generated Artifact");
+        assert_eq!(output["mime_type"], "image/png");
+        assert_eq!(output["media"], json!({"width": 1, "height": 1}));
+        let reference = output["path"]
+            .as_str()
+            .expect("Artifact reference")
+            .to_owned();
+        let artifact_id = ArtifactId::from_reference(&reference)?;
+        let store = harness.gateway.artifact_store().expect("Artifact store");
+        let reader = store
+            .open(&Principal::new(harness.key_id.clone()), &artifact_id)
+            .await?;
+        let stravia_runtime_contract::artifact::ArtifactSource::LocalPath(path) = &reader.source
+        else {
+            panic!("generated Artifact must be locally readable");
+        };
+        assert_eq!(tokio::fs::read(path).await?, expected_bytes);
+
+        if first_reference.is_none() {
+            first_reference = Some(reference);
+            // Second call returns a data URL directly (no extra GET download).
+            upstream
+                .push_json(
+                    "/gateway/api/v1/services/aigc/multimodal-generation/generation",
+                    StatusCode::OK,
+                    json!({
+                        "output": {
+                            "choices": [{
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{
+                                        "image": format!("data:image/png;base64,{second_base64}")
+                                    }]
+                                }
+                            }]
+                        },
+                        "request_id": "req-data-url"
+                    }),
+                )
+                .await;
+            let second = call_generate(
+                &client,
+                json!({"type": "image", "input": {"prompt": "second alibaba image"}}),
+            )
+            .await;
+            assert_ne!(second.is_error, Some(true), "{second:?}");
+            let second_reference = second.structured_content.expect("second Artifact")["path"]
+                .as_str()
+                .expect("second Artifact reference")
+                .to_owned();
+
+            // Third call exercises multi-reference image editing.
+            upstream
+                .push_json(
+                    "/gateway/api/v1/services/aigc/multimodal-generation/generation",
+                    StatusCode::OK,
+                    json!({
+                        "output": {
+                            "choices": [{
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{
+                                        "image": format!("data:image/png;base64,{PNG_BASE64}")
+                                    }]
+                                }
+                            }]
+                        },
+                        "request_id": "req-edit"
+                    }),
+                )
+                .await;
+            let edited = call_generate(
+                &client,
+                json!({
+                    "type": "image",
+                    "input": {
+                        "prompt": "edit both alibaba images",
+                        "reference_images": [first_reference.as_ref().unwrap(), second_reference],
+                        "aspect_ratio": "16:9",
+                        "resolution": "4K"
+                    }
+                }),
+            )
+            .await;
+            assert_ne!(edited.is_error, Some(true), "{edited:?}");
+            assert_eq!(
+                edited.structured_content.expect("edited Artifact")["mime_type"],
+                "image/png"
+            );
+        }
+    }
+
+    let requests = upstream.requests().await;
+    // Verify image downloads did NOT carry Authorization headers.
+    let download_requests: Vec<_> = requests
+        .iter()
+        .filter(|r| r.path.starts_with("/oss-result/"))
+        .collect();
+    assert_eq!(download_requests.len(), 4);
+    for req in download_requests {
+        assert!(
+            !req.headers.contains_key("authorization"),
+            "OSS image download must not forward provider credentials"
+        );
+    }
+
+    let gen_requests: Vec<_> = requests
+        .iter()
+        .filter(|r| r.path == "/gateway/api/v1/services/aigc/multimodal-generation/generation")
+        .collect();
+    assert_eq!(gen_requests.len(), 6);
+    for req in &gen_requests {
+        assert_eq!(
+            req.headers["authorization"],
+            "Bearer fixture-secret-not-production"
+        );
+        assert!(!req.body.to_string().contains("stravia://"));
+    }
+    // qwen-image-3.0-pro clamps 4K 16:9 to 2560*1440.
+    assert_eq!(gen_requests[0].body["parameters"]["size"], "2560*1440");
+    // Second request omitted aspect_ratio and resolution -> no parameters object.
+    assert!(gen_requests[1].body.get("parameters").is_none());
+    // Third request (edit) carries ordered reference images before text prompt.
+    assert_eq!(
+        gen_requests[2].body["input"]["messages"][0]["content"],
+        json!([
+            {"image": format!("data:image/png;base64,{PNG_BASE64}")},
+            {"image": format!("data:image/png;base64,{second_base64}")},
+            {"text": "edit both alibaba images"}
+        ])
+    );
+    // Last profile (alibaba-token-plan-cn) uses wan2.7-image-pro text-to-image -> 4K 16:9 = 5120*2880.
+    assert_eq!(gen_requests[5].body["model"], "wan2.7-image-pro");
+    assert_eq!(gen_requests[5].body["parameters"]["size"], "5120*2880");
     Ok(())
 }
 

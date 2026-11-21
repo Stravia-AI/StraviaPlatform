@@ -319,6 +319,10 @@ Schema 投影在 schema 节点将布尔 `true` 等价转换为 `{}`，将 `false
 
 普通 MiniMax API 与 Plan 的四个 Profile 均由内置 `base` 提供图片生成，同一图片模型通过统一 `generate` 输入的可选参考图执行文生图或参考图编辑，不注册第二个工具或专用编辑模型。模型同步从官方两份图片 OpenAPI 合并发现型号及图片输入能力，不在实现中固定型号名单；显式模型来源限制、逐字段固定和发现失败保留旧库存继续有效。远端 schema 不改变请求目的地或认证，目录能力不等同账号授权。接入、区域地址、Credits 与 Provider 级额度守护限制见[媒体生成](media-generation.md#minimax-统一图片生成)。
 
+### 阿里云百炼图片生成与发现
+
+阿里云百炼标准 API 与 Token Plan 的四个 Profile（`alibaba`、`alibaba-cn`、`alibaba-token-plan`、`alibaba-token-plan-cn`）均由内置 `base` 提供图片生成能力；`alibaba-coding-plan` 与 `alibaba-coding-plan-cn` 不支持生图，不声明 `MediaImage`。标准百炼在模型同步时通过 `GET {api_root}/api/v1/models` 动态合并同步生图型号及参考图输入能力；Token Plan 在 `/api/v1/models` 返回 404 时保留既有目录同步结果并为已声明图片输出的型号补齐 `media_image`。文生图与参考图编辑共用 `/api/v1/services/aigc/multimodal-generation/generation`，并通过固定正则白名单无凭据下载阿里云百炼结果 OSS 临时图片，详细映射与错误分类见[媒体生成](media-generation.md#阿里云百炼alibaba--dashscope-与-token-plan统一图片生成)。
+
 ### Provider 图标标识
 
 - `ProviderDescriptor.icon_svg` 可选，携带编译进插件的自包含 SVG。单图不超过 512 KiB；宿主加载时校验大小和 SVG 根格式，不将该校验当作 SVG sanitizer。图标通过既有宿主图像接口和 WebUI `img` 显示，响应保留 CSP，不将插件 SVG 注入页面 DOM；无需修改 WIT 函数布局。图像接口属于公开静态资源，不要求管理登录；入口 origin 策略仍生效。

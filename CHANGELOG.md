@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Built-in Base Alibaba Model Studio (DashScope) and Token Plan profiles (`alibaba`, `alibaba-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`) now support image generation and reference-image editing through the unified `generate` tool via `/api/v1/services/aigc/multimodal-generation/generation`. Model sync dynamically merges synchronous image models and reference-input support from `GET {api_root}/api/v1/models`, tolerates HTTP 404 on Token Plan `/api/v1/models` while preserving catalog-declared image models, and excludes Coding Plan profiles (`alibaba-coding-plan`, `alibaba-coding-plan-cn`) from image generation. Result OSS image URLs are downloaded without forwarding provider credentials under a fixed Alibaba DashScope OSS host regex allowlist. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, region matching, and Credits/balance consumption remain governed by Alibaba Cloud Model Studio.
+
 ## [0.7.4] - 2026-11-20
 
 This release also includes the changes listed under [0.7.3](https://github.com/Stravia-AI/StraviaPlatform/blob/v0.7.4/CHANGELOG.md#073---2026-11-19), whose publication was cancelled.
