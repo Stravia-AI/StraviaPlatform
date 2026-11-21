@@ -301,7 +301,7 @@ clear_history() -> ClearHistoryResult
 - `run_finished`
 - `interaction_relinked`
 - `observation_gap`
-- `user_input_recorded`：由 `input_preview_recorded` 改名，旧名不再保留或作为别名。每个带有新增用户输入的 Run 至多记录一次，保存经凭据保护发布后的最新 User item 的完整有序文本单元引用，读取时以 `\n` 连接，没有 4,096 字符截断。同一 Interaction 的追加输入也记录事件，但卡片的输入摘要只取根 Run 最新的 `user_input_recorded`（`interaction_observations.input_sequence`）；重复发布不覆盖已有引用。升级前已被截断的旧预览保持原样，不从 Turn Chain 回填，缺少文本的旧事件不推断或补录输入。
+- `user_input_recorded`：由 `input_preview_recorded` 改名，旧名不再保留或作为别名。每个带有新增用户输入的 Run 至多记录一次，保存经凭据保护发布后的本轮连续 User items（不含纯工具结果载体）的完整有序文本单元引用，读取时以 `\n` 连接，没有 4,096 字符截断。同一 Interaction 的追加输入也记录事件，但卡片的输入摘要只取根 Run 最新的 `user_input_recorded`（`interaction_observations.input_sequence`）；重复发布不覆盖已有引用。升级前已被截断的旧预览保持原样，不从 Turn Chain 回填，缺少文本的旧事件不推断或补录输入。
 - `run_state_changed`、`request_failed`：不带 payload，状态与失败信息分别来自 Run 的 `status` / `superseded_by` / `terminal_reason` 列与 `failure_json`；`run_state_changed` 在同一事务已写入其他事件时不单独写这一行，由那些事件触发 SSE 通知
 
 没有已核验 Generation parent 时，完整请求中的历史 User 不自动视为新增：只有已选定的唯一续接来源或已观察父节点提供 received-input 证明，且当前请求末尾为当前工具结果，才令新 Run 的 `has_new_user=false` 并抑制 `user_input_recorded`。证明比较来源 received-input 与当前请求中有序的用户输入（User 角色且非工具结果载体的 canonical item，忽略图片），二者必须逐项一致；客户端在回放时改写其余历史（删除较早图片、裁剪或移除旧工具结果、变更 system/developer 指令、私有控制）不是新的用户输入，不影响证明。不凭输入文字相同去重；追加同文 User、用户输入被改写、删除或重排、证据缺失或超过既有窗口预算时均保留输入。重启可通过保留的 Generation 证据恢复前缀，无法恢复时保守记录。该判定只影响后续观察事件，不改变分组、模型输入或 Generation 父关系，不删除、改写或隐藏旧重复事件。
@@ -326,7 +326,7 @@ clear_history() -> ClearHistoryResult
 
 未收口内容作为选中 Interaction 的累计易失快照发布并替换显示，不带 SSE ID、不推进持久 cursor；界面明确未保存状态。第一段与完成、失败、取消边界立即处理，中间修订按固定首次截止的最多 100ms 发布窗口合并，只发布变化 block 的最新修订；持续输入不延后截止。同一 block 尚未消费的旧修订可被新修订替换，不能让累计全文无限排队或拖累持久通知。发送用的全文构造和编码只在发布时进行，不在每个原始 delta 上重复执行。下游转发与推理不等待观察发布、诊断 item 收口或落盘，也不因有无管理订阅改变记录行为。持久化失败、live gap 与进程崩溃丢失分别表达，不能把易失预览截断误报成已落盘历史丢失。
 
-思考和工具内容不进入可见输出摘要（只有 `channel='visible'` 的块参与），采用普通 Observation 的 Authorization-only 写入过滤及统一的 `log_retention_days`（见 §6.4），不受 Debug 开关控制；原始凭据与业务敏感内容可能保留。普通事件不保存完整 canonical request/response；完整保存最新 User item 的文本单元是这一边界下的明确例外（`user_input_recorded`），它只引用内容存储里的文本单元，不扩大为保存完整 request。
+思考和工具内容不进入可见输出摘要（只有 `channel='visible'` 的块参与），采用普通 Observation 的 Authorization-only 写入过滤及统一的 `log_retention_days`（见 §6.4），不受 Debug 开关控制；原始凭据与业务敏感内容可能保留。普通事件不保存完整 canonical request/response；完整保存本轮连续 User items 的文本单元是这一边界下的明确例外（`user_input_recorded`），它只引用内容存储里的文本单元，不扩大为保存完整 request。
 
 ### 5.2 Debug 原始 Wire 捕获
 

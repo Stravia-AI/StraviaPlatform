@@ -7,18 +7,35 @@ use stravia_credential_protection::marker;
 
 pub(crate) const REDACTED: &str = "***";
 
-/// 最新用户 item 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
+fn is_user_input_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> bool {
+    use stravia_runtime_contract::protocol::ir::{MessageContent, Role};
+    if item.role != Role::User {
+        return false;
+    }
+    match &item.content {
+        MessageContent::Text(_) => true,
+        // 纯工具结果载体（例如 Anthropic 的 role=user + tool_result 块）属于工具续跑，不是用户输入。
+        MessageContent::Blocks(blocks) => {
+            blocks.is_empty() || blocks.iter().any(|block| !block.is_tool_result())
+        }
+    }
+}
+
+/// 本轮连续用户 items 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
 pub(crate) fn user_input_units(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
 ) -> Option<Vec<String>> {
-    use stravia_runtime_contract::protocol::ir::Role;
     use stravia_runtime_contract::protocol::ir::content::{ContentUnitBody, item_content_units};
-    let item = items.iter().rev().find(|item| item.role == Role::User)?;
-    let units = item_content_units(item);
-    let texts: Vec<String> = units
+    let end = items.iter().rposition(is_user_input_item)?;
+    let mut start = end;
+    while start > 0 && is_user_input_item(&items[start - 1]) {
+        start -= 1;
+    }
+    let texts: Vec<String> = items[start..=end]
         .iter()
-        .filter_map(|unit| match &unit.body {
-            ContentUnitBody::Text(text) => Some((*text).to_owned()),
+        .flat_map(item_content_units)
+        .filter_map(|unit| match unit.body {
+            ContentUnitBody::Text(text) => Some(text.to_owned()),
             ContentUnitBody::Json(_) => None,
         })
         .collect();
@@ -1112,10 +1129,55 @@ mod tests {
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"user","content":"old-user"},
+                {"role":"assistant","content":"assistant-reply"},
                 {"role":"user","content":[]}
             ]))
             .unwrap();
         assert_eq!(super::user_input_units(&items), None);
+        // 同一轮中连续多条 user item（如真实请求后追加 time-context）按原序保留，不被尾部空块或尾条覆盖。
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"system","content":"system-secret"},
+                {"role":"user","content":"turn-1"},
+                {"role":"assistant","content":"reply-1"},
+                {"role":"user","content":"real-user-prompt"},
+                {"role":"user","content":"Time sampled while preparing turn 2, step 1"}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec![
+                "real-user-prompt".to_owned(),
+                "Time sampled while preparing turn 2, step 1".to_owned(),
+            ])
+        );
+        // Anthropic 风格的纯 tool_result user 项作为边界，不并入本轮用户输入。
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":"turn-1"},
+                {"role":"assistant","content":"tool-call"},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call_1","content":"tool-secret"}
+                ]},
+                {"role":"user","content":"followup"},
+                {"role":"user","content":"time-context"}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec!["followup".to_owned(), "time-context".to_owned()])
+        );
+        // 同轮末尾跟空块 user item 时仍保留前面的用户正文。
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"user","content":"old-user"},
+                {"role":"user","content":[]}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec!["old-user".to_owned()])
+        );
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
             serde_json::from_value(serde_json::json!([
                 {"role":"user","content":[{"type":"text","text":""}]}
