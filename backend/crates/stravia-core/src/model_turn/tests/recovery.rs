@@ -379,7 +379,8 @@ async fn clean_empty_stream_eof_caps_same_target_retries_and_fails_over() {
             let mut request = vec![0_u8; 16 * 1024];
             let _ = socket.read(&mut request).await.expect("read request");
             observed.fetch_add(1, Ordering::SeqCst);
-            let frame = "event: message-start\ndata: {\"type\":\"message-start\",\"id\":\"msg-empty\"}\n\n";
+            let frame =
+                "event: message-start\ndata: {\"type\":\"message-start\",\"id\":\"msg-empty\"}\n\n";
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{frame}",
                 frame.len()
