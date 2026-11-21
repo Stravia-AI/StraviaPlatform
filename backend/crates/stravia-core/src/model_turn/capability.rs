@@ -449,6 +449,16 @@ impl Gateway {
                     Err(failure)
                 } else {
                     let mut attempt_context = clone_context(&context);
+                    if capability == Capability::Search {
+                        if let Some(level) = resolved_search_thinking_level(route, &target) {
+                            attempt_context.metadata.insert(
+                                "default_thinking_level".into(),
+                                serde_json::Value::String(level),
+                            );
+                        } else {
+                            attempt_context.metadata.remove("default_thinking_level");
+                        }
+                    }
                     attempt_context.send_admission = Some(crate::rpm::SendAdmission {
                         admission: self.rpm_admission.clone(),
                         root: context.root_request.clone(),
@@ -928,6 +938,45 @@ fn operation_usage(
 
 fn clone_request(request: &VendorRequest) -> VendorRequest {
     request.clone()
+}
+
+fn resolved_search_thinking_level(
+    route: &RouteConfig,
+    target: &crate::router::SelectedTarget,
+) -> Option<String> {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    let raw = route.default_thinking_level.as_deref()?;
+    let level = ThinkingLevel::from_wire(raw).ok()?;
+    let route_target = route
+        .targets
+        .iter()
+        .find(|candidate| candidate.destination == target.destination);
+    if let Some(mapping) = route_target.and_then(|candidate| {
+        candidate
+            .thinking_level_map
+            .iter()
+            .find(|row| row.level == level)
+    }) {
+        match &mapping.control {
+            TargetThinkingControl::Disabled => return Some(ThinkingLevel::Off.as_str().to_owned()),
+            TargetThinkingControl::Enabled => return Some(level.as_str().to_owned()),
+            TargetThinkingControl::Effort { value } => {
+                let normalized = value.trim();
+                if normalized.eq_ignore_ascii_case("none") {
+                    return Some(ThinkingLevel::Off.as_str().to_owned());
+                }
+                if !normalized.is_empty() {
+                    return Some(normalized.to_owned());
+                }
+            }
+            TargetThinkingControl::Budget { value: 0 } => {
+                return Some(ThinkingLevel::Off.as_str().to_owned());
+            }
+            TargetThinkingControl::Budget { .. } | TargetThinkingControl::Hidden => {}
+        }
+    }
+    Some(level.as_str().to_owned())
 }
 
 fn clone_context(context: &VendorCallContext) -> VendorCallContext {
