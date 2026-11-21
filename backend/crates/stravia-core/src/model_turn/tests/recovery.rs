@@ -362,3 +362,159 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
     assert_eq!(partial_calls.load(Ordering::SeqCst), 6);
     assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn clean_empty_stream_eof_caps_same_target_retries_and_fails_over() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cohere provider");
+    let address = listener.local_addr().expect("cohere address");
+    let primary_calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&primary_calls);
+    tokio::spawn(async move {
+        for _ in 0..6 {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut request = vec![0_u8; 16 * 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+            observed.fetch_add(1, Ordering::SeqCst);
+            let frame =
+                "event: message-start\ndata: {\"type\":\"message-start\",\"id\":\"msg-empty\"}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{frame}",
+                frame.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write empty stream");
+        }
+    });
+    let primary_url = format!("http://{address}/v2");
+    let (fallback_url, fallback_calls) = serve_openai_response(serde_json::json!({
+        "id": "chatcmpl-fallback",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "upstream-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "fallback"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
+    }))
+    .await;
+    let data_dir = tempfile::tempdir().expect("temporary data directory");
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: data_dir.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await
+    .expect("Gateway");
+    let admin = gateway.admin();
+    let primary = admin
+        .create_provider(CreateProvider {
+            name: Some("primary-cohere".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "cohere".into(),
+                channel: "default".into(),
+                protocol: Some("cohere".into()),
+                base_url: primary_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-provider-key".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await
+        .expect("primary Provider");
+    let fallback = admin
+        .create_provider(CreateProvider {
+            name: Some("fallback-openai".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "custom".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
+                base_url: fallback_url,
+                models_source: None,
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey {
+                value: "test-provider-key".into(),
+            },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await
+        .expect("fallback Provider");
+    for provider in [&primary, &fallback] {
+        add_test_provider_model(&gateway, &provider.id).await;
+    }
+    let model = admin
+        .create_model(CreateRoute {
+            purpose: crate::db::models::RoutePurpose::Inference,
+            model_id: "empty-eof-failover-model".into(),
+            display_name: None,
+            balance: Some("traffic_equalization".into()),
+            targets: vec![
+                CreateTarget {
+                    enabled: true,
+                    provider_id: primary.id.clone(),
+                    model: "upstream-model".into(),
+                    priority: Some(2),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: Some(5),
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                },
+                CreateTarget {
+                    enabled: true,
+                    provider_id: fallback.id.clone(),
+                    model: "upstream-model".into(),
+                    priority: Some(1),
+                    first_token_timeout_ms: None,
+                    target_retry_budget: Some(0),
+                    target_cooldown_ms: None,
+                    thinking_level_map: Vec::new(),
+                },
+            ],
+            default_thinking_level: None,
+            billing: None,
+        })
+        .await
+        .expect("Model");
+    let key = admin
+        .create_api_key(crate::db::models::CreateApiKey {
+            key: None,
+            name: "Empty EOF failover key".into(),
+            rpm_limit: None,
+            expires_at: None,
+            mcp_access_enabled: true,
+            transparent_injection_enabled: false,
+            transparent_injections: Default::default(),
+            model_ids: vec![model.id.into()],
+            spend_limit: None,
+        })
+        .await
+        .expect("API key");
+
+    let mut request = AiRequest::new("empty-eof-failover-model", Vec::new());
+    request.stream.enabled = true;
+    let turn = gateway
+        .model_turn
+        .execute(TurnInput::new(Principal::new(key.id), request))
+        .await
+        .expect("clean empty EOF should retry once and fail over");
+    assert_eq!(turn.route.provider_id, fallback.id);
+    let events = turn.output.collect::<Vec<_>>().await;
+    assert!(matches!(
+        events.last(),
+        Some(Ok(CanonicalEvent::Completed(response))) if response.output_text() == "fallback"
+    ));
+    assert_eq!(primary_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
+}

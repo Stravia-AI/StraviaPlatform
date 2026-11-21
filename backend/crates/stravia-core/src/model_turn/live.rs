@@ -844,6 +844,7 @@ fn execute_inner(
                 break;
             };
             let mut transport_preference = TransportPreference::Automatic;
+            let mut empty_stream_eof_retries = 0u8;
             loop {
                 if input.cancellation.is_cancelled() {
                     return Err(interruption_error(&input.deadline));
@@ -1002,6 +1003,18 @@ fn execute_inner(
                     last_error = Some(failure);
                     break;
                 }
+                // 上游返回 200 且在产出任何实质内容前即干净结束流（无传输错误、无 HTTP 错误状态），
+                // 在长多轮工具历史下可能确定性复现；同目标最多重试一次后即切下一个 Target，
+                // 避免在同一目标上反复消耗多轮 retry budget。
+                let empty_stream_eof = is_empty_stream_eof(&kind, &failure);
+                if empty_stream_eof
+                    && empty_stream_eof_retries >= MAX_SAME_TARGET_EMPTY_STREAM_EOF_RETRIES
+                {
+                    record_upstream_failure(&attempts, &target, &failure);
+                    attempts.skip_current();
+                    last_error = Some(failure);
+                    break;
+                }
                 let retry_over_http = matches!(
                     failure.transport_failure.as_ref(),
                     Some(TransportFailure::Websocket)
@@ -1023,6 +1036,9 @@ fn execute_inner(
                             attempts.skip_current();
                             last_error = Some(failure);
                             break;
+                        }
+                        if empty_stream_eof {
+                            empty_stream_eof_retries = empty_stream_eof_retries.saturating_add(1);
                         }
                         if retry_over_http {
                             transport_preference = TransportPreference::HttpOnly;
@@ -3071,6 +3087,14 @@ fn record_upstream_failure(
             failure.retry_after,
         );
     }
+}
+
+const MAX_SAME_TARGET_EMPTY_STREAM_EOF_RETRIES: u8 = 1;
+
+fn is_empty_stream_eof(kind: &AiErrorKind, failure: &AttemptFailure) -> bool {
+    matches!(kind, AiErrorKind::UnexpectedEof)
+        && failure.transport_failure.is_none()
+        && failure.diagnostic.status_code.is_none()
 }
 
 /// 路由判定使用的上游错误类别。Vendor 直接声明的凭据拒绝与流中断没有 canonical

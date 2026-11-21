@@ -105,6 +105,8 @@ const ws = new ObservationWorkspace(
 const selectedOutputPreview = $derived(
   ws.interactionDetail ? observationOutputPreview(ws.interactionDetail, ws.selectedLiveBlocks) : undefined,
 )
+// 画布常驻挂载：roots 短暂清空（如筛选重评）时只覆盖状态层，保留视口与布局 worker。
+const canvasEmpty = $derived(ws.canvasRoots.length === 0)
 const draftStartMs = $derived(new Date(draftStart).getTime())
 const draftEndMs = $derived(new Date(draftEnd).getTime())
 const validDraftRange = $derived(isValidObservationRange(draftStartMs, draftEndMs))
@@ -347,39 +349,12 @@ async function downloadBundle(): Promise<void> {
 
     {#if ws.activeTab === 'interactions'}
       <div class="canvas-stage">
-        {#if ws.loadError && ws.canvasRoots.length > 0}
+        {#if ws.loadError && !canvasEmpty}
           <div class="canvas-refresh-error">
             <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
           </div>
         {/if}
-        {#if ws.loading && ws.canvasRoots.length === 0}
-          <div class="stage-state"><p>{m.observation_loading_chains()}</p></div>
-        {:else if ws.loadError && ws.canvasRoots.length === 0}
-          <div class="stage-state">
-            <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
-          </div>
-        {:else if ws.canvasRoots.length === 0}
-          <div class="stage-state">
-            <Empty.Root
-              ><Empty.Header
-                ><Empty.Title
-                  >{ws.activeFilterCount ? m.observation_no_matching_chains() : m.observation_no_chains()}</Empty.Title
-                ><Empty.Description
-                  >{ws.activeFilterCount
-                    ? m.observation_clear_filters_help()
-                    : m.observation_new_requests_appear()}</Empty.Description
-                ></Empty.Header
-              >{#if ws.activeFilterCount}<Empty.Content
-                  ><Button
-                    variant="outline"
-                    onclick={() => {
-                      ws.clearFilters()
-                      void ws.applyFilters()
-                    }}>{m.observation_clear_filters()}</Button
-                  ></Empty.Content
-                >{/if}</Empty.Root>
-          </div>
-        {:else}
+        <div class="canvas-host" aria-hidden={canvasEmpty || undefined} inert={canvasEmpty || undefined}>
           <SvelteFlowProvider>
             <InteractionCanvas
               bind:this={canvas}
@@ -404,6 +379,34 @@ async function downloadBundle(): Promise<void> {
               onmanualmove={() => ws.pauseFollow()}
               onfollow={() => ws.resumeFollow()} />
           </SvelteFlowProvider>
+        </div>
+        {#if canvasEmpty}
+          <div class="stage-state stage-state-overlay">
+            {#if ws.loading}
+              <p>{m.observation_loading_chains()}</p>
+            {:else if ws.loadError}
+              <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
+            {:else}
+              <Empty.Root
+                ><Empty.Header
+                  ><Empty.Title
+                    >{ws.activeFilterCount ? m.observation_no_matching_chains() : m.observation_no_chains()}</Empty.Title
+                  ><Empty.Description
+                    >{ws.activeFilterCount
+                      ? m.observation_clear_filters_help()
+                      : m.observation_new_requests_appear()}</Empty.Description
+                  ></Empty.Header
+                >{#if ws.activeFilterCount}<Empty.Content
+                    ><Button
+                      variant="outline"
+                      onclick={() => {
+                        ws.clearFilters()
+                        void ws.applyFilters()
+                      }}>{m.observation_clear_filters()}</Button
+                    ></Empty.Content
+                  >{/if}</Empty.Root>
+            {/if}
+          </div>
         {/if}
         {#if ws.selectedInteraction}
           <ObservationInspector
@@ -778,6 +781,11 @@ async function downloadBundle(): Promise<void> {
   min-height: 0;
   overflow: hidden;
 }
+.canvas-host {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
 .canvas-refresh-error {
   position: absolute;
   z-index: 10;
@@ -795,6 +803,13 @@ async function downloadBundle(): Promise<void> {
   color: var(--muted-foreground);
   /* Windows Chromium 会在非滚动容器上残留 scrollbar-button 残影；此处无滚动语义，显式关闭 */
   scrollbar-width: none;
+}
+/* 覆盖常驻画布；低于检查器（z-index: 5）与刷新错误条（z-index: 10） */
+.stage-state-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--background);
 }
 .error-list-view {
   position: relative;
