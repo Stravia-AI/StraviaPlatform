@@ -758,6 +758,10 @@ async function installObservationFixture(
           known.status = payload.status ?? 'completed'
           run.status = payload.status ?? 'completed'
           run.finished_at = event.occurred_at
+        } else if (event.kind === 'run_started') {
+          known.status = 'running'
+          run.status = 'running'
+          run.finished_at = null
         }
       }
       streamEvents.push(event)
@@ -1531,6 +1535,53 @@ test.describe('Interaction Observation canvas', () => {
     await expect(page.getByText('No interaction chains match', { exact: true })).toBeVisible()
     expect(fixture.summaryRequests.at(-1)?.searchParams.get('status')).toBe('running')
     expect(fixture.detailRequests).toEqual([])
+  })
+
+  test('keeps the canvas mounted and preserves viewport across transient empty filter states', async ({ page }) => {
+    const fixture = await installObservationFixture(page)
+    await page.goto('/logs')
+    await page.getByRole('button', { name: 'Filters' }).click()
+    await page.getByLabel('Status', { exact: true }).click()
+    await page.getByRole('option', { name: 'Running', exact: true }).click()
+    await page.getByRole('button', { name: 'Apply filters' }).click()
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+
+    const viewportTransform = () =>
+      page.locator('.svelte-flow__viewport').evaluate((el) => getComputedStyle(el).transform)
+    // 等待首次取景完成，确认视口已离开默认原点 (0, 0)
+    await expect.poll(viewportTransform).not.toBe('matrix(1, 0, 0, 1, 0, 0)')
+    const initialTransform = await viewportTransform()
+    await page.locator('.observation-canvas').evaluate((el) => {
+      el.setAttribute('data-e2e-canvas-instance', 'initial')
+    })
+
+    // 筛选重评短暂归零：显示空态覆盖层，但画布保持挂载且视口不归零
+    fixture.emit({
+      sequence: 11,
+      occurred_at: startedAt + 299_000,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'run_finished',
+      payload: { status: 'completed', delivery: { delivered: true } },
+    })
+    await expect(page.getByText('No interaction chains match', { exact: true })).toBeVisible()
+    await expect(page.locator('.observation-canvas')).toHaveAttribute('data-e2e-canvas-instance', 'initial')
+    expect(await viewportTransform()).toBe(initialTransform)
+
+    // 卡片再次匹配回归：复用同一画布实例与原视口，不重置到左上角再滑回中间
+    fixture.emit({
+      sequence: 12,
+      occurred_at: startedAt + 299_500,
+      interaction_id: 'interaction-cinder',
+      run_id: 'run-interaction-cinder',
+      rejection_id: null,
+      kind: 'run_started',
+      payload: {},
+    })
+    await expect(node(page, 'Cinder', 'running')).toBeVisible()
+    await expect(page.locator('.observation-canvas')).toHaveAttribute('data-e2e-canvas-instance', 'initial')
+    expect(await viewportTransform()).toBe(initialTransform)
   })
 
   test('hides chains below the default token total and can show all', async ({ page }) => {

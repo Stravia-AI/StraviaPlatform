@@ -94,6 +94,8 @@ let minimapOpen = $state(false)
 let requestId = 0
 let requestedTopology = ''
 let initialized = false
+// 视口是否已定位过；首次取景瞬时完成，之后（含 roots 短暂清空再恢复）沿用视口并平滑过渡。
+let hasFramedViewport = false
 let worker: Worker | undefined
 let pendingLayout = Promise.resolve()
 let resolveLayout: (() => void) | undefined
@@ -277,7 +279,9 @@ async function acceptLayout(
 ): Promise<void> {
   if (message.data.requestId !== requestId) return
   positions = new Map(message.data.positions.map((position) => [position.id, position]))
-  await waitForRenderedLayout()
+  // 视口未定位前不等下一帧，否则节点会先以原点视口绘制一帧。
+  if (hasFramedViewport) await waitForRenderedLayout()
+  else await tick()
   resolveLayout?.()
   resolveLayout = undefined
   if (!initialized && nodes.length > 0) {
@@ -320,8 +324,11 @@ $effect(() => {
 
 async function fitLoaded(): Promise<void> {
   await pendingLayout
-  await waitForRenderedLayout()
+  const instant = !hasFramedViewport
+  if (instant) await tick()
+  else await waitForRenderedLayout()
   if (!canvasElement || nodes.length === 0) return
+  hasFramedViewport = true
   const viewport = getViewportForBounds(
     getNodesBounds(nodes),
     canvasElement.clientWidth,
@@ -331,16 +338,27 @@ async function fitLoaded(): Promise<void> {
     0.16,
   )
   // fitView 会等待全图完成 DOM 测量；虚拟画布直接用已知几何定位，不等待屏外节点。
-  await setViewport(viewport, { duration: cameraDuration(240) })
+  await setViewport(viewport, { duration: instant ? 0 : cameraDuration(240) })
 }
 
 export async function focusNode(id: string): Promise<void> {
   // 显式定位优先于首轮自动取景，避免新挂载画布覆盖目标节点。
   initialized = true
   await pendingLayout
-  await waitForRenderedLayout()
+  const instant = !hasFramedViewport
+  if (instant) await tick()
+  else await waitForRenderedLayout()
+  if (!canvasElement) return
   const target = positions.get(id)
-  if (!target || !canvasElement) return
+  if (!target) {
+    // 画布常驻挂载后可能在空画布上收到定位；首次取景的目标不在画布时交还总览，避免视口停在原点。
+    if (!hasFramedViewport) {
+      if (nodes.length > 0) await fitLoaded()
+      else initialized = false
+    }
+    return
+  }
+  hasFramedViewport = true
 
   const centerX = target.x + interactionNodeWidth / 2
   const centerY = target.y + interactionNodeHeight / 2
@@ -354,12 +372,13 @@ export async function focusNode(id: string): Promise<void> {
     ),
   )
 
-  await setCenter(centerX, centerY, { zoom, duration: cameraDuration(260) })
+  await setCenter(centerX, centerY, { zoom, duration: instant ? 0 : cameraDuration(260) })
 }
 
 function handleMoveEnd(event: MouseEvent | TouchEvent | null): void {
   // 程序定位没有源事件；结束回调可能晚于定位 Promise，不能依赖临时布尔标记。
   if (!event) return
+  hasFramedViewport = true
   onmanualmove()
   if (!nextCursor || loadingMore || nodes.length === 0) return
   const viewport = getViewport()
