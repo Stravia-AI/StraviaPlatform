@@ -66,9 +66,14 @@ impl Drop for TestHarness {
 
 impl TestHarness {
     async fn new() -> anyhow::Result<Self> {
+        Self::new_with_catalog(None).await
+    }
+
+    async fn new_with_catalog(catalog_base_url: Option<String>) -> anyhow::Result<Self> {
         let data_dir = tempfile::tempdir()?;
         let gateway = Gateway::new(GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
+            catalog_base_url,
             ..GatewayConfig::default()
         })
         .await?;
@@ -200,7 +205,7 @@ impl LocalUpstream {
             requests: Mutex::new(Vec::new()),
         });
         let app = Router::new()
-            .route("/{*path}", post(upstream_handler))
+            .route("/{*path}", post(upstream_handler).get(upstream_handler))
             .with_state(Arc::clone(&state));
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
@@ -1840,6 +1845,448 @@ async fn minimax_profiles_generate_and_edit_owned_images_through_base() -> anyho
             .iter()
             .all(|request| request.path == "/gateway/v1/images/generations")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn volcengine_profiles_discover_generate_and_edit_owned_images_through_base()
+-> anyhow::Result<()> {
+    let upstream = LocalUpstream::start().await?;
+    let text_catalog_models = json!({
+        "doubao-seed-2-0-pro": {
+            "id": "doubao-seed-2-0-pro",
+            "name": "Doubao Seed 2.0 Pro",
+            "tool_call": true,
+            "temperature": true,
+            "modalities": { "input": ["text"], "output": ["text"] },
+            "limit": { "context": 256000, "output": 8192 },
+            "cost": { "input": 1.0, "output": 2.0 }
+        }
+    });
+    let providers_index = json!({
+        "volcengine": {
+            "id": "volcengine",
+            "name": "Volcengine Ark",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("{}/api/v3", upstream.url)
+        },
+        "volcengine-coding-plan": {
+            "id": "volcengine-coding-plan",
+            "name": "Volcengine Coding Plan",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("{}/api/coding/v3", upstream.url)
+        },
+        "volcengine-agent-plan": {
+            "id": "volcengine-agent-plan",
+            "name": "Volcengine Agent Plan",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("{}/api/plan/v3", upstream.url)
+        },
+        "volcengine-token-plan": {
+            "id": "volcengine-token-plan",
+            "name": "Volcengine Token Plan",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("{}/api/plan/v3", upstream.url)
+        },
+        "byteplus": {
+            "id": "byteplus",
+            "name": "BytePlus ModelArk",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("{}/byteplus/api/v3", upstream.url)
+        }
+    });
+    let catalog_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let catalog_url = format!("http://{}", catalog_listener.local_addr()?);
+    let catalog_app = Router::new()
+        .route(
+            "/version.json",
+            axum::routing::get(|| async {
+                Json(json!({"revision": "rev-1", "generated_at": "2026-11-21T00:00:00Z"}))
+            }),
+        )
+        .route(
+            "/models.json",
+            axum::routing::get(|| async {
+                Json(json!({
+                    "bytedance/doubao-seed-2-0-pro": {
+                        "id": "bytedance/doubao-seed-2-0-pro",
+                        "name": "Doubao Seed 2.0 Pro",
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                        "limit": { "context": 256000, "output": 8192 },
+                        "cost": { "input": 1.0, "output": 2.0 }
+                    }
+                }))
+            }),
+        )
+        .route(
+            "/providers.json",
+            axum::routing::get({
+                let providers_index = providers_index.clone();
+                move || {
+                    let body = providers_index.clone();
+                    async move { Json(body) }
+                }
+            }),
+        )
+        .route(
+            "/providers/{profile}/models.json",
+            axum::routing::get({
+                let text_catalog_models = text_catalog_models.clone();
+                move || {
+                    let body = text_catalog_models.clone();
+                    async move { Json(body) }
+                }
+            }),
+        );
+    let _catalog_server = tokio::spawn(async move {
+        axum::serve(catalog_listener, catalog_app)
+            .await
+            .expect("serve controlled volcengine catalog");
+    });
+
+    let harness = TestHarness::new_with_catalog(Some(catalog_url)).await?;
+    harness.gateway.catalog_sync.refresh().await?;
+    let client = harness.connect().await;
+
+    // 1) Standard Volcengine Ark discovery merges dynamic /api/v3/models image models
+    //    with existing catalog text models and preserves image_to_image input support.
+    let ark_provider = create_provider(
+        &harness.gateway,
+        "volcengine-ark",
+        "volcengine",
+        &format!("{}/api/v3", upstream.url),
+        "openai-compatible",
+    )
+    .await?;
+    upstream
+        .push_json(
+            "/api/v3/models",
+            StatusCode::OK,
+            json!({
+                "object": "list",
+                "data": [
+                    {
+                        "id": "doubao-seedream-5-5-261028",
+                        "domain": "ImageGeneration",
+                        "api_supported": {"images/generations": true},
+                        "modalities": {
+                            "input_modalities": ["text", "image"],
+                            "output_modalities": ["image"]
+                        },
+                        "task_type": ["text_to_image", "image_to_image"]
+                    },
+                    {
+                        "id": "doubao-seedream-4-0-20260415",
+                        "domain": "ImageGeneration"
+                    }
+                ]
+            }),
+        )
+        .await;
+    harness
+        .gateway
+        .admin()
+        .sync_provider_models(&ark_provider.id)
+        .await?;
+    let seedream_55 = harness
+        .gateway
+        .admin()
+        .get_provider_model(&ark_provider.id, "doubao-seedream-5-5-261028")
+        .await?;
+    assert_eq!(
+        seedream_55.metadata.modalities.as_ref().unwrap().input,
+        vec!["text".to_string(), "image".to_string()]
+    );
+    assert_eq!(
+        seedream_55.metadata.modalities.as_ref().unwrap().output,
+        vec!["image".to_string()]
+    );
+    let seedream_40 = harness
+        .gateway
+        .admin()
+        .get_provider_model(&ark_provider.id, "doubao-seedream-4-0-20260415")
+        .await?;
+    assert_eq!(
+        seedream_40.metadata.modalities.as_ref().unwrap().input,
+        vec!["text".to_string()]
+    );
+    assert_eq!(
+        seedream_40.metadata.modalities.as_ref().unwrap().output,
+        vec!["image".to_string()]
+    );
+    let text_model = harness
+        .gateway
+        .admin()
+        .get_provider_model(&ark_provider.id, "doubao-seed-2-0-pro")
+        .await?;
+    assert_eq!(
+        text_model.metadata.modalities.as_ref().unwrap().output,
+        vec!["text".to_string()]
+    );
+
+    // 2) Coding Plan (/api/coding/v3) does not expose /images/generations, so discovery
+    //    must not advertise uncallable image models.
+    let coding_provider = create_provider(
+        &harness.gateway,
+        "volcengine-coding",
+        "volcengine-coding-plan",
+        &format!("{}/api/coding/v3", upstream.url),
+        "openai-compatible",
+    )
+    .await?;
+    harness
+        .gateway
+        .admin()
+        .sync_provider_models(&coding_provider.id)
+        .await?;
+    assert!(
+        harness
+            .gateway
+            .admin()
+            .get_provider_model(&coding_provider.id, "doubao-seed-2-0-pro")
+            .await
+            .is_ok()
+    );
+    assert!(
+        harness
+            .gateway
+            .admin()
+            .get_provider_model(&coding_provider.id, "doubao-seedream-5-5-261028")
+            .await
+            .is_err()
+    );
+
+    // 3) Agent Plan (/api/plan) tolerates 404 on /api/plan/v3/models without failing sync.
+    let agent_plan_provider = create_provider(
+        &harness.gateway,
+        "volcengine-agent",
+        "volcengine-agent-plan",
+        &format!("{}/api/plan", upstream.url),
+        "anthropic-messages",
+    )
+    .await?;
+    upstream
+        .push_json(
+            "/api/plan/v3/models",
+            StatusCode::NOT_FOUND,
+            json!({"error": {"code": "NotFound", "message": "not found"}}),
+        )
+        .await;
+    harness
+        .gateway
+        .admin()
+        .sync_provider_models(&agent_plan_provider.id)
+        .await?;
+    assert!(
+        harness
+            .gateway
+            .admin()
+            .get_provider_model(&agent_plan_provider.id, "doubao-seed-2-0-pro")
+            .await
+            .is_ok()
+    );
+
+    // 4) End-to-end image generation + single/multi-reference editing across profiles.
+    let expected_bytes = base64::engine::general_purpose::STANDARD.decode(PNG_BASE64)?;
+    let mut second_png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 3).write_to(&mut second_png, image::ImageFormat::Png)?;
+    let second_base64 = base64::engine::general_purpose::STANDARD.encode(second_png.into_inner());
+
+    let cases = [
+        (
+            "volcengine",
+            format!("{}/api/v3", upstream.url),
+            "openai-compatible",
+            "doubao-seedream-5-5-261028",
+            "/api/v3/images/generations",
+            true,
+        ),
+        (
+            "volcengine-agent-plan",
+            format!("{}/api/plan", upstream.url),
+            "anthropic-messages",
+            "doubao-seedream-5.5",
+            "/api/plan/v3/images/generations",
+            false,
+        ),
+        (
+            "volcengine-token-plan",
+            format!("{}/api/plan/v3", upstream.url),
+            "openai-compatible",
+            "doubao-seedream-5.0-pro",
+            "/api/plan/v3/images/generations",
+            true,
+        ),
+        (
+            "byteplus",
+            format!("{}/byteplus/api/v3", upstream.url),
+            "openai-compatible",
+            "dola-seedream-5-0-pro-260628",
+            "/byteplus/api/v3/images/generations",
+            false,
+        ),
+    ];
+
+    let mut first_reference = None;
+    for (profile, base_url, protocol, model, expected_path, include_output_format) in cases {
+        let provider = create_provider(
+            &harness.gateway,
+            &format!("{profile}-gen"),
+            profile,
+            &base_url,
+            protocol,
+        )
+        .await?;
+        harness
+            .gateway
+            .admin()
+            .create_manual_provider_model(
+                &provider.id,
+                model,
+                CreateManualProviderModel {
+                    metadata: json!({
+                        "id": model,
+                        "capabilities": ["media_image"],
+                        "modalities": {"input": ["text", "image"], "output": ["image"]}
+                    }),
+                    template_id: None,
+                },
+            )
+            .await?;
+        let route = create_route(
+            &harness.gateway,
+            &format!("{profile}-volc-image-route"),
+            vec![(&provider, model, 0)],
+            0,
+            stravia_core::db::models::RoutePurpose::ImageGeneration,
+        )
+        .await?;
+        configure_image_generation(&harness.gateway, &route.model_id).await?;
+
+        let response = |encoded: &str| {
+            if include_output_format {
+                json!({
+                    "data": [{"b64_json": encoded, "output_format": "png"}],
+                    "usage": {"generated_images": 1, "output_tokens": 16384, "total_tokens": 16384}
+                })
+            } else {
+                json!({"data": [{"b64_json": encoded}]})
+            }
+        };
+
+        upstream
+            .push_json(expected_path, StatusCode::OK, response(PNG_BASE64))
+            .await;
+        let generated = call_generate(
+            &client,
+            json!({
+                "type": "image",
+                "input": {"prompt": "a controlled volc image", "aspect_ratio": "16:9", "resolution": "4K"}
+            }),
+        )
+        .await;
+        assert_ne!(generated.is_error, Some(true), "{profile}: {generated:?}");
+        let output = generated.structured_content.expect("generated Artifact");
+        assert_eq!(output["mime_type"], "image/png");
+        assert_eq!(output["media"], json!({"width": 1, "height": 1}));
+        let reference = output["path"]
+            .as_str()
+            .expect("Artifact reference")
+            .to_owned();
+        let artifact_id = ArtifactId::from_reference(&reference)?;
+        let store = harness.gateway.artifact_store().expect("Artifact store");
+        let reader = store
+            .open(&Principal::new(harness.key_id.clone()), &artifact_id)
+            .await?;
+        assert_eq!(reader.artifact.mime_type, "image/png");
+        let stravia_runtime_contract::artifact::ArtifactSource::LocalPath(path) = &reader.source
+        else {
+            panic!("generated Artifact must be locally readable");
+        };
+        assert_eq!(tokio::fs::read(path).await?, expected_bytes);
+        assert!(
+            store
+                .open(&Principal::new("another-principal"), &artifact_id)
+                .await
+                .is_err()
+        );
+
+        if first_reference.is_none() {
+            first_reference = Some(reference);
+            upstream
+                .push_json(expected_path, StatusCode::OK, response(&second_base64))
+                .await;
+            let second = call_generate(
+                &client,
+                json!({"type": "image", "input": {"prompt": "second volc image"}}),
+            )
+            .await;
+            assert_ne!(second.is_error, Some(true), "{second:?}");
+            let second_reference = second.structured_content.expect("second Artifact")["path"]
+                .as_str()
+                .expect("second Artifact reference")
+                .to_owned();
+
+            // Multi-image editing uses the same /images/generations endpoint with image array.
+            upstream
+                .push_json(expected_path, StatusCode::OK, response(PNG_BASE64))
+                .await;
+            let edited = call_generate(
+                &client,
+                json!({
+                    "type": "image",
+                    "input": {
+                        "prompt": "edit both volc images",
+                        "reference_images": [first_reference.as_ref().unwrap(), second_reference],
+                        "aspect_ratio": "16:9",
+                        "resolution": "4K"
+                    }
+                }),
+            )
+            .await;
+            assert_ne!(edited.is_error, Some(true), "{edited:?}");
+            assert_eq!(
+                edited.structured_content.expect("edited Artifact")["mime_type"],
+                "image/png"
+            );
+        }
+    }
+
+    let post_requests: Vec<_> = upstream
+        .requests()
+        .await
+        .into_iter()
+        .filter(|request| request.path.ends_with("/images/generations"))
+        .collect();
+    assert_eq!(post_requests.len(), 6);
+    for request in &post_requests {
+        assert_eq!(
+            request.headers["authorization"],
+            "Bearer fixture-secret-not-production"
+        );
+        assert_eq!(request.body["response_format"], "b64_json");
+        assert!(request.body.get("stream").is_none());
+        assert!(request.body.get("output_format").is_none());
+        assert!(!request.body.to_string().contains("stravia://"));
+        if request.body["prompt"] == "second volc image" {
+            assert!(request.body.get("size").is_none());
+        } else {
+            assert_eq!(request.body["size"], "2816x1584");
+        }
+    }
+    assert_eq!(post_requests[0].path, "/api/v3/images/generations");
+    assert_eq!(post_requests[1].path, "/api/v3/images/generations");
+    assert_eq!(post_requests[2].path, "/api/v3/images/generations");
+    assert_eq!(
+        post_requests[2].body["image"],
+        json!([
+            format!("data:image/png;base64,{PNG_BASE64}"),
+            format!("data:image/png;base64,{second_base64}")
+        ])
+    );
+    assert_eq!(post_requests[3].path, "/api/plan/v3/images/generations");
+    assert_eq!(post_requests[4].path, "/api/plan/v3/images/generations");
+    assert_eq!(post_requests[5].path, "/byteplus/api/v3/images/generations");
     Ok(())
 }
 

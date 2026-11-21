@@ -8,6 +8,7 @@ mod generic;
 mod metadata;
 mod minimax;
 mod parameters;
+mod volcengine;
 mod messages {
     include!(concat!(env!("OUT_DIR"), "/messages.rs"));
 }
@@ -60,6 +61,7 @@ fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
         _ => metadata::descriptor(provider_id),
     }?;
     minimax::configure_descriptor(&mut descriptor);
+    volcengine::configure_descriptor(&mut descriptor);
     Some(add_allowance_capabilities(descriptor))
 }
 
@@ -217,7 +219,11 @@ pub fn execute(
     let provider_id = input.provider().provider_id.clone();
     validate_target(input.provider(), channel)?;
     let minimax_discovery = operation == Operation::Discover && minimax::supports(&provider_id);
-    let restrict_models = minimax_discovery
+    let volcengine_discovery =
+        operation == Operation::Discover && volcengine::supports(&provider_id);
+    let volcengine_context = volcengine_discovery
+        .then(|| volcengine::DiscoveryContext::from_provider(input.provider()));
+    let restrict_models = (minimax_discovery || volcengine_discovery)
         && (input
             .provider()
             .operation_metadata
@@ -237,6 +243,8 @@ pub fn execute(
         if let Some(response) = generic::explicit_discovery(&provider_id, provider)? {
             let response = if minimax_discovery {
                 minimax::discover(host, &provider_id, response, restrict_models)?
+            } else if let Some(ctx) = volcengine_context.as_ref() {
+                volcengine::discover(host, ctx, response, restrict_models)?
             } else {
                 response
             };
@@ -254,6 +262,18 @@ pub fn execute(
             ));
         }
         return minimax::generate(host, &provider, request).map(OperationOutput::MediaImage);
+    }
+    if operation == Operation::MediaImage && volcengine::supports(&provider_id) {
+        let OperationInput::MediaImage { provider, request } = input else {
+            return Err(error(ErrorKind::Invalid, "image input mismatch"));
+        };
+        if provider.channel != channel {
+            return Err(error(
+                ErrorKind::Invalid,
+                "snapshot channel does not match execute channel",
+            ));
+        }
+        return volcengine::generate(host, &provider, request).map(OperationOutput::MediaImage);
     }
     if operation == Operation::Allowance {
         let OperationInput::Allowance { provider, request } = input else {
@@ -303,6 +323,15 @@ pub fn execute(
         OperationOutput::Discover(response) if minimax_discovery => {
             minimax::discover(host, &provider_id, response, restrict_models)
                 .map(OperationOutput::Discover)
+        }
+        OperationOutput::Discover(response) if volcengine_context.is_some() => {
+            volcengine::discover(
+                host,
+                volcengine_context.as_ref().unwrap(),
+                response,
+                restrict_models,
+            )
+            .map(OperationOutput::Discover)
         }
         output => Ok(output),
     }
