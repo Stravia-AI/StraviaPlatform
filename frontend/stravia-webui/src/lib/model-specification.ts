@@ -8,8 +8,14 @@ import VideoIcon from '@lucide/svelte/icons/video'
 
 import { formatNumber } from '#lib/format.js'
 
+const BINARY_K = 1_024
+const BINARY_M = BINARY_K * BINARY_K
+
 export function formatSpecificationTokens(value: number): string {
   if (value >= 1_000_000 && value % 10_000 === 0) return `${value / 1_000_000}M`
+  if (value >= BINARY_M && value % (BINARY_M / 4) === 0) return `${value / BINARY_M}M`
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`
+  if (value >= BINARY_K && value % BINARY_K === 0) return `${value / BINARY_K}K`
   if (value >= 1_000 && value % 10 === 0) return `${value / 1_000}K`
   return formatNumber(value)
 }
