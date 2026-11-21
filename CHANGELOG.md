@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Built-in Base Volcengine Ark, BytePlus ModelArk, and Volcengine Plan profiles (`volcengine`, `volcengine-coding-plan`, `volcengine-agent-plan`, `volcengine-token-plan`, `volcengine-plan`, `byteplus`) now support image generation and reference-image editing through the unified `generate` tool via `/images/generations`. Model sync dynamically merges image models and reference-input support from `GET {base}/models` on standard Ark/BytePlus endpoints, normalizes Agent Plan `/api/plan` bases to `/api/plan/v3`, tolerates 404 on `/api/plan/v3/models`, and avoids advertising uncallable image models on Coding Plan `/api/coding/v3`. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, model activation, and pay-as-you-go or Agent Plan quota still apply.
+
 ### Changed
 
 - Release builds use thin LTO, a single codegen unit and stripped symbols. SQLite read paths use an in-memory temporary store, a 16 MiB per-connection page-cache target and a 128 MiB mapping window; `synchronous=FULL` and write durability are unchanged.

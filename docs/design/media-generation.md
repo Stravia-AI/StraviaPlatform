@@ -6,7 +6,7 @@
 
 Media Generation 的用户可见名称为“媒体生成”，属于 Advanced Capability。统一工具名为 `generate`；本期只支持图片生成与参考图编辑，首个接入后端为 Codex，不提前公布音频或视频类型。
 
-当前接入 Codex 托管图片工具、Antigravity 原生图片模型及内置 `base` 的 MiniMax 图片模型。文生图与参考图编辑共用同一个 `generate` 入口和图片模型；是否提供 `reference_images` 决定本次操作，不拆出独立的编辑工具或模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
+当前接入 Codex 托管图片工具、Antigravity 原生图片模型，以及内置 `base` 的 MiniMax 与火山引擎（Volcengine Ark / BytePlus ModelArk 及相关 Plan）图片模型。文生图与参考图编辑共用同一个 `generate` 入口和图片模型；是否提供 `reference_images` 决定本次操作，不拆出独立的编辑工具或模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
 
 透明注入总开关开启时同时提供基础 `StraviaRead`：所属 Artifact 的下载及公开工具执行状态／原始结果查询不依赖联网、多模态理解或媒体生成选择。联网与媒体理解仍按各自 Gate 和注入选择限制，不因基础 Read 自动开放。
 
@@ -173,6 +173,22 @@ MiniMax 普通 API 与 Plan 共用内置 `base`，沿用 `minimax`、`minimax-cn
 MiniMax 服务端最长等待 600 秒；本地仍服从调用者 deadline 和现有 15 分钟工具总期限。接口不幂等，断连或超时不保证上游取消，Route 重试可能再次生成并计费；适配器不添加隐藏重试。Plan Key 使用订阅额度及已有 Credits，按量 Key 使用账户余额，不自动换 Key 或购买 Credits。图片仅受上游周额度限制，但现有 [Provider 级额度守护](../adr/0078-suspend-provider-routing-on-guarded-allowance-exhaustion.md) 不变：管理员勾选五小时条目后，耗尽仍会连带暂停同连接的图片 Target；只守护周额度可避免这一连带影响。
 
 升级宿主内嵌的 `base` 后重新同步模型，将图片型号绑定到图片 Route，再在媒体生成中选择该 Route。真实生成会消耗上游额度，必须另行取得针对账号与影响的明确授权。
+
+### 火山引擎（Volcengine Ark / BytePlus）统一图片生成
+
+火山引擎标准 Ark、相关 Plan（Agent Plan / Token Plan / Coding Plan）与 BytePlus ModelArk 共用内置 `base`，支持 `volcengine`、`volcengine-coding-plan`、`volcengine-agent-plan`、`volcengine-token-plan`、`volcengine-plan` 和 `byteplus` 六个 Profile，不新增插件、认证字段、工具或图片编辑专用模型。原聊天协议与连接配置不变。
+
+模型同步保留既有文字目录/显式发现，并按连接路径区分发现策略：
+
+- 标准 Ark（`/api/v3`）与 BytePlus（`/api/v3`）：携带 Provider `apiKey` 请求对应基址的 `GET {base}/models`，仅依据上游声明的 `modalities.output_modalities`、`api_supported["images/generations"]` 或 `domain == "ImageGeneration"` 提取图片模型，并按 `modalities.input_modalities` 或 `task_type` 中的 `image_to_image` 登记图片输入（参考图编辑）能力，不在代码中维护图片型号白名单。显式静态模型列表或自定义模型发现源仍限制模型集合，仅补齐其中已选型号的图片能力。请求失败明确报告同步失败，由 Core 保留上次成功的模型库存。
+- Agent Plan / Token Plan（`/api/plan` 或 `/api/plan/v3`）：路径规范化至 `/api/plan/v3/models` 尝试发现；上游当前返回 HTTP 404 时不破坏文字模型同步，保留既有目录中已声明图片输出的型号（补齐 `media_image` 能力）或由管理员手动登记的型号。
+- Coding Plan（`/api/coding` 或 `/api/coding/v3`）：上游当前未开放 `/api/coding/v3/images/generations`，同步时不向该连接广告不可调用的图片模型。
+
+`generate` 的文生图与单图/多图参考编辑共用同一端点 `POST {normalized_base}/images/generations`（Anthropic 风格的 `/api/plan` 或 `/api/plan/v1` 基址自动规范化为 `/api/plan/v3/images/generations`；自定义代理前缀原样保留）。请求使用 `Authorization: Bearer <apiKey>` 鉴权，固定 `response_format: "b64_json"`，不发送 `stream`、`sequential_image_generation`、`output_format` 等非全系兼容参数以兼容 Seedream 4.0 / 4.5 / 5.0 / 5.5 全系列；有参考图时按单图字符串、多图字符串数组以 data URI 传入 `image` 字段（单张上限 30 MiB、最多 14 张、整包上限 64 MiB）。`aspect_ratio` 与 `resolution` 映射为上游 `size` 字段（同时省略时不发送 `size`，按已知模型系列约束做安全档位近似）。
+
+成功响应须验证恰好一张图片、严格 base64 编码与 32 MiB 大小限制；`media_type` 优先读取 `output_format`，旧版模型缺失该字段时按解码字节头识别 PNG / JPEG / WebP，并由 Core 解码实际像素后收存为当前 Principal 的 Artifact。内容审核（`SensitiveContentDetected*` / `*RiskDetection`）、配额耗尽（`QuotaExceeded*` / `AccountQuotaExceeded` / `SetLimitExceeded` / `AccountOverdueError`）、限流（`RateLimitExceeded.*` / `ModelAccount*RateLimitExceeded` / `ServerOverloaded`）与参数/模型未开通错误按各自类别交给现有执行策略；HTTP 401/403 仍返回安全摘要。
+
+升级宿主内嵌的 `base` 后同步目录与模型，将合格的图片型号绑定到图片 Route 并在媒体生成中选择该 Route。真实生图会消耗上游按量余额或 Agent Plan 订阅额度，账号权限与模型开通状态以上游实际配置为准。
 
 ## 5. 失败与重试
 
