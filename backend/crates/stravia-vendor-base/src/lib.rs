@@ -1,3 +1,4 @@
+mod alibaba;
 mod allowance;
 mod anthropic;
 mod catalog;
@@ -62,6 +63,7 @@ fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
     }?;
     minimax::configure_descriptor(&mut descriptor);
     volcengine::configure_descriptor(&mut descriptor);
+    alibaba::configure_descriptor(&mut descriptor);
     Some(add_allowance_capabilities(descriptor))
 }
 
@@ -223,7 +225,10 @@ pub fn execute(
         operation == Operation::Discover && volcengine::supports(&provider_id);
     let volcengine_context = volcengine_discovery
         .then(|| volcengine::DiscoveryContext::from_provider(input.provider()));
-    let restrict_models = (minimax_discovery || volcengine_discovery)
+    let alibaba_discovery = operation == Operation::Discover && alibaba::supports(&provider_id);
+    let alibaba_context =
+        alibaba_discovery.then(|| alibaba::DiscoveryContext::from_provider(input.provider()));
+    let restrict_models = (minimax_discovery || volcengine_discovery || alibaba_discovery)
         && (input
             .provider()
             .operation_metadata
@@ -245,6 +250,8 @@ pub fn execute(
                 minimax::discover(host, &provider_id, response, restrict_models)?
             } else if let Some(ctx) = volcengine_context.as_ref() {
                 volcengine::discover(host, ctx, response, restrict_models)?
+            } else if let Some(ctx) = alibaba_context.as_ref() {
+                alibaba::discover(host, ctx, response, restrict_models)?
             } else {
                 response
             };
@@ -274,6 +281,18 @@ pub fn execute(
             ));
         }
         return volcengine::generate(host, &provider, request).map(OperationOutput::MediaImage);
+    }
+    if operation == Operation::MediaImage && alibaba::supports(&provider_id) {
+        let OperationInput::MediaImage { provider, request } = input else {
+            return Err(error(ErrorKind::Invalid, "image input mismatch"));
+        };
+        if provider.channel != channel {
+            return Err(error(
+                ErrorKind::Invalid,
+                "snapshot channel does not match execute channel",
+            ));
+        }
+        return alibaba::generate(host, &provider, request).map(OperationOutput::MediaImage);
     }
     if operation == Operation::Allowance {
         let OperationInput::Allowance { provider, request } = input else {
@@ -333,6 +352,13 @@ pub fn execute(
             )
             .map(OperationOutput::Discover)
         }
+        OperationOutput::Discover(response) if alibaba_context.is_some() => alibaba::discover(
+            host,
+            alibaba_context.as_ref().unwrap(),
+            response,
+            restrict_models,
+        )
+        .map(OperationOutput::Discover),
         output => Ok(output),
     }
 }

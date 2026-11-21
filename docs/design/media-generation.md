@@ -6,7 +6,7 @@
 
 Media Generation 的用户可见名称为“媒体生成”，属于 Advanced Capability。统一工具名为 `generate`；本期只支持图片生成与参考图编辑，首个接入后端为 Codex，不提前公布音频或视频类型。
 
-当前接入 Codex 托管图片工具、Antigravity 原生图片模型，以及内置 `base` 的 MiniMax 与火山引擎（Volcengine Ark / BytePlus ModelArk 及相关 Plan）图片模型。文生图与参考图编辑共用同一个 `generate` 入口和图片模型；是否提供 `reference_images` 决定本次操作，不拆出独立的编辑工具或模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
+当前接入 Codex 托管图片工具、Antigravity 原生图片模型，以及内置 `base` 的 MiniMax、火山引擎（Volcengine Ark / BytePlus ModelArk 及相关 Plan）与阿里云百炼（Alibaba / DashScope 及 Token Plan）图片模型。文生图与参考图编辑共用同一个 `generate` 入口和图片模型；是否提供 `reference_images` 决定本次操作，不拆出独立的编辑工具或模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
 
 透明注入总开关开启时同时提供基础 `StraviaRead`：所属 Artifact 的下载及公开工具执行状态／原始结果查询不依赖联网、多模态理解或媒体生成选择。联网与媒体理解仍按各自 Gate 和注入选择限制，不因基础 Read 自动开放。
 
@@ -189,6 +189,21 @@ MiniMax 服务端最长等待 600 秒；本地仍服从调用者 deadline 和现
 成功响应须验证恰好一张图片、严格 base64 编码与 32 MiB 大小限制；`media_type` 优先读取 `output_format`，旧版模型缺失该字段时按解码字节头识别 PNG / JPEG / WebP，并由 Core 解码实际像素后收存为当前 Principal 的 Artifact。内容审核（`SensitiveContentDetected*` / `*RiskDetection`）、配额耗尽（`QuotaExceeded*` / `AccountQuotaExceeded` / `SetLimitExceeded` / `AccountOverdueError`）、限流（`RateLimitExceeded.*` / `ModelAccount*RateLimitExceeded` / `ServerOverloaded`）与参数/模型未开通错误按各自类别交给现有执行策略；HTTP 401/403 仍返回安全摘要。
 
 升级宿主内嵌的 `base` 后同步目录与模型，将合格的图片型号绑定到图片 Route 并在媒体生成中选择该 Route。真实生图会消耗上游按量余额或 Agent Plan 订阅额度，账号权限与模型开通状态以上游实际配置为准。
+
+### 阿里云百炼（Alibaba / DashScope 与 Token Plan）统一图片生成
+
+阿里云百炼标准 API 与 Token Plan 共用内置 `base`，支持 `alibaba`、`alibaba-cn`、`alibaba-token-plan` 与 `alibaba-token-plan-cn` 四个 Profile，不新增插件、认证字段、工具或图片编辑专用模型。`alibaba-coding-plan` 与 `alibaba-coding-plan-cn` 不包含图像生成模型，不声明 `MediaImage` 能力。原聊天协议与连接配置不变。
+
+模型同步保留既有文字目录/显式发现，并按连接类型区分发现策略：
+
+- 标准百炼（`alibaba`、`alibaba-cn` 及业务空间专属域名）：携带 Provider `apiKey` 分页请求 `GET {api_root}/api/v1/models`，依据上游声明的 `capabilities`（`IG`）、`inference_metadata.response_modality`（`Image`）和 `inference_metadata.request_modality`（要求包含 `Text`，并按是否包含 `Image` 登记参考图编辑能力）动态合并支持同步多模态生成接口的图片型号，自动排除已下线、旧版异步 `wanx*`/`wan2.0`–`wan2.5` 及第三方异步接口模型，不在代码中维护图片型号白名单。显式静态模型列表或自定义模型发现源仍限制模型集合，仅补齐其中已选型号的图片能力。请求失败明确报告同步失败，由 Core 保留上次成功的模型库存。
+- Token Plan（`alibaba-token-plan`、`alibaba-token-plan-cn`）：优先尝试 `GET {api_root}/api/v1/models`；上游当前返回 HTTP 404 或未提供 `apiKey` 时不破坏文字模型同步，保留既有目录中已声明图片输出的型号（补齐 `media_image` 能力）或由管理员手动登记的型号。
+
+`generate` 的文生图与参考图编辑共用 DashScope 同步多模态生成接口 `POST {api_root}/api/v1/services/aigc/multimodal-generation/generation`（兼容从 `/compatible-mode/v1`、`/apps/anthropic/v1`、`/api/v1` 或自定义代理前缀规范化）。请求使用 `Authorization: Bearer <apiKey>` 鉴权，按 `input.messages[0].content` 依次携带参考图（data URI，单张上限 20 MiB、最多 10 张、整包上限 64 MiB）与提示词；省略偏好时不发送多余参数以兼容 Qwen-Image、Wan 2.7/2.6 与 Z-Image 系列，显式比例与分辨率按各模型上限映射为 DashScope 星号格式 `宽*高`（Wan 2.7 仅指定分辨率时映射为 `1K` / `2K` / `4K`，其中 `wan2.7-image-pro` 仅文生图支持 `4K`）。
+
+成功响应要求恰好一张图片，同时兼容 Data URL 解码与临时 OSS URL 下载。URL 下载通过插件声明的阿里云百炼结果 OSS 正则白名单（`https://dashscope-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com`）以无凭据 `GET` 获取字节，校验 32 MiB 上限与魔数/MIME 后由 Core 解码实际像素并收存为当前 Principal 的 Artifact。内容审核（`DataInspectionFailed`、`IPInfringementSuspect`、`*RiskDetection`）、配额/欠费（`Throttling.AllocationQuota`、`AllocationQuota.FreeTierOnly`、`insufficient_quota`、`Arrearage`、`QuotaExceeded`）、限流（`Throttling*`、`LimitRequests`、`rate_limit_exceeded`）与参数/模型错误按各自类别交给现有执行策略；HTTP 401/403 仍返回安全摘要。
+
+升级宿主内嵌的 `base` 后重新同步模型，将合格的图片型号绑定到图片 Route 并在媒体生成中选择该 Route。真实生图会消耗上游按量余额或 Token Plan 订阅 Credits，账号权限、地域与模型开通状态以上游实际配置为准。
 
 ## 5. 失败与重试
 

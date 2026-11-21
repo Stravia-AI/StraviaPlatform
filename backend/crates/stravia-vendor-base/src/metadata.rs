@@ -429,6 +429,7 @@ pub(crate) fn catalog_profile_descriptor(
     }
     crate::minimax::configure_descriptor(&mut descriptor);
     crate::volcengine::configure_descriptor(&mut descriptor);
+    crate::alibaba::configure_descriptor(&mut descriptor);
     Some(descriptor)
 }
 
