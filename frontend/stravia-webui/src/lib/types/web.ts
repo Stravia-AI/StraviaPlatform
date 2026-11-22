@@ -1,21 +1,32 @@
 import type { ThinkingLevel } from './route'
 
-export type WebProviderKind = 'local' | 'exa' | 'zhipu'
-export type LocalSearchEngineId = 'google' | 'bing' | 'brave' | 'baidu' | '360' | 'sogou_weixin' | 'google_scholar'
+export type WebProviderKind = string
 
-export interface LocalSearchEngineConfig {
-  enabled: boolean
+export interface WebProviderCapabilities {
+  search: boolean
+  fetch: boolean
 }
 
-export type LocalSearchEngineConfigs = Record<LocalSearchEngineId, LocalSearchEngineConfig>
+export interface WebProviderKindDescriptor {
+  kind: WebProviderKind
+  capabilities: WebProviderCapabilities
+  requires_api_key: boolean
+  singleton: boolean
+  allow_delete: boolean
+}
 
 export interface WebProvider {
   id: string
   name: string
   kind: WebProviderKind
+  api_key_configured: boolean
   use_proxy: boolean
-  local_engines?: LocalSearchEngineConfigs | null
-  capabilities: { search: boolean; fetch: boolean }
+  config?: Record<string, unknown> | null
+  capabilities: WebProviderCapabilities | null
+  registered: boolean
+  available: boolean
+  unavailable_reason?: string | null
+  allow_delete: boolean
   last_test_success?: boolean | null
   last_test_at?: string | null
   created_at: string
@@ -27,27 +38,19 @@ export interface CreateWebProvider {
   kind: WebProviderKind
   api_key?: string | null
   use_proxy?: boolean
-  local_engines?: LocalSearchEngineConfigs | null
+  config?: Record<string, unknown> | null
 }
 
 export interface UpdateWebProvider {
   name?: string
-  api_key?: string
+  api_key?: string | null
   use_proxy?: boolean
-  local_engines?: LocalSearchEngineConfigs
+  config?: Record<string, unknown> | null
 }
 
 export interface WebAccessSettings {
   search_provider_ids: string[]
   fetch_provider_ids: string[]
-}
-
-export interface WebAccessBrowserState {
-  configuredPath: string | null
-  resolvedPath: string | null
-  source: 'manual' | 'environment' | 'automatic'
-  available: boolean
-  error: string | null
 }
 
 export type WebSearchBackend =

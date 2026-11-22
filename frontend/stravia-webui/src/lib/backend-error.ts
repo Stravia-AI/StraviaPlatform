@@ -218,8 +218,22 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       return m.credential_custom_error_not_found({}, options)
     case 'custom_credential_rule_unavailable':
       return m.credential_custom_error_unavailable({}, options)
-    case 'WEB_ACCESS_BROWSER_REQUIRED':
-      return m.web_access_browser_required({}, options)
+    case 'WEB_PROVIDER_UNAVAILABLE': {
+      const detail = (payload.message ?? (raw.startsWith('{') ? '' : raw)).trim()
+      return detail && !/^HTTP \d+$/.test(detail)
+        ? m.backend_error_web_provider_unavailable_reason({ reason: detail }, options)
+        : m.backend_error_web_provider_unavailable({}, options)
+    }
+    case 'WEB_PROVIDER_SINGLETON_CONFLICT': {
+      const kind = extractString(payload.params, 'kind')
+      return kind
+        ? m.backend_error_web_provider_singleton_conflict({ kind }, options)
+        : m.backend_error_web_provider_singleton_conflict_generic({}, options)
+    }
+    case 'WEB_PROVIDER_DELETE_FORBIDDEN':
+      return m.backend_error_web_provider_delete_forbidden({}, options)
+    case 'WEB_PROVIDER_NAME_CONFLICT':
+      return m.backend_error_web_provider_name_conflict({ name }, options)
     case 'PROVIDER_MODEL_INVALID_CHANGES': {
       const detail = extractString(payload.params, 'error')
       return m.backend_error_unknown({ message: detail || payload.message || raw }, options)

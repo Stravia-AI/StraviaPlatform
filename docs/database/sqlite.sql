@@ -920,31 +920,17 @@ CREATE TABLE vendor_private_state (
     updated_at BIGINT NOT NULL
 );
 
-CREATE TABLE web_providers (
+CREATE TABLE "web_providers" (
     id                TEXT PRIMARY KEY,
     name              TEXT NOT NULL UNIQUE,
-    kind              TEXT NOT NULL CHECK (kind IN ('local', 'exa', 'zhipu')),
-    api_key           TEXT,
-    use_proxy         INTEGER NOT NULL DEFAULT 0 CHECK (use_proxy IN (0, 1)),
-    local_engines     TEXT,
+    kind              TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+    api_key           TEXT CHECK (api_key IS NULL OR length(trim(api_key)) > 0),
+    use_proxy         INTEGER NOT NULL DEFAULT 0,
+    config_json       TEXT CHECK (config_json IS NULL OR (json_valid(config_json) AND json_type(config_json) = 'object')),
     last_test_success INTEGER,
     last_test_at      TEXT,
-    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
-    CHECK (
-        (
-            kind = 'local'
-            AND api_key IS NULL
-            AND local_engines IS NOT NULL
-            AND json_valid(local_engines)
-        )
-        OR (
-            kind IN ('exa', 'zhipu')
-            AND api_key IS NOT NULL
-            AND length(trim(api_key)) > 0
-            AND local_engines IS NULL
-        )
-    )
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX credential_mapping_reuses_interaction_idx
@@ -1018,10 +1004,6 @@ CREATE INDEX idx_reversible_redaction_mappings_principal_pending
 ON reversible_redaction_mappings(principal, pending_until);
 
 CREATE INDEX idx_vendor_private_state_vendor ON vendor_private_state(vendor_id);
-
-CREATE UNIQUE INDEX idx_web_providers_local_singleton
-ON web_providers(kind)
-WHERE kind = 'local';
 
 CREATE INDEX inference_runs_failed_window_idx
     ON inference_run_observations(started_at DESC, id) WHERE status = 'failed';
@@ -3500,12 +3482,14 @@ BEGIN
 END;
 
 CREATE TRIGGER web_providers_boolean_insert BEFORE INSERT ON web_providers
-WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)) OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
-    OR (NEW.kind = 'local' AND CASE WHEN json_valid(NEW.local_engines) THEN json_type(NEW.local_engines) <> 'object' ELSE 1 END)
-BEGIN SELECT RAISE(ABORT, 'invalid boolean or local engine configuration'); END;
+WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1))
+  OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
+  OR (NEW.config_json IS NOT NULL AND CASE WHEN json_valid(NEW.config_json) THEN json_type(NEW.config_json) <> 'object' ELSE 1 END)
+BEGIN SELECT RAISE(ABORT, 'invalid boolean or provider configuration'); END;
 
 CREATE TRIGGER web_providers_boolean_update BEFORE UPDATE ON web_providers
-WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)) OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
-    OR (NEW.kind = 'local' AND CASE WHEN json_valid(NEW.local_engines) THEN json_type(NEW.local_engines) <> 'object' ELSE 1 END)
-BEGIN SELECT RAISE(ABORT, 'invalid boolean or local engine configuration'); END;
+WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1))
+  OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
+  OR (NEW.config_json IS NOT NULL AND CASE WHEN json_valid(NEW.config_json) THEN json_type(NEW.config_json) <> 'object' ELSE 1 END)
+BEGIN SELECT RAISE(ABORT, 'invalid boolean or provider configuration'); END;
 

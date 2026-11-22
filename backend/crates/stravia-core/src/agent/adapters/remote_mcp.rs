@@ -131,8 +131,7 @@ async fn connect_remote_mcp(
     if let Some(token) = source.bearer_token.as_ref() {
         config = config.auth_header(token.clone());
     }
-    let transport =
-        stravia_web_access::remote::mcp_http_transport(reqwest::Client::default(), config);
+    let transport = stravia_web_access::mcp_http_transport(reqwest::Client::default(), config);
     ().serve(transport)
         .await
         .map_err(|error| AgentToolError::new("mcp_connect_failed", error.to_string()))

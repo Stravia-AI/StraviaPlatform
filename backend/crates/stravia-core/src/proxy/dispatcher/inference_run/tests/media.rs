@@ -135,10 +135,14 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     let (search_url, search_calls) =
         serve_openai_sequence(vec![openai_response("unexpected research")]).await;
     let data_dir = tempfile::tempdir().expect("temporary data directory");
-    let gateway = Gateway::new(crate::config::GatewayConfig {
+    let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
+    .web_provider_factory(std::sync::Arc::new(
+        crate::test_support::StubWebProviderFactory::new("test-web", true, true),
+    ))
+    .build()
     .await
     .expect("Gateway");
     let parent_provider = create_test_provider_with_model(
@@ -182,10 +186,10 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
     let source = admin
         .create_web_provider(crate::db::models::CreateWebProvider {
             name: "Unused search source".into(),
-            kind: "exa".into(),
+            kind: "test-web".into(),
             api_key: Some("unused-test-key".into()),
             use_proxy: false,
-            local_engines: None,
+            config: None,
         })
         .await
         .expect("configure search source");

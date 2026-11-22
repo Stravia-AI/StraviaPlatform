@@ -32,12 +32,11 @@ let
     "STRAVIA_CONFIG_POLL_INTERVAL"
   ];
   conflicts = builtins.filter (name: builtins.hasAttr name cfg.environment) (
-    reserved ++ [ "HOME" ] ++ lib.optional (cfg.browserPackage != null) "STRAVIA_CHROME_PATH"
+    reserved ++ [ "HOME" ]
   );
   escapeSpecifiers = lib.replaceStrings [ "%" ] [ "%%" ];
   quoteUnitValue = value: escapeSpecifiers (builtins.toJSON value);
   dataDirectoryRule = "d ${quoteUnitValue cfg.dataDir} 0700 ${quoteUnitValue cfg.user} ${quoteUnitValue cfg.group} - -";
-  browser = if cfg.browserPackage == null then null else lib.getExe cfg.browserPackage;
   repeated =
     flag: values:
     lib.concatMap (value: [
@@ -71,12 +70,6 @@ let
       echo 'stravia: EnvironmentFile must not override HOME' >&2
       exit 1
     fi
-    ${lib.optionalString (browser != null) ''
-      if [ "''${STRAVIA_CHROME_PATH-}" != ${lib.escapeShellArg browser} ]; then
-        echo 'stravia: EnvironmentFile conflicts with browserPackage' >&2
-        exit 1
-      fi
-    ''}
     ${lib.optionalString (cfg.configFile != null) ''
       # 初始化会在父目录创建临时文件并原子替换，不只是读取文件。
       test -d ${lib.escapeShellArg (builtins.dirOf cfg.configFile)}
@@ -171,11 +164,6 @@ in
       default = null;
       description = "Required-if-specified runtime systemd environment file, not a shell script or secure credential interface.";
     };
-    browserPackage = mkOption {
-      type = types.nullOr types.package;
-      default = null;
-      description = "Optional browser whose main executable becomes STRAVIA_CHROME_PATH; null does not require Chromium.";
-    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -223,7 +211,6 @@ in
         // {
           HOME = cfg.dataDir;
         }
-        // lib.optionalAttrs (browser != null) { STRAVIA_CHROME_PATH = browser; }
       );
       unitConfig = {
         StartLimitIntervalSec = 60;

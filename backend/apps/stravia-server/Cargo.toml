@@ -75,7 +75,9 @@ objc2-core-foundation = { workspace = true, features = ["CFAttributedString", "C
 objc2 = { workspace = true, features = ["disable-encoding-assertions", "exception"] }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 reqwest = { workspace = true }
 tower = { workspace = true }
 stravia-core = { workspace = true, features = ["test-support"] }
+stravia-web-access-contract = { workspace = true }
 zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }

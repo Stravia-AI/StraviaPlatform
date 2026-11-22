@@ -120,16 +120,13 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             "/currency",
             get(money::get_currency).put(money::put_currency),
         )
+        .route("/web-provider-kinds", get(list_web_provider_kinds_handler))
         .route(
             "/web-providers",
             get(list_web_providers_handler).post(create_web_provider_handler),
         )
         .route("/web-providers/{id}", web_providers_item)
         .route("/web-providers/{id}/test", post(test_web_provider_handler))
-        .route(
-            "/web-access/browser",
-            get(get_web_access_browser_handler).put(update_web_access_browser_handler),
-        )
         .route(
             "/web-access/settings",
             get(get_web_access_settings_handler).put(update_web_access_settings_handler),

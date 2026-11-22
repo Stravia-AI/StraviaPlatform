@@ -604,6 +604,7 @@ async function refreshPluginRuntimeQueries(): Promise<void> {
     queryClient.invalidateQueries({ queryKey: ['provider-allowance'] }),
     queryClient.invalidateQueries({ queryKey: ['model-target-statuses'] }),
     queryClient.invalidateQueries({ queryKey: ['models'] }),
+    queryClient.invalidateQueries({ queryKey: ['web-provider-kinds'] }),
     queryClient.invalidateQueries({ queryKey: ['web-providers'] }),
     queryClient.invalidateQueries({ queryKey: ['web-access-settings'] }),
     queryClient.invalidateQueries({ queryKey: ['web-search-config'] }),

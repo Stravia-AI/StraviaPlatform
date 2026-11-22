@@ -3723,10 +3723,10 @@ CREATE TABLE public.web_providers (
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     use_proxy boolean DEFAULT false NOT NULL,
-    local_engines jsonb,
-    CONSTRAINT web_providers_credentials_check CHECK ((((kind = 'local'::text) AND (api_key IS NULL) AND (local_engines IS NOT NULL)) OR ((kind = ANY (ARRAY['exa'::text, 'zhipu'::text])) AND (api_key IS NOT NULL) AND (length(TRIM(BOTH FROM api_key)) > 0) AND (local_engines IS NULL)))),
-    CONSTRAINT web_providers_kind_check CHECK ((kind = ANY (ARRAY['local'::text, 'exa'::text, 'zhipu'::text]))),
-    CONSTRAINT web_providers_local_engines_contract CHECK (((kind <> 'local'::text) OR COALESCE((jsonb_typeof(local_engines) = 'object'::text), false)))
+    config_json jsonb,
+    CONSTRAINT web_providers_api_key_check CHECK (((api_key IS NULL) OR (length(TRIM(BOTH FROM api_key)) > 0))),
+    CONSTRAINT web_providers_config_json_check CHECK (((config_json IS NULL) OR (jsonb_typeof(config_json) = 'object'::text))),
+    CONSTRAINT web_providers_kind_check CHECK ((length(TRIM(BOTH FROM kind)) > 0))
 );
 
 
@@ -4768,13 +4768,6 @@ CREATE INDEX idx_reversible_redaction_mappings_principal_pending ON public.rever
 --
 
 CREATE INDEX idx_vendor_private_state_vendor ON public.vendor_private_state USING btree (vendor_id);
-
-
---
--- Name: idx_web_providers_local_singleton; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX idx_web_providers_local_singleton ON public.web_providers USING btree (kind) WHERE (kind = 'local'::text);
 
 
 --

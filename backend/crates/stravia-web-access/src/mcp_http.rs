@@ -8,11 +8,28 @@ use rmcp::{
     transport::{
         common::client_side_sse::BoxedSseResponse,
         streamable_http_client::{
-            AuthRequiredError, InsufficientScopeError, StreamableHttpClient, StreamableHttpError,
-            StreamableHttpPostResponse,
+            AuthRequiredError, InsufficientScopeError, StreamableHttpClient,
+            StreamableHttpClientTransportConfig, StreamableHttpError, StreamableHttpPostResponse,
         },
+        StreamableHttpClientTransport,
     },
+    RoleClient,
 };
+
+/// 创建远程工具的 MCP HTTP 传输，不发起网络请求。
+///
+/// 配置、认证与 SSE 限额遵循 rmcp；连接、协议和正文错误在使用传输时返回。
+/// 构造时绑定当前请求的 Debug 接收端，使后台 worker 和重连仍归属同一请求。
+pub fn mcp_http_transport(
+    client: reqwest::Client,
+    config: StreamableHttpClientTransportConfig,
+) -> impl rmcp::transport::Transport<RoleClient> {
+    let client = Client::new(client);
+    let transport = StreamableHttpClientTransport::with_client(client.clone(), config);
+    let cancellation = transport.cancel_token();
+    client.cancel_on_event_limit(move || cancellation.cancel());
+    transport
+}
 use std::{
     collections::HashMap,
     sync::{

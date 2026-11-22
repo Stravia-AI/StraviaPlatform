@@ -226,17 +226,6 @@ pub(super) fn extract_html(html: &str, base_url: Option<&Url>) -> Result<HtmlExt
     }
 }
 
-pub(super) fn json_markdown(decoded: &str) -> String {
-    let pretty = serde_json::from_str::<serde_json::Value>(decoded)
-        .and_then(|value| serde_json::to_string_pretty(&value))
-        .unwrap_or_else(|_| decoded.trim().to_string());
-    format!("```json\n{pretty}\n```")
-}
-
-pub(super) fn xml_markdown(decoded: &str) -> String {
-    format!("```xml\n{}\n```", decoded.trim())
-}
-
 pub(super) fn unsupported(content_type: &str) -> FetchError {
     let mime = content_type
         .split(';')
@@ -247,48 +236,6 @@ pub(super) fn unsupported(content_type: &str) -> FetchError {
         FetchErrorCode::UnsupportedMediaType,
         format!("unsupported response media type: {mime}"),
     )
-}
-
-pub(super) fn is_low_quality(markdown: &str) -> bool {
-    let non_whitespace = markdown
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .count();
-    if non_whitespace <= 100 {
-        return true;
-    }
-    let lowercase = markdown.to_ascii_lowercase();
-    let javascript_gate = [
-        "enable javascript",
-        "javascript required",
-        "turn on javascript",
-        "please enable javascript",
-        "browser not supported",
-    ]
-    .iter()
-    .any(|phrase| lowercase.contains(phrase));
-    if markdown.chars().count() < 1024 && javascript_gate {
-        return true;
-    }
-    let lines = markdown
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    lines.len() > 10
-        && lines
-            .iter()
-            .filter(|line| line.chars().count() < 40)
-            .count()
-            * 10
-            > lines.len() * 7
-}
-
-pub(super) fn score(markdown: &str) -> usize {
-    markdown
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .count()
 }
 
 fn html_title(html: &str) -> Option<String> {

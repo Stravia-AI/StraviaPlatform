@@ -8,15 +8,40 @@ import type {
   UpdateMediaUnderstandingConfig,
   WebAccessSettings,
   WebProvider,
+  WebProviderKindDescriptor,
 } from '../src/lib/types'
 import { prepareApp } from './prepare-app'
 
-const searchSource: WebProvider = {
-  id: 'source-exa',
-  name: 'Search source',
-  kind: 'exa',
-  use_proxy: false,
+const primaryKind: WebProviderKindDescriptor = {
+  kind: 'index-api',
   capabilities: { search: true, fetch: true },
+  requires_api_key: true,
+  singleton: false,
+  allow_delete: true,
+}
+
+const secondaryKind: WebProviderKindDescriptor = {
+  kind: 'reader-api',
+  capabilities: { search: true, fetch: true },
+  requires_api_key: true,
+  singleton: false,
+  allow_delete: true,
+}
+
+const searchSource: WebProvider = {
+  id: 'source-primary',
+  name: 'Search source',
+  kind: primaryKind.kind,
+  api_key_configured: true,
+  use_proxy: false,
+  config: null,
+  capabilities: { search: true, fetch: true },
+  registered: true,
+  available: true,
+  unavailable_reason: null,
+  allow_delete: true,
+  last_test_success: null,
+  last_test_at: null,
   created_at: '2026-09-01T00:00:00Z',
   updated_at: '2026-09-01T00:00:00Z',
 }
@@ -728,6 +753,9 @@ test('advanced features keep separate media and web search surfaces', async ({ p
   await page.route('**/api/v1/web-access/settings', async (route) => {
     await route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } })
   })
+  await page.route('**/api/v1/web-provider-kinds', async (route) => {
+    await route.fulfill({ json: { data: [] } })
+  })
   await page.route('**/api/v1/web-providers', async (route) => {
     await route.fulfill({ json: { data: [] } })
   })
@@ -1145,6 +1173,7 @@ test('search activation saves only confirmed configuration without discarding th
       json: { data: { search_provider_ids: [searchSource.id], fetch_provider_ids: [searchSource.id] } },
     }),
   )
+  await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [primaryKind] } }))
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [searchSource] } }))
   await page.goto('/web-search')
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
@@ -1355,6 +1384,7 @@ test('source save failures preserve selection and drafts before the single searc
   await page.route('**/api/v1/web-search/eligible-models', (route) =>
     route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
   )
+  await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [primaryKind] } }))
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [searchSource] } }))
   await page.route('**/api/v1/web-access/settings', async (route) => {
     if (route.request().method() === 'PUT') {
@@ -1369,8 +1399,8 @@ test('source save failures preserve selection and drafts before the single searc
   })
   await page.goto('/web-search')
   const searchSwitch = page.getByRole('switch')
-  const searchSourceCheckbox = page.locator('#web-access-search-source-exa')
-  const pageSourceCheckbox = page.locator('#web-access-fetch-source-exa')
+  const searchSourceCheckbox = page.locator(`#web-access-search-${searchSource.id}`)
+  const pageSourceCheckbox = page.locator(`#web-access-fetch-${searchSource.id}`)
   await expect(searchSwitch).toHaveCount(1)
   await expect(searchSwitch).toBeDisabled()
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
@@ -1429,6 +1459,9 @@ test('External Route search activation does not depend on Local sources', async 
   await page.route('**/api/v1/web-access/**', (route) =>
     route.fulfill({ status: 503, json: { error: 'Fixture Local sources unavailable' } }),
   )
+  await page.route('**/api/v1/web-provider-kinds', (route) =>
+    route.fulfill({ status: 503, json: { error: 'Fixture web provider kinds unavailable' } }),
+  )
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [] } }))
   await page.goto('/web-search')
   const searchSwitch = page.getByRole('switch')
@@ -1440,150 +1473,12 @@ test('External Route search activation does not depend on Local sources', async 
   await expect(searchSwitch).toBeChecked()
 })
 
-test('source load recovery requires a configured browser before Local sources can enable search', async ({ page }) => {
-  let settingsUnavailable = true
-  let saved: WebAccessSettings = { search_provider_ids: [], fetch_provider_ids: [] }
-  let browserPath: string | null = null
-  const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
-  let config = {
-    revision: 1,
-    enabled: false,
-    backend: { kind: 'local', model_id: 'model-search' },
-    max_turns: 6,
-    total_time_seconds: 180,
-    updated_at: '2026-09-01T00:00:00Z',
-    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
-  }
-  await page.route('**/api/v1/web-search/config', async (route) => {
-    if (route.request().method() === 'PUT') {
-      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
-    }
-    await route.fulfill({ json: { data: config } })
-  })
-  await page.route('**/api/v1/web-search/eligible-models', (route) =>
-    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
-  )
-  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
-  await page.route('**/api/v1/web-providers/source-local', (route) => route.fulfill({ json: { data: localSource } }))
-  await page.route('**/api/v1/web-access/browser', async (route) => {
-    if (route.request().method() === 'PUT') browserPath = route.request().postDataJSON().path
-    await route.fulfill({
-      json: {
-        data: {
-          configuredPath: browserPath,
-          resolvedPath: browserPath,
-          source: browserPath ? 'manual' : 'automatic',
-          available: browserPath !== null,
-          error: null,
-        },
-      },
-    })
-  })
-  await page.route('**/api/v1/web-access/settings', async (route) => {
-    if (settingsUnavailable) {
-      await route.fulfill({ status: 503, json: { error: 'Fixture source settings unavailable' } })
-      return
-    }
-    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
-    await route.fulfill({ json: { data: saved } })
-  })
-  await page.goto('/web-search')
-  const searchSwitch = page.getByRole('switch')
-  const sources = page.locator('#web-search-sources')
-  await expect(searchSwitch).toBeDisabled()
-  await expect(sources.getByRole('alert')).toBeVisible()
-  await expect(page.locator('#web-access-search-source-local')).toHaveCount(0)
-  settingsUnavailable = false
-  await sources.getByRole('button', { name: 'Retry', exact: true }).click()
-  const searchCheckbox = page.locator('#web-access-search-source-local')
-  const fetchCheckbox = page.locator('#web-access-fetch-source-local')
-  await expect(searchCheckbox).toBeDisabled()
-  await expect(fetchCheckbox).toBeDisabled()
-  await expect(searchSwitch).toBeDisabled()
-  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
-  await page.locator('#web-provider-browser-path').fill('C:\\Browser\\chrome.exe')
-  await page.getByRole('dialog').getByRole('button', { name: 'Save service', exact: true }).click()
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(searchCheckbox).toBeEnabled()
-  await searchCheckbox.click()
-  await expect(searchCheckbox).toBeChecked()
-  await expect(searchSwitch).toBeDisabled()
-  await fetchCheckbox.click()
-  await expect(fetchCheckbox).toBeChecked()
-  await expect(searchSwitch).toHaveCount(1)
-
-  await expect(searchSwitch).toBeEnabled()
-  await searchSwitch.click()
-  await expect(searchSwitch).toBeChecked()
-  browserPath = null
-  await page.reload()
-  await expect(searchCheckbox).toBeChecked()
-  await expect(searchCheckbox).toBeEnabled()
-  await searchCheckbox.click()
-  await expect(searchCheckbox).not.toBeChecked()
-  await expect(fetchCheckbox).toBeEnabled()
-  await fetchCheckbox.click()
-  await expect(fetchCheckbox).not.toBeChecked()
-})
-
-test('remote sources remain usable while a selected Local browser is unavailable', async ({ page }) => {
-  const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
-  let saved: WebAccessSettings = {
-    search_provider_ids: [localSource.id, searchSource.id],
-    fetch_provider_ids: [localSource.id, searchSource.id],
-  }
-  let config = {
-    revision: 1,
-    enabled: false,
-    backend: { kind: 'local', model_id: 'model-search' },
-    max_turns: 6,
-    total_time_seconds: 180,
-    updated_at: '2026-09-01T00:00:00Z',
-    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
-  }
-  await page.route('**/api/v1/web-search/config', async (route) => {
-    if (route.request().method() === 'PUT') {
-      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
-    }
-    await route.fulfill({ json: { data: config } })
-  })
-  await page.route('**/api/v1/web-search/eligible-models', (route) =>
-    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
-  )
-  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource, searchSource] } }))
-  await page.route('**/api/v1/web-access/settings', async (route) => {
-    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
-    await route.fulfill({ json: { data: saved } })
-  })
-  await page.route('**/api/v1/web-access/browser', (route) =>
-    route.fulfill({ status: 503, json: { error: 'Fixture browser load unavailable' } }),
-  )
-  await page.goto('/web-search')
-  const searchSwitch = page.getByRole('switch', { name: 'Enable web search' })
-  await expect(page.locator('#web-search-sources')).toContainText('Browser configuration could not be loaded')
-  await expect(searchSwitch).toBeEnabled()
-  await searchSwitch.click()
-  await expect(searchSwitch).toBeChecked()
-  const localCheckbox = page.locator('#web-access-search-source-local')
-  await expect(localCheckbox).toBeEnabled()
-  await localCheckbox.click()
-  await expect(localCheckbox).not.toBeChecked()
-  expect(saved.search_provider_ids).toEqual([searchSource.id])
-})
-
 for (const locale of ['en-US', 'zh-CN']) {
-  test(`Local browser editor retains drafts, reports partial saves, and resets to automatic (${locale})`, async ({
+  test(`shows empty state without add action when no web provider kinds are registered (${locale})`, async ({
     page,
   }) => {
     const zh = locale === 'zh-CN'
     await page.addInitScript((value) => localStorage.setItem('stravia-locale', value), locale)
-    const localSource: WebProvider = { ...searchSource, id: 'source-local', name: 'Local source', kind: 'local' }
-    let browserLoadFails = true
-    let browserSaveFails = true
-    let serviceSaveFails = true
-    let browserPath: string | null = null
-    const browserSaves: Array<string | null> = []
-    let serviceSaves = 0
     await page.route('**/api/v1/web-search/config', (route) =>
       route.fulfill({
         json: {
@@ -1604,88 +1499,263 @@ for (const locale of ['en-US', 'zh-CN']) {
         json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] },
       }),
     )
-    await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [localSource] } }))
-    await page.route('**/api/v1/web-providers/source-local', async (route) => {
-      if (route.request().method() === 'PUT') {
-        serviceSaves++
-        if (serviceSaveFails) {
-          await route.fulfill({ status: 503, json: { error: 'Fixture service save unavailable' } })
-          return
-        }
-      }
-      await route.fulfill({ json: { data: localSource } })
-    })
+    await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [] } }))
+    await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [] } }))
     await page.route('**/api/v1/web-access/settings', (route) =>
       route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
     )
-    await page.route('**/api/v1/web-access/browser', async (route) => {
-      if (route.request().method() === 'GET' && browserLoadFails) {
-        await route.fulfill({ status: 503, json: { error: 'Fixture browser load unavailable' } })
-        return
-      }
-      if (route.request().method() === 'PUT') {
-        if (browserSaveFails) {
-          await route.fulfill({ status: 400, json: { error: 'Fixture invalid browser path' } })
-          return
-        }
-        browserPath = route.request().postDataJSON().path
-        browserSaves.push(browserPath)
-      }
-      await route.fulfill({
-        json: {
-          data: {
-            configuredPath: browserPath,
-            resolvedPath: browserPath,
-            source: browserPath ? 'manual' : 'automatic',
-            available: browserPath !== null,
-            error: null,
-          },
-        },
-      })
-    })
     await page.goto('/web-search')
     const sources = page.locator('#web-search-sources')
-    const searchCheckbox = page.locator('#web-access-search-source-local')
-    await expect(searchCheckbox).toBeDisabled()
-    await expect(sources).toContainText(zh ? '无法加载浏览器配置' : 'Browser configuration could not be loaded')
-    browserLoadFails = false
-    await sources.getByRole('button', { name: zh ? '重试' : 'Retry', exact: true }).click()
-    await expect(sources).toContainText(zh ? '请先在 Local 服务编辑窗口' : 'Configure a Chrome or Chromium executable')
-    await sources.getByRole('button', { name: zh ? '编辑' : 'Edit', exact: true }).click()
-    const dialog = page.getByRole('dialog')
-    const path = dialog.locator('#web-provider-browser-path')
-    const save = dialog.getByRole('button', { name: zh ? '保存服务' : 'Save service', exact: true })
-    await path.fill('C:\\Browser\\chrome.exe')
-    await save.click()
-    await expect(dialog.getByRole('alert')).toContainText('Fixture invalid browser path')
-    await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
-    expect(serviceSaves).toBe(0)
-    browserSaveFails = false
-    await save.click()
-    await expect(dialog.getByRole('alert')).toContainText(
-      zh
-        ? '浏览器路径已保存，但服务设置保存失败'
-        : 'The browser path was saved, but the service settings could not be saved',
-    )
-    await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
-    expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe'])
-    expect(serviceSaves).toBe(1)
-    serviceSaveFails = false
-    await save.click()
-    await expect(dialog).toHaveCount(0)
-    expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe'])
-    await expect(searchCheckbox).toBeEnabled()
-    await page.reload()
-    await expect(searchCheckbox).toBeEnabled()
-    await sources.getByRole('button', { name: zh ? '编辑' : 'Edit', exact: true }).click()
-    await expect(path).toHaveValue('C:\\Browser\\chrome.exe')
-    await path.fill('')
-    await save.click()
-    await expect(dialog).toHaveCount(0)
-    expect(browserSaves).toEqual(['C:\\Browser\\chrome.exe', null])
-    await expect(searchCheckbox).toBeDisabled()
+    await expect(sources).toContainText(zh ? '未安装 Web Provider 扩展' : 'No Web Provider extensions available')
+    await expect(sources.getByRole('button', { name: zh ? '连接服务' : 'Connect service', exact: true })).toHaveCount(0)
+    await expect(
+      sources.getByRole('button', { name: zh ? '连接第一个服务' : 'Connect first service', exact: true }),
+    ).toHaveCount(0)
+    await expect(page.getByRole('switch')).toBeDisabled()
+    await page.setViewportSize({ width: 320, height: 844 })
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   })
 }
+
+test('unregistered legacy web providers cannot be enabled or edited but can be deleted', async ({ page }) => {
+  let providers: WebProvider[] = [
+    {
+      ...searchSource,
+      id: 'source-legacy',
+      name: 'Legacy source',
+      kind: 'legacy-web',
+      api_key_configured: false,
+      capabilities: null,
+      registered: false,
+      available: false,
+      unavailable_reason: "Web Provider kind 'legacy-web' is not registered in this build",
+      allow_delete: true,
+    },
+  ]
+  const deleted: string[] = []
+  await page.route('**/api/v1/web-search/config', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          revision: 1,
+          enabled: false,
+          backend: { kind: 'local', model_id: 'model-search' },
+          max_turns: 6,
+          total_time_seconds: 180,
+          updated_at: '2026-09-01T00:00:00Z',
+          limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: providers } }))
+  await page.route('**/api/v1/web-providers/source-legacy', async (route) => {
+    if (route.request().method() === 'DELETE') {
+      deleted.push('source-legacy')
+      providers = []
+      await route.fulfill({ status: 204 })
+      return
+    }
+    await route.fulfill({ json: { data: providers[0] } })
+  })
+  await page.route('**/api/v1/web-access/settings', (route) =>
+    route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
+  )
+  await page.goto('/web-search')
+  const sources = page.locator('#web-search-sources')
+  await expect(sources).toContainText('Not installed')
+  await expect(sources).toContainText("Web Provider kind 'legacy-web' is not registered in this build")
+  await expect(sources.getByRole('button', { name: 'Connect service', exact: true })).toHaveCount(0)
+  await expect(sources.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0)
+  await expect(sources.getByRole('button', { name: 'Test', exact: true })).toHaveCount(0)
+  await expect(page.locator('#web-access-search-source-legacy')).toHaveCount(0)
+  await expect(page.locator('#web-access-fetch-source-legacy')).toHaveCount(0)
+  await sources.getByRole('button', { name: 'Delete', exact: true }).click()
+  const confirmDialog = page.getByRole('alertdialog')
+  await confirmDialog.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect.poll(() => deleted).toEqual(['source-legacy'])
+  await expect(sources).toContainText('No Web Provider extensions available')
+})
+
+test('source load recovery blocks enabling an unavailable provider until available and allows unchecking when offline', async ({
+  page,
+}) => {
+  let settingsUnavailable = true
+  let saved: WebAccessSettings = { search_provider_ids: [], fetch_provider_ids: [] }
+  let workerAvailable = false
+  const workerKind: WebProviderKindDescriptor = {
+    kind: 'worker-web',
+    capabilities: { search: true, fetch: true },
+    requires_api_key: false,
+    singleton: true,
+    allow_delete: false,
+  }
+  const workerProvider = (): WebProvider => ({
+    ...searchSource,
+    id: 'source-worker',
+    name: 'Worker web',
+    kind: workerKind.kind,
+    api_key_configured: false,
+    registered: true,
+    available: workerAvailable,
+    unavailable_reason: workerAvailable ? null : 'Worker node is offline',
+    allow_delete: false,
+  })
+  const providerUpdates: unknown[] = []
+  let config = {
+    revision: 1,
+    enabled: false,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [workerKind] } }))
+  await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [workerProvider()] } }))
+  await page.route('**/api/v1/web-providers/source-worker', async (route) => {
+    if (route.request().method() === 'PUT') {
+      providerUpdates.push(route.request().postDataJSON())
+    }
+    await route.fulfill({ json: { data: workerProvider() } })
+  })
+  await page.route('**/api/v1/web-access/settings', async (route) => {
+    if (settingsUnavailable) {
+      await route.fulfill({ status: 503, json: { error: 'Fixture source settings unavailable' } })
+      return
+    }
+    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.goto('/web-search')
+  const searchSwitch = page.getByRole('switch')
+  const sources = page.locator('#web-search-sources')
+  await expect(searchSwitch).toBeDisabled()
+  await expect(sources.getByRole('alert')).toBeVisible()
+  await expect(page.locator('#web-access-search-source-worker')).toHaveCount(0)
+  await expect(sources.getByRole('button', { name: 'Connect service', exact: true })).toHaveCount(0)
+  await expect(sources.getByRole('button', { name: 'Delete', exact: true })).toHaveCount(0)
+  settingsUnavailable = false
+  await sources.getByRole('button', { name: 'Retry', exact: true }).click()
+  const searchCheckbox = page.locator('#web-access-search-source-worker')
+  const fetchCheckbox = page.locator('#web-access-fetch-source-worker')
+  await expect(sources).toContainText('Worker node is offline')
+  await expect(searchCheckbox).toBeDisabled()
+  await expect(fetchCheckbox).toBeDisabled()
+  await expect(searchSwitch).toBeDisabled()
+
+  // Editing a kind with requires_api_key: false omits the API key input; once the provider comes online, checkboxes enable.
+  await sources.getByRole('button', { name: 'Edit', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.locator('#web-provider-secret')).toHaveCount(0)
+  workerAvailable = true
+  await dialog.getByRole('button', { name: 'Save service', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(providerUpdates).toEqual([{ name: 'Worker web', use_proxy: false }])
+  await expect(searchCheckbox).toBeEnabled()
+  await searchCheckbox.click()
+  await expect(searchCheckbox).toBeChecked()
+  await expect(searchSwitch).toBeDisabled()
+  await fetchCheckbox.click()
+  await expect(fetchCheckbox).toBeChecked()
+  await expect(searchSwitch).toHaveCount(1)
+
+  await expect(searchSwitch).toBeEnabled()
+  await searchSwitch.click()
+  await expect(searchSwitch).toBeChecked()
+
+  // When the provider goes offline again, already-selected checkboxes can still be unchecked to clean up priority order.
+  workerAvailable = false
+  await page.reload()
+  await expect(searchCheckbox).toBeChecked()
+  await expect(searchCheckbox).toBeEnabled()
+  await searchCheckbox.click()
+  await expect(searchCheckbox).not.toBeChecked()
+  await expect(searchCheckbox).toBeDisabled()
+  await expect(fetchCheckbox).toBeChecked()
+  await expect(fetchCheckbox).toBeEnabled()
+  await fetchCheckbox.click()
+  await expect(fetchCheckbox).not.toBeChecked()
+  await expect(fetchCheckbox).toBeDisabled()
+})
+
+test('available sources remain usable while another selected source is unavailable', async ({ page }) => {
+  const workerKind: WebProviderKindDescriptor = {
+    kind: 'worker-web',
+    capabilities: { search: true, fetch: true },
+    requires_api_key: false,
+    singleton: true,
+    allow_delete: false,
+  }
+  const offlineSource: WebProvider = {
+    ...searchSource,
+    id: 'source-offline',
+    name: 'Offline worker',
+    kind: workerKind.kind,
+    api_key_configured: false,
+    registered: true,
+    available: false,
+    unavailable_reason: 'Worker node is offline',
+    allow_delete: false,
+  }
+  let saved: WebAccessSettings = {
+    search_provider_ids: [offlineSource.id, searchSource.id],
+    fetch_provider_ids: [offlineSource.id, searchSource.id],
+  }
+  let config = {
+    revision: 1,
+    enabled: false,
+    backend: { kind: 'local', model_id: 'model-search' },
+    max_turns: 6,
+    total_time_seconds: 180,
+    updated_at: '2026-09-01T00:00:00Z',
+    limits: { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 },
+  }
+  await page.route('**/api/v1/web-search/config', async (route) => {
+    if (route.request().method() === 'PUT') {
+      config = { ...config, ...route.request().postDataJSON(), revision: config.revision + 1 }
+    }
+    await route.fulfill({ json: { data: config } })
+  })
+  await page.route('**/api/v1/web-search/eligible-models', (route) =>
+    route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-provider-kinds', (route) =>
+    route.fulfill({ json: { data: [workerKind, primaryKind] } }),
+  )
+  await page.route('**/api/v1/web-providers', (route) =>
+    route.fulfill({ json: { data: [offlineSource, searchSource] } }),
+  )
+  await page.route('**/api/v1/web-access/settings', async (route) => {
+    if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
+    await route.fulfill({ json: { data: saved } })
+  })
+  await page.goto('/web-search')
+  const searchSwitch = page.getByRole('switch', { name: 'Enable web search' })
+  await expect(page.locator('#web-search-sources')).toContainText('Worker node is offline')
+  await expect(searchSwitch).toBeEnabled()
+  await searchSwitch.click()
+  await expect(searchSwitch).toBeChecked()
+  const offlineCheckbox = page.locator('#web-access-search-source-offline')
+  await expect(offlineCheckbox).toBeEnabled()
+  await offlineCheckbox.click()
+  await expect(offlineCheckbox).not.toBeChecked()
+  await expect(offlineCheckbox).toBeDisabled()
+  expect(saved.search_provider_ids).toEqual([searchSource.id])
+})
 
 const searchLimits = { min_turns: 1, max_turns: 20, min_total_time_seconds: 30, max_total_time_seconds: 900 }
 
@@ -1724,6 +1794,7 @@ test('binding and budget saves recover from revision conflicts without losing in
   await page.route('**/api/v1/web-access/settings', (route) =>
     route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
   )
+  await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [] } }))
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [] } }))
   await page.goto('/web-search')
   await page.getByRole('button', { name: 'Advanced', exact: true }).click()
@@ -1806,8 +1877,9 @@ test('binding sheet and source editor guard dirty drafts and lock while saving',
   await page.route('**/api/v1/web-access/settings', (route) =>
     route.fulfill({ json: { data: { search_provider_ids: [], fetch_provider_ids: [] } } }),
   )
+  await page.route('**/api/v1/web-provider-kinds', (route) => route.fulfill({ json: { data: [primaryKind] } }))
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [searchSource] } }))
-  await page.route('**/api/v1/web-providers/source-exa', async (route) => {
+  await page.route(`**/api/v1/web-providers/${searchSource.id}`, async (route) => {
     if (route.request().method() === 'PUT') {
       providerSaves.push(route.request().postDataJSON())
       await new Promise<void>((resolve) => {
@@ -1884,7 +1956,7 @@ test('binding sheet and source editor guard dirty drafts and lock while saving',
 
 test('search and page sources keep independent priorities with disabled boundary arrows', async ({ page }) => {
   const alpha: WebProvider = { ...searchSource, id: 'source-alpha', name: 'Alpha' }
-  const beta: WebProvider = { ...searchSource, id: 'source-beta', name: 'Beta', kind: 'zhipu' }
+  const beta: WebProvider = { ...searchSource, id: 'source-beta', name: 'Beta', kind: secondaryKind.kind }
   let rejectSave = true
   let saved: WebAccessSettings = { search_provider_ids: [alpha.id, beta.id], fetch_provider_ids: [beta.id, alpha.id] }
   const writes: WebAccessSettings[] = []
@@ -1905,6 +1977,9 @@ test('search and page sources keep independent priorities with disabled boundary
   )
   await page.route('**/api/v1/web-search/eligible-models', (route) =>
     route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-provider-kinds', (route) =>
+    route.fulfill({ json: { data: [primaryKind, secondaryKind] } }),
   )
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [alpha, beta] } }))
   await page.route('**/api/v1/web-access/settings', async (route) => {
@@ -1958,7 +2033,7 @@ test('web search keeps one settings column with aligned actions and operable sou
   page,
 }) => {
   const alpha: WebProvider = { ...searchSource, id: 'source-alpha', name: 'Alpha', last_test_success: true }
-  const beta: WebProvider = { ...searchSource, id: 'source-beta', name: 'Beta', kind: 'zhipu' }
+  const beta: WebProvider = { ...searchSource, id: 'source-beta', name: 'Beta', kind: secondaryKind.kind }
   await page.route('**/api/v1/web-search/config', (route) =>
     route.fulfill({
       json: {
@@ -1976,6 +2051,9 @@ test('web search keeps one settings column with aligned actions and operable sou
   )
   await page.route('**/api/v1/web-search/eligible-models', (route) =>
     route.fulfill({ json: { data: [{ id: 'model-search', model_id: 'search-model', display_name: 'Search model' }] } }),
+  )
+  await page.route('**/api/v1/web-provider-kinds', (route) =>
+    route.fulfill({ json: { data: [primaryKind, secondaryKind] } }),
   )
   await page.route('**/api/v1/web-providers', (route) => route.fulfill({ json: { data: [alpha, beta] } }))
   let savedSources: WebAccessSettings = { search_provider_ids: [alpha.id], fetch_provider_ids: [alpha.id] }

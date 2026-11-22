@@ -44,12 +44,15 @@ pub(super) fn media_understanding_config_error(
         .into_response()
 }
 
+pub(super) async fn list_web_provider_kinds_handler(
+    State(gw): State<Gateway>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({ "data": gw.admin().list_web_provider_kinds() }))
+}
+
 pub(super) async fn list_web_providers_handler(State(gw): State<Gateway>) -> impl IntoResponse {
-    match gw.admin().list_web_providers().await {
-        Ok(value) => Json(serde_json::json!({
-            "data": value.into_iter().map(web_provider_value).collect::<Vec<_>>()
-        }))
-        .into_response(),
+    match gw.admin().list_web_provider_views().await {
+        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
         Err(error) => err(error),
     }
 }
@@ -58,8 +61,8 @@ pub(super) async fn get_web_provider_handler(
     State(gw): State<Gateway>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match gw.admin().get_web_provider(&id).await {
-        Ok(value) => Json(serde_json::json!({ "data": web_provider_value(value) })).into_response(),
+    match gw.admin().get_web_provider_view(&id).await {
+        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
         Err(error) => err(error),
     }
 }
@@ -69,11 +72,10 @@ pub(super) async fn create_web_provider_handler(
     Json(input): Json<CreateWebProvider>,
 ) -> impl IntoResponse {
     match gw.admin().create_web_provider(input).await {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "data": web_provider_value(value) })),
-        )
-            .into_response(),
+        Ok(value) => {
+            let view = gw.admin().web_provider_view(value).await;
+            (StatusCode::CREATED, Json(serde_json::json!({ "data": view }))).into_response()
+        }
         Err(error) => err(error),
     }
 }
@@ -84,29 +86,12 @@ pub(super) async fn update_web_provider_handler(
     Json(input): Json<UpdateWebProvider>,
 ) -> impl IntoResponse {
     match gw.admin().update_web_provider(&id, input).await {
-        Ok(value) => Json(serde_json::json!({ "data": web_provider_value(value) })).into_response(),
+        Ok(value) => {
+            let view = gw.admin().web_provider_view(value).await;
+            Json(serde_json::json!({ "data": view })).into_response()
+        }
         Err(error) => err(error),
     }
-}
-
-fn web_provider_value(provider: WebProvider) -> serde_json::Value {
-    let capabilities = provider.capabilities();
-    let local_engines = provider.local_engine_views();
-    let mut value = serde_json::to_value(provider).expect("Web Provider serializes");
-    let object = value
-        .as_object_mut()
-        .expect("Web Provider serializes as object");
-    object.insert(
-        "capabilities".into(),
-        serde_json::to_value(capabilities).expect("Web Provider capabilities serialize"),
-    );
-    if let Some(local_engines) = local_engines {
-        object.insert(
-            "local_engines".into(),
-            serde_json::to_value(local_engines).expect("Local Search Engines serialize"),
-        );
-    }
-    value
 }
 
 pub(super) async fn delete_web_provider_handler(
@@ -129,24 +114,6 @@ pub(super) async fn test_web_provider_handler(
     }
 }
 
-pub(super) async fn get_web_access_browser_handler(State(gw): State<Gateway>) -> impl IntoResponse {
-    Json(serde_json::json!({ "data": gw.admin().get_web_access_browser().await }))
-}
-
-pub(super) async fn update_web_access_browser_handler(
-    State(gw): State<Gateway>,
-    Json(input): Json<stravia_core::admin::BrowserSettingsUpdate>,
-) -> impl IntoResponse {
-    match gw.admin().update_web_access_browser(input).await {
-        Ok(value) => Json(serde_json::json!({ "data": value })).into_response(),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": error.to_string() })),
-        )
-            .into_response(),
-    }
-}
-
 pub(super) async fn get_web_access_settings_handler(
     State(gw): State<Gateway>,
 ) -> impl IntoResponse {
@@ -165,12 +132,12 @@ pub(super) async fn update_web_access_settings_handler(
         Err(error) => {
             let message = error.to_string();
             if let Ok(coded) = serde_json::from_str::<serde_json::Value>(&message)
-                && coded["code"] == "WEB_ACCESS_BROWSER_REQUIRED"
+                && let Some(code) = coded["code"].as_str()
             {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "code": "WEB_ACCESS_BROWSER_REQUIRED",
+                        "code": code,
                         "error": coded["message"],
                         "params": coded["params"],
                     })),
@@ -233,41 +200,4 @@ pub(super) fn web_search_config_error(
         })),
     )
         .into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::web_provider_value;
-    use stravia_core::db::models::{WebProvider, default_local_search_engines};
-
-    #[test]
-    fn local_web_provider_payload_exposes_engine_state_without_secrets() {
-        let mut engines = default_local_search_engines();
-        engines
-            .get_mut("google")
-            .expect("Google config")
-            .private_settings = Some(
-            [("cookies".to_string(), "SID=private-session".to_string())]
-                .into_iter()
-                .collect(),
-        );
-        let value = web_provider_value(WebProvider {
-            id: "web-provider-local".into(),
-            name: "Local".into(),
-            kind: "local".into(),
-            api_key: None,
-            use_proxy: false,
-            local_engines: Some(engines.into()),
-            last_test_success: None,
-            last_test_at: None,
-            created_at: "2026-01-01T00:00:00Z".into(),
-            updated_at: "2026-01-01T00:00:00Z".into(),
-        });
-
-        assert_eq!(value["local_engines"]["google"]["enabled"], true);
-        let payload = value.to_string();
-        assert!(!payload.contains("SID=private-session"));
-        assert!(!payload.contains("private_settings"));
-        assert!(value.get("api_key").is_none());
-    }
 }

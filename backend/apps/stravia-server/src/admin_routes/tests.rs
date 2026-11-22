@@ -1714,32 +1714,157 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
     Ok(())
 }
 
+struct TestHttpWebProviderFactory {
+    descriptor: stravia_web_access_contract::WebProviderKindDescriptor,
+    available: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct TestHttpWebAdapter {
+    id: String,
+    capabilities: stravia_web_access_contract::WebProviderCapabilities,
+}
+
+#[async_trait::async_trait]
+impl stravia_web_access_contract::WebProviderAdapter for TestHttpWebAdapter {
+    fn provider_id(&self) -> &str {
+        &self.id
+    }
+
+    fn supports_search(&self) -> bool {
+        self.capabilities.search
+    }
+
+    fn supports_fetch(&self) -> bool {
+        self.capabilities.fetch
+    }
+
+    async fn search(
+        &self,
+        request: &stravia_web_access_contract::SearchRequest,
+    ) -> Result<
+        stravia_web_access_contract::AdapterSuccess<stravia_web_access_contract::SearchResponse>,
+        stravia_web_access_contract::ProviderFailure,
+    > {
+        Ok(stravia_web_access_contract::AdapterSuccess::new(
+            stravia_web_access_contract::SearchResponse {
+                mode: stravia_web_access_contract::SearchMode::Index,
+                query: request.query.clone(),
+                results: vec![],
+                answer: None,
+                citations: None,
+            },
+            None,
+        ))
+    }
+
+    async fn fetch(
+        &self,
+        request: &stravia_web_access_contract::FetchRequest,
+    ) -> Result<
+        stravia_web_access_contract::AdapterSuccess<Vec<stravia_web_access_contract::FetchResult>>,
+        stravia_web_access_contract::ProviderFailure,
+    > {
+        Ok(stravia_web_access_contract::AdapterSuccess::new(
+            request
+                .urls
+                .iter()
+                .map(|url| stravia_web_access_contract::FetchResult {
+                    url: url.clone(),
+                    status: stravia_web_access_contract::FetchStatus::Success,
+                    content: Some("ok".into()),
+                    format: Some("markdown".into()),
+                    title: None,
+                    truncated: false,
+                    limitations: Vec::new(),
+                    error: None,
+                })
+                .collect(),
+            None,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl stravia_web_access_contract::WebProviderFactory for TestHttpWebProviderFactory {
+    fn descriptor(&self) -> stravia_web_access_contract::WebProviderKindDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn is_available(&self) -> bool {
+        self.available.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn build(
+        &self,
+        config: &stravia_web_access_contract::WebProviderConfig,
+        _outbound: stravia_web_access_contract::OutboundProxyMode,
+    ) -> Result<
+        std::sync::Arc<dyn stravia_web_access_contract::WebProviderAdapter>,
+        stravia_web_access_contract::ProviderFailure,
+    > {
+        Ok(std::sync::Arc::new(TestHttpWebAdapter {
+            id: config.id.clone(),
+            capabilities: self.descriptor.capabilities,
+        }))
+    }
+}
+
 #[tokio::test]
-async fn web_access_browser_http_controls_local_selection() -> anyhow::Result<()> {
+async fn web_provider_kinds_and_factory_availability_http_flow() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
+    let available = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let factory = std::sync::Arc::new(TestHttpWebProviderFactory {
+        descriptor: stravia_web_access_contract::WebProviderKindDescriptor {
+            kind: "worker-web".into(),
+            capabilities: stravia_web_access_contract::WebProviderCapabilities {
+                search: true,
+                fetch: true,
+            },
+            requires_api_key: false,
+            singleton: true,
+            allow_delete: false,
+        },
+        available: available.clone(),
+    });
+    let gateway = stravia_core::GatewayBuilder::new(GatewayConfig {
         data_dir: directory.path().to_owned(),
         ..Default::default()
     })
+    .web_provider_factory(factory)
+    .build()
     .await?;
-    let local = gateway
-        .admin()
-        .list_web_providers()
-        .await?
-        .into_iter()
-        .find(|provider| provider.kind == "local")
-        .unwrap();
     let app = create_unprotected_router(gateway.clone());
-    let settings = stravia_core::db::models::WebAccessSettings {
-        search_provider_ids: vec![local.id.clone()],
-        fetch_provider_ids: vec![local.id],
-    };
-    gateway
-        .admin()
-        .update_web_access_settings(stravia_core::db::models::WebAccessSettings::default())
+
+    let kinds_response = app
+        .clone()
+        .oneshot(Request::get("/api/v1/web-provider-kinds").body(Body::empty())?)
         .await?;
-    let missing = directory.path().join("missing-chrome.exe");
-    gateway.set_browser_path(Some(missing));
+    assert_eq!(kinds_response.status(), StatusCode::OK);
+    let kinds_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(kinds_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(kinds_body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(kinds_body["data"][0]["kind"], "worker-web");
+
+    let created = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/web-providers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"Worker","kind":"worker-web"}"#))?,
+        )
+        .await?;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await?)?;
+    assert_eq!(created_json["data"]["registered"], true);
+    assert_eq!(created_json["data"]["available"], false);
+    assert_eq!(created_json["data"]["allow_delete"], false);
+    let worker_id = created_json["data"]["id"].as_str().unwrap().to_owned();
+
+    let settings = stravia_core::db::models::WebAccessSettings {
+        search_provider_ids: vec![worker_id.clone()],
+        fetch_provider_ids: vec![worker_id],
+    };
     let rejected = app
         .clone()
         .oneshot(
@@ -1751,25 +1876,10 @@ async fn web_access_browser_http_controls_local_selection() -> anyhow::Result<()
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     let rejected_body: serde_json::Value =
         serde_json::from_slice(&to_bytes(rejected.into_body(), usize::MAX).await?)?;
-    assert_eq!(rejected_body["code"], "WEB_ACCESS_BROWSER_REQUIRED");
-    let executable = std::env::current_exe()?.to_string_lossy().into_owned();
-    let configured = app
-        .clone()
-        .oneshot(
-            Request::put("/api/v1/web-access/browser")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(
-                    &serde_json::json!({ "path": executable }),
-                )?))?,
-        )
-        .await?;
-    assert_eq!(configured.status(), StatusCode::OK);
-    let payload: serde_json::Value =
-        serde_json::from_slice(&to_bytes(configured.into_body(), usize::MAX).await?)?;
-    assert_eq!(payload["data"]["configuredPath"], executable);
-    assert_eq!(payload["data"]["source"], "manual");
-    assert_eq!(payload["data"]["available"], true);
-    let response = app
+    assert_eq!(rejected_body["code"], "WEB_PROVIDER_UNAVAILABLE");
+
+    available.store(true, std::sync::atomic::Ordering::SeqCst);
+    let accepted = app
         .clone()
         .oneshot(
             Request::put("/api/v1/web-access/settings")
@@ -1777,72 +1887,19 @@ async fn web_access_browser_http_controls_local_selection() -> anyhow::Result<()
                 .body(Body::from(serde_json::to_vec(&settings)?))?,
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = app
-        .clone()
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let persisted = app
         .oneshot(Request::get("/api/v1/web-access/settings").body(Body::empty())?)
         .await?;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(persisted.status(), StatusCode::OK);
     let body: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        serde_json::from_slice(&to_bytes(persisted.into_body(), usize::MAX).await?)?;
     assert_eq!(body["data"], serde_json::to_value(&settings)?);
-    assert_eq!(gateway.admin().get_web_access_settings().await?, settings);
-    let state = app
-        .clone()
-        .oneshot(Request::get("/api/v1/web-access/browser").body(Body::empty())?)
-        .await?;
-    assert_eq!(state.status(), StatusCode::OK);
-    let state: serde_json::Value =
-        serde_json::from_slice(&to_bytes(state.into_body(), usize::MAX).await?)?;
-    assert_eq!(state["data"]["resolvedPath"], executable);
-    let restarted = Gateway::new(GatewayConfig {
-        data_dir: directory.path().to_owned(),
-        ..Default::default()
-    })
-    .await?;
-    assert_eq!(
-        restarted
-            .admin()
-            .get_web_access_browser()
-            .await
-            .configured_path
-            .as_deref(),
-        Some(executable.as_str())
-    );
-    let invalid = app
-        .clone()
-        .oneshot(
-            Request::put("/api/v1/web-access/browser")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"path":"missing-chrome.exe"}"#))?,
-        )
-        .await?;
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        gateway
-            .admin()
-            .get_web_access_browser()
-            .await
-            .configured_path
-            .as_deref(),
-        Some(executable.as_str())
-    );
-    let reset = app
-        .oneshot(
-            Request::put("/api/v1/web-access/browser")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"path":null}"#))?,
-        )
-        .await?;
-    assert_eq!(reset.status(), StatusCode::OK);
-    let reset: serde_json::Value =
-        serde_json::from_slice(&to_bytes(reset.into_body(), usize::MAX).await?)?;
-    assert!(reset["data"]["configuredPath"].is_null());
     Ok(())
 }
 
 #[tokio::test]
-async fn browser_settings_routes_require_admin_auth() -> anyhow::Result<()> {
+async fn web_provider_kinds_route_requires_admin_auth() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.path().to_owned(),
@@ -1858,24 +1915,23 @@ async fn browser_settings_routes_require_admin_auth() -> anyhow::Result<()> {
             mode: AdminMode::Desktop,
         },
     );
-    for method in ["GET", "PUT"] {
-        let request = Request::builder()
-            .method(method)
-            .uri("/api/v1/web-access/browser")
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"path":null}"#))?;
-        let denied = app.clone().oneshot(request).await?;
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-    }
+    let denied = app
+        .clone()
+        .oneshot(Request::get("/api/v1/web-provider-kinds").body(Body::empty())?)
+        .await?;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     let tokens = auth.login_native().await?;
     let allowed = app
         .oneshot(
-            Request::get("/api/v1/web-access/browser")
+            Request::get("/api/v1/web-provider-kinds")
                 .header("authorization", format!("Bearer {}", tokens.access_token))
                 .body(Body::empty())?,
         )
         .await?;
     assert_eq!(allowed.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(allowed.into_body(), usize::MAX).await?)?;
+    assert_eq!(body["data"], serde_json::json!([]));
     Ok(())
 }
 
@@ -1883,27 +1939,43 @@ async fn browser_settings_routes_require_admin_auth() -> anyhow::Result<()> {
 async fn web_access_admin_routes_persist_masked_providers_and_atomic_priority() -> anyhow::Result<()>
 {
     let data_dir = tempfile::tempdir()?;
-    let gateway = Gateway::new(GatewayConfig {
+    let factory = std::sync::Arc::new(TestHttpWebProviderFactory {
+        descriptor: stravia_web_access_contract::WebProviderKindDescriptor {
+            kind: "remote-search".into(),
+            capabilities: stravia_web_access_contract::WebProviderCapabilities {
+                search: true,
+                fetch: true,
+            },
+            requires_api_key: true,
+            singleton: false,
+            allow_delete: true,
+        },
+        available: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+    let gateway = stravia_core::GatewayBuilder::new(GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
+    .web_provider_factory(factory)
+    .build()
     .await?;
     let app = create_unprotected_router(gateway);
 
     let created = app
-            .clone()
-            .oneshot(
-                Request::post("/api/v1/web-providers")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"name":"Exa primary","kind":"exa","api_key":"secret-exa","provider_id":null}"#,
-                    ))?,
-            )
-            .await?;
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/web-providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"Remote primary","kind":"remote-search","api_key":"secret-key"}"#,
+                ))?,
+        )
+        .await?;
     assert_eq!(created.status(), StatusCode::CREATED);
     let created_body = to_bytes(created.into_body(), usize::MAX).await?;
     let created_json: serde_json::Value = serde_json::from_slice(&created_body)?;
     assert!(created_json["data"].get("api_key").is_none());
+    assert_eq!(created_json["data"]["api_key_configured"], true);
     assert_eq!(
         created_json["data"]["capabilities"],
         serde_json::json!({ "search": true, "fetch": true })

@@ -230,15 +230,24 @@ async fn platform_tool_remote_bytes_and_header_redaction_survive_bundle_export()
         ),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let web = stravia_web_access::LocalWeb::new(stravia_web_access::OutboundProxyMode::Direct)?;
-    let request = axum::http::Request::builder()
-        .method("POST")
-        .uri(&url)
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let request = client
+        .post(&url)
         .header("Authorization", "Bearer request-header-secret")
-        .body(request_body.to_vec())?;
-    let (response, body) =
-        scope::scope(Some(run.clone()), web.http_client().fetch(request.into())).await?;
-    assert_eq!(response.status().as_u16(), 503);
+        .body(request_body.to_vec());
+    let (response, body) = scope::scope(Some(run.clone()), async {
+        let (response, exchange) = stravia_web_access::wire::send(
+            request,
+            stravia_runtime_contract::wire_debug::current(),
+            "web-access/http",
+        )
+        .await?;
+        let status = response.status();
+        let body = stravia_web_access::wire::body(response, exchange).await?;
+        Ok::<_, reqwest::Error>((status, body))
+    })
+    .await?;
+    assert_eq!(response.as_u16(), 503);
     assert_eq!(body, response_body);
     finish(&run, "completed", Some("platform-generation"));
     let ticket = ticket(&observation).await?;

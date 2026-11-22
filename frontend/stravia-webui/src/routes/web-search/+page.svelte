@@ -42,11 +42,6 @@ const sourceProvidersQuery = createQuery(() => ({
   queryFn: admin.webAccess.providers.list,
   enabled: usesLocal,
 }))
-const sourceBrowserQuery = createQuery(() => ({
-  queryKey: ['web-access-browser'],
-  queryFn: admin.webAccess.browser.get,
-  enabled: usesLocal,
-}))
 
 let toggleSaving = $state(false)
 let toggleError = $state('')
@@ -86,7 +81,7 @@ const bindingIssue = $derived.by((): 'loading' | 'unavailable' | 'missing' | und
 })
 const savedBindingReady = $derived(bindingIssue === undefined)
 
-// Availability combines server capability metadata with browser status; core validates activation.
+// Availability comes from server provider metadata; core validates activation.
 const savedSourceIssue = $derived.by(() => {
   if (configQuery.data?.backend?.kind !== 'local') return undefined
   // 在提前返回前订阅全部依赖，避免某项加载失败时其余查询停留在旧快照。
@@ -94,17 +89,11 @@ const savedSourceIssue = $derived.by(() => {
   const providersStatus = sourceProvidersQuery.status
   const settings = sourceSettingsQuery.data
   const providers = sourceProvidersQuery.data ?? []
-  const browserStatus = sourceBrowserQuery.status
-  const browserFetching = sourceBrowserQuery.isFetching
-  const browserAvailable = sourceBrowserQuery.data?.available === true
   if (settingsStatus === 'error' || providersStatus === 'error') return 'unavailable'
   if (settingsStatus === 'pending' || providersStatus === 'pending') return 'loading'
   const hasSource = (capability: 'search' | 'fetch', ids: string[]) =>
     providers.some(
-      (provider) =>
-        ids.includes(provider.id) &&
-        provider.capabilities[capability] &&
-        (provider.kind !== 'local' || (browserStatus === 'success' && !browserFetching && browserAvailable)),
+      (provider) => ids.includes(provider.id) && provider.available && provider.capabilities?.[capability] === true,
     )
   if (
     settings &&
@@ -113,13 +102,6 @@ const savedSourceIssue = $derived.by(() => {
   ) {
     return undefined
   }
-  const selectedLocal = providers.some(
-    (provider) =>
-      provider.kind === 'local' &&
-      (settings?.search_provider_ids.includes(provider.id) || settings?.fetch_provider_ids.includes(provider.id)),
-  )
-  if (selectedLocal && browserFetching) return 'loading'
-  if (selectedLocal && browserStatus === 'error') return 'unavailable'
   return 'missing'
 })
 const canEnable = $derived(savedBindingReady && !savedSourceIssue)

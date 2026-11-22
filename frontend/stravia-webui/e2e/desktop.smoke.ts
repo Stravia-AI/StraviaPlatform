@@ -9,8 +9,6 @@ import { promisify } from 'node:util'
 
 import { $, browser, expect } from '@wdio/globals'
 
-import type { WebSearchConfigView } from '../src/lib/types'
-
 interface DesktopPortState {
   currentPort: number
   fixedPort: number | null
@@ -542,52 +540,6 @@ describe('Stravia desktop smoke', () => {
       await adminRequest(port, `/api-keys/${key.id}`, { method: 'DELETE' })
       if (modelId) await adminRequest(port, `/models/${modelId}`, { method: 'DELETE' })
       if (serviceId) await adminRequest(port, `/providers/${serviceId}`, { method: 'DELETE' })
-    }
-  })
-
-  it('shows the native browser chooser and retains an invalid path draft without saving it', async () => {
-    await browser.execute(() => {
-      localStorage.setItem('stravia-locale', 'en-US')
-      localStorage.setItem('stravia-sidebar-state', 'expanded')
-    })
-    await refreshDesktop()
-    await browser.tauri.switchWindow('main')
-    const port = (await browser.tauri.execute(({ core }) => core.invoke('get_server_port'))) as number
-    const { limits, ...savedConfig } = (await adminRequest(port, '/web-search/config')) as WebSearchConfigView
-    // 来源仅在已保存的 Local 模式下显示。此用例不执行搜索，无需绑定模型或启用搜索。
-    await adminRequest(port, '/web-search/config', {
-      method: 'PUT',
-      body: JSON.stringify({
-        ...savedConfig,
-        enabled: false,
-        backend: { kind: 'local', model_id: null },
-        max_turns: limits.min_turns,
-        total_time_seconds: limits.min_total_time_seconds,
-      }),
-    })
-    try {
-      await $('a[href="/web-search"]').click()
-      const edit = $(
-        '//*[@id="web-search-sources"]//div[contains(@class,"py-3")][.//p[normalize-space()="Local"]]//button[normalize-space()="Edit"]',
-      )
-      await edit.click()
-      await expect($('#web-provider-browser-choose')).toBeDisplayed()
-      const path = $('#web-provider-browser-path')
-      await expect(path).toBeEnabled()
-      const savedPath = await path.getValue()
-      const invalidPath = resolve(process.cwd(), 'missing-stravia-chrome-executable')
-      await path.setValue(invalidPath)
-      await $('[role="dialog"]').$('button=Save service').click()
-      await expect($('#web-provider-browser-error')).toBeDisplayed()
-      await expect(path).toHaveValue(invalidPath)
-      await $('[role="dialog"]').$('button=Cancel').click()
-      await $('button=Discard changes').click()
-      await expect($('#web-provider-browser-path')).not.toExist()
-      await edit.click()
-      await expect($('#web-provider-browser-path')).toHaveValue(savedPath)
-      await $('[role="dialog"]').$('button=Cancel').click()
-    } finally {
-      await adminRequest(port, '/web-search/config', { method: 'PUT', body: JSON.stringify(savedConfig) })
     }
   })
 
