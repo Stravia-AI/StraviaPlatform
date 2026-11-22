@@ -339,7 +339,7 @@ graph TD
 
 **Web Access 扩展边界与公共工具：**
 
-开源核心不内置 `LocalWeb`、Chromium/CDP 浏览器运行时或硬编码的 `local` / `exa` / `zhipu` Web Provider 适配器。`stravia-web-access-contract` 定义 `WebProviderAdapter`、`WebProviderFactory`、`WebProviderRegistry`、`WebProviderKindDescriptor`、`OutboundProxyMode` 及公共地址策略 `address_policy`；外层宿主通过 `GatewayBuilder::web_provider_factory(...)` 在启动期注入外部 Web Provider 扩展（如独立 worker 节点适配器），管理面通过 `GET /api/v1/web-provider-kinds` 与脱敏 `WebProviderView` 动态发现能力、可用性与配置规则。开源默认构建下不注册任何内置 Web Provider，外部联网搜索继续通过 Wasm Vendor 插件的 `Capability::Search` External Search Route 提供。
+开源核心不内置 `LocalWeb`、Chromium/CDP 浏览器运行时或硬编码的 `local` / `exa` / `zhipu` Web Provider 适配器。`stravia-web-access-contract` 定义 `WebProviderAdapter`、`WebProviderFactory`、`WebProviderRegistry`、`WebProviderKindDescriptor`、`OutboundProxyMode` 及公共地址策略 `address_policy`；外层宿主通过 `GatewayBuilder::web_provider_factory(...)` 在启动期注入外部 Web Provider 扩展（如独立 worker 节点适配器），管理面通过 `GET /api/v1/web-provider-kinds` 与脱敏 `WebProviderView` 动态发现能力、可用性与配置规则。开源默认构建下不注册任何内置 Web Provider，外部联网搜索继续通过 Wasm Vendor 插件的 `Capability::Search` External Search Route 提供。完整重构设计见 [Web Access Provider 外部化与解耦重构设计](web-access-providers.md)。
 
 `stravia-web-access` 保留公共 Web 资源读取与转换流水线（`fetch::{convert_read_bytes, resolve_final_url, resource}`）、远程 MCP Streamable HTTP 传输（`mcp_http_transport`）及 wire-debug 抓包封装（`wire`），底层统一使用 `reqwest` 并维持逐跳公开地址校验、直连 IP 固定与 `socks5 -> socks5h` 代理侧 DNS 策略。数据库迁移 `0058_generalize_web_providers.sql` 将 `web_providers.local_engines` 泛化为可空 JSON 对象列 `config_json`、移除硬编码 kind 约束与 `web-provider-local` 种子行、清理 `web_access_browser_path` 项，同时保留用户历史配置的非 `local` 记录，使降级或升级后管理面仍可查看并删除未注册类型的遗留记录。
 
