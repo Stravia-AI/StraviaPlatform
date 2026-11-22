@@ -21,18 +21,30 @@ fn is_user_input_item(item: &stravia_runtime_contract::protocol::ir::AiItem) -> 
     }
 }
 
-/// 本轮连续用户 items 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
+/// 本轮用户 items 的完整有序文本单元；与 Turn Chain 使用同一拆分函数，摘要因此一致。
+///
+/// 从最后一个用户输入 item 向前扫描至本轮边界（`Assistant`、`Tool` 或纯 `tool_result` 的 `User`），
+/// 跳过夹在同轮用户输入之间的 `System`/`Developer` 上下文注入（不收录其文本，也不截断本轮）。
 pub(crate) fn user_input_units(
     items: &[stravia_runtime_contract::protocol::ir::AiItem],
 ) -> Option<Vec<String>> {
-    use stravia_runtime_contract::protocol::ir::content::{ContentUnitBody, item_content_units};
+    use stravia_runtime_contract::protocol::ir::{
+        Role,
+        content::{ContentUnitBody, item_content_units},
+    };
     let end = items.iter().rposition(is_user_input_item)?;
     let mut start = end;
-    while start > 0 && is_user_input_item(&items[start - 1]) {
-        start -= 1;
+    while start > 0 {
+        let prev = &items[start - 1];
+        if is_user_input_item(prev) || matches!(prev.role, Role::System | Role::Developer) {
+            start -= 1;
+        } else {
+            break;
+        }
     }
     let texts: Vec<String> = items[start..=end]
         .iter()
+        .filter(|item| is_user_input_item(item))
         .flat_map(item_content_units)
         .filter_map(|unit| match unit.body {
             ContentUnitBody::Text(text) => Some(text.to_owned()),
@@ -1166,6 +1178,26 @@ mod tests {
         assert_eq!(
             super::user_input_units(&items),
             Some(vec!["followup".to_owned(), "time-context".to_owned()])
+        );
+        // 同轮用户输入之间夹杂 system/developer 上下文注入（如 DSH 的 runtime-context、skill-catalog）：
+        // 跳过注入文本而不截断本轮，同时仍在上一轮 assistant 处止步。
+        let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
+            serde_json::from_value(serde_json::json!([
+                {"role":"system","content":"system-secret"},
+                {"role":"user","content":"turn-1"},
+                {"role":"assistant","content":"reply-1"},
+                {"role":"user","content":"请检查当前仓库"},
+                {"role":"developer","content":"runtime-context-secret"},
+                {"role":"system","content":"skill-catalog-secret"},
+                {"role":"user","content":"Time sampled while preparing turn 2, step 1"}
+            ]))
+            .unwrap();
+        assert_eq!(
+            super::user_input_units(&items),
+            Some(vec![
+                "请检查当前仓库".to_owned(),
+                "Time sampled while preparing turn 2, step 1".to_owned(),
+            ])
         );
         // 同轮末尾跟空块 user item 时仍保留前面的用户正文。
         let items: Vec<stravia_runtime_contract::protocol::ir::AiItem> =
