@@ -4,9 +4,6 @@
   serverPackage,
 }:
 let
-  alternateBrowser = pkgs.writeShellScript "stravia-alternate-browser" ''
-    exec ${pkgs.lib.getExe pkgs.chromium} "$@"
-  '';
   consumer = pkgs.writeText "stravia-service-consumer.py" ''
     import http.cookiejar
     import json
@@ -97,7 +94,7 @@ let
       pkgs.python3
       pkgs.curl
     ];
-    # 测试 VLAN 已有静态地址；不让额外 DHCP/RA 在 Chromium 导航中改变网络。
+    # 测试 VLAN 已有静态地址；关闭额外 DHCP/RA 保持 VM 网络确定。
     networking.useDHCP = false;
     virtualisation.memorySize = 3072;
     virtualisation.cores = 2;
@@ -149,17 +146,6 @@ pkgs.testers.runNixOSTest {
         ];
         trustedProxies = [ "127.0.0.1/32" ];
         configPollInterval = 0;
-        browserPackage = pkgs.chromium;
-        environmentFile = "/run/stravia-browser.env";
-      };
-      systemd.services.stravia-browser-environment = {
-        before = [ "stravia.service" ];
-        requiredBy = [ "stravia.service" ];
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-        };
-        script = "umask 077; touch /run/stravia-browser.env";
       };
       # 测试私钥只在隔离 VM 的 /run 生成，不进入 Nix store；浏览器正常验证证书。
       systemd.services.stravia-test-pki = {
@@ -219,21 +205,6 @@ pkgs.testers.runNixOSTest {
       };
       systemd.services.stravia.after = [ "nginx.service" ];
       systemd.services.stravia.requires = [ "nginx.service" ];
-      systemd.services.stravia.serviceConfig.ExecStartPost =
-        pkgs.writeShellScript "stravia-browser-smoke" ''
-          set -euo pipefail
-          if [ ! -f "$HOME/.pki/nssdb/cert9.db" ]; then
-            mkdir -p "$HOME/.pki/nssdb"
-            ${pkgs.nssTools}/bin/certutil -N -d "sql:$HOME/.pki/nssdb" --empty-password
-            ${pkgs.nssTools}/bin/certutil -A -d "sql:$HOME/.pki/nssdb" \
-              -n stravia-vm-root -t 'C,,' -i /run/stravia-test-pki/ca.pem
-          fi
-          "$STRAVIA_CHROME_PATH" --headless --disable-gpu --dump-dom \
-            "data:text/html,<title>stravia-nixos-browser</title><script>document.title='stravia-javascript-executed'</script>" \
-            | ${pkgs.python3}/bin/python3 -c 'import sys; assert "<title>stravia-javascript-executed</title>" in sys.stdin.read()'
-          "$STRAVIA_CHROME_PATH" --headless --disable-gpu --dump-dom https://localhost:8443/ \
-            | ${pkgs.python3}/bin/python3 -c 'import sys; assert "/_app/immutable/" in sys.stdin.read()'
-        '';
     };
     missing = { ... }: {
       imports = [ common ];
@@ -279,10 +250,6 @@ pkgs.testers.runNixOSTest {
     custom.execute("systemd-tmpfiles --create --prefix='/srv/stravia %$ state'")
     custom.succeed("test $(stat -c '%U:%G:%a' /var/lib/stravia-sentinel) = root:root:700; test ! -e /var/lib/stravia-sentinel/custom.toml")
     custom.succeed("systemctl stop stravia.service; rm -- '/srv/stravia %$ state'; mv /srv/stravia-original '/srv/stravia %$ state'; chown root:root /srv; systemctl reset-failed stravia.service")
-    # 替代路径本身可运行，失败必须来自选项所有权冲突，而非找不到浏览器。
-    custom.succeed("printf '%s\\n' STRAVIA_CHROME_PATH=${alternateBrowser} > /run/stravia-browser.env")
-    custom.fail("systemctl start stravia.service")
-    custom.succeed("test $(systemctl show stravia.service -p Result --value) = exit-code")
     missing.wait_until_succeeds("systemctl is-failed stravia.service")
     missing.fail("curl -fsS http://127.0.0.1:23471/healthz")
     missing.succeed("test ! -e /var/lib/stravia/server.toml")

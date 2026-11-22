@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use async_trait::async_trait;
 
 use crate::db::models::{
@@ -447,30 +446,13 @@ pub(crate) fn validate_web_access_provider_lists(
     providers: &[WebProvider],
     settings: &WebAccessSettings,
 ) -> anyhow::Result<()> {
-    validate_web_access_priority_list(providers, &settings.search_provider_ids, true)?;
-    validate_web_access_priority_list(providers, &settings.fetch_provider_ids, false)?;
-    Ok(())
-}
-
-fn validate_web_access_priority_list(
-    providers: &[WebProvider],
-    ids: &[String],
-    search: bool,
-) -> anyhow::Result<()> {
-    for id in ids {
-        let provider = providers
-            .iter()
-            .find(|provider| provider.id.as_str() == id.as_str())
-            .with_context(|| format!("Web Provider not found: {id}"))?;
-        let capabilities = provider
-            .capabilities()
-            .with_context(|| format!("unsupported Web Provider kind: {}", provider.kind))?;
-        if (search && !capabilities.search) || (!search && !capabilities.fetch) {
-            anyhow::bail!(
-                "Web Provider {} does not support {}",
-                provider.name,
-                if search { "Search" } else { "Fetch" }
-            );
+    for id in settings
+        .search_provider_ids
+        .iter()
+        .chain(&settings.fetch_provider_ids)
+    {
+        if !providers.iter().any(|provider| provider.id == *id) {
+            anyhow::bail!("Web Provider not found: {id}");
         }
     }
     Ok(())

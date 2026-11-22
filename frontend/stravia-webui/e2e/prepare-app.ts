@@ -1,6 +1,16 @@
 import type { Page } from '@playwright/test'
 import type { UpdateStatus } from '../src/lib/product-update'
-import type { ProviderMetadata } from '../src/lib/types'
+import type { CapabilitiesResponse, ProviderMetadata } from '../src/lib/types'
+
+/** Community Edition capabilities: no license and no commercial capabilities. */
+export const communityCapabilities = {
+  edition: 'ce',
+  license_tier: null,
+  license_status: null,
+  capabilities: [],
+  degraded_reason: null,
+  auth_mode: 'single_admin',
+} satisfies CapabilitiesResponse
 
 const codexManualInput = {
   type: 'callback_url',
@@ -229,6 +239,10 @@ export async function prepareApp(page: Page): Promise<void> {
     }
     if (path === '/status') {
       await route.fulfill({ json: { data: { status: 'running' } } })
+      return
+    }
+    if (path === '/capabilities') {
+      await route.fulfill({ json: communityCapabilities })
       return
     }
     if (path === '/updates' || path === '/updates/check') {

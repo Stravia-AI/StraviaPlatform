@@ -1,13 +1,28 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use stravia_web_access::WebProviderKindDescriptor;
 
 use super::*;
 use crate::storage::traits::{ProviderTestResult, WebProviderStore};
 
 impl AdminService {
+    /// 返回当前构建中通过 `GatewayBuilder::web_provider_factory` 注册的全部 Web Provider 类型描述。
+    pub fn list_web_provider_kinds(&self) -> Vec<WebProviderKindDescriptor> {
+        self.gw.web_provider_registry().descriptors()
+    }
+
     pub async fn list_web_providers(&self) -> anyhow::Result<Vec<WebProvider>> {
         self.web_provider_store()?.list().await
+    }
+
+    pub async fn list_web_provider_views(&self) -> anyhow::Result<Vec<WebProviderView>> {
+        let providers = self.list_web_providers().await?;
+        let mut views = Vec::with_capacity(providers.len());
+        for provider in providers {
+            views.push(self.web_provider_view(provider).await);
+        }
+        Ok(views)
     }
 
     pub async fn get_web_provider(&self, id: &str) -> anyhow::Result<WebProvider> {
@@ -17,40 +32,111 @@ impl AdminService {
             .context("Web Provider not found")
     }
 
+    pub async fn get_web_provider_view(&self, id: &str) -> anyhow::Result<WebProviderView> {
+        let provider = self.get_web_provider(id).await?;
+        Ok(self.web_provider_view(provider).await)
+    }
+
+    pub async fn web_provider_view(&self, provider: WebProvider) -> WebProviderView {
+        let factory = self.gw.web_provider_registry().get(&provider.kind);
+        let api_key_configured = provider
+            .api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        let (registered, available, unavailable_reason, capabilities, allow_delete, config) =
+            if let Some(factory) = factory {
+                let descriptor = factory.descriptor();
+                let available = factory.is_available().await;
+                let unavailable_reason = if available {
+                    None
+                } else {
+                    Some(factory.unavailable_reason().1)
+                };
+                let config = factory.public_config_view(provider.config_json.as_deref());
+                (
+                    true,
+                    available,
+                    unavailable_reason,
+                    Some(descriptor.capabilities),
+                    descriptor.allow_delete,
+                    config,
+                )
+            } else {
+                (
+                    false,
+                    false,
+                    Some(format!(
+                        "Web Provider kind '{}' is not registered in this build",
+                        provider.kind
+                    )),
+                    None,
+                    true,
+                    None,
+                )
+            };
+        WebProviderView {
+            id: provider.id,
+            name: provider.name,
+            kind: provider.kind,
+            api_key_configured,
+            use_proxy: provider.use_proxy,
+            config,
+            capabilities,
+            registered,
+            available,
+            unavailable_reason,
+            allow_delete,
+            last_test_success: provider.last_test_success,
+            last_test_at: provider.last_test_at,
+            created_at: provider.created_at,
+            updated_at: provider.updated_at,
+        }
+    }
+
     pub async fn create_web_provider(
         &self,
         mut input: CreateWebProvider,
     ) -> anyhow::Result<WebProvider> {
         let api_key_supplied = input.api_key.is_some();
         input.name = normalize_name(&input.name, "Web Provider name")?;
-        input.kind = normalize_web_provider_kind(&input.kind)?;
+        input.kind = input.kind.trim().to_ascii_lowercase();
+        let factory = self
+            .gw
+            .web_provider_registry()
+            .get(&input.kind)
+            .with_context(|| format!("unsupported Web Provider kind: {}", input.kind))?;
+        let descriptor = factory.descriptor();
         input.api_key = normalize_optional_text(input.api_key);
-        if input.kind == "local"
+        if descriptor.singleton
             && self
                 .web_provider_store()?
                 .list()
                 .await?
                 .iter()
-                .any(|provider| provider.kind == "local")
+                .any(|provider| provider.kind == input.kind)
         {
             return Err(coded_error(
-                "WEB_PROVIDER_LOCAL_SINGLETON",
-                "Local Web Provider already exists",
-                serde_json::json!({}),
+                "WEB_PROVIDER_SINGLETON_CONFLICT",
+                &format!("Web Provider of kind '{}' already exists", input.kind),
+                serde_json::json!({ "kind": input.kind }),
             ));
         }
+        let config_supplied = input.config.is_some();
         self.ensure_web_provider_name_unique(None, &input.name)
             .await?;
-        if input.kind == "local" && input.local_engines.is_none() {
-            input.local_engines = Some(default_local_search_engines());
+        if input.config.is_none() {
+            input.config = factory.default_config();
         }
-        Self::validate_web_provider_input(
-            &input.kind,
-            input.api_key.as_deref(),
-            api_key_supplied,
-            input.local_engines.is_some(),
-            input.local_engines.as_mut(),
-        )?;
+        validate_config_object(input.config.as_ref())?;
+        factory
+            .validate_config(
+                input.api_key.as_deref(),
+                api_key_supplied,
+                config_supplied,
+                input.config.as_mut(),
+            )
+            .map_err(anyhow::Error::msg)?;
+        validate_config_object(input.config.as_ref())?;
         let provider = self.web_provider_store()?.create(input).await?;
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(provider)
@@ -62,8 +148,13 @@ impl AdminService {
         mut input: UpdateWebProvider,
     ) -> anyhow::Result<WebProvider> {
         let current = self.get_web_provider(id).await?;
+        let factory = self
+            .gw
+            .web_provider_registry()
+            .get(&current.kind)
+            .with_context(|| format!("unsupported Web Provider kind: {}", current.kind))?;
         let api_key_supplied = input.api_key.is_some();
-        let local_engines_supplied = input.local_engines.is_some();
+        let config_supplied = input.config.is_some();
         let name = normalize_name(
             input.name.as_deref().unwrap_or(&current.name),
             "Web Provider name",
@@ -75,26 +166,21 @@ impl AdminService {
             Some(value) => value.as_deref(),
             None => current.api_key.as_deref(),
         };
-        let mut local_engines = match input.local_engines.take() {
-            Some(Some(update)) => Some(merge_local_engines(
-                current.local_engines.as_deref(),
-                update,
-            )),
+        let mut merged_config = match input.config.take() {
+            Some(Some(incoming)) => {
+                validate_config_object(Some(&incoming))?;
+                Some(factory.merge_config(current.config_json.as_deref(), incoming))
+            }
             Some(None) => None,
-            None => current
-                .local_engines
-                .as_ref()
-                .map(|engines| engines.0.clone()),
+            None => current.config_json.as_ref().map(|value| value.0.clone()),
         };
-        Self::validate_web_provider_input(
-            &current.kind,
-            api_key,
-            api_key_supplied,
-            local_engines_supplied,
-            local_engines.as_mut(),
-        )?;
+        validate_config_object(merged_config.as_ref())?;
+        factory
+            .validate_config(api_key, api_key_supplied, config_supplied, merged_config.as_mut())
+            .map_err(anyhow::Error::msg)?;
+        validate_config_object(merged_config.as_ref())?;
         input.name = Some(name);
-        input.local_engines = local_engines_supplied.then_some(local_engines);
+        input.config = config_supplied.then_some(merged_config);
         let provider = self.web_provider_store()?.update(id, input).await?;
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(provider)
@@ -102,11 +188,16 @@ impl AdminService {
 
     pub async fn delete_web_provider(&self, id: &str) -> anyhow::Result<()> {
         let provider = self.get_web_provider(id).await?;
-        if provider.kind == "local" {
+        if let Some(factory) = self.gw.web_provider_registry().get(&provider.kind)
+            && !factory.descriptor().allow_delete
+        {
             return Err(coded_error(
-                "WEB_PROVIDER_LOCAL_DELETE_FORBIDDEN",
-                "Remove Local from the Search or Fetch list instead of deleting it",
-                serde_json::json!({ "id": id }),
+                "WEB_PROVIDER_DELETE_FORBIDDEN",
+                &format!(
+                    "Remove '{}' from the Search or Fetch list instead of deleting it",
+                    provider.name
+                ),
+                serde_json::json!({ "id": id, "kind": provider.kind }),
             ));
         }
         self.web_provider_store()?.delete(id).await?;
@@ -158,25 +249,59 @@ impl AdminService {
         let store = self.web_provider_store()?;
         let current = store.load_settings().await?;
         let providers = store.list().await?;
-        let requires_browser = providers
-            .iter()
-            .filter(|provider| provider.kind == "local")
-            .any(|provider| {
-                let search = settings.search_provider_ids.contains(&provider.id);
-                let fetch = settings.fetch_provider_ids.contains(&provider.id);
-                (search && !current.search_provider_ids.contains(&provider.id))
-                    || (fetch && !current.fetch_provider_ids.contains(&provider.id))
-            });
-        if requires_browser && !self.gw.web_access().local_browser_available().await {
-            return Err(coded_error(
-                "WEB_ACCESS_BROWSER_REQUIRED",
-                "Local Search and Fetch require Chrome/Chromium on the machine running Stravia; configure its executable in the Local service editor, or set STRAVIA_CHROME_PATH and restart Stravia",
-                serde_json::json!({}),
-            ));
-        }
+        self.validate_selected_providers(
+            &providers,
+            &settings.search_provider_ids,
+            &current.search_provider_ids,
+            true,
+        )
+        .await?;
+        self.validate_selected_providers(
+            &providers,
+            &settings.fetch_provider_ids,
+            &current.fetch_provider_ids,
+            false,
+        )
+        .await?;
         store.save_settings(&settings).await?;
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(settings)
+    }
+
+    async fn validate_selected_providers(
+        &self,
+        providers: &[WebProvider],
+        next_ids: &[String],
+        current_ids: &[String],
+        search: bool,
+    ) -> anyhow::Result<()> {
+        let registry = self.gw.web_provider_registry();
+        for id in next_ids {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.id == *id)
+                .with_context(|| format!("Web Provider not found: {id}"))?;
+            let factory = registry
+                .get(&provider.kind)
+                .with_context(|| format!("unsupported Web Provider kind: {}", provider.kind))?;
+            let capabilities = factory.descriptor().capabilities;
+            if (search && !capabilities.search) || (!search && !capabilities.fetch) {
+                anyhow::bail!(
+                    "Web Provider {} does not support {}",
+                    provider.name,
+                    if search { "Search" } else { "Fetch" }
+                );
+            }
+            if !current_ids.contains(id) && !factory.is_available().await {
+                let (code, reason) = factory.unavailable_reason();
+                return Err(coded_error(
+                    code,
+                    &reason,
+                    serde_json::json!({ "id": provider.id, "kind": provider.kind }),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn web_provider_store(&self) -> anyhow::Result<&dyn WebProviderStore> {
@@ -204,99 +329,21 @@ impl AdminService {
         }
         Ok(())
     }
+}
 
-    fn validate_web_provider_input(
-        kind: &str,
-        api_key: Option<&str>,
-        api_key_supplied: bool,
-        local_engines_supplied: bool,
-        local_engines: Option<&mut LocalSearchEngineConfigs>,
-    ) -> anyhow::Result<()> {
-        match kind {
-            "local" => {
-                if api_key_supplied {
-                    anyhow::bail!("Local Web Provider does not accept an API key");
-                }
-                validate_local_engines(
-                    local_engines.context("Local Search Engine configuration is required")?,
-                )?;
-            }
-            "exa" | "zhipu" => {
-                if api_key
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .is_none()
-                {
-                    anyhow::bail!("API key is required for {kind}");
-                }
-                if local_engines_supplied {
-                    anyhow::bail!("{kind} does not accept Local Search Engine configuration");
-                }
-            }
-            _ => anyhow::bail!("unsupported Web Provider kind: {kind}"),
-        }
-        Ok(())
+fn validate_config_object(config: Option<&Value>) -> anyhow::Result<()> {
+    if let Some(value) = config
+        && !value.is_object()
+    {
+        anyhow::bail!("Web Provider configuration must be a JSON object");
     }
+    Ok(())
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn normalize_web_provider_kind(kind: &str) -> anyhow::Result<String> {
-    let kind = kind.trim().to_ascii_lowercase();
-    if matches!(kind.as_str(), "local" | "exa" | "zhipu") {
-        Ok(kind)
-    } else {
-        anyhow::bail!("unsupported Web Provider kind: {kind}")
-    }
-}
-
-fn merge_local_engines(
-    current: Option<&LocalSearchEngineConfigs>,
-    updates: LocalSearchEngineConfigs,
-) -> LocalSearchEngineConfigs {
-    let mut merged = current
-        .cloned()
-        .unwrap_or_else(default_local_search_engines);
-    for (id, mut update) in updates {
-        if update.private_settings.is_none() {
-            update.private_settings = merged
-                .get(&id)
-                .and_then(|engine| engine.private_settings.clone());
-        }
-        merged.insert(id, update);
-    }
-    merged
-}
-
-fn validate_local_engines(engines: &mut LocalSearchEngineConfigs) -> anyhow::Result<()> {
-    const ENGINE_IDS: [&str; 7] = [
-        "google",
-        "bing",
-        "brave",
-        "baidu",
-        "360",
-        "sogou_weixin",
-        "google_scholar",
-    ];
-    for (id, config) in engines.iter_mut() {
-        if !ENGINE_IDS.contains(&id.as_str()) {
-            anyhow::bail!("unknown Local Search Engine: {id}");
-        }
-        let private_settings = config.private_settings.get_or_insert_default();
-        for key in private_settings.keys() {
-            if key != "cookies" {
-                anyhow::bail!("unknown private setting for {id}: {key}");
-            }
-        }
-    }
-    if !engines.values().any(|engine| engine.enabled) {
-        anyhow::bail!("at least one Local Search Engine must be enabled");
-    }
-    Ok(())
 }
 
 fn ensure_unique_ids(ids: &[String], capability: &str) -> anyhow::Result<()> {
@@ -309,10 +356,16 @@ fn ensure_unique_ids(ids: &[String], capability: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use super::*;
+    use crate::test_support::StubWebProviderFactory;
 
     #[tokio::test]
-    async fn creates_zhipu_provider_with_search_and_fetch_capabilities() {
+    async fn default_gateway_has_no_builtin_web_provider_kinds_and_rejects_unregistered_create() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
@@ -321,162 +374,148 @@ mod tests {
         .await
         .expect("gateway");
 
-        let provider = gateway
-            .admin()
-            .create_web_provider(CreateWebProvider {
-                name: "Zhipu".into(),
-                kind: "zhipu".into(),
-                api_key: Some("secret".into()),
-                use_proxy: false,
-                local_engines: None,
-            })
-            .await
-            .expect("Zhipu Web Provider");
-
-        assert_eq!(provider.kind, "zhipu");
-        assert_eq!(
-            provider.capabilities(),
-            Some(WebProviderCapabilities {
-                search: true,
-                fetch: true,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_browser_blocks_local_additions_but_allows_cleanup_and_remote() {
-        let directory = tempfile::tempdir().unwrap();
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: directory.path().to_owned(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-        gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
         let admin = gateway.admin();
-        let local = admin
-            .list_web_providers()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|provider| provider.kind == "local")
-            .unwrap();
-        let store = gateway.storage.web_providers().unwrap();
-        let empty = WebAccessSettings::default();
-        store.save_settings(&empty).await.unwrap();
-        for search in [false, true] {
-            let requested = WebAccessSettings {
-                search_provider_ids: if search {
-                    vec![local.id.clone()]
-                } else {
-                    vec![]
-                },
-                fetch_provider_ids: if search {
-                    vec![]
-                } else {
-                    vec![local.id.clone()]
-                },
-            };
-            let error = admin
-                .update_web_access_settings(requested)
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("WEB_ACCESS_BROWSER_REQUIRED"));
-            assert_eq!(admin.get_web_access_settings().await.unwrap(), empty);
-        }
-        let stale = WebAccessSettings {
-            search_provider_ids: vec![local.id.clone()],
-            fetch_provider_ids: vec![local.id.clone()],
-        };
-        store.save_settings(&stale).await.unwrap();
+        assert!(admin.list_web_provider_kinds().is_empty());
+        assert!(admin.list_web_providers().await.unwrap().is_empty());
         assert_eq!(
-            admin
-                .update_web_access_settings(stale.clone())
-                .await
-                .unwrap(),
-            stale
+            admin.get_web_access_settings().await.unwrap(),
+            WebAccessSettings::default()
         );
-        admin.update_web_access_settings(empty).await.unwrap();
-        let remote = admin
+
+        let err = admin
             .create_web_provider(CreateWebProvider {
-                name: "Remote".into(),
-                kind: "exa".into(),
-                api_key: Some("secret".into()),
-                use_proxy: false,
-                local_engines: None,
-            })
-            .await
-            .unwrap();
-        let remote_settings = WebAccessSettings {
-            search_provider_ids: vec![remote.id.clone()],
-            fetch_provider_ids: vec![remote.id],
-        };
-        assert_eq!(
-            admin
-                .update_web_access_settings(remote_settings.clone())
-                .await
-                .unwrap(),
-            remote_settings
-        );
-        let probe = admin.test_web_provider(&local.id).await.unwrap();
-        assert!(!probe.success);
-    }
-
-    #[tokio::test]
-    async fn seeded_local_provider_is_a_non_deletable_singleton() {
-        let data_dir = tempfile::tempdir().expect("temp data dir");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
-            data_dir: data_dir.path().to_path_buf(),
-            ..Default::default()
-        })
-        .await
-        .expect("gateway");
-        let admin = gateway.admin();
-
-        let local = admin
-            .list_web_providers()
-            .await
-            .expect("Web Providers")
-            .into_iter()
-            .find(|provider| provider.kind == "local")
-            .expect("seeded Local Web Provider");
-        assert_eq!(
-            local.capabilities(),
-            Some(WebProviderCapabilities {
-                search: true,
-                fetch: true,
-            })
-        );
-
-        let duplicate_error = admin
-            .create_web_provider(CreateWebProvider {
-                name: "Another Local".into(),
+                name: "Unregistered".into(),
                 kind: "local".into(),
                 api_key: None,
                 use_proxy: false,
-                local_engines: None,
+                config: None,
             })
             .await
-            .expect_err("second Local Web Provider must be rejected");
-        assert!(
-            duplicate_error
-                .to_string()
-                .contains("WEB_PROVIDER_LOCAL_SINGLETON")
-        );
-
-        let delete_error = admin
-            .delete_web_provider(&local.id)
-            .await
-            .expect_err("Local Web Provider deletion must be rejected");
-        assert!(
-            delete_error
-                .to_string()
-                .contains("WEB_PROVIDER_LOCAL_DELETE_FORBIDDEN")
-        );
+            .unwrap_err();
+        assert!(err.to_string().contains("unsupported Web Provider kind"));
     }
 
     #[tokio::test]
-    async fn provider_configuration_persists_without_echoing_secrets() {
+    async fn registered_factory_supports_crud_availability_and_singleton_rules() {
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let available = Arc::new(AtomicBool::new(false));
+        let worker_factory = Arc::new(
+            StubWebProviderFactory::new("worker-web", true, true)
+                .with_requires_api_key(false)
+                .with_singleton(true)
+                .with_allow_delete(false)
+                .with_availability(available.clone(), "Worker is offline"),
+        );
+        let external_factory = Arc::new(StubWebProviderFactory::new("remote-search", true, true));
+
+        let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .web_provider_factory(worker_factory)
+        .web_provider_factory(external_factory)
+        .build()
+        .await
+        .expect("gateway");
+
+        let admin = gateway.admin();
+        let kinds = admin.list_web_provider_kinds();
+        assert_eq!(kinds.len(), 2);
+
+        let worker = admin
+            .create_web_provider(CreateWebProvider {
+                name: "Worker".into(),
+                kind: "worker-web".into(),
+                api_key: None,
+                use_proxy: false,
+                config: Some(serde_json::json!({"endpoint": "http://127.0.0.1:9000"})),
+            })
+            .await
+            .expect("create singleton worker provider");
+
+        // Singleton conflict rejects second instance of the same kind.
+        let dup_err = admin
+            .create_web_provider(CreateWebProvider {
+                name: "Worker 2".into(),
+                kind: "worker-web".into(),
+                api_key: None,
+                use_proxy: false,
+                config: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(dup_err.to_string().contains("WEB_PROVIDER_SINGLETON_CONFLICT"));
+
+        // Non-deletable kind cannot be deleted.
+        let del_err = admin.delete_web_provider(&worker.id).await.unwrap_err();
+        assert!(del_err.to_string().contains("WEB_PROVIDER_DELETE_FORBIDDEN"));
+
+        // Unavailable provider cannot be newly added to Web Access settings.
+        let unavail_err = admin
+            .update_web_access_settings(WebAccessSettings {
+                search_provider_ids: vec![worker.id.clone()],
+                fetch_provider_ids: vec![],
+            })
+            .await
+            .unwrap_err();
+        assert!(unavail_err.to_string().contains("WEB_PROVIDER_UNAVAILABLE"));
+
+        // Once available, selection succeeds and view reflects availability.
+        available.store(true, Ordering::SeqCst);
+        let view = admin.get_web_provider_view(&worker.id).await.unwrap();
+        assert!(view.registered);
+        assert!(view.available);
+        assert!(!view.allow_delete);
+        assert_eq!(
+            view.capabilities,
+            Some(WebProviderCapabilities {
+                search: true,
+                fetch: true,
+            })
+        );
+        admin
+            .update_web_access_settings(WebAccessSettings {
+                search_provider_ids: vec![worker.id.clone()],
+                fetch_provider_ids: vec![worker.id.clone()],
+            })
+            .await
+            .unwrap();
+
+        // When worker later goes offline, removing it from settings still works cleanly.
+        available.store(false, Ordering::SeqCst);
+        admin
+            .update_web_access_settings(WebAccessSettings::default())
+            .await
+            .unwrap();
+
+        // Standard API-key provider enforces key presence and supports deletion.
+        let missing_key = admin
+            .create_web_provider(CreateWebProvider {
+                name: "Remote".into(),
+                kind: "remote-search".into(),
+                api_key: None,
+                use_proxy: false,
+                config: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(missing_key.to_string().contains("API key is required"));
+
+        let remote = admin
+            .create_web_provider(CreateWebProvider {
+                name: "Remote".into(),
+                kind: "remote-search".into(),
+                api_key: Some("secret".into()),
+                use_proxy: false,
+                config: None,
+            })
+            .await
+            .unwrap();
+        admin.delete_web_provider(&remote.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unregistered_legacy_rows_surface_as_unregistered_and_remain_deletable() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let gateway = crate::Gateway::new(crate::config::GatewayConfig {
             data_dir: data_dir.path().to_path_buf(),
@@ -484,170 +523,30 @@ mod tests {
         })
         .await
         .expect("gateway");
+        let store = gateway.storage.web_providers().unwrap();
+        let legacy = store
+            .create(CreateWebProvider {
+                name: "Legacy Exa".into(),
+                kind: "exa".into(),
+                api_key: Some("legacy-secret".into()),
+                use_proxy: false,
+                config: None,
+            })
+            .await
+            .unwrap();
+
         let admin = gateway.admin();
-        let local = admin
-            .list_web_providers()
-            .await
-            .expect("Web Providers")
-            .into_iter()
-            .find(|provider| provider.kind == "local")
-            .expect("Local Web Provider");
+        let views = admin.list_web_provider_views().await.unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, legacy.id);
+        assert!(!views[0].registered);
+        assert!(!views[0].available);
+        assert!(views[0].allow_delete);
+        assert!(views[0].api_key_configured);
+        assert!(views[0].unavailable_reason.is_some());
 
-        let initial_bing_enabled =
-            local.local_engines.as_deref().expect("Local engines")["bing"].enabled;
-        let update = serde_json::from_value::<UpdateWebProvider>(serde_json::json!({
-            "name": "On-device Web",
-            "use_proxy": true,
-            "local_engines": {
-                "google": {
-                    "enabled": false,
-                    "private_settings": {
-                        "cookies": "SID=private-session"
-                    }
-                }
-            }
-        }))
-        .expect("Local update");
-        admin
-            .update_web_provider(&local.id, update)
-            .await
-            .expect("updated Local Web Provider");
-        let update_without_secret =
-            serde_json::from_value::<UpdateWebProvider>(serde_json::json!({
-                "local_engines": {
-                    "google": { "enabled": true }
-                }
-            }))
-            .expect("partial Local update");
-        admin
-            .update_web_provider(&local.id, update_without_secret)
-            .await
-            .expect("partially updated Local Web Provider");
-
-        let persisted = admin
-            .get_web_provider(&local.id)
-            .await
-            .expect("persisted Local Web Provider");
-        assert_eq!(persisted.name, "On-device Web");
-        assert!(persisted.use_proxy);
-        let engines = persisted.local_engines.as_deref().expect("Local engines");
-        assert!(engines["google"].enabled);
-        assert_eq!(engines["bing"].enabled, initial_bing_enabled);
-        assert_eq!(
-            engines["google"]
-                .private_settings
-                .as_ref()
-                .and_then(|settings| settings.get("cookies"))
-                .map(String::as_str),
-            Some("SID=private-session")
-        );
-        let serialized = serde_json::to_string(&persisted).expect("serialized Web Provider");
-        assert!(!serialized.contains("SID=private-session"));
-        assert!(!serialized.contains("private_settings"));
-
-        let test_result = admin
-            .test_web_provider(&local.id)
-            .await
-            .expect("Local connectivity test result");
-        assert!(!test_result.success);
-        assert!(
-            test_result
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("outbound_proxy"))
-        );
-
-        for kind in ["exa", "zhipu"] {
-            let created = admin
-                .create_web_provider(CreateWebProvider {
-                    name: kind.to_ascii_uppercase(),
-                    kind: kind.into(),
-                    api_key: Some("remote-secret".into()),
-                    use_proxy: true,
-                    local_engines: None,
-                })
-                .await
-                .expect("remote Web Provider");
-            let persisted = admin
-                .get_web_provider(&created.id)
-                .await
-                .expect("persisted remote Web Provider");
-            assert_eq!(persisted.kind, kind);
-            assert_eq!(persisted.api_key.as_deref(), Some("remote-secret"));
-            assert!(persisted.use_proxy);
-            assert!(persisted.local_engines.is_none());
-            assert!(
-                !serde_json::to_string(&persisted)
-                    .expect("serialized remote Web Provider")
-                    .contains("remote-secret")
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_local_engine_configuration_without_gateway() {
-        let invalid = [
-            (
-                "unknown engine",
-                serde_json::from_value::<LocalSearchEngineConfigs>(serde_json::json!({
-                    "unknown": { "enabled": true }
-                }))
-                .unwrap(),
-            ),
-            (
-                "unknown private setting",
-                serde_json::from_value::<LocalSearchEngineConfigs>(serde_json::json!({
-                    "google": {
-                        "enabled": true,
-                        "private_settings": { "typo": "secret" }
-                    }
-                }))
-                .unwrap(),
-            ),
-            (
-                "all engines disabled",
-                default_local_search_engines()
-                    .into_iter()
-                    .map(|(id, mut engine)| {
-                        engine.enabled = false;
-                        (id, engine)
-                    })
-                    .collect(),
-            ),
-        ];
-
-        for (case, mut engines) in invalid {
-            validate_local_engines(&mut engines).expect_err(case);
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_web_provider_kind_configuration_without_gateway() {
-        for kind in ["brave", "tavily"] {
-            normalize_web_provider_kind(kind).expect_err("unsupported kind");
-        }
-
-        let mut local_engines = default_local_search_engines();
-        AdminService::validate_web_provider_input(
-            "local",
-            Some("not-allowed"),
-            true,
-            true,
-            Some(&mut local_engines),
-        )
-        .expect_err("Local API key must be rejected");
-
-        AdminService::validate_web_provider_input("exa", None, false, false, None)
-            .expect_err("remote API key is required");
-
-        let mut remote_engines = default_local_search_engines();
-        AdminService::validate_web_provider_input(
-            "zhipu",
-            Some("secret"),
-            true,
-            true,
-            Some(&mut remote_engines),
-        )
-        .expect_err("remote Local Search Engines must be rejected");
+        // Legacy unregistered provider can be cleanly deleted.
+        admin.delete_web_provider(&legacy.id).await.unwrap();
+        assert!(admin.list_web_providers().await.unwrap().is_empty());
     }
 }

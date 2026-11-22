@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware;
@@ -5,6 +7,9 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 
+#[cfg(test)]
+use crate::extensions::CeCapabilityProvider;
+use crate::extensions::{CapabilitiesResponse, CapabilityProvider};
 use crate::http_auth::{AdminHttpState, auth_router, require_admin};
 use serde::Deserialize;
 use stravia_core::Gateway;
@@ -38,14 +43,32 @@ use provider_allowances::{
 
 #[cfg(test)]
 pub(crate) fn create_unprotected_router(gateway: Gateway) -> Router {
-    create_router_inner(gateway, None)
+    create_router_inner(gateway, None, Arc::new(CeCapabilityProvider), None, None)
 }
 
-pub(crate) fn create_router(gateway: Gateway, auth: AdminHttpState) -> Router {
-    create_router_inner(gateway, Some(auth))
+pub(crate) fn create_router(
+    gateway: Gateway,
+    auth: AdminHttpState,
+    capability_provider: Arc<dyn CapabilityProvider>,
+    extra_admin_routes: Option<Router>,
+    extra_public_routes: Option<Router>,
+) -> Router {
+    create_router_inner(
+        gateway,
+        Some(auth),
+        capability_provider,
+        extra_admin_routes,
+        extra_public_routes,
+    )
 }
 
-fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router {
+fn create_router_inner(
+    gateway: Gateway,
+    auth: Option<AdminHttpState>,
+    capability_provider: Arc<dyn CapabilityProvider>,
+    extra_admin_routes: Option<Router>,
+    extra_public_routes: Option<Router>,
+) -> Router {
     let oauth_callbacks = OAuthCallbackManager::new(gateway.clone());
     let providers_item = get(get_provider_handler)
         .put(update_provider_handler)
@@ -120,16 +143,13 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             "/currency",
             get(money::get_currency).put(money::put_currency),
         )
+        .route("/web-provider-kinds", get(list_web_provider_kinds_handler))
         .route(
             "/web-providers",
             get(list_web_providers_handler).post(create_web_provider_handler),
         )
         .route("/web-providers/{id}", web_providers_item)
         .route("/web-providers/{id}/test", post(test_web_provider_handler))
-        .route(
-            "/web-access/browser",
-            get(get_web_access_browser_handler).put(update_web_access_browser_handler),
-        )
         .route(
             "/web-access/settings",
             get(get_web_access_settings_handler).put(update_web_access_settings_handler),
@@ -362,12 +382,43 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
         .route("/status", get(get_status))
         .layer(Extension(oauth_callbacks))
         .with_state(gateway.clone());
+    let auth_mode = auth
+        .as_ref()
+        .map(|state| state.auth_provider.auth_mode())
+        .unwrap_or("single_admin");
+    let capabilities_route = Router::new().route(
+        "/capabilities",
+        get({
+            let provider = Arc::clone(&capability_provider);
+            move || {
+                let provider = Arc::clone(&provider);
+                async move {
+                    let snapshot = provider.capabilities();
+                    let mut capabilities = snapshot.capabilities;
+                    capabilities.sort();
+                    capabilities.dedup();
+                    Json(CapabilitiesResponse {
+                        edition: snapshot.edition,
+                        license_tier: snapshot.license_tier,
+                        license_status: snapshot.license_status,
+                        capabilities,
+                        degraded_reason: snapshot.degraded_reason,
+                        auth_mode: auth_mode.to_string(),
+                    })
+                }
+            }
+        }),
+    );
+    api = api.merge(capabilities_route);
+    if let Some(extra_admin) = extra_admin_routes {
+        api = api.merge(extra_admin);
+    }
     if let Some(auth_state) = auth.clone() {
         api = api.layer(middleware::from_fn_with_state(auth_state, require_admin));
     }
     // Catalog logos are public assets. Debug bundle downloads are separately authorized
     // by a single-use opaque ticket so browser navigation never exposes Admin credentials.
-    let public_api = Router::new()
+    let mut public_api = Router::new()
         .route(
             "/catalog/providers/{provider_id}/logo",
             get(catalog_logo_handler),
@@ -377,6 +428,9 @@ fn create_router_inner(gateway: Gateway, auth: Option<AdminHttpState>) -> Router
             get(consume_bundle_ticket),
         )
         .with_state(gateway.clone());
+    if let Some(extra_public) = extra_public_routes {
+        public_api = public_api.merge(extra_public);
+    }
 
     // Health probes are unauthenticated so K8s/load-balancers can reach them
     // without an admin token.

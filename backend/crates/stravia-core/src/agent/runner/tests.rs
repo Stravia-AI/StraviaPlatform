@@ -431,7 +431,7 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
     use std::io::Read;
     use stravia_runtime_contract::hook::{PlatformTool, PlatformToolError, ToolExecutionContext};
 
-    struct RemoteTool(Arc<stravia_web_access::LocalWeb>);
+    struct RemoteTool(reqwest::Client);
 
     #[async_trait]
     impl PlatformTool for RemoteTool {
@@ -456,15 +456,18 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
             arguments: Value,
             _context: ToolExecutionContext,
         ) -> Result<Value, PlatformToolError> {
-            let request = axum::http::Request::builder()
-                .method("POST")
-                .uri(arguments["url"].as_str().unwrap())
-                .body(arguments["marker"].as_str().unwrap().as_bytes().to_vec())
-                .map_err(|error| PlatformToolError::new(error.to_string()))?;
-            let (_, body) = self
+            let request = self
                 .0
-                .http_client()
-                .fetch(request.into())
+                .post(arguments["url"].as_str().unwrap())
+                .body(arguments["marker"].as_str().unwrap().as_bytes().to_vec());
+            let (response, exchange) = stravia_web_access::wire::send(
+                request,
+                stravia_runtime_contract::wire_debug::current(),
+                "web-access/http",
+            )
+            .await
+            .map_err(|error| PlatformToolError::new(error.to_string()))?;
+            let body = stravia_web_access::wire::body(response, exchange)
                 .await
                 .map_err(|error| PlatformToolError::new(error.to_string()))?;
             Ok(Value::String(String::from_utf8(body).unwrap()))
@@ -497,9 +500,7 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let web = Arc::new(stravia_web_access::LocalWeb::new(
-        stravia_web_access::OutboundProxyMode::Direct,
-    )?);
+    let web = reqwest::Client::builder().no_proxy().build()?;
     let mut drivers = Vec::new();
     let mut observers = Vec::new();
     for owner in ["agent-a", "agent-b"] {

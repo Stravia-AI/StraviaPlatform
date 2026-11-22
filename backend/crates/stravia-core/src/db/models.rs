@@ -1019,6 +1019,8 @@ mod api_key_tests {
     }
 }
 
+pub use stravia_web_access::{WebProviderCapabilities, WebProviderKindDescriptor};
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WebProvider {
     pub id: String,
@@ -1028,7 +1030,7 @@ pub struct WebProvider {
     pub api_key: Option<String>,
     pub use_proxy: bool,
     #[serde(skip_serializing)]
-    pub local_engines: Option<Json<LocalSearchEngineConfigs>>,
+    pub config_json: Option<Json<serde_json::Value>>,
     pub last_test_success: Option<bool>,
     pub last_test_at: Option<String>,
     pub created_at: String,
@@ -1042,7 +1044,8 @@ pub struct CreateWebProvider {
     pub api_key: Option<String>,
     #[serde(default)]
     pub use_proxy: bool,
-    pub local_engines: Option<LocalSearchEngineConfigs>,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
 }
 
 fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -1068,95 +1071,29 @@ pub struct UpdateWebProvider {
     pub api_key: Option<Option<String>>,
     pub use_proxy: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub local_engines: Option<Option<LocalSearchEngineConfigs>>,
+    pub config: Option<Option<serde_json::Value>>,
 }
 
-pub type LocalSearchEngineConfigs = BTreeMap<String, LocalSearchEngineConfig>;
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LocalSearchEngineConfig {
-    pub enabled: bool,
-    #[serde(default)]
-    pub private_settings: Option<BTreeMap<String, String>>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct LocalSearchEngineView {
-    pub enabled: bool,
-}
-
-impl std::fmt::Debug for LocalSearchEngineConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LocalSearchEngineConfig")
-            .field("enabled", &self.enabled)
-            .field(
-                "private_settings_configured",
-                &self
-                    .private_settings
-                    .as_ref()
-                    .is_some_and(|settings| !settings.is_empty()),
-            )
-            .finish()
-    }
-}
-
-pub fn default_local_search_engines() -> LocalSearchEngineConfigs {
-    [
-        ("google", true),
-        ("bing", true),
-        ("brave", true),
-        ("baidu", true),
-        ("360", false),
-        ("sogou_weixin", false),
-        ("google_scholar", false),
-    ]
-    .into_iter()
-    .map(|(id, enabled)| {
-        (
-            id.to_string(),
-            LocalSearchEngineConfig {
-                enabled,
-                private_settings: Some(BTreeMap::new()),
-            },
-        )
-    })
-    .collect()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WebProviderCapabilities {
-    pub search: bool,
-    pub fetch: bool,
-}
-
-impl WebProvider {
-    pub fn capabilities(&self) -> Option<WebProviderCapabilities> {
-        match self.kind.as_str() {
-            "local" | "exa" | "zhipu" => Some(WebProviderCapabilities {
-                search: true,
-                fetch: true,
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn local_engine_views(&self) -> Option<BTreeMap<String, LocalSearchEngineView>> {
-        self.local_engines.as_deref().map(|engines| {
-            engines
-                .iter()
-                .map(|(id, config)| {
-                    (
-                        id.clone(),
-                        LocalSearchEngineView {
-                            enabled: config.enabled,
-                        },
-                    )
-                })
-                .collect()
-        })
-    }
+/// 面向管理端与 WebUI 的脱敏 Web Provider 视图。
+#[derive(Debug, Clone, Serialize)]
+pub struct WebProviderView {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub api_key_configured: bool,
+    pub use_proxy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    pub capabilities: Option<WebProviderCapabilities>,
+    pub registered: bool,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+    pub allow_delete: bool,
+    pub last_test_success: Option<bool>,
+    pub last_test_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

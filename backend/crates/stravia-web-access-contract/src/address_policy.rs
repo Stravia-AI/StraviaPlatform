@@ -1,7 +1,7 @@
 //! Web Access 的静态地址规则；不执行 DNS 或网络访问。
 //!
 //! 域名通过静态检查不代表解析地址安全。调用方仍须在各自的准入、
-//! 重定向和浏览器出站时机检查已取得的全部地址，并保留连接地址固定与代理分工。
+//! 重定向和出站时机检查已取得的全部地址，并保留连接地址固定与代理分工。
 
 use std::net::IpAddr;
 
@@ -64,6 +64,7 @@ fn is_public_ipv4(address: std::net::Ipv4Addr) -> bool {
         && octets[0] < 240
         && octets[0] != 0
 }
+
 fn is_public_ipv6(address: std::net::Ipv6Addr) -> bool {
     if let Some(address) = address.to_ipv4() {
         return is_public_ipv4(address);

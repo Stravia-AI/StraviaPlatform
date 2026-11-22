@@ -1,11 +1,11 @@
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use serde_json::{json, Value};
-use stravia_runtime_contract::wire_debug::{self, Capture, WireEvent};
+use stravia_runtime_contract::wire_debug::{Capture, WireEvent};
 
 /// 单次远程交互显式归属调用请求，避免 MCP 后台 worker 丢失 task-local。
 #[derive(Clone)]
-pub(crate) struct Exchange {
+pub struct Exchange {
     capture: Capture,
     url: String,
     protocol: &'static str,
@@ -34,10 +34,6 @@ pub(crate) fn headers<'a>(values: impl Iterator<Item = (&'a str, &'a [u8])>) -> 
 }
 
 impl Exchange {
-    pub(crate) fn current(url: &str, protocol: &'static str) -> Option<Self> {
-        Self::new(wire_debug::current(), url, protocol)
-    }
-
     pub(crate) fn new(capture: Option<Capture>, url: &str, protocol: &'static str) -> Option<Self> {
         let protocol = match protocol {
             "http" => "web-access/http",
@@ -89,7 +85,7 @@ impl Exchange {
     }
 }
 
-pub(crate) async fn send(
+pub async fn send(
     builder: reqwest::RequestBuilder,
     capture: Option<Capture>,
     protocol: &'static str,
@@ -154,7 +150,7 @@ pub(crate) async fn send(
     Ok((response, exchange))
 }
 
-pub(crate) fn stream(
+pub fn stream(
     response: reqwest::Response,
     exchange: Option<Exchange>,
 ) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
@@ -191,7 +187,7 @@ pub(crate) fn stream(
     )
 }
 
-pub(crate) async fn body(
+pub async fn body(
     response: reqwest::Response,
     exchange: Option<Exchange>,
 ) -> Result<Vec<u8>, reqwest::Error> {
@@ -209,7 +205,7 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
     use std::sync::Arc;
-    use stravia_runtime_contract::wire_debug::WireSink;
+    use stravia_runtime_contract::wire_debug::{self, WireSink};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[derive(Clone, Default)]

@@ -543,6 +543,7 @@ async fn initialize_desktop(
                 desktop_cors_origins: cors_origins.clone(),
                 proxy_cors_origins: cors_origins,
                 serve_embedded_webui: false,
+                extensions: Default::default(),
             },
         );
         let port_store = desktop_preference_store(&app, &data_dir)?;

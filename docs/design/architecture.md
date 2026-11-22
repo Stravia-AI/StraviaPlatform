@@ -279,8 +279,8 @@ services.stravia.enable = true;
 - `host` 与 `openFirewall` 独立；后者只允许对应 TCP 端口，不改变监听地址，也不生成 TLS 或反向代理。公开部署须单独配置 HTTPS、精确的 `adminOrigins` 与实际 `trustedProxies`；默认不信任 loopback 代理。
 - `dataDir` 默认使用 `StateDirectory`，自定义路径通过系统 tmpfiles 创建并设置根目录的归属和权限，应用 unit 不执行提权的目录初始化命令；自定义用户/组须由调用者声明。修改身份或路径不会迁移已有数据，升级前仍须停止并备份实例。
 - 模块持有进程参数，应用持有可写 `server.toml`；不提供声明式数据库、Redis 或管理员凭据字段。`configFile` 为绝对运行时路径字符串，文件和父目录必须支持应用的原子替换，不可指向 store 或只读 secret。数据库/缓存契约见[统一派生缓存与 Server 配置](#统一派生缓存与-server-配置)。
-- `environment` 只放非秘密值；与具名部署参数、`HOME` 或已配置的 `browserPackage` 冲突时求值失败。`environmentFile` 也是绝对运行时路径字符串，指定文件缺失时启动失败；文件内容不进入 store，但环境变量不是安全凭据接口。保留的 `STRAVIA_*` 部署变量在载入文件后移除，`HOME`/浏览器冲突使启动失败。
-- 需要本机浏览器能力时设置 `services.stravia.browserPackage = pkgs.chromium;`，由其主程序设置 `STRAVIA_CHROME_PATH`。基础 Server 包不依赖 Chromium，也不关闭 Chromium sandbox、Wasm JIT、TLS 或 SSRF 检查。其他 unit/PATH 调整使用原生 `systemd.services.stravia`，不另设 `extraArgs` 覆盖具名字段。
+- `environment` 只放非秘密值；与具名部署参数或 `HOME` 冲突时求值失败。`environmentFile` 也是绝对运行时路径字符串，指定文件缺失时启动失败；文件内容不进入 store，但环境变量不是安全凭据接口。保留的 `STRAVIA_*` 部署变量在载入文件后移除，`HOME` 冲突使启动失败。
+- 基础 Server 包不依赖 Chromium，也不关闭 Wasm JIT、TLS 或 SSRF 检查。其他 unit/PATH 调整使用原生 `systemd.services.stravia`，不另设 `extraArgs` 覆盖具名字段。
 
 更新 `bun.lock` 或 workspace patch 后，在仓库根目录执行以下维护与检查命令；生成的 `nix/bun.nix` 不手工编辑：
 
@@ -294,7 +294,7 @@ nix build .#checks.x86_64-linux.service
 
 ### 共享出站代理配置与独立选择
 
-设置页维护共享代理地址及绕过规则，不再提供全局启用开关。`outbound_proxy` 是 settings 中一行 JSON（`url`、`bypass`、`force_http1`）：一次 PUT 提交完整配置，一次读取取得完整快照，验证或持久化失败保留原配置。URL 为空表示尚未配置；非空仅接受可用的 `http`、`https`、`socks5`、`socks5h` 代理地址。保存和使用边界均拒绝未知 scheme，不静默改为直连；错误不回显可能含凭据的 URL，保存并不检查代理在线或认证成功。Core reqwest 的 `socks5` 在本机解析目标，`socks5h` 将目标域名交给代理解析；LocalWeb 保留 ADR-0026 的既有代理侧 DNS 策略（其 `socks5` 规范化为 `socks5h`），不据此推断 Core 的 DNS 行为。读取迁移留下的非法旧 URL 不阻断管理编辑，使用时仍须校验并失败关闭。
+设置页维护共享代理地址及绕过规则，不再提供全局启用开关。`outbound_proxy` 是 settings 中一行 JSON（`url`、`bypass`、`force_http1`）：一次 PUT 提交完整配置，一次读取取得完整快照，验证或持久化失败保留原配置。URL 为空表示尚未配置；非空仅接受可用的 `http`、`https`、`socks5`、`socks5h` 代理地址。保存和使用边界均拒绝未知 scheme，不静默改为直连；错误不回显可能含凭据的 URL，保存并不检查代理在线或认证成功。Core reqwest 的 `socks5` 在本机解析目标，`socks5h` 将目标域名交给代理解析；`stravia-web-access` 的重定向解析保留 `socks5` 规范化为 `socks5h` 的代理侧 DNS 策略，不据此推断 Core 的 DNS 行为。读取迁移留下的非法旧 URL 不阻断管理编辑，使用时仍须校验并失败关闭。
 
 模型 Provider/session 与 Web Provider 各自的 `use_proxy` 是唯一选择：关闭明确直连，开启必须使用已保存的有效配置。产品更新有独立的 `update_use_proxy`（缺省 false），用于 Gateway 的 release/manifest 检查及 Desktop updater 检查、下载；改变更新偏好不修改 Provider 或共享代理配置。Provider Catalog 与 S3 不在这一选择范围。`force_http1` 保留 Vendor HTTP 专用行为，不改变 Web Access 或产品更新的 HTTP 协商；Vendor WebSocket 传输由网络选项和 shape 决定。
 
@@ -337,21 +337,11 @@ graph TD
 
 凭据保护的扫描、规则资源、canonical 文本替换、流式还原及 SQLite/PostgreSQL 映射实现归 `stravia-credential-protection`。Core 保留 settings/observation Adapter、Model Turn 成功终态 gate 和历史保留期集成：还原与映射发布失败仍显式终止，关闭保护仍还原有效旧映射，取消不回滚已发布映射。HTTP/MCP、配置键、Definition Revision 与数据库 schema 不因 crate 拆分改变。
 
-**Local Web Access 运行边界：**
+**Web Access 扩展边界与公共工具：**
 
-`stravia-web-access` 的 HTTP Search/Fetch 使用固定版本的 `wreq` 与 `wreq-util`，动态页面通过 CDP 控制已安装的 Chrome/Chromium，不内嵌浏览器引擎或下载浏览器。`LocalWeb` 在构造时固定代理快照；HTTP Search 使用共享内存 Cookie jar，HTTP Fetch 禁用 Cookie，浏览器使用临时 profile，身份不跨进程重启持久化。现有 Moli profile 和 search-cookie 文件保留在磁盘上，但不读取、迁移或删除。HTTP 适配器逐跳检查重定向与目标地址、清除跨 origin 凭据，并对解压后的正文实施大小和总时限限制；直连 Fetch 使用策略层验证后的固定地址。
+开源核心不内置 `LocalWeb`、Chromium/CDP 浏览器运行时或硬编码的 `local` / `exa` / `zhipu` Web Provider 适配器。`stravia-web-access-contract` 定义 `WebProviderAdapter`、`WebProviderFactory`、`WebProviderRegistry`、`WebProviderKindDescriptor`、`OutboundProxyMode` 及公共地址策略 `address_policy`；外层宿主通过 `GatewayBuilder::web_provider_factory(...)` 在启动期注入外部 Web Provider 扩展（如独立 worker 节点适配器），管理面通过 `GET /api/v1/web-provider-kinds` 与脱敏 `WebProviderView` 动态发现能力、可用性与配置规则。开源默认构建下不注册任何内置 Web Provider，外部联网搜索继续通过 Wasm Vendor 插件的 `Capability::Search` External Search Route 提供。完整重构设计见 [Web Access Provider 外部化与解耦重构设计](web-access-providers.md)。
 
-Chrome 按需启动，运行时持有浏览器 context，最后一个所有者释放时回收 target、进程和临时 profile。CDP 自动附加页面、iframe 和 worker：导航前注入含 UA metadata 的隐身补丁，worker 恢复前完成初始化；页面提取在隔离世界执行。脚本固定移植自 OMP commit `daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` 并保留 MIT 许可，指纹缓解不构成“不可检测”的承诺。下载拒绝；Chrome 保持操作系统沙箱，不使用 `--no-sandbox`。
-
-渲染取消或超时时，已取得页面 session 的清理先尝试 `Page.stopLoading`。仅当 Chromium 返回 `-32000 / Not attached to an active page` 时，再执行一次无 execution-context 依赖的 `Runtime.getIsolateId` renderer 回合：原生导航期间 CDP 会暂存该命令，待导航提交或中止并重新绑定当前宿主后才恢复派发。随后只尝试一次 `Target.closeTarget`；停止、settlement 和关闭共用原单次 CDP 调用的绝对清理期限，不刷新预算。尚未取得 session 的 target 直接关闭；出站拦截、Cookie/context 隔离、请求期限以及进程和临时 profile 回收策略不变。
-
-浏览器 HTTP 与 WebSocket 出站经过同一 EgressProxy；Search、静态 Fetch、渲染及子资源共用构造期代理快照。出口策略检查公共地址、直连 DNS 地址固定和上游代理转发，不进行 TLS 中间人解密；显式代理保持远端 DNS 语义。页面、重定向、iframe 和 worker 均不能绕过出口。
-
-Desktop 与 Server 在 Local 服务编辑器提供浏览器路径配置；Desktop 使用系统文件选择器，Server 输入服务器本机路径。手动设置优先于 `STRAVIA_CHROME_PATH`，后者优先于自动探测；显式无效路径不回退。管理认证保护 `GET/PUT /api/v1/web-access/browser`：GET 只检查路径而不启动浏览器，PUT 接受 `{path: string|null}`，先校验并原子保存，再激活；`null` 清除手动设置。配置保存在 `web-access-browser.json`，缺失时迁移旧 `desktop-browser.json`；读盘损坏显式报告。缺少浏览器时不得新增 Local 来源，已保存 Local 可移除或保持，执行时跳过 Local 并保留远程来源。Web Access 仍只管理来源与优先级，公开联网搜索仍由唯一的 Web Search 总开关控制；远程 Exa/Zhipu 不依赖本地浏览器。
-
-Fetch 继续限制下载与渲染结果大小，并保留超时、取消与静态提取回退契约。搜索优先 HTTP，在需要时回退 Chrome；Google 和 Bing 保留各自的请求策略。Google 的浏览器 preflight 与目标导航共用页面，在隔离世界先检测拦截，再检测结果就绪；命中异常流量挑战立即返回明确错误，而不是等待完整 deadline。
-
-正常结果标题与无结果提示优先排除 Google 拦截误报；其他来源与 Fetch 不启用该判定。
+`stravia-web-access` 保留公共 Web 资源读取与转换流水线（`fetch::{convert_read_bytes, resolve_final_url, resource}`）、远程 MCP Streamable HTTP 传输（`mcp_http_transport`）及 wire-debug 抓包封装（`wire`），底层统一使用 `reqwest` 并维持逐跳公开地址校验、直连 IP 固定与 `socks5 -> socks5h` 代理侧 DNS 策略。数据库迁移 `0058_generalize_web_providers.sql` 将 `web_providers.local_engines` 泛化为可空 JSON 对象列 `config_json`、移除硬编码 kind 约束与 `web-provider-local` 种子行、清理 `web_access_browser_path` 项，同时保留用户历史配置的非 `local` 记录，使降级或升级后管理面仍可查看并删除未注册类型的遗留记录。
 
 **stravia-core 顶层 `pub mod`（以 lib.rs 为准）：**
 

@@ -48,6 +48,22 @@ impl SearchSettingsHost for SearchSettings {
 #[async_trait]
 impl PublicSearchHost for SearchHost {
     async fn authorize(&self, principal: &Principal) -> Option<SearchAccess> {
+        if let Err(denial) = self
+            .0
+            .policy_allows_capability(
+                principal.api_key_id(),
+                crate::policy::PolicyCapability::WebSearch,
+            )
+            .await
+        {
+            tracing::warn!(
+                api_key_id = ?principal.api_key_id(),
+                code = denial.code.as_str(),
+                reason = denial.message.as_str(),
+                "policy denied public web search capability"
+            );
+            return None;
+        }
         crate::proxy::security::Security::new(self.0.storage.auth())
             .authorize_transparent_injections(principal)
             .await
@@ -369,24 +385,22 @@ impl SearchAdminHost for SearchHost {
         };
         let settings = store.load_settings().await.map_err(|_| ())?;
         let records = store.list().await.map_err(|_| ())?;
-        let uses_local = records.iter().any(|provider| {
-            provider.kind == "local"
-                && (settings.search_provider_ids.contains(&provider.id)
-                    || settings.fetch_provider_ids.contains(&provider.id))
-        });
-        let local_available = !uses_local || self.0.web_access().local_browser_available().await;
-        let providers = records
-            .into_iter()
-            .map(|provider| {
-                let capabilities = provider.capabilities();
-                let available = provider.kind != "local" || local_available;
-                SearchSourceProvider {
-                    id: provider.id,
-                    search: available && capabilities.as_ref().is_some_and(|value| value.search),
-                    fetch: available && capabilities.as_ref().is_some_and(|value| value.fetch),
+        let registry = self.0.web_provider_registry();
+        let mut providers = Vec::with_capacity(records.len());
+        for provider in records {
+            let (search, fetch) = match registry.get(&provider.kind) {
+                Some(factory) if factory.is_available().await => {
+                    let capabilities = factory.descriptor().capabilities;
+                    (capabilities.search, capabilities.fetch)
                 }
-            })
-            .collect();
+                _ => (false, false),
+            };
+            providers.push(SearchSourceProvider {
+                id: provider.id,
+                search,
+                fetch,
+            });
+        }
         Ok(Some(SearchSources {
             settings: SearchSourceSettings {
                 search_provider_ids: settings.search_provider_ids,

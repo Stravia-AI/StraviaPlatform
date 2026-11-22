@@ -1,4 +1,3 @@
-use super::service::AdapterFactory;
 use super::*;
 
 #[test]
@@ -218,33 +217,6 @@ struct FakeSearchProvider {
     calls: std::sync::atomic::AtomicUsize,
 }
 
-struct FakeAdapterFactory {
-    adapters: std::collections::HashMap<String, Arc<dyn WebProviderAdapter>>,
-    outbounds: parking_lot::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
-    browser_paths: parking_lot::Mutex<Vec<(String, Option<std::path::PathBuf>)>>,
-}
-
-impl AdapterFactory for FakeAdapterFactory {
-    fn build(
-        &self,
-        provider: &WebProvider,
-        outbound: stravia_web_access::OutboundProxyMode,
-        browser_path: Option<&std::path::Path>,
-    ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
-        self.outbounds.lock().push((provider.id.clone(), outbound));
-        self.browser_paths.lock().push((
-            provider.id.clone(),
-            browser_path.map(std::path::Path::to_owned),
-        ));
-        self.adapters.get(&provider.id).cloned().ok_or_else(|| {
-            WebAccessError::from_code(
-                WebAccessErrorCode::Unavailable,
-                "test adapter is unavailable",
-            )
-        })
-    }
-}
-
 #[async_trait::async_trait]
 impl WebProviderAdapter for FakeSearchProvider {
     fn supports_search(&self) -> bool {
@@ -274,15 +246,26 @@ impl WebProviderAdapter for FakeSearchProvider {
 }
 
 #[tokio::test]
-async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_failover() {
+async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+    let primary_factory = Arc::new(
+        crate::test_support::StubWebProviderFactory::new("worker-web", true, false)
+            .with_requires_api_key(false),
+    );
+    let secondary_factory = Arc::new(crate::test_support::StubWebProviderFactory::new(
+        "remote-web",
+        true,
+        false,
+    ));
+    let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
+    .web_provider_factory(primary_factory.clone())
+    .web_provider_factory(secondary_factory.clone())
+    .build()
     .await
     .expect("gateway");
-    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -300,50 +283,46 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         })
         .await
         .expect("API key");
-    let local = admin
-        .list_web_providers()
-        .await
-        .expect("Web Providers")
-        .into_iter()
-        .find(|provider| provider.kind == "local")
-        .expect("Local Web Provider");
-    admin
-        .update_web_provider(
-            &local.id,
-            crate::db::models::UpdateWebProvider {
-                use_proxy: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("proxied Local");
-    let exa = admin
+    let primary = admin
         .create_web_provider(crate::db::models::CreateWebProvider {
-            name: "Exa".into(),
-            kind: "exa".into(),
-            api_key: Some("test-exa-key".into()),
-            use_proxy: false,
-            local_engines: None,
+            name: "Worker".into(),
+            kind: "worker-web".into(),
+            api_key: None,
+            use_proxy: true,
+            config: None,
         })
         .await
-        .expect("Exa Web Provider");
+        .expect("Primary Web Provider");
+    let secondary = admin
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Remote".into(),
+            kind: "remote-web".into(),
+            api_key: Some("test-remote-key".into()),
+            use_proxy: false,
+            config: None,
+        })
+        .await
+        .expect("Secondary Web Provider");
     admin
         .update_web_access_settings(WebAccessSettings {
-            search_provider_ids: vec![local.id.clone(), exa.id.clone()],
+            search_provider_ids: vec![primary.id.clone(), secondary.id.clone()],
             fetch_provider_ids: vec![],
         })
         .await
         .expect("selected sources");
     admin
-        .set_setting("outbound_proxy", r#"{"url":"http://old-proxy.example:8080","bypass":".old.internal","force_http1":false}"#)
+        .set_setting(
+            "outbound_proxy",
+            r#"{"url":"http://old-proxy.example:8080","bypass":".old.internal","force_http1":false}"#,
+        )
         .await
         .expect("old proxy");
 
-    let failing_local = Arc::new(FakeSearchProvider {
-        response: Err(ProviderFailure::unavailable("Local unavailable")),
+    let failing_primary = Arc::new(FakeSearchProvider {
+        response: Err(ProviderFailure::unavailable("Worker unavailable")),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
-    let rescuing_exa = Arc::new(FakeSearchProvider {
+    let rescuing_secondary = Arc::new(FakeSearchProvider {
         response: Ok(SearchResponse {
             mode: SearchMode::Index,
             query: "Rust".into(),
@@ -357,25 +336,12 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         }),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
-    let old_factory = Arc::new(FakeAdapterFactory {
-        adapters: [
-            (
-                local.id.clone(),
-                failing_local.clone() as Arc<dyn WebProviderAdapter>,
-            ),
-            (
-                exa.id.clone(),
-                rescuing_exa.clone() as Arc<dyn WebProviderAdapter>,
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        outbounds: parking_lot::Mutex::new(vec![]),
-        browser_paths: parking_lot::Mutex::new(vec![]),
-    });
-    let old_service = WebAccessService::with_adapter_factory(gateway.clone(), old_factory.clone());
+    primary_factory.set_adapter(primary.id.clone(), failing_primary.clone());
+    secondary_factory.set_adapter(secondary.id.clone(), rescuing_secondary.clone());
+
+    let service = gateway.web_access();
     assert_eq!(
-        old_service
+        service
             .capture_run_snapshot("run-old", &key.id)
             .await
             .expect("old snapshot"),
@@ -386,10 +352,13 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
     );
 
     admin
-        .set_setting("outbound_proxy", r#"{"url":"http://new-proxy.example:8080","bypass":".new.internal","force_http1":false}"#)
+        .set_setting(
+            "outbound_proxy",
+            r#"{"url":"http://new-proxy.example:8080","bypass":".new.internal","force_http1":false}"#,
+        )
         .await
         .expect("new proxy");
-    let rescued = old_service
+    let rescued = service
         .search_in_run(
             "run-old",
             &key.id,
@@ -400,33 +369,27 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
             },
         )
         .await
-        .expect("Exa rescues Local hard failure");
+        .expect("Secondary rescues Primary hard failure");
     assert_eq!(rescued.results[0].url, "https://docs.rs/");
     assert_eq!(
-        old_factory.browser_paths.lock().as_slice(),
-        [
-            (local.id.clone(), Some(std::env::current_exe().unwrap())),
-            (exa.id.clone(), Some(std::env::current_exe().unwrap())),
-        ]
+        primary_factory.recorded_outbounds(),
+        [(
+            primary.id.clone(),
+            stravia_web_access::OutboundProxyMode::Explicit {
+                url: "http://old-proxy.example:8080".into(),
+                bypass: ".old.internal".into(),
+            },
+        )]
     );
     assert_eq!(
-        old_factory.outbounds.lock().as_slice(),
-        [
-            (
-                local.id.clone(),
-                stravia_web_access::OutboundProxyMode::Explicit {
-                    url: "http://old-proxy.example:8080".into(),
-                    bypass: ".old.internal".into(),
-                },
-            ),
-            (
-                exa.id.clone(),
-                stravia_web_access::OutboundProxyMode::Direct,
-            ),
-        ]
+        secondary_factory.recorded_outbounds(),
+        [(
+            secondary.id.clone(),
+            stravia_web_access::OutboundProxyMode::Direct,
+        )]
     );
 
-    let empty_local = Arc::new(FakeSearchProvider {
+    let empty_primary = Arc::new(FakeSearchProvider {
         response: Ok(SearchResponse {
             mode: SearchMode::Index,
             query: "Rust".into(),
@@ -436,32 +399,18 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
         }),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
-    let skipped_exa = Arc::new(FakeSearchProvider {
+    let skipped_secondary = Arc::new(FakeSearchProvider {
         response: Err(ProviderFailure::unavailable("must not run")),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
-    let new_factory = Arc::new(FakeAdapterFactory {
-        adapters: [
-            (
-                local.id.clone(),
-                empty_local.clone() as Arc<dyn WebProviderAdapter>,
-            ),
-            (
-                exa.id.clone(),
-                skipped_exa.clone() as Arc<dyn WebProviderAdapter>,
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        outbounds: parking_lot::Mutex::new(vec![]),
-        browser_paths: parking_lot::Mutex::new(vec![]),
-    });
-    let new_service = WebAccessService::with_adapter_factory(gateway, new_factory.clone());
-    new_service
+    primary_factory.set_adapter(primary.id.clone(), empty_primary.clone());
+    secondary_factory.set_adapter(secondary.id.clone(), skipped_secondary.clone());
+
+    service
         .capture_run_snapshot("run-new", &key.id)
         .await
         .expect("new snapshot");
-    let empty = new_service
+    let empty = service
         .search_in_run(
             "run-new",
             &key.id,
@@ -472,20 +421,22 @@ async fn configured_local_adapter_observes_proxy_snapshot_empty_success_and_fail
             },
         )
         .await
-        .expect("Local empty result succeeds");
+        .expect("Primary empty result succeeds");
     assert!(empty.results.is_empty());
     assert_eq!(
-        empty_local.calls.load(std::sync::atomic::Ordering::SeqCst),
+        empty_primary.calls.load(std::sync::atomic::Ordering::SeqCst),
         1
     );
     assert_eq!(
-        skipped_exa.calls.load(std::sync::atomic::Ordering::SeqCst),
+        skipped_secondary
+            .calls
+            .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
     assert_eq!(
-        new_factory.outbounds.lock()[0],
-        (
-            local.id,
+        primary_factory.recorded_outbounds().last().unwrap(),
+        &(
+            primary.id,
             stravia_web_access::OutboundProxyMode::Explicit {
                 url: "http://new-proxy.example:8080".into(),
                 bypass: ".new.internal".into(),
@@ -607,37 +558,52 @@ async fn search_strictly_filters_sources_outside_allowed_domains() {
     assert_eq!(response.results[1].url, "https://docs.rs/");
 }
 #[tokio::test]
-async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
+async fn unavailable_factory_skips_offline_provider_while_retaining_available_sources() {
     let directory = tempfile::tempdir().unwrap();
-    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+    let worker_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
         data_dir: directory.path().to_owned(),
         ..Default::default()
     })
+    .web_provider_factory(Arc::new(
+        crate::test_support::StubWebProviderFactory::new("worker-web", true, true)
+            .with_requires_api_key(false)
+            .with_availability(worker_available.clone(), "Worker is offline"),
+    ))
+    .web_provider_factory(Arc::new(crate::test_support::StubWebProviderFactory::new(
+        "remote-web",
+        true,
+        true,
+    )))
+    .build()
     .await
     .unwrap();
-    gateway.set_browser_path(Some(directory.path().join("missing-chrome.exe")));
     let service = gateway.web_access();
     let store = gateway.storage.web_providers().unwrap();
-    let local = store
-        .list()
+    let worker = gateway
+        .admin()
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Worker".into(),
+            kind: "worker-web".into(),
+            api_key: None,
+            use_proxy: false,
+            config: None,
+        })
         .await
-        .unwrap()
-        .into_iter()
-        .find(|provider| provider.kind == "local")
         .unwrap();
     let settings = WebAccessSettings {
-        search_provider_ids: vec![local.id.clone()],
-        fetch_provider_ids: vec![local.id.clone()],
+        search_provider_ids: vec![worker.id.clone()],
+        fetch_provider_ids: vec![worker.id.clone()],
     };
     store.save_settings(&settings).await.unwrap();
     let remote = gateway
         .admin()
         .create_web_provider(crate::db::models::CreateWebProvider {
             name: "Remote".into(),
-            kind: "exa".into(),
+            kind: "remote-web".into(),
             api_key: Some("secret".into()),
             use_proxy: false,
-            local_engines: None,
+            config: None,
         })
         .await
         .unwrap();
@@ -660,16 +626,16 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
         .unwrap();
     assert_eq!(
         service
-            .capture_run_snapshot("missing-local", &key.id)
+            .capture_run_snapshot("offline-worker", &key.id)
             .await
             .unwrap(),
         WebAccessAvailability::default()
     );
-    assert!(service.run_snapshot("missing-local", &key.id).is_err());
-    gateway.set_browser_path(Some(std::env::current_exe().unwrap()));
+    assert!(service.run_snapshot("offline-worker", &key.id).is_err());
+    worker_available.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         service
-            .capture_run_snapshot("embedded-local", &key.id)
+            .capture_run_snapshot("online-worker", &key.id)
             .await
             .unwrap(),
         WebAccessAvailability {
@@ -677,7 +643,7 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
             fetch: true
         }
     );
-    service.run_snapshot("embedded-local", &key.id).unwrap();
+    service.run_snapshot("online-worker", &key.id).unwrap();
     assert_eq!(store.load_settings().await.unwrap(), settings);
     store
         .save_settings(&WebAccessSettings::default())
@@ -685,13 +651,13 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
         .unwrap();
     assert_eq!(
         service
-            .capture_run_snapshot("disabled-local", &key.id)
+            .capture_run_snapshot("disabled-worker", &key.id)
             .await
             .unwrap(),
         WebAccessAvailability::default()
     );
-    assert!(service.run_snapshot("disabled-local", &key.id).is_err());
-    service.run_snapshot("embedded-local", &key.id).unwrap();
+    assert!(service.run_snapshot("disabled-worker", &key.id).is_err());
+    service.run_snapshot("online-worker", &key.id).unwrap();
     let remote_settings = WebAccessSettings {
         search_provider_ids: vec![remote.id.clone()],
         fetch_provider_ids: vec![remote.id],
@@ -712,10 +678,16 @@ async fn missing_browser_skips_local_but_retains_remote_runtime_sources() {
 #[tokio::test]
 async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_active_runs() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+    let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
+    .web_provider_factory(Arc::new(crate::test_support::StubWebProviderFactory::new(
+        "remote-web",
+        true,
+        true,
+    )))
+    .build()
     .await
     .expect("gateway");
     gateway
@@ -743,11 +715,11 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
         .expect("API key");
     let provider = admin
         .create_web_provider(crate::db::models::CreateWebProvider {
-            name: "Exa".into(),
-            kind: "exa".into(),
-            api_key: Some("test-exa-key".into()),
+            name: "Remote".into(),
+            kind: "remote-web".into(),
+            api_key: Some("test-remote-key".into()),
             use_proxy: false,
-            local_engines: None,
+            config: None,
         })
         .await
         .expect("Web Provider");
@@ -893,15 +865,26 @@ async fn fetch_retries_only_failed_urls_and_preserves_input_order() {
 }
 
 #[tokio::test]
-async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
+async fn configured_fetch_retries_only_failed_urls_on_secondary_provider() {
     let data_dir = tempfile::tempdir().expect("temp data dir");
-    let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+    let primary_factory = Arc::new(
+        crate::test_support::StubWebProviderFactory::new("worker-web", false, true)
+            .with_requires_api_key(false),
+    );
+    let secondary_factory = Arc::new(crate::test_support::StubWebProviderFactory::new(
+        "remote-web",
+        false,
+        true,
+    ));
+    let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
         data_dir: data_dir.path().to_path_buf(),
         ..Default::default()
     })
+    .web_provider_factory(primary_factory.clone())
+    .web_provider_factory(secondary_factory.clone())
+    .build()
     .await
     .expect("gateway");
-    gateway.set_browser_path(Some(std::env::current_exe().expect("test executable")));
     let admin = gateway.admin();
     let key = admin
         .create_api_key(crate::db::models::CreateApiKey {
@@ -919,52 +902,47 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         })
         .await
         .expect("API key");
-    let local = admin
-        .list_web_providers()
-        .await
-        .expect("Web Providers")
-        .into_iter()
-        .find(|provider| provider.kind == "local")
-        .expect("Local Web Provider");
-    let zhipu = admin
+    let primary = admin
         .create_web_provider(crate::db::models::CreateWebProvider {
-            name: "Zhipu".into(),
-            kind: "zhipu".into(),
-            api_key: Some("test-zhipu-key".into()),
+            name: "Worker".into(),
+            kind: "worker-web".into(),
+            api_key: None,
             use_proxy: false,
-            local_engines: None,
+            config: None,
         })
         .await
-        .expect("Zhipu Web Provider");
+        .expect("Primary Web Provider");
+    let secondary = admin
+        .create_web_provider(crate::db::models::CreateWebProvider {
+            name: "Remote".into(),
+            kind: "remote-web".into(),
+            api_key: Some("test-remote-key".into()),
+            use_proxy: false,
+            config: None,
+        })
+        .await
+        .expect("Secondary Web Provider");
     admin
         .update_web_access_settings(WebAccessSettings {
             search_provider_ids: vec![],
-            fetch_provider_ids: vec![local.id.clone(), zhipu.id.clone()],
+            fetch_provider_ids: vec![primary.id.clone(), secondary.id.clone()],
         })
         .await
         .expect("selected sources");
 
-    let local_fetch = Arc::new(FakeFetchProvider {
+    let primary_fetch = Arc::new(FakeFetchProvider {
         fail_url: Some("https://8.8.8.8/b".into()),
         content_characters: 7,
         calls: parking_lot::Mutex::new(vec![]),
     });
-    let zhipu_fetch = Arc::new(FakeFetchProvider {
+    let secondary_fetch = Arc::new(FakeFetchProvider {
         fail_url: None,
         content_characters: 7,
         calls: parking_lot::Mutex::new(vec![]),
     });
-    let factory = Arc::new(FakeAdapterFactory {
-        adapters: [
-            (local.id, local_fetch.clone() as Arc<dyn WebProviderAdapter>),
-            (zhipu.id, zhipu_fetch.clone() as Arc<dyn WebProviderAdapter>),
-        ]
-        .into_iter()
-        .collect(),
-        outbounds: parking_lot::Mutex::new(vec![]),
-        browser_paths: parking_lot::Mutex::new(vec![]),
-    });
-    let service = WebAccessService::with_adapter_factory(gateway, factory);
+    primary_factory.set_adapter(primary.id, primary_fetch.clone());
+    secondary_factory.set_adapter(secondary.id, secondary_fetch.clone());
+    let service = gateway.web_access();
     assert_eq!(
         service
             .capture_run_snapshot("run-fetch", &key.id)
@@ -985,7 +963,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
             },
         )
         .await
-        .expect("Zhipu recovers Local per-URL failure");
+        .expect("Secondary recovers Primary per-URL failure");
 
     assert_eq!(
         response
@@ -996,7 +974,7 @@ async fn configured_local_fetch_retries_only_failed_urls_on_zhipu() {
         ["https://8.8.8.8/a", "https://8.8.8.8/b"]
     );
     assert_eq!(
-        zhipu_fetch.calls.lock().as_slice(),
+        secondary_fetch.calls.lock().as_slice(),
         &[vec!["https://8.8.8.8/b".to_string()]]
     );
 }

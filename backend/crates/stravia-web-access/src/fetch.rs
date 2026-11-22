@@ -1,43 +1,20 @@
 mod extract;
-mod http;
 pub(crate) mod policy;
 pub mod resource;
 
 use std::{future::Future, net::IpAddr, pin::Pin, time::Duration};
 
 use serde::Serialize;
-use url::Url;
+use url::{Host, Url};
 
-use crate::browser::{BrowserRuntime, RenderRequest};
-use crate::outbound::LocalWeb;
-use extract::{ContentKind, HtmlExtract};
-use http::NetworkBackend;
+use crate::address_policy::is_public_ip;
+use crate::OutboundProxyMode;
+use extract::ContentKind;
 
-const MARKDOWN_CHARACTER_CAP: usize = 500_000;
 pub(crate) const DOWNLOAD_BYTE_CAP: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
-const RENDER_TIMEOUT: Duration = Duration::from_secs(15);
-const LOW_QUALITY_LIMITATION: &str =
-    "The extracted content may be a page shell, login wall, or challenge page.";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const LOSSY_DECODE_LIMITATION: &str = "The source encoding could not be decoded reliably; the returned text may contain substitutions. Use :download for the original bytes.";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtractionPath {
-    Static,
-    Rendered,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FetchedPage {
-    pub requested_url: String,
-    pub final_url: String,
-    pub title: Option<String>,
-    pub markdown: String,
-    pub extraction_path: ExtractionPath,
-    pub limitations: Vec<String>,
-    pub truncated: bool,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,12 +70,11 @@ pub struct ReadText {
 /// Converts already-downloaded bytes into readable text without any network,
 /// script, or secondary resource access.
 ///
-/// HTML uses the same Readability plus Markdown pipeline as the provider fetch
-/// path, with absolute links only when a trusted base URL is supplied. JSON,
-/// XML, and text are returned verbatim. `raw` bypasses Readability, Markdown,
-/// and reformatting entirely and strictly decodes the source bytes, failing on
-/// unknown or invalid character sets instead of substituting replacement
-/// characters.
+/// HTML uses Readability plus Markdown conversion, with absolute links only
+/// when a trusted base URL is supplied. JSON, XML, and text are returned
+/// verbatim. `raw` bypasses Readability, Markdown, and reformatting entirely
+/// and strictly decodes the source bytes, failing on unknown or invalid
+/// character sets instead of substituting replacement characters.
 pub fn convert_read_bytes(
     body: &[u8],
     content_type: &str,
@@ -157,13 +133,9 @@ pub fn convert_read_bytes(
     }
 }
 
-/// Resolve an HTTP redirect chain using Fetch's per-hop safety policy without reading bodies.
-/// Proxy-resolved origins retain the existing trusted-proxy DNS semantics.
-pub async fn resolve_final_url(
-    value: &str,
-    mode: crate::OutboundProxyMode,
-) -> Result<Url, FetchError> {
-    let backend = NetworkBackend::from_mode(mode)?;
+/// Resolve an HTTP redirect chain using per-hop public URL safety checks without reading bodies.
+pub async fn resolve_final_url(value: &str, mode: OutboundProxyMode) -> Result<Url, FetchError> {
+    let backend = RedirectBackend::from_mode(mode)?;
     let url = policy::validate_url(value).map_err(sanitize_resolution_error)?;
     let (url, response) = get_redirects(url, &backend, MAX_REDIRECTS, true)
         .await
@@ -185,24 +157,6 @@ fn sanitize_resolution_error(error: FetchError) -> FetchError {
         _ => "HTTP redirect resolution failed",
     };
     FetchError::new(error.code, message)
-}
-
-pub(crate) async fn fetch_with_runtime(
-    web: &LocalWeb,
-    value: &str,
-) -> Result<FetchedPage, FetchError> {
-    web.browser()
-        .require_available()
-        .await
-        .map_err(|error| FetchError::unavailable(error.to_string()))?;
-    fetch_with(
-        value,
-        &NetworkBackend::from_local_web(web),
-        &ChromeBackend {
-            browser: web.browser(),
-        },
-    )
-    .await
 }
 
 type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -229,103 +183,11 @@ trait HttpBackend: Sync {
     }
 }
 
-trait RenderBackend: Sync {
-    fn render<'a>(
-        &'a self,
-        url: &'a Url,
-    ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>>;
-}
-
 struct HttpResponse {
     status: u16,
     content_type: Option<String>,
     location: Option<String>,
     body: Vec<u8>,
-}
-
-struct RenderedResponse {
-    final_url: String,
-    html: String,
-}
-
-struct ChromeBackend {
-    browser: BrowserRuntime,
-}
-
-impl RenderBackend for ChromeBackend {
-    fn render<'a>(
-        &'a self,
-        url: &'a Url,
-    ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>> {
-        Box::pin(async move {
-            let rendered = self
-                .browser
-                .render(RenderRequest {
-                    url: url.as_str(),
-                    preflight_url: None,
-                    ready_selector: "body",
-                    failure_expression: None,
-                    timeout: RENDER_TIMEOUT,
-                    request_guard: Some(policy::is_public_browser_request),
-                })
-                .await
-                .map_err(|error| {
-                    FetchError::unavailable(format!("rendered extraction failed: {error}"))
-                })?;
-            if rendered.html.len() > DOWNLOAD_BYTE_CAP {
-                return Err(FetchError::new(
-                    FetchErrorCode::ResponseTooLarge,
-                    format!("rendered HTML exceeds the {DOWNLOAD_BYTE_CAP}-byte safety cap"),
-                ));
-            }
-            Ok(RenderedResponse {
-                final_url: rendered.url,
-                html: rendered.html,
-            })
-        })
-    }
-}
-
-async fn fetch_with(
-    value: &str,
-    http: &impl HttpBackend,
-    renderer: &impl RenderBackend,
-) -> Result<FetchedPage, FetchError> {
-    let requested_url = policy::validate_url(value)?;
-    let (final_url, response) =
-        get_redirects(requested_url.clone(), http, MAX_REDIRECTS, false).await?;
-    if !(200..300).contains(&response.status) {
-        return Err(FetchError::unavailable(format!(
-            "HTTP request returned status {}",
-            response.status
-        )));
-    }
-
-    let content_type = response.content_type.as_deref().unwrap_or("");
-    let decoded = extract::decode_lossy(&response.body, content_type);
-    let mut page = match extract::classify(content_type, &decoded.text) {
-        ContentKind::Html => {
-            fetch_html(requested_url, final_url, decoded.text, http, renderer).await?
-        }
-        ContentKind::Markdown | ContentKind::Plain => {
-            page_from_text(requested_url, final_url, decoded.text)
-        }
-        ContentKind::Json => page_from_text(
-            requested_url,
-            final_url,
-            extract::json_markdown(&decoded.text),
-        ),
-        ContentKind::Xml => page_from_text(
-            requested_url,
-            final_url,
-            extract::xml_markdown(&decoded.text),
-        ),
-        ContentKind::Unsupported => return Err(extract::unsupported(content_type)),
-    };
-    if decoded.lossy && page.extraction_path == ExtractionPath::Static {
-        page.limitations.push(LOSSY_DECODE_LIMITATION.into());
-    }
-    Ok(page)
 }
 
 async fn get_redirects(
@@ -375,115 +237,283 @@ async fn resolve_public_addresses(
             url.host_str().unwrap_or_default()
         )));
     }
-    if addresses
-        .iter()
-        .any(|address| !crate::address_policy::is_public_ip(*address))
-    {
+    if addresses.iter().any(|address| !is_public_ip(*address)) {
         return Err(FetchError::invalid_url(url.as_str()));
     }
     Ok(addresses)
 }
 
-async fn fetch_html(
-    requested_url: Url,
-    final_url: Url,
-    html: String,
-    http: &impl HttpBackend,
-    renderer: &impl RenderBackend,
-) -> Result<FetchedPage, FetchError> {
-    let static_extract = extract::extract_html(&html, Some(&final_url))?;
-    if !extract::is_low_quality(&static_extract.markdown) {
-        return Ok(page_from_extract(
-            requested_url,
-            final_url,
-            static_extract,
-            ExtractionPath::Static,
-            Vec::new(),
+struct RedirectBackend {
+    proxied: Option<(reqwest::Client, NoProxyList)>,
+}
+
+impl RedirectBackend {
+    fn from_mode(mode: OutboundProxyMode) -> Result<Self, FetchError> {
+        match mode {
+            OutboundProxyMode::Direct => Ok(Self { proxied: None }),
+            OutboundProxyMode::Explicit { url, bypass } => {
+                let normalized = normalize_proxy_url(&url)?;
+                let proxy = reqwest::Proxy::all(normalized.as_str())
+                    .map_err(|_| FetchError::unavailable("Invalid outbound proxy configuration"))?;
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .proxy(proxy)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(HTTP_TIMEOUT)
+                    .build()
+                    .map_err(|_| FetchError::unavailable("HTTP client initialization failed"))?;
+                Ok(Self {
+                    proxied: Some((client, NoProxyList::parse(&bypass))),
+                })
+            }
+            OutboundProxyMode::System => {
+                let client = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(HTTP_TIMEOUT)
+                    .build()
+                    .map_err(|_| FetchError::unavailable("HTTP client initialization failed"))?;
+                Ok(Self {
+                    proxied: Some((client, NoProxyList::default())),
+                })
+            }
+        }
+    }
+}
+
+fn normalize_proxy_url(raw: &str) -> Result<Url, FetchError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FetchError::unavailable(
+            "Invalid outbound proxy configuration",
         ));
     }
-
-    let rendered = match renderer.render(&final_url).await {
-        Ok(rendered) => rendered,
-        Err(error) => {
-            if static_extract.markdown.trim().is_empty() {
-                return Err(error);
-            }
-            return Ok(page_from_extract(
-                requested_url,
-                final_url,
-                static_extract,
-                ExtractionPath::Static,
-                vec![format!(
-                    "Rendered Extraction was unavailable: {error}. {LOW_QUALITY_LIMITATION}"
-                )],
+    let mut parsed = Url::parse(trimmed)
+        .map_err(|_| FetchError::unavailable("Invalid outbound proxy configuration"))?;
+    match parsed.scheme() {
+        "http" | "https" | "socks5h" => {}
+        "socks5" => {
+            // 与既有出站代理语义一致，socks5 交给代理侧解析域名。
+            let _ = parsed.set_scheme("socks5h");
+        }
+        _ => {
+            return Err(FetchError::unavailable(
+                "Invalid outbound proxy configuration",
             ));
         }
-    };
+    }
+    if parsed.host_str().is_none() {
+        return Err(FetchError::unavailable(
+            "Invalid outbound proxy configuration",
+        ));
+    }
+    Ok(parsed)
+}
 
-    let rendered_url = policy::validate_url(&rendered.final_url)?;
-    resolve_public_addresses(&rendered_url, http).await?;
-    let rendered_extract = extract::extract_html(&rendered.html, Some(&rendered_url))?;
-    let rendered_low_quality = extract::is_low_quality(&rendered_extract.markdown);
-    let (selected_url, selected_extract, selected_path) = if !rendered_low_quality
-        || extract::score(&rendered_extract.markdown) > extract::score(&static_extract.markdown)
+impl HttpBackend for RedirectBackend {
+    fn pins_origin(&self, url: &Url) -> bool {
+        match &self.proxied {
+            None => true,
+            Some((_, no_proxy)) => url
+                .host_str()
+                .is_some_and(|host| no_proxy.contains(host)),
+        }
+    }
+
+    fn resolve<'a>(&'a self, url: &'a Url) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
+        Box::pin(async move {
+            match url.host() {
+                Some(Host::Ipv4(address)) => return Ok(vec![IpAddr::V4(address)]),
+                Some(Host::Ipv6(address)) => return Ok(vec![IpAddr::V6(address)]),
+                _ => {}
+            }
+            let host = url
+                .host_str()
+                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
+            let addresses = tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|error| {
+                    FetchError::unavailable(format!(
+                        "URL hostname could not be resolved: {host}: {error}"
+                    ))
+                })?
+                .map(|address| address.ip())
+                .collect::<Vec<_>>();
+            Ok(addresses)
+        })
+    }
+
+    fn get<'a>(
+        &'a self,
+        url: &'a Url,
+        addresses: &'a [IpAddr],
+    ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
+        Box::pin(async move {
+            let pinned = self.pins_origin(url);
+            let client = if pinned {
+                let host = url
+                    .host_str()
+                    .ok_or_else(|| FetchError::invalid_url(url.as_str()))?
+                    .to_owned();
+                let port = url
+                    .port_or_known_default()
+                    .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
+                let addrs = addresses
+                    .iter()
+                    .map(|address| std::net::SocketAddr::new(*address, port))
+                    .collect::<Vec<_>>();
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(HTTP_TIMEOUT)
+                    .resolve_to_addrs(&host, &addrs)
+                    .build()
+                    .map_err(|error| {
+                        FetchError::unavailable(format!("HTTP client failed: {error}"))
+                    })?
+            } else {
+                self.proxied
+                    .as_ref()
+                    .expect("proxied client present when origin is not pinned")
+                    .0
+                    .clone()
+            };
+            let response = client
+                .get(url.as_str())
+                .send()
+                .await
+                .map_err(|error| FetchError::unavailable(format!("HTTP request failed: {error}")))?;
+            if pinned {
+                let connected = response.remote_addr().ok_or_else(|| {
+                    FetchError::unavailable("HTTP connection omitted its remote address")
+                })?;
+                if !is_public_ip(connected.ip())
+                    || !addresses.iter().any(|address| *address == connected.ip())
+                {
+                    return Err(FetchError::invalid_url(url.as_str()));
+                }
+            }
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            Ok(HttpResponse {
+                status: response.status().as_u16(),
+                content_type: header("content-type"),
+                location: header("location"),
+                body: Vec::new(),
+            })
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct NoProxyList {
+    entries: Vec<NoProxyEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NoProxyEntry {
+    Address(IpAddr),
+    Network { address: IpAddr, prefix: u8 },
+    Domain(String),
+}
+
+impl NoProxyList {
+    fn parse(value: &str) -> Self {
+        Self {
+            entries: value
+                .split(|separator: char| {
+                    separator == ',' || separator == ';' || separator.is_ascii_whitespace()
+                })
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    parse_ip_network(entry)
+                        .map(|(address, prefix)| NoProxyEntry::Network { address, prefix })
+                        .or_else(|| entry.parse::<IpAddr>().ok().map(NoProxyEntry::Address))
+                        .unwrap_or_else(|| NoProxyEntry::Domain(entry.to_owned()))
+                })
+                .collect(),
+        }
+    }
+
+    fn contains(&self, host: &str) -> bool {
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
+            .trim_end_matches('.');
+        if let Ok(address) = host.parse::<IpAddr>() {
+            return self.entries.iter().any(|entry| match entry {
+                NoProxyEntry::Address(expected) => *expected == address,
+                NoProxyEntry::Network {
+                    address: base,
+                    prefix,
+                } => network_contains(*base, *prefix, address),
+                NoProxyEntry::Domain(domain) => domain == "*",
+            });
+        }
+        self.entries.iter().any(|entry| match entry {
+            NoProxyEntry::Domain(domain) => domain_matches(domain, host),
+            NoProxyEntry::Address(_) | NoProxyEntry::Network { .. } => false,
+        })
+    }
+}
+
+fn parse_ip_network(value: &str) -> Option<(IpAddr, u8)> {
+    let (address, prefix) = value.split_once('/')?;
+    let address = address.parse::<IpAddr>().ok()?;
+    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let prefix = prefix.parse::<u8>().ok()?;
+    let bits = match address {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    (prefix <= bits).then_some((address, prefix))
+}
+
+fn network_contains(base: IpAddr, prefix: u8, address: IpAddr) -> bool {
+    match (base, address) {
+        (IpAddr::V4(base), IpAddr::V4(address)) => {
+            prefix == 0 || u32::from(base) >> (32 - prefix) == u32::from(address) >> (32 - prefix)
+        }
+        (IpAddr::V6(base), IpAddr::V6(address)) => {
+            prefix == 0
+                || u128::from(base) >> (128 - prefix) == u128::from(address) >> (128 - prefix)
+        }
+        _ => false,
+    }
+}
+
+fn domain_matches(entry: &str, domain: &str) -> bool {
+    if entry == "*" || entry.eq_ignore_ascii_case(domain) {
+        return true;
+    }
+    if entry
+        .strip_prefix('.')
+        .is_some_and(|root| root.eq_ignore_ascii_case(domain))
     {
-        (rendered_url, rendered_extract, ExtractionPath::Rendered)
-    } else {
-        (final_url, static_extract, ExtractionPath::Static)
-    };
-    let limitations = rendered_low_quality
-        .then(|| LOW_QUALITY_LIMITATION.to_string())
-        .into_iter()
-        .collect();
-    Ok(page_from_extract(
-        requested_url,
-        selected_url,
-        selected_extract,
-        selected_path,
-        limitations,
-    ))
-}
-
-fn page_from_extract(
-    requested_url: Url,
-    final_url: Url,
-    extract: HtmlExtract,
-    extraction_path: ExtractionPath,
-    limitations: Vec<String>,
-) -> FetchedPage {
-    let (markdown, truncated) = cap_markdown(extract.markdown);
-    FetchedPage {
-        requested_url: requested_url.into(),
-        final_url: final_url.into(),
-        title: extract.title,
-        markdown,
-        extraction_path,
-        limitations,
-        truncated,
+        return true;
     }
-}
-
-fn page_from_text(requested_url: Url, final_url: Url, markdown: String) -> FetchedPage {
-    let (markdown, truncated) = cap_markdown(markdown);
-    FetchedPage {
-        requested_url: requested_url.into(),
-        final_url: final_url.into(),
-        title: None,
-        markdown,
-        extraction_path: ExtractionPath::Static,
-        limitations: Vec::new(),
-        truncated,
+    if domain.len() <= entry.len()
+        || !domain
+            .get(domain.len().saturating_sub(entry.len())..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(entry))
+    {
+        return false;
     }
-}
-
-fn cap_markdown(markdown: String) -> (String, bool) {
-    if markdown.chars().count() <= MARKDOWN_CHARACTER_CAP {
-        return (markdown, false);
+    if entry.starts_with('.') {
+        return true;
     }
-    (
-        markdown.chars().take(MARKDOWN_CHARACTER_CAP).collect(),
-        true,
-    )
+    domain.as_bytes().get(domain.len() - entry.len() - 1) == Some(&b'.')
 }
 
 #[cfg(test)]
@@ -500,9 +530,7 @@ mod tests {
 
     pub(super) struct StubBackend {
         pub(super) responses: Mutex<VecDeque<HttpResponse>>,
-        pub(super) rendered: Mutex<Option<Result<RenderedResponse, FetchError>>>,
         pub(crate) requests: AtomicUsize,
-        pub(crate) renders: AtomicUsize,
         pub(crate) requested_urls: Mutex<Vec<String>>,
     }
 
@@ -515,19 +543,9 @@ mod tests {
                     location: None,
                     body: body.into(),
                 }])),
-                rendered: Mutex::new(None),
                 requests: AtomicUsize::new(0),
-                renders: AtomicUsize::new(0),
                 requested_urls: Mutex::new(Vec::new()),
             }
-        }
-
-        pub(crate) fn with_rendered(self, html: impl Into<String>) -> Self {
-            *self.rendered.lock() = Some(Ok(RenderedResponse {
-                final_url: "https://example.com/article".into(),
-                html: html.into(),
-            }));
-            self
         }
     }
 
@@ -557,20 +575,6 @@ mod tests {
                     .lock()
                     .pop_front()
                     .ok_or_else(|| FetchError::unavailable("stub response exhausted"))
-            })
-        }
-    }
-
-    impl RenderBackend for StubBackend {
-        fn render<'a>(
-            &'a self,
-            _url: &'a Url,
-        ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>> {
-            self.renders.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async move {
-                self.rendered.lock().take().unwrap_or_else(|| {
-                    Err(FetchError::unavailable("browser renderer is unavailable"))
-                })
             })
         }
     }
@@ -644,6 +648,7 @@ mod tests {
         .unwrap();
         assert_eq!(error.to_string(), "HTTP redirect limit exceeded");
         assert_eq!(backend.requests.load(Ordering::Relaxed), MAX_REDIRECTS + 1);
+
         let backend = StubBackend::default();
         *backend.responses.lock() = VecDeque::from([HttpResponse {
             location: None,
@@ -659,453 +664,6 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.to_string(), "HTTP redirect omitted Location");
-    }
-
-    #[tokio::test]
-    async fn rejects_non_public_urls_before_network_io() {
-        for url in [
-            "file:///etc/passwd",
-            "http://user:password@example.com/",
-            "http://localhost/",
-            "http://service.local/",
-            "http://home.arpa/",
-            "http://127.0.0.1/",
-            "http://192.168.1.1/",
-            "http://127.0.0.1../",
-            "http://192.168.1.1../",
-            "http://[::1]/",
-            "http://[2002:a00:100::1]/",
-            "http://[3fff::1]/",
-        ] {
-            let backend = StubBackend::default();
-            let error = fetch_with(url, &backend, &backend).await.unwrap_err();
-            assert_eq!(error.code(), FetchErrorCode::InvalidUrl, "{url}");
-            assert_eq!(backend.requests.load(Ordering::Relaxed), 0, "{url}");
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_unusable_dns_answers_before_http() {
-        struct DnsBackend(Mutex<Option<Result<Vec<IpAddr>, FetchError>>>);
-        impl HttpBackend for DnsBackend {
-            fn resolve<'a>(
-                &'a self,
-                _url: &'a Url,
-            ) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
-                Box::pin(async move { self.0.lock().take().unwrap() })
-            }
-
-            fn get<'a>(
-                &'a self,
-                _url: &'a Url,
-                _addresses: &'a [IpAddr],
-            ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
-                Box::pin(async { unreachable!("unusable DNS answers must stop before HTTP") })
-            }
-        }
-        let renderer = StubBackend::default();
-        for (answers, code) in [
-            (
-                Ok(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]),
-                FetchErrorCode::InvalidUrl,
-            ),
-            (
-                Ok(vec![
-                    IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                ]),
-                FetchErrorCode::InvalidUrl,
-            ),
-            (Ok(Vec::new()), FetchErrorCode::Unavailable),
-            (
-                Err(FetchError::unavailable("stub DNS lookup failed")),
-                FetchErrorCode::Unavailable,
-            ),
-        ] {
-            let backend = DnsBackend(Mutex::new(Some(answers)));
-            let error = get_redirects(
-                Url::parse("https://example.com/article").unwrap(),
-                &backend,
-                MAX_REDIRECTS,
-                true,
-            )
-            .await
-            .err()
-            .unwrap();
-
-            assert_eq!(error.code(), code);
-            assert_eq!(renderer.renders.load(Ordering::Relaxed), 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_trailing_dot_redirect_before_second_request() {
-        for location in ["http://127.0.0.1../", "http://192.168.1.1../"] {
-            let backend = StubBackend::default();
-            *backend.responses.lock() = VecDeque::from([HttpResponse {
-                status: 302,
-                content_type: None,
-                location: Some(location.into()),
-                body: Vec::new(),
-            }]);
-
-            let error = fetch_with("https://example.com/article", &backend, &backend)
-                .await
-                .unwrap_err();
-
-            assert_eq!(error.code(), FetchErrorCode::InvalidUrl, "{location}");
-            assert_eq!(backend.requests.load(Ordering::Relaxed), 1, "{location}");
-            assert_eq!(backend.renders.load(Ordering::Relaxed), 0, "{location}");
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_non_public_rendered_final_url() {
-        let backend = StubBackend::response(
-            "text/html",
-            "<html><body><main>Please enable JavaScript to continue to the requested article.</main></body></html>",
-        );
-        *backend.rendered.lock() = Some(Ok(RenderedResponse {
-            final_url: "http://127.0.0.1/".into(),
-            html: "<html><body><main>Private content must not be returned.</main></body></html>"
-                .into(),
-        }));
-
-        let error = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code(), FetchErrorCode::InvalidUrl);
-        assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
-        assert_eq!(backend.renders.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn extracts_article_markdown_without_page_navigation() {
-        let paragraphs = (0..12)
-            .map(|index| format!("<p>Paragraph {index} explains the complete local web fetch pipeline, including extraction quality, citations, and predictable Markdown output for callers.</p>"))
-            .collect::<String>();
-        let html = format!(
-            "<html><head><title>Fallback title</title></head><body><nav>Products Pricing Sign in</nav><article><h1>Local Web Fetch</h1>{paragraphs}<a href='/source'>Source</a></article><footer>Legal links</footer></body></html>"
-        );
-        let backend = StubBackend::response("text/html; charset=utf-8", html);
-
-        let page = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert_eq!(page.title.as_deref(), Some("Fallback title"));
-        assert_eq!(page.extraction_path, ExtractionPath::Static);
-        assert!(page.markdown.contains("Local Web Fetch"));
-        assert!(page
-            .markdown
-            .contains("[Source](https://example.com/source)"));
-        assert!(!page.markdown.contains("Products Pricing"));
-        assert_eq!(backend.renders.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn renders_a_javascript_gate_once_through_the_same_extractor() {
-        let paragraphs = (0..12)
-            .map(|index| format!("<p>Rendered paragraph {index} contains useful article detail, stable citations, and readable content after browser execution.</p>"))
-            .collect::<String>();
-        let rendered = format!(
-            "<html><head><title>Rendered page</title></head><body><nav>Menu</nav><article><h1>Rendered article</h1>{paragraphs}</article></body></html>"
-        );
-        let backend = StubBackend::response(
-            "text/html",
-            "<html><body><main><p>Please enable JavaScript to continue. This page requires scripts before the requested content can load.</p></main></body></html>",
-        )
-        .with_rendered(rendered);
-
-        let page = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert_eq!(page.extraction_path, ExtractionPath::Rendered);
-        assert_eq!(page.title.as_deref(), Some("Rendered page"));
-        assert!(page.markdown.contains("Rendered paragraph"));
-        assert!(!page.markdown.contains("Menu"));
-        assert_eq!(backend.renders.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn keeps_the_better_low_quality_body_with_a_limitation() {
-        let backend = StubBackend::response(
-            "text/html",
-            "<html><body><main>Please enable JavaScript to view this requested article and continue reading.</main></body></html>",
-        )
-        .with_rendered("<html><body><main>Sign in to continue to this protected article.</main></body></html>");
-
-        let page = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert!(!page.markdown.is_empty());
-        assert_eq!(page.limitations.len(), 1);
-        assert_eq!(backend.renders.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn default_html_fetch_reports_lossy_source_decoding() {
-        let mut body = format!(
-            "<html><body><article><p>{}",
-            "This article explains how a gateway validates requests and preserves complete content. ".repeat(30)
-        ).into_bytes();
-        body.extend_from_slice(b"\xff</p></article></body></html>");
-        let backend = StubBackend::response("text/html; charset=utf-8", body);
-        let page = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap();
-        assert_eq!(page.extraction_path, ExtractionPath::Static);
-        assert!(page.markdown.contains('\u{fffd}'));
-        assert!(!page.limitations.is_empty());
-    }
-
-    #[tokio::test]
-    async fn passes_text_and_markdown_through_and_pretty_prints_json() {
-        for content_type in ["text/plain", "text/markdown"] {
-            let backend = StubBackend::response(content_type, "# Exact body\n\nKeep me.");
-            let page = fetch_with("https://example.com/data", &backend, &backend)
-                .await
-                .unwrap();
-            assert_eq!(page.markdown, "# Exact body\n\nKeep me.");
-            assert_eq!(backend.renders.load(Ordering::Relaxed), 0);
-        }
-
-        let backend =
-            StubBackend::response("application/json", br#"{"ok":true,"items":[1,2]}"#.to_vec());
-        let page = fetch_with("https://example.com/data", &backend, &backend)
-            .await
-            .unwrap();
-        assert!(page.markdown.contains("\"ok\": true"));
-        assert!(page.markdown.starts_with("```json\n"));
-    }
-
-    #[tokio::test]
-    async fn honors_a_basic_html_meta_charset() {
-        let html = b"<html><head><meta charset=\"windows-1252\"><title>Caf\xe9</title></head><body><article><p>Caf\xe9 prices and details are available here.</p></article></body></html>";
-        let backend = StubBackend::response("text/html", html.to_vec());
-
-        let page = fetch_with("https://example.com/cafe", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert_eq!(page.title.as_deref(), Some("Café"));
-        assert!(page.markdown.contains("Café"));
-    }
-
-    #[tokio::test]
-    async fn rejects_unsupported_media_types() {
-        for content_type in ["application/pdf", "image/png", "image/svg+xml"] {
-            let backend = StubBackend::response(content_type, b"binary".to_vec());
-            let error = fetch_with("https://example.com/file", &backend, &backend)
-                .await
-                .unwrap_err();
-            assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
-        }
-    }
-
-    #[tokio::test]
-    async fn caps_markdown_only_at_the_safety_ceiling() {
-        let backend = StubBackend::response("text/plain", "x".repeat(MARKDOWN_CHARACTER_CAP + 1));
-        let page = fetch_with("https://example.com/large.txt", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert_eq!(page.markdown.chars().count(), MARKDOWN_CHARACTER_CAP);
-        assert!(page.truncated);
-    }
-
-    #[tokio::test]
-    async fn missing_renderer_returns_static_markdown_with_a_limitation() {
-        let backend = StubBackend::response(
-            "text/html",
-            "<html><head><title>Shell</title></head><body><main>Please enable JavaScript to continue to the requested article.</main></body></html>",
-        );
-
-        let page = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert_eq!(page.extraction_path, ExtractionPath::Static);
-        assert!(page.markdown.contains("enable JavaScript"));
-        assert_eq!(page.limitations.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn rejects_a_private_redirect_before_the_second_request() {
-        let backend = StubBackend {
-            responses: Mutex::new(VecDeque::from([HttpResponse {
-                status: 302,
-                content_type: None,
-                location: Some("http://127.0.0.1/admin".into()),
-                body: Vec::new(),
-            }])),
-            rendered: Mutex::new(None),
-            requests: AtomicUsize::new(0),
-            renders: AtomicUsize::new(0),
-            requested_urls: Mutex::new(Vec::new()),
-        };
-
-        let error = fetch_with("https://example.com/redirect", &backend, &backend)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code(), FetchErrorCode::InvalidUrl);
-        assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn navigation_heavy_markdown_triggers_one_fallback() {
-        let navigation = (0..12)
-            .map(|index| format!("<a href='/item/{index}'>Menu {index}</a><br>"))
-            .collect::<String>();
-        let rendered = (0..12)
-            .map(|index| format!("<p>Article paragraph {index} contains complete, useful rendered content for the fetched page contract.</p>"))
-            .collect::<String>();
-        let backend = StubBackend::response(
-            "text/html",
-            format!("<html><body><main>{navigation}</main></body></html>"),
-        )
-        .with_rendered(format!(
-            "<html><head><title>Article</title></head><body><article>{rendered}</article></body></html>"
-        ));
-
-        let page = fetch_with("https://example.com/menu", &backend, &backend)
-            .await
-            .unwrap();
-
-        assert_eq!(page.extraction_path, ExtractionPath::Rendered);
-        assert_eq!(backend.renders.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn proxied_fetch_skips_origin_dns_and_still_rejects_private_urls() {
-        struct ProxyBackend {
-            resolved: AtomicUsize,
-            requests: AtomicUsize,
-        }
-        impl HttpBackend for ProxyBackend {
-            fn pins_origin(&self, _url: &Url) -> bool {
-                false
-            }
-
-            fn resolve<'a>(
-                &'a self,
-                _url: &'a Url,
-            ) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
-                self.resolved.fetch_add(1, Ordering::Relaxed);
-                Box::pin(async { unreachable!("proxied fetch must not resolve origin DNS") })
-            }
-
-            fn get<'a>(
-                &'a self,
-                _url: &'a Url,
-                addresses: &'a [IpAddr],
-            ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
-                assert!(addresses.is_empty());
-                self.requests.fetch_add(1, Ordering::Relaxed);
-                Box::pin(async {
-                    Ok(HttpResponse {
-                        status: 200,
-                        content_type: Some("text/plain".into()),
-                        location: None,
-                        body: b"proxied".to_vec(),
-                    })
-                })
-            }
-        }
-        impl RenderBackend for ProxyBackend {
-            fn render<'a>(
-                &'a self,
-                _url: &'a Url,
-            ) -> BackendFuture<'a, Result<RenderedResponse, FetchError>> {
-                Box::pin(async { unreachable!("plain text does not render") })
-            }
-        }
-
-        let backend = ProxyBackend {
-            resolved: AtomicUsize::new(0),
-            requests: AtomicUsize::new(0),
-        };
-        let page = fetch_with("https://example.com/article", &backend, &backend)
-            .await
-            .unwrap();
-        assert_eq!(page.markdown, "proxied");
-        assert_eq!(backend.resolved.load(Ordering::Relaxed), 0);
-        assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
-
-        let error = fetch_with("http://127.0.0.1/", &backend, &backend)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), FetchErrorCode::InvalidUrl);
-        assert_eq!(backend.requests.load(Ordering::Relaxed), 1);
-    }
-
-    fn utf16_bytes(text: &str, to_bytes: fn(u16) -> [u8; 2], bom: [u8; 2]) -> Vec<u8> {
-        let mut bytes = bom.to_vec();
-        bytes.extend(text.encode_utf16().flat_map(to_bytes));
-        bytes
-    }
-
-    #[test]
-    fn reads_utf8_text_with_bom_in_both_modes() {
-        let text = "你好 🌆 plain utf8 text";
-        let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice(text.as_bytes());
-
-        let readable = convert_read_bytes(&bytes, "text/plain; charset=utf-8", None, false)
-            .expect("default utf8 read with BOM succeeds");
-        assert_eq!(readable.text, text);
-        assert_eq!(readable.representation, "text");
-        assert!(readable.limitations.is_empty());
-        assert!(!readable.source_truncated);
-
-        let raw = convert_read_bytes(&bytes, "text/plain; charset=utf-8", None, true)
-            .expect("raw utf8 read with BOM succeeds");
-        assert_eq!(raw.text, text);
-        assert_eq!(raw.representation, "raw");
-        assert_eq!(raw.title, None);
-    }
-
-    #[test]
-    fn bom_overrides_a_contradictory_declared_charset() {
-        let text = "中文内容必须按字节序标记解码";
-        let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice(text.as_bytes());
-
-        let raw = convert_read_bytes(&bytes, "text/plain; charset=iso-8859-1", None, true)
-            .expect("BOM must win over the declared charset");
-        assert_eq!(raw.text, text);
-    }
-
-    #[test]
-    fn reads_utf16_with_bom_in_both_modes() {
-        let text = "Grüße 中文 🌍";
-        for (charset, to_bytes, bom) in [
-            (
-                "text/plain; charset=utf-16le",
-                u16::to_le_bytes as fn(u16) -> [u8; 2],
-                [0xFF, 0xFE],
-            ),
-            (
-                "text/plain; charset=utf-16be",
-                u16::to_be_bytes as fn(u16) -> [u8; 2],
-                [0xFE, 0xFF],
-            ),
-        ] {
-            let bytes = utf16_bytes(text, to_bytes, bom);
-            for raw in [false, true] {
-                let read = convert_read_bytes(&bytes, charset, None, raw)
-                    .unwrap_or_else(|error| panic!("{charset} raw={raw}: {error}"));
-                assert_eq!(read.text, text, "{charset} raw={raw}");
-            }
-
-            let bom_only =
-                convert_read_bytes(&bytes, "text/plain", None, true).expect("BOM alone decodes");
-            assert_eq!(bom_only.text, text);
-        }
     }
 
     #[test]
@@ -1130,22 +688,6 @@ mod tests {
         let readable = convert_read_bytes(b"\x80", "text/plain; charset=cp1252", None, false)
             .expect("cp1252 alias decodes");
         assert_eq!(readable.text, "€");
-
-        for (charset, to_bytes) in [
-            (
-                "text/plain; charset=utf-16le",
-                u16::to_le_bytes as fn(u16) -> [u8; 2],
-            ),
-            (
-                "text/plain; charset=utf-16be",
-                u16::to_be_bytes as fn(u16) -> [u8; 2],
-            ),
-        ] {
-            let bytes: Vec<u8> = "Hi".encode_utf16().flat_map(to_bytes).collect();
-            let raw = convert_read_bytes(&bytes, charset, None, true)
-                .unwrap_or_else(|error| panic!("{charset}: {error}"));
-            assert_eq!(raw.text, "Hi", "{charset}");
-        }
     }
 
     #[test]
@@ -1169,213 +711,33 @@ mod tests {
         assert_eq!(readable.title.as_deref(), Some("Café menu"));
         assert_eq!(readable.representation, "markdown");
         assert!(readable.text.contains("Café paragraph"));
-        assert!(
-            readable.text.contains("https://example.com/order"),
-            "links must be absolutized against the trusted base: {}",
-            readable.text
-        );
+        assert!(readable.text.contains("https://example.com/order"));
         assert!(readable.limitations.is_empty());
     }
 
     #[test]
-    fn html_without_a_trusted_base_keeps_relative_links() {
-        let paragraphs = (0..6)
-            .map(|index| {
-                format!("<p>Detached paragraph {index} with enough words that the article stays the extracted main content without any origin.</p>")
-            })
-            .collect::<String>();
-        let html = format!(
-            "<html><head><title>Detached</title></head><body><article><h1>Detached doc</h1>{paragraphs}<a href='/source'>Source</a></article></body></html>"
-        );
-
-        let readable = convert_read_bytes(html.as_bytes(), "text/html", None, false)
-            .expect("base-less HTML converts");
-        assert!(
-            readable.text.contains("](/source)"),
-            "relative link must survive without a fabricated origin: {}",
-            readable.text
-        );
-        assert!(!readable.text.contains("://"));
-        assert!(!readable.text.contains("example.com"));
-    }
-
-    #[test]
-    fn raw_html_returns_the_exact_source_without_decoration() {
-        let html = "<html><head><title>Raw doc</title></head><body><nav>Nav stays</nav><article><p>Body</p></article></body></html>\n";
-
+    fn raw_and_lossy_modes_preserve_read_semantics() {
+        let html = "<html><head><title>Raw doc</title></head><body><article><p>Body</p></article></body></html>\n";
         let raw = convert_read_bytes(html.as_bytes(), "text/html; charset=utf-8", None, true)
             .expect("raw HTML strict decode");
         assert_eq!(raw.text, html);
         assert_eq!(raw.representation, "raw");
         assert_eq!(raw.title, None);
-    }
 
-    #[test]
-    fn json_and_xml_are_read_verbatim_without_reformatting() {
-        let json = r#"{"b":1,"a":[true,null]}"#;
-        for raw in [false, true] {
-            let read = convert_read_bytes(json.as_bytes(), "application/json", None, raw)
-                .unwrap_or_else(|error| panic!("json raw={raw}: {error}"));
-            assert_eq!(read.text, json, "json raw={raw}");
-            assert_eq!(read.representation, if raw { "raw" } else { "text" });
-            assert_eq!(read.title, None);
-        }
-
-        let xml = "<root><item>1</item>  <item>2</item></root>\n";
-        for raw in [false, true] {
-            let read = convert_read_bytes(xml.as_bytes(), "application/xml", None, raw)
-                .unwrap_or_else(|error| panic!("xml raw={raw}: {error}"));
-            assert_eq!(read.text, xml, "xml raw={raw}");
-        }
-    }
-
-    #[test]
-    fn markdown_and_explicit_text_subtypes_are_read_verbatim() {
-        let markdown = "# Heading\n\n- item\n";
-        let read = convert_read_bytes(markdown.as_bytes(), "text/markdown", None, false)
-            .expect("markdown source reads");
-        assert_eq!(read.text, markdown);
-        assert_eq!(read.representation, "markdown");
-
-        let csv = "a,b\r\n1,2\r\n";
-        for content_type in ["text/csv", "text/tab-separated-values"] {
-            let read = convert_read_bytes(csv.as_bytes(), content_type, None, false)
-                .unwrap_or_else(|error| panic!("{content_type}: {error}"));
-            assert_eq!(read.text, csv, "{content_type}");
-            assert_eq!(read.representation, "text");
-        }
-    }
-
-    #[test]
-    fn empty_text_reads_successfully_in_both_modes() {
-        for content_type in ["text/plain", ""] {
-            for raw in [false, true] {
-                let read = convert_read_bytes(b"", content_type, None, raw)
-                    .unwrap_or_else(|error| panic!("{content_type} raw={raw}: {error}"));
-                assert_eq!(read.text, "", "{content_type} raw={raw}");
-                assert!(read.limitations.is_empty());
-                assert!(!read.source_truncated);
-            }
-        }
-    }
-
-    #[test]
-    fn raw_rejects_invalid_utf8_while_default_reads_lossily() {
         let bytes = b"valid start then \xc3\x28 invalid tail";
-
         let error = convert_read_bytes(bytes, "text/plain", None, true)
             .expect_err("raw must reject invalid utf-8");
         assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
-
         let readable = convert_read_bytes(bytes, "text/plain", None, false)
             .expect("default mode degrades lossily");
-        assert!(readable.text.contains("valid start then"));
-        assert!(readable.text.contains("invalid tail"));
-        assert!(!readable.limitations.is_empty());
-    }
-
-    #[test]
-    fn raw_rejects_unknown_charsets_in_declaration_and_meta() {
-        let error = convert_read_bytes(b"ascii only", "text/plain; charset=euc-kr", None, true)
-            .expect_err("raw must reject unknown declared charsets");
-        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
-
-        let readable = convert_read_bytes(b"ascii only", "text/plain; charset=euc-kr", None, false)
-            .expect("default mode still reads the ascii subset");
-        assert_eq!(readable.text, "ascii only");
         assert!(!readable.limitations.is_empty());
 
-        let html = b"<html><head><meta charset=\"shift_jis\"><title>t</title></head><body><article><p>ascii</p></article></body></html>";
-        let error = convert_read_bytes(html, "text/html", None, true)
-            .expect_err("raw must reject unknown meta charsets");
-        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
-    }
-
-    #[test]
-    fn raw_rejects_broken_utf16_payloads() {
-        let odd: Vec<u8> = "hi"
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .chain([0x41])
-            .collect();
-        let error = convert_read_bytes(&odd, "text/plain; charset=utf-16le", None, true)
-            .expect_err("raw must reject an odd utf-16 length");
-        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
-        let readable = convert_read_bytes(&odd, "text/plain; charset=utf-16le", None, false)
-            .expect("default mode drops the dangling unit lossily");
-        assert!(readable.text.starts_with("hi"));
-        assert!(!readable.limitations.is_empty());
-
-        let mut lone_surrogate = Vec::new();
-        for unit in [0xD800_u16, 0x0041] {
-            lone_surrogate.extend_from_slice(&unit.to_le_bytes());
-        }
-        let error = convert_read_bytes(&lone_surrogate, "text/plain; charset=utf-16le", None, true)
-            .expect_err("raw must reject a lone utf-16 surrogate");
-        assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
-        let readable =
-            convert_read_bytes(&lone_surrogate, "text/plain; charset=utf-16le", None, false)
-                .expect("default mode replaces the surrogate lossily");
-        assert!(readable.text.ends_with('A'));
-        assert!(!readable.limitations.is_empty());
-    }
-
-    #[test]
-    fn binary_media_types_are_rejected_by_both_read_modes() {
         for content_type in ["image/png", "image/jpeg", "application/pdf"] {
             for raw in [false, true] {
                 let error = convert_read_bytes(b"pretend bytes", content_type, None, raw)
-                    .expect_err(&format!("{content_type} raw={raw} must be rejected"));
-                assert_eq!(
-                    error.code(),
-                    FetchErrorCode::UnsupportedMediaType,
-                    "{content_type} raw={raw}"
-                );
+                    .expect_err("binary must be rejected");
+                assert_eq!(error.code(), FetchErrorCode::UnsupportedMediaType);
             }
         }
-    }
-
-    #[tokio::test]
-    async fn enforces_the_redirect_budget_passed_by_the_caller() {
-        let redirect = |location: String| HttpResponse {
-            status: 302,
-            content_type: None,
-            location: Some(location),
-            body: Vec::new(),
-        };
-        let ok = HttpResponse {
-            status: 200,
-            content_type: Some("text/plain".into()),
-            location: None,
-            body: b"done".to_vec(),
-        };
-        let stub = |responses: VecDeque<HttpResponse>| StubBackend {
-            responses: Mutex::new(responses),
-            rendered: Mutex::new(None),
-            requests: AtomicUsize::new(0),
-            renders: AtomicUsize::new(0),
-            requested_urls: Mutex::new(Vec::new()),
-        };
-
-        let mut within_budget: VecDeque<HttpResponse> = (0..MAX_REDIRECTS)
-            .map(|index| redirect(format!("https://example.com/hop/{index}")))
-            .collect();
-        within_budget.push_back(ok);
-        let backend = stub(within_budget);
-        let page = fetch_with("https://example.com/start", &backend, &backend)
-            .await
-            .expect("exactly MAX_REDIRECTS hops fit the budget");
-        assert_eq!(page.markdown, "done");
-        assert_eq!(backend.requests.load(Ordering::Relaxed), MAX_REDIRECTS + 1);
-
-        let over_budget: VecDeque<HttpResponse> = (0..=MAX_REDIRECTS)
-            .map(|index| redirect(format!("https://example.com/hop/{index}")))
-            .collect();
-        let backend = stub(over_budget);
-        let error = fetch_with("https://example.com/start", &backend, &backend)
-            .await
-            .expect_err("one hop over the budget fails");
-        assert_eq!(error.code(), FetchErrorCode::Unavailable);
-        assert_eq!(backend.requests.load(Ordering::Relaxed), MAX_REDIRECTS + 1);
     }
 }

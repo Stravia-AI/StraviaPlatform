@@ -42,10 +42,14 @@ mod tests {
     #[tokio::test]
     async fn local_search_requires_sources_but_ignores_the_legacy_disabled_switch() {
         let _directory = tempfile::tempdir().expect("temporary directory");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
             data_dir: _directory.path().to_path_buf(),
             ..Default::default()
         })
+        .web_provider_factory(std::sync::Arc::new(
+            crate::test_support::StubWebProviderFactory::new("test-search", true, true),
+        ))
+        .build()
         .await
         .expect("Gateway");
         let admin = gateway.admin();
@@ -147,10 +151,10 @@ mod tests {
         let remote = admin
             .create_web_provider(crate::db::models::CreateWebProvider {
                 name: "Search sources".into(),
-                kind: "exa".into(),
+                kind: "test-search".into(),
                 api_key: Some("secret".into()),
                 use_proxy: false,
-                local_engines: None,
+                config: None,
             })
             .await
             .unwrap();
@@ -168,36 +172,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_browser_excludes_local_sources_without_blocking_remote_search() {
+    async fn unavailable_factory_excludes_sources_without_blocking_available_factory() {
         let _directory = tempfile::tempdir().expect("temporary directory");
-        let gateway = crate::Gateway::new(crate::config::GatewayConfig {
+        let primary_available = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gateway = crate::GatewayBuilder::new(crate::config::GatewayConfig {
             data_dir: _directory.path().to_path_buf(),
             ..Default::default()
         })
+        .web_provider_factory(std::sync::Arc::new(
+            crate::test_support::StubWebProviderFactory::new("worker-web", true, true)
+                .with_requires_api_key(false)
+                .with_availability(primary_available.clone(), "Worker is offline"),
+        ))
+        .web_provider_factory(std::sync::Arc::new(
+            crate::test_support::StubWebProviderFactory::new("remote-web", true, true),
+        ))
+        .build()
         .await
         .expect("Gateway");
-        gateway.set_browser_path(Some(std::env::current_exe().unwrap()));
         let admin = gateway.admin();
-        let store = admin.gw.storage.web_providers().unwrap();
-        let local = store
-            .list()
+        let worker = admin
+            .create_web_provider(crate::db::models::CreateWebProvider {
+                name: "Worker".into(),
+                kind: "worker-web".into(),
+                api_key: None,
+                use_proxy: false,
+                config: None,
+            })
             .await
-            .unwrap()
-            .into_iter()
-            .find(|provider| provider.kind == "local")
             .unwrap();
         let settings = crate::db::models::WebAccessSettings {
-            search_provider_ids: vec![local.id.clone()],
-            fetch_provider_ids: vec![local.id],
+            search_provider_ids: vec![worker.id.clone()],
+            fetch_provider_ids: vec![worker.id],
         };
         admin
             .update_web_access_settings(settings.clone())
             .await
             .unwrap();
         admin.search_admin().validate_local_sources().await.unwrap();
-        admin
-            .gw
-            .set_browser_path(Some(_directory.path().join("missing-chrome.exe")));
+        primary_available.store(false, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             admin
                 .search_admin()
@@ -210,10 +223,10 @@ mod tests {
         let remote = admin
             .create_web_provider(crate::db::models::CreateWebProvider {
                 name: "Remote sources".into(),
-                kind: "exa".into(),
+                kind: "remote-web".into(),
                 api_key: Some("secret".into()),
                 use_proxy: false,
-                local_engines: None,
+                config: None,
             })
             .await
             .unwrap();

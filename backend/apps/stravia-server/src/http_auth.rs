@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::admin_entry::{RequestOrigin, canonical_origin};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -6,7 +8,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
-use stravia_core::admin::identity::{AdminAuth, AuthError, SessionTokens};
+use stravia_core::admin::identity::{
+    AdminAction, AdminAuthProvider, AdminAuthorizer, AdminResourceRef, AuthError, SessionTokens,
+};
 
 use crate::AdminMode;
 
@@ -16,13 +20,31 @@ const CSRF_HEADER: &str = "x-stravia-csrf";
 
 #[derive(Clone)]
 pub(crate) struct AdminHttpState {
-    pub auth: AdminAuth,
+    pub auth_provider: Arc<dyn AdminAuthProvider>,
+    pub authorizer: Arc<dyn AdminAuthorizer>,
     pub mode: AdminMode,
+}
+
+impl AdminHttpState {
+    #[cfg(test)]
+    pub(crate) fn single_admin(
+        auth: stravia_core::admin::identity::AdminAuth,
+        mode: AdminMode,
+    ) -> Self {
+        Self {
+            auth_provider: Arc::new(stravia_core::admin::identity::SingleAdminAuthProvider::new(
+                auth,
+            )),
+            authorizer: Arc::new(stravia_core::admin::identity::SingleAdminAuthorizer),
+            mode,
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct AuthStateResponse {
     mode: &'static str,
+    auth_mode: &'static str,
     authenticated: bool,
     setup_authorized: bool,
     username: Option<String>,
@@ -85,13 +107,38 @@ pub(crate) async fn require_admin(
         return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
 
-    match state.auth.authenticate(token).await {
-        Ok(session) => {
-            request.extensions_mut().insert(session);
-            next.run(request).await
-        }
-        Err(error) => map_auth_error(error),
+    let principal = match state.auth_provider.authenticate(token).await {
+        Ok(principal) => principal,
+        Err(error) => return map_auth_error(error),
+    };
+
+    let action = match *request.method() {
+        Method::GET | Method::HEAD | Method::OPTIONS => AdminAction::Read,
+        Method::DELETE => AdminAction::Delete,
+        _ => AdminAction::Write,
+    };
+    let path = request.uri().path().to_owned();
+    let resource = AdminResourceRef::new("http_route", Some(path.as_str()));
+    if let Err(denied) = state
+        .authorizer
+        .authorize(&principal, action, &resource)
+        .await
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": {
+                    "code": denied.code,
+                    "message": denied.message
+                }
+            })),
+        )
+            .into_response();
     }
+
+    request.extensions_mut().insert(principal.to_session());
+    request.extensions_mut().insert(principal);
+    next.run(request).await
 }
 
 async fn auth_state(State(state): State<AdminHttpState>, headers: HeaderMap) -> Response {
@@ -99,9 +146,9 @@ async fn auth_state(State(state): State<AdminHttpState>, headers: HeaderMap) -> 
         AdminMode::Desktop => bearer_token(&headers),
         AdminMode::Server => cookie(&headers, ACCESS_COOKIE),
     };
-    let session = match token {
-        Some(token) => match state.auth.authenticate(token).await {
-            Ok(session) => Some(session),
+    let principal = match token {
+        Some(token) => match state.auth_provider.authenticate(token).await {
+            Ok(principal) => Some(principal),
             Err(AuthError::Unauthorized) => None,
             Err(error) => return map_auth_error(error),
         },
@@ -112,9 +159,10 @@ async fn auth_state(State(state): State<AdminHttpState>, headers: HeaderMap) -> 
             AdminMode::Server => "server",
             AdminMode::Desktop => "desktop",
         },
-        authenticated: session.is_some(),
+        auth_mode: state.auth_provider.auth_mode(),
+        authenticated: principal.is_some(),
         setup_authorized: false,
-        username: session.and_then(|value| value.username),
+        username: principal.and_then(|value| value.username),
     })
     .into_response()
 }
@@ -135,7 +183,11 @@ async fn login(
     ) {
         return *response;
     }
-    match state.auth.login(&input.username, &input.password).await {
+    match state
+        .auth_provider
+        .login(&input.username, &input.password)
+        .await
+    {
         Ok(tokens) => {
             session_response(
                 &state,
@@ -169,7 +221,7 @@ async fn refresh(
     let Some(token) = cookie(&headers, REFRESH_COOKIE) else {
         return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
-    match state.auth.refresh(token).await {
+    match state.auth_provider.refresh(token).await {
         Ok(tokens) => {
             session_response(
                 &state,
@@ -198,8 +250,8 @@ async fn logout(
         return *response;
     }
     let session_id = if let Some(token) = cookie(&headers, ACCESS_COOKIE) {
-        match state.auth.authenticate(token).await {
-            Ok(session) => Some(session.session_id),
+        match state.auth_provider.authenticate(token).await {
+            Ok(principal) => Some(principal.session_id),
             Err(AuthError::Unauthorized) => None,
             Err(error) => return map_auth_error(error),
         }
@@ -209,7 +261,7 @@ async fn logout(
     let session_id = match session_id {
         Some(session_id) => Some(session_id),
         None => match cookie(&headers, REFRESH_COOKIE) {
-            Some(token) => match state.auth.refresh(token).await {
+            Some(token) => match state.auth_provider.refresh(token).await {
                 Ok(tokens) => Some(tokens.session_id),
                 Err(AuthError::Unauthorized) => None,
                 Err(error) => return map_auth_error(error),
@@ -218,7 +270,7 @@ async fn logout(
         },
     };
     if let Some(session_id) = session_id
-        && let Err(error) = state.auth.logout(&session_id).await
+        && let Err(error) = state.auth_provider.logout(&session_id).await
     {
         return map_auth_error(error);
     }
@@ -249,14 +301,14 @@ async fn change_credentials(
     let Some(token) = cookie(&headers, ACCESS_COOKIE) else {
         return auth_error(StatusCode::UNAUTHORIZED, "unauthorized");
     };
-    let session = match state.auth.authenticate(token).await {
-        Ok(session) => session,
+    let principal = match state.auth_provider.authenticate(token).await {
+        Ok(principal) => principal,
         Err(error) => return map_auth_error(error),
     };
     match state
-        .auth
+        .auth_provider
         .change_credentials(
-            &session,
+            &principal,
             &input.current_password,
             &input.username,
             &input.password,
@@ -280,11 +332,11 @@ async fn change_credentials(
 
 async fn session_response(state: &AdminHttpState, secure: bool, tokens: SessionTokens) -> Response {
     let username = state
-        .auth
+        .auth_provider
         .authenticate(&tokens.access_token)
         .await
         .ok()
-        .and_then(|session| session.username);
+        .and_then(|principal| principal.username);
     let body = SessionResponse {
         username,
         access_expires_at: tokens.access_expires_at,

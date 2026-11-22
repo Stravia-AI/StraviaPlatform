@@ -10,6 +10,10 @@ const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url))
 // 桌面测试包含 native smoke bridge，不能覆盖服务端验收使用的生产资源。
 const outputDirectory = process.env.STRAVIA_WEBUI_DIST ?? 'dist'
 
+const extensionsEntry = process.env.STRAVIA_WEBUI_EXTENSIONS
+  ? fileURLToPath(new URL(process.env.STRAVIA_WEBUI_EXTENSIONS, new URL('./', import.meta.url)))
+  : fileURLToPath(new URL('./src/lib/extensions/ce-entry.ts', import.meta.url))
+
 export default defineConfig(({ mode }) => {
   const { STRAVIA_PORT = '23471' } = loadEnv(mode, repositoryRoot, 'STRAVIA_')
   const backendPort = Number(STRAVIA_PORT)
@@ -19,6 +23,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     envDir: repositoryRoot,
+    resolve: { alias: { '#webui-extensions': extensionsEntry } },
     plugins: [
       tailwindcss(),
       sveltekit({

@@ -106,8 +106,8 @@ pub struct Gateway {
     pub(crate) compaction: crate::compaction::Compaction,
     pub(crate) model_turn: Arc<dyn model_turn::ModelTurnExecutor>,
     pub(crate) web_access_run_snapshots: web_access::WebAccessRunSnapshotStore,
-    pub(crate) browser_path: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
-    pub(crate) browser_preferences: Arc<admin::browser::BrowserPreferences>,
+    pub(crate) web_provider_registry: Arc<stravia_web_access::WebProviderRegistry>,
+    pub(crate) policy_resolver: Arc<dyn crate::policy::PolicyResolver>,
     pub(crate) web_search_runner_state:
         Arc<tokio::sync::RwLock<Option<stravia_web_search::WebSearchRunner>>>,
     pub(crate) route_media_mutation: Arc<tokio::sync::Mutex<()>>,
@@ -169,8 +169,8 @@ impl Gateway {
             compaction: self.compaction.clone(),
             model_turn: Arc::clone(&self.model_turn),
             web_access_run_snapshots: self.web_access_run_snapshots.clone(),
-            browser_path: Arc::clone(&self.browser_path),
-            browser_preferences: Arc::clone(&self.browser_preferences),
+            web_provider_registry: Arc::clone(&self.web_provider_registry),
+            policy_resolver: Arc::clone(&self.policy_resolver),
             web_search_runner_state: Arc::clone(&self.web_search_runner_state),
             route_media_mutation: Arc::clone(&self.route_media_mutation),
             update_service: Arc::clone(&self.update_service),
@@ -186,6 +186,24 @@ impl Gateway {
 
     pub(crate) fn background_clone(&self) -> Self {
         self.clone_with_owner(false)
+    }
+
+    /// Evaluate the configured [`crate::policy::PolicyResolver`] for a platform capability
+    /// in fail-closed mode.
+    pub async fn policy_allows_capability(
+        &self,
+        api_key_id: &str,
+        capability: crate::policy::PolicyCapability,
+    ) -> Result<(), crate::policy::PolicyDenial> {
+        let ctx = crate::policy::PolicyRequestContext::capability(api_key_id, capability);
+        let policy = self.policy_resolver.resolve(&ctx).await?;
+        if !policy.allows_capability(capability) {
+            return Err(crate::policy::PolicyDenial::forbidden(
+                "policy_capability_denied",
+                "Capability denied by execution policy",
+            ));
+        }
+        Ok(())
     }
 
     fn clone_for_live(&self) -> Self {

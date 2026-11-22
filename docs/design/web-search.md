@@ -6,7 +6,7 @@
 
 ## 1. 结论
 
-实现归属独立 `stravia-web-search` crate，包含 Runner、Local/External Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化及内部工具 ID 归 `stravia-web-access-contract`，静态地址规则继续归 `stravia-web-access`。
+实现归属独立 `stravia-web-search` crate，包含 Runner、Local/External Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化、内部工具 ID、Web Provider 工厂契约与静态地址规则归 `stravia-web-access-contract`，公共重定向解析与资源读取工具归 `stravia-web-access`（具体 Web Provider 适配器通过 `GatewayBuilder::web_provider_factory` 外部注入，见[Web Access Provider 外部化与解耦重构设计](web-access-providers.md)）。
 
 Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `stravia://search` path 并在 `body.question` 中给出搜索文本，执行完整研究并返回带来源的 `SearchReport`；Local 与 External backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md) 与 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
 
@@ -166,9 +166,9 @@ SQLite 与 PostgreSQL migration `0018_advanced_capabilities_web_search.sql`：
 
 ### Web Access 静态规则与执行检查
 
-`stravia-web-access::address_policy` 是 Web Access IP 分类与 HTTP(S) URL 静态规则的唯一所有者。`is_public_ip(IpAddr)` 分类一个地址；`allows_url(&Url)` 接受已解析 URL，只返回静态允许或拒绝，不分配、不重新解析 URL、不执行 DNS。域名静态通过不代表实际目的地址安全。
+`stravia-web-access-contract::address_policy`（由 `stravia-web-access` 重导出）是 Web Access IP 分类与 HTTP(S) URL 静态规则的唯一所有者。`is_public_ip(IpAddr)` 分类一个地址；`allows_url(&Url)` 接受已解析 URL，只返回静态允许或拒绝，不分配、不重新解析 URL、不执行 DNS。域名静态通过不代表实际目的地址安全。
 
-core 保留输入修整、错误映射、准入与异步解析调度；adapter 保留解析错误映射、每次重定向、已取得的全部 DNS 地址检查、连接地址固定和代理 DNS 分工。fetch 经代理时仍不新增本地 origin DNS；其他原有入口的解析检查也不删除。浏览器导航、子资源和最终 URL 检查继续执行；`about:`、`blob:`、`data:` 的处理仍由 browser adapter 路径拥有，不进入共享 HTTP(S) 规则。
+core 保留输入修整、错误映射、准入与异步解析调度；`stravia-web-access` 的重定向解析与外部注入的 `WebProviderFactory` 适配器保留解析错误映射、每次重定向、已取得的全部 DNS 地址检查、连接地址固定和代理 DNS 分工。fetch 经代理时仍不新增本地 origin DNS；其他原有入口的解析检查也不删除。外部浏览器类适配器的 `about:`、`blob:`、`data:` 及子资源出口边界由各自适配器负责，不进入共享 HTTP(S) 规则。
 
 迁移前发现 `http://127.0.0.1../`、`http://192.168.1.1../` 的实际差异：core 去除尾随点后按 IP 拒绝，adapter 原先按域名静态接受。经维护者明确授权，共享规则采用 core 的既有拒绝语义；这是 adapter 静态接受范围的一项收紧，不是完全行为等价的重构，也不构成已证明的 SSRF 绕过结论。core 的 Unicode `trim()` 与 adapter 原始输入解析差异保留。
 

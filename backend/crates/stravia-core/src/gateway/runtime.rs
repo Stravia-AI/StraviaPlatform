@@ -229,6 +229,16 @@ impl PreparedGateway {
         &self.runtime.1
     }
 
+    /// 借用已初始化并完成核心迁移的 SQLite 连接池（若当前后端为 SQLite）。
+    pub fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        self.runtime.2.as_ref()
+    }
+
+    /// 借用已初始化并完成核心迁移的 PostgreSQL 连接池（若当前后端为 PostgreSQL）。
+    pub fn postgres_pool(&self) -> Option<&Pool<Postgres>> {
+        self.runtime.3.as_ref()
+    }
+
     /// 使用保留的配置与连接池启动 Gateway；初始化错误原样返回。
     /// 不重新连接、迁移数据库，也不把持久存储当作内存存储装配。
     pub async fn start(self) -> anyhow::Result<Gateway> {
@@ -645,8 +655,6 @@ impl Gateway {
             tracing::warn!(error = ?error, "plugin marketplace official source initialization failed");
         }
         let catalog_base_url = config.catalog_base_url.clone();
-        let (browser_preferences, browser_path) =
-            admin::browser::BrowserPreferences::load(&config.data_dir);
         let custom_currency = storage.money().custom_currency().await?;
         let mut gw = Self {
             config,
@@ -697,8 +705,8 @@ impl Gateway {
             compaction,
             model_turn: model_turn::unreachable_executor(),
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
-            browser_path: Arc::new(std::sync::RwLock::new(browser_path)),
-            browser_preferences: Arc::new(browser_preferences),
+            web_provider_registry: Arc::new(stravia_web_access::WebProviderRegistry::new()),
+            policy_resolver: Arc::new(crate::policy::AllowAllPolicyResolver),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             route_media_mutation: Arc::new(tokio::sync::Mutex::new(())),
             update_service,
@@ -1089,13 +1097,9 @@ impl Gateway {
         Ok(())
     }
 
-    /// Change the browser path for this Gateway and its clones; active runs retain their snapshot.
-    /// Does not persist or validate the path. Admin updates use the persistent API instead.
-    pub fn set_browser_path(&self, path: Option<std::path::PathBuf>) {
-        *self
-            .browser_path
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+    /// Registered external Web Provider factories injected via [`GatewayBuilder::web_provider_factory`].
+    pub fn web_provider_registry(&self) -> &stravia_web_access::WebProviderRegistry {
+        self.web_provider_registry.as_ref()
     }
 
     /// ADR-0073 收口：把一条上游凭据拒绝证据按条件写落库。代际已变（凭据

@@ -128,10 +128,11 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 52 只重建没有入站外键的 vendor_plugins，其余为新表，FK 保持开启即可。
     // 56 仅增加可空 cursor 元数据列，不回填数据，也不改动外键。
     // 57 修改 Route 列并克隆受引用的配置，始终保持外键约束开启。
+    // 58 重建无入站外键的 web_providers（local_engines 泛化为 config_json）并清理已移除种子设置，保持外键约束开启。
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55..=57
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55..=58
     ) {
         return false;
     }
@@ -2061,17 +2062,11 @@ mod tests {
         assert!(!mcp);
         assert_eq!(injections, "[]");
 
-        let (use_proxy, api_key, engines): (bool, Option<String>, String) = sqlx::query_as(
-            "SELECT use_proxy, api_key, local_engines FROM web_providers WHERE id = 'web-provider-local'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("built-in Local Web Provider");
-        assert!(!use_proxy);
-        assert!(api_key.is_none());
-        let engines: serde_json::Value = serde_json::from_str(&engines).unwrap();
-        assert_eq!(engines["google"]["enabled"], true);
-        assert_eq!(engines["google_scholar"]["enabled"], false);
+        let provider_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM web_providers")
+            .fetch_one(&pool)
+            .await
+            .expect("empty fresh web_providers");
+        assert_eq!(provider_count, 0);
         for key in [
             "web_access_search_provider_ids",
             "web_access_fetch_provider_ids",
@@ -2083,15 +2078,109 @@ mod tests {
                 .expect("initial Web Access priority");
             assert_eq!(
                 serde_json::from_str::<Vec<String>>(&value).unwrap(),
-                ["web-provider-local"]
+                Vec::<String>::new()
             );
         }
         assert!(
-            sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ('removed', 'Removed', 'tavily', 'secret')")
+            sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ('blank', 'Blank', '   ', 'secret')")
                 .execute(&pool)
                 .await
                 .is_err()
         );
+        assert!(
+            sqlx::query("INSERT INTO web_providers (id, name, kind, config_json) VALUES ('bad-cfg', 'BadCfg', 'worker', '[]')")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query(
+            "INSERT INTO web_providers (id, name, kind, config_json) VALUES ('custom-worker', 'Worker', 'worker-web', '{\"endpoint\":\"http://127.0.0.1:9000\"}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("custom registered kind persists with JSON object config");
+    }
+
+    #[tokio::test]
+    async fn sqlite_upgrade_0058_removes_local_seed_and_preserves_custom_providers() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        let prefix = |version| {
+            Migrator::with_migrations(
+                SQLITE_MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= version)
+                    .cloned()
+                    .collect(),
+            )
+        };
+        super::run_sqlite_migrator(&pool, &prefix(57), None)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO web_providers (id, name, kind, api_key, use_proxy) VALUES ('existing-exa', 'Existing Exa', 'exa', 'secret-key', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE settings SET value = '[\"web-provider-local\",\"existing-exa\"]' WHERE name = 'web_access_search_provider_ids'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO settings (name, value) VALUES ('web_access_browser_path', '/usr/bin/chromium')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::migrate_sqlite(&pool, None).await.unwrap();
+
+        let rows: Vec<(String, String, Option<String>, bool, Option<String>)> = sqlx::query_as(
+            "SELECT id, kind, api_key, use_proxy, config_json FROM web_providers ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "existing-exa".into(),
+                "exa".into(),
+                Some("secret-key".into()),
+                true,
+                None
+            )]
+        );
+        let search_ids: String = sqlx::query_scalar(
+            "SELECT value FROM settings WHERE name = 'web_access_search_provider_ids'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&search_ids).unwrap(),
+            vec!["existing-exa"]
+        );
+        let fetch_ids: String = sqlx::query_scalar(
+            "SELECT value FROM settings WHERE name = 'web_access_fetch_provider_ids'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&fetch_ids).unwrap(),
+            Vec::<String>::new()
+        );
+        let browser_setting: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM settings WHERE name = 'web_access_browser_path'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert!(browser_setting.is_none());
     }
 
     #[tokio::test]
@@ -3286,17 +3375,11 @@ mod tests {
             .is_err()
         );
 
-        let (use_proxy, api_key, engines): (bool, Option<String>, serde_json::Value) =
-            sqlx::query_as(
-                "SELECT use_proxy, api_key, local_engines FROM web_providers WHERE id = 'web-provider-local'",
-            )
+        let provider_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM web_providers")
             .fetch_one(&pool)
             .await
-            .expect("built-in Local Web Provider");
-        assert!(!use_proxy);
-        assert!(api_key.is_none());
-        assert_eq!(engines["google"]["enabled"], true);
-        assert_eq!(engines["google_scholar"]["enabled"], false);
+            .expect("empty fresh web_providers");
+        assert_eq!(provider_count, 0);
         for key in [
             "web_access_search_provider_ids",
             "web_access_fetch_provider_ids",
@@ -3308,15 +3391,27 @@ mod tests {
                 .expect("initial Web Access priority");
             assert_eq!(
                 serde_json::from_str::<Vec<String>>(&value).unwrap(),
-                ["web-provider-local"]
+                Vec::<String>::new()
             );
         }
         assert!(
-            sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ('removed', 'Removed', 'tavily', 'secret')")
+            sqlx::query("INSERT INTO web_providers (id, name, kind, api_key) VALUES ('blank', 'Blank', '   ', 'secret')")
                 .execute(&pool)
                 .await
                 .is_err()
         );
+        assert!(
+            sqlx::query("INSERT INTO web_providers (id, name, kind, config_json) VALUES ('bad-cfg', 'BadCfg', 'worker', '[]'::jsonb)")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        sqlx::query(
+            "INSERT INTO web_providers (id, name, kind, config_json) VALUES ('custom-worker', 'Worker', 'worker-web', '{\"endpoint\":\"http://127.0.0.1:9000\"}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("custom registered kind persists with JSON object config");
         })
         .await;
         pool.close().await;

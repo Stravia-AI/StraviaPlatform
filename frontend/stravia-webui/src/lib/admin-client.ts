@@ -8,6 +8,7 @@ import type { UpdateStatus } from '#lib/product-update.js'
 import type {
   ApiKey,
   ApiKeySpend,
+  CapabilitiesResponse,
   CustomCurrency,
   NewProviderCostPlan,
   ProviderCostPlan,
@@ -85,8 +86,8 @@ import type {
   ProviderConnectionCheckInput,
   ProviderConnectionCheckResult,
   WebAccessSettings,
-  WebAccessBrowserState,
   WebProvider,
+  WebProviderKindDescriptor,
   WebSearchConfigView,
   UpdateWebSearchConfig,
   EligibleSearchModel,
@@ -391,6 +392,7 @@ export const admin = {
   },
   catalog: { canonicalModels: () => request<CanonicalModelList>('GET', '/catalog/models') },
   webAccess: {
+    kinds: { list: () => request<WebProviderKindDescriptor[]>('GET', '/web-provider-kinds') },
     providers: {
       list: () => request<WebProvider[]>('GET', '/web-providers'),
       create: (input: CreateWebProvider) => request<WebProvider>('POST', '/web-providers', input),
@@ -401,10 +403,6 @@ export const admin = {
     settings: {
       get: () => request<WebAccessSettings>('GET', '/web-access/settings'),
       update: (input: WebAccessSettings) => request<WebAccessSettings>('PUT', '/web-access/settings', input),
-    },
-    browser: {
-      get: () => request<WebAccessBrowserState>('GET', '/web-access/browser'),
-      set: (path: string | null) => request<WebAccessBrowserState>('PUT', '/web-access/browser', { path }),
     },
   },
   webSearch: {
@@ -613,6 +611,13 @@ export const admin = {
     check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
     skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
+  capabilities: { get: () => request<CapabilitiesResponse>('GET', '/capabilities') },
+}
+
+export const capabilitiesQueryKey = ['capabilities'] as const
+
+export function capabilitiesQueryOptions() {
+  return { queryKey: capabilitiesQueryKey, queryFn: admin.capabilities.get, staleTime: 60_000, retry: false }
 }
 
 /** Changing a route can also change which routes can be bound in the advanced settings. */

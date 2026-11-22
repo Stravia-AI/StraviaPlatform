@@ -789,6 +789,7 @@ async fn main() -> anyhow::Result<()> {
             desktop_cors_origins: cors_origins.clone(),
             proxy_cors_origins: cors_origins,
             serve_embedded_webui: false,
+            extensions: Default::default(),
         },
     );
     let server = start_http_server(format!("127.0.0.1:{server_port}"), app).await?;

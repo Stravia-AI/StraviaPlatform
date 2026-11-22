@@ -5,7 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod address_policy;
+pub mod factory;
 pub mod read_path;
+
+pub use factory::{
+    OutboundProxyMode, WebProviderCapabilities, WebProviderConfig, WebProviderFactory,
+    WebProviderKindDescriptor, WebProviderRegistry,
+};
 
 /// 未指定时每次搜索最多返回的结果数。
 pub const DEFAULT_SEARCH_RESULTS: usize = 5;
@@ -225,7 +232,7 @@ impl<T> AdapterSuccess<T> {
 }
 
 #[async_trait::async_trait]
-/// Local、Exa 与 Zhipu 共用的单一适配器接口。
+/// 外部注册的 Web Provider 适配器统一接口。
 ///
 /// 整体错误通过 [`ProviderFailure`] 返回；Fetch 的逐 URL 错误留在 [`FetchResult`] 中，
 /// 供 Engine 仅重试失败 URL。

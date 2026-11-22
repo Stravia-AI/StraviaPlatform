@@ -273,6 +273,7 @@ mod tests {
             admin_entry: policy,
             proxy_cors_origins: Vec::new(),
             serve_embedded_webui: false,
+            extensions: Default::default(),
         }
     }
 

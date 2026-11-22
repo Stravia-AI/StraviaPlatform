@@ -186,6 +186,22 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
         principal: &stravia_runtime_contract::Principal,
         binding: &stravia_web_search::ResolvedWebSearchBackend,
     ) -> Result<(), stravia_web_search::WebSearchError> {
+        if let Err(denial) = self
+            .gateway
+            .policy_allows_capability(
+                principal.api_key_id(),
+                crate::policy::PolicyCapability::WebSearch,
+            )
+            .await
+        {
+            tracing::warn!(
+                api_key_id = ?principal.api_key_id(),
+                code = denial.code.as_str(),
+                reason = denial.message.as_str(),
+                "policy denied web search capability"
+            );
+            return Err(web_search_authorization_error());
+        }
         proxy::security::Security::new(self.gateway.storage.auth())
             .authorize_principal_capability(principal)
             .await
