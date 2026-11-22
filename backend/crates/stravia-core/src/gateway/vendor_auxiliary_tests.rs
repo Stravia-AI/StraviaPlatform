@@ -30,8 +30,6 @@ use crate::db::models::{CreateProvider, ProviderCredentialInput, ProviderSourceI
 
 #[path = "vendor_antigravity_search_tests.rs"]
 mod antigravity_search_tests;
-#[path = "vendor_deepseek_search_tests.rs"]
-mod deepseek_search_tests;
 #[path = "vendor_antigravity_shape_acceptance_tests.rs"]
 mod antigravity_shape_acceptance_tests;
 #[path = "vendor_claude_shape_acceptance_tests.rs"]
@@ -40,6 +38,8 @@ mod claude_shape_acceptance_tests;
 mod cli_shape_acceptance_tests;
 #[path = "vendor_codex_shape_acceptance_tests.rs"]
 mod codex_shape_acceptance_tests;
+#[path = "vendor_deepseek_search_tests.rs"]
+mod deepseek_search_tests;
 
 #[tokio::test]
 async fn default_shape_matches_existing_reqwest_client_hello() {

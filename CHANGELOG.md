@@ -2,21 +2,41 @@
 
 ## Unreleased
 
-### Added
-
-- Built-in Base Alibaba Model Studio (DashScope) and Token Plan profiles (`alibaba`, `alibaba-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`) now support image generation and reference-image editing through the unified `generate` tool via `/api/v1/services/aigc/multimodal-generation/generation`. Model sync dynamically merges synchronous image models and reference-input support from `GET {api_root}/api/v1/models`, tolerates HTTP 404 on Token Plan `/api/v1/models` while preserving catalog-declared image models, and excludes Coding Plan profiles (`alibaba-coding-plan`, `alibaba-coding-plan-cn`) from image generation. Result OSS image URLs are downloaded without forwarding provider credentials under a fixed Alibaba DashScope OSS host regex allowlist. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, region matching, and Credits/balance consumption remain governed by Alibaba Cloud Model Studio.
-- Built-in Base Volcengine Ark, BytePlus ModelArk, and Volcengine Plan profiles (`volcengine`, `volcengine-coding-plan`, `volcengine-agent-plan`, `volcengine-token-plan`, `volcengine-plan`, `byteplus`) now support image generation and reference-image editing through the unified `generate` tool via `/images/generations`. Model sync dynamically merges image models and reference-input support from `GET {base}/models` on standard Ark/BytePlus endpoints, normalizes Agent Plan `/api/plan` bases to `/api/plan/v3`, tolerates 404 on `/api/plan/v3/models`, and avoids advertising uncallable image models on Coding Plan `/api/coding/v3`. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, model activation, and pay-as-you-go or Agent Plan quota still apply.
-
 ### Changed
 
 - Removed the built-in `LocalWeb` search/fetch runtime, Chromium browser path management (`/api/v1/web-access/browser`, `STRAVIA_CHROME_PATH`, NixOS `browserPackage`, Docker Chromium packages), and hardcoded `local`/`exa`/`zhipu` Web Provider adapters from the core repository. Web Providers are now injected via `GatewayBuilder::web_provider_factory` (`WebProviderFactory`/`WebProviderRegistry` in `stravia-web-access-contract`) and discovered dynamically through `GET /api/v1/web-provider-kinds`. Migration `0058_generalize_web_providers.sql` (SQLite and PostgreSQL) generalizes `web_providers.local_engines` to `config_json`, removes the built-in `web-provider-local` seed and `web_access_browser_path` setting, and preserves existing non-local rows so operators can inspect or remove unregistered entries. Built-in Wasm vendor External Search Routes (such as Codex, Antigravity, and DeepSeek) remain unaffected.
-- Release builds use thin LTO, a single codegen unit and stripped symbols. SQLite read paths use an in-memory temporary store, a 16 MiB per-connection page-cache target and a 128 MiB mapping window; `synchronous=FULL` and write durability are unchanged.
-- Vendor execution uses epoch-based cooperative interruption instead of fuel instrumentation, with a sleeping idle ticker and pooled Wasm instances on supported 64-bit hosts. The pool can reserve about 1 TiB of virtual address space, not physical RAM; pool initialization failure falls back to on-demand allocation. Channels can opt into static protocol selection to avoid a separate guest call; OpenAI and Azure retain dynamic selection. Rebuild and re-import standalone plugins to apply descriptor and codec optimizations; the bundled Base component updates with the host.
-- SQLite API-key lookups reuse positive, digest-indexed configuration snapshots with mutation invalidation; PostgreSQL keeps authoritative storage reads. Authorization continues to check current key state after asynchronous preparation; non-OAuth connections skip OAuth credential reads, and vendor-profile JSON is reused per admitted plugin. Observation subscriptions evict the oldest cached root IDs instead of clearing the entire cache.
 
 ### Fixed
 
 - DeepSeek Harness client configuration generation (`$DSH_HOME/settings.yaml`) now writes per-model `reasoningEfforts` from each Route's supported thinking levels (mapping `off` to `"none"` and omitting `reasoningEfforts` for non-reasoning or `off`-only models) and sets OpenAI `compat` (`supportsReasoningEffort: true`, `thinkingFormat: "openai"`). Re-apply the DeepSeek Harness client configuration to update existing files.
+
+## [0.7.5] - 2026-11-22
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
+### Added
+
+- Built-in Base DeepSeek profiles now support native web search and thinking-level configuration.
+- Built-in Base Alibaba Model Studio (DashScope) and Token Plan profiles (`alibaba`, `alibaba-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`) now support image generation and reference-image editing through the unified `generate` tool via `/api/v1/services/aigc/multimodal-generation/generation`. Model sync dynamically merges synchronous image models and reference-input support from `GET {api_root}/api/v1/models`, tolerates HTTP 404 on Token Plan `/api/v1/models` while preserving catalog-declared image models, and excludes Coding Plan profiles (`alibaba-coding-plan`, `alibaba-coding-plan-cn`) from image generation. Result OSS image URLs are downloaded without forwarding provider credentials under a fixed Alibaba DashScope OSS host regex allowlist. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, region matching, and Credits/balance consumption remain governed by Alibaba Cloud Model Studio.
+- Built-in Base Volcengine Ark, BytePlus ModelArk, and Volcengine Plan profiles (`volcengine`, `volcengine-coding-plan`, `volcengine-agent-plan`, `volcengine-token-plan`, `volcengine-plan`, `byteplus`) now support image generation and reference-image editing through the unified `generate` tool via `/images/generations`. Model sync dynamically merges image models and reference-input support from `GET {base}/models` on standard Ark/BytePlus endpoints, normalizes Agent Plan `/api/plan` bases to `/api/plan/v3`, tolerates 404 on `/api/plan/v3/models`, and avoids advertising uncallable image models on Coding Plan `/api/coding/v3`. Rebuild the bundled Base component, sync models, and bind an eligible image Route. Upstream account permissions, model activation, and pay-as-you-go or Agent Plan quota still apply.
+- Model specification token limits now format binary multiples (such as `1,048,576` as `1M` and binary `K` multiples) in compact notation.
+
+### Changed
+
+- Release builds use thin LTO, a single codegen unit and stripped symbols. SQLite read paths use an in-memory temporary store, a 16 MiB per-connection page-cache target and a 128 MiB mapping window; `synchronous=FULL` and write durability are unchanged.
+- Vendor execution uses epoch-based cooperative interruption instead of fuel instrumentation, with a sleeping idle ticker and pooled Wasm instances on supported 64-bit hosts. The pool can reserve about 1 TiB of virtual address space, not physical RAM; pool initialization failure falls back to on-demand allocation. Channels can opt into static protocol selection to avoid a separate guest call; OpenAI and Azure retain dynamic selection. Rebuild and re-import standalone plugins to apply descriptor and codec optimizations; the bundled Base component updates with the host.
+- SQLite API-key lookups reuse positive, digest-indexed configuration snapshots with mutation invalidation; PostgreSQL keeps authoritative storage reads. Authorization continues to check current key state after asynchronous preparation; non-OAuth connections skip OAuth credential reads, and vendor-profile JSON is reused per admitted plugin. Observation subscriptions evict the oldest cached root IDs instead of clearing the entire cache.
+- History recall reads are now bound to the caller's authorization scope.
+
+### Fixed
+
+- Empty-stream EOF errors in Model Turn execution now restore target failover, limit same-target retries, and avoid prematurely committing signed items.
+- Interaction observation now extracts the current turn's user input accurately.
+- Logs canvas now preserves viewport continuity when filters yield an empty state.
+- Server shutdown and Wasm compilation thread pool cleanup now reclaim resources promptly.
+- Fixed Prettier formatting in the Logs page and updated the WebUI provider specification E2E assertion to match binary token formatting (`1M`).
 
 ## [0.7.4] - 2026-11-20
 

@@ -271,11 +271,7 @@ fn ensure_existing_image_capabilities(response: &mut DiscoverResponse) {
     }
 }
 
-fn merge_models(
-    response: &mut DiscoverResponse,
-    models: &[ImageModelEntry],
-    restricted: bool,
-) {
+fn merge_models(response: &mut DiscoverResponse, models: &[ImageModelEntry], restricted: bool) {
     for entry in models {
         let edit = entry.supports_image_input;
         if let Some(model) = response.models.iter_mut().find(|m| m.id == entry.id) {
@@ -846,7 +842,11 @@ mod tests {
         );
         assert_eq!(map_size("doubao-seedream-5.5", None, None), None);
         assert_eq!(
-            map_size("doubao-seedream-5.5", None, Some(MediaImageResolution::FourK)),
+            map_size(
+                "doubao-seedream-5.5",
+                None,
+                Some(MediaImageResolution::FourK)
+            ),
             Some("2K")
         );
 
@@ -991,7 +991,11 @@ mod tests {
                 "{code}"
             );
         }
-        for code in ["ModelNotOpen", "InvalidSubscription", "InvalidParameter.Size"] {
+        for code in [
+            "ModelNotOpen",
+            "InvalidSubscription",
+            "InvalidParameter.Size",
+        ] {
             let err = classify_error(
                 404,
                 &headers,

@@ -389,7 +389,10 @@ async fn deepseek_search_live_upstream_smoke() -> anyhow::Result<()> {
         panic!("unexpected output: {:?}", out_off.content);
     };
     let res_off: WebSearchResult = serde_json::from_value(raw_off.clone())?;
-    assert_eq!(res_off.completion, stravia_web_search::SearchCompletion::Complete);
+    assert_eq!(
+        res_off.completion,
+        stravia_web_search::SearchCompletion::Complete
+    );
     assert!(!res_off.report.sources.is_empty());
     println!(
         "[live off] sources={} answer_len={} first_url={}",
@@ -421,7 +424,10 @@ async fn deepseek_search_live_upstream_smoke() -> anyhow::Result<()> {
         panic!("unexpected output: {:?}", out_low.content);
     };
     let res_low: WebSearchResult = serde_json::from_value(raw_low.clone())?;
-    assert_eq!(res_low.completion, stravia_web_search::SearchCompletion::Complete);
+    assert_eq!(
+        res_low.completion,
+        stravia_web_search::SearchCompletion::Complete
+    );
     assert!(!res_low.report.sources.is_empty());
     println!(
         "[live low] sources={} answer_len={} first_url={}",

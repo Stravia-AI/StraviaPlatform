@@ -226,8 +226,8 @@ pub fn execute(
     let volcengine_discovery =
         operation == Operation::Discover && volcengine::supports(&provider_id);
     let deepseek_discovery = operation == Operation::Discover && deepseek::supports(&provider_id);
-    let volcengine_context = volcengine_discovery
-        .then(|| volcengine::DiscoveryContext::from_provider(input.provider()));
+    let volcengine_context =
+        volcengine_discovery.then(|| volcengine::DiscoveryContext::from_provider(input.provider()));
     let alibaba_discovery = operation == Operation::Discover && alibaba::supports(&provider_id);
     let alibaba_context =
         alibaba_discovery.then(|| alibaba::DiscoveryContext::from_provider(input.provider()));
@@ -376,9 +376,9 @@ pub fn execute(
             restrict_models,
         )
         .map(OperationOutput::Discover),
-        OperationOutput::Discover(response) if deepseek_discovery => {
-            Ok(OperationOutput::Discover(deepseek::decorate_discovery(response)))
-        }
+        OperationOutput::Discover(response) if deepseek_discovery => Ok(OperationOutput::Discover(
+            deepseek::decorate_discovery(response),
+        )),
         output => Ok(output),
     }
 }
