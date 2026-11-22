@@ -5,6 +5,7 @@ mod catalog;
 mod cloud;
 mod codec;
 mod connection_check;
+mod deepseek;
 mod generic;
 mod metadata;
 mod minimax;
@@ -64,6 +65,7 @@ fn provider_descriptor(provider_id: &str) -> Option<ProviderDescriptor> {
     minimax::configure_descriptor(&mut descriptor);
     volcengine::configure_descriptor(&mut descriptor);
     alibaba::configure_descriptor(&mut descriptor);
+    deepseek::configure_descriptor(&mut descriptor);
     Some(add_allowance_capabilities(descriptor))
 }
 
@@ -223,6 +225,7 @@ pub fn execute(
     let minimax_discovery = operation == Operation::Discover && minimax::supports(&provider_id);
     let volcengine_discovery =
         operation == Operation::Discover && volcengine::supports(&provider_id);
+    let deepseek_discovery = operation == Operation::Discover && deepseek::supports(&provider_id);
     let volcengine_context = volcengine_discovery
         .then(|| volcengine::DiscoveryContext::from_provider(input.provider()));
     let alibaba_discovery = operation == Operation::Discover && alibaba::supports(&provider_id);
@@ -252,11 +255,25 @@ pub fn execute(
                 volcengine::discover(host, ctx, response, restrict_models)?
             } else if let Some(ctx) = alibaba_context.as_ref() {
                 alibaba::discover(host, ctx, response, restrict_models)?
+            } else if deepseek_discovery {
+                deepseek::decorate_discovery(response)
             } else {
                 response
             };
             return Ok(OperationOutput::Discover(response));
         }
+    }
+    if operation == Operation::Search && deepseek::supports(&provider_id) {
+        let OperationInput::Search { provider, request } = input else {
+            return Err(error(ErrorKind::Invalid, "search input mismatch"));
+        };
+        if provider.channel != channel {
+            return Err(error(
+                ErrorKind::Invalid,
+                "snapshot channel does not match execute channel",
+            ));
+        }
+        return deepseek::search(host, &provider, request).map(OperationOutput::Search);
     }
     if operation == Operation::MediaImage && minimax::supports(&provider_id) {
         let OperationInput::MediaImage { provider, request } = input else {
@@ -359,6 +376,9 @@ pub fn execute(
             restrict_models,
         )
         .map(OperationOutput::Discover),
+        OperationOutput::Discover(response) if deepseek_discovery => {
+            Ok(OperationOutput::Discover(deepseek::decorate_discovery(response)))
+        }
         output => Ok(output),
     }
 }
