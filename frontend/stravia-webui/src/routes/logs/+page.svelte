@@ -390,7 +390,9 @@ async function downloadBundle(): Promise<void> {
               <Empty.Root
                 ><Empty.Header
                   ><Empty.Title
-                    >{ws.activeFilterCount ? m.observation_no_matching_chains() : m.observation_no_chains()}</Empty.Title
+                    >{ws.activeFilterCount
+                      ? m.observation_no_matching_chains()
+                      : m.observation_no_chains()}</Empty.Title
                   ><Empty.Description
                     >{ws.activeFilterCount
                       ? m.observation_clear_filters_help()

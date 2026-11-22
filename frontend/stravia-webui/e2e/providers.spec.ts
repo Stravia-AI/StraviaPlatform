@@ -1327,9 +1327,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
   const precisionRow = table.getByRole('row').filter({ hasText: /Precision Model.*precision-model/ })
   const unknownRow = table.getByRole('row').filter({ hasText: /Unknown Model.*unknown-model/ })
   const binaryRow = table.getByRole('row').filter({ hasText: /Binary Limit.*binary-limit/ })
-  await expect(binaryRow.getByRole('button', { name: 'Context tokens binary-limit', exact: true })).toHaveText(
-    '1,048,576',
-  )
+  await expect(binaryRow.getByRole('button', { name: 'Context tokens binary-limit', exact: true })).toHaveText('1M')
   const identityCell = precisionRow.getByRole('cell').filter({ hasText: /Precision Model.*precision-model/ })
   await expect(identityCell).not.toContainText('1.05M')
   await expect(identityCell).not.toContainText('Input')

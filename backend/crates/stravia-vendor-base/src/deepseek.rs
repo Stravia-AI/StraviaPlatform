@@ -272,8 +272,8 @@ fn scan_responses_body(bytes: &[u8]) -> Result<(Vec<Value>, Value), PluginError>
         if data.is_empty() || data == "[DONE]" {
             continue;
         }
-        let payload: Value =
-            serde_json::from_str(&data).map_err(|_| retryable("DeepSeek returned malformed SSE"))?;
+        let payload: Value = serde_json::from_str(&data)
+            .map_err(|_| retryable("DeepSeek returned malformed SSE"))?;
         let event = event
             .or_else(|| payload.get("type").and_then(Value::as_str))
             .unwrap_or_default();
