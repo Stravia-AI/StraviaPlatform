@@ -13,7 +13,7 @@ use stravia_vendor_sdk::{
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_SOURCES: u32 = 20;
-const SEARCH_INSTRUCTIONS: &str = "Perform speed-first Web Search. Distinguish verified facts, inference, disagreement, and uncertainty. Follow the requested language; otherwise follow the query language; use English when ambiguous.";
+const SEARCH_INSTRUCTIONS: &str = "Perform speed-first Web Search. You MUST use the web search tool to search the web and cite live web sources before answering. Distinguish verified facts, inference, disagreement, and uncertainty. Follow the requested language; otherwise follow the query language; use English when ambiguous.";
 
 pub(crate) fn supports(provider_id: &str) -> bool {
     provider_id == "deepseek"

@@ -271,3 +271,164 @@ async fn deepseek_search_follows_bound_flash_thinking_level_through_stravia_read
     server.task.await??;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "live upstream test; requires DEEPSEEK_API_KEY"]
+async fn deepseek_search_live_upstream_smoke() -> anyhow::Result<()> {
+    let api_key = std::env::var("DEEPSEEK_API_KEY")
+        .map_err(|_| anyhow::anyhow!("DEEPSEEK_API_KEY must be set"))?;
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_owned(),
+        ..GatewayConfig::default()
+    })
+    .await?;
+
+    let provider = gateway
+        .admin()
+        .create_provider(CreateProvider {
+            name: Some("DeepSeek Live Search".into()),
+            source: ProviderSourceInput::Custom {
+                vendor: "deepseek".into(),
+                channel: "default".into(),
+                protocol: Some("openai-compatible".into()),
+                base_url: "https://api.deepseek.com".into(),
+                models_source: Some("https://api.deepseek.com/models".into()),
+                static_models: None,
+            },
+            credential: ProviderCredentialInput::ApiKey { value: api_key },
+            vendor_options: Default::default(),
+            use_proxy: false,
+        })
+        .await?;
+
+    let sync = gateway.admin().sync_provider_models(&provider.id).await?;
+    assert_eq!(
+        sync.outcome,
+        crate::provider_models::ModelChangeOutcome::Success
+    );
+
+    let route = gateway
+        .admin()
+        .create_model(CreateRoute {
+            model_id: "deepseek-live-search".into(),
+            display_name: None,
+            purpose: RoutePurpose::WebSearch,
+            balance: None,
+            targets: vec![CreateTarget {
+                provider_id: provider.id.clone(),
+                model: "deepseek-flash".into(),
+                enabled: true,
+                priority: Some(0),
+                first_token_timeout_ms: None,
+                target_retry_budget: Some(0),
+                target_cooldown_ms: Some(0),
+                thinking_level_map: Vec::new(),
+            }],
+            default_thinking_level: Some(ThinkingLevel::Off),
+            billing: None,
+        })
+        .await?;
+
+    let config = gateway.admin().get_web_search_config().await?.config;
+    gateway
+        .admin()
+        .update_web_search_config(WebSearchConfig {
+            revision: config.revision,
+            enabled: true,
+            backend: Some(WebSearchBackendDraft::External {
+                route_id: Some(route.model_id.clone().into()),
+            }),
+            max_turns: config.max_turns,
+            total_time_seconds: config.total_time_seconds,
+            updated_at: config.updated_at,
+        })
+        .await?;
+
+    let key = gateway
+        .admin()
+        .create_api_key(CreateApiKey {
+            key: None,
+            name: "deepseek live search".into(),
+            rpm_limit: None,
+            expires_at: None,
+            mcp_access_enabled: false,
+            transparent_injection_enabled: true,
+            transparent_injections: TransparentInjectionSet::from_items([
+                TransparentInjection::WebSearch,
+            ]),
+            model_ids: vec![route.id.into()],
+            spend_limit: None,
+        })
+        .await?;
+
+    let (_, mut tools) = stravia_web_search::builtin_extensions(Arc::new(
+        crate::web_search::host::SearchHost(gateway.clone()),
+    ));
+    let reader = crate::mcp::read::ReadTool::new(&gateway, &mut tools)?;
+
+    let run = |id: &str, question: &str| {
+        reader.execute_result(
+            json!({"path": "stravia://search", "body": {"question": question}}),
+            ToolExecutionContext {
+                request_id: id.into(),
+                run_id: id.into(),
+                interaction_id: None,
+                principal: Principal::new(key.id.clone()),
+                read_scope: ReadExposureScope::FULL,
+                cancellation: CancellationToken::new(),
+                progress: None,
+            },
+        )
+    };
+
+    // 1. thinking = off (联网搜索)
+    let out_off = run("live-off", "Rust 最新稳定版本是多少？").await?;
+    assert!(!out_off.is_error, "{out_off:?}");
+    let [ContentBlock::Unknown { raw: raw_off }] = out_off.content.as_slice() else {
+        panic!("unexpected output: {:?}", out_off.content);
+    };
+    let res_off: WebSearchResult = serde_json::from_value(raw_off.clone())?;
+    assert_eq!(res_off.completion, stravia_web_search::SearchCompletion::Complete);
+    assert!(!res_off.report.sources.is_empty());
+    println!(
+        "[live off] sources={} answer_len={} first_url={}",
+        res_off.report.sources.len(),
+        res_off.report.answer.len(),
+        res_off.report.sources[0].url
+    );
+
+    // 2. thinking = low (深度思考搜索)
+    gateway
+        .admin()
+        .update_model(
+            &route.model_id,
+            UpdateRoute {
+                model_id: None,
+                display_name: None,
+                purpose: None,
+                balance: None,
+                is_enabled: None,
+                targets: None,
+                default_thinking_level: Some(Some(ThinkingLevel::Low)),
+                billing: None,
+            },
+        )
+        .await?;
+    let out_low = run("live-low", "What is the latest population of Iceland?").await?;
+    assert!(!out_low.is_error, "{out_low:?}");
+    let [ContentBlock::Unknown { raw: raw_low }] = out_low.content.as_slice() else {
+        panic!("unexpected output: {:?}", out_low.content);
+    };
+    let res_low: WebSearchResult = serde_json::from_value(raw_low.clone())?;
+    assert_eq!(res_low.completion, stravia_web_search::SearchCompletion::Complete);
+    assert!(!res_low.report.sources.is_empty());
+    println!(
+        "[live low] sources={} answer_len={} first_url={}",
+        res_low.report.sources.len(),
+        res_low.report.answer.len(),
+        res_low.report.sources[0].url
+    );
+
+    Ok(())
+}
