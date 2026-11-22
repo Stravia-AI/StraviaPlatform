@@ -452,6 +452,30 @@ fn plan_zcode(
     )
 }
 
+fn deepseek_harness_reasoning_efforts(
+    model: &ConnectClientModel,
+) -> Option<JsonMap<String, JsonValue>> {
+    let mut efforts = JsonMap::new();
+    let mut has_non_off = false;
+    for level in &model.supported_thinking_levels {
+        if !matches!(
+            level.as_str(),
+            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            continue;
+        }
+        if level == "off" {
+            // DSH 留空 off 会省略 reasoning_effort，无法覆盖 Route 默认思考等级；
+            // 显式发 "none" 让 Stravia 入站解码为 ThinkingLevel::Off。
+            efforts.insert("off".to_owned(), json!("none"));
+        } else {
+            has_non_off = true;
+            efforts.insert(level.clone(), json!(level));
+        }
+    }
+    has_non_off.then_some(efforts)
+}
+
 fn plan_deepseek_harness(
     input: &ConnectClientApplyInput,
     paths: &ConfigPaths<'_>,
@@ -471,6 +495,10 @@ fn plan_deepseek_harness(
         "apiKeyEnv": "STRAVIA_API_KEY",
         "api": "openai-completions",
         "baseURL": format!("{}/v1", input.host.trim_end_matches('/')),
+        "compat": {
+            "supportsReasoningEffort": true,
+            "thinkingFormat": "openai",
+        },
         "models": input.models.iter().map(|model| {
             let mut value = JsonMap::from_iter([
                 ("id".to_owned(), json!(model.model_id)),
@@ -480,6 +508,9 @@ fn plan_deepseek_harness(
                 ),
             ]);
             insert_optional_context(&mut value, model, "contextWindow");
+            if let Some(efforts) = deepseek_harness_reasoning_efforts(model) {
+                value.insert("reasoningEfforts".to_owned(), JsonValue::Object(efforts));
+            }
             JsonValue::Object(value)
         }).collect::<Vec<_>>(),
     });
@@ -2644,6 +2675,72 @@ modelRoles:
         assert_eq!(
             provider["experimental_bearer_token"].as_str(),
             Some(input.api_key.as_str())
+        );
+    }
+
+    #[test]
+    fn deepseek_harness_writes_reasoning_efforts_and_openai_compat() {
+        let mut input = standard_input(ConnectClientId::DeepseekHarness);
+        input.models = vec![
+            ConnectClientModel {
+                supported_thinking_levels: vec![
+                    "off".to_owned(),
+                    "minimal".to_owned(),
+                    "low".to_owned(),
+                    "medium".to_owned(),
+                    "high".to_owned(),
+                    "xhigh".to_owned(),
+                    "max".to_owned(),
+                    "custom-unknown".to_owned(),
+                ],
+                ..model("slow", "Slow")
+            },
+            ConnectClientModel {
+                supported_thinking_levels: vec!["off".to_owned()],
+                ..model("off-only", "Off Only")
+            },
+            ConnectClientModel {
+                supported_thinking_levels: vec![],
+                ..model("plain", "Plain")
+            },
+        ];
+
+        let plan = preview_connect_client_apply(&input).expect("DeepSeek Harness preview");
+        let (settings_yaml, _) = plan
+            .preview
+            .split_once("\n# $DSH_HOME/.credentials.yaml\n")
+            .expect("separate settings and credentials sections");
+        let settings_yaml = settings_yaml
+            .strip_prefix("# $DSH_HOME/settings.yaml\n")
+            .expect("settings header");
+        let document: serde_json::Value =
+            serde_saphyr::from_str(settings_yaml).expect("DeepSeek Harness YAML");
+        let provider = &document["llm-pi-ai"]["providers"]["stravia"];
+
+        assert_eq!(provider["compat"]["supportsReasoningEffort"], true);
+        assert_eq!(provider["compat"]["thinkingFormat"], "openai");
+
+        let models = provider["models"].as_array().expect("models array");
+        assert_eq!(models.len(), 3);
+        assert_eq!(
+            models[0]["reasoningEfforts"],
+            serde_json::json!({
+                "off": "none",
+                "minimal": "minimal",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "xhigh": "xhigh",
+                "max": "max",
+            })
+        );
+        assert!(
+            models[1].get("reasoningEfforts").is_none(),
+            "DSH rejects off-only reasoningEfforts"
+        );
+        assert!(
+            models[2].get("reasoningEfforts").is_none(),
+            "DSH rejects empty reasoningEfforts"
         );
     }
 }
