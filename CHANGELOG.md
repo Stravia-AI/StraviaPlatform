@@ -13,6 +13,10 @@
 - Vendor execution uses epoch-based cooperative interruption instead of fuel instrumentation, with a sleeping idle ticker and pooled Wasm instances on supported 64-bit hosts. The pool can reserve about 1 TiB of virtual address space, not physical RAM; pool initialization failure falls back to on-demand allocation. Channels can opt into static protocol selection to avoid a separate guest call; OpenAI and Azure retain dynamic selection. Rebuild and re-import standalone plugins to apply descriptor and codec optimizations; the bundled Base component updates with the host.
 - SQLite API-key lookups reuse positive, digest-indexed configuration snapshots with mutation invalidation; PostgreSQL keeps authoritative storage reads. Authorization continues to check current key state after asynchronous preparation; non-OAuth connections skip OAuth credential reads, and vendor-profile JSON is reused per admitted plugin. Observation subscriptions evict the oldest cached root IDs instead of clearing the entire cache.
 
+### Fixed
+
+- DeepSeek Harness client configuration generation (`$DSH_HOME/settings.yaml`) now writes per-model `reasoningEfforts` from each Route's supported thinking levels (mapping `off` to `"none"` and omitting `reasoningEfforts` for non-reasoning or `off`-only models) and sets OpenAI `compat` (`supportsReasoningEffort: true`, `thinkingFormat: "openai"`). Re-apply the DeepSeek Harness client configuration to update existing files.
+
 ## [0.7.4] - 2026-11-20
 
 This release also includes the changes listed under [0.7.3](https://github.com/Stravia-AI/StraviaPlatform/blob/v0.7.4/CHANGELOG.md#073---2026-11-19), whose publication was cancelled.
