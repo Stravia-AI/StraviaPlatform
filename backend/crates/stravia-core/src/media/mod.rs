@@ -139,6 +139,22 @@ impl MediaHost for GatewayHost {
         Some(route_metadata(&self.0, &route).await)
     }
     async fn authorize_capability(&self, principal: &Principal) -> bool {
+        if let Err(denial) = self
+            .0
+            .policy_allows_capability(
+                principal.api_key_id(),
+                crate::policy::PolicyCapability::MediaUnderstanding,
+            )
+            .await
+        {
+            tracing::warn!(
+                api_key_id = ?principal.api_key_id(),
+                code = denial.code.as_str(),
+                reason = denial.message.as_str(),
+                "policy denied media understanding capability"
+            );
+            return false;
+        }
         crate::proxy::security::Security::new(self.0.storage.auth())
             .authorize_principal_capability(principal)
             .await

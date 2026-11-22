@@ -1,10 +1,11 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
 import { page } from '$app/state'
+import { resolve } from '$app/paths'
 import { createQuery } from '@tanstack/svelte-query'
 import { tick } from 'svelte'
 
-import { isTauri } from '#lib/admin-client.js'
+import { capabilitiesQueryOptions, isTauri } from '#lib/admin-client.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import { DraftGuard } from '#lib/draft-guard.svelte.js'
 import { provideInlineDraftRegistry } from '#lib/inline-draft-registry.svelte.js'
@@ -18,6 +19,8 @@ import DesktopStartupSettings from '#lib/components/settings/desktop-startup-set
 import DiagnosticsSettings from '#lib/components/settings/diagnostics-settings.svelte'
 import ProxySettings from '#lib/components/settings/proxy-settings.svelte'
 import RequestHistorySettings from '#lib/components/settings/request-history-settings.svelte'
+import SettingsSection from '#lib/components/settings/settings-section.svelte'
+import { ensureBuildExtensionsRegistered } from '#lib/extensions/index.js'
 import SettingsNav from '#lib/components/settings/settings-nav.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import ProductUpdateSettings from '#lib/components/product-update-settings.svelte'
@@ -37,12 +40,60 @@ const requested = $derived(page.url.searchParams.get('view'))
 // 账号分组取决于异步的认证状态：加载期间保持请求的分组，避免先闪回「通用」。
 const waitingForHost = $derived(requested === 'account' && authStateQuery.isPending)
 const group = $derived(waitingForHost ? 'account' : resolveSettingsGroup(requested, groups))
-const groupTitle = $derived(settingsGroupLabels[group]())
+
+// 与壳层共用能力查询缓存：社区版构建不注册扩展模块，仅在扩展贡献非空时渲染插槽与分组。
+const extensions = ensureBuildExtensionsRegistered()
+const capabilitiesQuery = createQuery(() => capabilitiesQueryOptions())
+const capabilities = $derived(capabilitiesQuery.data?.capabilities ?? [])
+
+interface RenderableSlotContribution {
+  id: string
+  title: string | null
+  description: string | null
+  href?: string
+}
+
+interface RenderableExtensionSettingsGroup {
+  id: string
+  label: string
+  description: string | null
+  slots: RenderableSlotContribution[]
+}
+
+function renderableSlots(slot: string): RenderableSlotContribution[] {
+  return extensions
+    .activeSlots(capabilities, slot)
+    .map((contribution) => ({
+      id: contribution.id,
+      title: contribution.title?.().trim() || null,
+      description: contribution.description?.().trim() || null,
+      href: contribution.href,
+    }))
+    .filter((contribution) => contribution.title !== null || contribution.description !== null)
+}
+
+const generalTopSlots = $derived(renderableSlots('settings:general:top'))
+const extensionSettingsGroups = $derived.by((): RenderableExtensionSettingsGroup[] =>
+  extensions
+    .activeSettingsGroups(capabilities)
+    .map((item) => ({
+      id: item.id,
+      label: item.label().trim(),
+      description: item.description?.().trim() || null,
+      slots: renderableSlots(`settings:${item.id}`),
+    }))
+    .filter((item) => item.label.length > 0),
+)
+const activeExtensionGroup = $derived(
+  requested ? (extensionSettingsGroups.find((item) => item.id === requested) ?? null) : null,
+)
+const groupTitle = $derived(activeExtensionGroup ? activeExtensionGroup.label : settingsGroupLabels[group]())
 
 // 跨页入口附带分区锚点（如 `?view=network#client`）：分组渲染后滚动到该分区。
 $effect(() => {
   const hash = page.url.hash.slice(1)
   void group
+  void activeExtensionGroup
   if (!hash) return
   void tick().then(() => {
     const section = document.getElementById(hash)
@@ -55,17 +106,67 @@ $effect(() => {
 
 <svelte:head><title>{groupTitle} · {m.settings_settings()} · Stravia</title></svelte:head>
 
+{#snippet extensionSlotList(slotName: string, items: readonly RenderableSlotContribution[])}
+  {#if items.length > 0}
+    <div class="flex min-w-0 flex-col gap-2" data-extension-slot={slotName}>
+      {#each items as contribution (contribution.id)}
+        <div
+          class="flex min-w-0 flex-col gap-0.5 rounded-lg border bg-card px-3 py-2.5 text-sm"
+          data-extension-contribution={contribution.id}>
+          {#if contribution.title && contribution.href}
+            <a
+              class="w-fit font-medium break-words text-pretty text-primary underline-offset-4 hover:underline"
+              href={resolve(contribution.href)}>{contribution.title}</a>
+          {:else if contribution.title}
+            <p class="font-medium break-words text-pretty">{contribution.title}</p>
+          {/if}
+          {#if contribution.description}
+            {#if !contribution.title && contribution.href}
+              <a
+                class="w-fit text-xs break-words text-pretty text-primary underline-offset-4 hover:underline"
+                href={resolve(contribution.href)}>{contribution.description}</a>
+            {:else}
+              <p class="text-xs break-words text-pretty text-muted-foreground">{contribution.description}</p>
+            {/if}
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet extensionSettingsGroupSection(extGroup: RenderableExtensionSettingsGroup)}
+  <SettingsSection id={extGroup.id} title={extGroup.label}>
+    {#if extGroup.description || extGroup.slots.length > 0}
+      <div class="flex min-w-0 flex-col gap-2" data-extension-settings-group={extGroup.id}>
+        {#if extGroup.description}
+          <p class="text-sm break-words text-pretty text-muted-foreground">{extGroup.description}</p>
+        {/if}
+        {@render extensionSlotList(`settings:${extGroup.id}`, extGroup.slots)}
+      </div>
+    {/if}
+  </SettingsSection>
+{/snippet}
+
 <div class="route-page route-page-column settings-page">
   <PageHeader title={m.settings_settings()} />
 
   <div class="settings-layout">
     <SettingsNav {groups} current={group} />
     <div class="settings-column">
-      {#if group === 'general'}
+      {#if activeExtensionGroup}
+        {@render extensionSettingsGroupSection(activeExtensionGroup)}
+      {:else if group === 'general'}
+        {@render extensionSlotList('settings:general:top', generalTopSlots)}
         <AppearanceSettings />
         <CurrencySettings />
         {#if isTauri}<DesktopStartupSettings />{/if}
         <ProductUpdateSettings />
+        {#if extensionSettingsGroups.length > 0}
+          {#each extensionSettingsGroups as extGroup (extGroup.id)}
+            {@render extensionSettingsGroupSection(extGroup)}
+          {/each}
+        {/if}
       {:else if group === 'network'}
         <ProxySettings />
         {#if isTauri}<DesktopServiceSettings />{/if}

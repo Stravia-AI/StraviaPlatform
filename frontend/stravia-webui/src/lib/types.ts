@@ -9,6 +9,7 @@ export * from './types/provider-allowance'
 export * from './types/media-generation'
 export * from './types/plugin'
 export * from './types/money'
+export * from './types/capabilities'
 
 export interface CredentialRule {
   id: string

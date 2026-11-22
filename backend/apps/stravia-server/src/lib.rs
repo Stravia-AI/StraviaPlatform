@@ -17,11 +17,16 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
 use stravia_core::Gateway;
-use stravia_core::admin::identity::AdminAuth;
+use stravia_core::admin::identity::{AdminAuth, SingleAdminAuthProvider, SingleAdminAuthorizer};
 
 mod admin_entry;
 mod admin_routes;
 pub use admin_entry::AdminEntryPolicy;
+pub mod extensions;
+pub use extensions::{
+    CapabilitiesResponse, CapabilitiesSnapshot, CapabilityProvider, CeCapabilityProvider, Edition,
+    HttpAppExtensions, LicenseStatus, LicenseTier, PostPrepareHook,
+};
 mod http_auth;
 mod oauth_callback;
 mod setup;
@@ -55,6 +60,7 @@ pub struct HttpAppConfig {
     pub desktop_cors_origins: Vec<String>,
     pub proxy_cors_origins: Vec<String>,
     pub serve_embedded_webui: bool,
+    pub extensions: HttpAppExtensions,
 }
 
 pub fn standalone_local_origins(port: u16) -> Vec<String> {
@@ -76,12 +82,28 @@ pub fn desktop_origins() -> Vec<String> {
 }
 
 pub fn build_http_app(gateway: Gateway, config: HttpAppConfig) -> Router {
+    let auth_provider = config
+        .extensions
+        .admin_auth_provider
+        .unwrap_or_else(|| Arc::new(SingleAdminAuthProvider::new(config.admin_auth)));
+    let authorizer = config
+        .extensions
+        .admin_authorizer
+        .unwrap_or_else(|| Arc::new(SingleAdminAuthorizer));
+    let capability_provider = config
+        .extensions
+        .capability_provider
+        .unwrap_or_else(|| Arc::new(CeCapabilityProvider));
     let mut admin_router = admin_routes::create_router(
         gateway.clone(),
         http_auth::AdminHttpState {
-            auth: config.admin_auth,
+            auth_provider,
+            authorizer,
             mode: config.admin_mode,
         },
+        capability_provider,
+        config.extensions.extra_admin_routes,
+        config.extensions.extra_public_routes,
     );
     if config.admin_mode == AdminMode::Desktop {
         admin_router = admin_router.layer(build_admin_cors_layer(&config.desktop_cors_origins));
@@ -405,5 +427,231 @@ mod tests {
         request
             .await
             .expect_err("request task should be cancelled after the server stops waiting");
+    }
+
+    struct StubCapabilityProvider {
+        snapshot: crate::CapabilitiesSnapshot,
+    }
+
+    impl crate::CapabilityProvider for StubCapabilityProvider {
+        fn capabilities(&self) -> crate::CapabilitiesSnapshot {
+            self.snapshot.clone()
+        }
+    }
+
+    struct DenyingAuthorizer {
+        denied_prefix: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl stravia_core::admin::identity::AdminAuthorizer for DenyingAuthorizer {
+        async fn authorize(
+            &self,
+            _principal: &stravia_core::admin::identity::AdminPrincipal,
+            _action: stravia_core::admin::identity::AdminAction,
+            resource: &stravia_core::admin::identity::AdminResourceRef<'_>,
+        ) -> Result<(), stravia_core::admin::identity::AuthorizationDenied> {
+            if resource
+                .id
+                .is_some_and(|path| path.starts_with(self.denied_prefix))
+            {
+                return Err(
+                    stravia_core::admin::identity::AuthorizationDenied::forbidden(
+                        "ee_role_denied",
+                        "Not permitted by commercial authorizer",
+                    ),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    async fn desktop_gateway_and_token(
+        extensions: crate::HttpAppExtensions,
+    ) -> (Router, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gateway = stravia_core::GatewayBuilder::new(stravia_core::config::GatewayConfig {
+            data_dir: dir.path().to_path_buf(),
+            catalog_background_refresh: false,
+            catalog_base_url: None,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("build gateway");
+        let admin_auth = stravia_core::admin::identity::AdminAuth::new(gateway.storage.clone());
+        admin_auth
+            .ensure_native_admin()
+            .await
+            .expect("ensure native admin");
+        let tokens = admin_auth.login_native().await.expect("login native");
+        let app = crate::build_http_app(
+            gateway,
+            crate::HttpAppConfig {
+                admin_auth,
+                admin_mode: crate::AdminMode::Desktop,
+                admin_entry: Default::default(),
+                desktop_cors_origins: Vec::new(),
+                proxy_cors_origins: Vec::new(),
+                serve_embedded_webui: false,
+                extensions,
+            },
+        );
+        (app, tokens.access_token, dir)
+    }
+
+    #[tokio::test]
+    async fn capabilities_requires_admin_auth_and_defaults_to_ce() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let (app, token, _dir) =
+            desktop_gateway_and_token(crate::HttpAppExtensions::default()).await;
+
+        let anon = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+        let authed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/capabilities")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authed.status(), StatusCode::OK);
+        let body = to_bytes(authed.into_body(), 1024 * 64).await.unwrap();
+        let payload: crate::CapabilitiesResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.edition, crate::Edition::Ce);
+        assert_eq!(payload.license_tier, None);
+        assert_eq!(payload.license_status, None);
+        assert!(payload.capabilities.is_empty());
+        assert_eq!(payload.degraded_reason, None);
+        assert_eq!(payload.auth_mode, "single_admin");
+    }
+
+    #[tokio::test]
+    async fn extensions_mount_commercial_capabilities_extra_routes_and_authorizer() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let extensions = crate::HttpAppExtensions::default()
+            .with_capability_provider(Arc::new(StubCapabilityProvider {
+                snapshot: crate::CapabilitiesSnapshot {
+                    edition: crate::Edition::Commercial,
+                    license_tier: Some(crate::LicenseTier::Enterprise),
+                    license_status: Some(crate::LicenseStatus::Valid),
+                    capabilities: vec![
+                        "multi_admin".to_string(),
+                        "license_status".to_string(),
+                        "multi_admin".to_string(),
+                    ],
+                    degraded_reason: None,
+                },
+            }))
+            .with_admin_authorizer(Arc::new(DenyingAuthorizer {
+                denied_prefix: "/ee/restricted",
+            }))
+            .with_extra_admin_routes(
+                Router::new()
+                    .route("/ee/license", get(|| async { "ok-license" }))
+                    .route("/ee/restricted", get(|| async { "secret" })),
+            )
+            .with_extra_public_routes(
+                Router::new().route("/ee/public-ping", get(|| async { "pong" })),
+            );
+
+        let (app, token, _dir) = desktop_gateway_and_token(extensions).await;
+
+        // Capabilities sorted & deduplicated
+        let caps_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/capabilities")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(caps_res.status(), StatusCode::OK);
+        let caps: crate::CapabilitiesResponse =
+            serde_json::from_slice(&to_bytes(caps_res.into_body(), 1024 * 64).await.unwrap())
+                .unwrap();
+        assert_eq!(caps.edition, crate::Edition::Commercial);
+        assert_eq!(caps.license_tier, Some(crate::LicenseTier::Enterprise));
+        assert_eq!(caps.license_status, Some(crate::LicenseStatus::Valid));
+        assert_eq!(caps.capabilities, vec!["license_status", "multi_admin"]);
+
+        // Extra admin route requires auth
+        let unauth_extra = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/ee/license")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_extra.status(), StatusCode::UNAUTHORIZED);
+
+        // Allowed extra admin route returns 200
+        let ok_extra = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/ee/license")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_extra.status(), StatusCode::OK);
+
+        // Authorizer denial returns 403 fail-closed
+        let denied_extra = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/ee/restricted")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied_extra.status(), StatusCode::FORBIDDEN);
+        let denied_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(denied_extra.into_body(), 1024 * 64).await.unwrap())
+                .unwrap();
+        assert_eq!(denied_json["error"]["code"], "ee_role_denied");
+
+        // Extra public route works without auth
+        let public_res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/ee/public-ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(public_res.status(), StatusCode::OK);
     }
 }

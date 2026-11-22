@@ -48,6 +48,22 @@ impl SearchSettingsHost for SearchSettings {
 #[async_trait]
 impl PublicSearchHost for SearchHost {
     async fn authorize(&self, principal: &Principal) -> Option<SearchAccess> {
+        if let Err(denial) = self
+            .0
+            .policy_allows_capability(
+                principal.api_key_id(),
+                crate::policy::PolicyCapability::WebSearch,
+            )
+            .await
+        {
+            tracing::warn!(
+                api_key_id = ?principal.api_key_id(),
+                code = denial.code.as_str(),
+                reason = denial.message.as_str(),
+                "policy denied public web search capability"
+            );
+            return None;
+        }
         crate::proxy::security::Security::new(self.0.storage.auth())
             .authorize_transparent_injections(principal)
             .await

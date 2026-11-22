@@ -258,6 +258,7 @@ async fn run_server(
         admin_entry,
         proxy_cors_origins,
         serve_embedded_webui: true,
+        extensions: Default::default(),
     });
     let server =
         start_http_server(listener_address(&args.host, args.port), startup.router()).await?;

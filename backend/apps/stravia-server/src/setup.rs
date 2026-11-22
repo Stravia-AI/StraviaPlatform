@@ -81,6 +81,7 @@ pub struct ServerStartupConfig {
     pub admin_entry: crate::AdminEntryPolicy,
     pub proxy_cors_origins: Vec<String>,
     pub serve_embedded_webui: bool,
+    pub extensions: crate::HttpAppExtensions,
 }
 
 pub struct PreparedServerApp {
@@ -155,6 +156,9 @@ pub async fn prepare_server_app(
                 startup.config_path.display()
             ))
         })?;
+        if let Some(hook) = startup.extensions.post_prepare_hook.as_ref() {
+            hook.after_core_migrations(&prepared).await?;
+        }
         let auth = AdminAuth::new(Arc::clone(prepared.storage()));
         if auth.has_admin().await.map_err(auth_to_anyhow)? {
             let gateway = prepared.start().await.map_err(|error| {
@@ -469,6 +473,12 @@ async fn complete_setup(
             return auth_error(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable");
         }
     };
+    if let Some(hook) = runtime.startup.extensions.post_prepare_hook.as_ref()
+        && let Err(error) = hook.after_core_migrations(&prepared).await
+    {
+        tracing::warn!(error = %redacted_database_error(&error), "post-prepare migration hook failed");
+        return auth_error(StatusCode::SERVICE_UNAVAILABLE, "database_unavailable");
+    }
     let storage = prepared.storage();
     let artifact_json = match serde_json::to_string(&artifact_settings) {
         Ok(value) => value,
@@ -659,6 +669,7 @@ fn normal_app(gateway: Gateway, auth: AdminAuth, startup: &ServerStartupConfig) 
             desktop_cors_origins: Vec::new(),
             proxy_cors_origins: startup.proxy_cors_origins.clone(),
             serve_embedded_webui: startup.serve_embedded_webui,
+            extensions: startup.extensions.clone(),
         },
     )
 }
@@ -725,6 +736,7 @@ mod tests {
             admin_entry: crate::AdminEntryPolicy::default(),
             proxy_cors_origins: Vec::new(),
             serve_embedded_webui: false,
+            extensions: Default::default(),
         }
     }
 

@@ -444,11 +444,44 @@ pub(super) async fn orchestrate(
             );
         }
     };
-    let rpm_limit = authenticated_principal.rpm_limit;
-    let spend_limit_nanos = authenticated_principal.spend_limit_nanos;
     let api_key_name = authenticated_principal.api_key_name;
     let principal = authenticated_principal.principal;
     ingress_observer.set_authenticated_source(principal.api_key_id(), &api_key_name);
+    let execution_policy = match gw
+        .policy_resolver
+        .resolve(&crate::policy::PolicyRequestContext::inference(
+            principal.api_key_id(),
+            &request.model,
+        ))
+        .await
+    {
+        Ok(policy) => {
+            if !policy.allows_route(&request.model) {
+                return reject_before_admission(
+                    &mut Some(ingress_observer),
+                    "policy",
+                    "policy_route_denied",
+                    coded_error_response(
+                        StatusCode::FORBIDDEN,
+                        "policy_route_denied",
+                        "Requested route is denied by execution policy",
+                    ),
+                );
+            }
+            policy
+        }
+        Err(denial) => {
+            return reject_before_admission(
+                &mut Some(ingress_observer),
+                "policy",
+                &denial.code,
+                coded_error_response(denial.status_code(), &denial.code, &denial.message),
+            );
+        }
+    };
+    let rpm_limit = execution_policy.tighten_rpm_limit(authenticated_principal.rpm_limit);
+    let spend_limit_nanos =
+        execution_policy.tighten_spend_limit(authenticated_principal.spend_limit_nanos);
     if let Err(error) =
         crate::media::ingest::normalize_request(&gw, &principal, &mut request, &ctx.cancellation)
             .await

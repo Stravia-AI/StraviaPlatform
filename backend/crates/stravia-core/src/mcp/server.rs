@@ -340,6 +340,44 @@ async fn authenticate_request(
     if let Err(response) = validate_origin(&headers) {
         return *response;
     }
+    let execution_policy = match gateway
+        .policy_resolver
+        .resolve(&crate::policy::PolicyRequestContext::mcp(
+            authenticated.principal.api_key_id(),
+        ))
+        .await
+    {
+        Ok(policy) if policy.allows_capability(crate::policy::PolicyCapability::McpAccess) => {
+            policy
+        }
+        Ok(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "policy_capability_denied",
+                        "message": "MCP access denied by execution policy"
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Err(denial) => {
+            return (
+                denial.status_code(),
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": denial.code,
+                        "message": denial.message
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let effective_spend_limit_nanos =
+        execution_policy.tighten_spend_limit(authenticated.spend_limit_nanos);
+    let effective_rpm_limit = execution_policy.tighten_rpm_limit(authenticated.rpm_limit);
 
     let (mut parts, body) = request.into_parts();
     if parts.method == Method::POST {
@@ -361,13 +399,13 @@ async fn authenticate_request(
             match gateway
                 .check_api_key_spend_limit(
                     authenticated.principal.api_key_id(),
-                    authenticated.spend_limit_nanos,
+                    effective_spend_limit_nanos,
                 )
                 .await
             {
                 Ok(()) => gateway
                     .principal_admission
-                    .acquire(&authenticated.principal, authenticated.rpm_limit),
+                    .acquire(&authenticated.principal, effective_rpm_limit),
                 Err(error) => Err(error),
             }
         } else {

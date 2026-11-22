@@ -549,6 +549,8 @@
   "app_shell_running": "Running",
   "app_shell_sign_out": "Sign out",
   "app_shell_stravia_unavailable": "Stravia unavailable",
+  "app_shell_capabilities_load_failed_title": "Couldn't load edition features",
+  "app_shell_capabilities_load_failed_description": "Navigation may be missing features of your edition until they load.",
   "startup_phase_session": "Checking sign-in status",
   "startup_phase_storage_connect": "Connecting to storage",
   "startup_phase_migration_validate": "Checking stored data",

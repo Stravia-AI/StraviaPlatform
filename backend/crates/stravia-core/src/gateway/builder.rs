@@ -8,6 +8,7 @@ pub struct GatewayBuilder {
     mcp_tools: Vec<Arc<dyn McpTool>>,
     agent_definitions: Vec<stravia_runtime_contract::agent::AgentDefinitionSpec>,
     web_provider_factories: Vec<Arc<dyn stravia_web_access::WebProviderFactory>>,
+    policy_resolver: Option<Arc<dyn crate::policy::PolicyResolver>>,
 }
 
 impl GatewayBuilder {
@@ -20,6 +21,7 @@ impl GatewayBuilder {
             mcp_tools: Vec::new(),
             agent_definitions: Vec::new(),
             web_provider_factories: Vec::new(),
+            policy_resolver: None,
         }
     }
 
@@ -59,6 +61,13 @@ impl GatewayBuilder {
         self
     }
 
+    /// Install an external [`crate::policy::PolicyResolver`] enforced fail-closed
+    /// across inference, MCP, and platform capability gates.
+    pub fn policy_resolver(mut self, resolver: Arc<dyn crate::policy::PolicyResolver>) -> Self {
+        self.policy_resolver = Some(resolver);
+        self
+    }
+
     pub async fn build(self) -> anyhow::Result<Gateway> {
         let Self {
             config,
@@ -68,6 +77,7 @@ impl GatewayBuilder {
             mcp_tools,
             agent_definitions,
             web_provider_factories,
+            policy_resolver,
         } = self;
         let mut registry = stravia_web_access::WebProviderRegistry::new();
         for factory in web_provider_factories {
@@ -79,6 +89,9 @@ impl GatewayBuilder {
             Gateway::new(config).await?
         };
         gateway.web_provider_registry = Arc::new(registry);
+        if let Some(resolver) = policy_resolver {
+            gateway.policy_resolver = resolver;
+        }
         gateway.generation_chains = generation_chain::GenerationChain::from_turn_chain(
             Arc::clone(&gateway.turn_chains),
             gateway.artifact_store.clone(),

@@ -39,6 +39,16 @@ async fn status_reports_the_running_server_version() -> anyhow::Result<()> {
 }
 
 /// 内容端点测试夹具：带管理员令牌的路由与同一个 Gateway。
+fn desktop_admin_router(gateway: Gateway, auth: AdminAuth) -> axum::Router {
+    create_router(
+        gateway,
+        AdminHttpState::single_admin(auth, AdminMode::Desktop),
+        Arc::new(crate::CeCapabilityProvider),
+        None,
+        None,
+    )
+}
+
 async fn contents_fixture(directory: &Path) -> anyhow::Result<(Gateway, axum::Router, String)> {
     let gateway = Gateway::new(GatewayConfig {
         data_dir: directory.to_path_buf(),
@@ -47,13 +57,7 @@ async fn contents_fixture(directory: &Path) -> anyhow::Result<(Gateway, axum::Ro
     .await?;
     let auth = AdminAuth::new(gateway.storage.clone());
     auth.ensure_native_admin().await?;
-    let app = create_router(
-        gateway.clone(),
-        AdminHttpState {
-            auth: auth.clone(),
-            mode: AdminMode::Desktop,
-        },
-    );
+    let app = desktop_admin_router(gateway.clone(), auth.clone());
     let tokens = auth.login_native().await?;
     Ok((gateway, app, tokens.access_token))
 }
@@ -259,13 +263,7 @@ async fn performance_export_requires_admin_and_clears_session_after_debug_is_dis
     .await?;
     let auth = AdminAuth::new(gateway.storage.clone());
     auth.ensure_native_admin().await?;
-    let app = create_router(
-        gateway.clone(),
-        AdminHttpState {
-            auth: auth.clone(),
-            mode: AdminMode::Desktop,
-        },
-    );
+    let app = desktop_admin_router(gateway.clone(), auth.clone());
 
     let denied = app
         .clone()
@@ -1474,13 +1472,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
         .await?;
     let auth = AdminAuth::new(gateway.storage.clone());
     auth.ensure_native_admin().await?;
-    let app = create_router(
-        gateway,
-        AdminHttpState {
-            auth: auth.clone(),
-            mode: AdminMode::Desktop,
-        },
-    );
+    let app = desktop_admin_router(gateway, auth.clone());
 
     let denied = app
         .clone()
@@ -1908,13 +1900,7 @@ async fn web_provider_kinds_route_requires_admin_auth() -> anyhow::Result<()> {
     .await?;
     let auth = AdminAuth::new(gateway.storage.clone());
     auth.ensure_native_admin().await?;
-    let app = create_router(
-        gateway,
-        AdminHttpState {
-            auth: auth.clone(),
-            mode: AdminMode::Desktop,
-        },
-    );
+    let app = desktop_admin_router(gateway, auth.clone());
     let denied = app
         .clone()
         .oneshot(Request::get("/api/v1/web-provider-kinds").body(Body::empty())?)
@@ -2703,13 +2689,7 @@ async fn observation_contents_rejects_invalid_ids_with_stable_code() -> anyhow::
     .await?;
     let auth = AdminAuth::new(gateway.storage.clone());
     auth.ensure_native_admin().await?;
-    let app = create_router(
-        gateway,
-        AdminHttpState {
-            auth: auth.clone(),
-            mode: AdminMode::Desktop,
-        },
-    );
+    let app = desktop_admin_router(gateway, auth.clone());
     let tokens = auth.login_native().await?;
     let too_many = (1..=257)
         .map(|id| id.to_string())
@@ -2747,13 +2727,7 @@ async fn observation_sse_streams_close_promptly_on_request_shutdown() -> anyhow:
     let auth = AdminAuth::new(gateway.storage.clone());
     auth.ensure_native_admin().await?;
     let tokens = auth.login_native().await?;
-    let app = create_router(
-        gateway.clone(),
-        AdminHttpState {
-            auth,
-            mode: AdminMode::Desktop,
-        },
-    );
+    let app = desktop_admin_router(gateway.clone(), auth);
     let server = crate::start_http_server(("127.0.0.1", 0), app).await?;
     let base = format!("http://{}", server.local_addr());
     let client = reqwest::Client::builder().no_proxy().build()?;

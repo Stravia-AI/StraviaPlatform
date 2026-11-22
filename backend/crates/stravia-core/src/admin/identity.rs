@@ -47,6 +47,210 @@ impl AdminSession {
     }
 }
 
+const SINGLE_ADMIN_USER_ID: &str = "instance-admin";
+
+/// Authenticated management principal returned by an [`AdminAuthProvider`].
+///
+/// Management identities are strictly isolated from inference `Principal` / API key identities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminPrincipal {
+    pub user_id: String,
+    pub session_id: String,
+    pub username: Option<String>,
+    pub roles: Vec<String>,
+    pub project_scopes: Option<Vec<String>>,
+}
+
+impl AdminPrincipal {
+    pub fn from_single_admin_session(session: AdminSession) -> Self {
+        Self {
+            user_id: SINGLE_ADMIN_USER_ID.to_string(),
+            session_id: session.session_id,
+            username: session.username,
+            roles: vec![session.role],
+            project_scopes: None,
+        }
+    }
+
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|candidate| candidate == role)
+    }
+
+    pub fn to_session(&self) -> AdminSession {
+        let role = if self.has_role(ROLE_ADMIN) {
+            ROLE_ADMIN.to_string()
+        } else {
+            self.roles.first().cloned().unwrap_or_default()
+        };
+        AdminSession {
+            session_id: self.session_id.clone(),
+            username: self.username.clone(),
+            role,
+        }
+    }
+}
+
+/// Coarse management action evaluated by [`AdminAuthorizer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminAction {
+    Read,
+    Write,
+    Delete,
+    ManageSecurity,
+    RevealCredentials,
+    ManageSystem,
+    Custom(String),
+}
+
+/// Resource target evaluated by [`AdminAuthorizer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdminResourceRef<'a> {
+    pub kind: &'a str,
+    pub id: Option<&'a str>,
+    pub project_id: Option<&'a str>,
+}
+
+impl<'a> AdminResourceRef<'a> {
+    pub fn new(kind: &'a str, id: Option<&'a str>) -> Self {
+        Self {
+            kind,
+            id,
+            project_id: None,
+        }
+    }
+}
+
+/// Fail-closed authorization denial returned by [`AdminAuthorizer::authorize`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct AuthorizationDenied {
+    pub code: String,
+    pub message: String,
+}
+
+impl AuthorizationDenied {
+    pub fn forbidden(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Extension seam for authenticating management users and managing sessions.
+///
+/// Community Edition uses [`SingleAdminAuthProvider`], preserving ADR-0040 single-admin behavior.
+#[async_trait::async_trait]
+pub trait AdminAuthProvider: Send + Sync {
+    /// Stable identifier of the active admin authentication mode (e.g. `"single_admin"`).
+    fn auth_mode(&self) -> &'static str {
+        "single_admin"
+    }
+
+    async fn authenticate(&self, access_token: &str) -> Result<AdminPrincipal, AuthError>;
+
+    async fn login(&self, username: &str, password: &str) -> Result<SessionTokens, AuthError>;
+
+    async fn refresh(&self, refresh_token: &str) -> Result<SessionTokens, AuthError>;
+
+    async fn logout(&self, session_id: &str) -> Result<(), AuthError>;
+
+    async fn change_credentials(
+        &self,
+        principal: &AdminPrincipal,
+        current_password: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), AuthError>;
+}
+
+/// Extension seam for authorizing management actions on resources.
+///
+/// Implementations MUST fail closed when an action or resource is not permitted.
+#[async_trait::async_trait]
+pub trait AdminAuthorizer: Send + Sync {
+    async fn authorize(
+        &self,
+        principal: &AdminPrincipal,
+        action: AdminAction,
+        resource: &AdminResourceRef<'_>,
+    ) -> Result<(), AuthorizationDenied>;
+}
+
+/// Default Community Edition [`AdminAuthProvider`] backed by single-instance [`AdminAuth`].
+#[derive(Clone)]
+pub struct SingleAdminAuthProvider {
+    auth: AdminAuth,
+}
+
+impl SingleAdminAuthProvider {
+    pub fn new(auth: AdminAuth) -> Self {
+        Self { auth }
+    }
+
+    pub fn inner(&self) -> &AdminAuth {
+        &self.auth
+    }
+}
+
+#[async_trait::async_trait]
+impl AdminAuthProvider for SingleAdminAuthProvider {
+    async fn authenticate(&self, access_token: &str) -> Result<AdminPrincipal, AuthError> {
+        self.auth
+            .authenticate(access_token)
+            .await
+            .map(AdminPrincipal::from_single_admin_session)
+    }
+
+    async fn login(&self, username: &str, password: &str) -> Result<SessionTokens, AuthError> {
+        self.auth.login(username, password).await
+    }
+
+    async fn refresh(&self, refresh_token: &str) -> Result<SessionTokens, AuthError> {
+        self.auth.refresh(refresh_token).await
+    }
+
+    async fn logout(&self, session_id: &str) -> Result<(), AuthError> {
+        self.auth.logout(session_id).await
+    }
+
+    async fn change_credentials(
+        &self,
+        principal: &AdminPrincipal,
+        current_password: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), AuthError> {
+        let session = principal.to_session();
+        self.auth
+            .change_credentials(&session, current_password, username, password)
+            .await
+    }
+}
+
+/// Default Community Edition [`AdminAuthorizer`] permitting only the sole `"admin"` role.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SingleAdminAuthorizer;
+
+#[async_trait::async_trait]
+impl AdminAuthorizer for SingleAdminAuthorizer {
+    async fn authorize(
+        &self,
+        principal: &AdminPrincipal,
+        _action: AdminAction,
+        _resource: &AdminResourceRef<'_>,
+    ) -> Result<(), AuthorizationDenied> {
+        if principal.has_role(ROLE_ADMIN) {
+            Ok(())
+        } else {
+            Err(AuthorizationDenied::forbidden(
+                "forbidden",
+                "Administrator role required",
+            ))
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("invalid administrator credentials")]
@@ -603,5 +807,60 @@ mod tests {
         let left_login = auth.login("left", "left-password").await;
         let right_login = auth.login("right", "right-password").await;
         assert!(left_login.is_ok() ^ right_login.is_ok());
+    }
+
+    #[tokio::test]
+    async fn single_admin_provider_and_authorizer_preserve_adr_0040_and_fail_closed() {
+        let (auth, _now) = auth_at(1_900_000_000).await;
+        auth.create_admin("rootadmin", "strong-password")
+            .await
+            .expect("create admin");
+        let provider = SingleAdminAuthProvider::new(auth);
+        assert_eq!(provider.auth_mode(), "single_admin");
+
+        let tokens = provider
+            .login("rootadmin", "strong-password")
+            .await
+            .expect("login");
+        let principal = provider
+            .authenticate(&tokens.access_token)
+            .await
+            .expect("authenticate");
+        assert_eq!(principal.username.as_deref(), Some("rootadmin"));
+        assert!(principal.has_role(ROLE_ADMIN));
+        assert!(principal.to_session().may_reveal_credentials());
+
+        let authorizer = SingleAdminAuthorizer;
+        let resource = AdminResourceRef::new("settings", Some("proxy"));
+        assert!(
+            authorizer
+                .authorize(&principal, AdminAction::Write, &resource)
+                .await
+                .is_ok()
+        );
+
+        let non_admin = AdminPrincipal {
+            user_id: "viewer-1".to_string(),
+            session_id: "sess-1".to_string(),
+            username: Some("viewer".to_string()),
+            roles: vec!["viewer".to_string()],
+            project_scopes: Some(vec!["proj-a".to_string()]),
+        };
+        assert!(!non_admin.to_session().may_reveal_credentials());
+        assert!(
+            authorizer
+                .authorize(&non_admin, AdminAction::Read, &resource)
+                .await
+                .is_err()
+        );
+
+        provider
+            .logout(&principal.session_id)
+            .await
+            .expect("logout");
+        assert!(matches!(
+            provider.authenticate(&tokens.access_token).await,
+            Err(AuthError::Unauthorized)
+        ));
     }
 }

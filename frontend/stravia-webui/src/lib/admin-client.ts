@@ -8,6 +8,7 @@ import type { UpdateStatus } from '#lib/product-update.js'
 import type {
   ApiKey,
   ApiKeySpend,
+  CapabilitiesResponse,
   CustomCurrency,
   NewProviderCostPlan,
   ProviderCostPlan,
@@ -610,6 +611,13 @@ export const admin = {
     check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
     skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
+  capabilities: { get: () => request<CapabilitiesResponse>('GET', '/capabilities') },
+}
+
+export const capabilitiesQueryKey = ['capabilities'] as const
+
+export function capabilitiesQueryOptions() {
+  return { queryKey: capabilitiesQueryKey, queryFn: admin.capabilities.get, staleTime: 60_000, retry: false }
 }
 
 /** Changing a route can also change which routes can be bound in the advanced settings. */

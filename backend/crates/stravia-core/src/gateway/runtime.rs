@@ -229,6 +229,16 @@ impl PreparedGateway {
         &self.runtime.1
     }
 
+    /// 借用已初始化并完成核心迁移的 SQLite 连接池（若当前后端为 SQLite）。
+    pub fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        self.runtime.2.as_ref()
+    }
+
+    /// 借用已初始化并完成核心迁移的 PostgreSQL 连接池（若当前后端为 PostgreSQL）。
+    pub fn postgres_pool(&self) -> Option<&Pool<Postgres>> {
+        self.runtime.3.as_ref()
+    }
+
     /// 使用保留的配置与连接池启动 Gateway；初始化错误原样返回。
     /// 不重新连接、迁移数据库，也不把持久存储当作内存存储装配。
     pub async fn start(self) -> anyhow::Result<Gateway> {
@@ -696,6 +706,7 @@ impl Gateway {
             model_turn: model_turn::unreachable_executor(),
             web_access_run_snapshots: web_access::WebAccessRunSnapshotStore::default(),
             web_provider_registry: Arc::new(stravia_web_access::WebProviderRegistry::new()),
+            policy_resolver: Arc::new(crate::policy::AllowAllPolicyResolver),
             web_search_runner_state: Arc::new(tokio::sync::RwLock::new(None)),
             route_media_mutation: Arc::new(tokio::sync::Mutex::new(())),
             update_service,

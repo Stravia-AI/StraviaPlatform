@@ -543,6 +543,8 @@
   "app_shell_running": "运行中",
   "app_shell_sign_out": "退出登录",
   "app_shell_stravia_unavailable": "Stravia 不可用",
+  "app_shell_capabilities_load_failed_title": "无法加载版本功能",
+  "app_shell_capabilities_load_failed_description": "加载成功前，导航中可能缺少当前版本的功能。",
   "startup_phase_session": "正在确认登录状态",
   "startup_phase_storage_connect": "正在连接存储",
   "startup_phase_migration_validate": "正在检查已有数据",

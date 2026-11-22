@@ -568,6 +568,7 @@ mod tests {
                 desktop_cors_origins: cors_origins.clone(),
                 proxy_cors_origins: cors_origins,
                 serve_embedded_webui: false,
+                extensions: Default::default(),
             },
         );
 

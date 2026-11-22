@@ -4,6 +4,7 @@ import { resolve } from '$app/paths'
 import { goto } from '$app/navigation'
 import { page } from '$app/state'
 import { createQuery } from '@tanstack/svelte-query'
+import BlocksIcon from '@lucide/svelte/icons/blocks'
 import ChartNoAxesCombinedIcon from '@lucide/svelte/icons/chart-no-axes-combined'
 import CogIcon from '@lucide/svelte/icons/cog'
 import GaugeIcon from '@lucide/svelte/icons/gauge'
@@ -23,13 +24,15 @@ import { userPrefersMode } from 'mode-watcher'
 import { onMount } from 'svelte'
 import type { Snippet } from 'svelte'
 import { toast } from 'svelte-sonner'
-import { admin, isTauri } from '#lib/admin-client.js'
+import { admin, capabilitiesQueryOptions, isTauri } from '#lib/admin-client.js'
 import { logout } from '#lib/auth.js'
 import { getConsoleChat } from '#lib/console-chat.svelte.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import { ensureBuildExtensionsRegistered, type ExtensionNavSection } from '#lib/extensions/index.js'
 import { createWindowChrome } from '#lib/window-chrome.js'
 import BrandMark from '#lib/components/brand-mark.svelte'
 import BrandWordmark from '#lib/components/brand-wordmark.svelte'
+import RequestFailure from '#lib/components/request-failure.svelte'
 import StatusIndicator from '#lib/components/status-indicator.svelte'
 import WindowControls from '#lib/components/window-controls.svelte'
 import { Badge } from '#lib/components/ui/badge/index.js'
@@ -75,6 +78,22 @@ const marketplaceQuery = createQuery(() => ({
   refetchInterval: 60_000,
 }))
 const marketplaceUpdateCount = $derived(marketplaceQuery.data?.update_count ?? 0)
+
+// 版本能力决定哪些扩展入口出现；社区版构建不注册任何扩展模块，导航与今天完全一致。
+const extensions = ensureBuildExtensionsRegistered()
+const capabilitiesQuery = createQuery(() => ({ ...capabilitiesQueryOptions(), enabled: hasNavigation }))
+const capabilities = $derived(capabilitiesQuery.data?.capabilities ?? [])
+const shellTopSlots = $derived.by(() =>
+  extensions
+    .activeSlots(capabilities, 'shell:top')
+    .map((contribution) => ({
+      id: contribution.id,
+      title: contribution.title?.().trim() || null,
+      description: contribution.description?.().trim() || null,
+      href: contribution.href,
+    }))
+    .filter((contribution) => contribution.title !== null || contribution.description !== null),
+)
 
 const gatewayRunning = $derived(statusQuery.data?.status === 'running')
 
@@ -124,8 +143,24 @@ $effect(() => {
   windowChrome.syncTheme(themePreference === 'system' ? null : themePreference)
 })
 
-const navigationGroups = [
+interface NavigationItem {
+  href: string
+  label: () => string
+  icon: typeof CogIcon
+  beta?: boolean
+  /** 扩展入口提供的短标记；内置入口不使用。 */
+  badge?: () => string
+}
+
+interface NavigationGroup {
+  section: ExtensionNavSection
+  label: () => string
+  items: NavigationItem[]
+}
+
+const builtInNavigationGroups: readonly NavigationGroup[] = [
   {
+    section: 'setup',
     label: m.app_shell_nav_setup,
     items: [
       { href: '/providers', label: m.app_shell_nav_model_services, icon: PlugZapIcon },
@@ -138,6 +173,7 @@ const navigationGroups = [
   },
 
   {
+    section: 'advanced',
     label: m.app_shell_nav_advanced_features,
     items: [
       { href: '/media-understanding', label: m.app_shell_nav_media_understanding, icon: ImagesIcon, beta: true },
@@ -150,6 +186,7 @@ const navigationGroups = [
   },
 
   {
+    section: 'monitor',
     label: m.app_shell_nav_monitor,
     items: [
       { href: '/logs', label: m.app_shell_nav_request_history, icon: ScrollTextIcon },
@@ -160,6 +197,7 @@ const navigationGroups = [
   },
 
   {
+    section: 'system',
     label: m.app_shell_nav_system,
     items: [
       { href: '/vendor-plugins', label: m.app_shell_nav_vendor_plugins, icon: PackageOpenIcon },
@@ -167,10 +205,22 @@ const navigationGroups = [
       { href: '/settings', label: m.app_shell_nav_settings, icon: CogIcon },
     ],
   },
-] as const
+]
 
-type NavigationItem = (typeof navigationGroups)[number]['items'][number]
-type BreadcrumbItem = { label: string; href?: NavigationItem['href'] | '/' }
+// 能力开启的扩展入口接在所属分组的内置项之后，侧栏与 breadcrumb 共用同一份导航。
+const navigationGroups = $derived(
+  builtInNavigationGroups.map((group) => ({
+    ...group,
+    items: [
+      ...group.items,
+      ...extensions
+        .activeNavItems(capabilities, group.section)
+        .map(({ href, label, badge }): NavigationItem => ({ href, label, badge, icon: BlocksIcon })),
+    ],
+  })),
+)
+
+type BreadcrumbItem = { label: string; href?: string }
 
 const breadcrumbProvidersQuery = createQuery(() => ({
   queryKey: ['providers'],
@@ -408,9 +458,11 @@ onMount(() => {
                         href={resolve(item.href)}
                         aria-label={item.href === '/vendor-plugins' && marketplaceUpdateCount > 0
                           ? `${label} — ${m.settings_update_status_available()} (${marketplaceUpdateCount})`
-                          : 'beta' in item
+                          : item.beta
                             ? `${label} ${m.common_beta()}`
-                            : label}
+                            : item.badge
+                              ? `${label} ${item.badge()}`
+                              : label}
                         data-sveltekit-reset={!isDesktopNavigation ? false : undefined}
                         aria-current={current ? 'page' : undefined}
                         onclick={() => {
@@ -421,8 +473,10 @@ onMount(() => {
                       </a>
                     {/snippet}
                   </Sidebar.MenuButton>
-                  {#if 'beta' in item}
+                  {#if item.beta}
                     <Sidebar.MenuBadge><Badge variant="secondary">{m.common_beta()}</Badge></Sidebar.MenuBadge>
+                  {:else if item.badge}
+                    <Sidebar.MenuBadge><Badge variant="secondary">{item.badge()}</Badge></Sidebar.MenuBadge>
                   {:else if item.href === '/vendor-plugins' && marketplaceUpdateCount > 0}
                     <Sidebar.MenuBadge aria-hidden="true"
                       ><Badge variant="secondary">{marketplaceUpdateCount}</Badge></Sidebar.MenuBadge>
@@ -566,6 +620,49 @@ onMount(() => {
         <main
           class="shell-main shell-scrollbar flex h-full min-w-0 flex-col overflow-y-auto bg-background p-4 md:rounded-lg">
           <div class="mx-auto w-full max-w-(--content-max-width)">
+            {#if capabilitiesQuery.isError || shellTopSlots.length > 0}
+              <div class="mb-4 flex min-w-0 flex-col gap-2" data-slot="shell-notices">
+                {#if capabilitiesQuery.isError}
+                  <RequestFailure
+                    title={m.app_shell_capabilities_load_failed_title()}
+                    message={m.app_shell_capabilities_load_failed_description()}
+                    retry={() => capabilitiesQuery.refetch()}
+                    retrying={capabilitiesQuery.isFetching}>
+                    <p class="font-technical text-xs break-words text-muted-foreground">
+                      {localizeBackendErrorMessage(capabilitiesQuery.error)}
+                    </p>
+                  </RequestFailure>
+                {/if}
+                {#if shellTopSlots.length > 0}
+                  <div class="flex min-w-0 flex-col gap-2" data-extension-slot="shell:top">
+                    {#each shellTopSlots as contribution (contribution.id)}
+                      <div
+                        class="flex min-w-0 flex-col gap-0.5 rounded-lg border bg-card px-3 py-2.5 text-sm"
+                        data-extension-contribution={contribution.id}>
+                        {#if contribution.title && contribution.href}
+                          <a
+                            class="w-fit font-medium break-words text-pretty text-primary underline-offset-4 hover:underline"
+                            href={resolve(contribution.href)}>{contribution.title}</a>
+                        {:else if contribution.title}
+                          <p class="font-medium break-words text-pretty">{contribution.title}</p>
+                        {/if}
+                        {#if contribution.description}
+                          {#if !contribution.title && contribution.href}
+                            <a
+                              class="w-fit text-xs break-words text-pretty text-primary underline-offset-4 hover:underline"
+                              href={resolve(contribution.href)}>{contribution.description}</a>
+                          {:else}
+                            <p class="text-xs break-words text-pretty text-muted-foreground">
+                              {contribution.description}
+                            </p>
+                          {/if}
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
             {@render children()}
           </div>
         </main>
