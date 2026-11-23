@@ -546,7 +546,7 @@ cargo build --locked -p stravia-server --bin stravia-server \
 
 ### 可靠性验证
 
-在旧代码上分别复现了拒绝准入后继续发送孤儿 Run 命令、缺失 Model Turn 开始导致事件批次外键失败，以及后台发布句柄存活时 Finish 丢失历史关联。修复后的真实 HTTP 队列满场景又暴露出已交付响应的 `client_output_committed=false`；现由实际输出事实进入保留 Finish，不从 HTTP 状态推断。生命周期与缺口契约见 [Interaction Observation](../design/interaction-observation.md#53-顺序与-sse-cursor)。
+在旧代码上分别复现了拒绝准入后继续发送孤儿 Run 命令、缺失 Model Turn 开始导致事件批次外键失败，以及后台发布句柄存活时 Finish 丢失历史关联。修复后的真实 HTTP 队列满场景又暴露出已交付响应的 `client_output_committed=false`；现由实际输出事实进入保留 Finish，不从 HTTP 状态推断。生命周期与缺口契约见 [Interaction Observation](../design/interaction-observation.md#普通事件内容与实时游标)。
 
 使用隔离的本机 PostgreSQL 16.15、Redis 协议服务 Valkey 9.1.2，以及测试内自建的 loopback catalog/upstream，不访问生产服务。真实 server HTTP 回归：
 

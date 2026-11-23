@@ -4,7 +4,7 @@ status: accepted
 
 # Discover Generation Chain parents from strict canonical history
 
-Open Responses 可以显式提交 `previous_response_id`，但 Chat Completions、Anthropic Messages 与 Gemini generation 不携带 Stravia 父节点。Stravia 决定：显式父节点始终优先；未提供时，只在同一 Principal 内以完整 canonical 历史精确匹配选择最长父链，且匹配后必须仍有至少一个新 input item；没有候选或存在任一语义差异就创建新根。
+Open Responses 可以显式提交 `previous_response_id`，其他客户端也可重发完整历史。显式父节点优先；未提供时，只在同一 Principal 内以完整 canonical 历史精确匹配选择最长父链，且匹配后必须仍有至少一个新 input item。没有候选或存在语义差异就创建新根。协议续接入口见 [Open Responses](../design/open-responses.md)。
 
 ## Considered options
 

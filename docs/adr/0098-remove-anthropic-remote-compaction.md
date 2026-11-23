@@ -4,7 +4,7 @@ status: accepted
 
 # 删除 Anthropic 远程压缩，仅保留 Responses 原生状态
 
-本决定取代 [ADR-0089](0089-carry-native-compaction-across-anthropic-and-responses.md) 的跨协议压缩设计，并撤销 [ADR-0047](0047-separate-native-compaction-ancestry-from-context.md) 中 Anthropic 可读摘要降级的例外。此前对官方 Claude Code 2.1.323 的真实手动 `/compact` 抓包表明，它使用普通 Messages 文本摘要，与原来的 on-demand 签名压缩并不相同。本次选择删除支持，不实施 CLI 摘要替代方案；厂商 API 的独立机制见[研究报告](../research/upstream-remote-compaction.md)。
+Stravia 仅保留 Responses 原生 Compact，移除 Anthropic 远程压缩，并撤销 [ADR-0047](0047-separate-native-compaction-ancestry-from-context.md) 中 Anthropic 可读摘要降级的例外。对官方 Claude Code 2.1.323 的手动 `/compact` 抓包表明，它使用普通 Messages 文本摘要，并非原先的按需签名压缩；我们不把该客户端摘要流程实现为网关替代方案。现行原生 Compact 契约见 [Open Responses 设计](../design/open-responses.md)。
 
 ## 契约
 

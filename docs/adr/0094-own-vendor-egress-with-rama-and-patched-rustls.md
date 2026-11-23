@@ -16,4 +16,4 @@ rustls 仅添加默认关闭的 ClientHello 配置入口。仓库保存补丁与
 
 Wire Debug 的请求头是按 rama 序列化规则构造的应用层快照，不是对套接字字节或 HTTP/2 帧的逐字节抓包；协议归一化与必要的 framing 会改变插件提交的字段。实际网络行为及指纹保真须由独立 wire capture 验证，不能由此 ADR 推断测试结果。
 
-未选择 hyper 的私有字段旁路、完整 wreq 客户端、libcurl 或 Go/uTLS：前者不能提供所需公共控制面，其他选项引入不同的连接或运行时体系。rama 的 0.x API 变化和并存两套 HTTP 栈是已接受的代价。本决定局部替代 [ADR-0013](0013-own-provider-transport-behind-model-turn-executor.md) 和 [ADR-0063](0063-record-four-direction-wire-debug-at-transport-boundaries.md) 对 reqwest 实现位置的描述，不改变重试及观察的权限与生命周期。
+未选择 hyper 的私有字段旁路、完整 wreq 客户端、libcurl 或 Go/uTLS：前者不能提供所需公共控制面，其他选项引入不同的连接或运行时体系。rama 的 0.x API 变化和并存两套 HTTP 栈是已接受的代价。本决定局部替代 [ADR-0013](0013-own-provider-transport-behind-model-turn-executor.md) 和 [ADR-0063](0063-record-four-direction-wire-debug-at-transport-boundaries.md) 对 reqwest 实现位置的描述，不改变重试及观察的权限与生命周期。出站约束见 [Vendor 插件设计](../design/vendor-plugins.md)，捕获边界见[交互观测设计](../design/interaction-observation.md)。

@@ -4,7 +4,7 @@ status: accepted
 
 # 按字段固定 Provider Model 规格的人工修改
 
-本决策部分取代 [ADR-0054](0054-persist-provider-model-snapshots.md) 中“编辑即由管理员接管整条规格”与“显式重新导入整条 Provider Catalog Entry”两项约定，并删除 [ADR-0057](0057-own-provider-write-and-route-bind-as-two-modules.md) 中的 Provider Model reimport 操作；快照持久化、有效模态回退、输出资格与 Effective Availability 的约定不变。
+本决策部分取代 [ADR-0054](0054-persist-provider-model-snapshots.md) 中“编辑即由管理员接管整条规格”与“显式重新导入整条 Provider Catalog Entry”两项约定，并删除 [ADR-0057](0057-own-provider-write-and-route-bind-as-two-modules.md) 中的 Provider Model reimport 操作；快照持久化、有效模态回退、输出资格与 Effective Availability 的约定不变。同步与路由边界见[架构设计](../design/architecture.md)，价格行为见[成本与计费设计](../design/cost-and-billing.md)。
 
 管理员通常只修正个别字段（例如补一个缺失的缓存价格），整条接管却让其余字段从此错过上游的改价与规格更新，而成本估算直接依赖这些价格。因此 Stravia 改为逐字段记录人工修改：管理员修改过的字段被固定，普通同步只更新未固定的字段；每个已固定字段可单独恢复同步。
 

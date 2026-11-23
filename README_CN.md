@@ -3,67 +3,74 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="frontend/stravia-webui/static/stravia-logo-reversed.svg">
   <source media="(prefers-color-scheme: light)" srcset="frontend/stravia-webui/static/stravia-logo.svg">
-  <img alt="Stravia" src="frontend/stravia-webui/static/stravia-logo.svg" width="96">
+  <img alt="Stravia" src="frontend/stravia-webui/static/stravia-logo.svg" width="88">
 </picture>
 
 <h1>Stravia</h1>
 
-**本地 Agent 基础设施 —— 一个端点接入所有 AI 客户端。**<br>
-统一模型接入、替你运行的工具，以及共享的访问控制、<br>
-历史与用量 —— 桌面应用或单一二进制。
+**本地优先的 Agent 基础设施 —— 一个端点接入所有 AI 客户端。**<br>
+统一模型接入、平台代跑工具、本地凭据保护，<br>
+以及实时请求可观测性 —— 桌面应用或单一二进制开箱即用。
 
-[![Release](https://img.shields.io/github/v/release/Stravia-AI/StraviaPlatform)](https://github.com/Stravia-AI/StraviaPlatform/releases)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
-[![CI](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-toolchain-orange)](rust-toolchain.toml)
+[![Release](https://img.shields.io/github/v/release/Stravia-AI/StraviaPlatform?style=flat-square)](https://github.com/Stravia-AI/StraviaPlatform/releases)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-2563eb?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Stravia-AI/StraviaPlatform/ci.yml?style=flat-square&label=CI)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-toolchain-f97316?style=flat-square)](rust-toolchain.toml)
 
-[发布版本](https://github.com/Stravia-AI/StraviaPlatform/releases) · [更新日志](CHANGELOG.md) · [English](README.md)
+[快速开始](#快速开始) · [核心特性](#核心特性) · [部署形态](#桌面端-vs-服务端) · [文档地图](#文档地图) · [发布版本](https://github.com/Stravia-AI/StraviaPlatform/releases) · [更新日志](CHANGELOG.md) · [English](README.md)
 
 </div>
 
-![请求记录 —— 实时追踪每个客户端请求](docs/assets/request-records.png)
+<p align="center">
+  <img src="docs/assets/request-records.png" alt="Stravia 请求记录 —— 实时追踪每次模型调用、重试与工具执行">
+</p>
 
-> **项目状态：** Stravia 尚未发布 1.0，仍在积极开发中。稳定版发布前，配置格式和数据库兼容性可能发生变化。
+> [!NOTE]
+> **Pre-1.0 提示：** Stravia 尚未发布 `1.0`，仍在积极演进中。稳定版发布前，配置格式与数据库兼容性可能发生变化。
 
-## 项目简介
+---
 
-Stravia 是本地运行、可自托管的 **Agent infra（智能体基础设施）**，面向使用 AI 编程客户端或构建智能体应用的开发者。客户端不需要改协议 —— OpenAI、Anthropic、Gemini 照旧 —— 只要把地址指向 Stravia。Stravia 决定由哪个上游服务回答，并在需要时完成协议转换。
+## 简介
 
-在模型接入之上，平台自己运行工具：内置联网搜索与多模态理解在 Stravia 内执行，结果直接送回模型 —— 通过普通模型请求或 MCP 提供，客户端不用装插件。访问控制、请求记录、用量与诊断都在同一个地方。
+Stravia 是本地运行、可自托管的 **Agent 基础设施（Agent infra）**，面向使用 AI 编程客户端或构建智能体应用的开发者。你的客户端无需修改协议 —— OpenAI、Anthropic、Gemini 照旧 —— 只需指向同一个本地端口。Stravia 在同一套 Rust 内核中统一完成协议转换、路由与故障切换、平台工具执行、访问控制、费用统计与全链路诊断。
 
 ```text
-Claude Code · Codex CLI · Gemini CLI · OpenCode · 各类 SDK
-                            │
-                            ▼
-              Stravia 统一监听端口 :23471
-                ├─ OpenAI 兼容 API
-                ├─ Anthropic Messages API
-                ├─ Gemini GenerateContent API
-                ├─ MCP 工具
-                ├─ 平台工具与内置 Agent 执行
-                ├─ Admin API
-                └─ WebUI
-                            │
-                            ▼
- OpenAI · Anthropic · Google · Vertex AI · DeepSeek · Ollama · …
+  Claude Code · Codex CLI · Gemini CLI · OpenCode · 各类 SDK
+                             │
+                             ▼
+            Stravia 统一监听端口 (:23471)
+              ├── 模型接口   OpenAI · Open Responses · Anthropic · Gemini
+              ├── 平台工具   StraviaRead · 联网搜索 · 多模态 · MCP (/mcp)
+              ├── 安全控制   API Key · 限流 · 消费上限 · 本地可逆脱敏
+              └── 可观测性   实时请求记录 · 线级调试包 · 内嵌 WebUI
+                             │
+                             ▼
+   OpenAI · Anthropic · Google · Vertex AI · DeepSeek · Ollama · Wasm 插件
 ```
 
-Agent 行为由平台实现定义并进行版本管理 —— Stravia 不是用户自定义 Agent 或可视化工作流构建器。
+> Agent 行为由平台实现定义并做版本管理 —— Stravia **不是**用户自定义 Agent 或可视化工作流搭建器。
 
-## 为什么选择 Stravia
+### 为什么选择 Stravia
 
-- **AI 编程客户端的即插即用端点** —— 把 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 指向 `127.0.0.1:23471` 就能继续工作。客户端协议不变，协议转换、选路和故障切换由 Stravia 处理。
-- **工具替你跑** —— 内置联网搜索（本地搜索使用已安装的 Chrome/Chromium 浏览器；容器已内置 Chromium）与图片理解在 Stravia 内执行，结果直接送回模型。可通过 MCP 提供，也可自动加入兼容请求。
-- **密钥、花费和请求记录都在一处** —— 每个应用一把 Key，各自设置可用模型与每分钟请求数（RPM）上限；看到服务商上报的真实用量；实时查看每个请求，出问题时下载完整调试包。
-- **本地优先，一个 Rust 内核** —— 桌面应用或无头服务端二进制；默认 SQLite，团队可用 PostgreSQL；文件存本地或 S3。不依赖云。
+- **AI 编程客户端的即插即用端点** —— 把 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 指向 `127.0.0.1:23471` 即可工作。客户端保留原生协议，转换、选路与故障切换全由 Stravia 接管。
+- **替你运行的平台工具** —— 内置统一读取（`StraviaRead`）、联网搜索、多模态理解与媒体生成在 Stravia 内部执行并把经校验的结果交回模型，支持普通请求透明注入或 `POST /mcp`，客户端无需装插件。
+- **本地离线凭据保护** —— 内置 461 条离线规则自动检测并替换发往模型的密钥，并在回答与工具参数中原样还原，秘密全程不出本机。
+- **密钥、用量与请求全景** —— 按 Key 配置模型权限、RPM 与消费上限，展示上游真实上报用量，提供可缩放实时请求画布与可导出的四方向线级调试包。
+- **单一 Rust 核心，零云端绑定** —— 桌面应用或无头服务端/容器任选；默认 SQLite，团队可用 PostgreSQL + Redis；文件支持本地或 S3 存储。
+
+---
 
 ## 快速开始
 
-**桌面应用** —— 从 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 下载 Windows（NSIS）、Linux（AppImage）或 macOS（DMG，Intel / Apple Silicon）安装包，完整平台在本地启动并自带集成管理界面。macOS 构建使用 Ad-hoc 签名，未经过 Apple 公证，Gatekeeper 可能阻止首次启动。详见[发布与签名说明](docs/releasing.md#macos-构建与独立验证)。
+### 桌面应用
 
-启动遇到问题时，桌面应用会提供诊断信息和恢复入口；不会自动重置数据库。
+从 [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 下载 **Windows（NSIS）**、**Linux（AppImage）** 或 **macOS（DMG，Intel / Apple Silicon）** 安装包。
 
-**服务端** —— 一个容器：
+- 本地完整运行平台与内嵌 WebUI，支持直接把配置写入本机编程客户端。
+- 启动异常时提供诊断与恢复入口，**不会**自动重置你的数据库。
+- **macOS 说明：** 构建采用 Ad-hoc 签名、未经 Apple 公证，首次启动可能被 Gatekeeper 拦截，处理方式见[发布与签名说明](docs/releasing.md#macos-发布构建与手动验证)。
+
+### Docker
 
 ```bash
 docker run --rm \
@@ -72,135 +79,159 @@ docker run --rm \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-也可从 Releases 下载对应平台压缩包（请先对照 `SHA256SUMS` 校验）。
+### 服务端二进制与 Nix / NixOS
 
-**Nix / NixOS（仅 Linux Server）：** 在仓库根目录运行 `nix build .#stravia-server`，或导入 `nixosModules.default` 并启用 `services.stravia`。Nix 包预装全部官方插件，并随软件包升级自动更新兼容的随包版本。见 [Nix 部署说明](docs/design/architecture.md#nix-server-与-nixos-服务)。
+- **发布压缩包：** 从 [Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) 下载 Linux 或 Windows 服务端压缩包，并对照 `SHA256SUMS` 校验。
+- **Nix / NixOS（仅 Linux Server）：** 运行 `nix build .#stravia-server` 构建，或导入 `nixosModules.default` 并启用 `services.stravia`（预装全部官方 Wasm 插件）。详见 [Nix 部署说明](docs/design/architecture.md#nix-server-与-nixos-服务)。
 
-**已有实例升级：** 先停机并备份完整数据目录及外部数据库。路由输出用途迁移会使 **全部历史 Route 在逐条重新配置前不可执行**，SQLite 与 PostgreSQL 相同。见[升级与恢复说明](docs/design/media-generation.md#4-route-与-codex-接入)；回退须恢复备份。历史存储升级会在启动时一次性改写已有的对话与请求历史，历史越多耗时越长、所需临时空间越大，旧版本无法读取升级后的数据库。
+### 首次启动（四步上手）
 
-**首次启动（两种形态相同）：**
+1. **初始化实例** —— 打开 <http://127.0.0.1:23471/setup>，粘贴控制台输出的一次性设置令牌，选择 SQLite 或 PostgreSQL 并创建管理员。*（选择 PostgreSQL 须先配置 Redis，见[缓存与 Server 配置](docs/design/data-layout-performance.md#统一派生缓存与-server-配置)。）*
+2. **添加供应商连接（Provider）** —— 配置 API Key 或 OAuth 通道（Codex、Claude Code、Grok、Devin 等），Stravia 会自动同步可用模型清单。
+3. **创建模型路由（Route）** —— 选择路由用途（对话推理、图片生成或联网搜索）并绑定匹配的上游目标；**Model ID** 即客户端调用名称。
+4. **创建 API Key 并接入客户端** —— 打开**接入客户端**，为 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 生成配置补丁（桌面端支持直接写入）。
 
-1. 打开 <http://127.0.0.1:23471/setup>，输入控制台打印的一次性设置令牌。选择 SQLite 或 PostgreSQL，创建管理员。选择 PostgreSQL 必须在首次设置前配置 Redis，见[缓存与 Server 配置](docs/design/architecture.md#统一派生缓存与-server-配置)。
-2. **添加提供商** —— API Key 或 OAuth 通道（Codex、Claude 订阅、Grok device flow、Devin）。Stravia 会同步可用模型清单。
-3. **添加模型** —— 选择文字或图片输出用途，再选择匹配的上游模型；Model ID 即客户端调用的路由。
-4. **创建 API Key**，然后打开**接入客户端** —— Stravia 为 Claude Code、Codex CLI、Gemini CLI 或 OpenCode 生成可直接应用的 provider 补丁；桌面端可直接写入客户端配置。
-
-之后即可通过任意受支持协议调用：
+随后即可通过任意受支持协议调用：
 
 ```bash
 curl http://127.0.0.1:23471/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PROXY_KEY" \
+  -H "Authorization: Bearer YOUR_STRAVIA_KEY" \
   -d '{"model": "my-model", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-## 功能特性
+> [!WARNING]
+> **升级已有实例前必读：** 请先停机，并**配套备份**完整数据目录（含已安装的 Wasm 插件与本地文件）以及外部数据库 —— 仅备份远程 PostgreSQL 并不完整。
+> - **既有 PostgreSQL 实例** 升级前必须先配置 Redis（[详见此处](docs/design/data-layout-performance.md#统一派生缓存与-server-配置)）。
+> - **路由用途迁移** 会保留原有对话路由，并将图片生成与外部联网搜索路由独立区分（[详见此处](docs/design/media-generation.md#route-与-provider-接入)）。
+> - **历史存储升级** 会在启动时一次性改写已有对话与请求历史；历史越大耗时越长、所需临时空间越多，且旧版本无法读取升级后的数据库。回退必须恢复备份。
 
-### 统一模型接入
+---
 
-| 客户端协议                | 端点                                                   |
-| ------------------------- | ------------------------------------------------------ |
-| OpenAI Chat Completions   | `POST /v1/chat/completions`                            |
-| Open Responses 2026-04-24 | `POST /v1/responses`（JSON、SSE、WebSocket）           |
-| Anthropic Messages        | `POST /v1/messages`                                    |
-| Gemini GenerateContent    | `POST /v1beta/models/{model}:generateContent`          |
-| Gemini 流式生成           | `POST /v1beta/models/{model}:streamGenerateContent`    |
+## 核心特性
 
-跨协议工具调用、推理内容和用量数据完整保留；不需要修改的请求直接透传。
+### 统一模型接口
 
-### 提供商与模型路由
+| 客户端协议 | 端点 |
+| --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` |
+| Open Responses `2026-04-24` | `POST /v1/responses` *（JSON、SSE、WebSocket）* |
+| Anthropic Messages | `POST /v1/messages` |
+| Gemini GenerateContent | `POST /v1beta/models/{model}:generateContent` |
+| Gemini 流式生成 | `POST /v1beta/models/{model}:streamGenerateContent` |
 
-OpenAI（含 Codex OAuth）· Anthropic（API Key；Claude Pro/Max 订阅 OAuth 由 Claude Code 插件提供，在 Claude Code 之外使用订阅可能违反 Anthropic 条款）· Google Gemini + Vertex AI · Devin（OAuth）· DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI（API Key 与 Grok OAuth）· NVIDIA · OpenRouter · Ollama · 自定义 OpenAI 兼容端点。
+跨协议完整保留工具调用、思考/推理与用量统计；无需转换的请求直接透传。详见 [Open Responses 设计](docs/design/open-responses.md)。
 
-客户端调用你定义的 **Model ID** —— 可以绑定一个或多个上游并按优先级分层：请求先走最高层，同层按流量均衡或延迟偏好选择，同一会话尽量留在已成功的目标上。内置目录让各服务商的模型清单保持最新。
+### 供应商接入与优先级泳道路由
 
-上游服务暂时不可用时，Stravia 会按路由配置重试或切换服务；你可以在管理界面查看各目标的可用状态。
+内置及插件支持 **OpenAI** *（含 Codex OAuth）*、**Anthropic** *（API Key；Claude Pro/Max 订阅 OAuth 由 Claude Code 插件提供）*、**Google Gemini 与 Vertex AI**、**Devin** *（OAuth）*、**DeepSeek**、**Moonshot AI**、**智谱 AI**、**Z.AI**、**MiniMax**、**xAI** *（API Key 与 Grok OAuth）*、**NVIDIA**、**OpenRouter**、**Ollama** 及**自定义 OpenAI 兼容**端点。
 
-![编辑模型 —— 上游目标按优先级分层](docs/assets/model-routing.png)
+> [!NOTE]
+> 在官方 Claude Code 之外通过 OAuth 使用 Claude Pro/Max 订阅可能违反 Anthropic 服务条款，请自行评估风险。
+
+将任意面向客户端的 **Model ID（Route）** 映射到按**优先级泳道**分层的多个上游目标：优先走最高层，同层按流量均衡或延迟偏好调度，兼顾会话与提示词缓存亲和，并在可配置的重试预算与冷却策略下自动故障切换。
+
+<p align="center">
+  <img src="docs/assets/model-routing.png" alt="模型路由 —— 上游目标按优先级泳道分层配置">
+</p>
 
 ### 平台工具与内置 Agent 运行时
 
-- `StraviaRead` —— 一个工具、一个 `path` 加可选 `body`：读文件、网页、研究问题和图片，无需 URL 编码，Office 文档（DOCX/XLSX/PPTX/DOC/XLS/PPT）读取为提取的 Markdown，长结果自动分页续读。
-- **联网搜索** —— 可使用 Local Agent 循环配合需要浏览器的 Local 来源、Exa 或智谱来源，也可绑定由 Vendor 插件返回完整引用报告的 External Route。
-- **多模态理解** —— 用你选的视觉模型描述 JPEG/PNG/WebP 图片、提取文字，或回答 Office 文档相关问题。
-- **媒体生成** —— 通过由具备能力的 Vendor 插件支持的已保存 Route 生成或编辑图片，再用 Artifact Reference 在后续工具中复用。
-- 能力可通过 `POST /mcp` 提供，也可自动加入兼容请求；循环在时间、轮次、token、工具预算内运行。
-- **历史回看** —— 可选让某个 Key 自动加入的 `StraviaRead` 以只读文件的形式浏览、读取该 Key 在历史保留期内的过往对话；默认关闭，不经 MCP 提供；共用同一 Key 的人会互相看到对话。
+所有能力既可通过 `POST /mcp` 暴露，也可按 API Key 透明注入兼容模型请求，并在时间、轮次、token 与工具硬预算内安全运行。
 
-#### 图片生成
+| 能力 | 功能说明 | 文档与边界提示 |
+| --- | --- | --- |
+| **`StraviaRead`** | 统一通过单个 `path`（含 `:` 选择器与可选 `body`）读取文件、网页、Office 文档（`DOCX/XLSX/PPTX/DOC/XLS/PPT` → Markdown）、图片、研究查询与后台工具结果，长文本自动分页 | [Agent Core 与 StraviaRead](docs/design/agent-core.md#straviaread-统一读取契约) |
+| **联网搜索与网页读取** | 可绑定具备完整搜索能力的 Vendor 插件外部路由，或在宿主注册外部 Web Provider 后使用 Local Agent 循环 | 开源核心不内置本地浏览器引擎（[联网搜索](docs/design/web-search.md) · [Web Provider 扩展](docs/design/web-access-providers.md)） |
+| **多模态理解** | 用你选定的视觉模型描述图片（`JPEG/PNG/WebP`）、提取文字或问答 Office 文档 | [多模态理解](docs/design/media-understanding.md) |
+| **媒体生成** | 通过已保存的 `image_generation` 路由生成或编辑图片，并用 Artifact 引用在后续工具中复用 | 可用性取决于上游账号与模型；尺寸偏好不保证精确；重试可能额外消耗额度（[媒体生成](docs/design/media-generation.md)） |
+| **历史回看** | 允许开启该项的 Key 经透明注入的 `StraviaRead` 以只读转录方式浏览、检索该 Key 保留期内的历史对话 | **默认关闭，绝不经 MCP 提供。** 共用同一 Key 的使用者会看到彼此对话（[历史回看](docs/design/history-recall.md)） |
+| **控制台对话** | 管理面内置多轮对话，选定 API Key 与模型经网关流式交互，历史仅存本机浏览器/桌面端 | [控制台对话](docs/design/console-chat.md) |
 
-在 **高级功能 → 媒体生成** 中绑定已保存且有合格图片生成目标的图片输出 Route，再开启能力。内置 Codex OAuth 与纯图片插件使用同一 Route 机制；实际可用性仍取决于上游账号和模型支持。
+### Wasm 供应商插件
 
-具体可用性取决于上游账号和模型支持；尺寸偏好不保证精确输出，重试可能额外消耗额度。配置、调用示例和限制见[媒体生成文档](docs/design/media-generation.md)。
+全部模型供应商均以自包含 **Wasm Component**（`wasm32-wasip2`）运行。Stravia 默认内嵌基础插件（`base`）；添加专属供应商连接前，先在**供应商插件**页安装 **Codex**、**Claude Code**、**Grok**、**Command Code**、**Devin**、**Kiro**、**Antigravity** 或 **OpenCode Free** 等专属插件。专属插件完整拥有供应商身份，任何情况下都不会回退到基础包。
 
-### 供应商插件
+支持官方插件源、添加发布签名目录的第三方公开 GitHub 仓库，以及离线导入 `.wasm` / `.wasm.zst`。
 
-所有模型 Vendor 均作为自包含 Wasm Component 执行。Stravia 默认内嵌基础 Vendor；添加连接前，先在**供应商插件**中安装 Codex、Claude Code、Grok、Command Code 或 Devin 等专属插件。页面统一展示已安装插件、可用版本与更新检查。专属插件完整拥有对应供应商身份，任何情况下都不会回退到基础包。
+> [!IMPORTANT]
+> 信任第三方来源前请务必核对公钥指纹。签名与摘要校验只证明来源真实，**不代表代码安全**：插件会获得所选连接的上游凭据与已批准的网络目标。详见[插件市场](docs/design/plugin-marketplace.md)与[供应商插件设计](docs/design/vendor-plugins.md)。
 
-可使用官方源，或添加已发布签名插件目录的公开 GitHub 仓库；信任前应核对其公钥指纹。离线导入支持 `.wasm` 和 `.wasm.zst`。下载经过验证，安装与更新仍需确认：插件会获得所选连接的上游凭据和已批准网络目标，签名有效不等于代码安全。来源要求见[插件市场指南](docs/design/plugin-marketplace.md)，支持能力、隔离与生命周期细节见[插件设计](docs/design/vendor-plugins.md)。
+### 本地凭据保护（可逆脱敏）
 
-### 密钥、用量与请求记录
+默认关闭。开启一次即可覆盖所有 Stravia API Key 的出站模型请求，客户端零改动。
 
-- 管理面内置控制台对话：选择 API Key 与模型，流式进行多轮对话并回看本地历史；存储与自动工具注入限制见[控制台对话文档](docs/design/console-chat.md)。
-- API Key 支持自定义密钥、模型绑定、有效期，以及按 Key 的并发、MCP 访问和自动工具注入限制。
-- 请求记录：在可缩放的画布上实时看到每次交互 —— 模型调用、重试、工具调用 —— 失败的请求单独成列，单次对话可逐条查看。
-- 查看服务商实际上报的 token 用量与配额。
-- 打开 Debug 可捕获 HTTP/SSE/WebSocket 流量并按交互下载诊断包；仅 HTTP `Authorization` 值会被遮盖，其他凭据、业务内容与媒体可能被保留。诊断包应按敏感数据处理，详见[请求记录设计](docs/design/interaction-observation.md)。
-- 普通请求观测即使在 Debug 关闭时也使用同一过滤：仅遮盖实际 HTTP `Authorization` header 值（名称不区分大小写），不遮盖正文或工具参数中的同名字段。实时展示、落盘记录和导出事件可能保留下载授权及其他原始凭据。这不将普通观测扩展为完整 Wire 抓包，不回写旧记录，不改变保留期、权限、进程日志／普通客户端错误脱敏或模型侧凭据保护，也不自动刷新或续签下载授权。
+- **秘密不出本机：** 使用内置 **461 条 Betterleaks 离线规则**与自定义规则，在发往模型前识别消息、历史及工具入/出参中的凭据并替换为占位符，不向任何外部服务发送内容。
+- **端到端无缝还原：** 模型原样返回占位符时，Stravia 在回答与工具调用参数中还原真值，工具照常执行；同一 API Key 下同一秘密跨对话、跨重启复用同一占位符。
+- **宁可失败，绝不偷跑明文：** 检测或存储异常时直接使请求失败（fail-closed）；关闭开关后停止新建映射，未过期占位符仍可继续还原。
+- **透明可见、随时试测：** 可浏览全部规则、查看遮罩后的命中记录，并用样本文本离线试跑规则（测试文本不会落盘）。
 
-### 凭据保护
+> [!NOTE]
+> 凭据保护只覆盖规则可识别的凭据模式，不承诺发现所有秘密、个人信息或业务机密，可能存在误报/漏报，也不扫描图片与二进制附件；工具运行时会收到真实凭据，请继续保持工具权限与出站限制。详见[凭据保护设计](docs/design/credential-protection.md)。
 
-默认关闭。打开一次，所有 Stravia API 密钥的请求都会自动保护 —— 客户端不用改任何东西。
+### 密钥、费用与请求记录
 
-- **秘密不出本机** —— Stravia 能认出发往模型的消息、历史记录和工具输入/输出里的 API Key、令牌等凭据，在请求发出前替换成占位符。461 条检测规则全部内置、在本机运行，不会把内容发到任何地方校验。
-- **来回无缝衔接** —— 服务商原样返回占位符时，Stravia 会在回答和工具调用里还原成真值，工具照常能用凭据。同一个秘密跨对话、跨重启都用同一个占位符。
-- **宁可失败，不偷跑明文** —— 检测或存储出错时，这个请求会直接失败，而不会降级把明文发出去。关掉开关后新请求不再保护，已发出的占位符在过期前仍会还原。
-- **看得见、试得动** —— 翻看全部规则、查看每个请求新保护了哪些凭据，还能拿自己的文本测一测 —— 测试内容只发到当前实例，不会保存。
+- **访问与成本控制：** 支持自定义密钥、模型绑定、有效期、入口 RPM 上限、消费上限、自定义展示币种，以及按 Key 配置的透明工具注入集合（[成本与计费](docs/design/cost-and-billing.md)）。
+- **实时请求记录：** 在可缩放画布上实时追踪每次交互的模型调用、重试、故障切换与工具执行，配合独立的客户端错误视图、上游真实用量与供应商额度监控。
+- **线级调试与诊断包：** 按需开启进程级 Debug 开关，捕获四方向 HTTP/SSE/WebSocket 流量并按交互导出版本化 ZIP 诊断包。
 
-需要知道：它只能认出规则认识的凭据 —— 不是所有秘密，也不是个人信息或业务内容；可能误报、漏报，也不扫描图片和附件。工具运行时拿到的是真值，请继续保持工具权限和出站限制 —— 它减少暴露，但不是保险箱。
+> [!CAUTION]
+> **敏感数据提示：** 无论 Debug 是否开启，线级抓包与普通请求观测都**仅**遮盖实际 HTTP `Authorization` 请求头值（名称不区分大小写），不遮盖正文、工具参数或下载授权。实时视图、落盘记录与导出的诊断包可能保留原始凭据与媒体内容，请按高度敏感数据妥善保管。详见[线级调试与脱敏边界](docs/design/interaction-observation.md#wire-debug-与脱敏边界)。
 
-### 存储与部署
+---
 
-- 首次设置可选 SQLite 或 PostgreSQL；文件存本地或 S3。既有 PostgreSQL 安装也必须在升级前配置 Redis，见[缓存与 Server 配置](docs/design/architecture.md#统一派生缓存与-server-配置)。
-- 实例数据集中在一个目录，便于管理。数据库与本地文件（包括已安装的插件 Component）必须配套备份；仅备份远程 PostgreSQL 并不完整。迁移与升级前请阅读[部署与存储说明](docs/design/architecture.md)，确认备份和版本兼容要求。
-- 一个端口同时提供模型 API、MCP、Admin API、健康探针与内嵌 WebUI；反向代理下可用显式管理入口与受信代理。
+## 桌面端 vs 服务端
 
-## 部署形态
+两种形态由同一套 Rust 核心驱动，共用内嵌 Svelte 5 WebUI 与统一监听端口（`:23471`），支持本地直连或反向代理部署。
 
-|          | Desktop                                | Server                                |
-| -------- | -------------------------------------- | ------------------------------------- |
-| 形态     | Tauri 桌面应用，集成管理界面           | 单一无头二进制或容器镜像              |
-| 适用     | 个人开发者；可直接写入本机客户端配置   | 自托管与团队共享部署                  |
-| 存储     | 本地 SQLite                            | SQLite 或 PostgreSQL                  |
-| 获取     | Releases 上的 Windows NSIS / Linux AppImage / macOS DMG | 压缩包 · `ghcr.io` 镜像 |
+| | Desktop（桌面端） | Server（服务端） |
+| --- | --- | --- |
+| **形态** | Tauri 桌面应用，自带集成管理界面 | 单一无头二进制或容器镜像 |
+| **适用场景** | 个人开发者；可直接改写本机编程客户端配置 | 自托管与团队共享部署 |
+| **数据库** | 本地 SQLite | SQLite 或 PostgreSQL *（需配合 Redis）* |
+| **文件存储** | 本地目录 | 本地目录或 S3 对象存储 |
+| **获取方式** | Windows NSIS · Linux AppImage · macOS DMG | 发布压缩包 · `ghcr.io` 镜像 · Nix flake |
 
-同一套 Rust 核心驱动两种形态，管理面是同一个 WebUI。
+---
 
-## 文档
+## 文档地图
 
-- [架构设计](docs/design/architecture.md) 与 [设计文档](docs/design/) · [ADR](docs/adr/)
-- 数据库结构：[PostgreSQL](docs/database/postgres.sql) · [SQLite](docs/database/sqlite.sql) · [更新日志](CHANGELOG.md)
+| 文档 | 职责 |
+| --- | --- |
+| [领域术语词典 (`GLOSSARY.md`)](GLOSSARY.md) | 面向中文阅读的核心概念关系图与标准术语定义 |
+| [设计文档 (`docs/design/`)](docs/design/README.md) | 当前生效的系统架构与各子系统权威契约 |
+| [架构决策记录 (`docs/adr/`)](docs/adr/README.md) | 记录关键架构权衡与不可逆技术决策 |
+| [数据库结构参考 (`docs/database/`)](docs/database/) | 自动导出的最终表结构：[SQLite](docs/database/sqlite.sql) · [PostgreSQL](docs/database/postgres.sql) |
+| [发布与签名指南 (`docs/releasing.md`)](docs/releasing.md) | 发版流程、Desktop 更新签名、macOS 提示与插件目录发布 |
+| [更新日志 (`CHANGELOG.md`)](CHANGELOG.md) | 版本演进与变更记录 |
 
-## 开发
+---
 
-Rust 工具链以 [`rust-toolchain.toml`](rust-toolchain.toml) 为准 · Bun `1.4.2` · Task `3.52.0` · Python E2E 需要 uv。
+## 本地开发
 
-项目的 JavaScript 开发、构建与测试命令统一使用 Bun。Rust 和 Python 测试保留各自的原生运行器。
+**工具链：** Rust（见 [`rust-toolchain.toml`](rust-toolchain.toml)）· Bun `1.4.2`（见 [`package.json`](package.json)）· [Task](Taskfile.yml) · `uv`（Python E2E）。
 
-直接运行 Cargo 或在 IDE 中打开工作区前，先运行 `task prepare:crates`（需要 Cargo 和 Git）。该命令按需安装固定版本的 `patch-crate`，并准备补丁依赖；Task 的 Rust 命令会自动执行。`cargo clean` 后需重新准备。准备必须先于构建完成，不要在构建期间刷新补丁源码。补丁更新与离线源配置见[架构文档](docs/design/architecture.md#61-descriptor-与操作入口)。
+直接调用 `cargo` 或在 IDE 中打开工作区前，请先执行 `task prepare:crates`（需 Cargo 与 Git，`cargo clean` 后需重新执行；Task 的 Rust 命令会自动运行）。详见[开发环境与 `patch-crate`](docs/design/architecture.md#开发环境与-patch-crate)。
 
-| 命令                     | 用途                                                 |
-| ------------------------ | ---------------------------------------------------- |
-| `task dev:server`        | 启动 Vite WebUI 和 debug 独立服务端                  |
-| `task dev:desktop`       | 以开发模式启动 Tauri 桌面应用                        |
-| `task check`             | 运行 WebUI 检查、ESLint、Rust 格式和 Cargo 检查      |
-| `task test`              | 运行 WebUI 和受支持的 Rust 单元测试                  |
-| `DB_URL=… STRAVIA_TEST_REDIS_URL=… task test:e2e` | 运行完整 Proxy、Admin、SQLite 和 PostgreSQL E2E 套件 |
+| 命令 | 用途 |
+| --- | --- |
+| `task prepare:crates` | 准备补丁依赖（直接跑 Cargo 或开 IDE 前必跑） |
+| `task dev:server` | 启动 Vite WebUI 与 debug 独立服务端 |
+| `task dev:desktop` | 以开发模式启动 Tauri 桌面应用 |
+| `task check` | 运行 WebUI 类型检查、ESLint、`rustfmt` 与 Cargo 检查 |
+| `task test` | 运行 WebUI 与 Rust 单元测试 |
+| `task test:all` | 运行完整本地测试矩阵（隔离 Docker PG/Redis + E2E） |
+| `DB_URL=… STRAVIA_TEST_REDIS_URL=… task test:e2e` | 运行完整后端 Proxy、Admin、SQLite 与 PostgreSQL E2E 套件 |
+
+---
 
 ## 许可证
 
 Stravia 采用 [GNU Affero General Public License v3.0 only](LICENSE)（`AGPL-3.0-only`）许可。
-单独许可的组件继续适用各自条款：`stravia-web-access` 采用 `CC0-1.0 AND MIT`（见 [Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)）；其浏览器隐身脚本保留 [MIT 许可](backend/crates/stravia-web-access/src/browser/stealth/LICENSE)。内置字体采用各自许可证。
+
+随仓库分发的第三方组件保留各自许可证：
+- 凭据检测规则（Betterleaks）：[MIT License](backend/crates/stravia-credential-protection/src/detection/LICENSE.betterleaks)
+- 内置字体：[IBM Plex](frontend/stravia-webui/static/fonts/LICENSE-IBM-PLEX.txt) · [Noto Sans SC](frontend/stravia-webui/static/fonts/LICENSE-NOTO-SANS-SC.txt)
 
 ## Star History
 

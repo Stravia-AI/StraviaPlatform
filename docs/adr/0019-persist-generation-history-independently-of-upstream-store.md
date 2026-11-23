@@ -4,7 +4,7 @@ status: accepted
 
 # Persist Generation Chain independently of upstream `store`
 
-Stravia 将所有完整交付的生成请求与最终响应写入 Principal-scoped、不可变且可分支的 Generation Chain，覆盖 Open Responses、Chat Completions、Anthropic Messages 与 Gemini ingress；Response Chain 仅是其中带 Stravia response ID 的 Responses 投影。Open Responses `store` 仅作为发给 Target 的 Upstream Store Hint，不再控制 Stravia 的持久化：即使 Provider 不保存或不能续接上游状态，Stravia 仍可 materialize 完整 canonical 历史。
+Stravia 将所有完整交付的生成请求与最终响应写入 Principal-scoped、不可变且可分支的 Generation Chain，不依赖 ingress 协议；Response Chain 仅是其中带 Stravia response ID 的 Responses 投影。Open Responses `store` 仅作为发给 Target 的 Upstream Store Hint，不再控制 Stravia 的持久化：即使 Provider 不保存或不能续接上游状态，Stravia 仍可 materialize 完整 canonical 历史。
 
 ## Considered options
 
@@ -14,6 +14,6 @@ Stravia 将所有完整交付的生成请求与最终响应写入 Principal-scop
 
 ## Consequences
 
-- 这是刻意改变既有 `store=false` 本地零留存契约；部署者必须按「历史保留」天数（`log_retention_days`，最小 1，见 [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md)）管理所有生成请求的保留。
+- 需要本地留存限制时应设置历史保留，而非发送 `store=false`；当前 [Response Chain 与 `store` 契约](../design/open-responses.md) 与存储保留是两个边界。
 - Provider continuation 仍是可选优化。上游状态不可用时，Stravia 从 Generation Chain 展开完整历史，不把 upstream response ID 作为公共身份。
 - 只有完整交付的 `completed` 与 `incomplete` 终态写入节点；`failed`、取消、客户端断线与 delivery failure 不写入。

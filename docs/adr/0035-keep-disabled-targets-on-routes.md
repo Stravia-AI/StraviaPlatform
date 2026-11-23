@@ -6,7 +6,7 @@ status: accepted
 
 Target 过去只要出现在 Route 上就会进入选择。管理面需要「配好备用、先不参与选路」，删除会丢掉超时、思考映射等配置，仅编辑期暂存则刷新即丢。
 
-因此 Target 增加持久化的启用/禁用。已禁用 Target 仍属于该 Route，但不参与选择、亲和或冷却。缺省为已启用，现有数据全部视为已启用。一条 Route 必须至少有一个已启用 Target；已启用 Target 必须已配置 Provider 与上游 model。
+因此 Target 增加持久化的启用/禁用。已禁用 Target 仍属于该 Route，但不参与选择、亲和或冷却。缺省为已启用。一条 Route 必须至少有一个已启用 Target；已启用 Target 必须已配置 Provider 与上游 model。
 
 ## Considered options
 

@@ -4,15 +4,13 @@ status: accepted
 
 # 数据库连接仅由配置文件定义
 
-> 部分被 [ADR-0073](0073-cutover-to-single-baseline-schema.md) 取代：旧布局“停机后运行 `stravia-tools migrate-data` 复制并转换配置”的路径不再适用。`migrate-data` 只搬迁、优化带有受支持迁移前缀的数据根，不修改源 schema；`--config`（旧 `database.path` 转换）与 `--webview-from` 入口已移除。配置文件是数据库连接的唯一来源、统一数据根等其余约定继续有效。
-
 首次设置向导需要保存下一次启动仍能使用的数据库连接。本次设计选择配置文件作为数据库连接的唯一来源，移除现有数据库 CLI 参数及环境变量入口，而不采用 CLI、环境变量与文件的分层覆盖；这避免向导保存值与实际生效值存在两套解释。
 
 配置文件固定使用 `[database]`，由 `backend = "sqlite"` 或 `backend = "postgres"` 加 `url`（以及可选连接池参数）表达。`--config <path>` 只选择文件，默认是 `<data-dir>/server.toml`。后端选择及 PostgreSQL 连接不支持 CLI 或环境变量覆盖；SQLite 固定使用 `<data-dir>/db/gateway.db`，不再接受独立 `path`。
 
 统一数据布局替代了最初“SQLite path 相对配置目录解析、保存绝对路径”的决定。旧实现由数据库父目录反向改写运行根，导致 SQLite 与 PostgreSQL 的附件、诊断和缓存路径含义不同。现在宿主启动时解析唯一数据根，设置向导的连接测试、初始化、后续启动与本地恢复都从该根推导 SQLite 路径，外部配置文件不改变文件存储位置。
 
-取舍是移除任意 SQLite 文件位置的自由度，换取整实例搬迁与备份的确定性；需要换盘时改整个数据根。旧布局及带 `path` 的配置明确拒绝启动，操作者停机后运行 `stravia-tools migrate-data` 显式复制并转换配置，不保留双读、自动搬迁或空库回退。PostgreSQL 数据与 S3 对象仍由外部后端持有，目录迁移不等于外部后端备份。迁移不修改数据库 schema。
+取舍是移除任意 SQLite 文件位置的自由度，换取整实例搬迁与备份的确定性；换盘时改整个数据根。旧布局与带 `path` 的配置明确拒绝启动，不保留双读、自动搬迁、配置转换或空库回退。受支持的数据根可用 `stravia-tools migrate-data` 搬迁和优化；工具不改源 schema，也不备份外部 PostgreSQL 或 S3，剩余迁移由目标宿主启动时应用。当前数据布局和迁移规则见[存储设计](../design/data-layout-performance.md)。
 
 该决定要求 Docker、Nix 和启动脚本同步迁移。已有 PostgreSQL 安装必须在启动升级版本前，将原连接信息写入持久化的 `server.toml`；缺少配置进入显式设置流程，而不是根据旧环境变量选择数据库或默认切换到 SQLite。配置损坏、已配置数据库不可达或 schema 不兼容均显式失败；目标数据库是否存在管理员决定首次设置是否完成，不另存本地完成标志。
 

@@ -55,4 +55,4 @@ description: 数据库 migration、新增或修改升级钩子、启动数据转
 - 批量引用回填：`backend/crates/stravia-core/src/turn_chain/upgrade/retention.rs`。
 - 迁移专用多核恢复：`backend/crates/stravia-core/src/turn_chain/content.rs`。
 - 消费者回归：`tests/e2e/storage/test_shared_content_upgrade.py`、`frontend/stravia-webui/e2e/standalone-pages.spec.ts`。
-- 设计边界和带口径的实测：`docs/design/data-layout-performance.md` 第 10.2、10.5 节。该历史测量不是未来迁移的性能基线，须对当前变更重新取证。
+- 设计边界与升级原则：`docs/design/data-layout-performance.md`（「共享正文存储与引用回收」与「升级迁移原则与约束」），历史基准与口径见 `docs/research/protocol-http-benchmark.md`。历史测量不是未来迁移的性能基线，须对当前变更重新取证。

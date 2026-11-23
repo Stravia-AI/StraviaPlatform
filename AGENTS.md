@@ -4,7 +4,7 @@
 
 ## 项目
 
-Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、平台工具、内置 Agent 循环、统一访问控制与可观测性）。协议网关只是模型接入层；产品不是用户自定义 Agent 或工作流搭建器，定位细节见 `README.md` / `CONTEXT.md`。
+Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、平台工具、内置 Agent 循环、统一访问控制与可观测性）。协议网关只是模型接入层；产品不是用户自定义 Agent 或工作流搭建器，定位细节见 `README.md` / `GLOSSARY.md`。
 
 | 路径 | 职责 |
 |---|---|
@@ -27,7 +27,7 @@ Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、�
 | 任务场景 | 必读 |
 |---|---|
 | Issue 或规格 | `.scratch/` 本地票据与 `docs/agents/issue-tracker.md`；不用远程 Issue 系统 |
-| 领域行为或架构 | `CONTEXT.md`、相关的 `docs/adr/`、`docs/agents/domain.md` |
+| 领域行为或架构 | `GLOSSARY.md`、相关的 `docs/adr/`、`docs/agents/domain.md` |
 | 前端 UI 设计、实现、评审 | 根目录 `DESIGN.md` 全文 |
 | 修改已有设计 | `docs/design/` 下相关文档 |
 | 工具链或工作流 | `rust-toolchain.toml`、根 `package.json`、`uv.lock`、`Taskfile.yml`；版本号以它们为准，不复制到本文件 |

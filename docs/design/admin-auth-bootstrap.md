@@ -1,110 +1,75 @@
-# 管理用户与首次初始化设计
+# 管理认证与首次设置
 
-状态：已实施。本文记录当前管理认证、首次设置与部署迁移契约。
+## 管理身份与会话
 
-## 身份与权限
+Admin User 管理实例；推理与 MCP 使用 API Key 及其 Principal。两套身份不互换，API Key 不归属管理用户。
+Core 通过 `AdminAuthProvider` 验证管理会话，以 `AdminAuthorizer` 判定管理权限；传输适配器负责提取凭据，不替代授权。见 [ADR-0040](../adr/0040-separate-admin-identity-and-revoke-sessions.md)。
+每实例只有一个具备全部管理权限的 `admin`。Server 支持用户名和密码登录、退出和修改凭据，不支持公开注册或邮件找回。
 
-- 用户系统仅替换管理面的静态 Admin Token。模型调用与 MCP 继续使用现有 API Key 和 Principal，不建立 API Key 到管理用户的归属关系。
-- 每个独立实例只有一个管理员，唯一角色为 `admin`，拥有全部管理权限。不提供其他用户的创建、禁用或删除功能。
-- Server 管理员通过用户名和密码登录，可退出登录及修改自身凭据。不提供公开注册、邮箱验证或邮件找回。
-- 旧 Admin Token 不再作为管理登录凭据，不保留双认证兼容路径。
+- Access JWT 有效期为 15 分钟，轮换 refresh token 可续期，登录总期限最多 7 天。验签后还须检查服务端会话。
+- 退出撤销当前会话；改密或本地恢复撤销全部旧会话，旧 access 和 refresh 均失效。会话和签名密钥存于所选数据库，普通重启不撤销有效会话。
+- 认证存储故障返回 `503`；撤销未提交不清 Cookie、不报告退出成功。WebUI 只有收到 refresh 的明确 `401` 才回到登录；网络错误、`403` 和服务端错误保留地址及查询参数，提供重试。
+- Server 使用 `HttpOnly`、`SameSite=Strict` 的 `stravia_access`（`Path=/`）和 `stravia_refresh`（`Path=/api/v1/auth`），HTTPS 再加 `Secure`。不在响应正文或 localStorage 交付令牌。
+- `GET /api/v1/auth/state` 只报告 `setup`、`server`、`desktop` 或 `unavailable` 与请求资格，不刷新会话。Web 写请求要求精确同源的 `Origin`、`X-Stravia-CSRF: 1`，有请求正文时要求 JSON。
 
-## JWT 与管理会话
+Server 的日常写接口为 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout` 与 `/api/v1/auth/credentials`。
+入口／代理拒绝时，页面提示检查入口配置，并重试原地址；不通过清凭据或改地址掩盖部署问题。
 
-- 访问 JWT 有效期为 15 分钟；使用可撤销、轮换的 refresh token 静默续期，登录总有效期最多为 7 天。
-- JWT 验签之外还必须校验服务端会话状态。退出撤销当前会话，修改密码或本地恢复凭据撤销全部旧会话；后续请求与刷新均不得继续使用已撤销会话。
-- 认证存储故障返回 `503`，不能被当成无效凭据或成功注销。撤销未完成时不得清除 Cookie；WebUI 保留当前页面并显示错误，避免把仍有效的服务端会话误报为已退出。
-- WebUI 恢复登录时，只有 refresh 明确返回 `401` 才按登录失效处理；状态读取或续期的网络异常、`403` 与服务端错误向调用方传播，不清除 Cookie。初始化阶段的认证故障保留原地址及查询参数，显示可重试的独立错误界面；管理入口或代理校验被拒绝时提示检查地址与代理设置，手动重试重新加载同一地址。
-- 管理会话与 JWT 签名密钥持久化在所选数据库中。同一数据目录和数据库的普通服务重启不撤销有效登录；浏览器继续使用原 access Cookie，或以原 refresh Cookie 恢复访问，不需要重新提交用户名和密码。
-- Server WebUI 通过 `stravia_access`（`Path=/`）与 `stravia_refresh`（`Path=/api/v1/auth`）两个 `HttpOnly`、`SameSite=Strict` Cookie 携带凭据；HTTPS origin 下同时设置 `Secure`。前端不将凭据存入 localStorage。
-- `GET /api/v1/auth/state` 报告 `setup`、`server`、`desktop` 或 `unavailable` 模式，以及当前请求的认证/设置资格；该只读检查不会刷新凭据。`POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`、`POST /api/v1/auth/logout` 与 `PUT /api/v1/auth/credentials` 是 Server 日常认证入口；响应正文不返回 token。所有会修改状态的 Web 请求均要求 `Origin` 精确等于独立恢复的当前请求外部源，并携带 `X-Stravia-CSRF: 1`；需要正文时还必须使用 JSON content type。
-- Desktop 通过受限原生通道取得 access JWT，仅在内存中保存，以 Bearer JWT 请求 HTTP 管理 API；refresh token 只保留在原生进程内存中。两种载体共享后端会话验证。登录总有效期耗尽后，Desktop 可通过原生通道重新取得会话。
-- 取舍见 [ADR-0040](../adr/0040-separate-admin-identity-and-revoke-sessions.md)。
+### Desktop
 
-## Desktop
-
-- 首次启动直接使用本地 SQLite，自动创建唯一管理员，无初始化向导；后续启动复用该身份并自动登录。
-- 自动登录只授予原生应用。普通浏览器或其他本机进程不能仅凭访问回环地址获得管理权限，HTTP 管理 API 不再免认证。
-- Desktop 仅支持原生登录，不提供用户名或密码设置，不生成默认密码。若将该数据库交给 Server 使用，必须通过本地恢复命令设置用户名和密码；Desktop 本身不因此开放密码登录。
-- Desktop 不提供独立的“退出登录”。实际退出应用时结束当前原生会话，下次启动自动登录；关闭窗口到托盘不算退出应用。
+首次启动使用本地 SQLite 并自动创建唯一管理员，后续复用身份。原生通道在内存中交付 access JWT，管理 HTTP 使用 Bearer；refresh token 留在原生进程内存。
+会话到达总期限后可由原生通道重新建立。普通浏览器或本机进程不因回环地址获得管理权限。
+Desktop 不设默认密码，也不开放密码登录。将数据库交给 Server 时，使用本地恢复命令设置凭据。
+实际退出应用结束当前原生会话；关闭窗口到托盘不算退出，下次启动自动登录。
 
 ## 启动与迁移进度
 
-- Desktop 和 Server 使用同一个 Core 内部进度事件，展示当前操作；有实际工作总量时显示当前阶段的已完成数、总数和百分比。未知总量使用不定进度条，不按阶段权重或时间模拟整体启动百分比。历史、观测数据在批次事务提交后递增；诊断清单在文件导出或已有文件核验成功后计数。重启续跑以本次待处理工作为总量。
-- Server 完成基础参数、管理入口策略和数据目录检查后先监听 HTTP，再准备数据库和 Gateway。准备期间提供内嵌 WebUI、`GET /api/v1/startup` 快照和 `GET /api/v1/startup/events` 进度流；业务 API、`/healthz` 和 `/readyz` 返回 `503`，避免既有启动检查提前把业务服务当作可用。
-- 已配置实例先通过 `Gateway::prepare` 建立一次存储与连接池，再从同一存储检查管理员；已有管理员时直接消费准备结果启动 Gateway。首次设置提交也复用本次准备结果，不在创建管理员后再次连接和迁移。无待应用迁移时只检查迁移历史、checksum 与 SQLite 外键启用状态，不以普通启动代替全库完整性审计。
-- 进度快照包含 `status: starting|ready|failed` 和可空的 `progress: {phase, label, completed, total}`。SSE 的事件名为 `startup`，连接后先发送当前快照，后续只保留最新状态，终态发送后结束。接口禁止缓存，不提供历史正文、SQL、路径、凭据或原始异常。进度与页面共用既有管理入口及可信代理策略，不授予任何管理权限；准备完成后清空计数，业务接口继续要求原有认证。
-- 浏览器等待启动完成后才确认登录状态，随后进入既有登录、首次设置或控制台入口；`ready` 表示启动准备完成，不表示首次设置已经完成或模型 API 已可用。连接失败保留刷新动作，启动失败提示查看服务器日志并重启，不静默重连或跳转登录掩盖故障。Server 初始化失败仍以错误退出；已打开的页面可接收失败终态，不将失败进程伪装成正常服务。
-- Desktop 仍通过独立原生快照和事件桥展示进度，不依赖尚未启动的 HTTP；关键故障恢复窗口、诊断、重启和退出行为不变。
+Server 完成参数、入口策略和数据目录检查后先监听，再准备数据库与 Gateway。准备期间提供内嵌 WebUI、`GET /api/v1/startup` 快照和 `GET /api/v1/startup/events`；业务 API、`/healthz` 和 `/readyz` 返回 `503`。
+已配置实例用同一次存储准备检查管理员并启动 Gateway，首次设置同样复用准备结果；普通启动不做全库审计。迁移约束见[数据布局](data-layout-performance.md#升级迁移原则与约束)。
+
+- Core 报告 `starting`、`ready`、`failed`。`startup` SSE 先发当前快照，只保留最新状态并在终态后结束；接口禁止缓存，不返回 SQL、路径、凭据或原始异常，也不授予管理权限。
+- 中英文界面显示真实阶段。总量可知时显示该阶段的完成数、总数和百分比；未知总量显示不定进度，不估算整体百分比。
+- 数据批次提交、诊断文件可靠落盘或现有文件验证通过后才推进计数。重启续跑按本次待处理工作计数。
+- `ready` 仅表示启动准备完成；浏览器随后检查认证与设置状态，不把它当作首次设置完成或模型入口可用的证明。
+- 连接失败提供刷新；启动失败提示检查日志后重启，不跳转登录掩盖故障。Server 初始化失败仍以错误退出。
+- Desktop 通过原生快照和事件桥展示进度及恢复入口，不依赖尚未启动的 HTTP。
 
 ## Server 首次设置
 
-### 进入条件
+### 准入与 Setup Token
 
-- 配置文件负责定位数据库，目标数据库是否已有管理员是初始化状态的唯一事实源，不另存本地 `initialized` 标志。
-- 全新安装尚未选择数据库时，先进入受设置令牌保护的数据库选择流程。
-- 已配置的数据库可正常读取且无管理员时，进入设置流程；已有管理员时仅开放正常登录。
-- 配置损坏或已配置数据库连接失败必须报错，不视为全新安装，不自动创建替代数据库或重新开放设置。
-- 初始化完成前只提供初始化所需服务，不继续提供模型调用或 MCP。
+数据库中是否已有管理员是唯一完成依据。没有数据库配置时允许选择数据库；已配置且可读但无管理员时允许设置；已有管理员时仅正常登录。
+配置损坏、连接失败或 schema 不兼容明确报错，不当作全新安装，也不创建替代库。设置完成前不提供推理或 MCP。
 
-### 一次性设置令牌
+- 启动时向控制台输出一次性 Setup Token。`POST /api/v1/setup/claim` 首次成功即消费，最多一个请求领取。
+- 领取获得 `stravia_setup`（`HttpOnly`、`SameSite=Strict`、`Path=/api/v1`；HTTPS 加 `Secure`）。
+  设置会话只授权 `POST /api/v1/setup/test` 和 `POST /api/v1/setup/complete`，不授权管理 API。
+- 令牌与设置会话无进程内时限；连接测试失败可修正。未完成时重启发新令牌，旧令牌及会话失效；完成后关闭设置权限。
+- 控制台日志若持久化了未消费令牌，持有者在该进程完成设置前仍可能领取，须保护日志访问。
 
-- 未完成初始化的 Server 启动时在控制台打印设置令牌。`POST /api/v1/setup/claim` 首次验证成功即消费令牌，并发领取最多一个成功；它换取 `Path=/api/v1`、`SameSite=Strict` 的 `stravia_setup` HttpOnly 设置 Cookie（HTTPS origin 下同时设置 `Secure`），只能访问 `POST /api/v1/setup/test` 与 `POST /api/v1/setup/complete`，不能调用正常管理 API。
-- 设置令牌和初始化会话在当前进程内不限时。数据库连接测试失败可在该会话内修正后重新提交。
-- 未完成初始化时重启 Server 会打印新令牌，旧令牌与旧初始化会话均失效；初始化完成后关闭设置权限。
-- 已接受风险：未消费的令牌若进入持久化控制台日志，在该进程存活且未完成初始化期间持续有效。
+### 配置、提交与恢复
 
-### 数据库选择与配置
+数据库选项只取 `server.toml`，默认位于 `<data-dir>/server.toml`，可用 `--config` 指定。`--data-dir` 独立确定托管路径，不选择后端。
+`[database]` 的 `backend = "sqlite"` 使用固定 `<data-dir>/db/gateway.db`；`backend = "postgres"` 连接操作者已创建的库，运行 Stravia schema 迁移，不需要 `CREATEDB`。PostgreSQL `url` 为秘密，须保护文件权限。见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
 
-- SQLite 自动创建本地数据库文件。PostgreSQL 连接用户事先创建的数据库，验证连接后运行 Stravia 自身的 schema migrations；不创建 PostgreSQL 数据库，不要求 `CREATEDB` 权限，也不安装或启动 PostgreSQL 服务。
-- 数据库后端及 PostgreSQL 连接以 `server.toml` 为唯一来源；`--config <path>` 显式选择文件，默认是 `<data-dir>/server.toml`。`--data-dir` 拥有全部托管本地路径，不改变后端选择；旧数据库 CLI 参数与环境变量入口不保留。
-- 配置使用带 `backend` tag 的 `[database]`：SQLite 仅写入 `backend = "sqlite"`，固定使用 `<data-dir>/db/gateway.db`，设置接口不再接受 `path`；PostgreSQL 写入 `backend = "postgres"`、`url`，并可选连接池设置。PostgreSQL URL 属于秘密，配置文件需受文件权限保护。
-- 宿主在启动时解析绝对数据根；连接测试、初始化、启动和本地恢复都使用此根，不由外部配置文件改变。默认 Debug 配置和数据库分别是 `.stravia-dev/server.toml` 与 `.stravia-dev/db/gateway.db`。旧布局、旧路径配置与旧版本创建的数据库明确拒绝启动，不创建替代空库；本版本不提供升级路径，须使用全新数据目录。
-- 若向导选择的数据库已有管理员，保存连接配置后关闭设置权限，转到正常登录页；必须使用该数据库已有管理员的凭据，设置令牌不能重建或覆盖管理员。
-- 数据库配置来源取舍见 [ADR-0041](../adr/0041-own-database-connection-in-config-file.md)。
+1. 验证连接和配置目录可写，再原子写入连接配置；保存失败不创建管理员。
+2. 完成迁移并在数据库事务中创建唯一管理员。接入已有管理员的库时不覆盖账户，直接关闭设置入口并进入正常登录。
+3. 同一进程开放 Gateway，浏览器使用管理员凭据登录；设置会话不会升级为管理会话。
 
-### 提交与恢复
+配置与数据库不是跨系统原子事务：账户创建失败保留配置，重启后按同一目标库恢复；账户已提交但客户端没收到响应时，继续正常登录，不删库或重复创建账户。
 
-1. 验证数据库连接及配置目录可写。
-2. 原子保存连接配置。
-3. 运行所需迁移，并在数据库事务中创建唯一管理员。
-4. 关闭初始化入口，在同一进程启用正常 Gateway，无需手动重启。
-5. 浏览器转到登录页，使用刚设置的用户名和密码登录；设置会话不直接升级为管理会话。
+本地恢复：先停止占用同一数据根的实例，再执行 `stravia-server --data-dir <root> --config <path> recover-admin`。
+命令要求配置、数据库及既有管理员可读，在终端无回显读取新密码，原地更新账户并撤销旧会话；不开放设置向导，不从命令行或日志接收密码。
 
-管理员创建失败时保留连接配置，允许修正；重启后按目标数据库有无管理员恢复流程。文件与数据库不构成跨系统原子事务，不通过删除数据库或管理员补偿失败。账户已创建但页面未收到成功响应时，不能再次覆盖账户，应恢复为正常登录。
-
-## 已有安装与凭据恢复
-
-- schema 以冻结基线为兼容性起点：新部署应用全部迁移；已有受支持迁移前缀保留用户、会话与业务数据增量升级。基线前历史、未知版本、失败记录、checksum 不一致或未识别非空数据库明确报错，不删库重建。升级前备份完整数据根与外部数据库；不满足新增约束时先处理数据问题，回退使用升级前备份。
-- 向既有当前基线数据库首次接入时通过新的设置令牌创建管理员，完成前只提供初始化服务。已有 PostgreSQL 安装必须先将原连接配置迁入文件，不能因缺少配置默认切换到 SQLite。
-- Server 提供 `stravia-server --data-dir <root> --config <path> recover-admin` 本地交互式凭据恢复命令；操作者先停止占用该根的实例，再针对同一数据根及配置运行它。命令在终端读取用户名，并以无回显方式读取新密码及确认，原地更新唯一管理员并撤销全部旧会话。
-- 恢复要求配置文件、目标数据库与既有管理员均可读；它不删除管理员、不重新开放数据库选择向导、不提供邮件找回。密码不得通过命令行参数或日志传递。
-- 管理入口默认支持 HTTP 与 HTTPS，非回环监听不要求 HTTPS，默认监听仍为 `127.0.0.1:23471`。Docker 的数据库连接同样只来自持久化的 `server.toml`。
+恢复操作只改管理凭据和会话，不影响业务数据。认证扩展仍通过 [Core 的管理身份接口](../../backend/crates/stravia-core/src/admin/identity.rs)。
 
 ## 管理入口与代理信任
 
-- Server HTTP 传输层统一拥有外部源恢复、实际 TCP 对端信任与管理入口准入；core 不解释 HTTP header。设置、正常管理和不可用状态共用这一规则，Desktop 原生 Bearer 认证契约不变。
-- `--admin-origin` 可重复，环境变量 `STRAVIA_ADMIN_ORIGINS` 使用逗号分隔。未配置表示不限入口；显式配置后按规范化协议、主机及有效端口精确匹配整个管理面，包括 WebUI、设置、登录、认证状态与全部管理 GET／写操作。未列出入口被直接拒绝，不按不可信 Host 重定向。模型 API、MCP 和健康探针及其既有认证／CORS 不变。
-- `--trusted-proxy` 可重复，环境变量 `STRAVIA_TRUSTED_PROXIES` 使用逗号分隔 IP／CIDR。默认不信任任何代理；仅实际直接 TCP 对端可匹配信任范围，不能从 `X-Forwarded-For` 或客户端 header 推断对端。入口列表和代理信任相互独立，均仅由部署端配置、重启生效；非法或显式空项使启动失败，而非降级为不限入口。入口不允许凭据、页面路径、query、fragment 或通配符。
-- 不受信对端的转发声明被忽略；直连外部源由 Host 和 HTTP 恢复。受信代理必须覆盖客户端头，提供唯一一对 `X-Forwarded-Proto: http|https` 与 `X-Forwarded-Host: <authority>`（保留外部端口）。缺少配对、重复、逗号链、非法／冲突信息或任何 RFC `Forwarded` 均拒绝；代理应清除 `Forwarded`。受信对端完全不发送这些转发头时按直连处理。多级代理只接受最后一个受信代理提供的一对权威、已清洗声明，不解析转发链。
-- `Origin` 请求头只是独立校验对象，不能用于恢复预期外部源。允许入口 A 与 B 不代表 A 可以跨源写 B；不开放管理跨源 CORS。既有 CSRF、JSON、HttpOnly、SameSite 与会话撤销要求保留。
-- 设置、访问、刷新 Cookie 的设置和清除均根据每个请求恢复的外部协议采用 Secure；HTTPS 代理的 HTTP 回源不造成降级。不同主机不承诺登录态互通；同一主机 Cookie 不按协议／端口隔离，已有 Secure Cookie 可能阻止 HTTP 覆写。不能为兼容混用而取消 Secure 或扩大 Domain。
-- 旧 `--public-origin`、`STRAVIA_PUBLIC_ORIGIN` 与 Server `--admin-cors-origin` 已移除，不保留兼容入口。残留的 `STRAVIA_PUBLIC_ORIGIN` 会使 Server 启动失败并要求迁移，不会静默丢弃旧入口限制。入口列表误配置可通过本地修改启动配置并重启恢复，无需登录。
-- HTTP 暴露密码、会话与请求完整性；默认不限入口失去固定主机列表的部分 DNS rebinding 防护。启动警告按允许 HTTP／不限入口的配置事实提示，不把 HTTP 回源当成浏览器明文。可信代理 CIDR 应尽量窄，不得默认信任全部网络；入口列表、同源与 CSRF 均不能替代 TLS／防火墙。完整 Nginx、Docker 与 Vite 配置见两种语言的 README，决策见 [ADR-0052](../adr/0052-allow-explicit-http-admin-origin.md)。
+Server 传输层恢复外部源并执行入口策略。HTTP、HTTPS 都允许，默认监听 `127.0.0.1:23471`；模型 API、MCP 与健康探针不使用管理入口列表。见 [ADR-0052](../adr/0052-allow-explicit-http-admin-origin.md)。
 
-## 实施验收
-
-- 管理 JWT 不能作为推理或 MCP 的 API Key；原有调用身份、权限与数据归属保持不变。
-- 单管理员约束能抵御并发初始化请求；设置令牌只能成功消费一次，旧设置权限不能覆盖已存在的管理员。
-- 退出、修改密码与本地恢复后的旧 JWT 及 refresh token 均不能通过后续认证；过期会话不可刷新。
-- Web 刷新页面可恢复有效登录；轮换刷新能正确处理同一浏览器的并发请求，不能因正常并发意外锁死会话。
-- Desktop 首次启动自动创建身份，重复启动不重复创建；原生应用可自动登录，普通回环 HTTP 请求不能免认证。
-- SQLite 与 PostgreSQL 均覆盖首次创建、基线应用与重复启动、已有管理员库接入、连接失败及初始化中断恢复。
-- 配置写入失败不创建管理员；管理员创建失败保留配置；管理员已提交后重启进入正常登录，不重复创建或重置。
-- 已配置数据库故障不触发新的首次设置；不兼容 schema 不被清空或重建。
-- Server 初始化成功后无需重启即可使用正常服务；本地凭据恢复不影响业务数据。
-- 同步更新 README 两种语言、部署入口、数据库 schema 文档与生成的 PostgreSQL 参考 schema，并验证 WebUI、Server 和实际 Desktop 表面。
-
-## 实施状态
-
-该设计已完成干净切换：静态 Admin Token 与数据库 CLI/环境变量入口不再受支持。部署者必须按本文迁移 `server.toml`；API Key 与 Principal 的推理/MCP 契约不受影响。
+- 重复的 `--admin-origin` 或逗号分隔的 `STRAVIA_ADMIN_ORIGINS` 定义整个管理面允许的协议、主机和有效端口；未配置则不限。拒绝通配符、凭据、路径、query、fragment 和非法或显式空项；不按未受信 Host 重定向。
+- `--trusted-proxy` / `STRAVIA_TRUSTED_PROXIES` 独立配置 IP/CIDR，默认不信任代理，仅匹配直接 TCP 对端。非法配置使启动失败，修改部署配置后重启恢复。
+- 非受信对端的转发声明不参与恢复，按直连 Host 和 HTTP 处理。受信代理必须清理客户端声明，并可提供唯一配对的 `X-Forwarded-Proto` 和 `X-Forwarded-Host`；两者都无则按直连，缺一、重复、逗号链、冲突或 RFC `Forwarded` 均拒绝。
+- `Origin` 是被校验对象，不是外部源的依据；两个允许入口也不能互相跨源写入，不开放管理跨源 CORS。
+- Cookie 的设置和清除按恢复出的外部协议决定 `Secure`，HTTPS 代理的 HTTP 回源不降低保护。同主机 Cookie 不按协议或端口隔离，不为兼容混用扩大 Domain 或取消 Secure。
+- HTTP 可能暴露密码、会话与请求完整性。显式入口列表、窄代理 CIDR、同源和 CSRF 均不能替代 TLS 与防火墙；部署示例见 [README](../../README_CN.md)。

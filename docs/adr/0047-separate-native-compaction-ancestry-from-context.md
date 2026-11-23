@@ -4,21 +4,8 @@ status: accepted
 
 # 分离原生压缩来源与执行窗口
 
-> [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 取代本文「契约与取舍」中原生登记的保留约定（“确认交付或合法引用后保留七天并延长必要来源”）：登记不再有到期时间，被 Turn 节点引用（`turn_node_compactions`）时不回收，来源节点由 `RESTRICT` 外键保护；没有引用时未确认的登记按一小时 `pending_until`，已确认的按首次确认时刻加统一历史保留天数回收。`delivered_at` 与 `referenced_at` 合并为 `confirmed_at`。其余约定继续有效。
+客户端压缩会替换先前已提交的窗口，普通严格前缀不足以跨边界证明父关系。Stravia 持久登记 Responses 原生压缩状态、精确身份、来源与 Target 绑定，以显式证据保留执行祖先；不放宽普通 Automatic Parent Discovery。客户端提交的新窗口仍是模型实际接收的上下文，来源只用于证明祖先，不能把已裁剪历史拼回来。客户端本地摘要及保留尾部匹配只能建立[诊断归属](../design/interaction-observation.md)，不能当作执行证据。
 
-客户端压缩会替换已提交的窗口，原有严格完整前缀不能证明跨边界父关系。Stravia 以独立 core Compaction 深模块持久登记 Provider 原生状态、精确身份和来源，把这作为显式续接证据；模型始终接收客户端压缩窗口，不借来源关联恢复已删除历史。客户端本地摘要的幸存尾部只能形成 Observation 推断。
+[ADR-0098](0098-remove-anthropic-remote-compaction.md) 将现行原生 Compact 限定在 Open Responses：不跨 Target 重放、不降级成可读摘要、不接受或还原 Anthropic 原生压缩状态。独立 Compact 不创建空 Generation；普通后继仍使用结构共享。把原生状态包装成 History Marker 会混淆两种身份，静默本地摘要则会改变客户端意图，均不采用。
 
-## 契约与取舍
-
-- 这是对 [ADR-0020](0020-discover-generation-parents-from-strict-canonical-history.md) 的显式原生引用扩展，不放宽普通 Automatic Parent Discovery。同一状态多次回传时，先确认当前窗口的严格后继；没有后继才跨登记边界，显式引用与状态冲突则拒绝，不按最新登记或可变 head 选父。
-- [ADR-0022](0022-materialize-generation-chains-from-deltas.md) 的结构共享保留。压缩边界同时记录 client-shaped 与 effective Replace；普通后继继续保存 delta。冷物化不重跑 Hook，也不把祖先有效历史拼回压缩窗口。
-- Standalone compact 通过既有 Model Turn Executor、Vendor 用途构造与 HTTP unary adapter 执行，返回原生 compact resource，不生成空 Generation。Inline 沿用 JSON、SSE 与 Responses WebSocket；每个完整状态在可回放字节交付前持久登记，不缓冲无关公开文本。
-- 压缩操作的 instructions 不必等于原任务指令。确认操作来源时，可用平台已发布的 output item identity 定位同 Principal 的节点，并核验其完整 client-shaped 前缀；不能仅凭 ID 或正文相似度确认来源。这个查询不复用来源 controls，不改变普通 Generation 的严格父发现，也不将原生 compact ID 当成 Generation ID。
-- 明确的原生控制或已开启的 Route 自动策略使用原生用途的来源准备：已验证的完整来源窗口可以提供父关系与输入 delta，即使本次没有追加 User。执行仍以当前客户端窗口与控制为准；阈值未触发时不伪造压缩事件。Standalone 使用相同来源与 delta 元数据分组，但不 stage/persist Generation。普通请求仍不把完全相同的已完成窗口视为严格后继。
-- SQLite/PostgreSQL 是原生登记事实源，与诊断保留隔离。登记后、交付确认前已经可解析；未确认且未被节点引用的记录保留一小时（`pending_until`），确认交付或合法引用后记录首次确认时刻 `confirmed_at`，之后按统一历史保留天数与节点引用回收，来源节点由外键保护而不是被延长期限。状态重复使用与分支不是消费操作。SQLite 读后写事务与 Turn Chain 一样预先取得写锁，避免立即回传与交付确认的快照升级竞争。
-- 原生状态绑定已知 Target、账号/配置 generation、模型与协议；它不适用 [ADR-0028](0028-persist-hidden-history-behind-markers.md) 的历史推理降级，也不能通过省略绕过来源、Principal、有效期或 Target 绑定校验。通过校验后的普通推理投影遵循 [ADR-0006](0006-own-protocol-conversion-behind-canonical-stages.md)：目标不能表达的 inline 控制与条目省略，不伪造压缩状态；独立 compact 操作不改成普通推理，协议无法承载时仍返回不支持。原生 compact ID、upstream response ID、Generation ID 不互换。Target Continuation 失效时，允许重放的完整上下文仍是当前压缩窗口。
-- Route 策略默认关闭，仅在客户端原生控制缺省时注入；实际阈值由支持原生 server-side compaction 的 Target 判断，不使用累计 usage、字节估算或平台摘要回路。`context_management` 决定本次执行策略，不改变已经交付的历史身份；调整或取消阈值后仍可发现完整的压缩后继。请求与 Target Continuation 的语义指纹继续区分该控制的缺省、null 和空集合，不能复用不兼容的上游状态。
-- Retained Tail Association 只保存诊断元数据。其敏感内容索引可丢失；重启后存在未索引保留候选、索引容量不足或搜索不完整时，返回 unavailable/resource-limit，不宣称唯一。已有持久关系仍可查询，清理后的卡片不从核心历史复活。
-- [ADR-0098](0098-remove-anthropic-remote-compaction.md) 已删除 Anthropic 压缩及其可读摘要降级例外；当前仅支持 Responses 原生状态，不能跨 Target 回放或降级为普通文本。
-
-不采用静默本地摘要、放宽 unknown item、单独复制 compact HTTP 发送路径或把原生 state 包成 History Marker。它们分别改变客户端意图、掩盖有损转换、复制执行语义或混淆独立身份。
+原生 Compact、来源确认与回放详见 [Open Responses 设计](../design/open-responses.md)，登记持久化与引用保留详见[存储设计](../design/data-layout-performance.md)。

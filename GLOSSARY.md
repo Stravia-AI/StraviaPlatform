@@ -1,1077 +1,390 @@
-# 术语
-
-## Stravia
-
-Stravia 是本地运行、可自托管的 Agent infra（智能体基础设施），为智能体应用提供模型接入、平台工具与内置 Agent 执行，以及统一的访问控制、历史和可观测性；协议网关是其接入层，而非完整产品定位。
-
-Stravia 是本产品的唯一品牌名称。用户可见文本、技术标识、配置键、持久化目录、错误代码和发布元数据均使用 Stravia 派生名称；不保留旧品牌兼容名称或别名。
-
-## Stravia Desktop
-
-Stravia Desktop 是运行在本机的 Stravia 管理壳，与独立 HTTP server 相对。只有它能直接改写本机 Connect Client 的配置文件。
-_避免使用_：客户端（单独使用、未区分 Desktop 与 Connect Client）
-
-## 可用更新
-
-可用更新是版本高于当前安装、且符合当前发布通道的已发布 Stravia Release。稳定版安装只接受稳定 Release；预发布版安装接受后续预发布 Release 和版本更高的稳定 Release。
-_避免使用_：最新版（未经过版本与通道判定时）、客户端更新
-
-## 跳过版本
-
-跳过版本是一个 Stravia 安装实例对某个可用更新关闭自动通知的共享偏好。它只作用于该精确版本，不隐藏手动检查结果；出现版本更高的可用更新时自动失效。
-_避免使用_：关闭更新、永久忽略更新
-
-## Connect Client
-
-Connect Client 是用户本机上的第三方编程工具，可被配置为以 Stravia 为模型服务；管理面「客户端」下拉里的 Codex、Claude Code 等即此类。它不是 Principal，也不是 Agent Definition。
-_避免使用_：Agent（当指这些工具）、接入 Agent、把 Desktop 和 Connect Client 都叫客户端
-
-## 控制台对话（Console Chat）
-
-控制台对话是管理员在 Stravia 管理面中，以创建时选定的一个 API Key 所对应的 Principal 与模型进行的多轮对话。每次发送都与 Connect Client 请求一样形成 Inference Run，受该 Key 的模型访问、请求频率与透明注入设置约束，并计入其用量与观测；对话所属 Key 不可更换，Key 失效后对话只读，模型可以逐条消息更换。对话历史由管理面所在的浏览器或 Desktop 安装自行保存，不是平台 Session、Turn Chain 节点或 Generation Chain 视图。
-_避免使用_：Agent 对话、Playground、Session、Connect Client（当指控制台对话）
-
-## Connect Client Interaction
-
-Connect Client Interaction 是归属于同一 Principal、由一个或多个 Inference Run 推进的同一次客户端交互，通常由新 User 输入发起，也可由无法归入已有交互的合法无 User 根请求发起。经充分证据确认的同一任务续接可跨多个 Generation Chain 根而共享交互归属、活动状态、Confirmed Upstream Usage 汇总与 Interaction Debug Bundle 范围；诊断归并不改变模型输入、权限或执行历史。
-_避免使用_：Agent Turn、Model Turn、Inference Run、Agent Loop
-
-## Interaction Observation
-
-Interaction Observation 是管理面用于查看 Connect Client Interaction 及其 Inference Run、Model Turn、工具调用、Target attempt、交付状态和 Confirmed Upstream Usage 的可持久化诊断投影，也是历史回看的唯一只读来源。它可以实时变化并保留失败、取消或断线记录，但不是推理执行、Generation Chain 或模型历史的事实源；观察记录失败或丢失只影响相关诊断任务，不改变推理结果，也不终止实例。它与 Debug Trace 均仅遮盖实际 HTTP Authorization header 值，实时、持久化与导出内容可能包含下载授权及其他凭据；相同过滤标准不表示相同捕获范围，普通 Observation 不是完整 wire 抓包。
-_避免使用_：Generation Chain、Request Log、Execution State Store
-
-## 失败的请求（Failed Request）
-
-失败的请求是最终因平台或上游服务错误而失败的一次客户端请求，涵盖无可用 Target、额度暂停、超时、连接上游失败和 HTTP 200 之后的流式错误；内部重试或切换服务后最终成功的请求、单纯由客户端主动取消或断线终止的请求，以及上游发送前被平台校验拒绝的错误的请求，不属于此类。每次请求独立判定，后续新请求成功不改变前一次请求的失败事实。
-_避免使用_：错误的请求（当指此类）、失败的上游尝试、失败的交互
-
-## 错误的请求（Rejected Request）
-
-错误的请求是在发送任何上游请求前被平台校验拒绝的客户端请求：包括准入前拒绝，以及已准入后的模型不存在、模型访问禁止、请求 Hook 拒绝和参数校验失败。它不构成平台可用性事实，不计入请求成功率，但保留诊断记录；即使已进入 Target 准备阶段也不改变此分类，而无可用 Target、额度暂停和已发送上游后的失败仍属于失败的请求，不能只按 HTTP 状态码或是否创建尝试记录归类。
-_避免使用_：失败的请求（当指此类）、客户端 4xx、无效请求
-
-## 客户端错误（Client Errors）
-
-客户端错误是请求观测中客户端视角的汇总视图，以类型区分并列出失败的请求与错误的请求两类终局错误；被内部重试或切换吸收的上游错误不在其中。它不等同于 HTTP 4xx。
-_避免使用_：失败列表、HTTP 客户端错误
-
-## 上游错误（Upstream Error）
-
-上游错误是一次经 Provider 发出的 Target 尝试（含多模态理解、媒体生成等 capability 尝试）收到的上游来源终态失败，包括 HTTP 非 2xx、连接或传输失败、首 token 超时、HTTP 200 之后的流错误与凭据被拒。无论请求随后经重试或切换恢复还是最终失败，各次上游错误独立成立；本地准备失败、未发送、取消、断线与观察丢失的尝试不是上游错误。
-_避免使用_：失败的请求、失败的上游尝试（当指请求结果）、供应商故障
-
-## 最终成功率（Final Success Rate）
-
-最终成功率是最终正常完成的请求占已终结请求的比例；已终结请求指已完成（含向客户端交接工具调用后等待续接）或最终失败、非客户端取消、且不是错误的请求的请求。取消、断线和进行中的请求不入分母，窗口值以总量相除，不取各时间桶的均值。
-_避免使用_：客户端可用率、上游成功率、成功率（当含错误的请求）
-
-## 一次通过率（First-pass Success Rate）
-
-一次通过率是不依赖失败后的自动重试或路由切换便正常完成的请求，占同一组已终结请求的比例。它与最终成功率使用相同分母，不等同于单次上游调用的成功比例；无法确定请求是否经历自动恢复时，该组的一次通过率未知。
-_避免使用_：上游成功率、首次模型调用成功率
-
-## 自动恢复成功的请求（Recovered Request）
-
-自动恢复成功的请求是同一次客户端请求中，失败后经平台自动重试或路由切换，最终正常完成的请求；多次恢复仍只计一次，正常多轮模型调用、用户重新发起请求和最终失败的请求不属于此类。它占同组已终结请求的比例，就是最终成功率相对一次通过率的提升，使用百分点表达。
-_避免使用_：成功的重试次数、上游成功次数
-
-## 上游调用成功率（Upstream Attempt Success Rate）
-
-上游调用成功率是 1 减去上游错误占上游请求的比例；上游请求指已得到上游判定结果（完成或上游错误）的 Target 尝试，含重试与切换产生的尝试，不含本地失败、未发送、取消与观察丢失的尝试。它反映上游自身表现，不反映请求最终是否被路由吸收，也不能与请求级成功率相减来计算路由收益。
-_避免使用_：上游可用率、路由可用率、供应商故障率
-
-## 交互链路（Interaction Chains）
-
-交互链路是按诊断父边组织 Connect Client Interaction 因果关系的视图，供请求记录管理面与历史回看共用，节点代表对话实质；交付过任何客户端可见输出（文本、公开工具调用或 Thinking 预览）即算有实质。从未交付任何客户端可见输出且最终失败的交互不是链路成员，其失败事实归宿于客户端错误视图并可从那里回看；用户取消、断线或观察丢失造成的零输出交互仍是链路成员。
-_避免使用_：全量请求清单、失败列表（当指客户端错误视图）、Session、会话
-
-## 历史回看（History Recall）
-
-历史回看是平台对话中的模型经 Inference Run 内 StraviaRead 的 `stravia://history/` 路径，只读浏览、读取并检索当前 API Key 所对应 Principal 的交互链路的能力。它只经透明注入提供：Key 开启透明注入并选中「历史回看」时才随 StraviaRead 注入，默认不选；显式声明的 StraviaRead、MCP 与内部 Agent 都不提供。内容取自 Interaction Observation，可能因观测缺口、到期清理或清除历史而不完整；它只作为工具结果提供，不用于重建模型输入、续接或授权。
-_避免使用_：Session、会话存储、记忆（Memory）、对话历史（当指控制台对话的本地历史）
-
-## 交互转录（Interaction Transcript）
-
-交互转录是一个 Connect Client Interaction 在历史回看中按 Observation 事件顺序渲染的只追加文本文件。已完成 Interaction 的转录行号稳定，检索命中以「路径 + 行范围」指向它；状态、用量等可变信息只出现在目录列表中，不写入转录。
-_避免使用_：Debug Trace、Interaction Debug Bundle、模型历史
-
-## Rejected Request Observation
-
-Rejected Request Observation 是请求在形成 Inference Run 之前因解码、协议或认证错误被拒绝时形成的独立诊断投影。它不属于 Principal、Generation Chain 或 Connect Client Interaction。请求进入 Gateway 时 Debug 已开启的，可以附带只覆盖客户端请求与平台错误响应的 Rejected Request Debug Trace；没有上游方向不得表示为缺失抓包。
-_避免使用_：Connect Client Interaction、Anonymous Principal、孤立 Interaction
-
-## Observation Workspace
-
-Observation Workspace 是 WebUI 观测页（`/logs`）的编排深模块（`observation-workspace.ts` 的 `ObservationWorkspaceController` + `.svelte.ts` 壳）。它一次拥有五组编排职责：forest roots/cursor 和解、live 窗口算术、selection/range/failure 竞态守卫、live-block 保留与容量缺口、reset_required 恢复与 failures 分页、deep-link reveal；页面只保留 DOM 副作用（focus/fit/scroll）、对话框与 toast。竞态守卫是控制器内部 epoch，不外露为裸计数器。
-_避免使用_：把编排逻辑写回 `+page.svelte`、把 DOM 副作用带进控制器
-
-## Observation Timeline
-
-Observation Timeline 是把 Interaction Detail 或 Client Error Detail 拍平为渲染视图的纯派生模块（`observation-timeline.ts` 的 `deriveTimeline`）。它返回完整视图包：title、按 started_at 排序的 runs、runIndex、events/timelines Map、stream 分组（连续 process 合并、同名 client_tool_handoff 折叠、2s gap 阈值与 rapid_continuation 绑定）、failure items、offsetLabel/gapLabel、usageRows 与 processGroup。i18n 与格式化调用留在模块内；组件一个 `$derived` 拿全部，不保留第二份派生。
-_避免使用_：在组件内维护平行的拍平逻辑、把 DOM 操作带进模块
-
-## Wire Debug Capture
-
-Wire Debug Capture 是 Connect Client 到 Stravia、Stravia 到上游、上游到 Stravia、Stravia 到 Connect Client 四个方向的应用协议级诊断记录。它记录传输序列化规整后的有序 HTTP 字段快照、body chunk、SSE byte，以及 WebSocket handshake 元数据和 message 的顺序与时间，但不表示 TLS、TCP、HTTP/2 frame 或其他网络分包；仅对 Authorization header 值永久脱敏（header 名不区分大小写），媒体保留捕获内容，不因媒体类型替换为 Artifact 引用，其他内容原样保留。
-_避免使用_：Network Capture、Packet Capture
-
-## Inference Run Debug Trace
-
-Inference Run Debug Trace 是单个 Inference Run 准入时按当前进程级 Debug 开关独立决定是否生成的完整诊断，由该 Run 的四方向 Wire Debug Capture 组成，仅保留 wire 载荷、Run 关联与捕获完整性所需元数据，不保留独立 canonical 阶段或其他独立内部诊断阶段内容。Trace 与所属请求记录采用相同保留期并一起删除；Debug 开关不跨进程重启保持。Debug 捕获独立于普通 Observation 的按 item 收口内容；普通 Observation 的生命周期、用量与工具事件仍按既有契约记录。
-_避免使用_：Request Log、Wire Debug Capture（当指包含 Run 关联与捕获完整度信息的完整诊断）
-
-## Debug Trace Manifest
-
-Debug Trace Manifest 是单条 Debug Trace 的捕获完整性与保留状态说明；它表达归属、已捕获内容规模、完成或部分捕获及缺口原因，不是模型历史、执行状态或独立 Observation 事实。它随 Trace 所在实例可见，不能以共享数据库存在推断其他实例也能读取原始捕获。
-_避免使用_：请求记录、共享抓包索引、模型历史
-
-## Interaction Debug Bundle
-
-Interaction Debug Bundle 是管理员在某一时间点导出的版本化 ZIP 诊断包，汇总一个 Connect Client Interaction 中当时已落盘的全部 Inference Run Debug Trace。Bundle 必须说明 Interaction 状态、导出时间、schema 版本，以及每个 Inference Run 的捕获状态；部分存在时明确列出未捕获或不完整的 Run，不得表示为完整。
-_避免使用_：完整抓包（当存在未捕获或不完整的 Inference Run）、实时备份
-
-## Confirmed Upstream Usage
-
-Confirmed Upstream Usage 是上游在某次模型调用中明确报告、Stravia 已收到的 token 用量。Connect Client Interaction 的用量是其中所有 Inference Run、隐藏 Model Turn、重试和 Target failover 已报告用量的累计值；尚未报告或永不报告的消耗保持未知，但不遮蔽其他已确认用量，累计值与各项用量的报告覆盖程度分别表达，不能把未知记为零或用本地估算冒充精确值。
-_避免使用_：Agent Token、Estimated Usage、仅最终回答 Token
-
-## 用量统计汇总（Stats Usage）
-
-用量统计汇总是独立于对话历史与请求诊断记录、长期保留的 Token 用量、按量成本、计费金额、请求数、失败的请求数、上游请求与上游错误数及性能指标统计，其中 Token 用量以 Confirmed Upstream Usage 为依据。它不保留可逐对话查询的计量明细，不因历史手动删除或到期回收而减少；归属的 API Key、模型或 Provider 删除后仍保留各自的历史统计身份，同名重建不合并身份。
-_避免使用_：对话历史、逐对话账单、Provider Allowance、上游额度快照
-
-## Net Input Tokens
-
-Net Input Tokens 是每次上游尝试的总输入扣除缓存读取后的非负值，也是 Stravia 管理面「输入」指标的统一含义。总输入或缓存读取未知时，该次净输入保持未知；缓存写入不参与扣减。
-_避免使用_：总输入 Token（当指管理面输入）、Estimated Input Tokens
-
-## Total Input Tokens
-
-Total Input Tokens 是上游明确报告、包含缓存输入的原始输入 Token 数，用于原始用量记录、协议响应与计价，不是管理面的输入指标。净输入展示不改变该原始事实。
-_避免使用_：净输入 Token（当指原始上游输入）
-
-## 估算成本（Estimated Cost）
-
-估算成本是 Stravia 依据本地登记的上游价格或订阅费，对本实例应向上游 Provider 支付金额的估计。它不是上游账单，也不向 API Key 收取；上游实际扣费以上游为准。
-_避免使用_：计费、账单、实际费用
-
-## 计费（Billing）
-
-计费是 Stravia 按 Route（逻辑模型）的计费价格，对 API Key 发起的模型调用记取并累计消费的内部记账，可用于限制该 Key 的继续使用。它由管理员定价，不是上游账单，也不是估算成本。
-_避免使用_：成本（当指此义）、额度（当指 API Key 的可用消费）、Provider Allowance
-
-## 消费上限（Spend Limit）
-
-消费上限是管理员为一个 API Key 设定的计费累计上限，设有自定义币种时以自定义币种计，否则以美元计。该 Key 的已消费达到上限后新请求被拒绝，但 Key 不被禁用；调高上限或清零已消费后立即恢复。
-_避免使用_：额度、余额、配额、预算
-
-## 自定义币种（Custom Currency）
-
-自定义币种是管理员在美元之外定义的唯一一种显示币种，由显示符号与兑美元汇率组成，用于输入价格、设定消费上限和展示用量分析。每笔成本与计费在发生时同时冻结美元金额与按当时汇率折算的自定义币种金额；更换符号只改变显示，不换算任何金额，修改汇率只影响此后的记录。
-_避免使用_：结算币种、本位币、币种代码
-
-## 按量成本（Usage-Based Cost）
-
-按量成本是一次上游尝试按其 Provider Model 当时的价格（含上下文分档与峰谷定价）与 Confirmed Upstream Usage 得出的估算成本，发生时冻结。对订阅制 Provider，它只表示等价按量金额，不是该 Provider 的实际成本；不计算成本（`none`）的 Provider 不产生按量成本，也不计入未知成本。
-_避免使用_：实际费用、账单金额
-
-## Connect Client Apply
-
-Connect Client Apply 是 Stravia Desktop 把 Stravia provider 增量写入某个 Connect Client Global Config 的操作。它只 upsert Stravia 拥有的 provider 段及配套 catalog；可写与当前模型分离的激活 provider 键；不写当前/默认模型，也不写把 provider 和模型焊在一起的键。Claude Code 例外：只 merge Anthropic 的 base URL、token 与四套模型映射。它不是 admin HTTP API。
-_避免使用_：一键覆盖配置、在 Gateway 进程里写用户 home、把完整可粘贴示例整文件写盘
-
-## Connect Client Global Config
-
-Connect Client Global Config 是该 Connect Client 的用户级配置文件，路径由该工具的官方目录环境变量与默认目录解析；Connect Client Apply 只改这份文件，不改仓库内的项目配置。
-_避免使用_：项目级 `.codex/config.toml`、项目级 `.claude/settings.json`、把任意 OPENCODE_CONFIG 文件都当成全局配置
-
-## 管理用户（Admin User）
-
-管理用户是访问 Stravia 管理控制台与管理功能的身份，与模型调用及 MCP 使用的 Principal 分离。Stravia API Key 不归属于管理用户；管理用户身份本身不授予模型调用或 MCP 访问资格。开源核心通过 `AdminAuthProvider` 与 `AdminAuthorizer` 扩展缝抽象认证与授权边界，便于商业版按需接入多管理用户、SSO/OIDC 与项目级 RBAC，同时始终保持管理身份与推理 Principal 隔离。
-_避免使用_：Principal、Connect Client、上游账户
-
-## 实例管理员
-
-实例管理员是开源社区版（CE）默认 `SingleAdminAuthProvider` / `SingleAdminAuthorizer` 模型下单个 Stravia 实例唯一的管理用户，拥有该实例的全部管理权限；社区版默认不提供其他管理用户的创建、禁用或删除功能。
-_避免使用_：多用户管理（当指 CE 默认单管理员模型）、普通用户、API Key 所有者
-
-## 管理入口
-
-管理入口是浏览器访问 Stravia 管理面的外部源，由协议、主机与有效端口共同标识，不包含页面路径。它不同于服务监听地址、反向代理回源地址或客户端／文件访问地址。
-_避免使用_：服务地址（未区分外部入口与内部监听时）
-
-## 受信代理
-
-受信代理是部署者明确授权、可以向 Stravia 声明浏览器侧原始访问信息的反向代理。该信任不授予管理员身份，也不代表其声明的管理入口自动获得允许。
-_避免使用_：可信入口、已认证客户端
-
-## 设置令牌（Setup Token）
-
-设置令牌是领取 Stravia 首次设置资格的一次性凭据，只用于选择服务存储并建立首个实例管理员。它不是日常管理凭据，也不授予覆盖已有管理员的资格。
-_避免使用_：Admin Token、API Key、管理员密码
-
-## 初始化会话
-
-初始化会话是已领取首次设置资格的操作者完成配置与管理员创建的受限操作上下文。它不具备日常管理权限，也不能代替管理员登录。
-_避免使用_：管理会话、Principal、管理员身份
-
-## Principal
-
-Principal 是由有效 Stravia API Key 建立、用于归属 Turn Chain、Artifact、请求频率额度与执行状态的认证客户端身份。Stravia 不存在 Anonymous Principal，也不以连接或 Session 代替认证身份。
-_避免使用_：Anonymous Principal、Client Session
-
-## API Key Root RPM
-
-API Key Root RPM 是同一 Principal 在严格滑动 60 秒内可准入的客户端执行根请求数。Proxy Inference Run、remote compaction 和 MCP `tools/call` 共享这一额度；同根内部重试、隐藏 Model Turn、透明工具与后台执行不重复计入口请求。独立续接或重发是新根；WebSocket 连接复用不合并生成请求。不限表示没有本地请求频率上限，而非无限上游容量；长流、chunk、token 和心跳不增加计数，执行结束也不退回窗口记录。
-_避免使用_：Principal Concurrency Limit、执行并发数、连接数、TPM、RPD
-
-## RootRequest
-
-RootRequest 是一次已准入客户端根请求共享的执行上下文。它跨内部 Model Turn、工具与后台执行保留同根身份、累计等待和受控冷却尝试的归属，不是活跃执行名额，也不是客户端 Session。独立客户端续接建立新的 RootRequest。
-_避免使用_：Concurrency Lease、Session、Model Turn
-
-## Target
-
-Target 是 Route 中一个明确绑定 Provider 与非空白 upstream model 的执行目的地；所有能力（包括完整搜索）都通过所选 Provider Model 校验资格。它不是只绑定连接的服务入口。
-_避免使用_：无模型 Target、把 Provider 连接等同于 Target
-
-## Destination RPM
-
-Destination RPM 是同一 Provider 与 upstream model 组成的目的地在严格滑动 60 秒内可发送的上游请求数。同目的地跨 Route 共同计数，每次实际上游请求包括重试各计一次；不同目的地不共享额度。请求频率限制不是健康身份，不改变冷却、失败计数或凭据状态。
-_避免使用_：Target Health、Route、Session、并发池
-
-## Hook
-
-Hook 是受信平台管理员配置的进程内推理扩展。它读取规范化的请求或响应语义，并以受限动作改写、拒绝或提前完成一次推理，而不直接接触客户端凭据或上游凭据。
-
-## Inference Run
-
-Inference Run 是处理一次客户端生成请求直到一个响应完整交付或终止的执行过程。一次 run 可以包含多个隐藏 Model Turn 和 Platform Tool 调用；一旦向客户端交付公开工具调用，该 run 即结束，客户端提交工具结果时开始新的 run。
-
-## Model Turn
-
-Model Turn 是一次完整的规范化模型交互，可以包含同一逻辑模型路由内的上游重试，但不包含平台工具执行；工具结果引发的下一次模型交互属于新的 Model Turn。其成功终态表示该轮规范化输出与所需可逆脱敏映射发布均已完成，不再有后续输出或失败，也不表示客户端已完整收到响应。
-
-## Canonical Item（规范化内容项）
-
-Canonical Item 是一次规范化交互中具有独立身份与语义边界的有序内容单元。同一项的流式增量不形成多个 Canonical Item；不同项不因类型相同而合并，项内内容分段保持不变。
-
-Canonical Item ID 标识内容项，Tool Call ID 关联调用与结果，Item Reference 选择已有内容项，三者不能互换。引用只在 Principal 与历史范围允许的候选中解析；同一被引用 ID 对应不同语义时属于歧义，不能以最后一项覆盖前一项。
-
-## Effective Model Request
-
-Effective Model Request 是一次 Model Turn 在历史恢复、继承状态与 Hook 变更全部解析后，准备交给某个 Target 的完整 canonical 任务语义。它不等于客户端原始 wire request，也不包含纯 transport 或交付格式差异。
-_避免使用_：Raw Request、Wire Request
-
-## Model Turn Executor
-
-Model Turn Executor 是执行一个 Model Turn 的深模块。调用方提交 Principal、Effective Model Request、授权方式、可选的允许转发上游提示，以及 cancel / deadline。授权方式是 Route 模型绑定，或 Advanced Capability grant；它不是 API Key 上的独立能力开关。Executor 负责授权、Route / Target 选择、第一次 canonical 输出之前的 Target failover、Provider Transport（含 Responses WebSocket 与可选 Target Continuation）以及 live canonical stream。它返回 Route、canonical stream 与本次 Target 身份。Target Continuation 由注入的 lookup 发现，不把 Generation Chain 纳入 interface。它不拥有 Hook、Platform Tool 循环、Client Output Commit、客户端交付、ingress 协议或 Generation Chain / Agent Turn 落盘；请求中的 tools 是 Target 的硬约束。调用方消费 stream，Executor 不另提供 unary 完成方法。
-_避免使用_：在 Inference Run 或 Agent Runner 内复制 Target 循环；让 Gateway 自身充当 Executor；把 Generation Chain Store 传入一次 Model Turn
-
-## Model Leg
-
-Model Leg 是 Inference Run 内消费一个 Model Turn 的完整生命周期：从腿开始（Hook 流腿开启、Completion Context 组装），经 canonical 事件的 transform、归并与终态检测，到腿收口（flush 合流、media reconcile、Completed 归并、Incomplete 判定）与推进（完成公开响应、Platform-only 隐藏续腿、Hook 响应或失败渲染）。一条腿终止为可见响应、Platform-only 续腿、Hook 响应或失败；Platform-only 续腿在同一腿循环内获取下一个 Model Turn，不外溢为新一轮请求处理。终态 StreamError / UnexpectedEof 在任何交付形态下都使整条腿失败。
-
-## Model Leg Consume
-
-Model Leg Consume 是消费一条 Model Leg 的深模块（`engine/leg.rs` 的 `ModelLegConsume`）。调用方按自己的 transport 泵入 CanonicalEvent 并执行返回的 LegReaction；模块拥有 leg 仪式、Hook transform 与 flush、Generation Chain 身份应用、early Platform 执行管线（检测→prepare→marker 交付→start）、seal 与 advance（含 follow-up Model Turn 获取）。交付差异经闭枚举 `LegOps`（Live / Buffered）注入：live 在泵中直接交付投影批并回报 wire 送达，buffered 累积腿体并把 staged 批记为 Sent。模块不拥有 transport 取消与断连监听、Client Projection Session 的创建、请求级 Hook、turn 选择策略或 Generation Chain 落盘。
-_避免使用_：在 buffered 与 live 两条调用路径各自复制腿生命周期；把 `LegOps` 当开放 trait 扩展点
-
-## Agent Definition
-
-Agent Definition 是平台程序拥有的稳定 agent 用例。它规定输入输出契约、exposure policy，并以不可变 Revision 固定 instructions、可用 Platform Tool、运行预算和 Artifact policy；管理员不能创建或改写其行为。
-
-## Agent Definition Revision
-
-Agent Definition Revision 是 Agent Definition 行为的一次不可变版本。新根使用当前 Revision，已有 Agent Turn 始终沿用其根节点固定的 Revision。
-
-## Agent Definition Config
-
-Agent Definition Config 是管理员对 Agent Definition 的本地启用状态和逻辑 Model 绑定；它不改变 Definition 的输入输出契约或行为版本。
-
-## Agent Runner
-
-Agent Runner 是按一个 Agent Definition 推进有界模型与平台工具循环的深模块。它可在调用方明确选择时提交 Agent Turn，也可作为另一个深模块的 ephemeral 内部执行器；ephemeral execution 不形成可续接 Agent 历史。
-
-## Agent Run
-
-Agent Run 是 Agent Runner 的一次执行尝试。它可以包含多个 Model Turn 和 Platform Tool 调用；失败、取消或执行实例失联不会产生可续接历史节点。
-
-## Agent Turn
-
-Agent Turn 是 Agent Run 成功完成或受预算约束完成后提交的不可变续接点。每个 Agent Turn 由 AgentTurnId 标识，并可引用一个父 Turn；同一父 Turn 可以产生多个互不合并的分支。
-
-## Turn Chain
-
-Turn Chain 是由持久化不可变历史节点组成、归属于一个认证主体的有向无环父链。调用方以 Turn Reference 选择精确前缀，平台据此恢复完整规范化历史；不存在内存事实源、可变 latest head 或独立 Session 身份。
-
-## Turn Reference
-
-Turn Reference 是供 Connect Client 与模型传递的稳定、不透明续接引用，外壳为 `stravia://turns/<turn-id>`，精确选择 Principal 所属 Turn Chain 中的一个不可变节点；它不表示独立 Session 或可变 latest head，也不授予访问权限。
-_避免使用_：Session ID、latest head、访问凭据
-
-## Artifact
-
-Artifact 是归属于一个认证主体的不可变媒体或大对象；同一主体下，声明媒体类型与完整内容完全相同的文件具有同一身份，而非按上传次数区分。内部以 opaque ArtifactId 标识，外部通过 Artifact Reference 引用；保留期与内容身份相互独立。
-
-## Artifact Store
-
-Artifact Store 是保存并读取 Artifact 内容的深模块。它向调用方隐藏本地文件或对象存储差异，不负责解释媒体语义或执行模型任务。
-
-## Artifact Reference
-
-Artifact Reference 是供 Connect Client 与模型传递的稳定、不透明文件引用，外壳为 `stravia://artifacts/<artifact-id>`；它不是实际下载地址，也不授予访问权限。解析必须校验当前 Principal 的归属；同一 Principal 可以跨对话复用，不同 Principal 不得解析。
-_避免使用_：公开文件地址、下载凭据、伪 URL
-
-## Artifact Download Grant
-
-Artifact Download Grant 是针对单个 Artifact 的限时下载授权，持有其签名下载地址即可在有效期内下载，无须另外提供 Stravia API Key。它可以被转交，不代表 Artifact 公开或永久可访问。
-_避免使用_：Artifact Reference、永久公开链接
-
-## Artifact Upload Grant
-
-Artifact Upload Grant 是允许向指定 Principal 上传文件的临时受限凭据，不授予模型调用、读取已有 Artifact 或管理权限。它不是 Stravia API Key，也不是用于提示模型的凭据占位符。
-_避免使用_：Stravia API Key、Artifact Download Grant
-
-## Platform Tool
-
-Platform Tool 是由平台拥有、注册和执行的模型工具。平台向模型暴露它、拦截其调用并将结果仅送回模型；客户端看不到调用参数或工具结果，但协议可以暴露不含敏感内容的执行生命周期。
-
-## Client Tool
-
-Client Tool 是由 Connect Client 拥有并执行、由模型发起调用且由 Connect Client 回传结果的工具。调用交接与结果回传是不同事实，Inference Run 的交付完成或等待结束不证明该工具已执行完成。
-_避免使用_：Platform Tool、平台工具结果、工具已完成（当仅有交接或 Run 终态时）
-
-## Client Tool Waiting
-
-Client Tool Waiting 是 Interaction Observation 中平台已交付客户端工具调用、仍等待 Connect Client 回传工具结果的观察状态。它不表示工具在客户端内的实际执行进度；等待结束也不构成单个工具成功、失败或执行超时的证明。
-_避免使用_：Tool Execution、客户端工具执行超时、工具执行完成（当指等待结束）
-
-## Client Projection
-
-Client Projection 是把 canonical response 变成客户端可见视图：Platform Tool call/result 与 authoritative Thinking 可替换为 History Marker，普通可见 Text 不因潜在或实际 Platform ToolCall 而延迟交付；OpenAI-compatible 的 Post-Text Thinking 以 Markdown 引用 Preview、Projection Delimiter 与一对一 History Marker 经 Text carrier 交付，其他协议保持原生 carrier，不能表示该顺序时显式失败而不回退缓冲。它拥有 Thinking History Marker 的 reserve → 落盘 → 交付 → publish 顺序，以及 Platform History Marker 的投影与交付 → publish；交付指把 Marker 交给 Delivery，publish 只在 caller 确认 Sent 之后；Cancelled 或失败则废弃 Reserved Thinking Marker。Platform Tool Execution 的落盘与执行仍不在 Client Projection。live 流式 delta 与 staged 完整响应走同一 Client Projection，不是两套投影。它不拥有 Hook 变换、Delivery 发送、Model Leg 循环、Platform Tool Execution，也不拥有 Marker 的持久化事实源。它不按 Target 的 egress 协议 id 选择缓冲或 carrier。它不是 Protocol Conversion，也不拥有 ingress 协议形态改写；Generation Chain 保存的是投影完成之后、按 ingress 协议落盘的结果。
-OpenAI-compatible 的每个 Thinking block 都由独立的权威 History Marker 恢复，包括首个 Text 之前的公开无签名 Thinking。独立块和块内 summary/content part 在 Preview 中保留段落边界；同一 part 的 delta 不引入新段落。展示排版不改变权威原文、原始空白或块内 part 结构。
-_避免使用_：History Marker Projection；把 Generation Chain 的协议形态改写称为 Client Projection；把 Platform Tool Execution 生命周期称为 Client Projection；把 live 流式路径称为第二套投影
-
-## Post-Text Thinking
-
-Post-Text Thinking 是同一 Inference Run 的 Client Projection 顺序中首个非空 Text 后出现的 canonical Thinking，不因 Model Leg 切换而重置；live 与 staged 都在 Client Projection 产出该非空 Text 时进入 Post-Text，不因 Delivery 的 Sent 或 Client Output Commit 翻转；空 delta 不触发，非空空白属于 Text。OpenAI-compatible Client Projection 仅将其中原本可公开的字节作为 Markdown 引用 Preview，权威内容由一对一 Thinking History Marker 恢复；protected payload 没有公开 Preview 时只交付 Marker。
-_避免使用_：Late Reasoning、Quoted Text
-
-## Quoted Thinking Preview
-
-Quoted Thinking Preview 是 Post-Text Thinking 中可公开字节的 Markdown blockquote 展示，每个物理行及空行都属于同一外层引用块；它只保证内容不逃逸该引用块，不保证内部 Markdown 采用统一样式。其布局字节属于 Projection Delimiter span，authoritative Thinking 仍由 Marker 恢复；仅编辑 Preview 而保留 Marker 不改变 authoritative Thinking，删除 Marker 后引用按普通客户端 Text 保留。编码器可以保留不超过最长私有语法前缀的固定 lookbehind，以跨 delta 转义 Marker 与 Delimiter 伪造，这不构成 Model Leg Text 缓冲。
-_避免使用_：Thinking Text、Authoritative Thinking
-
-## History Marker
-
-History Marker 是 Client Projection 中、归属于 Principal 的 opaque 历史引用，用于在原位置等待并恢复一个 Hidden History Segment。一个 Marker 只能引用一次 Platform Tool 调用的 call 与实际交付结果，或一个 authoritative Thinking block，禁止聚合多个工具调用或多个 block。工具返回 Tool Execution Reference 时，Marker 恢复该次实际交付的工具结果，不随后台执行完成而替换为其最终结果。新 Marker 默认以无签名 Thinking block 中仅供机器读取的 HTML comment 呈现；OpenAI-compatible 客户端收到首个 Text 后，所有 Thinking 与 Platform Marker 均改用 Text carrier，以保留它们与后续内容的顺序。Markdown renderer 通常隐藏该 comment，纯文本客户端可能直接显示它，这是 Text carrier 的显式协议行为；周边客户端历史可以独立修改，同一 Marker 在保留期内可以被重试和并发分支重复使用。
-其访问隔离边界仅为 Stravia API Key 对应的 Principal；同一 API Key 持有有效 Marker 引用时可跨对话或分支复用，不要求属于原历史或其后代，其他 API Key 不得解析。
-_避免使用_：占位文本、Platform Tool Call、Client History Token
-
-## Reserved Thinking Marker
-
-Reserved Thinking Marker 是 canonical Thinking block 开始投影时由 Client Projection 在当前 Inference Run 中分配、尚未落盘且未发布的 History Marker reference，适用于 OpenAI-compatible 的 Text 前后两种 Thinking carrier；它允许 Preview 立即流式交付，只有完整 block 以同一 reference 原子落盘、Marker 按顺序交付并发布后才能恢复，后续 Text 必须等待该过程完成。落盘或发布失败必须显式终止交付且不得提交 Generation Chain，不得把 Preview 降级为 canonical Text；失败或未完整交付的 reference 必须废弃。无原生 block identity 时，一个连续 Thinking delta run 构成一个 block。
-_避免使用_：Published Marker、Partial Thinking
-
-## Projection Delimiter
-
-Projection Delimiter 是 Client Projection 中围绕一段可见字节的成对、无状态机器语法，表示该段 canonical content 为客户端展示临时使用了不同 carrier；Text mode 将 Thinking carrier 中的可见字节恢复为 canonical Text，Preview mode 在绑定 Marker 可恢复时删除仅供展示的字节，由 Marker 提供 authoritative content。Delimiter span 拥有为展示插入的换行、Markdown 引用前缀与转义字节，它们不属于 canonical content；客户端回放时只有绑定的 Principal-scoped History Marker 仍存在、Delimiter 正确配对且 Marker 可解析，范围内字节才按 mode 恢复。删除或破坏任一边界属于显式历史编辑。
-_避免使用_：History Marker、Hidden History Segment、Projection Record
-
-## Hidden History Segment
-
-Hidden History Segment 是 Client Projection 省略、但属于模型有效上下文的单个受保护单元；它是一个 Thinking block，或一次 Platform Tool 调用的 call 与实际交付结果，不随该结果引用的后台执行完成而改变。恢复只替换对应 History Marker，不覆盖 Marker 之外的客户端历史，也不拥有同一模型轮次中客户端可见的工具调用。一次恢复同时给出模型可见历史，以及仍带 Marker 的 client-shaped 对照；Generation Chain 落盘 effective request 时使用该对照，不自己回锚 Marker。
-_避免使用_：Hidden Client History、完整历史快照
-
-## Thinking Replay
-
-Thinking Replay 是面向当前 Target 的历史推理回放视图，优先让会话继续。Core 只按兼容性决定受保护载荷能否回放，不以保密为由省略：签发作用域一致、来源不明，或同一出口协议下仅部署或凭据不同时保留（被上游拒绝后分级剥离）；出口协议不同、协议绑定的模型不同，或该载荷已被当前签发作用域拒绝过时省略；可读推理始终作为推理交给出口 codec，由 codec 原生承载，只在原生载体拒绝无签名推理时降级为正文。不把摘要视为完整推理的等价替代。回放视图不改写权威历史；原历史仍在且回到兼容来源时，可以重新使用保留的密文。它不放宽普通消息、工具调用、原生压缩状态或其他硬约束。
-_避免使用_：无损跨模型思维链、解密降级、删除原始推理
-
-## History Marker Store
-
-History Marker Store 是在 Marker 交付前持久化 Principal-scoped 隐藏历史及其交付状态的事实源；本次调用的交付结果封存后形成不可变 Hidden History Segment，与工具独立执行的最终结果分别保留。它独立于只在完整交付后形成节点的 Generation Chain；未被完整交付引用的记录由各自保留策略清理。
-_避免使用_：Marker Cache、Tool Continuation Store
-
-## Platform Tool Execution
-
-Platform Tool Execution 是一次归属于 Principal、可与客户端工具并行推进的平台工具执行；已交接的后台执行及其可查询结果独立于来源请求的诊断记录，清除诊断不取消该执行或回收其结果。进程崩溃时未落盘完成的执行转为失败结果并提示模型重新请求工具，Stravia 不自动重放可能已经产生副作用的调用。
-_避免使用_：Tool Retry Job、Inference Run
-
-## 工具执行交接（Tool Execution Handoff）
-
-工具执行交接是采用有界同步等待的平台工具调用在等待耗尽后，将执行归属从原调用方转为独立后台执行的持久确认；等待窗口不是执行期限，交接不重置原始执行期限。对于这类调用，History Marker 发布只确认隐藏历史的发布，不转移执行归属：交接提交前原调用方断开会取消本地执行，即使 Marker 已发布；提交后则不因原调用方断开或执行引用未送达而取消。它不表示上游能够被撤销或停止计费。
-
-本地取消实际生效时形成明确的取消工具结果，对应 History Marker 保存并恢复该次调用与取消结果，不因原请求的 Hook 无法继续而改成其他交付错误；已经完成的终态不被后续断线改写。
-_避免使用_：执行超时、客户端已收到引用、重新执行
-
-## 工具执行引用（Tool Execution Reference）
-
-工具执行引用是供客户端与模型通过 StraviaRead 查询某次平台工具执行状态及结果的稳定、不透明引用，外壳为 `stravia://tool-executions/<id>`，可查询结果从执行终态起按历史保留时长独立保留，查询不续期。它不是模型生成的 tool-call ID、History Marker 或结果文件的 Artifact Reference，也不授予访问权限；解析仍受所属 Principal 的访问隔离约束。
-_避免使用_：Tool Call ID、工具定义 ID、访问凭据
-
-## Generation Chain
-
-Generation Chain 是归属于 Principal、由已完整交付且终态为 `completed` 或 `incomplete` 的生成请求与最终响应组成的不可变历史有向无环图，独立于 ingress 协议。每个节点保存的是该次交付在 ingress 协议下的形态，其内容来自已完成的 Client Projection，不等于 Effective Model Request 的 items；ingress 形态改写由 Generation Chain 拥有，Marker 与 Projection Delimiter 规则不属于它。Stravia 始终记录每个这类生成请求；每个请求形成一个可分支的节点。`failed`、取消、客户端断线与 delivery failure 不形成节点。它不拥有可变 Session head 或 Inference Run 生命周期状态。
-_避免使用_：Client History（当作独立事实源）；把客户端可见投影当作 Protocol Conversion；把 Client Projection 当作 Generation Chain 的阶段
-
-## Generation Chain Write
-
-Generation Chain Write 是一次尚未落盘的 Generation Chain 节点写入尝试，由进行中的 Inference Run 持有；完整交付后才成为节点，失败或中止则丢弃。Write 拥有节点合法性（仅 `completed` 或 `incomplete` 可落盘，并在 stage 时写入 ingress 协议形态与明确来源）；来源是产出该响应的实际 Target 或合法 Hook 合成来源，缺失来源不能由默认 Target 身份代替。effective request 在观察时必须已是恢复给出的 client-shaped 对照，Write 不回锚 History Marker。Inference Run 只在完整交付后提交，不解释投影或终态合法性。它不是 Model Turn、Agent Turn、Search Turn、Media Understanding Turn，也不是已持久化的 Generation Chain 节点。
-_避免使用_：GenerationChainTurn、GenerationChainDraft、Session
-
-## Generation Materialization Cache
-
-
-Generation Materialization Cache 是可丢弃的派生缓存，保存从 immutable Generation Chain delta 精确物化的 execution context。它不是历史事实源，也不承诺跨 Gateway 或重启复用；未命中、失效或淘汰后，Stravia 必须从 Generation Chain 按父节点顺序重建，不能重跑 Hook。
-
-## Automatic Parent Discovery
-
-Automatic Parent Discovery 是在调用方未显式给出父节点时，为 Generation Chain 选择父节点的规则。它只在同一 Principal 内比较完整消息语义的严格 canonical 历史前缀，选择最长且仍留下新 input item 的候选。角色、顺序、指令、内容块、工具调用与结果关联、受保护推理及原生压缩状态属于历史语义；应用元数据、追踪标识和交付状态不构成历史身份，未分类的协议扩展仍保守比较。任何语义差异或无候选都创建新根。它不从连接、网络属性、时间接近或模糊文本推断父节点。
-
-## Native Compaction Boundary
-
-Native Compaction Boundary 是由 Provider 原生压缩状态证明、与已确认来源关联的不可变上下文替换点；后续执行使用压缩窗口，而不是重新继承来源的旧窗口。它不是 Generation、History Marker 或以上游 response ID 为依据的 Target Continuation。
-_避免使用_：摘要文本匹配、Thinking History Marker、可变 Session head
-
-## Remote Compaction Request
-
-Remote Compaction Request 是客户端发起、由当前选中 Target 的上游执行的上下文压缩请求。独立压缩在协议无法承载时返回不支持；能力未知但协议可承载时仍由上游裁决，成功或错误直接返回客户端，不为完成压缩而重试或切换 Target。显式独立压缩与普通推理中的 inline 控制不同：后者在目标无法表达时可按 ADR-0006 省略并继续处理业务输入，不代表压缩成功。它不是平台主动压缩策略，没有平台配置或本地摘要。客户端负责构造压缩后的保留窗口；平台只交付上游状态并执行协议转换。另一协议产生的状态封装在入口协议的不透明字段里回传，见 ADR-0089。
-_避免使用_：Native Automatic Window、平台自动压缩、累计 token 限额
-
-## Current Tool Continuation
-
-Current Tool Continuation 是 Interaction Observation 用当前输入尾段的工具结果，精确对应到同 Principal 唯一已交付来源中尚待完成工具调用的诊断判定。确认后优先于 Generation parent 的常规观测分组，归入来源 Interaction 并续接来源 Run，即使历史编辑使严格前缀退回较早父节点、夹带新增 User 或超过尾部五分钟窗口。旧结果回放、重复 ID 或冲突来源不能证明续接；它不写入 Generation parent，也不启用 Target Continuation。
-_避免使用_：Automatic Parent Discovery、Generation Chain parent、Retained Tail Association
-
-## Retained Tail Association
-
-Retained Tail Association 是 Interaction Observation 对幸存完整连续交互与唯一历史候选的精确匹配所作的诊断推断，用于在当前工具续接不成立时确定跨 Generation Chain 根的交互续接或新交互的诊断来源。匹配之后没有新增 User 且准入相对交付完成不超过五分钟时归入来源 Interaction；其他唯一尾部只建立诊断父连接。它不证明发生过压缩，不建立执行父边或恢复历史；缺少、歧义或不完整的证据不能证明任务续接，时间接近也不能替代匹配证据。
-_避免使用_：Automatic Parent Discovery、Generation Chain parent、确认压缩
-
-## Run Attribution
-
-Run Attribution 是 Interaction Observation 内部拥有"一次 Inference Run 归入哪个 Connect Client Interaction"全部判定的深模块。它消费调用方提交的 client items 与 Generation Chain 已确认证据（新增 User、命中 pending tool result），自己捕获 tail window、计算 canonical fingerprint 与准入时间，统一执行 Current Tool Continuation 与 Retained Tail Association 的判定表并产出诊断事件；内存证据与持久化证据的合并规则只在此模块内成立。它不改变 ADR-0053 的判定语义，不写入 Generation parent，也不替代 writer 的顺序与背压职责。
-_避免使用_：Grouping、归属逻辑（当散在多模块时）、把 engine 预计算证据当作判定
-
-## Upstream Store Hint
-
-Upstream Store Hint 是 Open Responses `store` 传达给 Target 的上游状态保留偏好。它只约束 Provider 是否可保存或续接其自身状态，不约束 Stravia 对 Generation Chain 的持久化。
-
-## Response Chain
-
-Response Chain 是 Generation Chain 面向 Responses 协议、以平台生成 response ID 连接的投影。客户端可显式引用旧节点，平台也可从 Effective Model Request 发现 Reusable Response Prefix；每个分支开启新的 Inference Run，不共享原 run 的可变生命周期状态。
-
-## Target Continuation
-
-Target Continuation 是由 Target 持有、以上游 response ID 引用的可复用模型状态。它独立于 Response Chain；其保留期、连接亲和与失效由 Provider 契约决定。
-当 Reusable Response Prefix 成立时，Stravia 优先使用 Target Continuation；仅作用于已继承历史的新 Prompt Cache Directive 不阻止续接。只有 Provider 明确证明 continuation reference 不存在且本次执行尚未开始时，Stravia 才能完整重放历史；执行状态不确定时不得重放。
-_避免使用_：Upstream Session、Response Chain ID
-
-## Reusable Response Prefix
-
-Reusable Response Prefix 是与一个已成功交付的 Generation Chain 节点在模型可见语义上精确相等、且对应 Target Continuation 仍可用的 Effective Model Request 完整 item 前缀。它只在同一 Principal 与等价 Target 语义内成立；Prompt Cache Directive 不属于模型可见语义，不改变该前缀。
-_避免使用_：最长链、文本前缀、Session 命中
-
-## Open Responses Protocol
-
-Open Responses Protocol 是 Stravia 以官方日期版本为 canonical baseline 的多供应商 Responses wire contract。Ingress 兼容 rolling Responses 的 additive 字段和 hosted tool 声明：目标协议可以表达的保留，无法表达的默认省略，包括内容、工具硬要求或成本上限；这不保证跨协议无损，也不放宽非法源输入或安全校验。它不等同于任何单一供应商的滚动产品协议。
-
-## Namespaced Extension
-
-Namespaced Extension 是 Open Responses Protocol 核心契约之外、由一个平台或供应商明确拥有的可选能力。扩展身份使用所有者的 canonical slug；Stravia 自有扩展使用 `stravia:*`。
-
-## Representability
-
-Representability 是一段 canonical 语义能否在目标协议中等价表达的性质。它区分等价转换与会改变任务内容、身份、结构或硬约束的 lossy conversion；当前 Protocol Conversion 对目标无法表达的部分默认省略、保留可表达部分，而不是以此拒绝合法源输入。它不豁免源协议有效性、解析或安全校验。
-
-## Context Rewrite
-
-Context Rewrite 是 hook 对一段连续历史的稳定语义替换。替换依据原始上下文的稳定身份命中，并在历史仅追加后继续生效。
-
-## Lab
-
-Lab 是 Canonical Model 的作者身份，也是 Canonical Model ID 的命名空间；它不同于负责提供模型访问渠道的 Provider。
-_避免使用_：Provider、Vendor
-
-## Canonical Model
-
-Canonical Model 是归属于一个 Lab、独立于具体 Provider 的模型身份与共享规格；其 ID 固定为 `{lab_id}/{model_id}`，多个 Provider Catalog Entry 可以关联同一个 Canonical Model。它不同于负责客户端路由的 Route。
-_避免使用_：Base Model、模型数据元、Catalog Model
-
-## Provider Catalog Entry
-
-Provider Catalog Entry 是共享目录中某个 Provider 对一个 upstream model ID 的完整供应记录；它已经包含 Canonical Model 共享规格与该 Provider 的覆盖，并通过 canonical identity 关联前者。它不属于任何已保存的 Provider 实例。
-_避免使用_：Provider Offering、Catalog Model
-
-## Provider Model
-
-Provider Model 是属于一个已保存 Provider 实例、以 upstream model ID 标识的持久化模型快照，可以表示纯媒体生成模型，不以具备聊天能力为前提。它不同于共享 Provider Catalog 条目，也不同于负责客户端路由的 Route 和 Target；模型身份与其支持的能力相互区分。
-_避免使用_：Provider Model Override、Catalog Model
-
-## 模型清单同步（Provider Model Sync）
-
-模型清单同步是针对一个已保存 Provider，由后台自动检查或管理员手动触发、检查并协调该服务提供的 Provider Model 清单的操作。发现新的 Provider Model 不等于添加供客户端调用的 Route。
-_避免使用_：自动添加客户端模型、产品更新、共享目录刷新
-
-## 模型清单变更（Provider Model List Change）
-
-模型清单变更是某个已保存 Provider 下 Provider Model 的新增、提供状态变化、同步刷新规格或管理员 Selection Policy 修改。上游不再提供与管理员手动禁用是不同事实，自动同步、手动同步与手动修改是不同变更来源。
-_避免使用_：把不再提供统称为禁用、Route 变更、请求运行状态
-
-## 模型变更记录（Model Change Record）
-
-模型变更记录是某个 Provider 的一次模型清单同步、手动添加或 Selection Policy 修改的持久结果，模型变化与同步失败分别表达；其归属跟随具体连接身份，改名不拆分、同名重建不合并。记录时间表示 Stravia 确认结果的时间，首次同步发现的模型不因此被视为上游刚发布的模型。记录保留 90 天，删除连接不提前删除历史；成功无变化的检查只更新检查摘要，日常人工规格编辑不进入此时间线。
-_避免使用_：上游发布时间、用模型更新时间重建历史、按服务展示名称合并历史
-
-## 不再提供（No Longer Offered）
-
-不再提供是曾被某个 Provider 发现的模型，在一次成功、完整的模型清单同步中不再出现的提供状态。它不同于管理员手动禁用，也不等于上游弃用。
-_避免使用_：手动禁用、模型已删除、同步失败
-
-## 上游弃用（Deprecated by Service）
-
-上游弃用是服务模型发现或来源元数据将模型生命周期标记为 `deprecated` 的状态，模型仍可能出现在服务清单中。它不同于不再提供与管理员手动禁用；是否允许发送继续由 Selection Policy 与 Effective Availability 决定。
-_避免使用_：不再提供、手动禁用、模型已删除
-
-## Provider Model Editing
-
-Provider Model Editing 是管理面针对一个 Provider Model 的当前详情与未提交规格形成的临时编辑上下文，也涵盖尚未保存的手动模型草稿。它不是持久化的 Model Snapshot State，不改变 Selection Policy 与 Destination RPM 各自独立生效的含义。
-_避免使用_：Provider Connection Draft、持久化模型快照、跨模型草稿缓存
-
-## Model Snapshot State
-
-Model Snapshot State 表达 Provider Model 规格快照的来源与逐字段编辑状态：尚未登记或已从明确来源导入，并记录哪些字段已由管理员固定。未知规格保持未知；普通同步补齐尚未登记的规格，并让未固定的字段跟随来源更新；管理员修改过的字段被固定，不再随同步改变，直到对该字段恢复同步。
-_避免使用_：模型可用性、占位默认规格、从字段值推断人工修改、整条规格接管
-
-## Model Specification
-
-Model Specification（模型规格）是模型记录中已登记的上下文、输入输出模态、明确的推理强度支持值及结构化价格；对 Provider Model，以已保存且可人工编辑的快照为准。未登记模态时，有效规格默认文本输入、文本输出；显式模态列表（包括空列表）优先，回退不改变原始快照的登记状态。它不代表经过实测的能力或当前接入路径的可用保证，不包含平台补充能力；其他信息缺失不等于不支持。
-_避免使用_：实测能力、实际可用能力、把未登记称为不支持
-
-## 峰谷定价（Peak Pricing）
-
-峰谷定价是附加在一份价格上的本地时段倍率：在其指定时区的星期与时段内，该价格各项单价（含按上下文分档后的单价）乘以同一倍率，其余时间按原价。它不同于按上下文长度划分的价格分档。
-_避免使用_：分组定价、分时折扣、空闲折扣
-
-## Selection Policy
-
-Selection Policy 是管理员对 Provider Model 路由候选资格与后续上游发送资格的本地策略，取值为自动跟随、强制可用或强制禁用。
-_避免使用_：Enabled、Availability Override
-
-## Effective Availability
-
-Effective Availability 是 Selection Policy、Provider discovery presence 与上游生命周期共同计算出的“可用/不可用”结果；它既约束新的路由候选，也约束已有 Target 的后续上游发送，但不删除或改写绑定配置。
-_避免使用_：Provider Status、Model Status
-
-## Route
-
-Route 将 Route ID 映射到一组 Target，并规定这些 Target 的选择策略。一条 Route 必须至少有一个已启用 Target。
-
-## 路由用途（Route Purpose）
-
-路由用途是一条 Route 执行的单一任务：对话推理、图片生成或联网搜索。与 Provider Model 的能力不同，同一个 Provider Model 可以具备多种能力，并分别用作不同用途的 Target。输入输出模态仍是模型规格；联网搜索用途要求能执行完整外部搜索，不要求登记文字输出。
-_避免使用_：路由输出模态、模型全部能力、路由多选模态
-
-## 图片生成绑定
-
-图片生成绑定是媒体生成配置对一条图片生成用途 Route 的引用，不是 Route 内对 Provider Model 的 Target 绑定。被引用的 Route 在解除图片生成绑定前，不得改为其他用途。
-_避免使用_：图片模型绑定（未区分配置引用与 Target 绑定时）
-
-## Route Scheduling Strategy
-
-Route Scheduling Strategy 是同一 Target Priority 组内选择 Target 的策略，取值为 Traffic Equalization 或 Latency Preference；缺省为 Traffic Equalization。它不替代 Target Continuation、Conversation Affinity、Cache Affinity 或 Target Priority。
-_避免使用_：balance、weighted、priority（当指 Route 旧四档）、cooldown（当指 Route 旧四档）、平均调度、Cost Equalization
-
-## Traffic Equalization
-
-Traffic Equalization 是在亲和偏好之后，先选择同组内在途请求数最少、再选择最近一小时加权 token 流量与在途输入占位最低的 Target 的调度策略。它均衡的是负载与流量，不是美元成本。
-_避免使用_：平均调度、Cost Equalization、weighted、round-robin、计费
-
-
-## Latency Preference
-
-Latency Preference 是按上游近期 Token 速度与成功率选择同组 Target 的调度策略。
-_避免使用_：latency（当指 Route 旧四档）、EMA 延迟
-
-
-## Route ID
-
-Route ID 是客户端请求里填写的模型 ID。它是调用身份，不是展示标签，也不是存储主键。查找与绑定都按精确、大小写敏感比较；存储主键不是客户端查找键。一键接入时默认等于 Provider Model 的 upstream ID；同一 Route ID 即同一 Route。
-_避免使用_：Route 名、展示名、昵称、大小写折叠、用存储主键兜底查找
-
-## Model Display Name
-
-Model Display Name 是 Route 可选、可重复的人类可读标签。它不参与路由、授权、绑定或 Target 选择；为空时，面向人的展示统一回退到 Route ID。
-_避免使用_：Route ID、模型身份、查找键
-
-## Conversation Affinity
-
-Conversation Affinity 是客户端给出 Generation Chain 父节点或 Prompt Cache Directive 路由键时，对同一身份优先选择该身份上次成功 Target 的软性偏好。不同身份不共享该偏好；两种身份都没有时不生效。它按 Principal 与 Route 隔离，可压过 Target Priority，不形成 Session，也不替代 Target Continuation。
-_避免使用_：Session、Session Affinity、Client Session
-
-## Cache Affinity
-
-Cache Affinity 是在 Conversation Affinity 不生效时，为提高上游 Prompt Cache 复用率施加的软性偏好。它按 Principal 隔离；对一个由 Canonical Item Hash 顺序组成的 Cache Prefix，它优先选择曾成功处理该前缀、且报告 `prompt_tokens` 不少于 20,000 的合格 Target；没有合格命中时，回退到 Target Priority 与 Route Scheduling Strategy。它可压过 Target Priority，不形成客户端、连接或 Session 绑定，不改变 Effective Model Request，也不复用响应或 Target Continuation。
-
-## Canonical Item Hash
-
-Canonical Item Hash 是单个 `AiItem` 语义 canonical 序列化的 SHA-256 摘要。Cache Affinity 记录请求中每个 `AiItem` 的 Hash，并从有序 Hash 序列推导 Cache Prefix；它不记录 raw wire 文本，也不把 Hash 写入日志。
-
-## Cache Prefix
-
-Cache Prefix 是 Effective Model Request 中可由上游 Prompt Cache 复用的连续开头语义。它只由可缓存 material 与明确影响目标 Provider 缓存匹配的控制正向构成，不通过序列化完整请求后排除无关字段来构造，也不按原始 wire 文本拼接匹配。
-
-## Prompt Cache
-
-Prompt Cache 是上游 Provider 对已计算输入前缀的复用。它由 Provider 拥有；Stravia 仅以 Cache Affinity 提高请求到达该 Target 的可能性，不读取、构造或保证其中的内容。
-
-## Prompt Cache Directive
-
-Prompt Cache Directive 是调用方对 Prompt Cache 的可选策略提示，包括 Cache Breakpoint、保留期、模式与路由键。它不属于模型可见历史，不改变 Reusable Response Prefix；Target 无法在 continuation delta 中表达作用于已继承历史的 Directive 时，Stravia 允许降级该提示，不为执行它放弃可用的 Target Continuation。
-
-## Cache Breakpoint
-
-Cache Breakpoint 是 Prompt Cache Directive 中标记可缓存前缀结束位置的提示。它使从 prompt 开头到该位置的完整 material 成为缓存候选；它不是缓存内容、缓存身份、缓存命中结果或 continuation 节点。
-
-## Cache Prefix Token Count
-
-Cache Prefix Token Count 是 Target 在成功处理 Cache Prefix 后报告的 `prompt_tokens`。只有已知的 Cache Prefix Token Count 可以满足基于 token 的 Cache Affinity 阈值；未报告计数的前缀不满足该条件。
-
-
-## Target
-
-Target 是 Route 上一个已配置的上游目的地，关联 Provider，并在所用能力要求模型选择时关联上游模型；独立完整搜索服务可以仅关联 Provider。只有已启用且符合所需能力的 Target 才能执行，重试与切换遵守对应能力的错误及结果提交规则，不因外围 Hook 或 Platform Tool 失败而重放已经完成的上游调用。
-_避免使用_：调度泳池
-
-## Enabled Target
-
-已启用 Target 是参与该 Route 上 Target 选择、亲和与冷却的 Target，缺省为已启用。它必须已配置 Provider，并满足所需能力的模型选择要求；不公开模型选择的独立搜索服务不要求配置上游模型。
-_避免使用_：调度泳池、可调度 Target、在线 Target
-
-## Disabled Target
-
-已禁用 Target 是仍属于该 Route、但不参与选择、亲和或冷却的 Target。它不是已删除的 Target。
-_避免使用_：删除的 Target、暂存 Target、断开的 Target
-
-## 凭据失效（Credential Invalid）
-
-凭据失效是 Provider 的持久化凭据健康状态：上游明确拒绝该 Provider 当前凭据组合的证据记录。失效 Provider 的所有 Target 不参与新选择的调度，已开始执行的请求不中断。它与 `is_enabled` 正交（禁用是管理员意图，失效是上游证据），也不同于自动恢复的 Target Cooldown——仅新凭据证据可以撤销：Provider 非展示字段变更、OAuth 重新绑定或刷新成功、手动测试成功。403 权限失败与 Hook、客户端侧认证失败不构成证据；标记以发出请求时的凭据版本为条件写入，对管理 API 只读。
-_避免使用_：禁用 Provider、熔断、冷却（当指凭据失效）、Provider Status
-
-## Target Priority
-
-Target Priority 是 Target 上的分组整数，取值 -2147483648–2147483647，缺省为 0；数值越高越优先。用于选择时，仅已启用且数值相同的 Target 构成同一优先级组。它不是列表顺序，也不是 Weight。
-_避免使用_：列表序号、唯一排名、Weight（当指优先级）
-
-
-## First Token
-
-First Token 是当前 Target 本次尝试从上游收到的第一个 canonical 输出，包含 Thinking。它不是 Client Output Commit，也不要求该输出已经对客户端可见。
-_避免使用_：首个可见 Text、Client Output Commit
-
-## First Token Timeout
-
-First Token Timeout 是流式推理尝试在 First Token 出现前允许的连续上游空闲窗口；收到上游数据或心跳后续期，不是从请求开始计算的总时长。缺省 120 秒，每个窗口允许 ±5% 浮动，0 表示关闭。非流式推理与独立远程压缩不受该窗口约束，统一受请求的空闲 deadline 约束。超时按瞬时失败处置。
-_避免使用_：总超时、Connect Timeout
-
-## Target Cooldown
-
-Target Cooldown 是 Target 因共享连续上游失败数超过 Target Retry Budget，或显式 Retry-After 超过已启用的 First Token Timeout 而暂时不承接新尝试的恢复等待期；缺省 120 秒，长 Retry-After 触发时取两者较短值，0 仅关闭冷却调度门禁。失败仍计数，完整成功仍清零；等待期结束后仅允许一个符合调度条件的请求进行半开探测，完整成功后恢复正常；已经开始执行的请求不会因其他请求触发冷却而取消。
-_避免使用_：固定失败次数熔断、单次请求失败即冷却
-
-## Target Retry Budget
-
-Target Retry Budget 是 Target 正常状态下可容纳的连续上游失败数；配置为 N 表示第 N+1 次连续失败触发冷却，缺省 5 即第 6 次。同一 Target 的内部重试与跨请求终态上游失败共享计数，完整成功清零；错误分类仍独立决定同 Target 重试、切换 Target 或终止请求。取消、本地准备、Hook 与存储错误不计入；半开探测和显式长 Retry-After 触发冷却不等待此预算耗尽。
-_避免使用_：单请求重试次数、Route 重试、循环重试
-
-
-## Client Output Commit
-
-Client Output Commit 是一次 Run 的输出首次不可逆地对客户端可见的时点。此前，当前 Target 的明确可重试上游失败可以触发 Target 切换；此后禁止切换 Target，只终止当前请求。Commit 本身不计作上游失败，也不单独触发冷却；其后的真实上游失败仍按 Target 的共享连续失败规则计数。它不表示响应正文已完整交付，完整交付只在正文成功结束时成立。
-_避免使用_：Output Started、Response Committed、Delivery Commit
-
-
-## Protocol Conversion
-
-Protocol Conversion 是在客户端与上游 wire protocol 之间转换一次推理的 canonical semantics。请求、响应、stream delta 和 continuation 历史均按目标协议的表达能力处理：可表达的内容、控制与扩展保留，无法表达的默认省略，不因语义损失拒绝整个转换，也不提供严格模式开关。省略可能损失图片、工具调用及关联结果、硬约束、多候选或历史，不能宣称无损；省略只作用于此次编码，不改写原始 canonical 历史。非法源 wire、解析错误、安全与凭据校验及网络失败仍是真实错误；不得伪造工具参数 `{}`、把不可表达内容 stringify 冒充支持或合成零 usage。它不把响应投影成客户端历史。它向 Client Projection 提供 Thinking 载体形状（是否 indexed、是否可能 protected、未保护 summary 能否直播），不执行投影。
-_避免使用_：无损跨协议转换、把客户端可见投影当作 Protocol Conversion 的阶段
-
-## Thinking Summary
-
-Thinking Summary 是 Provider 返回的可公开推理概述，不等同于完整内部推理、签名、密文或 History Marker。索取或隐藏摘要是展示偏好，与 Thinking Level 的强度选择相互独立；未收到摘要不证明模型未进行推理。
-_避免使用_：完整思维链、思考签名、关闭思考（当指关闭摘要展示）
-
-## Thinking Level
-
-Thinking Level 是一次推理请求选择的规范思考强度，取值为 off、minimal、low、medium、high、xhigh、max。关闭档的规范名是 off，与 OpenAI 协议及现有 IR 中的 none 表示同一档；它不是任何协议的原生字段名。
-_避免使用_：Reasoning Effort（当指规范档）、Think Level、Client Thinking
-
-## Thinking Level Map
-
-Thinking Level Map 是一个 Target 拥有的、从 Thinking Level 到该 Target 原生思考控制的对照表。执行时先选 Target，按模型明确声明的原生 Effort 集合过滤非 Hidden Mapping，再以请求原始 Thinking Level 在剩余映射中精确匹配；没有精确档位则优先选择更高的最近档位，没有更高档位才选择更低的最近档位。每次 Target failover 均从原请求档位重新匹配，不能沿用上一个 Target 的实际档位；因此 off 也可能向上匹配，同一请求在不同 Target 的实际档位可以不同。原生 Effort 声明缺失时沿用既有映射与协议表达规则；明确空列表不授权任何 Effort 值。没有可用映射时省略本次档位控制、保留其他推理意图，让模型使用默认值，不改写已保存映射。
-_避免使用_：reasoningEffortMap、Reasoning Options Map、Route Thinking Map
-
-## Generated Mapping
-
-Generated Mapping 是 Thinking Level Map 中仍由 Provider Model 快照明确登记的 Effort 值推导、在该快照的 Effort 列表随同步或恢复同步改变时重算的一行。未登记 Effort 时，不推测可用档位。
-_避免使用_：Synced Mapping、Catalog Mapping
-
-## Overridden Mapping
-
-Overridden Mapping 是 Thinking Level Map 中被手改过、不再跟随目录推导的一行。
-_避免使用_：Frozen Mapping、Manual Mapping
-
-## Hidden Mapping
-
-Hidden Mapping 是 Thinking Level Map 中不产出 Target Thinking Control 的一行；该 Thinking Level 对该 Target 不可见。它必须显式记录，不能靠缺 key 表示。
-_避免使用_：Omitted Mapping、Null Level、Unsupported Level（当指对照表行）
-
-## Supported Thinking Levels
-
-Supported Thinking Levels 是一条 Route 的所有已启用 Target 非 Hidden Mapping 的并集，供管理面、模型发现面及客户端配置导出展示至少一个已启用 Target 支持的等级；无已启用 Target 时为空。它不由管理员单独配置，也不是请求执行的准入集合或钳制集合；实际档位仍按选中 Target 的映射匹配，不保证每个 Target 都提供同一档位。它不是 Provider Model 登记的 Effort 值列表，也不是对照表里的上游值。
-_避免使用_：Advertised Thinking Levels、Visible Thinking Levels、Supported Reasoning
-
-## Default Thinking Level
-
-Default Thinking Level 是 Route 上的一个可选管理员配置，表示客户端请求完全没有给出推理指令（level、effort、budget、display、enabled 全缺省）时应用的 Canonical Thinking Level。它只在保存时校验枚举合法性，可配置当前不在 Supported Thinking Levels 中的档位；运行时与客户端显式档位统一按选中 Target 的非 Hidden Mapping 匹配，不受 Route 的 Supported Thinking Levels 钳制。客户端显式给出的任何推理指令优先于它。若选中 Target 没有可用映射（全部 Hidden 或被模型原生 Effort 声明排除），则无论档位来自客户端还是 Route 默认值，都清除本次上游请求的 level 和 effort，保留其他推理指令并继续请求该 Target；不因未配置档位而跳过 Target，由上游模型自行决定推理强度。
-_避免使用_：Route Reasoning Default、Fallback Effort、Implicit Thinking
-
-## Target Thinking Control
-
-Target Thinking Control 是 Thinking Level Map 为某个 Thinking Level 产出的、该 Target 原生的思考控制（effort 值、toggle 或 budget）。它不是客户端请求字段，也不是 Protocol Conversion 写出的 egress wire。
-_避免使用_：Egress Wire Value、Native Reasoning Option、Mapped Effort
-
-## Provider
-
-Provider 是管理员保存的一条上游连接，引用一个 Vendor、供应商身份及其 channel，并保存 Protocol、已确认的服务地址、普通选项和连接范围的上游凭据。供应商身份表示这条连接属于哪类上游接入；保存连接的 UUID 区分具体连接记录，同一供应商身份可以有多条连接，两者不得互换。Provider 是调用与凭据信任的连接边界，不是 Vendor Plugin、Provider Catalog Entry 或客户端 Route。
-_避免使用_：Vendor（当指这条保存记录）、把供应商身份当作连接 UUID
-
-## Provider Connection Draft
-
-Provider Connection Draft 是 WebUI 新建与编辑 Provider 共用的未提交连接状态，由 `provider-connection-draft.ts` 的 controller 与 `.svelte.ts` 响应式壳拥有。它统一管理配置预览失效、提交互斥、OAuth ready 自动保存，以及配置写入后绑定授权的顺序；配置已保存但绑定失败是部分成功，保留草稿并明确提示。创建与更新的写入差异、保存后刷新与导航留在适配器；OAuth 弹窗与会话操作、字段呈现和离开拦截留在视图。Core 仍拥有配置验证、凭据权限和持久化规则，Provider 写入与 Route 绑定不合并。
-
-提交从预览到写入及绑定结束期间禁止编辑、重复授权、关闭面板和应用内导航；等待交互式 OAuth 登录时不锁定。刷新或关闭浏览器页签只能触发原生离开提示，不能保证阻止强制退出或取消已发出的写入。
-_避免使用_：通用表单状态机、Core 草稿、把部分成功当作全部失败
-
-## Provider Allowance
-
-Provider Allowance 是上游 Provider 对当前账户报告的可消费额度快照，包括订阅配额窗口、请求额度与账户余额；它不等于 Stravia 从请求日志汇总的 token、请求数或成本统计，也不是 Provider 健康状态；只有守护条目的读取结果可以经额度暂停影响路由资格，其余条目只用于展示、趋势与预计耗尽。
-_避免使用_：Provider Plan Usage、Token Usage、Request Usage、Stats Usage
-
-## Provider Allowance 读取编排
-
-Provider Allowance 读取编排是管理面围绕额度快照读取、手动刷新与守护配置保存的操作协调，区分本地保存确认、后台额度读取与已确认的结果。守护保存确认后立即展示服务器确认集合，后台读取不锁住守护编辑；新增守护的暂停状态仍等待 fresh 证据。它不定义上游额度、额度暂停或样本事实，也不包含搜索、筛选、摘要与时间轴的展示派生。
-_避免使用_：Provider Allowance Monitor、完整额度工作区
-
-## Provider Allowance Monitor
-
-Provider Allowance Monitor 是 Provider 所引用的 Vendor Plugin 为该类供应商读取并规范化上游额度的受信能力。Stravia 负责按 Provider 调度读取、保存样本与呈现结果；Monitor 只使用该 Provider 已保存的 Adapter Credentials 或 OAuth Credential。
-_避免使用_：Catalog Allowance Capability、Quota Endpoint、远端解析规则
-
-## Allowance Item
-
-Allowance Item 是 Provider Allowance 快照里账户级的一条可消费额度，是配额窗口、请求额度或账户余额之一。它以 Monitor 给出的稳定 key 标识，归属一个 Provider。模型级额度不是 Allowance Item，不进入额度矩阵、重置时间轴或预计耗尽。
-_避免使用_：Quota、把 Model Allowance 当作账户级行
-
-## Allowance Condition
-
-Allowance Condition 是 Allowance Item 的展示态，由当前快照的剩余或已用比例派生：已用 ≥ 100% 或剩余 ≤ 0 为耗尽，剩余 < 20% 为紧张，其余可计算的为正常。它不是 Provider 健康，也不落盘；它本身不改变路由资格，守护条目的耗尽判定沿用同一阈值，由额度暂停承载路由后果。
-_避免使用_：Health、Provider Status、把 fresh/stale/error 叫作成色
-
-## 守护条目（Guarded Allowance Item）
-
-守护条目是管理员为某个 Provider 选定、其耗尽会触发额度暂停的 Allowance Item。它是实例级管理员选择，对所有 Principal 与 Route 生效，不按 API Key 区分；模型级额度不能成为守护条目。取消守护立即撤销由它引起的额度暂停；某次读取结果中缺失的守护条目既不触发暂停，也不作为恢复依据。
-_避免使用_：监控条目、Monitor（当指管理员选择）、门禁条目
-
-## 额度暂停（Allowance Suspension）
-
-额度暂停是 Provider 的持久化路由资格状态：最近一次成功的 Provider Allowance 读取显示任一守护条目耗尽。暂停期间该 Provider 在所有 Route 上的 Target 不参与新选择、亲和或冷却，已开始执行的请求不中断，暂停本身也不计作 Target 失败。只有新的成功读取显示全部守护条目不再耗尽，或取消相关守护，才能解除暂停；到达 `reset_at` 只触发读取，不直接解除；读取失败时维持原状态。它与已禁用 Target、Provider `is_enabled`（管理员意图）以及凭据失效（凭据证据）正交，也不同于按失败计数自动恢复的 Target Cooldown。全部候选因额度暂停不可选时，请求以明确的额度暂停错误失败，且不承诺恢复时间。
-_避免使用_：禁用 Target、自动禁用、额度耗尽（当指路由状态）、熔断、冷却
-
-## Allowance Sample
-
-Allowance Sample 是一次成功 Monitor 读取后，对一个 Allowance Item 在某一时刻的 used / remaining / reset 观察记录。它只服务于趋势和预计耗尽，保留 14 天；它不是 live 快照，不是 Stats Usage，不表示 Provider 健康，也不作为额度暂停的判定依据。
-_避免使用_：Provider Allowance Snapshot、用量历史、Quota History
-
-## Exhaustion Forecast
-
-Exhaustion Forecast 是对一个 Allowance Item、用当前重置窗口内 Allowance Sample 做线性外推后得到的耗尽估计：是否会在 reset_at 之前耗尽，以及窗口结束时的预计剩余。它不是 Stats Usage；跨重置的 Sample 不参与计算，样本不足时不给出估计。没有 reset_at 的余额只估计何时到 0，不使用「重置前」语义。
-_避免使用_：7 日均用量、Usage Forecast
-
-## Vendor
-
-Vendor 是具有稳定身份的供应商接入实现，可以包含多个 channel。基础回退 Vendor 以一个身份覆盖多个供应商 Profile；专属 Vendor 完整接管其供应商身份下的全部连接，不与基础 Vendor 按 channel、能力或操作混用，在专属实现缺失、不可用或失败时也不回退。供应商身份与已保存 Provider 连接的 UUID 不同。
-_避免使用_：SDK、npm package、Provider（当指接入定义）、把基础 Vendor 的供应商身份当作多个 Vendor
-
-## Vendor Plugin
-
-Vendor Plugin 是实现一个 Vendor 的可安装、版本化软件包，可包含多个 channel，并提供模型推理、完整联网搜索、媒体生成中的一种或多种能力，不以模型推理为必备能力。一个基础插件实现一个覆盖多个供应商 Profile 的回退 Vendor，而不是导出多个 Vendor 身份；专属插件完整接管匹配的供应商 Profile。它不是已保存的 Provider 连接，也不是供多个插件复用的 Protocol Codec。
-私有上游协议的身份由插件声明并作为不透明字符串保留，不进入宿主共享协议枚举；私有 wire 与表达能力判断归所属插件。channel 可以精确声明需读取的额外非凭据客户端头，宿主按当前目标及通用安全规则提供上下文，不按供应商名字补齐权限。
-_避免使用_：Provider 连接、Protocol Codec
-
-## Egress Shape（出站形态）
-
-Egress Shape 是客户端连接层的出站形态，涵盖 TLS ClientHello、ALPN、HTTP/1 和 HTTP/2 参数及 WebSocket 传输。它不包含请求头、供应商身份、请求内容、凭据或重试策略。
-_避免使用_：Profile、Network Profile、供应商 Profile、指纹伪装配置、User-Agent 设置
-
-## Slot Header（槽位头）
-
-Slot Header 是由宿主在插件指定的位置填入协议值的请求字段；它表达字段位置和协议意图，不授予插件覆盖宿主授权或连接凭据的能力。
-_避免使用_：默认头、任意请求头覆盖
-
-## Plugin Source
-
-Plugin Source 是发布 Vendor Plugin 的公开 GitHub 仓库及管理员已确认的签名公钥，以不可变的数字仓库身份识别，不以可变仓库名或自报的“官方”名称识别。
-
-## Plugin Catalog
-
-Plugin Catalog 是一个 Release 内经发布者签名的插件发布清单，描述可获取版本、宿主兼容要求及产物身份；它不是已安装插件清单，也不证明内容最新或代码安全。
-
-## Install Origin
-
-Install Origin 是一次 Vendor Plugin 安装实际使用的来源及其快照，区分内置、本地文件和插件市场。市场更新跟随该来源；删除来源不删除已安装插件，包自报信息不能重建可信的安装来源。
-
-## Vendor Credential Authorization
-
-Vendor Credential Authorization 是管理员为选定 Vendor Plugin 的连接登录或填写凭据时，授予该插件处理本连接上游账户秘密的信任；连接尚未保存时，该信任限定于对应的待配置连接认证会话。它不授予其他 Provider、其他认证会话或 Stravia 平台凭据的访问权，也不表示凭据对插件不可见。
-_避免使用_：平台管理授权、所有账户访问权、凭据对插件不可见
-
-## Protocol Codec
-
-Protocol Codec 是规范化模型语义与一种 wire protocol 之间的编解码契约及其实现，可由多个 Vendor Plugin 复用。复用同一个 Protocol Codec 不意味着这些插件属于同一 Vendor。
-_避免使用_：Vendor、Vendor Plugin
-
-## Vendor Private State
-
-Vendor Private State 是 Vendor Plugin 为一条 Provider 保存的、必要时跨重启保留的供应商私有状态，例如设备注册标识与账户绑定信息；连接尚未保存时，其临时状态只归属于对应认证会话。它不替代连接配置、凭据或 Provider Model，也不表示活跃网络连接与请求可以跨重启恢复。
-_避免使用_：凭据存储、Provider Model、可恢复的网络会话
-
-## Vendor Conversation State
-
-Vendor Conversation State 是 Vendor Plugin 在获准的 Provider、Principal 与会话分支内维护的原生请求状态，随确定的历史快照继承而非在不同分支间共享可变进度。它不同于连接级 Vendor Private State，也不意味着上游网络会话可跨进程恢复。
-_避免使用_：全局插件缓存、共享 Session head、可恢复的 WebSocket
-
-## User Prompt Admission
-
-User Prompt Admission 是一次获准用户输入与其会话、逻辑用户轮及来源证明的关联；同一输入的模型工具循环和内部重试不另算用户输入。它不同于只记录已交付 Client Projection 的 Generation，也不把缺少历史证明的轮次当作从第一轮开始。
-_避免使用_：Model Turn 序号、HTTP 请求序号、截断历史消息数
-
-## History Boundary Candidate
-
-History Boundary Candidate 是宿主为原生请求状态提供的、带来源证明的 canonical 历史间隙身份，允许投影变换后仍关联同一位置。它不是实际网络发送、上游接纳或原生压缩已完成的证明。
-_避免使用_：正文 hash 锚点、发送收据、Native Compaction Boundary
-
-## User Prompt Ordinal
-
-User Prompt Ordinal 是已证明会话 lineage 中用户文本或媒体输入的累计序号；纯工具结果不计入，同一输入的重试与工具循环不重复推进。压缩不重置该序号，未知历史不等于零用户历史。
-_避免使用_：Model Turn 序号、当前窗口消息数、HTTP 尝试次数
-
-## User Turn Ordinal
-
-User Turn Ordinal 是已证明会话 lineage 中独立用户对话轮的累计序号；混有工具结果的输入不作为新的独立用户对话轮。它是用户输入的专门投影，不等同于包含这类混合输入的 User Prompt Ordinal。
-_避免使用_：Model Turn 序号、所有用户项计数
-
-## Logical Turn
-
-Logical Turn 是贯穿同一次逻辑输入的模型执行、工具后续调用与内部重试的稳定交互身份，区别于其中的每次 Model Turn。没有用户输入的操作也可有交互身份，但不因此制造一次用户输入。
-_避免使用_：HTTP 请求 ID、Model Turn、Generation
-
-## Virtual Window
-
-Virtual Window 是由已确认历史来源限定的原生请求上下文窗口；安装 Native Compaction Boundary 后形成新的窗口，用户轮身份与累计用户输入序号不随之重置。它不是可变 Session head，也不是从压缩后文本猜测的历史范围。
-_避免使用_：当前消息数组、Session、用户轮次
-
-## Vendor Write Permit
-
-Vendor Write Permit 是 Vendor 配置、凭据、发现结果与能力结果最终写回持有的复合许可，由 Vendor Operation 准入与该 Vendor 的写入围栏一次取得；持有期间该 Vendor 的插件更新无法完成排空与代际切换，更新起步后代际复检失败，写回必须中止。许可可由 VendorPlugins 直接签发（纯写回路径），也可由进行中的 Vendor Operation 派生（执行后写回路径）；它只约束写回时序，不授予插件执行资格，也不同于面向已完成操作结果的 Vendor Publication Fence。
-_避免使用_：写锁、Write Guard、把 Vendor Operation 当作写回许可
-
-## Adapter Credentials
-
-Adapter Credentials 是一条 Provider 上由其 Vendor 声明的多字段上游凭据；它不同于客户端 API Key，也不同于 OAuth Credential。
-
-## Media Generation
-
-Media Generation 是根据内容要求及可选参考素材生成媒体 Artifact 的高级能力，用户可见名称为“媒体生成”。不同生成类型拥有各自的输入契约，产物统一沿用 Artifact 的身份、Principal 归属与保留期语义；它不同于解释已有内容的 Media Understanding。
-_避免使用_：Image Generation（当指整个高级能力）、Media Understanding、文件上传
-
-## Media Understanding
-
-Media Understanding 是针对一个或多个多模态 Artifact 回答开放问题的平台能力。它面向图片、PDF、视频、音频等内容持续扩展；文字提取、描述、比较与推理都是同一能力的用例，不形成彼此重叠的专用工具。用户可见名称为“多模态理解”。
-_避免使用_：Image Understanding、Vision、OCR Tool
-
-## Media Understanding Turn
-
-Media Understanding Turn 是由内置 Media Understanding Definition 提交的 Agent Turn，也是一次完整或有效 partial 媒体理解的不可变续接点。它复用 Turn Chain 的 Principal、父链、分支与保留期语义；后续 Turn 只追加 Artifact 和问题，不改写已有前缀。
-
-## Media Report
-
-Media Report 是 Media Understanding 返回的强校验工具结果，由 Markdown answer、实际引用的媒体 Artifact 和 limitations 组成；它不同于读取该工具结果的父模型最终回答。
-
-## Media Derivative
-
-Media Derivative 是 Media Understanding 为源 Artifact 生成并复用的内部、write-once 派生物：图片源对应规范化 JPEG，Office 文档源对应记录提取 Markdown 与内嵌图片引用的 manifest。不同源可以共享同一派生物，源与派生物也可以是同一 Artifact。Media Report 始终引用当前或祖先 Turn 已声明的源 Artifact 与文档内嵌图片 Artifact；仍在保留期内的源映射不会被重算或替换。
-
-## Web Search
-
-Web Search 是把查询转换为有来源 Search Report 的平台能力。用户可见名称为“联网搜索”，通过外层 StraviaRead 的查询输入提供；具体执行由管理员选择的 Search Backend 拥有。
-
-## Search Backend
-
-Search Backend 是 Web Search 的执行方式，分为 Local Agent 与供应商提供的外部完整搜索，Codex hosted search 属于后者。Local Agent 使用平台研究预算并支持固定原绑定的续接；外部搜索通过 Route 选择符合能力的 Target，按单次独立调用执行，不提供续接、不使用 Local 研究预算，但仍受调用方取消、请求生命周期和传输安全边界约束。
-
-## Search Report
-
-Search Report 是 Web Search 返回的强校验工具结果，由 Markdown answer、实际引用的 Search Sources 和 limitations 组成；它不同于读取该工具结果的父模型最终回答。
-
-## Search Turn
-
-Search Turn 是一次完整或有效 partial Web Search 提交的不可变报告记录，具有 Principal 归属、来源引用身份与保留期；它不保存网页正文或内部 Agent transcript。Local 搜索记录可作为固定原绑定的续接与分支点，外部搜索记录不授予续接能力。
-
-## Search Source
-
-Search Source 是某个 Search Turn 已验证 Search Report 中实际引用、且可追溯到当前或历史已验证 Web evidence 的从属来源条目，引用外壳为 `stravia://turns/<turn-id>/sources/<ordinal>`。它依附于所属 Search Turn，不是独立会话，也不授予访问权限；未被 Report 引用的 consulted URL 不是 Search Source。
-
-## Web Access
-
-Web Access 是管理员配置的内部联网能力，为 Local Web Search 提供统一的 Internal Web Search 与 Internal Web Fetch leaves；它不直接形成公开工具契约，也没有独立的能力总开关。管理员配置其来源与优先级，公开联网搜索统一受 Web Search 的 Platform Capability Gate 控制。
-_避免使用_：Web Search Add-on、Web Tools
-
-## Web Fetch
-
-Web Fetch 是客户端与外层模型通过 StraviaRead 读取指定网页并获得 Markdown 正文的平台能力，用户可见名称为“网页读取”，与 Web Search 共用“联网搜索”Platform Capability Gate 及透明注入选择项，不新增独立开关或勾选项。它不等于完整研究搜索或 Artifact 文件导入。
-_避免使用_：Web Search、Web Access、Internal Web Fetch Leaf
-
-## Internal Web Search Leaf
-
-Internal Web Search Leaf 是搜索 Agent 收集证据时使用的隐藏基础检索能力，不执行完整 Web Search。它通过内部 StraviaRead 入口使用，不作为独立工具进入客户端或 MCP discovery。
-
-## Internal Web Fetch Leaf
-
-Internal Web Fetch Leaf 是内部 Agent 读取网页正文的基础能力，通过内部 StraviaRead 入口使用。客户端也可通过其 StraviaRead 入口调用网页抓取，但不因此获得内部 Agent 的执行身份。
-
-## StraviaRead
-
-StraviaRead 是客户端、外层模型与内部 Agent 的统一内容读取工具入口，覆盖文件、网页、图片理解、搜索及工具执行状态与结果查询。搜索语义由平台确定的执行环境区分为外层完整研究与内部基础检索，统一入口不合并两者的执行身份。
-_避免使用_：Artifact Store、无上下文的全局工具执行器
-
-## Read Snapshot
-
-Read Snapshot 是所属 Principal 一次读取结果的不可变文本表示，可独立于原始资源或模型执行继续读取。它固定已取得的内容，不表示上游一定交付了完整来源，也不把来源注记升级为已验证研究证据。
-_避免使用_：新的 Search Turn、可重新抓取的页面缓存
-
-## Fetched Page
-
-Fetched Page 是一次公网 HTTP(S) URL 的主内容抽取结果，包含来源、标题、正文与提取限制。它不同于读取工具交付的 Read Snapshot；快照可以继续读取已取得的文本，但不能恢复来源未交付的内容。
-_避免使用_：Artifact、Document、Markdown Document、Article
-
-## Static Extraction
-
-Static Extraction 是对 HTTP 响应 HTML 做正文抽取并得到 Markdown，不执行 JavaScript。
-_避免使用_：SSR、静态页面
-
-## Rendered Extraction
-
-Rendered Extraction 是对浏览器渲染后的 HTML 做正文抽取并得到 Markdown。
-_避免使用_：SPA、动态页面、浏览器抓取
-
-## Extraction Fallback
-
-Extraction Fallback 是 Static Extraction 得到的 Markdown 属于 Low-Quality Extraction 时，对该 URL 再做一次 Rendered Extraction。
-_避免使用_：重试、Provider fallback
-
-## Low-Quality Extraction
-
-Low-Quality Extraction 是被判定为壳页或导航页的 Markdown：过短且含 JavaScript 门提示，或短行占比过高。它触发 Extraction Fallback，不是页面架构。
-_避免使用_：SSR、SPA、低质量页面
-
-## 共享出站代理配置
-
-共享出站代理配置是供模型 Provider、Web Provider 和产品更新选择使用的代理地址与目标绕过规则。它描述可选出口，不是全局启用开关；是否使用它由各消费者独立决定。绕过规则匹配的目标仍直连，不改变目标访问授权。
-_避免使用_：全局代理开关、所有流量代理、系统代理配置
-
-## 产品更新代理偏好
-
-产品更新代理偏好是产品检查和下载是否使用共享出站代理配置的独立选择；它不改变模型或 Web Provider 的选择，也不修改共享代理地址。
-_避免使用_：全局代理开关、模型代理开关
-
-## Web Provider
-
-Web Provider 是 Local Web Search 中执行 Internal Web Search、Internal Web Fetch 之一或两者的已配置上游，由宿主通过 `GatewayBuilder::web_provider_factory` 注入的 `WebProviderFactory` 驱动；开源核心默认注册表为空（仍可通过 Wasm Vendor Plugin 配置 External Search Route）。它独立于模型路由的 Target，每条记录拥有与模型 Provider 同构的 `use_proxy`（开启时必须有可用的共享出站代理配置，关闭时直连）及可选 `config_json`；管理面仅暴露脱敏后的 `WebProviderView`。
-_避免使用_：Search Engine、Web Backend
-
-## Local Web Provider（历史内置适配器，已移出开源核心）
-
-Local Web Provider 曾是开源核心进程内内置的 Web Provider，现已随 Web Provider 外部化重构移出开源核心与默认迁移种子；历史数据库升级（迁移 `0058`）仅移除内置默认 `web-provider-local` 种子并保留其余非 `local` 记录。后续商业版可通过 `WebProviderFactory` 扩展缝在 `ee/` 独立挂载。
-_避免使用_：元搜索、Metasearch、Search Engine、Local Search、Local Search Backend、内置 Local 运行时
-
-## Local Search Engine
-
-Local Search Engine 是已从社区版移除的旧版 Local Web Provider 内部概念，原指其在 Internal Web Search 中查询的公网 HTML 检索服务。社区版现已外置全部网络搜索与页面提取能力至外部 Web Provider，不再内置 Local Search Engine。
-_避免使用_：Search Engine（当指 Web Provider）、Metasearch、引擎 Provider、全局 cookie jar、把计算器或页面后处理当作 Local Search Engine
-
-## Local Web Outbound Proxy Mode
-
-Local Web Outbound Proxy Mode 是已从社区版移除的旧版 Local Web Provider 出站策略概念，原指由 `use_proxy` 与共享出站代理配置派生的直连或代理规则。社区版现已改为外部 Web Provider 按外部服务配置与共享出站代理规则访问上游，不再内置 Local Web Outbound Proxy Mode。
-_避免使用_：System 代理档、独立 Local 代理 URL、wreq proxy、browser proxy、系统代理（未限定时）
-
-## 可逆脱敏（Reversible Redaction）
-
-可逆脱敏是 Stravia 将模型请求中检测到的凭据类秘密替换为占位符，并在 Provider 返回对应占位符时，在交付给请求方的回答文本、客户端工具调用参数及平台工具执行参数中还原原文的保护能力。保护对象以内置 Betterleaks 离线规则可检测的 API Key、访问令牌、私钥和连接串密码等凭据类秘密为限，不承诺发现所有秘密，也不包含个人敏感信息或业务机密的通用识别。隐藏辅助规则不单独产生脱敏映射；多个规则命中相同秘密时复用同一个映射。
-_避免使用_：日志脱敏、永久脱敏、加密、通用敏感信息识别
-
-## 命中记录（Hit Record）
-
-命中记录是可逆脱敏对每个新增脱敏映射留下的一条绑定记录，管理界面称「命中记录」：创建时间、所属 Stravia API Key、创建该映射的规则集（内置或自定义）与规则，以及创建时检测到它的「规则 ← 来源」配对。创建映射只是绑定，记录不带请求状态，也不因请求失败或用户取消而消失。它以映射为单位，不以 Interaction、Inference Run 或同一 API Key 下的全部活动为单位；仅还原占位符不产生记录。映射复用命中不是记录，只作为该映射的后续使用出现在记录详情里。
-_避免使用_：可逆脱敏会话记录、整段对话、单次请求记录、API Key 会话、发现记录
-
-## 新增脱敏映射
-
-新增脱敏映射是同一 Stravia API Key 下，因某个秘密当前没有有效映射而为其新建立的可逆脱敏映射。有效映射的后续复用不算新增而算映射复用命中；映射过期后重新建立算新增，不同 API Key 分别判断，不承诺永久去重。
-_避免使用_：秘密在实例中首次出现、每次规则命中、永久首次发现、新增发现
-
-## 映射复用命中
-
-映射复用命中是同一 Stravia API Key 下，某个 Model Turn 里已有有效映射被实际用到的观察，不新建映射。有两种情形：本次请求新提交的文本（最后一条 Assistant 之后的新用户消息或工具结果；没有 Assistant 条目时为整个请求）里的秘密被替换为已有占位符；或模型在工具调用参数里使用了占位符并被还原。客户端重放的历史文本不产生复用命中，因此它回答「这个秘密在哪里又被用到」，而不是每个 Model Turn 重复计数。位置来自实际发生的替换与还原，规则取自映射创建时记录的检测规则；创建时没有记录规则的映射只受保护，不产生复用命中。复用命中通过映射的占位符与创建它的命中记录关联，在记录详情里按 Interaction、来源和工具调用去重列出，不计次数；没有记录占位符的升级前映射无法关联。
-_避免使用_：新增脱敏映射、重复发现、还原占位符
-
-## 密钥匹配测试
-
-密钥匹配测试是管理员主动提供文本以检验当前凭据保护规则识别结果的独立试运行，不验证凭据的真实有效性，也不证明未命中的内容安全。它在凭据保护关闭时仍可使用，不保存测试文本、不建立可逆脱敏映射、不形成可逆脱敏会话记录，也不改变正式请求的保护状态。
-_避免使用_：密钥有效性验证、安全认证、正式保护记录
-
-## 可逆脱敏映射
-
-可逆脱敏映射是归属于单个 Stravia API Key 对应 Principal 的凭据原文与替代占位符之间的持久化对应关系，并记录创建它时检测出该秘密的规则，可跨轮次及进程重启恢复，保留期、续期与过期清理规则与 History Marker 一致。同一 API Key 下相同秘密在映射有效期内复用同一占位符、过期后重新分配，持有有效占位符时可跨对话和分支还原且不要求历史祖先关系，不同 API Key 不共享占位符或映射；请求取消不撤销已发布的映射，也不证明并发进行的发布尚未生效。
-_避免使用_：实例级秘密字典、历史分支隔离、History Marker
-
-## 凭据标记（Redaction Marker）
-
-凭据标记是 Stravia 在模型可读文本中代表一个受保护值的不透明引用。模型需要使用该值时原样保留完整标记，由平台在回答和工具参数中按当前 Principal 的有效可逆脱敏映射还原。完整标记本身不作为新凭据检测，但合法外形不证明存在映射或具有还原权限。它可以嵌入路径或其他文本，不改变周围内容；它不引用隐藏历史，也不承担 History Marker 的恢复语义。
-_避免使用_：History Marker、明文凭据、工具授权
-
-## 受保护模型文本
-
-受保护模型文本是可逆脱敏覆盖的全部模型请求可读文本，包括系统指令、用户消息、历史消息、工具调用参数与工具结果，以及平台内部追加的模型请求文本。它不包含图片、音频或二进制附件中的内容，也不包含上游连接必需的认证凭据或协议结构。
-_避免使用_：仅本次用户输入、整个 HTTP 请求脱敏、多模态秘密识别
-
-## 可逆脱敏总开关
-
-可逆脱敏总开关是实例管理员统一控制所有有效 API Key 的新模型请求是否自动检测并替换凭据类秘密的高级功能开关，默认关闭，开启后无 API Key 级豁免且不依赖客户端声明或模型调用工具。关闭后停止新增脱敏，但已有有效占位符仍在回答与所有工具调用参数中还原直至过期，不因关闭开关删除映射。
-_避免使用_：透明注入、API Key 脱敏授权、脱敏工具
-
-## Advanced Capability
-
-
-Advanced Capability 是面向用户提供、由平台级总开关控制可用性的高级能力；包括用户可见名称为“多模态理解”的 Media Understanding、“联网搜索”的 Web Search，以及“网页读取”的 Web Fetch。
-
-## Platform Capability Gate
-
-Platform Capability Gate 是控制高级能力可用性的平台级总开关；Web Search 与 Web Fetch 共用“联网搜索”开关，Media Understanding 使用“多模态理解”开关。总开关打开后，对应能力对所有有效 API Key 可用，关闭时任何 API Key 都不能直接使用；它同时约束显式工具调用与 MCP，不由 API Key 单独授予或撤销。
-
-## Transparent Injection
-
-Transparent Injection 是平台在客户端未显式声明工具时自动提供工具的偏好，不是 API Key 能力授权；开启总开关即提供所属 Artifact 下载与工具执行查询的基础 Read，联网搜索、多模态理解和媒体生成按 Key 的选择及平台可用性额外暴露，历史回看按 Key 的选择额外暴露。它不扩大基础 Read 的资源归属或联网、媒体理解范围，不限制显式调用与 MCP；历史回看例外，它只经透明注入提供，Key 的选择即决定其可用性。总开关关闭期间，已选择的注入项保留但不生效，重新打开后恢复。
+# Stravia 领域术语词典
+
+本词典定义 Stravia 的核心业务与领域概念，统一中文表述与代码/协议中的规范英文名。
+
+- **本文件只回答「是什么、不是什么、彼此是什么关系」**，不包含实现细节、代码模块或配置步骤。
+- 详细模块契约见 [`docs/design/`](docs/design/README.md)；架构决策与取舍见 [`docs/adr/`](docs/adr/README.md)。
+
+## 核心概念全景图
+
+先看懂概念之间如何串联，再查阅具体词条：
+
+```text
+接入客户端（Connect Client） / 控制台对话（Console Chat）
+        │ 持 Stravia API Key → 建立认证主体（Principal）
+        ▼
+  路由（Route，以 Route ID 对外暴露，限定单一路由用途）
+        │ 按 亲和性 → 目标优先级 → 调度策略 选路
+        ▼
+  路由目标（Target = 上游连接 Provider + 供应商模型 Provider Model）
+        │ 经由 供应商插件（Vendor Plugin / Wasm）发往上游服务
+        ▼
+  推理运行（Inference Run）
+    ├── 模型轮次（Model Turn）── 可逆脱敏 / Hook / 协议转换 / 客户端投影
+    ├── 平台工具（Platform Tool）── StraviaRead / 联网搜索 / 多模态理解 / 媒体生成 / 历史回看
+    ├── 生成链（Generation Chain）── 已完整交付的不可变历史图（用于续接与上下文恢复）
+    └── 交互观测（Interaction Observation）── 独立于执行的诊断视图、调试抓包、用量与计费
+```
+
+### 常见易混概念速查
+
+| 容易混淆的几组概念 | 一句话区分 |
+| --- | --- |
+| **模型厂商（Lab） / 供应商（Vendor） / 上游连接（Provider） / 路由（Route）** | **Lab** 是模型作者（如 Anthropic）；**Vendor** 是对接协议与认证的代码插件；**Provider** 是管理员保存的一条带凭据的账号连接；**Route** 是暴露给客户端调用的逻辑模型名。 |
+| **失败的请求 / 错误的请求 / 上游错误** | **错误的请求**在发往上游前被平台校验拒绝（不计入可用率）；**失败的请求**是客户端最终因平台或上游故障失败；**上游错误**是单次发往上游的尝试失败（可能已被重试或切换吸收）。 |
+| **估算成本 / 计费 / 供应商额度** | **估算成本**按上游价格估算本实例应付给上游的钱；**计费**按 Route 定价向 API Key 内部记账并驱动消费上限；**供应商额度**是上游账户实时上报的配额或余额。 |
+| **可逆脱敏 / 调试抓包过滤** | **可逆脱敏**在发给模型前把凭据换成占位符、回来后再还原；**调试抓包过滤**只遮盖 HTTP `Authorization` 请求头，不保证清理其他凭据。 |
+| **资产引用 / 下载授权** | **资产引用**（`stravia://artifacts/...`）是不透明身份标识，本身不授予访问权；**下载授权**是带有效期的签名链接，持有即可在有效期内下载。 |
+
+## 目录
+
+1. [产品、运行形态与管理入口](#1-产品运行形态与管理入口)
+2. [主体、访问控制与流量准入](#2-主体访问控制与流量准入)
+3. [供应商、插件与模型清单](#3-供应商插件与模型清单)
+4. [路由、调度与容错](#4-路由调度与容错)
+5. [协议、推理与上下文历史](#5-协议推理与上下文历史)
+6. [内置 Agent、平台工具与文件资产](#6-内置-agent平台工具与文件资产)
+7. [凭据保护（可逆脱敏）](#7-凭据保护可逆脱敏)
+8. [交互观测、调试、用量与计费](#8-交互观测调试用量与计费)
+
+---
+
+## 1. 产品、运行形态与管理入口
+
+### Stravia
+本地运行、可自托管的 Agent 基础设施（Agent infra），统一提供模型接入、平台工具与内置 Agent 执行、访问控制、历史与可观测性。协议网关只是其模型接入层；Stravia 不是用户自定义 Agent 或可视化工作流搭建器。它是本产品的唯一品牌名，不保留旧名或别名。
+
+### Stravia 桌面端（Stravia Desktop）
+运行在本机的 Tauri 桌面管理壳，与独立无头服务端（Server）共用同一 Rust 核心。只有桌面端可以直接改写本机接入客户端的配置文件。
+- **避免混用**：单独称作「客户端」（未区分桌面端与第三方编程工具时）。
+
+### 接入客户端（Connect Client）
+用户本机上可配置为以 Stravia 为模型服务的第三方编程工具（如 Claude Code、Codex CLI、Gemini CLI、OpenCode）。它既不是认证主体（Principal），也不是内置 Agent 定义。
+- **避免混用**：Agent（指第三方工具时）、把桌面端和第三方工具混称为「客户端」。
+
+### 客户端全局配置与一键接入（Connect Client Global Config / Connect Client Apply）
+- **客户端全局配置**：接入客户端的用户级配置文件（按各工具官方环境变量与默认目录解析），不含仓库级项目配置。
+- **一键接入（Connect Client Apply）**：Stravia 桌面端向客户端全局配置增量写入（upsert）Stravia provider 配置的操作；默认不覆盖用户的当前/默认模型（Claude Code 环境变量映射除外）。它不是服务端 HTTP 管理接口。
+- **避免混用**：一键覆盖配置、项目级 `.claude/settings.json` 或 `.codex/config.toml`。
+
+### 控制台对话（Console Chat）
+管理员在管理界面中，选定一个 API Key（即对应 Principal）与模型进行的多轮对话。请求与普通接入客户端一样走网关、计入用量与观测；对话所属 Key 创建后不可更换（Key 失效后变为只读），模型可逐条切换。历史保存在浏览器或桌面端本地，不是平台 Session 或生成链视图。
+- **避免混用**：Playground、Agent 对话、Session、接入客户端。
+
+### 管理用户与实例管理员（Admin User / Instance Admin）
+- **管理用户（Admin User）**：访问管理控制台与管理 API 的身份，与调用模型和 MCP 的 Principal 严格分离；管理用户身份本身不授予模型调用或 MCP 权限，API Key 也不归属于管理用户。
+- **实例管理员**：开源社区版默认单管理员模式下唯一的管理用户，拥有实例全部管理权限。
+- **避免混用**：Principal、接入客户端、API Key 所有者、上游账号。
+
+### 管理入口与受信代理（Admin Origin / Trusted Proxy）
+- **管理入口**：浏览器访问管理面的外部源（协议 + 主机 + 有效端口，不含路径），不同于服务内部监听地址或反代回源地址。
+- **受信代理**：部署者明确授权、可向 Stravia 传递浏览器侧原始请求头（如 `X-Forwarded-*`）的反向代理；受信代理本身不授予管理员身份。
+- **避免混用**：服务监听地址、已认证客户端。
+
+### 设置令牌与初始化会话（Setup Token / Bootstrap Session）
+- **设置令牌**：领取首次初始化资格的一次性凭据，仅用于选择存储后端并创建首个实例管理员，不能用于日常管理或覆盖已有管理员。
+- **初始化会话**：凭设置令牌建立的受限上下文，仅用于完成首次初始化流程。
+- **避免混用**：Admin Token、API Key、日常管理会话。
+
+### 可用更新与跳过版本（Available Update / Skipped Version）
+- **可用更新**：版本高于当前安装且符合发布通道的正式 Release（稳定版只接收稳定版；预发布版接收更新的预发布版或更高稳定版）。
+- **跳过版本**：实例对某个精确版本关闭自动更新提醒的共享偏好，不隐藏手动检查结果，出现更高可用更新时自动失效。
+- **避免混用**：最新版（未判通道时）、关闭更新、永久忽略更新。
+
+---
+
+## 2. 主体、访问控制与流量准入
+
+### 主体（Principal）
+由有效 Stravia API Key 建立的认证客户端身份，是生成链、轮次链、文件资产、脱敏映射与请求频率限额的隔离边界。Stravia 不存在匿名主体，也不用网络连接或 Session 代替主体身份。
+- **避免混用**：匿名主体（Anonymous Principal）、Client Session。
+
+### 根请求与 API Key 入口限流（RootRequest / API Key Root RPM）
+- **根请求（RootRequest）**：一次已准入的客户端请求所共享的执行上下文，贯穿其内部的隐藏模型轮次、平台工具调用与后台执行；独立的客户端续接构成新的根请求。
+- **API Key 入口限流（API Key Root RPM）**：同一 Principal 在严格滑动 60 秒窗口内可准入的根请求数，覆盖模型推理、Responses 远程压缩与 MCP `tools/call`。同根内部重试与隐藏工具轮次不重复计数；不限代表无本地上限，不代表上游容量无限。
+- **避免混用**：并发数上限（Concurrency Limit）、连接数、TPM、RPD。
+
+### 目的地限流（Destination RPM）
+同一「上游连接（Provider）+ 上游模型」组合在严格滑动 60 秒内可发出的上游请求数。跨 Route 共享同一目的地的计数，每次实际上游请求（含重试）各计一次。限流不改变目标的健康状态、失败计数或冷却状态。
+- **避免混用**：Target 健康状态、Route 限流、并发池。
+
+### 共享出站代理配置与更新代理偏好（Shared Outbound Proxy / Update Proxy Preference）
+- **共享出站代理配置**：实例级可选代理地址与绕过规则，供模型 Provider、外部 Web Provider 与产品更新按需选用；它不是全局强制代理开关。
+- **产品更新代理偏好**：产品检查与下载更新时是否走共享出站代理的独立选择。
+- **避免混用**：全局代理开关、系统代理配置。
+
+---
+
+## 3. 供应商、插件与模型清单
+
+### 模型厂商与规范模型（Lab / Canonical Model）
+- **模型厂商（Lab）**：模型的原生作者身份，也是规范模型 ID 的命名空间（如 `anthropic`、`openai`），区别于提供接入渠道的 Provider。
+- **规范模型（Canonical Model）**：独立于具体 Provider 的模型身份与共享规格，ID 固定为 `{lab_id}/{model_id}`；多个目录条目可指向同一规范模型。
+- **避免混用**：把 Lab 与 Provider/Vendor 混为一谈；把规范模型当作客户端调用的 Route。
+
+### 供应商目录条目（Provider Catalog Entry）
+共享模型目录中某个供应商对单个上游模型 ID 的完整供应模板（合并了规范模型共享规格与该渠道覆盖值）。它属于参考模板，不隶属于任何已保存的 Provider 连接实例。
+- **避免混用**：已保存的 Provider Model、Catalog Model。
+
+### 供应商与供应商插件（Vendor / Vendor Plugin）
+- **供应商（Vendor）**：具有稳定身份的上游接入实现（可含多个 channel）。内置基础 Vendor 覆盖通用兼容 Profile；专属 Vendor 完整接管对应供应商的全部连接，失败或缺失时永不回退到基础包。
+- **供应商插件（Vendor Plugin）**：实现一个 Vendor 的版本化 Wasm Component 软件包，可提供模型推理、完整联网搜索、媒体生成或额度读取中的一种或多种能力。
+- **避免混用**：上游连接（Provider）、协议编解码器（Protocol Codec）、npm package。
+
+### 协议编解码器（Protocol Codec）
+在规范化模型语义与某种具体线协议（wire protocol）之间做编解码的契约及实现，可被多个供应商插件复用。复用同一编解码器不代表属于同一 Vendor。
+- **避免混用**：Vendor、Vendor Plugin。
+
+### 插件源、插件目录与安装来源（Plugin Source / Plugin Catalog / Install Origin）
+- **插件源（Plugin Source）**：发布插件的公开 GitHub 仓库及管理员确认的签名公钥，以不可变数字仓库 ID 识别。
+- **插件目录（Plugin Catalog）**：Release 中经发布者签名的版本清单，声明产物摘要与宿主兼容范围；签名有效证明来源真实，不等于代码安全。
+- **安装来源（Install Origin）**：一次插件安装的实际来源快照（内置、本地导入或插件市场），决定后续更新追踪目标。
+
+### 上游连接（Provider）
+管理员保存的一条上游服务连接记录（以 UUID 区分），绑定一个 Vendor 及其 channel、协议、服务地址、常规选项与连接范围凭据。同一 Vendor 可以保存多条独立连接。
+- **避免混用**：Vendor（代码实现）、目录条目、客户端 Route。
+
+### 适配器凭据与凭据授权（Adapter Credentials / Vendor Credential Authorization）
+- **适配器凭据**：一条 Provider 上由对应 Vendor 声明的多字段上游凭据（区别于客户端 Stravia API Key 与 OAuth 凭据）。
+- **供应商凭据授权**：管理员为某条连接登录或填写凭据时，授予选定插件处理该连接上游秘密的信任边界；仅限本连接或待配置认证会话，不授予其他连接或平台凭据访问权。
+- **避免混用**：凭据对插件不可见、全实例账户权限。
+
+### 凭据失效（Credential Invalid）
+上游明确拒绝某条 Provider 当前凭据组合后写下的持久化健康标记。失效 Provider 下所有目标退出新请求调度（已开始的请求不中断），直到修改非展示字段、OAuth 刷新/重绑成功或手动测试成功才撤销。它与管理员禁用（`is_enabled`）和自动恢复的目标冷却正交；403 权限不足不构成凭据失效。
+- **避免混用**：禁用 Provider、目标冷却、熔断。
+
+### 出站形态与槽位头（Egress Shape / Slot Header）
+- **出站形态（Egress Shape）**：由宿主管理的连接层参数（TLS ClientHello、ALPN、HTTP/1/2 及 WebSocket 传输特征），不含请求头、凭据或业务内容。
+- **槽位头（Slot Header）**：宿主在插件声明位置填入协议值的请求头，表达字段位置与协议意图，不授予插件覆盖宿主授权或连接凭据的权限。
+- **避免混用**：供应商 Profile、任意请求头覆盖、User-Agent 设置。
+
+### 供应商私有状态与会话状态（Vendor Private State / Vendor Conversation State）
+- **供应商私有状态**：插件为单条 Provider 持久保存的私有数据（如设备注册标识、账号绑定信息），不替代连接配置或模型快照，也不代表网络连接可跨重启恢复。
+- **供应商会话状态**：插件在获准的 Provider、Principal 与会话分支内维护的原生请求状态，随确定的历史快照继承，不在分支间共享可变进度。
+- **避免混用**：凭据存储、全局插件缓存、共享 Session head。
+
+### 供应商模型、规格与快照状态（Provider Model / Model Specification / Model Snapshot State）
+- **供应商模型（Provider Model）**：归属某条已保存 Provider、以上游模型 ID 标识的持久化模型快照，可表示纯媒体生成模型，不以具备对话能力为前提。
+- **模型规格（Model Specification）**：模型记录中已登记的上下文长度、输入输出模态、推理强度支持列表与结构化价格；未登记模态时默认文本入/出，其余缺失保持未知，不代表实测承诺。
+- **模型快照状态**：记录规格来源以及哪些字段已被管理员按字段固定；同步只刷新未固定字段，固定字段直至恢复同步才跟随来源更新。
+- **避免混用**：共享目录条目、Route、实测可用保证。
+
+### 模型清单同步、提供状态与变更记录（Provider Model Sync / Model Change Record）
+- **模型清单同步**：检查并协调某条 Provider 供应模型清单的操作；发现新模型不会自动暴露为客户端 Route。
+- **不再提供（No Longer Offered）**：曾在清单中的模型在一次完整成功同步中不再出现（不同于管理员手动禁用，也不同于上游标记 `deprecated` 的**上游弃用**）。
+- **选择策略（Selection Policy）**：管理员对单个 Provider Model 的路由与发送策略（自动跟随、强制可用、强制禁用）。
+- **有效可用性（Effective Availability）**：综合选择策略、清单在场状态与上游生命周期计算出的可用判定，同时约束新路由选择与已有目标的后续发送。
+- **模型变更记录**：单条 Provider 的同步结果、手动添加与策略变更的时间线（保留 90 天，跟随连接 UUID），记录 Stravia 确认结果的时间而非上游发布时间。
+- **避免混用**：把「不再提供」「上游弃用」「手动禁用」混为一谈；把首次同步时间当成模型发布时间。
+
+### 供应商额度体系（Provider Allowance）
+- **供应商额度（Provider Allowance）**：上游报告的当前账户可消费额度快照（订阅配额窗口、请求额度或账户余额），不是 Stravia 统计的本地用量或成本。
+- **额度监控器（Provider Allowance Monitor）**：插件提供的受控额度读取与规范化能力。
+- **额度条目（Allowance Item）**：快照中单条账户级可消费额度（模型级额度不纳入）。
+- **额度状态（Allowance Condition）**：由剩余/已用比例派生的展示态（已用 ≥ 100% 或剩余 ≤ 0 为耗尽；剩余 < 20% 为紧张；其余为正常），本身不直接改变路由。
+- **守护条目（Guarded Allowance Item）**：管理员选定用于触发路由保护的账户级额度条目（实例级生效）。
+- **额度暂停（Allowance Suspension）**：最近一次成功读取显示任一守护条目耗尽时，该 Provider 下所有目标退出新选路（已开始请求不中断）；直到新的成功读取恢复或取消守护才解除，与禁用、凭据失效和目标冷却正交。
+- **额度样本与耗尽预测（Allowance Sample / Exhaustion Forecast）**：每次成功读取留存的时序点（保留 14 天），用于对当前重置窗口做线性外推，预测是否会在重置前耗尽。
+- **避免混用**：本地用量统计（Stats Usage）、计费消费上限、目标冷却。
+
+---
+
+## 4. 路由、调度与容错
+
+### 路由、路由 ID 与展示名（Route / Route ID / Model Display Name）
+- **路由（Route）**：将对外暴露的逻辑模型名映射到一组路由目标（Target）及其选择策略，至少需包含一个已启用目标。
+- **路由 ID（Route ID）**：客户端请求体中填写的 `model` 字段，精确区分大小写，是调用身份而非数据库主键。
+- **展示名（Model Display Name）**：给人看的可选、可重复标签，为空时回退显示路由 ID，不参与路由或授权。
+- **避免混用**：把展示名当调用键、用数据库主键兜底查找。
+
+### 路由用途（Route Purpose）
+一条路由执行的单一任务类型：**对话推理**、**图片生成**或**联网搜索**。同一个 Provider Model 可以具备多种能力，但每条 Route 只服务一种用途。
+- **避免混用**：模型全部能力、路由多选模态。
+
+### 路由目标与启停状态（Target / Enabled Target / Disabled Target）
+- **路由目标（Target）**：Route 上绑定的一个具体上游目的地（绑定一条 Provider，并在能力需要时绑定上游模型 ID）。
+- **已启用 / 已禁用目标**：已启用目标参与选路、亲和与冷却；已禁用目标仍保留在路由配置中，但不参与调度，也不等于已删除。
+- **避免混用**：把 Provider 直接等同于 Target；把禁用目标当成已删除目标。
+
+### 目标优先级与路由调度策略（Target Priority / Route Scheduling Strategy）
+- **目标优先级（Target Priority）**：有符号 32 位整数（默认 `0`，数值越大越优先），同数值的已启用目标组成同一优先级泳道。它不是列表顺序或权重。
+- **路由调度策略**：同一优先级泳道内选路的策略：
+  - **流量均衡（Traffic Equalization，默认）**：先选在途请求数最少的，再选近一小时加权 token 流量最低的（均衡流量而非美元成本）。
+  - **延迟偏好（Latency Preference）**：综合上游近期输出速度与成功率择优。
+- **避免混用**：列表序号、成本均衡、简单轮询（round-robin）。
+
+### 会话亲和与缓存亲和（Conversation Affinity / Cache Affinity）
+- **会话亲和（Conversation Affinity）**：请求携带生成链父节点或提示词缓存路由键时，优先命中同一身份上次成功的目标（按 Principal 与 Route 隔离，可压过优先级，不形成 Session）。
+- **缓存亲和（Cache Affinity）**：会话亲和未生效时，按前缀内容项摘要（Canonical Item Hash）优先命中曾成功处理该前缀且输入规模达阈值（≥ 20,000 `prompt_tokens`）的目标，以提升上游提示词缓存复用率。
+- **提示词缓存（Prompt Cache）与缓存指令（Prompt Cache Directive / Cache Breakpoint）**：上游服务对已计算输入前缀的复用能力；调用方可附带缓存断点、保留期或路由键提示，它不属于模型可见历史，也不阻碍目标续接。
+- **避免混用**：Session Affinity、复写历史文本前缀。
+
+### 首 Token、首 Token 超时、重试预算与目标冷却
+- **首 Token（First Token）**：当前目标本次尝试从上游收到的第一个规范化输出（含思考内容），早于或独立于客户端可见输出。
+- **首 Token 超时（First Token Timeout）**：流式推理在收到首 Token 前允许的连续上游空闲窗口（默认 120 秒 ±5%，收到数据或心跳即续期，0 表示关闭）；超时按瞬时上游失败处理。
+- **目标重试预算（Target Retry Budget）**：目标在正常状态下允许的连续上游失败次数（默认 5 次，第 6 次触发冷却），跨同目标重试与跨请求终态上游失败共享计数，完整成功即清零。
+- **目标冷却（Target Cooldown）**：目标连续失败超预算或收到长 `Retry-After` 后暂时退出新调度的恢复期（默认 120 秒）；到期后先放行单个请求做半开探测，成功后恢复。
+- **客户端输出提交（Client Output Commit）**：响应输出首次不可逆地发往客户端的时点。此前遇到可重试上游失败允许切换目标；此后禁止切换，只能终止当前请求。
+- **避免混用**：请求总超时、单次请求重试次数、单次失败即熔断、响应已完成。
+
+---
+
+## 5. 协议、推理与上下文历史
+
+### 推理运行、模型轮次与模型腿（Inference Run / Model Turn / Model Leg）
+- **推理运行（Inference Run）**：处理一次客户端生成请求直到交付完整响应或终止的完整过程，内部可含多次隐藏模型轮次与平台工具执行；一旦向客户端交接客户端工具调用，本次运行即告结束。
+- **模型轮次（Model Turn）**：一次规范化模型交互（可含同路由内的上游重试，不含平台工具执行）；工具结果触发的下一次调用属于新的模型轮次。
+- **模型腿（Model Leg）**：一次推理运行内消费单个模型轮次的完整流转（从 Hook 介入、事件归并到收口及决定公开交付或隐藏续跑）。
+- **避免混用**：把单次 HTTP 上游尝试、模型轮次与整次推理运行混用。
+
+### 规范化内容项与有效模型请求（Canonical Item / Effective Model Request）
+- **规范化内容项（Canonical Item）**：规范化交互中具有独立身份与语义边界的有序内容单元（文本、思考、工具调用、工具结果等）；流式增量归属同一内容项。内容项 ID、Tool Call ID 与引用三者不可互换。
+- **有效模型请求（Effective Model Request）**：完成历史恢复、继承状态解析与 Hook 改写后，准备交给某个目标的完整规范化任务语义，区别于客户端原始线协议报文。
+- **避免混用**：原始请求（Raw / Wire Request）。
+
+### 协议转换与表达能力（Protocol Conversion / Representability）
+- **协议转换**：在客户端线协议与上游线协议之间转换规范化语义，不负责把响应投影成客户端历史。
+- **表达能力（Representability）**：某段规范化语义能否在目标协议中等价表达。目标协议可表达的保留，无法表达的默认省略（不伪造参数或宣称跨协议无损），但不豁免源协议解析或安全校验错误。
+- **避免混用**：无损跨协议转换、客户端投影。
+
+### Open Responses 协议与命名空间扩展（Open Responses Protocol / Namespaced Extension）
+- **Open Responses 协议**：Stravia 以官方日期版本（`2026-04-24`）为基准的多供应商 Responses 线协议契约，不等同于单一厂商的滚动私有协议。
+- **命名空间扩展**：核心契约之外由平台或供应商明确拥有的可选能力，Stravia 自有扩展以 `stravia:*` 标识。
+
+### 钩子与上下文改写（Hook / Context Rewrite）
+- **钩子（Hook）**：由平台管理员配置的进程内推理扩展，读取规范化请求/响应语义并以受限动作改写、拒绝或提前完成推理，不接触客户端或上游凭据。
+- **上下文改写（Context Rewrite）**：Hook 对一段连续历史所做的稳定语义替换，历史追加后仍依据原始稳定身份持续生效。
+
+### 思考强度控制体系（Thinking Level / Map / Summary）
+- **思考等级（Thinking Level）**：平台统一的规范思考强度档位（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），不是任何单一协议的原生字段名。
+- **思考等级映射（Thinking Level Map）**：单个目标上从规范思考等级到上游原生控制（effort / toggle / budget）的对照表，每行分为目录推导（Generated）、人工覆盖（Overridden）或显式隐藏（Hidden）。未精确命中时先向上取最近可用档，无更高档再向下取。
+- **支持思考等级（Supported Thinking Levels）**：路由下全部已启用目标非隐藏映射的并集，仅供展示与客户端配置导出，不是运行时强制钳制集合。
+- **默认思考等级（Default Thinking Level）**：客户端请求完全未给推理控制时生效的路由级默认规范档位；客户端任何显式推理指令优先于它。
+- **思考摘要（Thinking Summary）**：上游返回的可公开推理概述，独立于思考强度控制，也不等同于完整内部推理或加密签名。
+- **避免混用**：把原生 `reasoning_effort` 当规范档位；把关闭摘要当成关闭思考。
+
+### 客户端投影、隐藏历史与思考回放（Client Projection / History Marker / Thinking Replay）
+- **客户端投影（Client Projection）**：把规范化模型响应转换为客户端可见形态的过程——将平台工具调用/结果与权威思考块替换为**历史标记**，同时保证普通正文流式直出，不因潜在工具调用整段缓冲。
+- **隐藏历史片段（Hidden History Segment）**：客户端投影省略但属于模型有效上下文的受保护单元（单个权威思考块，或单次平台工具调用及实际交付结果）。
+- **历史标记（History Marker）**：嵌入客户端响应中的 Principal 级不透明引用，用于在后续请求原位恢复对应隐藏历史片段（一对一绑定，不聚合多个工具或思考块）。
+- **投影定界符（Projection Delimiter）**：成对无状态机器语法，标记某段正文为展示目的临时借用了其他载体（如正后思考预览），客户端原样回传时按绑定标记恢复权威语义。
+- **正后思考（Post-Text Thinking）与引用预览**：客户端收到首个非空正文之后出现的思考内容；在 OpenAI 兼容协议下以 Markdown 引用块展示可公开预览，并由历史标记恢复权威内容。
+- **思考回放（Thinking Replay）**：面向当前目标构造的历史推理回放视图——优先乐观回放受保护载荷，遇上游拒绝后仅剥离非本上游来源并按内存拒绝记忆收敛，不改写原始权威历史。
+- **避免混用**：把客户端投影当成协议转换；把历史标记当成占位文案或会话 Token；宣称跨模型无损思维链。
+
+### 生成链、响应链、目标续接与原生压缩（Generation Chain / Target Continuation）
+- **生成链（Generation Chain）**：归属同一 Principal、由已完整交付（`completed` 或 `incomplete`）的生成请求与响应组成的不可变有向无环历史图（失败、取消或断线不入链），支持分支。
+- **自动父节点发现（Automatic Parent Discovery）**：请求未显式指定父节点时，在同 Principal 内按严格规范化历史前缀匹配最长父节点的规则；不凭连接或时间接近猜测。
+- **响应链（Response Chain）**：生成链面向 Responses 协议、以平台生成的 response ID 连接的投影。
+- **上游存储提示（Upstream Store Hint）**：Open Responses 的 `store` 字段，仅约束上游是否保留自身状态，不影响 Stravia 本地记录生成链。
+- **目标续接（Target Continuation）与可复用响应前缀（Reusable Response Prefix）**：上游自身持有、以上游 response ID 引用的状态。当有效模型请求的完整前缀与某已交付节点精确匹配且对应上游状态可用时，优先续接而非重放全量历史。
+- **原生压缩边界（Native Compaction Boundary）**：由支持原生压缩的上游（当前仅限 Responses 原生状态）证明的不可变上下文替换点，后续执行使用压缩后的窗口而非旧窗口。
+- **避免混用**：把生成链当成可变 Session head；把上游 response ID 混同于平台响应链 ID。
+
+---
+
+## 6. 内置 Agent、平台工具与文件资产
+
+### 内置 Agent 体系（Agent Definition / Runner / Turn Chain）
+- **Agent 定义（Agent Definition）与修订版（Revision）**：由平台程序内置并版本化的稳定智能体用例（规定输入输出契约、指令、工具与预算），管理员不能自定义或改写逻辑；**Agent 配置（Config）**仅管理启用状态与绑定的逻辑路由。
+- **Agent 执行器（Agent Runner） / 运行（Run） / 轮次（Turn）**：在时间、轮次、token 与工具硬预算内推进有界循环（禁止 Agent 嵌套调用 Agent）；仅成功或合规受预算结束的运行提交不可变的 **Agent Turn**。
+- **轮次链（Turn Chain）与轮次引用（Turn Reference）**：归属同一 Principal 的不可变 Agent 历史父链，通过不透明引用 `stravia://turns/<turn-id>` 精确选择续接前缀或分支。
+- **避免混用**：自定义工作流搭建器、Session ID、可变 latest head。
+
+### 平台工具、客户端工具与执行交接
+- **平台工具（Platform Tool）**：由 Stravia 注册并执行的工具，调用参数与原始结果仅送回模型而不暴露给客户端。
+- **客户端工具（Client Tool）与等待状态（Client Tool Waiting）**：由接入客户端自己执行的工具；平台交接调用后本轮运行结束，观测中的「等待客户端工具」仅表示尚未收到回传，不证明客户端执行成败或超时。
+- **工具执行交接（Tool Execution Handoff）与工具执行引用（Tool Execution Reference）**：带同步等待窗口的平台工具在等待耗尽后转为独立后台执行的持久确认（交接后不因原请求断线而取消），并交付 `stravia://tool-executions/<id>` 供模型后续经 `StraviaRead` 查询状态与结果。
+- **避免混用**：把工具交接当成执行超时或失败；把执行引用当成模型生成的 Tool Call ID。
+
+### 统一读取工具与读取快照（StraviaRead / Read Snapshot）
+- **StraviaRead**：客户端、外层模型与内部 Agent 共用的统一内容读取入口，通过单个 `path`（支持 `:` 选择器）加可选 `body` 读取文件资产、网页、搜索、多模态理解、历史回看及后台工具执行结果。外层公开调用与内部 Agent 基础检索保持独立执行身份。
+- **读取快照（Read Snapshot）**：归属 Principal 的不可变只读文本视图，支持分页续读已获取内容，不触发重新抓取或生成新搜索轮次。
+- **避免混用**：文件存储（Artifact Store）、可重新抓取的页面缓存。
+
+### 文件资产与传输授权（Artifact / Grants）
+- **文件资产（Artifact）**：归属同一 Principal 的不可变媒体或大对象，按「媒体类型 + 完整内容」去重，通过不透明 **资产引用（Artifact Reference）** `stravia://artifacts/<artifact-id>` 跨对话复用（仅限同 Principal 解析）。
+- **下载授权（Artifact Download Grant）**：针对单个资产的限时签名下载链接，有效期内无须 API Key 即可下载，不代表资产公开或永久有效。
+- **上传授权（Artifact Upload Grant）**：允许向指定 Principal 上传文件的临时受限凭据，不授予模型调用、读取或管理权限。
+- **避免混用**：把资产引用当成公开 URL 或下载凭据；把上传授权当成 Stravia API Key。
+
+### 高级能力、平台能力门禁与透明注入
+- **高级能力（Advanced Capability）**：面向用户提供、受平台总开关控制的能力，包括联网搜索（含网页读取）、多模态理解、媒体生成等。
+- **平台能力门禁（Platform Capability Gate）**：实例级能力总开关。关闭时任何 API Key 都不能通过显式调用、MCP 或透明注入使用该能力。
+- **透明注入（Transparent Injection）**：客户端未显式声明工具时，平台按 API Key 的已选集合自动注入工具的偏好设置（不是能力授权，也不限制显式调用或 MCP；唯独历史回看仅经透明注入提供）。
+- **避免混用**：把透明注入开关当成 API Key 的能力权限开关。
+
+### 联网搜索、网页读取与外部 Web Provider
+- **联网搜索（Web Search）**：将查询转为带来源校验的 **搜索报告（Search Report）** 的能力，提交不可变的 **搜索轮次（Search Turn）**，每个经核验的引用条目为 **搜索来源（Search Source）**（`stravia://turns/<id>/sources/<ordinal>`）。
+- **搜索后端（Search Backend）**：分为 **Local Agent**（使用外部 Web Provider 提供的内部搜索/抓取叶子与研究预算，支持续接）与 **External Route**（由具备完整搜索能力的供应商插件路由单次执行，不支持续接），两者互不自动回退。
+- **网页读取（Web Fetch）**：外层模型经 `StraviaRead` 读取指定公网 URL 并提取正文（**Fetched Page**）的能力，与联网搜索共用平台门禁与透明注入项。
+- **Web Access 与 Web Provider**：管理员配置的内部联网来源层，由宿主通过扩展缝（`WebProviderFactory`）注入实现；开源核心默认不内置本地搜索/浏览器适配器，外部搜索路由仍可通过供应商插件使用。
+- **避免混用**：把普通网页读取当成完整研究搜索；把底层 Web Provider 当成模型路由 Target。
+
+### 多模态理解与媒体生成（Media Understanding / Media Generation）
+- **多模态理解（Media Understanding）**：针对图片（JPEG/PNG/WebP）或 Office 文档回答开放问题的能力，返回带引用校验的 **多模态报告（Media Report）**，提交不可变的 **理解轮次（Media Understanding Turn）**；为源资产生成并复用的规范化图或文档提取清单称为 **媒体派生物（Media Derivative）**。
+- **媒体生成（Media Generation）与图片生成绑定**：按提示词及可选参考图生成新媒体 Artifact 的能力。管理面通过 **图片生成绑定** 引用一条「图片生成」用途的 Route（解除绑定前不得修改该路由用途）。
+- **避免混用**：把多模态理解局限称为 OCR；把图片生成与多模态理解混淆；把「图片生成绑定」混同于 Route 内的 Target 绑定。
+
+### 历史回看与交互转录（History Recall / Interaction Transcript）
+- **历史回看（History Recall）**：允许开启该透明注入项的 API Key 通过 `StraviaRead` 的 `stravia://history/` 路径，只读浏览、读取与检索同一 Principal 在保留期内的交互链路。默认关闭，绝不经 MCP 提供；共用同一 Key 的人可见彼此对话。
+- **交互转录（Interaction Transcript）**：单次交互在历史回看中按观测事件渲染的只追加只读文本文件，已完成交互的行号稳定，用于检索结果定位；它不是调试抓包，也不用于重建模型上下文。
+- **避免混用**：Session 存储、长期记忆（Memory）、控制台对话的浏览器本地历史、调试包。
+
+---
+
+## 7. 凭据保护（可逆脱敏）
+
+### 可逆脱敏与总开关（Reversible Redaction / Master Toggle）
+- **可逆脱敏**：在发往模型的 **受保护模型文本**（系统指令、消息、历史及工具入/出参，不含图片或二进制附件）中，通过本地内置规则与自定义规则识别凭据类秘密并替换为占位符，在模型返回的回答与工具调用参数中再还原为真值。仅限规则可识别的凭据，不覆盖通用个人隐私或业务机密；检测或存储异常时直接失败（fail-closed），绝不静默泄露明文。
+- **可逆脱敏总开关**：实例级开关，默认关闭；开启后对全部有效 API Key 生效，无 Key 级豁免。关闭后不再新建脱敏映射，但已有未过期占位符仍继续还原。
+- **避免混用**：日志脱敏、永久脱敏、加密、通用敏感信息识别。
+
+### 可逆脱敏映射与凭据标记（Redaction Mapping / Redaction Marker）
+- **可逆脱敏映射**：归属单个 API Key（Principal）的「凭据原文 ↔ 占位符」持久化映射，跨对话与重启复用同一占位符，按最近一次规则检出时间计算过期；不同 API Key 间严格隔离。
+- **凭据标记（Redaction Marker）**：代表受保护凭据的不透明占位符，可嵌入文本或路径中，由平台在回答与工具参数中按当前 Principal 还原；它不引用隐藏历史。
+- **避免混用**：实例级共享字典、History Marker、工具授权。
+
+### 命中记录、映射复用与密钥匹配测试
+- **命中记录（Hit Record）**：某 API Key 下每次**新增脱敏映射**时记下的一条绑定记录（创建时间、规则、来源），不因原请求失败或取消消失。
+- **映射复用命中**：同一 API Key 下，后续新提交文本再次命中已有映射、或模型在工具参数中复用占位符并被还原的观测记录（重放旧历史不重复计为复用）。
+- **密钥匹配测试**：管理员输入样本文本试跑检测规则的工具；即使总开关关闭也可使用，不落盘样本、不建立映射，也不验证凭据真实有效性。
+- **避免混用**：把「新增映射」当成「每次规则命中」；把匹配测试当成密钥有效性校验。
+
+---
+
+## 8. 交互观测、调试、用量与计费
+
+### 客户端交互、交互观测与交互链路
+- **客户端交互（Connect Client Interaction）**：归属同一 Principal、由一次或多次推理运行推进的同一次客户端任务交互（可跨越多个生成链根）；诊断归并不改变模型输入或权限。
+- **交互观测（Interaction Observation）**：面向管理面的持久化诊断投影，记录交互、推理运行、模型轮次、工具调用、目标尝试与用量，也是历史回看的唯一只读来源。观测失败或丢失绝不影响推理执行。
+- **交互链路（Interaction Chains）**：按诊断父边组织的交互因果树，供请求记录页与历史回看共用。交付过任何客户端可见输出的交互入链；零输出且最终失败的交互不入链，归入客户端错误视图。
+- **被拒请求观测（Rejected Request Observation）**：请求在形成推理运行前即因解码、协议或认证错误被拒绝时留下的独立诊断记录，不归属任何 Principal 或交互链路。
+- **诊断续接判定（Current Tool Continuation / Retained Tail Association）**：观测层用于跨生成链根归并同一交互的两种诊断规则（优先按待完成工具结果精确归并，其次按唯一幸存尾段推断），不影响模型执行历史。
+- **避免混用**：把交互观测当成模型历史事实源（Generation Chain）；把交互链路当成 Session。
+
+### 请求终态分类与成功率指标
+- **错误的请求（Rejected Request）**：发出任何上游请求前被平台校验拒绝的请求（鉴权失败、模型不存在/无权访问、Hook 拒绝、参数无效等）。不计入请求成功率分母。
+- **失败的请求（Failed Request）**：最终因平台或上游故障失败的请求（无可用目标、额度暂停、超时、上游连接或流式错误等）；重试/切换后最终成功、客户端主动取消/断线以及错误的请求均不算此类。
+- **客户端错误（Client Errors）**：观测中按客户端视角汇总「失败的请求」与「错误的请求」的列表视图（不等同于 HTTP 4xx）。
+- **上游错误（Upstream Error）**：单次实际发往上游的目标尝试收到的上游终态失败（非 2xx、传输/流错误、首 token 超时、凭据被拒），无论是否被重试吸收均独立计次。
+- **最终成功率（Final Success Rate）**：最终正常完成的请求 ÷ 已终结请求（完成 + 失败的请求；不含取消、断线、进行中与错误的请求）。
+- **一次通过率（First-pass Success Rate）**：未依赖失败后自动重试或切换目标便完成的请求 ÷ 同一分母。
+- **自动恢复成功的请求（Recovered Request）**：单次请求中经历自动重试或路由切换后最终完成的请求（多次恢复只计一次），其占比即最终成功率相对一次通过率的百分点提升。
+- **上游调用成功率（Upstream Attempt Success Rate）**：`1 - 上游错误 ÷ 已获上游判定的尝试总数`，反映上游自身稳定性，不能直接与请求级成功率相减。
+- **避免混用**：把「错误的请求」与「失败的请求」混称；把「客户端错误」等同于 HTTP 4xx；把「上游成功率」混作「最终成功率」。
+
+### 线级调试抓包与交互调试包
+- **线级调试抓包（Wire Debug Capture）**：覆盖客户端↔Stravia↔上游四个方向的应用协议级诊断记录（HTTP 字段、body、SSE、WebSocket 消息与时序），不是底层 TCP/TLS 抓包；仅永久遮盖 HTTP `Authorization` 头值，其他凭据、正文与媒体可能保留。
+- **推理运行调试追踪（Inference Run Debug Trace）与清单（Manifest）**：由进程级 Debug 开关（重启不保持）控制生成的单次运行四方向抓包及完整性说明。普通观测在 Debug 关闭时亦采用相同的 `Authorization`-only 过滤标准，但不做完整抓包。
+- **交互调试包（Interaction Debug Bundle）**：管理员导出的版本化 ZIP 诊断包，汇总某次交互当时已落盘的调试追踪并明确标示未捕获或不完整的运行；应按高度敏感数据妥善保管。
+- **避免混用**：网络抓包（Packet Capture）、完整备份、普通请求观测。
+
+### 用量、成本与计费
+- **已确认上游用量（Confirmed Upstream Usage）**：上游在模型调用中明确报告并被 Stravia 收到的 token 用量；未报告部分保持未知，绝不记零或本地估算冒充。
+- **总输入 Token（Total Input Tokens）与净输入 Token（Net Input Tokens）**：前者为上游报告的原始含缓存输入，用于原始记录、协议响应与计价；后者为总输入扣除缓存读取后的非负值，是管理面「输入」指标的统一口径。
+- **用量统计汇总（Stats Usage）**：独立于对话历史与观测记录长期保留的聚合指标（Token、成本、计费、请求与错误计数），不因清理历史而减少；API Key、Route 或 Provider 删除后保留各自历史统计身份，同名重建不合并。
+- **自定义币种（Custom Currency）**：美元之外管理员配置的唯一展示币种（符号 + 汇率）。每笔成本与计费发生时同时冻结美元与自定义币种金额；改符号不换算，改汇率只影响后续记录。
+- **估算成本（Estimated Cost）与按量成本（Usage-Based Cost）**：依据本地登记的上游价格（含上下文分档与**峰谷定价 Peak Pricing** 时段倍率）或订阅费，对本实例应向上游支付金额的本地估计；不是上游官方账单。
+- **计费（Billing）与消费上限（Spend Limit）**：按 Route 计费价格对 API Key 发起的调用做的内部记账；累计达到消费上限后拒绝新请求但不禁用 Key，调高上限或清零已消费后立即恢复。
+- **避免混用**：把估算成本当成计费或上游账单；把消费上限混同于上游额度（Provider Allowance）；把净输入当成总输入。

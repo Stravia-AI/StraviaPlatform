@@ -4,19 +4,10 @@ status: accepted
 
 # Prefer Route Targets by canonical cache prefix
 
-> 部分被 [ADR-0034](0034-layer-route-target-selection.md) 取代：前缀 Cache Affinity 不再“适用于所有经 Route 的调用”。请求带有 Conversation Affinity 身份（Generation Chain 父节点或 Prompt Cache Directive 路由键）时，按该身份粘滞 Target；只有两种身份都缺失时，才使用本 ADR 的前缀 Cache Affinity。前缀匹配、`prompt_tokens` 阈值与健康候选提升规则继续有效。
+## 背景与决策
 
-Stravia 在 Request Hook 完成后、首次选择 Target 前，为所有经 Route 的调用计算 ordered Canonical Item Hash 前缀。Gateway-local Cache Affinity 索引按 Principal 与 Route 隔离；某个 Target 成功响应并报告 `prompt_tokens >= 20,000` 后，最长精确前缀命中的健康候选仅被提到 RouteAttemptPolicy 的首位。无命中、不健康、Target 已不在 Route 中或可重试失败时，现有 Route 策略与重试顺序保持不变。
+对不具备 Conversation Affinity 的 Route 请求，在 Request Hook 后以有序 canonical item 摘要匹配最长精确前缀。Cache Affinity 隔离在 Principal 与 Route 内；只有成功报告 `prompt_tokens >= 20,000` 的历史可建立候选。命中的健康 Target 可优先于常规 Priority 和组内调度，但不绕过资格、冷却或重试边界；有 Conversation Affinity 身份时由其接管（见 [ADR-0034](0034-layer-route-target-selection.md)）。
 
-## Considered options
+## 权衡
 
-- 客户端请求全量 fingerprint：跨协议不一致，客户端可操纵，且已取消该层需求。
-- 按 Principal、连接或 Session 固定 Target：不能证明 Prompt Cache 前缀相同，且会把无关请求黏到一个 Target。
-- Provider 的缓存命中指标驱动：多数 Provider 不提供可用于选路的稳定命中信息，且信息在选路后才可获得。
-- 使用精确 canonical 前缀和成功后的 `prompt_tokens`：不读取或保证 Provider cache，但能以最小语义风险提高同一 Target 的概率。
-
-## Consequences
-
-- 每条 `AiItem` 只以 canonical SHA-256 摘要记录在内存索引；不得持久化 raw 内容或在日志中输出 Hash。
-- 这是纯性能优化，不影响 Effective Model Request、Response Chain、Target Continuation、鉴权或故障切换。
-- 首次访问、Gateway 重启、索引淘汰或 Provider cache 丢失会回退 Route 策略，不产生错误或客户端可见语义变化。
+全请求 fingerprint 无法帮助增量前缀；按连接或 Principal 粘滞会把无关请求聚到同一 Target；上游缓存指标又往往在选路后才可得。摘要索引不保留原文，只提高缓存命中机会，不证明上游一定命中。索引丢失时直接使用 Route 策略，不改变任务、鉴权或历史。完整选路契约见 [系统架构](../design/architecture.md)。

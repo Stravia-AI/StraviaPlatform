@@ -130,7 +130,7 @@ operation GET 不带 JSON Content-Type。二进制 `setHeaders` 没有默认注�
 
 推理统一请求 `POST /v1internal:streamGenerateContent?alt=sse`，非流式下游也由现有累积器收束。
 
-外层只构造 `project`、`model`、`request`、`userAgent`、`requestType`、`requestId`。project 来自该账号，model 来自宿主 Target，requestId 随调用生成；不接受外部 envelope 覆盖。上述字段在实际外层 GenerateContentRequest 描述符中存在，2026-11-06 官方 agy 1.5.1 抓包确认推理的 `userAgent=antigravity`、`requestType=agent`，生图则为 `requestType=image_gen`。2026-10-22 核对的[官方 CLI 1.3.5 Linux 产物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)表明，无原生操作上下文时 `computeRequestID` 使用 `requestType/UUIDv4`；文本推理保留 `agent/UUIDv4` fallback，独立生图按新抓包采用 `image_gen/<毫秒时间戳>/<UUIDv4>/1`，不伪造 CLI 的共享操作树或计数。`getSessionID` 对完整 UTF-8 使用 FNV-1a64，再以 signed int64 十进制输出；插件只转换可信宿主 session affinity。上层输入结构的准确字段名及服务端校验尚未证实。算法、作用域、向量与本地验证边界见[会话与请求 ID 契约](../design/vendor-plugins.md#会话与请求-id)。
+外层只构造 `project`、`model`、`request`、`userAgent`、`requestType`、`requestId`。project 来自该账号，model 来自宿主 Target，requestId 随调用生成；不接受外部 envelope 覆盖。上述字段在实际外层 GenerateContentRequest 描述符中存在，2026-11-06 官方 agy 1.5.1 抓包确认推理的 `userAgent=antigravity`、`requestType=agent`，生图则为 `requestType=image_gen`。2026-10-22 核对的[官方 CLI 1.3.5 Linux 产物](https://github.com/google-antigravity/antigravity-cli/releases/download/1.3.5/agy_cli_linux_x64.tar.gz)表明，无原生操作上下文时 `computeRequestID` 使用 `requestType/UUIDv4`；文本推理保留 `agent/UUIDv4` fallback，独立生图按新抓包采用 `image_gen/<毫秒时间戳>/<UUIDv4>/1`，不伪造 CLI 的共享操作树或计数。`getSessionID` 对完整 UTF-8 使用 FNV-1a64，再以 signed int64 十进制输出；插件只转换可信宿主 session affinity。上层输入结构的准确字段名及服务端校验尚未证实。算法、作用域、向量与本地验证边界见[Antigravity 插件契约](../design/vendor-plugins.md#antigravity--antigravity)。
 
 内层递归投影：
 

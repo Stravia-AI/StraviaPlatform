@@ -10,26 +10,6 @@ status: accepted
 
 保留多个独立 Interaction 的方案更保守，但会让任务状态、用量和最终回复继续分散，仅增加导航无法解决任务归属问题。选择统一归属意味着误合并会同时影响状态、统计和诊断导出，不能用 session 相同、时间接近或模糊文本相似代替跨根续接证据。
 
-已确认的当前工具续接优先于 Generation parent 的常规观测分组与保留尾部归并：请求回传来源 Run 当前待完成工具调用的结果时，即使同时夹带新增 User 输入，也继续原 Interaction。该判定不以缺少 Generation parent 为前提；历史编辑可能使严格前缀退回较早父节点，Observation 仍以已确认的工具来源 Run 作为 `parent_run_id`，Generation 父边保持原样。只有未满足当前工具续接条件时，才应用原有 Generation parent 分组及下面的保留尾部、新 User 分支和五分钟窗口规则；历史回放中的旧工具结果不能触发该优先级。
+归属评估先核验同 Principal 已交付来源的当前工具续接，即使请求已有较早的 Generation parent 或夹带 User 输入；旧工具结果的回放或编辑不等同于完成当前待处理工具。没有当前工具来源时，沿用已确认的 Generation parent；无执行父边且存在唯一、完整的保留尾部匹配时，才考虑按尾部归属。只以实际完整交付到本次入口的时间计五分钟归并窗；尾后有新增 User 或超出窗口则保留独立的 Interaction，只连接诊断来源。证据不完整或来源不唯一时不猜测。
 
-已交付来源在 HTTP 流式协议终帧交出、非流式完整 body 交付确认或 WebSocket 终帧发送成功时可用，不等待 Generation 提交与 Run finish。后续准入先处理该来源及实际交付时间；来源的晚到 finish 不得把同一 Interaction 内已经有 child 的分支重新置为 `waiting_client`。
-
-当前工具来源以交付时登记的 pending-tool 索引为证据，不再通过重新物化来源的完整历史窗口重复证明同一组工具 ID。客户端省略工具轮纯空白消息、尾窗口缓存未命中或来源 Generation 尚未提交，都不能使已经确认的工具来源失效。内存与持久化来源均须属于同一 Principal 且未过期，本次尾部的全部结果须唯一对应同一个来源 Run，实际交付时间不得晚于当前 ingress；歧义、尚未交付和已证明的旧结果回放仍不能据此归并。该容错只改变诊断归属，不补回客户端省略的内容，也不放宽 Generation Chain 的严格历史匹配。
-
-旧结果回放必须由同 Principal、未过期的已保存工具收据和完整收到输入的 canonical 严格前缀共同证明，新增后缀只能是普通 User 输入。该证明允许客户端省略 thinking-only 输出，但不忽略已有输入中的指令、媒体或控制差异，也不把 User 内的 ToolResult 当作普通追加输入。成立时不采用当前工具／pending-tool 优先级，且不重复保存该 Run 的历史结果；精确父节点、快速续接和尾部规则照常适用。相同输入的独立 sibling、结果值变化和其他历史变化仍保留各自收据，不全局消费工具 ID。完整证明不可用时不猜测回放，不改变 Generation 父边或模型输入。
-
-已收到工具结果后的普通 User 尾段被编辑，而非仅在完整旧输入后追加 User 时，另按分支处理。同 Principal、未过期的工具收据和完整收到输入必须证明：工具结果及其之前的全部 canonical 输入不变，结果后的两侧尾段均仅含普通 User 输入，且本次尾段非空并发生变化。唯一工具来源确认后，创建连接到来源 Interaction 的 child Interaction，以工具来源 Run 为 `parent_run_id`，跳过重复工具结果捕获；当前工具、pending-tool、两秒快速续接和五分钟尾部归并均不得把该分支重新并回原 Interaction。该判定支持没有 Generation parent 的跨根请求和重启后重建证据，不改变模型输入、Generation 父边或已有 Observation。
-
-没有 Generation parent 且不满足当前工具续接时，唯一且包含完整连续交互的保留尾部精确匹配也可以作为自动归并依据，但必须满足时间窗口约束。时间窗口限制的是这条尾部归并路径；时间接近本身不是任务续接证据，不能放宽唯一性、完整性或 Principal 隔离。
-
-客户端压缩后回放的是一条线性历史，多个已交付来源可能同时在其中形成完整匹配。此时唯一来源指匹配区间在本次输入中结束最晚的来源：更早结束的匹配必然是它之前的历史，不能因保留的旧回答更长而胜出。结束位置相同才比较匹配长度，结束位置与长度都并列仍为歧义。客户端原样回放的私有 reasoning 以其密文、签名等不透明字节的摘要参与连续性证明，使最后一轮不因隐藏思考被截断；摘要不计入匹配强度，不透明字节变化或缺失时仍阻断匹配。这些规则只选择诊断来源，不按时间、链底位置或拓扑猜测父边。
-
-保留尾部路径确认来源后，若匹配区间之后还有新的 User 输入，则创建新的 Connect Client Interaction 节点，并在诊断树中连接到来源 Interaction，而不是归入原 Interaction。两个交互分别汇总状态、Confirmed Upstream Usage 和 Debug Bundle 范围；该连接表达诊断来源，不建立 Generation Chain 执行父边。
-
-时间窗口仅限制归入同一个 Interaction，不限制诊断来源连接。即使没有新增 User 输入，超出归并窗口也创建新的 Interaction；只要来源记录仍在保留期内，且匹配证据完整、唯一，仍连接来源 Interaction。先确认来源，再决定是否归并，不能先按归并窗口排除较旧候选而将歧义误判为唯一。
-
-尾部自动归并窗口为五分钟，包含边界：本次请求入口接收时间减去被匹配来源 Run 完整交付给客户端的时间，须落在 `[0, 300000]` 毫秒内。不使用任务开始时间、Interaction 的可变 `last_active_at` 或数据库写入时间，避免长任务、其他分支活动及持久化排队改变归并资格。
-
-本次修复只改变启用新规则后准入请求的归属判定，不重新分配已有 Run 的 Interaction、不改写其已记录的来源关系，也不提供存量 Observation 重建工具。已发现的两次裁图和一次摘要替换断点用于隔离回归样本，不直接修改 release 数据库；已有错误分组不会因本次修复而自动纠正。
-
-Observation 对启用后准入的请求按本决策分组；已有 Run 不重算。过长的收到窗口只保留最新后缀作为诊断索引，单个超限单元仍明确失败。它扩展 [ADR-0060](0060-own-interaction-observation-outside-generation-chain.md) 的诊断归属语义，保持 [ADR-0020](0020-discover-generation-parents-from-strict-canonical-history.md) 的严格执行历史匹配契约不变。
+本决策不重算既有 Run 的分组。判定优先级、重启和裁剪下的证据、分支与保留尾部见[请求记录设计](../design/interaction-observation.md)；[Open Responses 设计](../design/open-responses.md)仍拥有严格执行父边语义。

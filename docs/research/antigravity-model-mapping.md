@@ -254,7 +254,7 @@ gpt-oss-120b-medium
 
 家族记录用现有 `DiscoveredModel.family`、`selector`、`metadata.reasoning_efforts` 表达。`metadata.antigravity` 保存默认请求 ID 与 `variants`，每档保留实际 ID、显示 slug、effort 和规格。家族上下文采用所有已知档位的最小值，任一档未知则不登记；输入模态取交集。Thinking 保留在名称中，不伪造 Effort。没有新增公共 API、数据库 schema、前端供应商分支或依赖。
 
-推理根据 Target 的 Effort 从选择表取真实 ID 和该 variant metadata 的强度控制：优先使用存在且合法的 `thinkingLevel`，只有未声明 level 时才读取 `thinkingBudget`，不同时发送两者。缺省使用该家族的默认 selector 与目录强度，显式 Target 非 Effort 控制或合法原始强度字段优先于目录缺省强度。未登记 Effort、对应的两种控制均缺失或所选控制无效时，在 HTTP 前返回明确错误；非法 level 不回退到 budget，也不从 `minThinkingBudget` 猜预算。已消费的 Effort 不再让通用 codec 生成额外强度字段，摘要开关独立。已有逐档记录与 Route 绑定不自动删除或迁移，部署步骤见 [插件设计说明](../design/vendor-plugins.md#antigravity-cli-接入)。
+推理根据 Target 的 Effort 从选择表取真实 ID 和该 variant metadata 的强度控制：优先使用存在且合法的 `thinkingLevel`，只有未声明 level 时才读取 `thinkingBudget`，不同时发送两者。缺省使用该家族的默认 selector 与目录强度，显式 Target 非 Effort 控制或合法原始强度字段优先于目录缺省强度。未登记 Effort、对应的两种控制均缺失或所选控制无效时，在 HTTP 前返回明确错误；非法 level 不回退到 budget，也不从 `minThinkingBudget` 猜预算。已消费的 Effort 不再让通用 codec 生成额外强度字段，摘要开关独立。已有逐档记录与 Route 绑定不自动删除或迁移，部署步骤见 [插件设计说明](../design/vendor-plugins.md#antigravity--antigravity)。
 
 CLI 1.3.2 曾记录 Gemini 3.8 Flash Medium/High 的目录预算 `4000`/`-1`，但当前目录已可仅声明 `thinkingLevel`。2026-10-28 的真实 Wasm + loopback HTTP 回归以 Flash 的 level-only 三档和 Pro 的 budget 目录（缺省/Low/High 请求）覆盖两种目录形态，并校验默认 ID、显式控制优先级、独立摘要、level/budget 互斥及非法元数据在 HTTP 前拒绝；未调用真实上游。
 
@@ -387,7 +387,7 @@ antigravity/cli/1.5.11 (aidev_client; os_type=linux; arch=amd64; cl=1024248524; 
 - 三个使用标志序列化为小写 `%t`。没有前一次生成元数据时均从 false 开始；有前一次、但缺少相应标志时，`used_claude` 为 false，`used_claude_conservative` 和 `used_non_gemini_model` 保守为 true。当前 `ModelInfo.api_provider = API_PROVIDER_ANTHROPIC_VERTEX`（26）将前两项置 true；`ModelInfo.model_provider != MODEL_PROVIDER_GOOGLE`（4）将第三项置 true。
 - `model_enum` 调用 `Model.String()`。可选 cascade/root/parent 标识只在非空时加入。外层 `computeRequestID`（`0x925e9c0`）另行构造斜杠分隔的 ID；没有操作标识时采用 request type 与随机 UUID，不等于内层标签。
 
-实现按用户要求使用 **Stravia 自己的事实**，并非伪造原生 CLI 的操作历史：链路根映射 cascade，上下文窗口映射 trajectory；生成序号与步骤索引分别投影 canonical assistant 项数和非 system/developer 项数。非 UUID 的宿主亲和键使用固定域 UUIDv8 表示；缺失身份时不生成随机会话。原生累计 metadata 不在输入中时使用上述保守规则，模型判定只读新同步目录中的 provider enums。完整映射与缺项行为见[插件设计](../design/vendor-plugins.md#antigravity-cli-接入)。
+实现按用户要求使用 **Stravia 自己的事实**，并非伪造原生 CLI 的操作历史：链路根映射 cascade，上下文窗口映射 trajectory；生成序号与步骤索引分别投影 canonical assistant 项数和非 system/developer 项数。非 UUID 的宿主亲和键使用固定域 UUIDv8 表示；缺失身份时不生成随机会话。原生累计 metadata 不在输入中时使用上述保守规则，模型判定只读新同步目录中的 provider enums。完整映射与缺项行为见[插件设计](../design/vendor-plugins.md#antigravity--antigravity)。
 
 另在临时 HOME、agent 目录和空 workspace 内运行本机 `omp 18.22.1`，保留原生系统提示和默认工具，所有模型请求截获于 loopback，不转发 Google。捕获 1 次请求、11 个工具、10,070 字节系统提示；其中没有 `RFC 2119`、`system-conventions`、`system_conventions`、`system-directive` 或 `system_directive`。因此 [#5751](https://github.com/router-for-me/CLIProxyAPI/issues/5751) 的精确触发文本不能解释该输入，未直接套用其 RFC 删除或零宽字符方案；后续改动依据下方本次单变量实测，而非该引用的归因。这个结论仅限该次干净 OMP 输入，不排除其他上游内容规则。
 
@@ -424,7 +424,7 @@ To commit your changes, use the eval `commit` namespace (`d = await commit.draft
 
 ## 13. agy 1.5.11 labels 生命周期：静态与离线多轮对照（2026-11-19）
 
-> 本节的 Stravia 对照记录的是改造前实现。后续已采用宿主派发 cursor 与 conversation CAS 生命周期状态；现行行为、升级要求和未知历史边界见[插件设计](../design/vendor-plugins.md#antigravity-cli-接入)，不将本节原生实验扩张为未验证路径的兼容承诺。
+> 本节的 Stravia 对照记录的是改造前实现。后续已采用宿主派发 cursor 与 conversation CAS 生命周期状态；现行行为、升级要求和未知历史边界见[插件设计](../design/vendor-plugins.md#antigravity--antigravity)，不将本节原生实验扩张为未验证路径的兼容承诺。
 
 本节补充而不覆盖上述历史实验。离线静态对象是 `/home/chikage/.local/bin/agy`，`--version` 为 `1.5.11`，SHA-256 为 `01b063665007b7098116ac98015954d97ff49b7e3147086d75849c16e952ee0e`；下列地址为该 ELF 的虚拟地址。使用 Go pclntab 符号和 x86-64 反汇编；地址不适用于未经核对的其他版本。动态矩阵使用官方 CLI、临时隔离会话、假 OAuth 和 loopback TLS 假上游，进程置于断外网网络命名空间；响应是合成 SSE 或受控错误，**没有真实上游推理**。真实服务仅作一次已授权的模型目录读取，隔离夹具只保留模型公开描述字段；初始一次 eligibility fixture 不完整、未产生推理的尝试不计入矩阵。矩阵共 11 次有推理的 CLI 启动、18 次本地推理 HTTP：17 次合成 200 和 1 次受控 400。以下是客户端行为，不证明服务端如何解释 labels。
 
@@ -455,7 +455,7 @@ To commit your changes, use the eval `commit` namespace (`d = await commit.draft
 
 ### 与现有 Stravia 映射的差异和后续依据
 
-当前设计见[插件设计](../design/vendor-plugins.md#antigravity-cli-接入)，实现 `RequestLabels::new` 见 `wire.rs`。宿主 chain 根用于 cascade/root、context window 用于 trajectory，是宿主事实的投影而非原生 conversation/trajectory 生命周期；尤其不能据此声称支持原生 fork 或 compact。canonical assistant 项数作为生成数、非 system/developer 项数减一作为 step 的公式，与上述失败生成及原生 `system_message` 的事实不等价；不能仅用 wire content 数推断 canonical item 数。
+当前设计见[插件设计](../design/vendor-plugins.md#antigravity--antigravity)，实现 `RequestLabels::new` 见 `wire.rs`。宿主 chain 根用于 cascade/root、context window 用于 trajectory，是宿主事实的投影而非原生 conversation/trajectory 生命周期；尤其不能据此声称支持原生 fork 或 compact。canonical assistant 项数作为生成数、非 system/developer 项数减一作为 step 的公式，与上述失败生成及原生 `system_message` 的事实不等价；不能仅用 wire content 数推断 canonical item 数。
 
 当前 `used_claude` 仅看本次 provider，故 Claude → Google 会从 true 回 false；`used_claude_conservative = used_claude || assistant_item_count > 0`、`used_non_gemini_model = !google_model || assistant_item_count > 0`，故纯 Google 的第二轮会把后两项置 true，而原生样本仍 false。插件没有 `last_execution_id` 对应状态；外层使用独立 attempt UUID 的 fallback，也不等同于原生具有操作元数据时的五段 ID。这些都是可核查的语义差异，不代表已证实服务端依赖或要求它们。
 
@@ -463,7 +463,7 @@ To commit your changes, use the eval `commit` namespace (`d = await commit.draft
 
 ## 14. Neon 隐式缓存：原生 TUI、工具续接与 Stravia 现场对照
 
-> 下文的 Stravia 抓包早于外层 `requestId` 对齐。对齐时在同一 `agy` 1.5.11 ELF 核实：`StreamGenerateContent` 于 `0x925ef26` 取 `time.Now`、换算 Unix 毫秒后于 `0x925f027` 传入 `computeRequestID`。新的 CCPA continuation leg 也会通过 `0x929718e` 重新取时钟；重发同一已编码 HTTP 请求体则保留 ID。此证据不覆盖所有 HTTP 状态对应的重试分支。当前 Stravia 使用[五段式派发关联号](../design/vendor-plugins.md#antigravity-cli-接入)，未知步骤时仍回退。此前缓存读数不代表这个改动能提高命中率。
+> 下文的 Stravia 抓包早于外层 `requestId` 对齐。对齐时在同一 `agy` 1.5.11 ELF 核实：`StreamGenerateContent` 于 `0x925ef26` 取 `time.Now`、换算 Unix 毫秒后于 `0x925f027` 传入 `computeRequestID`。新的 CCPA continuation leg 也会通过 `0x929718e` 重新取时钟；重发同一已编码 HTTP 请求体则保留 ID。此证据不覆盖所有 HTTP 状态对应的重试分支。当前 Stravia 使用[五段式派发关联号](../design/vendor-plugins.md#antigravity--antigravity)，未知步骤时仍回退。此前缓存读数不代表这个改动能提高命中率。
 
 现场是 OMP 18.22.2 经 `/v1/responses` 到 Stravia 的 `gemini-4-neon-medium`，不是原生 agy。附件中同一用户轮内进行五次完整推理，第六次请求中断、没有上游响应。前五次输入依次为 `11420 / 19236 / 36750 / 53576 / 60478`，上游缓存读数为 `0 / 0 / 19237 / 0 / 0`。只有第 3 次的 Google SSE `usageMetadata` 带 `cachedContentTokenCount`；其它完整 usage 省略的私有 proto3 标量按零解释，不能将第 6 次也计为零。各次的 Provider、Target、project、实际模型、`prompt_cache_key`、`sessionId`、cascade/root/trajectory、系统指令、工具和生成配置相同；上一请求的所有 `contents` 都逐项原样保留，包含工具参数、结果和签名，仅在尾部追加。附件已永久脱敏 Authorization，不能比较其原值。第 3→4 次派发相隔约 20 秒，且输入增加 16,826；这不是输入不够长、旧前缀被改写或可见选路变化的例子。
 

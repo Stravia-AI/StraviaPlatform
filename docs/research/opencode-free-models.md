@@ -243,9 +243,9 @@ tools 检查对象的细化（同日实测，模型 big-pickle）：单工具 `b
 
 ### 7.4 本仓库实现
 
-专属插件 `stravia-vendor-opencode-free`（`provider_id = "opencode-free"`，dedicated，本地导入分发）保持 HTTP Chat Completions 接入，默认 Base URL 为 `https://opencode.ai/inference/v1`。免费请求强制原生流式 wire 与 `tool_choice: auto`，即使客户端已提供完整工具集也执行归一。只补缺失的 `bash/read`，采用官方输入字段与边界，保留客户端同名工具和已有指令；禁令只针对补出的名字，不新增执行器，不伪造结果。消息 ID 使用原生时间／随机编码；2026-10-22 起，session 由完整宿主作用域 affinity 确定性生成 `ses_` 表示，删除旧 256 项私有映射缓存，跨进程与组件重载不依赖保存映射。其前 12 hex 不再表示真实时间，不声称保持官方创建时间排序；无可信 affinity 的 session 仍按官方生命周期新建。固定 namespace、字节布局、向量、官方 parser 与公开网关证据见[会话与请求 ID 契约](../design/vendor-plugins.md#会话与请求-id)。旧日期的真实上游验证不能外推为新确定性身份已获私有网关接受，本次仅完成合成凭据的本地 Wasm→HTTP 验证。
+专属插件 `stravia-vendor-opencode-free`（`provider_id = "opencode-free"`，dedicated，本地导入分发）保持 HTTP Chat Completions 接入，默认 Base URL 为 `https://opencode.ai/inference/v1`。免费请求强制原生流式 wire 与 `tool_choice: auto`，即使客户端已提供完整工具集也执行归一。只补缺失的 `bash/read`，采用官方输入字段与边界，保留客户端同名工具和已有指令；禁令只针对补出的名字，不新增执行器，不伪造结果。消息 ID 使用原生时间／随机编码；2026-10-22 起，session 由完整宿主作用域 affinity 确定性生成 `ses_` 表示，删除旧 256 项私有映射缓存，跨进程与组件重载不依赖保存映射。其前 12 hex 不再表示真实时间，不声称保持官方创建时间排序；无可信 affinity 的 session 仍按官方生命周期新建。固定 namespace、字节布局、向量、官方 parser 与公开网关证据见[OpenCode Free 插件契约](../design/vendor-plugins.md#opencode-free--opencode-free)。旧日期的真实上游验证不能外推为新确定性身份已获私有网关接受，本次仅完成合成凭据的本地 Wasm→HTTP 验证。
 
-不开放任意 `userAgent` 覆盖；未知控制仍由正向白名单透明丢弃，无 apiKey 时使用 `Bearer public`。与 base 的 `opencode` Profile 并存，不接管 Zen Go，不静默重写自定义 Base URL；手动固定旧 `/zen/v1` 的已有连接须在重新导入组件后更新地址。具体限制见[设计文档](../design/vendor-plugins.md#opencode-zen-free-准入限制)。
+不开放任意 `userAgent` 覆盖；未知控制仍由正向白名单透明丢弃，无 apiKey 时使用 `Bearer public`。与 base 的 `opencode` Profile 并存，不接管 Zen Go，不静默重写自定义 Base URL；手动固定旧 `/zen/v1` 的已有连接须在重新导入组件后更新地址。具体限制见[设计文档](../design/vendor-plugins.md#opencode-free--opencode-free)。
 
 先执行 `task build:vendors:all`，再分别运行：
 

@@ -4,23 +4,21 @@ status: accepted
 
 # 在管理端后端遮罩凭据明文，并为后续复用分页
 
-> **局部被取代。** [ADR-0090](0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md) 取代下述局部约定：本文「按当前有效映射把秘密原文替换为 `***`」与「保护生效以存在未过期映射为准」增加规则过滤及强弱边界：至少一条创建规则当前启用才遮罩，空归因不再放行，弱秘密只在 ASCII 单词字符边界匹配。取舍中「发布后至少保留 N 天」改为最近规则检出后至少 N 天（G 为一小时续期节流粒度）；首次发布不再决定映射的回收下限。0055 一次性删除空归因或仅退役归因映射，即使有 Turn 引用也不保留；有现行归因的映射不因这次清理删除，禁用的现行规则也算现行。删除后的历史 marker 无法还原，按未知 marker 契约原样透传，后续重新检出同值可创建新 marker。后端默认遮罩、显式显示明文与分页契约不变。
-
 ## 决定
 
-[ADR-0087](0087-list-credential-hits-per-mapping-with-retained-item-context.md) 让命中详情返回含明文的条目正文，由浏览器遮罩并「点击才显示」，同时承认这「是误触保护，不是访问控制」；普通 Observation 与请求记录也原样返回保留的正文。这样任何能打开页面的会话都已经拿到了全部明文，后续无法按权限收紧。现决定：
+早先命中详情由浏览器遮罩，普通 Observation 与请求记录也原样返回正文；能打开页面的会话实际已拿到全部明文。现改为后端默认遮罩与显式授权显示，并为 [ADR-0087](0087-list-credential-hits-per-mapping-with-retained-item-context.md) 的复用投影提供游标分页。现行规则见[凭据保护设计](../design/credential-protection.md)与[交互观测设计](../design/interaction-observation.md)。
 
 - **遮罩在后端完成，默认不下发明文。**
   - 命中详情默认返回已遮罩的响应（`masked=true`）：服务端把已算出的每个匹配区间（命中与其他匹配）整体替换为固定长度的 `••••••`，相互重叠或相邻的区间合并为一个遮罩；`matches` 的偏移与行列按遮罩后的文本重算，不返回原始区间长度，因此秘密长度不外泄。`hit` 标记保持原义。
   - 明文只能经 `GET …/hits/{index}?reveal=true` 取得。服务端在该入口调用 `AdminSession::may_reveal_credentials()`，不允许则返回 403 `credential_reveal_forbidden`。当前唯一角色 `admin` 拥有全部管理权限，因此恒为允许；它是将来引入角色或权限时唯一需要改动的策略点，Observation 端点没有对应的显示明文入口。
   - 浏览器不再持有「遮罩 / 明文」的本地切换：入口级的「显示明文 / 隐藏明文」按钮在两种响应之间切换，隐藏即回到默认已遮罩的缓存。逐匹配点击显示取消。
-- **Observation 与请求记录在读取时遮罩。** 所有返回 Observation 内容的管理端读取（请求链列表与详情、事件分页、拒绝与错误详情、实时内容流）按所属 API Key（Principal）的当前有效映射，把其中的秘密原文替换为 `***`，覆盖 JSON 转义形式与嵌套的 JSON 字符串，占位符原样保留。复用既有的 `ProtectedSecrets`，不新增检测路径；映射读取失败使请求失败，不退回未遮罩输出。
-  - **没有凭据保护就没有遮罩开销。** 「保护生效」以所属 Principal 存在未过期映射为准，而不是读取当前的 `reversible_redaction_enabled` 开关（关闭开关后既有映射仍可还原，其明文仍须遮罩）。读取先做一次按过期时间索引的存在性检查；实例里没有任何有效映射时原样返回，不查归属、不加载映射、不遍历载荷。有映射时才批量查询 Interaction 到 Principal 的归属，只为响应里出现且有有效映射的 Principal 加载映射，其余 Interaction 的载荷不遍历；遍历只限携带正文的字段，原地替换，只有命中字面值时才分配。存储的事件不改写：显示明文与命中位置重算都依赖保留的原文。
+- **Observation 与请求记录在读取时遮罩。** 所有返回 Observation 内容的管理端读取（请求链列表与详情、事件分页、拒绝与错误详情、实时内容流）按所属 API Key（Principal）的当前有效映射，把其中的秘密原文替换为 `***`，覆盖 JSON 转义形式与嵌套的 JSON 字符串，占位符原样保留。按 [ADR-0090](0090-gate-credential-protection-by-rule-and-strength-and-expire-mappings.md)，映射须未过期且至少一条创建规则当前启用，空归因不放行；弱秘密只在 ASCII 单词字符边界匹配。复用既有的 `ProtectedSecrets`，不新增检测路径；映射读取失败使请求失败，不退回未遮罩输出。
+  - **没有有效映射时不扫描正文。** 是否遮罩取决于所属 Principal 是否存在满足上述条件的映射，不取决于当前的 `reversible_redaction_enabled` 总开关。读取先做一次按过期时间索引的存在性检查；实例里没有任何有效映射时原样返回，不查归属、不加载映射、不遍历载荷。有映射时才批量查询 Interaction 到 Principal 的归属，只为响应里出现且有有效映射的 Principal 加载映射，其余 Interaction 的载荷不遍历；遍历只限携带正文的字段，原地替换，只有命中字面值时才分配。存储的事件不改写：显示明文与命中位置重算都依赖保留的原文。
 - **后续复用游标分页。** `GET …/reuses` 接受 `cursor` 与 `limit`（默认 20，最大 100），返回 `{ linkable, items, total, next_cursor }`；按 `(last_reused_at DESC, interaction_id, source_type, tool_id, latest_input)` 做键集翻页，`total` 是同一过滤条件下的位置数。取消 200 项上限与 `truncated`。侧栏的「后续复用」改为默认折叠、展开后为有界滚动的下拉框，以每页 10 项翻页。
 
 ## 取舍
 
-- 遮罩依赖有效映射的明文：映射被回收后无法再按字面值遮罩更早的记录。映射保留期按 [ADR-0089](0089-share-content-store-and-normalize-observation-writes.md) 改为：仍被 Turn 节点引用时不回收，发布后至少保留 `log_retention_days` 天（不再是固定的「至少 7 天、随 Generation Chain 延长」）；Observation 不引用映射，所以映射可能先于所属 Interaction 被回收，此后更早的记录不再被遮罩。用检测器在读取时重扫所有事件正文成本过高（每次读取都要对最多数百个事件、每条至多 MiB 级正文运行全部规则），因此不采用。
+- 遮罩依赖有效映射的明文：映射被回收后无法再按字面值遮罩更早的记录。映射按最近规则检出过期，不按首次发布时间计；仍被 Turn 引用的过期映射可保留用于旧占位符还原，但不再遮罩。Observation 不引用映射，因此所属 Interaction 仍可查询时也可能失去按映射遮罩的能力。映射回收与一次性退役归因清理见 ADR-0090。用检测器在读取时重扫所有事件正文成本过高（每次读取都要对最多数百个事件、每条至多 MiB 级正文运行全部规则），因此不采用。
 - 只有已知映射的秘密会被遮罩：检测器认定但没有映射的内容（可逆脱敏关闭时的记录）不在 Observation 遮罩范围内。命中详情本身用检测器的匹配结果，不受此限制。
 - Debug Bundle 是原始取证导出，保持仅替换 `Authorization` 头值的既有口径，不在本次范围内。
 - 命中详情的遮罩直接使用已算出的匹配，不增加检测次数；`reveal=true` 与旧响应一致，返回完整正文（ADR-0089 删除了原先 1 MiB 的截断与 `truncated` 字段）。
@@ -28,7 +26,6 @@ status: accepted
 
 ## 后果
 
-- 取代 ADR-0087 中「界面默认遮罩命中片段，点击才显示……这是误触保护，不是访问控制」及「复用至多展示 200 个位置、`truncated`」两处；其余仍然有效。
 - `GET …/hits/{index}` 响应新增 `masked`，默认文本与偏移变为遮罩后的值；`GET …/reuses` 响应不兼容变更（新增 `total`、`next_cursor`，移除 `truncated`）；不保留旧字段或别名。
 - Observation 读取在没有任何有效映射时只多一次索引存在性检查；有映射时再多一次（按每 400 个交互分批的）归属查询与每个主体一次有效映射读取。实时内容流有内容更新时至多每秒重新检查并刷新一次。
 - 无数据库迁移。

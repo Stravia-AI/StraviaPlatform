@@ -3,67 +3,74 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="frontend/stravia-webui/static/stravia-logo-reversed.svg">
   <source media="(prefers-color-scheme: light)" srcset="frontend/stravia-webui/static/stravia-logo.svg">
-  <img alt="Stravia" src="frontend/stravia-webui/static/stravia-logo.svg" width="96">
+  <img alt="Stravia" src="frontend/stravia-webui/static/stravia-logo.svg" width="88">
 </picture>
 
 <h1>Stravia</h1>
 
-**Local agent infrastructure — one endpoint for every AI client.**<br>
-Unified model access, tools that run for you, and shared access control,<br>
-history, and usage — desktop app or single binary.
+**Local-first agent infrastructure — one endpoint for every AI client.**<br>
+Unified model access, platform-executed tools, local credential protection,<br>
+and live request observability in a desktop app or single binary.
 
-[![Release](https://img.shields.io/github/v/release/Stravia-AI/StraviaPlatform)](https://github.com/Stravia-AI/StraviaPlatform/releases)
-[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
-[![CI](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-toolchain-orange)](rust-toolchain.toml)
+[![Release](https://img.shields.io/github/v/release/Stravia-AI/StraviaPlatform?style=flat-square)](https://github.com/Stravia-AI/StraviaPlatform/releases)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-2563eb?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Stravia-AI/StraviaPlatform/ci.yml?style=flat-square&label=CI)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-toolchain-f97316?style=flat-square)](rust-toolchain.toml)
 
-[Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) · [Changelog](CHANGELOG.md) · [中文文档](README_CN.md)
+[Quick Start](#quick-start) · [Features](#features) · [Deployment](#desktop-vs-server) · [Docs](#documentation) · [Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) · [Changelog](CHANGELOG.md) · [中文文档](README_CN.md)
 
 </div>
 
-![Request Records — every client request, traced live](docs/assets/request-records.png)
+<p align="center">
+  <img src="docs/assets/request-records.png" alt="Stravia Request Records — live trace of model calls, retries, and tool executions">
+</p>
 
-> **Status:** Stravia is pre-1.0 and under active development. Configuration and database compatibility may change before a stable release.
+> [!NOTE]
+> **Pre-1.0:** Stravia is under active development. Configuration formats and database compatibility may change before a stable `1.0` release.
 
-## What is Stravia
+---
 
-Stravia is local, self-hostable **agent infrastructure** for developers who use AI coding clients or build agent-powered apps. Your clients keep the protocol they already speak — OpenAI, Anthropic, or Gemini — and simply point at Stravia. Stravia decides which upstream service should answer and translates between protocols when needed.
+## Overview
 
-On top of model access, the platform runs tools itself: built-in web search and media understanding execute inside Stravia and hand results back to the model — through ordinary model requests or MCP, no client plugins required. Access control, request history, usage, and diagnostics all live in the same place.
+Stravia is local, self-hostable **agent infrastructure** for developers using AI coding clients or building agent-powered apps. Your clients keep the protocol they already speak — OpenAI, Anthropic, or Gemini — and point at a single local listener. Stravia handles protocol conversion, routing, failover, platform tools, access control, spend tracking, and diagnostics in one place.
 
 ```text
-Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
-                            │
-                            ▼
-              Stravia unified listener :23471
-                ├─ OpenAI-compatible API
-                ├─ Anthropic Messages API
-                ├─ Gemini GenerateContent API
-                ├─ MCP tools
-                ├─ Platform tools and built-in agent execution
-                ├─ Admin API
-                └─ WebUI
-                            │
-                            ▼
- OpenAI · Anthropic · Google · Vertex AI · DeepSeek · Ollama · …
+  Claude Code · Codex CLI · Gemini CLI · OpenCode · SDKs
+                             │
+                             ▼
+            Stravia unified listener (:23471)
+              ├── Model APIs   OpenAI · Open Responses · Anthropic · Gemini
+              ├── Tooling      StraviaRead · Search · Media · MCP (/mcp)
+              ├── Security     API Keys · RPM · Spend Limits · Local Redaction
+              └── Operations   Request Records · Debug Bundles · WebUI
+                             │
+                             ▼
+   OpenAI · Anthropic · Google · Vertex AI · DeepSeek · Ollama · Wasm Plugins
 ```
 
-Agent behavior is defined and versioned by the platform — Stravia is not a user-defined agent or visual workflow builder.
+> Agent behavior is defined and versioned by the platform — Stravia is **not** a user-defined agent or visual workflow builder.
 
-## Why Stravia
+### Why Stravia
 
-- **Drop-in endpoint for AI coding clients** — point Claude Code, Codex CLI, Gemini CLI, or OpenCode at `127.0.0.1:23471` and keep working. Each client keeps its own protocol; Stravia handles translation, routing, and failover.
-- **Tools that run for you** — built-in web search (local search uses an installed Chrome/Chromium browser; the container includes Chromium) and image understanding execute inside Stravia and hand results back to the model. Expose them over MCP or add them automatically to compatible requests.
-- **Keys, spend, and request history in one place** — give each app its own key with model access and RPM limits, see the usage providers actually report, watch every request live, and download a full debug bundle when something goes wrong.
-- **Local-first, one Rust core** — a desktop app or a headless server binary; SQLite by default, PostgreSQL for teams; local or S3 file storage. No cloud dependency.
+- **Drop-in endpoint for AI coding clients** — Point Claude Code, Codex CLI, Gemini CLI, or OpenCode at `127.0.0.1:23471`. Each client keeps its native protocol; Stravia translates, routes, and fails over automatically.
+- **Tools that run for you** — Built-in reading (`StraviaRead`), web search, media understanding, and media generation run inside Stravia and hand verified results back to the model — via ordinary requests or `POST /mcp`, with no client plugins required.
+- **Local credential protection** — Detects and replaces secrets in outbound model text using 461 bundled offline rules, then restores real values in answers and tool calls — without sending your secrets to any third-party service.
+- **Full visibility & control** — Per-key model bindings, RPM & spend limits, confirmed upstream token usage, live request graphs, and downloadable wire Debug Bundles.
+- **One Rust core, zero cloud lock-in** — Ship as a Tauri desktop app or a headless server binary/container; SQLite by default, PostgreSQL + Redis for teams; local or S3 file storage.
+
+---
 
 ## Quick Start
 
-**Desktop** — download the Windows (NSIS), Linux (AppImage), or macOS (DMG, Intel / Apple Silicon) installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases). The full platform runs locally with an integrated management UI. macOS builds use Ad-hoc signing without Apple notarization; Gatekeeper may block the first launch. See [release and signing details](docs/releasing.md#macos-构建与独立验证).
+### Desktop App
 
-If startup fails, the desktop app provides diagnostics and recovery options; it does not automatically reset your database.
+Download the **Windows (NSIS)**, **Linux (AppImage)**, or **macOS (DMG, Intel / Apple Silicon)** installer from [GitHub Releases](https://github.com/Stravia-AI/StraviaPlatform/releases).
 
-**Server** — one container:
+- Includes the full local platform, embedded WebUI, and direct config writing for local coding clients.
+- On startup errors, Stravia Desktop offers diagnostics and recovery controls and does **not** automatically reset your database.
+- **macOS:** Builds use ad-hoc signing without Apple notarization, so Gatekeeper may block the first launch. See [macOS signing & verification](docs/releasing.md#macos-发布构建与手动验证).
+
+### Docker
 
 ```bash
 docker run --rm \
@@ -72,135 +79,159 @@ docker run --rm \
   ghcr.io/stravia-ai/straviaplatform:latest
 ```
 
-Alternatively, download a platform archive from Releases (verify against `SHA256SUMS`).
+### Server Binary & Nix / NixOS
 
-**Nix / NixOS (Linux Server only):** Build this checkout with `nix build .#stravia-server`, or import `nixosModules.default` and enable `services.stravia`. Nix builds preinstall all official plugins and update compatible bundled versions with the package. See [Nix deployment](docs/design/architecture.md#nix-server-与-nixos-服务).
+- **Release archives:** Download a Linux or Windows server archive from [Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) and verify against `SHA256SUMS`.
+- **Nix / NixOS (Linux Server only):** Build with `nix build .#stravia-server`, or import `nixosModules.default` and enable `services.stravia` (preinstalls official Wasm plugins). See [Nix deployment](docs/design/architecture.md#nix-server-与-nixos-服务).
 
-**Upgrading an existing instance:** Stop and back up the complete data directory and any external database first. The Route output-purpose migration makes **all historical Routes nonexecutable until individually reconfigured**, on both SQLite and PostgreSQL. See [upgrade and recovery](docs/design/media-generation.md#4-route-与-codex-接入); rollback requires restoring the backup. The history-storage upgrade rewrites existing conversation and request history once at startup; it takes longer and needs more temporary space the larger the history is, and older binaries cannot read the upgraded database.
+### First Run
 
-**First run (both):**
+1. **Initialize** — Open <http://127.0.0.1:23471/setup>, paste the one-time setup token from the console, choose SQLite or PostgreSQL, and create the admin account. *(PostgreSQL requires Redis configured before setup; see [cache & Server config](docs/design/data-layout-performance.md#统一派生缓存与-server-配置).)*
+2. **Add a Provider** — Configure an API key or OAuth channel (e.g., Codex, Claude Code, Grok, Devin). Stravia syncs its model catalog automatically.
+3. **Create a Model Route** — Choose the route purpose (chat, image generation, or web search) and bind matching upstream targets; the **Model ID** is the route clients call.
+4. **Create an API Key & Connect** — Open **Connect clients** to generate a ready-to-apply config patch for Claude Code, Codex CLI, Gemini CLI, or OpenCode (Desktop can apply it directly).
 
-1. Open <http://127.0.0.1:23471/setup> and paste the one-time setup token printed to the console. Pick SQLite or PostgreSQL and create the administrator. PostgreSQL requires Redis configured before setup; see [cache and Server configuration](docs/design/architecture.md#统一派生缓存与-server-配置).
-2. **Add a provider** — API key or OAuth channel (Codex, Claude subscription, Grok device flow, Devin). Stravia syncs the available model inventory.
-3. **Add a model** — choose text or image output, then select matching upstream models; the Model ID is the route clients call.
-4. **Create an API key**, then open **Connect clients** — Stravia generates a ready-to-apply provider patch for Claude Code, Codex CLI, Gemini CLI, or OpenCode; the desktop app can write the config for you.
-
-Then call it through any supported protocol:
+Test with any supported protocol:
 
 ```bash
 curl http://127.0.0.1:23471/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_PROXY_KEY" \
+  -H "Authorization: Bearer YOUR_STRAVIA_KEY" \
   -d '{"model": "my-model", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
+> [!WARNING]
+> **Upgrading an existing instance:** Stop Stravia and back up **both** the complete data directory (including installed Wasm plugins and local files) **and** any external database — a remote PostgreSQL dump alone is incomplete.
+> - **PostgreSQL instances** must configure Redis before upgrading ([details](docs/design/data-layout-performance.md#统一派生缓存与-server-配置)).
+> - **Route purpose upgrades** preserve existing chat routes while separating image-generation and external web-search routes ([details](docs/design/media-generation.md#route-与-provider-接入)).
+> - **History storage upgrades** rewrite conversation and request history once at startup; larger histories require proportionally more time and temporary disk space, and older binaries cannot read upgraded databases. Rollback requires restoring your backup.
+
+---
+
 ## Features
 
-### Unified model access
+### Unified Model Endpoints
 
-| Client-facing protocol    | Endpoint                                               |
-| ------------------------- | ------------------------------------------------------ |
-| OpenAI Chat Completions   | `POST /v1/chat/completions`                            |
-| Open Responses 2026-04-24 | `POST /v1/responses` (JSON, SSE, WebSocket)            |
-| Anthropic Messages        | `POST /v1/messages`                                    |
-| Gemini GenerateContent    | `POST /v1beta/models/{model}:generateContent`          |
-| Gemini streaming          | `POST /v1beta/models/{model}:streamGenerateContent`    |
+| Client Protocol | Endpoint |
+| --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` |
+| Open Responses `2026-04-24` | `POST /v1/responses` *(JSON, SSE, WebSocket)* |
+| Anthropic Messages | `POST /v1/messages` |
+| Gemini GenerateContent | `POST /v1beta/models/{model}:generateContent` |
+| Gemini Streaming | `POST /v1beta/models/{model}:streamGenerateContent` |
 
-Cross-protocol tool calls, reasoning, and usage reporting are preserved; requests that need no changes pass through as-is.
+Cross-protocol tool calls, thinking/reasoning, and usage reporting are preserved; requests needing no translation pass through cleanly. See [Open Responses design](docs/design/open-responses.md).
 
-### Providers and model routing
+### Providers & Priority-Lane Routing
 
-OpenAI (incl. Codex OAuth) · Anthropic (API key; Claude Pro/Max subscription OAuth via the Claude Code plugin — using a subscription outside Claude Code may violate Anthropic's terms) · Google Gemini + Vertex AI · Devin (OAuth) · DeepSeek · Moonshot AI · Zhipu AI · Z.AI · MiniMax · xAI (API key and Grok OAuth) · NVIDIA · OpenRouter · Ollama · custom OpenAI-compatible endpoints.
+Built-in and plugin-backed support for **OpenAI** *(incl. Codex OAuth)*, **Anthropic** *(API key; Claude Pro/Max subscription OAuth via the Claude Code plugin)*, **Google Gemini & Vertex AI**, **Devin** *(OAuth)*, **DeepSeek**, **Moonshot AI**, **Zhipu AI**, **Z.AI**, **MiniMax**, **xAI** *(API key & Grok OAuth)*, **NVIDIA**, **OpenRouter**, **Ollama**, and **custom OpenAI-compatible** endpoints.
 
-Clients call a **Model ID** you define — map it to one or more upstreams in priority layers: requests go to the top layer first, balanced by traffic or preferring the fastest target, and a conversation sticks to what worked before. A built-in catalog keeps provider model lists up to date.
+> [!NOTE]
+> Using a Claude Pro/Max subscription outside official Claude Code via OAuth may violate Anthropic's terms of service.
 
-When an upstream service is temporarily unavailable, Stravia retries or switches services according to your route configuration. The management UI shows each target's availability.
+Map any client-facing **Model ID** (`Route`) to upstream targets organized in **priority layers**: requests hit the top layer first using traffic equalization or latency preference, keep conversation and prompt-cache affinity, and fail over automatically under configurable retry budgets and cooldowns.
 
-![Editing a model — upstream targets in priority layers](docs/assets/model-routing.png)
+<p align="center">
+  <img src="docs/assets/model-routing.png" alt="Model routing — upstream targets organized in priority lanes">
+</p>
 
-### Platform tools and built-in agent runtime
+### Platform Tools & Built-in Agent Runtime
 
-- `StraviaRead` — one tool, one `path` plus an optional `body`: read files, webpages, research questions, and images with no URL encoding; Office documents (DOCX/XLSX/PPTX/DOC/XLS/PPT) read as extracted Markdown; long results page through automatically.
-- **Web Search** — use the Local agent loop with a browser-backed Local source, Exa, or Zhipu, or bind an External Route whose Vendor plugin returns a complete cited report.
-- **Media Understanding** — describe images and extract text (JPEG/PNG/WebP) or answer questions about Office documents with the vision model you choose.
-- **Media Generation** — generate or edit an image through a saved Route backed by a capable Vendor plugin, then reuse its Artifact Reference in later tools.
-- Expose everything over `POST /mcp`, or add it to compatible requests automatically. Loops run under hard time, turn, token, and tool budgets.
-- **History Recall** — optionally let a Key's automatically added `StraviaRead` browse and read that Key's earlier conversations as read-only files within the history retention period. Off by default and never offered over MCP; everyone sharing the Key can see each other's conversations.
+Expose platform tools over `POST /mcp`, or inject them transparently per API key into compatible model requests — all bounded by hard turn, time, token, and tool budgets.
 
-#### Image generation
+| Capability | What It Does | Details & Caveats |
+| --- | --- | --- |
+| **`StraviaRead`** | One unified `path` (+ `:` selectors & optional `body`) tool for files, webpages, Office docs (`DOCX/XLSX/PPTX/DOC/XLS/PPT` → Markdown), images, research, and background tool results with automatic paging | [Agent Core & StraviaRead](docs/design/agent-core.md#straviaread-统一读取契约) |
+| **Web Search & Fetch** | Bind an External Search Route backed by a capable Vendor plugin, or run the Local Agent loop with host-registered external Web Providers | No built-in local browser engine in the OSS core ([Web Search](docs/design/web-search.md) · [Web Providers](docs/design/web-access-providers.md)) |
+| **Media Understanding** | Describe images (`JPEG/PNG/WebP`), extract text, or answer questions over Office documents with your chosen vision model | [Media Understanding](docs/design/media-understanding.md) |
+| **Media Generation** | Generate or edit images through a saved `image_generation` Route and reuse the resulting Artifact reference in later tools | Subject to upstream account/model support; size hints are not guaranteed exact; retries may consume quota ([Media Generation](docs/design/media-generation.md)) |
+| **History Recall** | Let a Key's transparent `StraviaRead` browse and search that Key's prior conversations as read-only transcripts | **Off by default; never exposed over MCP.** Everyone sharing the same Key can see each other's retained history ([History Recall](docs/design/history-recall.md)) |
+| **Console Chat** | Built-in multi-turn chat inside WebUI using a selected API Key and model, with browser/Desktop-local history | [Console Chat](docs/design/console-chat.md) |
 
-In **Advanced Features → Media Generation**, bind a saved image-output Route with eligible image-generation targets, then enable the capability. Bundled Codex OAuth and image-only plugins use the same Route mechanism; actual availability remains subject to upstream account and model support.
+### Wasm Vendor Plugins
 
-Availability depends on upstream account and model support. Size preferences do not guarantee exact dimensions, and retries may consume additional quota. See the [Media Generation documentation](docs/design/media-generation.md) for configuration, examples, and limits.
+All model vendors run as self-contained **Wasm Components** (`wasm32-wasip2`). Stravia embeds the base vendor (`base`) for standard providers; install dedicated plugins (**Codex**, **Claude Code**, **Grok**, **Command Code**, **Devin**, **Kiro**, **Antigravity**, **OpenCode Free**) from **Vendor Plugins** before adding their connections. Dedicated plugins own their full supplier identity and never fall back to `base`.
 
-### Vendor plugins
+Install from the official catalog, add a third-party public GitHub repository publishing a signed catalog, or import `.wasm` / `.wasm.zst` files offline.
 
-All model Vendors run as self-contained Wasm Components. Stravia embeds the base Vendor; install dedicated plugins such as Codex, Claude Code, Grok, Command Code, and Devin in **Vendor Plugins** before adding a connection. The page combines installed plugins, available releases, and update checks. Dedicated plugins own their full supplier identity and never fall back to the base package.
+> [!IMPORTANT]
+> Review a third-party source's public key fingerprint before trusting it. Signature and digest verification confirm provenance, **not code safety**: installed plugins are trusted with the selected connection's upstream credentials and approved network destinations. See [Plugin Marketplace](docs/design/plugin-marketplace.md) and [Vendor Plugins](docs/design/vendor-plugins.md).
 
-Use the official source or add a public GitHub repository that publishes a signed plugin catalog; review its key fingerprint before trusting it. Offline import accepts `.wasm` and `.wasm.zst`. Downloads are verified, but installation and updates still require confirmation: a plugin is trusted with the selected connection's upstream credentials and approved network destinations, and a valid signature does not establish code safety. See the [marketplace guide](docs/design/plugin-marketplace.md) for source requirements and the [plugin design](docs/design/vendor-plugins.md) for capabilities, isolation, and lifecycle details.
+### Local Credential Protection
 
-### Keys, usage, and request history
+Off by default — enable once to protect outbound requests across every Stravia API Key with zero client changes.
 
-- Built-in console chat: choose an API Key and model in the management UI, stream multi-turn replies, and revisit local conversation history. See [Console Chat](docs/design/console-chat.md) for storage and tool-injection limits.
-- API keys with custom secrets, model bindings, expiry, and per-key limits for concurrency, MCP access, and automatic tool injection.
-- Request Records: watch every interaction live on a zoomable canvas — model calls, retries, and tool calls — with a separate failed-requests list and a per-conversation view.
-- See the token usage and provider quotas that services actually report.
-- Turn on Debug to capture HTTP/SSE/WebSocket traffic and download it as a debug bundle; only HTTP `Authorization` values are masked, while other credentials, content, and media may be retained. Treat bundles as sensitive; see the [Request Records design](docs/design/interaction-observation.md).
-- Ordinary request observations use the same filtering even with Debug off: only actual HTTP `Authorization` header values are masked (case-insensitive header name), not similarly named body or tool fields. Live views, saved records, and exported events may retain download grants and other raw credentials. This does not expand ordinary capture into full wire recording, rewrite old records, or change retention, permissions, process-log/client-error filtering, or model-side credential protection. Download grants are not automatically refreshed or renewed.
+- **Local-only detection:** Scans outbound model messages, history, and tool inputs/outputs with **461 bundled offline Betterleaks rules** plus custom rules — nothing is sent externally for inspection.
+- **End-to-end restore:** When a model echoes a placeholder, Stravia restores the real credential in answers and tool arguments so tools keep working; the same secret reuses the same placeholder per API Key across turns and restarts.
+- **Fail-closed:** If detection or storage fails, the request fails rather than leaking plaintext. Disabling stops new replacements while letting unexpired placeholders restore.
+- **Inspectable & testable:** Browse rules, review masked hit records, and test sample text locally (test input is never saved).
 
-### Credential protection
+> [!NOTE]
+> Credential protection catches patterns covered by its rules — not every secret, PII, or business data — may over- or under-match, and does not scan images or binary attachments. Tools receive real credentials at execution time, so keep tool permissions and egress limits enforced. See [Credential Protection](docs/design/credential-protection.md).
 
-Off by default — turn it on once and it covers every Stravia API key, with nothing to change in your clients.
+### Keys, Spend & Request Records
 
-- **Secrets stay on your machine** — Stravia recognizes API keys, tokens, and other credentials in messages, history, and tool inputs and outputs bound for a model, and swaps them for placeholders before the request goes out. All 461 detection rules are bundled and run locally — nothing is sent anywhere to be checked.
-- **Replies still work end to end** — when a provider echoes a placeholder back, Stravia restores the real value in the answer and in tool calls, so tools can keep using the credential. The same secret keeps the same placeholder across conversations and restarts.
-- **Fails safe, never silently** — if detection or storage breaks, the request fails instead of shipping your plaintext. Turning it off stops new replacements; placeholders already issued still restore until they expire.
-- **Visible and testable** — browse the full rule list, see which credentials each request caught, and try your own text against the detector — test input stays on this instance and is never saved.
+- **Access & cost control:** Custom API keys with model bindings, expiry, root RPM limits, spend limits, custom display currency, and per-key transparent tool injection sets ([Cost & Billing](docs/design/cost-and-billing.md)).
+- **Live Request Records:** Watch every interaction on a zoomable canvas — model turns, retries, failovers, and tool calls — alongside separate Client Errors, confirmed upstream usage, and provider allowance tracking.
+- **Wire Debug & Bundles:** Toggle process-level Debug to capture 4-direction HTTP/SSE/WebSocket traffic and export a versioned ZIP Debug Bundle per interaction.
 
-Good to know: it catches what its rules know — not every secret, and not personal or business data. It can over- or under-match and doesn't scan images or attachments. Tools receive the real credential when they run, so keep tool permissions and outbound limits in place — this lowers exposure, it isn't a lock.
+> [!CAUTION]
+> **Sensitive capture data:** Both Wire Debug Capture and ordinary Request Observation mask **only** actual HTTP `Authorization` header values (case-insensitive) — not body fields, tool parameters, or download grants. Live views, saved records, and exported Debug Bundles may retain raw credentials and media; handle them as sensitive data. See [Wire Debug & Redaction Boundaries](docs/design/interaction-observation.md#wire-debug-与脱敏边界).
 
-### Storage and deployment
+---
 
-- SQLite or PostgreSQL, chosen at first-run setup; files in local storage or S3. Existing PostgreSQL installations must also configure Redis before upgrading; see [cache and Server configuration](docs/design/architecture.md#统一派生缓存与-server-配置).
-- Instance data lives in one directory for easier management. Back up its database and local files—including installed plugin Components—together; a remote PostgreSQL backup alone is incomplete. Before migrating or upgrading, review the [deployment and storage documentation](docs/design/architecture.md) for backup and version compatibility requirements.
-- One port serves the model APIs, MCP, the admin API, health checks, and the built-in management UI; deploys cleanly behind a reverse proxy.
+## Desktop vs. Server
 
-## Deployment modes
+Both editions share the exact same Rust core and embedded Svelte 5 WebUI on a single unified port (`:23471`), ready for direct local use or reverse-proxy deployment.
 
-|               | Desktop                                             | Server                                      |
-| ------------- | --------------------------------------------------- | ------------------------------------------- |
-| Form          | Tauri app with integrated management UI             | Single headless binary or container image   |
-| Best for      | Individual developers; writes client config locally | Self-hosted and shared team deployments     |
-| Storage       | Local SQLite                                        | SQLite or PostgreSQL                        |
-| Get it        | Windows NSIS / Linux AppImage / macOS DMG on Releases | Archive · `ghcr.io` image                  |
+| | Desktop | Server |
+| --- | --- | --- |
+| **Form factor** | Tauri desktop app with integrated UI | Headless single binary or container image |
+| **Best for** | Individual developers; auto-writes local client configs | Self-hosted and shared team deployments |
+| **Database** | Local SQLite | SQLite or PostgreSQL *(+ Redis)* |
+| **File storage** | Local directory | Local directory or S3 |
+| **Distribution** | Windows NSIS · Linux AppImage · macOS DMG | Release archives · `ghcr.io` image · Nix flake |
 
-The same Rust core powers both; the management surface is the same WebUI.
+---
 
 ## Documentation
 
-- [Architecture](docs/design/architecture.md) and [design documents](docs/design/) · [ADRs](docs/adr/)
-- Database schema: [PostgreSQL](docs/database/postgres.sql) · [SQLite](docs/database/sqlite.sql) · [Changelog](CHANGELOG.md)
+| Document | Purpose |
+| --- | --- |
+| [Glossary (`GLOSSARY.md`)](GLOSSARY.md) | Domain terminology & concept map (Chinese-first with canonical English terms) |
+| [Design Docs (`docs/design/`)](docs/design/README.md) | Authoritative current system architecture & subsystem contracts |
+| [Architecture Decisions (`docs/adr/`)](docs/adr/README.md) | Active ADRs explaining key engineering trade-offs |
+| [Database Schemas](docs/database/) | Generated reference schemas: [SQLite](docs/database/sqlite.sql) · [PostgreSQL](docs/database/postgres.sql) |
+| [Releasing & Signing](docs/releasing.md) | Release pipeline, Desktop updater signing, macOS notes & plugin catalog publishing |
+| [Changelog](CHANGELOG.md) | Version history and release notes |
+
+---
 
 ## Development
 
-Rust toolchain: [`rust-toolchain.toml`](rust-toolchain.toml) · Bun `1.4.2` · Task `3.52.0` · uv for Python E2E.
+**Toolchain:** Rust ([`rust-toolchain.toml`](rust-toolchain.toml)) · Bun `1.4.2` ([`package.json`](package.json)) · [Task](Taskfile.yml) · `uv` (Python E2E).
 
-Project JavaScript development, build, and test commands use Bun. Rust and Python tests retain their native runners.
+Before invoking `cargo` directly or opening the workspace in an IDE, run `task prepare:crates` (requires Cargo & Git; re-run after `cargo clean`). Task's Rust commands run it automatically. See [dev environment & `patch-crate`](docs/design/architecture.md#开发环境与-patch-crate).
 
-Before invoking Cargo directly or opening the workspace in an IDE, run `task prepare:crates` (requires Cargo and Git). It installs the pinned `patch-crate` tool when needed and prepares the patched dependencies; Task's Rust commands do this automatically. Run it again after `cargo clean`. Preparation must finish before builds start; do not refresh patched sources during a build. Patch updates and offline source setup are described in the [architecture documentation](docs/design/architecture.md#61-descriptor-与操作入口).
+| Command | Purpose |
+| --- | --- |
+| `task prepare:crates` | Prepare patched Cargo crates before direct Cargo/IDE use |
+| `task dev:server` | Start Vite WebUI + standalone debug server |
+| `task dev:desktop` | Start Tauri desktop app in development mode |
+| `task check` | Run WebUI check, ESLint, `rustfmt`, and Cargo checks |
+| `task test` | Run WebUI and Rust unit tests |
+| `task test:all` | Run the full local test matrix (isolated Docker PG/Redis + E2E) |
+| `DB_URL=… STRAVIA_TEST_REDIS_URL=… task test:e2e` | Run the full backend Proxy, Admin, SQLite, and PostgreSQL E2E suite |
 
-| Command                  | Purpose                                                     |
-| ------------------------ | ----------------------------------------------------------- |
-| `task dev:server`        | Start the Vite WebUI and standalone debug server            |
-| `task dev:desktop`       | Start the Tauri desktop app in development mode             |
-| `task check`             | Run WebUI checks, ESLint, Rust formatting, and Cargo checks |
-| `task test`              | Run WebUI and supported Rust unit tests                     |
-| `DB_URL=… STRAVIA_TEST_REDIS_URL=… task test:e2e` | Run the full proxy, Admin, SQLite, and PostgreSQL E2E suite |
+---
 
 ## License
 
 Stravia is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
-Separately licensed components retain their own terms: `stravia-web-access` is `CC0-1.0 AND MIT` ([Cargo.toml](backend/crates/stravia-web-access/Cargo.toml)); its browser stealth scripts retain their [MIT license](backend/crates/stravia-web-access/src/browser/stealth/LICENSE). Bundled fonts retain their respective licenses.
+
+Third-party bundled assets retain their respective licenses:
+- Credential detection rules (Betterleaks): [MIT License](backend/crates/stravia-credential-protection/src/detection/LICENSE.betterleaks)
+- Bundled fonts: [IBM Plex](frontend/stravia-webui/static/fonts/LICENSE-IBM-PLEX.txt) · [Noto Sans SC](frontend/stravia-webui/static/fonts/LICENSE-NOTO-SANS-SC.txt)
 
 ## Star History
 

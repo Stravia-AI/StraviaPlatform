@@ -4,77 +4,8 @@ status: accepted
 
 # 用 `:` 选择器与纯文本字段读取路径
 
-StraviaRead 的输入不再是一个必须转义的 URL 字符串，而是 `path` 加可选 `body` 对象：`path` 只承载地址和写在末尾的 `:` 选择器，自由文本放在 `body.question`，`attachments`、`allowed_domains`、`wait` 放在 `body` 内。本决定局部取代 [ADR-0051](0051-disambiguate-artifact-download-and-understanding.md) 的公开输入约定（只公开 `path`、`search://`、`#stravia?` fragment、Artifact query 选项与搜索 query 参数）、[ADR-0064](0064-use-stravia-uri-references-without-sessions.md) 中 StraviaRead query 参数 `previous_path` 的约定，以及 [ADR-0082](0082-expose-queryable-tool-executions-after-bounded-wait.md) 中 `?wait=` 查询参数的约定。
+StraviaRead 采用必填的 `path` 和可选的 `body`。`path` 只承载地址与末尾的 `:` 选择器；问题、搜索文本及追问以 `body.question` 原样传入，`attachments`、`allowed_domains` 和 `wait` 也在 `body`。联网搜索用 `stravia://search`，续接直接用 `stravia://turns/<turn-id>` 作 `path`；搜索和媒体续接各自校验其适用字段，不由解析器猜测 Turn 类型。
 
-## 背景
+把自由文本与地址分开，避免表单解码把 `+` 当作空格、拒绝字面 `%`，以及为嵌套 Turn 地址再次编码。行范围、`raw`、`download` 与 `cursor=…` 是受限的路径后缀，不把所有选项都平铺成工具 schema 字段；下一页路径因此可直接复制。选择器的适用范围由目标资源决定。普通 HTTP(S) 查询与片段仍属于源站，端口不会被识别成行范围；外部 URL 确以类似选择器的内容结尾时，用 `%3A` 表达属于 URL 的字面冒号。旧平台选项语法不再接受，也不提供别名。
 
-旧契约把搜索文本、允许域名、问题、行范围、下载与续接都编码进一个字符串：`search://<文本>?allowed_domains=…`、`<URL>#stravia?...`、`stravia://artifacts/<id>?question=...`。调用方必须在调用前做 percent-encoding：表单解码把 `+` 当作空格，非法的 `%` 会导致参数错误，续接还需把 Turn Reference 编码成 `previous_path`，形成嵌套编码。自由文本改用 JSON 字段，结构化选项改用受限字符集的 `:` 选择器，不再要求模型编码这些参数。选择器是 Stravia 的读取语法，不是通用 URL 标准；源 URL 以选择器形态结尾时仍需转义字面冒号。
-
-## path 与选择器
-
-`path` 只承载地址和无需编码的 `:` 选择器，与 omp `read` 工具的形态一致。选择器从 path 末尾按 `:` 切出 token，自右向左逐个剥离，类型只有四种：
-
-- `raw`；
-- `download`；
-- `cursor=<1+ 个 [A-Za-z0-9_-]>`（平台生成的 base64url 无填充游标）；
-- 行范围：逗号分隔的段，每段为 `N`（到 EOF）、`N-M`、`N+K` 或 `-K`，均为 1-based 正整数，最多 `MAX_LINE_SELECTIONS` 段，运算做溢出检查。
-
-剥离位置的底线是：Artifact 为 55 位 id 结束处，HTTP(S) 为 authority 结束处，即 `scheme://` 之后第一个 `/`、`?` 或 `#`。没有这种字符时不剥离，因此 `https://host:8080` 里的 `:8080` 仍是端口。token 严格符合语法才剥离，否则停止，剩余部分按字面作为地址。每种 token 最多出现一次；多个行范围 token 报错并提示用逗号合并；`:raw:1-20` 与 `:1-20:raw` 两种顺序都合法。Artifact 剥离后若仍有多余字符，报“无效 Artifact Reference”并附选择器提示。
-
-源 URL 本身以选择器形态结尾时，把属于 URL 的那个 `:` 写成 `%3A`，`%3A` 原样发往源站，不做任何解码。裸 `host:port` 后需要跟一个 `/` 才能追加选择器。
-
-组合约束沿用旧规则：`raw` 与 `question` 互斥；`download` 不能与任何其他选择器或 `question` 同用；`cursor` 只对 Artifact 有效，不能与其他选择器或 `question` 同用；行范围可与 `question` 共存，具体内容类型限制由 core 决定。续页 `next_path` 由平台生成为 `{read_path}:cursor={token}`。
-
-## 自由文本走字段
-
-顶层只接受 `path` 和 `body`：`path` 是必填字符串，`body` 可省略或为 `null`，否则必须为对象。`body` 接受 `question`（字符串）、`attachments` 与 `allowed_domains`（字符串数组）、`wait`（非负整数），这些字段均可省略或为 `null`。顶层与 `body` 内的未知字段、类型错误及不适用的非零字段均被拒绝；旧的顶层平铺字段明确拒绝并提示移入 `body`，不提供兼容 shim。参数错误提示字段位置、期望类型和正确用法，不回显输入值。
-
-JSON 里的 `null`、缺省与零值（空白 `question`、空数组、`wait: 0`）含义相同：解析入口先把零值归一为缺省，各 path 只校验有内容的字段，零值不会因“字段不适用于该 path”被拒绝，原因见“模型 schema 与运行时校验”。`question` 承载搜索文本、网页/媒体问题与续接追问；搜索轮与续接必须带非空白的 `question`，空白按缺省报缺少字段，搜索轮不超过 `MAX_SEARCH_TEXT_BYTES`；`attachments`、`allowed_domains`、`wait` 可空。`allowed_domains` 沿用现有规则：原始条目 ≤ 20、每项非空白、经 `normalize_domains` 规范化去重、规范化后非空；空数组与省略、`null` 相同，新搜索不限制来源，续接继承父策略，非空列表表示替换。空数组本身没有可执行的独立含义（不能表示“禁止所有来源”，也不能清空续接继承的策略），因此不单独报错。`attachments` 的 `[]` 等同于缺省；每项必须是精确的 Artifact Reference（`stravia://artifacts/<55 lowercase>`）或公网 http(s) URL，按字面值处理，不剥离选择器，也不接受 `#stravia?`；重复项报错，数量上限由媒体执行侧负责。`wait` 只对 tool-executions path 有效，缺省为 0；其他 path 只拒绝正整数 `wait`。
-
-解析器不知道 Turn 的类型：`attachments` 只适用于媒体轮，`allowed_domains` 只适用于搜索轮，由 core 在查出 Turn 类型后校验。
-
-## 按范围裁剪
-
-参数表放在工具 description 中，按暴露范围裁剪以控制 token 成本：`wait` 仅面向非内部入口；`question` 随联网、媒体或历史范围出现；`attachments` 随媒体范围出现；`allowed_domains` 随联网范围出现。描述裁剪不放宽运行时权限与各 path 的字段矩阵。内部 Agent 不提供 `wait`，但提供搜索和媒体相关字段。
-
-## 续接
-
-续接直接把上一轮结果里的 `stravia://turns/<id>` 作为 `path`，`question` 是追问，不再有独立的 `previous_path` 参数。`attachments` 保住“续接时换新图”的能力：媒体续接在 `attachments` 中列出新增的 Artifact path 或公网 URL；搜索续接省略 `allowed_domains` 时继承父策略。Turn 类型由平台用 `TurnChainStore::node_kind` 查出：WebSearch 轮分派搜索，Agent 轮分派媒体，Response 轮或不可用 Turn 报“Turn cannot be continued with StraviaRead”或“Turn unavailable”。内部 Agent 仍拒绝研究续接。
-
-## 取代旧语法
-
-`stravia://search` 取代 `search://`；Artifact 与 HTTP(S) 资源的 `:` 选择器取代 `?`／`#` 选项；续接 path 取代 `previous_path` 参数；`wait` 字段取代 `?wait=`。旧语法不保留别名，只给出可执行的报错：
-
-- `search://…` 或 `query://…` → 提示使用 path `stravia://search` 并把搜索文本放入 `body.question`；
-- Artifact 带 `?` 或 `#` → 提示使用 `:` 选择器并把问题放入 `body.question`；
-- HTTP fragment 以 `stravia?` 开头 → 同上提示；
-- tool-executions 带 `?wait=` → 提示使用 `body.wait`；
-- Turn 带后缀 → 无效 Turn Reference。
-
-其他 `stravia://`、`sa:`、`https://stravia/artifact/…` 继续拒绝；HTTP 普通 fragment 保留源语义。报错不回显完整 URL、question 或字段值。
-
-## 模型 schema 与运行时校验
-
-模型侧声明使用 `strict: false`，schema 只公开 `path` 与可空对象 `body`，模型声明可将两者都列入 `required`；MCP schema 只有 `path` 必填。`body` 内部字段不在模型 schema 中展开，仅在 description 中按能力范围提供参数表。这一取舍避免严格 schema 将每个内部字段都强制填入，并保留模型可自纠的参数错误；后端仍执行强类型校验、未知字段检查和路径／能力限制，不能因 schema 宽松而放宽授权。
-
-模型仍可传 `null` 表示不设置，语义与省略一致。部分模型使用空字符串、空数组或 `0` 作为占位值，因此零值也按省略处理；否则调用会因不适用字段的占位值反复失败。
-
-## Considered options
-
-- **全部 JSON 字段**：搜索文本、问题、行范围、下载、续接全部做成独立字段。字段多、schema 与每次调用的 token 成本高，也偏离 URL 规范方向；路径本身就是地址，选择器比一堆并列字段更贴近用户看到的 `next_path`。
-- **保留 query 与 fragment 选项**：即旧契约。表单解码中 `+` 的问题、非法 `%` 直接报错、`previous_path` 的嵌套编码，都会让 LLM 在真实调用中反复失败，且这些错误对模型不可见或难以自纠。
-- **保留 `previous_path` 字段**：同一续接会同时存在“Turn 作为 path”和“Turn 作为 `previous_path`”两种写法，解析、schema 与文档都要维护两条路径，调用方也会混用。
-
-## Consequences
-
-- 旧语法被干净切换，没有别名；旧搜索路径、Artifact query 选项、专用 HTTP fragment 和执行查询参数会得到指明新写法的错误。外部 HTTP(S) URL 的普通 query 属于源站，不能将其中的 `question` 或 `download` 当作旧平台参数拒绝。
-- 外部 URL 字面以 `:数字` 结尾时会被当作行范围。用户必须把属于 URL 的 `:` 写成 `%3A`；这是唯一的编码要求。
-- 内部 Agent 仍拒绝研究续接；它的字段集不含 `wait`，但包含 `attachments` 与 `allowed_domains`。
-- 续接只有一种写法；`attachments` 只影响媒体轮，`allowed_domains` 只影响搜索轮，错用会在 core 查明 Turn 类型后报错，而不是在解析器里猜测。
-- 输入不再有 percent-decode 路径，安全校验不再需要先解码再判断选项归属。
-
-## 与既有决策的关系
-
-- [ADR-0051](0051-disambiguate-artifact-download-and-understanding.md)：只公开 `path`、`search://`、`#stravia?` fragment、Artifact query 选项与搜索 query 参数这几项输入约定被本决定取代；内容决定默认行为、来源约束、不可变文本续读与能力门控不变。
-- [ADR-0064](0064-use-stravia-uri-references-without-sessions.md)：仅 StraviaRead query 参数 `previous_path` 改为续接 path；平台工具 JSON 字段 `previous_path` 仍有效，引用外壳与 Principal 边界不变。
-- [ADR-0082](0082-expose-queryable-tool-executions-after-bounded-wait.md)：仅 StraviaRead 的 `?wait=` 改为 `wait` 字段；同步等待窗口、执行引用、取消与查询语义不变。
+模型 schema 不展开 `body` 内的所有字段，避免强制模型填入无关参数，参数说明按暴露范围裁剪。`null`、缺省和空占位值按未设置处理；宽松声明不放宽运行时类型、未知字段、路径适用性或授权校验。通用语法、分页和执行范围由 [Agent Core 设计](../design/agent-core.md)维护；历史路径及其检索字段矩阵由[历史回看设计](../design/history-recall.md)维护。

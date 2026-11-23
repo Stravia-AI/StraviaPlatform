@@ -22,7 +22,7 @@ Responses 客户端在无状态回放（`store=false` 的 Codex HTTP、AI SDK �
 - 令牌不是上游载荷：它不进入受保护载荷摘要、来源清单和 ADR-0080 的拒绝记忆。
 - 旧历史中位于 `content` 的 Marker 继续按原规则解析；新输出只使用 `encrypted_content`，不双写。
 
-ADR-0075 与 `docs/design/open-responses.md` 关于 `Thinking.signature` 不得伪装为 `encrypted_content` 的约束保持：令牌是指向服务端私有历史的指针，签名、密文和 redacted 数据本身从不离开网关。
+按 [Open Responses 设计](../design/open-responses.md)，`Thinking.signature` 不得伪装为 `encrypted_content`。Stravia 令牌仅指向服务端私有历史；走 Marker 投影的载荷不会嵌入令牌或客户端预览，原生 Responses 载荷仍遵循本协议的既有规则。
 
 ## Considered Options
 

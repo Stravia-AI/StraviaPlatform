@@ -6,7 +6,7 @@ status: accepted
 
 Stravia 将 Generation Chain 的持久节点限定为 canonical 输入 delta、最终输出和 resolved profile delta；Gateway 使用可丢弃的 Generation Materialization Cache 加速精确重建。完整 durable Checkpoint 会持续复制增长中的历史，且现有逐祖先物化接口不会从中获益，因此不作为当前存储格式。
 
-当前缓存后端修正原来的进程内 LRU 实现：物化对象及按 ingress 隔离的祖先引用目录进入同一 Gateway 的统一派生缓存，Memory / SQLite 使用 TinyUFO，PostgreSQL 使用 Redis，共享逻辑字节预算。后端变化不改变本 ADR 的 delta 存储决定或 SQL 历史事实源；配置与单实例边界见[存储架构](../design/architecture.md#统一派生缓存与-server-配置)。
+物化对象和按 ingress 隔离的祖先引用目录共享派生缓存预算。配置与实例边界见[统一派生缓存与 Server 配置](../design/data-layout-performance.md#统一派生缓存与-server-配置)。
 
 ## Consequences
 

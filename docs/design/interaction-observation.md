@@ -1,1289 +1,280 @@
-# Connect Client Interaction Observation 设计
+# 交互观测与请求记录
 
-> Canonical Item 的诊断持久化边界以 [ADR-0062](../adr/0062-persist-diagnostic-content-at-canonical-item-boundaries.md) 为准；Debug 的 wire-only 捕获边界以 [ADR-0063](../adr/0063-record-four-direction-wire-debug-at-transport-boundaries.md) 为准；事件收敛与 Debug manifest 文件化以 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md) 为准。
+Interaction Observation 记录一次客户端任务中的 Inference Run、Model Turn、Target 尝试、工具交接、实际交付及已确认用量，供管理诊断与分析。
+失败、取消、重试和分支保持各自事实。普通记录不保存完整 canonical 请求／响应，不保存思考签名或密文；原始应用协议字节另由显式 Wire Debug 捕获。
 
-## 1. 目标
+## 执行隔离与存储失败
 
-把现有按单条请求展示的 `request_logs` 与仅限 debug 构建的 `wire_capture` 干净切换为统一的 `Interaction Observation`：
+Observation 不是模型历史、执行调度或 Generation Chain 的事实源。它不恢复模型输入、不重放 Hook 或生成，也不按 IP、连接、客户端名称或模糊文字推断执行历史。
+实时通知、Debug 开关和文件只保证同一 Gateway 进程内可用；持久历史可跨进程读取，不承诺实时聚合或共享本地 Trace。
 
-- 请求记录页以 `Connect Client Interaction` 为画布节点，以 `Generation Chain` 因果关系连接节点；
-- 一次 Interaction 覆盖一次新 User 输入到最终生成响应之间的一个或多个 Inference Run，并允许 Run 子树分叉；
-- 正在执行的状态、客户端可见输出和 Confirmed Upstream Usage 通过轻量变更通知、按 root 的差量查询与选中正文 SSE 更新；主动调度等待共享 500ms 预算，网络、数据库与实际渲染服务时间另计，不承诺固定端到端完成时间；
-- Debug 按每个 Inference Run 准入时的进程级开关快照生效；
-- Debug Trace 只覆盖四个方向的原始应用协议级收发：上游 HTTP 在 reqwest 请求/响应边界，WebSocket 与客户端在各自传输边界；不记录 canonical、Hook 或 Client Projection 中间阶段；
-- Interaction Debug Bundle 以版本化 ZIP 流式导出，明确完整、部分或缺失状态；
-- 普通 Observation 保存生命周期、usage、工具事件，以及按 Canonical Item 收口的可读思考与客户端可见内容；正文不再进入事件行，而是引用共享内容存储中的不可变单元（见 §6.1.2）；不保存完整 canonical request/response 或 wire payload，也不采集模型思考的签名和密文；
-- Observation 只服务诊断，不成为推理执行、Generation Chain 或模型历史的事实源。
+- 观测队列过载、写入、SSE、文件、容量统计或导出失败不改变推理、路由重试、Client Output Commit 或 Generation Chain 提交，也不终止实例。能确认的缺失标记 `observation_gap` 或 Trace `partial`，不能补造用量或重放请求。
+- 关键同步存储失败只让所属请求或任务按原错误失败；异步诊断失败只归诊断任务，不取消推理或其他工作。见 [ADR-0060](../adr/0060-own-interaction-observation-outside-generation-chain.md)。
+- 已交付但 Generation 提交失败记录 `settlement_generation_commit`，显示「响应已交付，历史未保存」，不改报失败。Generation parent 存在而其观察不可用记录 `generation_parent_observation_unavailable`，不伪造父节点或断言历史库故障。
+- 独立统计写入失败时保护破坏性清理，见[长期 Stats Usage](#长期-stats-usage)。
 
-本设计同时适用于 SQLite 和 PostgreSQL 存储，但实时状态与 Debug 开关只承诺单 Gateway 实例。多实例聚合不在本设计范围内。
+## 归属与交互链路
 
-对话正文与 Thinking、工具活动按同一 Run 的首次接收顺序交错展示，不再按类型分组。文本首段在观察入口采集 `first_received_at`；writer 分配进程内单调 `receive_order`，易失块与 Canonical Item 收口事件沿用同一序号，工具生命周期事件在同一接收序列中取号。元数据只存在于事件属性（读取时拼回 `payload`，存储见 §6.1.2）与 live block 中，不需要 SQL 列。刷新后优先使用已记录的接收序号，不能把条目最终闭包的时间当作首次收到。没有这些元数据的历史仍使用已知事件 sequence，不推断或回写旧顺序；只包含 History Marker 的空正文不生成展示块。
+**Interaction** 汇总一个客户端任务的一个或多个 Run，可有并发子树。按同一 Principal 的已证实来源做诊断归属；充分证据可以跨 Generation 根，但不新增或改写执行父边，不恢复裁掉的输入，也不增加 Target Continuation 权限。见 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)。
+`parent_run_id` 是观测来源，`generation_parent_id` 是执行父边。记录归属理由与可确认来源，不重分配已保存历史。
 
-模型、工具与交付生命周期事件在生产者进入观察模块时采集发生时间，随写命令传递；排队、异步发送、批处理和 deferred 命令不得在出队时重新取时，文本合流保留首段的接收时间。已有实际交付和完成时间直接沿用，不从 `duration_ms` 反推。事件的 `occurred_at`、writer 接收序号和落盘 sequence 各自保留语义，不按时间重排事件；批内聚合活跃时间取实际持久化事件的最大发生时间，迟到事件不能掩盖同批较新的活动，迟到准入也不能回退 Interaction 已知的活跃时间。此规则适用于新记录，不推测或回写旧记录的发生时间。
+### 归属优先级
 
-控制台对话按 Responses 输出项顺序渲染正文与公开思考；流式检查点另存交错的 `partialBlocks`，使中断、失败或刷新后保持已观察到的块布局。旧检查点缺少交错证据时保留其原有布局，不从拼接正文推测边界。
+1. **已证实的工具结果后 User 尾段编辑。** 已保存收据与完整 canonical 输入证明工具结果及此前历史完全相同、只编辑其后非空普通 User 尾段时，另建 child Interaction，连来源 Interaction 和 Run。该结论不受两秒或五分钟规则覆盖，即使模型或控制变更导致执行父边缺失。
+2. **Current Tool Continuation。** 由本次真实收到输入的当前尾段，核验同一 Principal 下已交付来源的待回传工具。尾段从最后一个 Assistant 后开始，接受顶层结果及 User 中的 ToolResult；本批结果须唯一对应同一个来源 Run，交付不晚于本次 ingress。
+   确认后归入来源 Interaction，并把来源 Run 作为观测父节点；即使夹带新 User、执行父边更早或缺失、超过五分钟，结论不变。同一父响应的并发合法续接仍各保留 Run。
+3. **已确认的 Generation parent。** 无新 User 的精确续接／失败重试归入父 Interaction；其精确 delta 回传父历史的当前待处理工具时也归入父 Interaction。否则有新 User 时，只有 ingress 距父响应完整交付 `[0, 2000]` ms 且父 Generation node 未被其他 Run 续接，才快速归并；失败且无输出的尝试不占此资格。
+   快速续接可重新激活已完成 Interaction，不区分自动提醒与真人输入；已有续接的后到支路或其余新 User 新建 child Interaction。
+4. **Retained Tail Association。** 无当前工具来源也无执行父边时，唯一完整尾部匹配、匹配后无新 User 且 ingress 距来源完整交付 `[0, 300000]` ms，归入来源 Interaction。
+   若有新 User、已超窗或不能证实时间，但来源仍完整且唯一，创建新 Interaction 并保留诊断来源；不先按时间排除较旧的冲突候选。已存在执行父边时可独立记录尾部诊断，但不覆盖执行父边主导的归属。
+5. **失败根重试与独立根。** 无父边且无前述来源时，同 Principal、全 canonical fingerprint 相同、候选 Run 已失败且无 Client Output Commit、间隔小于两分钟、无同指纹活动 Run 才合并根重试。
+   指纹只排除尝试级 `parameters.session.request_id`，不使用输入短文本或任意 session 标签；索引只在本进程，重启后不猜。在同一归属内不再重复发布此重试的用户输入，仍保留两条 Run。
+   证据不成立就新建独立根，即使合法请求没有 User。
 
-一次工具调用只占一个可展开块：调用的参数与结果合并在同一块内，块在调用开始的位置展示，不另起结果块。状态在原地更新且只用图标表达，行内不显示状态文字：进行中或等待客户端返回时显示转圈；失败为红色叉号，等待已结束而未收到结果（`superseded`、断线、过期、进程重启、中断）为琥珀色减号，悬停图标显示具体原因，同时以不可见文本供辅助技术读取。结果到达后同一块恢复默认图标，并在展开详情里依次展示参数与返回（失败返回以叉号标记）。并发调用各自按调用开始的位置排列、各自更新状态；客户端续接的结果由承载该结果的 Run 提供，仍通过已确认祖先调用关联到原调用块，不在承载它的 Run 里重复出现。
+### 工具回放证据
 
-Observation 使用统一平台身份契约：随机不透明 ID 是由密码学安全随机生成器均匀采样的 28 位 ASCII 小写字母（约 131.6 bit），完整 SHA-256 派生身份则用 55 位 ASCII 小写字母保留全部 256 bit。Artifact Reference 为 `stravia://artifacts/<55 位 ID>`，Turn Reference 为 `stravia://turns/<28 位 ID>`，Search Source 为 `stravia://turns/<28 位 ID>/sources/<ordinal>`；History Marker 为 `<!--sh:<28 位 ID>-->`，Projection Delimiter 为 `<!--sp:<28 位 ID>:<t|p>:<ordinal>:<s|e>-->`，可逆脱敏引用为 `<!--sr:<28 位 ID>-->`。这些外壳不授予访问权，外部 Provider／客户端 ID 与真实凭据 token 不变；旧平台引用不提供兼容解析，已有不可变或外部历史不回写。
+- 交付收据建立待回传调用索引；合并易失与持久有效来源，不等 Generation 提交或窗口重建。旧工具结果不算当前回传；相同 ID、冲突来源或仅含历史截断证据不足。
+- 已保留 `client_tool_result` 收据加上完整旧输入是严格前缀、且新后缀仅是普通 User，证明旧结果重放：不参与当前工具归属，不再捕获该结果，仍应用正常父节点和时间规则。
+- 前缀证明保留 leading system/developer、媒体和原生控制等 canonical 语义，只忽略既定交付、graph 与缓存元数据。进程缓存缺失可从仍保留的 Generation 重建 received-input；截断、过期或无法无损重建时不猜。
+- 同 ID 的新 handoff 是不同调用；仅沿可信祖先比较既有收据，最近结果的内容与错误标记都相同才可去重。结果有变、并发兄弟分支、证据缺失或重复 handoff 不全局吞掉。
+- 已核对的工具续跑若能证明有序用户项与来源一致、且当前以新工具结果结尾，不把完整回放里的 User 误报为新增。证明缺失或确有新增／删除／重排时保留输入。
 
-## 2. 非目标
+### 尾部匹配与原生压缩
 
-- 不记录 TLS、TCP、HTTP/2 frame 或操作系统 packet capture。
-- 不改变 Generation Chain 只保存完整交付 `completed` / `incomplete` 节点的契约。
-- 不用 Observation 恢复模型历史、重放 Hook 或驱动 Inference Run。
-- 不持久化画布坐标，不允许用户拖动或重连节点。
-- 不保留旧 `/api/v1/logs` contract、旧请求表格、普通 CSV 导出或升级前 `request_logs` 数据。
-- 不通过连接、IP、User-Agent 或模糊文本相似度推断 Generation Chain。
-- 不承诺多 Gateway 实例之间的实时事件、Debug 开关或本地 Trace 文件共享。
+索引只以已收到的规范化 client-shaped 输入与实际已交付输出为证据。旧后缀须完整匹配本次输入的连续区间；只可排除顶层 leading system/developer，不能删除内部差异后拼接。
+指纹仅筛选候选，随后核验角色、内容、媒体、工具参数／结果及控制。各来源取自身结束最晚的强匹配；跨来源依次比较结束位置、语义单元跨度、证据字节，并列为 `ambiguous`。
 
-## 3. 领域关系与不变量
+- 强匹配须达到完整语义单元和公开字节门槛，含完整 User／Assistant 交互或闭合工具关系；典型最低为 2 单元、256 canonical UTF-8 字节、64 Assistant 字节。仅短提示或相同会话名不足以归并。
+- 带合法 History Marker 的公开思考投影可核对原样连续性，不恢复隐藏内容，也不计为公开回答。签名、密文等不透明原生状态只以域分隔摘要校验连续性，不计入强匹配阈值；变化即不匹配。无可证回放身份的私有思考使用不可匹配边界。
+- 冷缺窗口可从仍保留的 Generation 客户端视图按需重建；不能完整索引或超出候选核验预算，报告 `index_unavailable` 或 `resource_limit`，不把部分扫描当唯一来源。物理清理过的来源不能复活。
+- `retained_tail_associated` 是诊断推断；`native_compaction_associated` 是已登记原生状态跨越已验证边界，独立于确认的 Generation 父边。三者不互相替代。
+- 支持的[原生压缩](open-responses.md#原生压缩)只来自 Responses。记录实际 standalone／inline `compaction_operation`，按所属 Target 尝试计量；回放已登记状态不算新压缩，独立压缩不造空 Generation 节点。
 
-### 3.1 Interaction 边界
+尾部窗口按最多 512 个语义单元／512 KiB 保留最新后缀；单个单元本身超限不截断后伪匹配。核验按候选和读取字节限额执行，超过预算只影响诊断。
+能用于严格回放的输入证明还需要包含 leading 前缀的完整 received-input；可做尾部诊断的窗口不自动等于完整回放证据。
 
-已确认的目标领域契约见 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：充分证据确认的同一任务续接可以跨多个 Generation Chain 根，仍归入同一个 Interaction。新准入请求按该决策分组；已有 Observation 不重算。以下编号规则描述当前归并行为。
+归属计算由 [Core Run Attribution](../../backend/crates/stravia-core/src/interaction_observation/attribution.rs) 完成，Server、Desktop 与 WebUI 不复制判定。
+作者必须区分 ingress 接收时刻、父响应完整交付时刻和 writer 排队时刻；只有前两者参与归并窗口，其他分支活动不延长资格。
 
-1. 一条新的 canonical `User` item 通常开启新的 Connect Client Interaction；已确认的当前工具续接与两秒快速续接按以下规则归并。
-2. 无法归入已有 Interaction、且不含 User item 的合法根请求也开启新的 Interaction。
-3. 客户端公开工具调用结束当前 Inference Run。同一 Principal 下精确续接父响应、没有新增 User item 的请求继续原 Interaction；请求 delta 的当前输入尾段提交父历史中尚未得到结果的工具调用所对应的结果时，即使夹带新增 User item 也继续原 Interaction，不限时间。当前尾段从 delta 最后一个 Assistant item 之后开始；顶层工具返回与 User 内容块中的 ToolResult 使用相同判定。此外，Observation 独立核验完整输入当前尾段的工具结果：若唯一对应同 Principal 已交付来源的待完成调用，则优先归入该来源 Interaction，并以来源 Run 作为观测父节点，即使严格前缀退回较早 Generation parent。完整历史中的旧工具结果不构成归并证据，历史编辑导致父节点退回更早位置也不例外。
-4. 同一父响应的并发工具续接属于同一 Interaction，并在详情中形成 Run 子树；已保存工具收据证明的 User 尾段编辑分支按下文另建 child Interaction。
-5. 同一 Principal 下精确续接父响应的新请求，其 ingress 接收时间距父响应完整交付时间在 `[0, 2000]` 毫秒内时，即使包含新增 User item 或父 Interaction 已完成，也继续原 Interaction；已完成交互重新进入活动状态。时间不取 admission 处理时间或可变的 `last_active_at`。该父 Generation node 已被其他 Run 续接（失败且未向客户端输出的尝试除外）时，后到的带 User 请求是并行分支，不适用快速续接，按下一条创建 child Interaction，避免旁路请求（如 harness 的 side-channel 询问）污染主 Interaction 的摘要与用量。这项规则仅表示快速续接，不识别或信任 harness hook，真人快速追问同样归并。其他新增 User item 开启新 Interaction；仅此时原 Interaction 中尚无最终响应、且尚无续接 Run 的执行分支标记为 `user_interrupted`；已被续接的等待分支记为 `superseded`，不当作中断。
-6. 有明确 Generation Chain parent、无新 User item 的失败重试恢复原 Interaction，并保留失败 Run。
-7. 无 parent 的失败根 Run 只在以下条件全部满足时归并：
-   - Principal 相同；
-   - canonical request fingerprint 精确相同；
-   - 前一个根 Run 已失败；
-   - 前一个根 Run 从未发生 Client Output Commit；
-   - 新 Run 在前次失败后两分钟内开始；
-   - 没有相同 fingerprint 的 Run 正在执行。
-8. 根重试 fingerprint 只保存在当前进程的短期索引中，不写入 Observation、日志或 API；进程重启后不再归并。
-9. 根重试归并只改变 Observation 分组，不建立或伪造 Generation Chain parent。
-10. 工具续接与快速续接同样只改变 Observation 分组，保留独立 Run 与全部输入，不修改 Generation Chain 父边、权限或模型执行。诊断记录保留归并依据；缺少精确父关系或完整交付时间时，不猜测快速归并。
+### Interaction Chains 成员与状态
 
-Generation parent 存在但对应父观察不可用时，新准入记录 `generation_parent_observation_unavailable` gap，不伪造该父节点的观察；独立确认的当前工具来源仍可决定观测归属。未捕获、已清理、过期或查询失败都可能造成这类缺失，不能仅据此断言历史存储故障。真正的交付后 Generation 提交失败保留 `settlement_generation_commit` 诊断，界面明确“响应已交付，历史未保存”，不把已交付响应改报为请求失败，也不自动重放。
+交付过客户端可见输出的交互保留在链上，包含之后失败的 Run；尚未产生最终失败的活动节点可显示。**从未交付任何客户端可见输出且最终失败的 Interaction 不进默认交互链路**，仍可从客户端错误或深链打开；准入前拒绝不伪造节点。
+筛选可保留因果上下文，但不会把被排除的失败节点当默认成员。[历史回看](history-recall.md)复用链路成员规则，不读取 Debug。
 
-### 3.2 Interaction 主状态
+主状态按优先级为 `running`、`waiting_client`、有最终响应的 `completed`、等待断线后的 `disconnected`，其余为 `interrupted` 并保留真实原因。
+历史失败标志独立于主状态，不覆盖正在运行、等待或最终成功。Run 与工具活动的生命周期不相同。
 
-主状态只表达当前最需要用户注意的活动，不显示分支计数：
+- Delivery 确认终态才产生交付收据：HTTP/SSE 终帧交给实际响应流，WebSocket 终帧实际发送成功，非流式为完整 body。生产者入队、HTTP 200 或 Generation ID 不等于 Client Output Commit。
+- 同 Interaction 的续接在准入事务内将仍等待的观测父 Run 终结为 `superseded`，不算用户中断；来源 finish 比续接晚时仍保留接替。新 User 另开任务仅中断原未完成且未接替的等待分支。
+- 同交互更晚的完整工具收据也可解除等待聚合，即使来自 sibling；错误结果算回传、不算最终生成成功。缺失、部分、空 ID 或不确定调用边界保守保留等待。
+- WS 关闭只结束本连接上未接替且未获完整回传的等待；HTTP/SSE 正常响应结束不意味着客户端离线，闲置 24 小时可记 `client_wait_expired`。合法晚到续接仍可再次激活。
+- 启动收口上一进程遗留活动与真正未解决等待，以 `run_state_changed` 记录 `process_restarted`，不推定客户端离线、不重放工具，也不改以前的交付时间与用量。
+- 最后一个观察句柄释放才以 `unfinished_observation_activity` 收口残留 Turn／attempt；已交接后台执行不因请求诊断收口、删除或过期而被取消，见[工具执行交接](agent-core.md#工具执行交接)。
 
-1. 任一 Run 正在执行：`running`，绿色圆点呼吸；
-2. 无 Run 执行，但任一叶分支等待 Connect Client 工具结果：`waiting_client`，静态琥珀圆点；
-3. 无活动分支且至少有最终生成响应：`completed`；
-4. 既无活动分支，也无最终生成响应，且仍有因客户端连接关闭或等待超时结束等待的叶分支：`disconnected`，显示“已断开”；
-5. 其余终态：`interrupted`，详情保留 `failed`、`cancelled`、`delivery_failed`、`user_interrupted` 等原因。
+### 状态与摘要的独立性
 
-`failed_request` 表示历史中存在失败请求，不覆盖 `completed`、`running` 或 `waiting_client` 主状态；这些状态使用独立的低权重历史失败标记。无活动且以失败结束的交互仍显示失败。输出预览不再有 `visible_tail` 列：摘要的 `output` 是该 Interaction 最新一条 `channel='visible'` 块（`observation_blocks`）的内容引用与 `raw_len`，块内文本单元按空行（`\n\n`）连接，使预览按 Markdown 段落分隔；详情的 `output_text` 另以空行分隔各 Model Turn 的输出。摘要 `output.refs` 为空而 `client_output_delivered` 为真时显示“已交付输出，暂无文本预览”，不能否定已经交付的工具调用或思考预览。该判断不修改 Markdown 原文或代码缩进，也不把思考内容替换为公开正文。
+交付收据先于迟到的执行 finish 或 Generation 提交记录；没有可索引历史窗口不阻止记录实际交付。
+只按已确认收据设置交付结束时间，迟到 finish 补齐执行事实而不延后已知交付时刻。收据失败仅记录观测缺口。
 
-响应完成不等于后台工具完成。仅在最后一个 `RunObserver` 释放、确认不会再产生该 Run 的事件后，writer 才把残留运行中的 Model Turn／Target attempt 记为 `interrupted`，释放残留活动计数并追加 `unfinished_observation_activity` gap。普通后台执行持有的观察句柄继续保护真实活动；公开 `generate` / `StraviaRead` 的子 Model Turn 保留诊断与用量，但不额外占用来源请求的活动保护计数，避免任务已交接仍阻止本已具备资格的来源清理。来源请求自身与其他在途工作的原有保护不变。收口不改写 Run 的交付状态、Generation 关联或已确认 usage，不将缺失的结束事实推断为成功。
+Bundle 内的分支状态只从截止快照内的交付和回传推导；晚到结果可结束当前页面等待，但不能改变先前导出的快照。
 
-等待客户端的常规解除只凭客户端回传证据，不使用会话级猜测超时。同一 Interaction 内，一个 Run 的全部公开工具交接都已收到其他 Run 中 sequence 严格更晚的同 ID `client_tool_result` 时，该分支不再参与活动等待聚合，即使结果来自 sibling、结构上仍是叶节点。错误工具结果同样证明客户端已回传，但不证明最终生成成功；没有最终生成响应时，不能因此把 Interaction 标为 `completed`。判定只读取工具 ID 与事件顺序（`observation_tool_results` 的 `tool_id` 与所属事件 sequence，走 `(tool_id, sequence)` 索引），不读取参数、结果正文或 Debug 文件；缺失或空 ID、没有 handoff、先于 handoff 的结果、部分回传以及同 ID 多次 handoff 均保守保留等待，重复 result 幂等，不跨 Interaction 或 Principal 匹配。状态计算使用尚未物理清除的历史证据；事件没有自己的到期时间，随所属 Interaction 一并删除。Bundle 只使用导出快照内的事件，不能借未来结果解除过去的等待。原 RunOutcome、工具历史和 Generation Chain 父边不改写。
+## 请求终态与成功率指标
 
-Run 级别的等待分支在两条路径上终结，不无限滞留：续接 Run 准入同一 Interaction 时（`parent_run_id` 落在本 Interaction 内、非新交互打断），仍停在 `waiting_client` 的父 Run 在准入同一事务内转为终态 `superseded`、`terminal_reason='superseded'`，并发布 `run_state_changed`（该事件不带 payload，`superseded_by` 是 Run 列，指向续接 Run，读取投影时拼回 payload；同一事务已写入其他事件时不再单独写这一行，由那些事件触发 SSE 通知）。`superseded` 是终态：不持有最终生成响应、不参与 `completed` 判定、不再被中断/断连/重启清扫改写，随所属 Interaction 由保留期扫描删除。仅 sibling 证据解除、结构上仍是叶节点的等待分支保持 `waiting_client` 投影（不参与活动等待聚合），由断连、进程重启或新输入清扫终结；新输入清扫只把本 Interaction 内尚无续接 Run 的叶分支记为 `user_interrupted`，已有本 Interaction 续接的分支一律记 `superseded`（其他 Interaction 的新分支不算续接），不当作中断。
+分类依据真实上游发送及用户请求终态，而非 HTTP 状态码或是否建立了本地尝试记录。见 [ADR-0083（请求终态与上游错误）](../adr/0083-separate-rejected-requests-from-failed-requests-and-count-upstream-errors.md)。
 
-续接准入可能早于来源 Run 的 Generation 提交和 finish。来源随后以工具等待结束时，finish 事务核验同一 Interaction 内已经存在的 child，保留 `superseded` 并以该实际状态写入 `run_finished`，不能把已续接的分支退回 `waiting_client`。既有 `user_interrupted` 和真实失败的优先级不变。
-
-HTTP 等待允许一个兜底闲置边界：叶等待 Run 的 `last_active_at` 超过 24 小时仍无回传时，随保留清理按 `client_wait_expired` 转为 `disconnected` 并发布 `run_state_changed`。窗口必须覆盖合法的长时客户端工具执行，不能缩短到会话级别；客户端可能在边界后补传结果，逾期转换不删除历史也不阻止该结果照常落库。
-
-WebSocket 连接关闭时，该连接所属、仍在等待、没有后继 Run 且尚未由完整工具回传解除等待的分支转为 `disconnected`，记录 `client_disconnected` 原因并发布 `run_state_changed`；已完整交付的结果与 Generation Chain 保留。结果先到时不追加虚假断线；关闭先到时保留真实断线历史。其他连接的等待、已续接分支与最终生成响应不受影响。HTTP/SSE 响应正常结束不能证明客户端离线，同一进程内仍等待合法续接、24 小时闲置超时或保留期清理。旧父节点发生合法晚到续接时，Interaction 可以重新进入活动状态；无法证明连接归属的旧记录不回填 `client_disconnected`。
-
-启动时，在 writer 与对外服务启动前以同一恢复事务修正上一进程遗留的 `running` / `waiting_client` 投影：先沿用运行活动恢复，再排除已有完整工具回传的等待叶；只剩未解决、没有 child 的旧等待 Run 转为 `interrupted`，以 `run_state_changed` 承载；该事件不带 payload，Run 列记录 `status='interrupted'` 与 `terminal_reason='process_restarted'`，读取投影时拼回状态；不再单独持久化 `process_restarted` kind。重启只证明原观察进程结束，不证明第三方客户端离线，不取消或重放客户端工具，也不阻止旧 Generation 的合法晚到续接。恢复保留原 `finished_at`、交付完成时间、Generation 关联、committed、usage 和 `last_active_at`；仅重算投影时保留原 sequence，追加恢复事件时递增 sequence，并以恢复判定时刻记录事件 `occurred_at`，但不推进请求活动时间。恢复幂等，事务失败整体回滚，不手工部分补写；不自动删除历史。既有手动清除仍保护正在运行及真正等待的记录，恢复后的 completed/interrupted 历史按既有规则可清除或由保留期扫描删除。
-
-HTTP 流式响应以 Delivery 确认的协议终态为完成边界，而不是客户端是否继续读取到 body EOF。终帧被 delivery stream 交出时，同步投递交付收据，先于生产任务恢复和 Generation Chain 提交；非流式响应沿用完整 body 交付确认。收据使用准入时保留的队列槽，按事件顺序先于后续准入持久化 `delivery_completed_at` 和分支终态：最终响应为 `completed`，工具交接为 `waiting_client`，已有同 Interaction 续接则保留 `superseded`。已记录的真实失败或中断不改为成功；后台工具活动独立保留。
-
-收据不依赖可捕获的历史窗口；窗口可用时再登记客户端投影的来源索引，使立即回传工具结果的请求不依赖来源 Generation 已落盘。观察尚无结束时间时先以实际交付时间收口，迟到 finish 补充执行结束时间与已提交节点关联，保留最早实际交付时间，不把已经交付的最终响应因新 User 准入改为 `user_interrupted`。缺少保留队列槽或收据持久化失败时显式记录 observation gap，不伪造持续运行的投影。协议终态之后关闭读取不能覆盖成功结果，终态之前断线仍按中断记录。
-
-WebSocket 在 socket writer 的实际终帧发送成功后、发送 ACK 之前同步登记交付收据与可用的已交付来源；不能把生产任务开始转发或消息入队当成交付。收据按已发送结果登记最终响应或工具等待，流生产任务随后补充执行终态和 Generation 关联。交付发布沿用已经取得的 Vendor fences，并重新检查取消、deadline 和 epoch，不等待新的写者之后重新取得读锁。连接关闭与最终交接采用同一连接范围内的同步登记，关闭先发生或后发生均能结束等待，不额外延长 Inference Run 的执行期限。
-
-`prefers-reduced-motion: reduce` 下，`running` 使用静态绿色圆点，不播放呼吸动画。
-
-### 3.3 用量口径
-
-Interaction 卡片、详情与用量分析共享 `Confirmed Upstream Usage`：
-
-用量页在原有单张「请求成功率」图中比较同一组已终结请求的一次通过率和最终成功率，差值带表示自动恢复贡献。实线为最终成功率，虚线为一次通过率，共用固定的 0–100% 纵轴；头部按所选窗口的总量只显示两项比率，不平均时间桶比率。提示框按时间桶显示请求级计数、恢复成功次数与提升百分点，并保留按 Target 尝试统计的上游请求数、错误数与调用成功率；两种分母不混用于计算提升。悬停、键盘与触摸均可读取，无流量和未知桶各自断线，不跨缺口填充。
-
-`recovered_request_count` 记录同一请求因失败自动重试或切换后最终成功的次数，每请求最多一次；`recovery_known_request_count` 记录已终结请求中可确定恢复成功与否的数量。只有后者等于 `terminal_request_count` 且分母大于零时，才显示一次通过率、恢复次数和恢复提升；不完整历史不补零，也不因上游错误后来被别的请求吸收而改写旧请求。观察明细清理后沿用持久化统计，不能在查询时用仍保留的明细冒充完整长期历史。
-
-- 用量分析总览、时间分桶与「客户端错误」共用同一请求级分类，但读取来源不同：长期汇总读取 `terminal_request_count` 与 `failed_request_count`，保留中的详情读取客户端错误列表。已终结请求 = 终态为 `completed`、`waiting_client`（向客户端交接工具调用）、`superseded` 或 `failed`、已结束、非取消类终止且不是错误的请求的 Inference Run；失败的请求是其中 `failed` 的部分，因此恒有失败 ≤ 已终结。准入前拒绝与上游发送前被平台校验拒绝的「错误的请求」不进最终成功率的分子或分母，即使已创建 Target 尝试记录；取消、断线、进行中同样不入账。无可用 Target、额度暂停等服务失败仍降低最终成功率。按请求开始时间归入窗口和分桶；长期 Stats Usage 不按 Observation 保留期过滤，而客户端错误列表仍仅查询保留中的详情；同一请求的多次尝试或隐藏 Model Turn 只计一次。只有拒绝请求、没有 Model Turn 的时间桶也必须显示请求数；上游请求数（已完成的尝试 + 上游错误）与上游错误数按 Target 尝试计数，包括被重试或切换吸收的错误，按所属 Model Turn 的起点入桶；
-- 上述三处的请求数和错误率分母同样按客户端请求计数，不按 Model Turn 或 Target attempt 计数；准入前拒绝计入总览和时间分桶。供应商汇总改按上游尝试计数：上游请求数 = 已完成的 Target 尝试 + 上游错误，上游错误数 = 来源为上游的失败尝试，重试与切换各自独立计入，因此各供应商数字不是客户端请求的拆分，也不与全局失败的请求数相加。Token、耗时和吞吐量仍沿用各自的模型轮次或尝试口径；
-- 汇总所有 Inference Run、隐藏 Model Turn、重试和 Target failover 中上游明确报告的 usage；
-- 管理面 `input_tokens` 统一表示净输入：每个 attempt 的总输入与缓存读取均已知时，先计算 `max(input_tokens - cache_read_tokens, 0)`，再累计各 attempt 的已知净值；缓存写入不参与扣减。任一操作数未知时，该 attempt 的净输入未知，`missing_input_tokens` 计入该缺失；
-- output 已包含 reasoning，不再累加或单列思考指标；cache read 与 cache write 保留独立展示。管理面按输入、输出分别呈现，不以缺少缓存分项的相加结果冒充总 Token；
-- 原始 IR、attempt 用量、持久化事件与 wire debug trace 保留上游总输入及 reasoning 子项；管理统计、列表、详情、分页事件查询与 Bundle 汇总在读取边界使用净输入投影，前端不再次扣减。Bundle 导出的原始 events 保持上游值，汇总先按 attempt 合并修订再计算净输入。历史查询立即使用新口径，无需改写数据库、事件或新增接口字段；轻量全局 SSE 通知仍不携带事件正文；
-- 每个实际上游 attempt 的 usage 最多记一次；
-- 流式 usage 在接收时观察，不以客户端输出已经提交为前提。正常完成以 Vendor 的完整返回值确认；失败或取消没有完整返回值时，以已收到的最后已知快照确认。多帧报告是同一 attempt 的修订，不重复累加；未知字段不抹掉已知值，明确报告的零可覆盖先前数值，完全未报告的字段保持 `null`。OpenAI-compatible 流式解析按字段合并累计报告（包括只报告一个必需字段的零值修订），再交给通用累积器。Anthropic 同样合并 `message_start` / `message_delta` 中已报告的累计 token 与 cache 字段，防止仅含最终 output 的修订被初始已知零值遮蔽；这些协议内归一化不改变其他 Vendor 的增量或累计契约；
-- Target attempt 成功与明确报告的 usage 不因随后还原或映射发布失败而改写；Model Turn 的唯一终态由内部完成 gate 记录，只有发布完成且未被取消或超时抢占才记成功；
-- 上游尚未报告或永不报告时保持 `unknown`，不显示为零，不用本地 tokenizer 估算；
-- Interaction、Run 与 Bundle 聚合按字段累计已报告部分；某次 attempt 的未知值不抹掉其他 attempt 的已确认值。全部未报告时该字段保持 `null`，明确报告的零保留为零。失败但已报告的用量同样累计，重复报告不重复计数；用量分析的 overview、series、model、API Key 汇总只统计成功的 Target attempt，按字段累计已报告部分：某次成功 attempt 的字段未知只不计入该值，不抹掉组内其他已确认用量，全部未知时该字段保持 `null`。失败或未完成 attempt 不参与这些成功尝试统计，但不否认其在 Run、Interaction 与 Bundle 中已报告的用量；
-- 全平台 TPS 使用测量对象自身的完整耗时，不扣首 Token 等待，也不使用 50ms 回退规则。首 Token 时间独立展示，不参与分母；
-- Run 耗时与 TPS 共用客户端接收到交付结束的时间：`delivery_completed_at - started_at`，包括内部重试、failover、平台工具与交付等待。分子使用 Run 的全部已报告输出，包括失败 attempt 已报告的输出；coverage 表明任一输出未知时 TPS 保持 `null`。运行中、成功但缺交付时间、无有效正耗时或输出未知时不猜测速率；失败、取消与中断等未交付终态可用 `finished_at` 收口。迟到 usage 修订不延长交付耗时，客户端跨请求执行工具的间隔不属于任一 Run；
-- Attempt TPS 使用自己的 `duration_ms`；Provider `avg_output_tps` 使用成功 attempt 的 `Σoutput_tokens / (Σduration_ms / 1000)`，不是单次 TPS 的平均值。成功样本缺输出或耗时、或总耗时为零时为 `null`；已知零输出保留为零。低延迟选路同样使用完整成功 attempt 耗时，仍按一小时成功率加权，保留 20 个成功样本、同组至少两个有效 Target 的门槛及既有亲和、优先级和 fallback；
-- 管理统计 `StatsOverview` 与 `StatsSeries` 的 `avg_output_tps` 使用同一成功 attempt 加权比率，单位为 tok/s；无成功样本、任一成功样本缺输出或 `duration_ms`、或完整耗时总和不为正时显式返回 JSON `null`，不省略字段。窗口和基础桶归属沿用所属 Model Turn 的开始时间，以绝对 Unix 时间整刻钟划分；调用方本地时区仅影响时间输入和显示，不按 attempt 完成时间归属，也不平均桶或 Provider 的 TPS。成功 attempt 不因随后 Model Turn 发布失败或客户端交付失败被排除。`avg_first_token_ms` 仍对已记录的首次 canonical 输出时间取平均，包含 Thinking，保留零；缺首字时间本身不使 TPS 失效。原有 `avg_duration_ms` 与部分已知 Token 累计规则不变；
-- Interaction、Run 与 Bundle 的既有聚合 `usage.coverage` 包含 `attempt_count` 和五项 `missing_*_tokens`；其中 `missing_input_tokens` 表示因总输入或缓存读取缺失而无法计算净输入的尝试数，其余项表示对应字段未报告的尝试数。`target_attempt_finished.usage` 不携带聚合 coverage（最后一个 attempt 并入 `model_turn_finished` 后，其 `usage` 同样不携带）；正在运行与终态未报告的区别仍由 attempt 状态表达。管理统计不新增 Token 覆盖字段或完整性标记，请求恢复的判定覆盖独立表达。coverage 不替代 `observation_gap`，无法记录的 attempt 不计入已观察尝试总数；
-- Observation 详情与 Bundle 查询仍从现存 attempt 记录派生已确认累计与覆盖信息，旧版保存的 `null` 汇总不遮蔽仍然存在的用量；管理统计则从独立的 Stats Usage 充分聚合信息读取，不在查询时扫描仍保留的详情。无需改写旧事件或自动拆分历史 Interaction。SQLite 与 PostgreSQL 使用相同计量规则，Route Scheduling 与成本计算仍读取原始用量；
-- 收到新的上游 usage 后立即更新持久化数值投影供查询；时间线与 SSE 在实际 `target_attempt_finished`（Model Turn 的最后一个 attempt 并入 `model_turn_finished` 行，见 §5.1）时显示合并结果，迟到事实以更高 sequence 的同 kind 终态修订承载，不新增独立 `usage_confirmed`（该 kind 已不再作为事件出现）、易失 usage 或 reset 协议。
-
-请求记录的链路 Token 阈值按整个根 DAG（含子孙）的已确认净输入与输出累计，不加回缓存分项；用量活动图采用相同口径，输入标签保持「输入」。尚在运行且没有任何 Target attempt 报告 usage 的 Model Turn，临时加入该轮未缓存输入估算，不再次扣除缓存，使大输入请求无需等待首轮响应结束即可显示。估算每轮只计一次，不随重试重复累计；任一 attempt 报告 usage（包括明确的零）或该轮结束后，停止使用该轮估算。真实合计低于阈值时，链路可能重新隐藏。列表、总数、分页与实时匹配采用同一规则，0 表示不过滤。
-
-用量页的「Token 构成」环图按已报告的净输入、输出、缓存读取与缓存写入四类计算占比，中心显示这些已报告分类的合计。输入直接使用管理接口的净值，不再次扣减缓存读取；未报告的类别不绘制，也不记作零。仅缓存类别有已知正值时仍显示环图；至少一类已报告且合计为零时显示零用量，四类全部未知时显示未报告用量。此分类合计不改变请求记录阈值或活动图的输入与输出口径。
-
-用量页展示「延迟与速度」图：首字延迟为左轴秒值和钢蓝实线，TPS 为右轴 tok/s 和钢蓝虚线，两轴独立线性缩放、从零起点自动扩展上限。顶部原始窗口汇总兼作图例；悬停或通过方向键、Home/End 聚焦时间桶时读取同桶的两项值与单位。空桶和单项 `null` 各自断线，未知显示「—」，有效零输出显示 `0 tok/s`；不插值、不补零。说明按钮支持焦点和触摸，明确首字延迟包含 Thinking、TPS 包含首字等待。其他耗时展示保留；加载失败与确实无数据分别表达，不能用零替代失败或未知。
-
-图表读数浮层在触摸或笔输入时向接触点上方避让，并自动限制在可视范围内；鼠标悬停与键盘时间桶导航保留，不固定水平居中。
-
-**用量页时间操作：**
-
-时间条与请求记录共用展示组件（时长选择、较早、日历起止／实时、较新），但各自保留预设、输入校验和刷新语义；请求记录的秒级范围与 24 小时上限不进入用量统计。所选范围只在日历控件显示，页头保留实时／固定历史状态，不另设所选时间与历史恢复提示行。
-
-Token 活动图按实测可视宽度拥有独立查询范围，结束仍为顶部所选窗口的结束。所选范围不足一屏时，保持当前活动粒度并向左查询真实历史，填满可容纳的列；所选范围放不下一屏时合并相邻时间桶，完整覆盖范围而不截断或横向滚动。整个活动图使用同一粒度与色阶，色阶是连续的：每个活跃格按其用量在全图活跃格中的名次映射到 0–1 的强度，再沿色阶无级插值取色（最小为 0，峰值为 1，用量相同的格子同色，零用量与未知用量不参与名次，保持空格底色）；不按峰值线性缩放，避免少数峰值把其余格子压成近似同色。强度只表示相对强弱，精确值以格子提示为准，网格下方图例是「空格」加一条由弱到强的渐变条。只在活动区标题下、网格上方展示自身实际起止，网格下方图例靠右，不标出所选范围的内部边界。总览、延迟／错误趋势与各分类统计仍共用顶部范围，不能把活动图所有方块之和当作顶部总量。调整宽度不触发无限历史加载，范围与粒度共同构成活动查询的缓存身份；历史窗口刷新不漂移。活动图沿用最多 512 桶和正 Unix 毫秒边界，已返回的未知 Token 保持未知；没有汇总记录的桶按零显示，包括空响应，这只是展示规则，不能证明该时段历史事实已保存或恢复。活动查询加载、失败或未更新必须与零值区分。
-
-用量页的 Provider 与 API Key 表通过点击行单选或多选，不渲染复选框列，也不显示「已选 N 行」页脚（页头状态行已给出真实数量）；选中行用 `accent` 底色并暴露 `aria-selected`，手机列表行是 `role="button"`，用 `aria-pressed` 表达同一状态，点按或 Enter / Space 切换。二者互斥：选中任一 API Key 会取消全部 Provider，反之亦然；页头状态行显示所选类型与数量并提供清除入口（放在标题行而不是内容区，出现与消失不改变页面高度，下方表格不会在点击瞬间被推开）。已删除或没有 ID 的行不可选，所选 ID 只取当前仍存在的行，列表加载前沿用原勾选。有选择时，汇总条、Token 活动图、延迟与速度、Token 构成都改用 `provider_ids` / `api_key_ids` 查询并随勾选实时更新，Provider 与 API Key 两张表自身保持未筛选，否则取消勾选后行会消失。请求成功率与模型占比在筛选口径下不可用，面板明确说明并停止请求模型占比，不显示整体数字冒充；超过 100 个 ID 时不静默截断，后端 400 进入错误面板。
-
-悬停 Token 活动图的方格（指针或键盘焦点）落稳后（进入 120ms、离开 240ms 防抖，避免指针划过时逐格发请求，方格间隙里也不闪烁），Token 构成取该格所在行的分类用量，模型占比查询该格自身的时段；延迟与速度、请求成功率改看与所选窗口等长、止于该格结束的区间。汇总条、活动图和两张表始终保持所选窗口，悬停记录绑定落稳时的窗口，窗口变化即失效。构成与模型的标题旁标明所悬停的时段；延迟与成功率的横轴本身标出区间，不另加说明（标题行内的说明不得换行，否则会改变标题行高度，指针下的方格被挤走）。悬停图例项时，对应扇区向外伸出并高亮，其余扇区变淡，环心改显该项数值；图例只写分项名，不带“Token”后缀。
-
-筛选或悬停引起的重新查询，只在所选窗口不变时保留旧数据并淡化（`aria-busy`），不用别的窗口的数据冒充新窗口；所选窗口变化、首次加载才显示骨架。图表数据切换使用 300ms ease-out 补间，悬停高亮 140ms；`prefers-reduced-motion` 下无补间。
-
-- 选择 6 小时、24 小时、3 天或 7 天预设进入实时模式；图与窗口汇总每 30 秒刷新。实时范围由连续整刻钟基础桶组成，包含尚在累计的当前桶，日历控件显示本地起止／实时；15 分钟是持久化粒度，不是发布更新的等待时间，也不是任意秒级滑动窗口。
-- 点击前后导航按当前窗口跨度平移；离开当前后固定绝对起止，刷新与新请求不使历史范围漂移。点击返回当前重新进入实时模式，向前浏览不生成未来用量。
-- 点击范围控件打开本地日期时间选择，起止必须为整刻钟，起点早于终点；错误输入不能应用，不能静默取整。自定义范围可超过 24 小时。应用后显示实际生效范围，并保持固定；本地时区只负责输入与显示，后端使用绝对时刻，无效或有歧义的本地时间不得静默改成另一时间。
-- Core 的 `StatsWindow` 采用 Unix 毫秒 `[start_at, end_at)`：两个边界必须成对、为正、对齐 `900000` 毫秒，且结束晚于开始；都省略表示全部累计。不再接受 `hours` 或 `tz_offset`。相邻窗口的公共边界只计入后一个窗口。
-- `GET /api/v1/stats/overview` 与 `/stats/series` 另接受互斥的可选 `provider_ids` / `api_key_ids`：逗号分隔的 ID 列表，最多 100 个；空列表、空元素或二者同时出现返回 400 `invalid_stats_query`。过滤只切换读取的边际桶与 `identity IN (...)`：Provider 口径的请求数（总览 `total_requests`、序列 `request_count`）等于该 Provider 的上游请求数，API key 口径使用其自身请求数；请求级分类列在两种过滤下都为 0，API key 口径的上游计数也为 0。未知 ID 匹配零结果，重复 ID 无害。窗口校验、分桶与 `bucket` 粗化不变；`window` 省略时按所选 scope 与 ID 集合的 MIN/MAX 桶确定范围。边际桶不含跨维度请求结果，因此过滤时不提供请求成功率/恢复分类，也不能推导模型占比。
-- 序列可提供以秒为单位、为 900 倍数的 `bucket`；Core 自动选择足够粗的整倍基础桶，使返回不超过 512 点，`StatsSeries.bucket_ms` 返回实际展示粒度。长范围合并充分聚合信息，重新计算均值、错误率和 TPS，不平均桶均值，也不截掉范围来减少点数；同范围总览与趋势保持同一统计口径。
-
-输入估算不进入 Confirmed Upstream Usage、卡片数值、用量统计或计费。普通模型请求的筛选与路由调度共用同一估算：将消息 `items`、独立系统提示词 `instructions` 和工具定义 `tools` 一并计算 JSON 序列化字节数，除以 4 向上取整；工具说明与参数 schema 也属于输入，不能只按用户消息估算。它不是模型 tokenizer 的精确计数。估算随 `model_turn_started` 写入独立的 nullable 字段，已有记录不重算，不从输入摘要或 Debug 内容回填。
-
-客户端响应的 Run 用量账本在上游 attempt 确认边界独立累计主模型、隐藏轮次、独立媒体生成等内部调用及重试已经报告的用量，每个 attempt 只确认一次；最终响应直接使用该快照，不再次叠加主轮或末轮。流式失败终态也使用该账本，即使失败的当前 leg 没有报告用量，仍保留此前确认事实及整体的不确定性；此路径只替换 usage，不重复拼接隐藏输出。账本通过本次请求新建的根执行句柄跨工具并发任务共享，不读取 Observation，也不受其持久化失败影响；后续客户端请求使用新的账本，不回写历史。缓存读、缓存写与 reasoning 分项只有全部已计入调用均明确报告时才返回合计，任一缺失则保持未知；显式报告的零参与合计，不与缺失混同。这与 Observation 对已报告部分的独立累计口径不同。没有实际上游确认调用的执行器保留其终态响应及隐藏轮已有的数值与 known 标志，包括明确报告的零；空账本不得把已知用量降级为未知。未知值不补零，Responses 可选分项以 null 表达未知；客户端 wire 仍保留协议规定的总输入，管理面另在读取边界计算净输入。
-
-Gemini `thoughtsTokenCount` 保留为 reasoning 子项，输出仍只包含一次该部分；终态之后的累计 usage 修订覆盖同一 attempt 的快照，不作为新增用量相加。标准 Gemini 缺失缓存字段仍为未知。Antigravity 仅对已确认完整的私有终态 usage 使用其 proto3 标量缺省零语义，缺失整个 usage 或中间帧不补零；事实来源和消息存在性边界见 [Antigravity 响应协议](../research/antigravity-oauth.md#响应)。这些归一化仅影响后续请求，不补写存量事件。
-
-首内容超时在取消执行 future 前标记原因，未正常结束的 attempt 记录 `first_token_timeout`；`attempt_aborted` 仅作为没有明确结束原因的释放兜底。两者均不伪造 usage，也不改变原有超时配置、重试预算或调度策略，每个 attempt 仍只有一个终态。
-
-### 3.4 Observation 不影响执行
-
-Observation 写入、SSE、Debug 分段文件、容量统计或导出的普通诊断失败不得改变 Inference Run 的响应、重试、Target 选择、Client Output Commit 或 Generation Chain 提交。无法记录时产生显式 `observation_gap` 或把 Debug Trace 标成 `partial`；不得因普通观测缺口阻塞、取消或伪造业务结果。
-
-数据库、事务日志或实例文件存储失败（包括容量耗尽）适用 [ADR-0060 的请求/任务局部处理约束](../adr/0060-own-interaction-observation-outside-generation-chain.md#存储失败只影响所属请求或任务)：关键同步操作沿原 Result 失败当前相关请求或任务，Observation/Debug 独立异步写入失败只归所属诊断任务并保留 gap/partial，不牵连推理与无关请求/后台任务，Server/Desktop 继续服务。诊断不作为执行事实源；不新增全局 fatal 广播、全入口 scope、降级模式、健康检查或自动重试，不补造用量、不自动重放模型调用。独立长期 Stats 未可靠汇总时相关破坏性清理仍明确失败。队列满、Trace 限额及普通缺口保留原语义；该局部策略已实现，真实 Server SQLite/PostgreSQL 与 Desktop SQLite 的[宿主/HTTP 测试](../../tests/e2e/storage/test_storage_failures.py)覆盖在途/后续请求、已交付后的后台 Media 任务、诊断 gap/partial 与双库 Stats 写失败的清理保护；真实 SQLITE_FULL 与隔离固定 PostgreSQL trigger 的边界见[整体架构 §4.10](architecture.md#410-interaction-observation)。
-
-历史回看（[ADR-0096](../adr/0096-recall-interaction-chains-through-read-paths.md)，[设计](history-recall.md)）是 Observation 的只读使用方：按 Principal 读取保留期内的 Interaction、Run 与普通事件，渲染给同一 API Key 透明注入的 StraviaRead。它不写 Observation，不改变保留、清理、清除历史记录或归属规则，也不读取 Debug Trace；观测缺口照常以缺口行出现，不从 Generation Chain 补写。Observation 仍是诊断投影，回看不把它升级为执行事实源。按 Principal 列出链路使用 `interaction_observations (principal, last_active_at DESC, id)` 索引（迁移 0050）。
-
-### 3.5 凭据命中记录
-
-命中记录从普通 `credential_mappings_created` 与 `credential_mappings_reused` 事件投影，不另建秘密目录或会话事实源。两个事件载荷同形：`discoveries: [{ rule_ids, source_types, locators, omitted_locators?, marker? }]` 加可选 `omitted_discoveries`，每个元素对应一个映射。`created` 在映射实际新建提交后、可失败的替换前由 `RunObserver` 发出；`reused` 有两处来源：一是出站替换，命中已有有效映射、且位置在本次请求新提交的文本时，在替换完成后发出（最后一条 Assistant 之后的条目；更早的是客户端重放的历史，不写入；没有 Assistant 条目时整个请求都是新提交）；二是模型响应，完整响应里工具调用参数的引用被还原时发出，来源 `tool_arguments`，块标识是该调用 ID，流式中途断开而没有完整响应时不记。同一 Model Turn 新建与复用并存时各发一个事件；模型在同一轮就把刚新建的凭据用到工具调用里时，该 Interaction 同时有新增与复用。复用命中的位置来自实际发生的替换与还原而不是检测器，因此已知凭据出现在检测器认不出的上下文（例如只有裸值的工具结果）也会记录；规则取自映射表的 `rule_ids`，由检测器在创建映射时写入且之后不改写，创建之前的映射没有规则，只受保护、不产生复用命中。`locators` 逐项保存「规则 + 来源」配对及块级标识：工具参数与工具结果带 provider 原始 `tool_id`，用户消息只带 `latest_input`（是否为请求窗口里最后一条用户输入；内部 Agent 轮次的用户条目是平台构造的，一律为假），其余来源不带标识；去重后每个映射至多 50 项，每个事件至多 50 个映射，超出部分只记 `omitted_locators` / `omitted_discoveries` 计数；位置超限时每种「规则 + 来源 + 是否最新输入」先各留一项，再按序补满，不让排在后面的来源整体丢失。不使用请求条目下标（`protect` 之前历史标记还原会拆分、注入条目），不保存字符偏移、消息片段、指纹或完整 JSON 路径。来源类型为 `user_message`、`system_or_history`、`tool_arguments`、`tool_result`、`other_text`，来自本次提取和最终规则命中，不从历史正文补推。没有 `locators` 的旧事件按空处理：列表回退为 `rule_ids` × `source_types` 的组合，请求记录只打开 Interaction 而不高亮。`marker` 是该映射的不透明占位符（= 映射 `reference`），所有 Run 都记录，不再受 Debug 开关约束；同一占位符即同一映射，复用查询靠它把 `credential_mappings_reused` 事件关联回创建行。占位符不含秘密，持有它也不能脱离对应 Principal 的有效映射还原，且命中记录列表接口永不返回它，只以 `linkable` 表达「是否记录了占位符」。事件仍不含秘密、指纹和消息片段；Debug Trace 仍只保存 wire 本身。本变更之前创建的事件没有占位符（Debug 开启的 Run 除外），不回填，对应行的复用区显示无法关联。
-
-映射预留与发现投递由同一独立任务持有，防止数据库已经提交、调用方尚未收到确认时取消导致遗漏。取消不等待此任务，也不执行后续替换、Provider 调用或发布；已启动的预留可以完成，并沿用未发布映射的 `pending_until` 一小时窗口（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。
-
-命中记录一行对应 `credential_mappings_created` 事件 `discoveries[]` 的一个元素，即一次新增映射；创建映射只是绑定，行上没有请求状态，也没有 `kind` 筛选。行按事件 `sequence` 倒序、同一事件内按元素下标倒序排列，行标识 `id` 为 `{sequence}.{下标}`。复用不是行：它在行的详情里作为该映射的后续使用列出。该投影不要求 Debug，也不等待客户端交付或 Generation Chain 成功；清理观察不直接删除保护映射；映射仍保留且满足归因规则开关条件时，再次提交的已知凭据出现为复用，不重新计为新增。映射独立按最近使用空闲过期（N 复用历史保留天数，见[整体架构 §4.11](architecture.md#411-可逆脱敏)）；过期后由启用规则重新检出会创建新映射，规则认不出的裸出现则原样发往上游。管理端查看命中与遮罩不算使用。
-
-`GET /api/v1/reversible-redaction/discoveries` 经 `AdminService` 查询已持久化的创建事件，采用有界 `limit` 与不透明 `next_cursor`（`(sequence, 下标)`，长度有界，无效返回 400）翻页，只返回事件与所属 Interaction 都仍存在的行。可选 `start_at` / `end_at` 以 Unix 毫秒按创建事件的 `occurred_at` 过滤，左闭右开：`start_at <= created_at < end_at`；两端各自可缺省，缺省即该侧不限，`end_at <= start_at` 返回空页而不报错。该时间窗在 SQL 内过滤而不是取页后再裁剪，有界游标翻页与排序不变，也不能当作 `kind` 筛选（行仍只来自创建事件）。读取不等待全局 Observation writer 屏障，也不触发活动 Debug Trace 刷盘；尚在队列中的命中允许延迟可见，不保证写后立即可读。条目含 `id`、`created_at`、`interaction_id`、`run_id`、`api_key_name`、`rule_sets`（由规则 ID 前缀 `custom.` 推导为 `custom`，其余为 `builtin`）、创建规则 `rule_ids`、`{ rule_id, source_type, tool_id?, latest_input? }` 命中配对 `hits`、`omitted_hits` 与 `linkable`。每事件至多 50 个映射的写入上限不变，超出部分不产生行，也不再统计新增数。查询失败与空记录分别表达。「缺失记录不代表没有发现凭据」的限制说明在凭据保护页的「保护详情与限制」。
-
-侧栏的两个只读端点同样经 `AdminService`，鉴权沿用管理入口：
-
-- `GET …/discoveries/{id}/hits/{index}`：`index` 是该行 `hits` 的下标；行或下标不存在（含所属 Interaction 已被保留期扫描或清除历史删除）返回 404。服务端按命中的来源找回 Observation 已保留的条目正文，对它运行与「密钥匹配测试」相同的检测器，返回完整条目文本、`hit_basis` 与带 `hit` 标记的匹配（UTF-16 偏移，行列从 1 开始）；响应不再有 `truncated` 字段，也没有 1 MiB 上限（ADR-0089 删除 `MAX_DISCOVERY_TEXT_BYTES`）。正文来源：`tool_arguments` 取 `platform_tool_started.input` / `client_tool_handoff.input`，`tool_result` 取 `observation_tool_results` 中的客户端工具结果（`client_tool_result` 的 `results`）/ `platform_tool_finished.content`，`tool_id` 先在所属 Interaction 内找，找不到再在同 Principal、不晚于创建事件的范围内取最近一条；`user_message` 且 `latest_input` 为真取 `user_input_recorded.text`（该 Run，没有则取同 Interaction 此前最近一条，完整文本不截断）；system、历史用户消息、其他来源和 `latest_input` 缺省的命中不保留正文，返回 `unavailable` 与 `not_retained`，事件已随 Interaction 删除或不在库中返回 `missing`。非字符串 JSON 先文本化（文本块按行拼接，其他用美化 JSON）。能按占位符取到仍保留的映射明文时，只把秘密字面值等于它的匹配标为 `hit`（`hit_basis=secret`）；取不到则按所选规则标记（`hit_basis=rule`）。默认返回已遮罩的响应（`masked=true`）：把上述每个匹配区间（命中与其他匹配，重叠或相邻的合并）在后端替换为固定长度的 `••••••`，`matches` 的偏移与行列按遮罩后的文本重算，丢弃越界或零长度的匹配，`hit` 标记保持原义；不另做检测，也不返回原始区间长度。`?reveal=true` 返回未遮罩的条目文本与原始偏移（`masked=false`），先经 `AdminSession::may_reveal_credentials()` 判定，不允许返回 403 `credential_reveal_forbidden`；该判定当前对唯一的 `admin` 角色恒为允许，是将来引入角色或权限时唯一的策略点（见 [ADR-0088](../adr/0088-mask-credentials-at-admin-boundary-and-page-reuses.md)）。含明文的响应类型不派生 `Debug`，不写入日志。
-- `GET …/discoveries/{id}/reuses`：从 `credential_mapping_reuses` 按 `marker` 取同 Principal、所属 Interaction 仍存在的行，不扫描事件。该表在写 `credential_mappings_reused` 事件的同一事务里按 `(marker, interaction_id, source_type, tool_id, latest_input)` upsert，保留最大 `last_reused_at` 及其 `run_id`，因此已按 `(interaction_id, source_type, tool_id ?? latest_input)` 去重；倒序按 `(last_reused_at DESC, interaction_id, source_type, tool_id, latest_input)` 做键集翻页：`cursor` 是不透明、长度有界的游标（无效返回 400），`limit` 默认 20、最大 100，响应 `{ linkable, items, total, next_cursor }`；`total` 是同一 Principal、marker 与 Interaction 仍存在条件下的位置数，不随游标变化，由独立的 `COUNT(*)` 得出，不计使用次数。键集谓词与计数都走复用表主键与索引，不扫描事件。创建事件自身不算复用，同一 Interaction 之后的复用算。`linkable=false`（没有占位符）时 `items` 为空、`total=0`、`next_cursor=null`。侧栏的「后续复用」默认折叠，首次展开才请求，每页 10 项并缓存已加载的页。
-
-SQLite 与 PostgreSQL 均建立 `observation_events_credential_hit_idx` 部分索引（`kind, sequence DESC`，谓词为创建事件），列表按 `sequence` 倒序读取创建事件。复用关联靠 `credential_mapping_reuses`：主键即去重键，另有 `interaction_id` 索引服务保留期清理，`purge_expired_batch` 随所属 Interaction 删除其行，外键 `ON DELETE CASCADE` 兜底。迁移 `0035_credential_hit_records` 删除只服务于旧 Interaction 聚合的 `observation_events_credential_discovery_idx`，同时清理映射表 `rule_ids` 中的 `kingfisher.*`。事件载荷是 `storage_codec` 编码，SQL 无法按规则过滤，所以 Kingfisher 规则清理在应用层解码。0035 应用之前，启动升级先分批（每批 500、按 `sequence` 键集）重写两类事件载荷：移除 `kingfisher.*` 的 `rule_ids` 与 `locators` 并重算 `source_types`，删除变空的映射项，事件再无映射项时删除整个事件。该步幂等，失败则 0035 不会应用，下次启动重试。仅由 Kingfisher 规则创建的映射继续保护与还原，但归因为空，不再产生复用记录，其命中记录行随事件清理消失；首次升级的开销取决于保留的事件规模。上述 0035 及其载荷重写发生在 ADR-0089 的规范化之前；此后这两类事件的 `payload` 原样迁入 `attrs`（迁移 0041/0042，见 §6.1.2），创建与复用的检索方式不变。
-
-Observation 读取在管理端响应边界做凭据脱敏（[ADR-0088](../adr/0088-mask-credentials-at-admin-boundary-and-page-reuses.md)）：`GET /api/v1/observations/contents` 返回的文本正文，请求链详情（含 `input_text` / `output_text`）与事件分页中由引用回填的正文，Client / Upstream 错误列表与详情，以及实时内容流（`LiveContent` / `LiveSnapshot`）。列表与 changes 的摘要只返回内容引用与 `raw_len`，不含正文，因此不在列表上遮蔽（ADR-0089）。存储的正文单元与事件不改写，因为命中详情的复检与「显示明文」需要原文；Debug Bundle 是原始取证导出，不在其内。流程是：先用一次存在性检查（`reversible_redaction_mappings` 是否有任何行；映射读取已无时间条件）确认实例里有没有映射，没有则原样返回，不查归属、不加载映射、不遍历载荷；有则按交互 ID 批量查询所属 Principal（每 400 个一批），只为有有效映射的 Principal 加载 `active` 映射，按映射创建时的 `rule_ids` 过滤：为空（无法归因）或至少一条规则当前启用才参加遮罩；内置规则不在禁用集即启用，自定义规则必须仍存在且 `enabled`。用既有的 `ProtectedSecrets` 把正文里的明文替换为 `***`（含 JSON 转义与嵌套 JSON 字符串，`<!--sr:...-->` 占位符原样保留）；强秘密按子串，弱秘密只按 ASCII 单词字符边界匹配，与出站替换一致，算法与中文短词、紧贴单词字符处漏替换的限制见[整体架构 §4.11](architecture.md#411-可逆脱敏)。只遍历携带正文的事件种类，只含 ID、用量、时序、状态的事件整条跳过，未知种类按携带正文处理。任一查询失败都使请求失败，不退回未脱敏输出。拒绝记录没有归属 Principal，也不含客户端正文，不脱敏。实时流在有内容更新时至多每秒重新检查一次存在性并刷新映射，没有映射时直接透传。`contents` 响应的 ETag 含映射版本，映射增减会使缓存失效（见 §9）。映射被回收后明文已无法还原，更早的记录不再被脱敏；归因规则全部停用、删除或禁用时也停止观测遮罩，但已有占位符仍可还原。命中位置回看不受禁用影响，仍以保留正文复检。遮罩不会续期映射，这是该做法的已知限制。
-
-请求记录从命中记录侧栏的复用项进入时携带 `highlight=credential-hits`，仅此入口触发高亮。WebUI 在已加载的事件里按 `locators` 解析目标：`tool_arguments` / `tool_result` 按 `tool_id` 匹配对话中的工具调用与结果块，`user_message` 且 `latest_input` 为真的命中匹配所属 Run 的用户消息（工具续跑没有新的用户输入，沿用此前最近的那条用户消息），其余命中（更早 Interaction 的工具调用、历史用户消息、system、其他来源）只能定位到 Run，在提示条里汇总并可跳到诊断标签中的该 Run。新增与复用用不同样式和「新增」「复用」徽标区分，徽标 tooltip 列出规则名；命中所在的折叠工具活动在会话内临时展开，不写入本地展开偏好。深链向前加载更早事件直到出现新增命中或加载穷尽，并滚动到第一个新增命中（没有则第一个复用命中）。清除高亮、关闭检查器或选中另一个 Interaction 都会移除该 URL 参数。
-
-## 4. 模块与 seam
-
-### 普通准入队列与用户输入
-
-普通准入在入队前从收到的 canonical 请求生成 `PreparedAdmission`：只保留有界 received-input 证据、溢出或指纹缺口标志、Generation 已确认事实及完整请求的 canonical fingerprint，不让 writer 等待 SQL 时持有完整原文请求。fingerprint 覆盖完整请求语义，仅排除每次尝试的 `parameters.session.request_id` 关联 ID；会话、线程、轮次、父节点、Provider context 和业务 JSON 中同名字段仍参与身份判定。对象键顺序不影响身份；正文借用并流式计算摘要，不复制完整历史或依赖有界尾窗。证据超限、缺失或无法无损重建时按既有规则记录 gap，不凭截断内容确认归属。
-
-用户输入不作为上述准入证据，也不提前写入普通队列。捕获阶段只借用不可变的 received canonical 请求，取最后一个 User item 的完整有序文本单元（与 Turn Chain 使用同一拆分函数 `item_content_units`，同一 Principal 作用域内相同文本在内容存储中只存一份），不再有 4,096 字符的前缀截断；非文本单元不记入。等待凭据映射期间只保留这些文本单元，不额外持有整棵请求树。
-
-发布边界不变：活动请求完成模型侧凭据保护并登记全部有效映射后，才发布 `user_input_recorded` 及待发布的客户端工具结果；保护失败或取消时不发布。该顺序不表示普通 Observation 的用户输入会替换保护映射：文本单元来自 received canonical 原文，writer 按 §7.2 的 Authorization-only 规则写入，不额外替换正文中的已知秘密。该捕获方式不关闭普通 Observation、进程日志、Generation Chain 历史或 Debug 契约，不缩减模型上下文或 SQL 历史；Debug 原文捕获仍只在明确启用时遵循 §7 的独立边界。
-
-同一 Principal、完整 canonical request fingerprint 相同、前次失败且没有 Client Output Commit、失败后两分钟内开始、没有同指纹活动请求的重试，归入同一 Interaction 时不再次发布用户输入（`user_input_recorded`）。当前工具续接等归属证据仍优先决定父节点与分组原因，但不能遮蔽上述重试事实；重试 Run 与失败诊断照常保留。判定复用进程内完整请求指纹，不依赖有界输入窗口或输入文字相等。新增 User item、修改请求语义、已提交输出、并发请求或证据过期不据此去重；既有持久化记录不重算，进程重启后不推断已丢失的重试证据。
-
-### 原生压缩与保留尾部关联
-
-目标契约按 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md) 扩展：唯一、完整的保留尾部精确匹配在五分钟窗口内可以自动归入原 Interaction，即使本次没有当前工具结果。该行为对启用后准入的请求生效。
-
-已确认的当前工具续接优先于 Generation parent 的常规观测分组：本次回传来源 Run 当前待完成工具调用的结果时，即使已有 Generation parent、同时夹带额外的 User 输入，也继续来源 Interaction，并将观测父节点指向来源 Run，不受尾部归并五分钟窗口限制。Generation 父边不变。历史回放中的旧工具结果不能作为当前续接证据；不能只在完整输入中找到相同工具 ID 就触发归并。
-
-交付时建立的 pending-tool 索引已经证明来源 Run 的待回传工具集合；准入直接合并内存与持久化索引中的有效来源，不再重建来源 Window 或等待 Generation 提交来重复核验。内存来源与持久化来源使用相同的 Principal、过期和唯一性约束；本次尾部的所有结果必须对应同一个已交付 Run，实际交付时间不得晚于本次 ingress。客户端省略工具轮空白消息时，执行父边可以回退，但诊断父边仍指向已确认的工具来源。归属修复沿用既有祖先收据去重与等待接替规则，不按工具 ID 全局消费，不改写存量观察记录。
-
-客户端可能省略 thinking-only 输出，再把上次收到的完整输入加一条 User 提醒重新提交。只有同 Principal、仍保留的 `client_tool_result` 收据和完整收到输入的 canonical 严格前缀共同证明这种回放，且新增后缀仅为普通 User 输入时，才排除当前工具／pending-tool 归并优先级并跳过本 Run 的重复结果捕获。User 内容块中的 ToolResult 是新工具结果，不属于 User-only 后缀。该判定只影响 Observation；原有精确父节点、两秒快速续接和尾部规则继续适用，模型输入与 Generation 父边不变。
-
-编辑已回传结果后的旧 User 消息不是首次工具续接。已有收据与完整收到输入若证明工具结果及其之前的全部 canonical 历史相同，只有结果后的非空普通 User 尾段被编辑，则确认唯一工具来源后直接创建 child Interaction，连接来源 Interaction，并以工具来源 Run 为 `parent_run_id`。该分支不受两秒快速续接或五分钟尾部归并影响，不再捕获重复工具结果；即使控制参数或模型切换使 Generation parent 缺失，也保留诊断父边。仅在完整旧输入后追加 User 的请求仍遵循上一段规则。
-
-收到输入的证明包含 leading system/developer、媒体和原生控制的 canonical 语义；忽略范围严格沿用既有 canonical 规则，包括交付/graph 元数据与缓存指令。进程内使用准入时的完整输入摘要；缓存不可用时，由已保存 Generation 重建收到输入边界，不把本次输出混入证明。截断、缺失、过期或无法无损重建时不推断回放。除上述已证明的 User 尾段编辑外，相同输入的独立 sibling、结果值变化和其他历史变化仍保留自己的工具收据，不按工具 ID 全局消费或去重。
-
-只有未满足当前工具续接条件且没有 Generation parent 时，才用保留尾部决定交互归属；先确认来源，再按以下规则分组：
-
-- 匹配区间之后没有新的 User 输入，且满足时间窗口：归入来源 Interaction。
-- 匹配区间之后有新的 User 输入，或已超出归并窗口：创建新的 Interaction，并在诊断树中连接来源 Interaction；两个交互分别汇总状态、用量和 Debug Bundle 范围。
-
-时间窗口按本次请求入口接收时间减去被匹配来源 Run 完整交付给客户端的时间计算，差值须位于 `[0, 300000]` 毫秒，包含两端。任务开始时间、Interaction 的 `last_active_at`、writer 处理时间和数据库写入时间不参与计时；其他分支活动不得延长来源的归并资格。恰好五分钟可归并，多一毫秒则创建新 Interaction 并保留满足条件的诊断来源连接。
-
-归并窗口不限制诊断来源连接。来源记录仍须在保留期内，匹配仍须完整且唯一；不能先按归并窗口过滤较旧候选，再把剩余候选宣称为唯一来源。诊断连接不建立 Generation Chain 执行父边。
-
-`compaction_operation` 保存 standalone/inline、所属 Model Turn、来源、登记 ID、阶段、耗时与错误分类；所选 Target/Provider 沿用 Target attempt，usage 仅沿用每 attempt 一次的确认用量投影及 `target_attempt_finished.usage`。Standalone 是真实操作，不落空 Generation；回放旧 state 不再登记压缩操作。
-
-`native_compaction_associated` 表示原生状态跨越已登记边界，`retained_tail_associated` 仅表示客户端幸存上下文的诊断推断。两者与既有确定 Generation 关系在 `context_events`、forest/detail、SSE、详情及画布中分开；推断不改变父边、Target Continuation 或有效输入。分组按 ADR-0053 诊断规则，不恢复已删除历史。来源卡片已清理时不从核心存储复活。
-
-尾部索引只接收实际收到的规范化 client-shaped 输入和已交付公开输出。流式与非流式输出均复用 Generation Chain 拥有的 ingress 历史整形规则，使诊断索引与客户端回放采用相同分块；整形失败记录 observation gap，不能把交付前的 canonical 分块作为后备索引。指纹仅筛选候选，完整语义再次核验；匹配旧历史后缀与新请求任意连续区间。只有顶层 leading system/developer 可排除，内部差异不能删除后拼接。完整工具 ID、参数、结果、角色、媒体与控制保持语义身份。有 Generation parent 时仍对本次收到的 client 输入做尾部诊断。每个来源取本次输入中结束最晚的强匹配；多个来源同时匹配时，采用匹配区间结束最晚的来源，结束位置相同再依次比较语义单元跨度与证据字节，三者全部并列仍为 `ambiguous`。压缩后的回放是线性历史，更早结束的匹配是更晚来源之前的历史，因此保留的旧回答更长不能使旧来源胜出。`matched_units` 是输入中的连续跨度（含私有摘要单元），`matched_bytes` 只计公开证据。
-
-无签名、无密文且带合法 History Marker 的公开思考投影参与精确匹配，保留全部预览与标记字节，不恢复隐藏内容，也不把投影本身算作公开回答。它不截断相邻 User 与公开回答的完整交互，因此客户端切换模型并更新顶层提示后，仍可形成诊断关联。其余私有控制（签名或密文 reasoning、redacted thinking、native compaction 等）所在单元替换为其不透明字段（`encrypted_content`、`signature`、redacted `data`）的域分隔 SHA-256 摘要：客户端原样回放同一不透明状态时，摘要单元证明连续，最后一轮不会因隐藏 reasoning 被截断；摘要不计入强匹配的单元下限、字节门槛或完整交互，不透明字节变化即不匹配。无签名、无密文的原始思考和无 Marker 投影没有可验证的回放身份，继续使用随机不可匹配边界；预览或 Marker 的改动不能跳过后拼接。完整交互、唯一来源、Principal 隔离及资源预算要求不变，Generation Chain 的严格父链规则不变。
-
-隔离样本校准采用至少两个完整语义单元、256 canonical UTF-8 bytes、64 assistant UTF-8 bytes，并额外要求完整 User/Assistant 交互或闭合工具关系。短应答样本为 193/3 bytes，泛化短交互 220/30 bytes；具体英文任务 587/240 bytes、具体中文任务 567/213 bytes 达到长度门槛。长度达标不能替代唯一性、角色和工具闭合。
-
-校准原文如下；只校准长度门槛，不将文本内容当成运行时特例。
-
-| 样本         | User                                                                                                                                                                          | Assistant                                                                                                                                                                                                                                        |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 短应答       | Please continue.                                                                                                                                                              | OK.                                                                                                                                                                                                                                              |
-| 泛化短交互   | Can you help me?                                                                                                                                                              | Yes, I can help you with that.                                                                                                                                                                                                                   |
-| 具体英文任务 | Inspect the importer failure: invoice INV-2048 has a duplicated ledger entry after the retry. Preserve its original external reference and identify the transaction boundary. | The importer committed the ledger row before recording the external reference. Move both writes into the same database transaction, and keep the unique external reference constraint so a repeated invoice cannot create a second ledger entry. |
-| 具体中文任务 | 请检查订单导入失败的原因：订单编号为订单二零四八，重试后出现了重复的账目记录。请保留原始外部引用，并找出事务边界的问题。                                                      | 导入器在记录外部引用之前提交了账目行。应该把这两个写入放进同一个数据库事务，并保留外部引用的唯一约束，以防止重复提交的订单创建第二条账目记录。                                                                                                   |
-
-重现时分别构造纯文本 User、Assistant `AiItem`，累加 `canonical::item_value` 返回的各个语义单元经 `serde_json::to_vec` 编码后的字节数。纯文本 User 单元包含 `role`、单元素 `content` 数组及值为 null 的 `tool_calls`、`tool_call_id`、`artifact_references`；Assistant 单元包含 `role` 和单个文本 `content` 对象。第二个数值是 Assistant 原文的 UTF-8 长度，中文不转义为 ASCII。资源预算用于限制候选集合、序列化和核验成本，不是从这些小样本推断出的性能保证；截断搜索必须保持未关联。
-
-每窗口最多 512 单元/512 KiB：超限时保留最新后缀，而不是丢弃整个窗口；单个语义单元超过字节上限仍返回 `resource_limit`。进程索引最多 128 候选/16 MiB，单次最多 65,536 单元检查和 8 MiB 内容核验。候选核验超过资源预算返回 `resource_limit`；保留候选未完整索引（包括冷启动）返回 `index_unavailable`；多个来源成立返回 `ambiguous`。这些情况不影响正常推理。敏感比对内容只在易失索引中保存，隐藏 reasoning/native state 只保留不透明字段摘要或随机边界，不保留原文；持久 Observation 只保存来源与匹配元数据。核心原生登记的重启保证与诊断索引可用性不是同一承诺。
-
-无 metadata、无 tool calls 且仅含普通文本的 item 形成一个语义单元；其原始 UTF-8 文本总长度是编码尺寸的下界。该下界已超出剩余窗口预算时，在物化 JSON 前沿用既有后缀溢出裁决，避免先复制数 MB 正文再丢弃。混合内容、私有控制及 native metadata 仍走完整投影与私有摘要／不可匹配边界；原有预算、指纹与完整性标记不变，也不裁剪推理请求或 Generation Chain 历史。
-
-收到输入的证明与已交付尾部共用 16 MiB 进程索引预算，并额外要求包含 leading 前缀的完整输入不超过 512 items/512 KiB；超限后缀仍可用于既有尾部诊断，但不能证明结果回放。输入证明只保留 canonical 摘要，不向普通 Observation 新增完整请求、签名或密文。
-
-`stravia-core` 新增 crate-private 深模块 `interaction_observation/`。外部 seam 保持小：
-
-```text
-observe_ingress(IngressStart) -> IngressObserver
-IngressObserver.reject(RejectedOutcome)
-IngressObserver.admit(RunStart, AdmissionFacts) -> RunObserver
-RunObserver.record(RunEvent)
-RunObserver.finish(RunOutcome)
-
-query_forest(ForestQuery) -> ForestPage
-get_interaction(InteractionId) -> InteractionDetail
-query_rejections(RejectionQuery) -> RejectionPage
-subscribe(after: EventSequence) -> ObservationStream
-set_debug_enabled(bool) -> DebugState
-issue_debug_bundle_ticket(BundleRequest) -> DownloadTicket
-stream_debug_bundle(DownloadTicket) -> BundleStream
-clear_history() -> ClearHistoryResult
-```
-
-接口名称是设计约束而非逐字 Rust 签名。实现必须保留以下所有权：
-
-- `IngressObserver` 在认证/解码前捕获可形成 Rejected Request Observation 的最小元数据；
-- `RunObserver` 持有该 Run 的 Debug 快照、Interaction 关联和终态 guard；
-- typed `RunEvent` 表达普通 Observation 的 Model Turn、Target attempt、Platform Tool、按 Canonical Item 收口的内容、Delivery 与 usage；Debug Trace 不借 `RunEvent` 采集语义中间阶段；
-- AdminService 只调用查询、开关、清理、票据和流式导出接口；
-- Axum/Tauri adapter 不解释 Interaction 分组、Trace 完整度、ZIP 内容或保留策略；
-- Generation Chain 提供已确认的 node/root/parent 关联及按 Principal 隔离的祖先客户端历史读取，不接收运行中或失败 Observation 状态；
-- 归并判定集中在内部 Run Attribution 深模块：writer 在 Admit 处理中把 `RunStart` 与 `AdmissionFacts`（收到的 canonical client 请求与 Generation Chain 已确认证据）交给它，canonical fingerprint、入口接收时间与合并规则只在该模块内计算；writer 保留顺序、背压、持久化与发布职责。
-
-删除旧 `logging::LogEntry`、`run_collector`、`LogStore`、`proxy::observability::send_log` 和旧 `wire_capture` 的平行写入路径。普通 Observation 与 Debug Wire 采用相同的 Authorization-only 写入过滤；Debug Wire 仍独立在 reqwest、WebSocket 与客户端传输边界捕获，普通 Observation 不因此扩大内容范围。
-
-## 5. 事件与投影
-
-### 5.1 普通事件
-
-普通 Observation 保存稳定、结构化、无 wire payload 的事件（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。事件行只保留顺序与关联列；该 kind 独有的小属性存于 `attrs`，正文保存为共享内容存储的引用，管理读取时拼回 `payload`，两种来源的投影一致（存储结构见 §6.1.2，读取契约见 §9）：
-
-- `run_admitted`：不带 payload；`inferred_retry`、`grouping_reason`、`diagnostic_source_run_id`、`has_new_user` 是 Run 列
-- `run_started`
-- `model_turn_started`：同一行携带该 Model Turn 首个 Target attempt 的开始（`attrs.attempt`、`attrs.attempt_at`），不再为首个 attempt 单独写 `target_attempt_started`
-- `target_attempt_started`：仅后续 retry / failover attempt 写入
-- `target_attempt_finished`：仅后续 attempt 写入
-- `model_turn_finished`：同一行携带最后一个 attempt 的结束与用量（`attrs.attempt`、`attrs.attempt_at`、`attrs.usage`）
-- `model_thinking`
-- `platform_tool_started`
-- `platform_tool_finished`
-- `client_tool_handoff`
-- `client_tool_result`：每批一行，逐条结果（`tool_id`、`is_error`、正文引用）存于 `observation_tool_results`
-- `client_visible_content`
-- `run_finished`
-- `interaction_relinked`
-- `observation_gap`
-- `user_input_recorded`：由 `input_preview_recorded` 改名，旧名不再保留或作为别名。每个带有新增用户输入的 Run 至多记录一次，保存经凭据保护发布后的本轮连续 User items（不含纯工具结果载体）的完整有序文本单元引用，读取时以 `\n` 连接，没有 4,096 字符截断。同一 Interaction 的追加输入也记录事件，但卡片的输入摘要只取根 Run 最新的 `user_input_recorded`（`interaction_observations.input_sequence`）；重复发布不覆盖已有引用。升级前已被截断的旧预览保持原样，不从 Turn Chain 回填，缺少文本的旧事件不推断或补录输入。
-- `run_state_changed`、`request_failed`：不带 payload，状态与失败信息分别来自 Run 的 `status` / `superseded_by` / `terminal_reason` 列与 `failure_json`；`run_state_changed` 在同一事务已写入其他事件时不单独写这一行，由那些事件触发 SSE 通知
-
-没有已核验 Generation parent 时，完整请求中的历史 User 不自动视为新增：只有已选定的唯一续接来源或已观察父节点提供 received-input 证明，且当前请求末尾为当前工具结果，才令新 Run 的 `has_new_user=false` 并抑制 `user_input_recorded`。证明比较来源 received-input 与当前请求中有序的用户输入（User 角色且非工具结果载体的 canonical item，忽略图片），二者必须逐项一致；客户端在回放时改写其余历史（删除较早图片、裁剪或移除旧工具结果、变更 system/developer 指令、私有控制）不是新的用户输入，不影响证明。不凭输入文字相同去重；追加同文 User、用户输入被改写、删除或重排、证据缺失或超过既有窗口预算时均保留输入。重启可通过保留的 Generation 证据恢复前缀，无法恢复时保守记录。该判定只影响后续观察事件，不改变分组、模型输入或 Generation 父关系，不删除、改写或隐藏旧重复事件。
-
-`platform_tool_started.input` 和 `client_tool_handoff.input` 保存工具输入，`platform_tool_finished.content` 保存平台工具返回；输入为可解析的 JSON 时保留其类型，否则保留原始参数字符串。旧事件缺少这些可选字段时表示未采集，字段值为 `null` 则表示实际采集到 JSON null。`client_tool_result` 保存收到的客户端返回及其调用 ID、错误标记：每批一行事件，逐条结果写入 `observation_tool_results`（`tool_id`、`is_error`、正文内容引用），读取投影为 `results: [{ tool_id, content, is_error }]`；兼容显式 `tool_result` 块和 `role=tool` 消息；只采集收到的 canonical 窗口，不从恢复后的模型历史重新提取。客户端返回先留在内存，凭据映射注册完成后与用户输入共用发布边界，没有新用户文本的工具续跑也会发布。
-
-客户端工具结果只从已核验 Generation Chain 父节点的本次 `client_delta` 捕获，不再复制父节点完整窗口；没有已核验父节点时不从父历史推断结果。收到的本次新增结果再按批次查询当前 Run 及明确 `parent_run_id` 祖先，只使用同一 Principal、仍在保留期内的调用证据。最近一次 `client_tool_handoff` 确定调用边界；相同 ID 的新 handoff 是新调用。只有与该调用最近结果的已记录正文、`is_error` 均相同时才跳过重复写入。正文变化、错误状态变化、分支结果与新调用保留；没有 handoff 证据，或最近结果正文缺失、为 null 时，不跨越该不确定边界去重。比较状态只存在于当前批次，不另存正文副本或原始凭据摘要。工具去重本身不回写或删除既有结果；升级时事件编码与生命周期合并另按 ADR-0077 无损转换。
-
-生命周期事件把 `usage_confirmed` 合并到 `target_attempt_finished.usage`（`ConfirmedUsage | null`；Model Turn 最后一个 attempt 的结束与用量由 ADR-0089 进一步并入 `model_turn_finished`，`usage_confirmed` 不再作为事件出现），把 `delivery_finished` 合并到 `run_finished.delivery`（`{status, reason, completed_at} | null`）；失败、中断前已收到的用量与交付事实也保留，早到事实先更新投影，不能因尚未终态而丢弃。`delivery_completed_at` 保存于 Run 投影。`generation_associated`、`client_output_committed` 只更新投影，不再落独立事件；启动恢复以 `run_state_changed` 维持 SSE 唤醒。
-
-推理尝试已有失败诊断时，`target_attempt_finished.error` 保存可选的 `FailureDiagnostic`（`source`、`code`、`message`、`status_code`、`upstream_code`；并入 `model_turn_finished` 的最后一个 attempt 则位于 `attempt.error`）。它沿用普通 Observation 的 Authorization-only 写入过滤，随事件查询和 Bundle 导出，原因摘要可能包含原始凭据；即使后续重试成功，该尝试的原因摘要也不会被丢弃。既有 `error_code` 与状态语义不变，成功尝试不附带 `error`，旧记录与没有诊断的恢复终态允许缺省；无需数据库迁移，也不为旧记录补造原因。恢复成功的内部失败仍不成为最终客户端错误；进程日志和面向客户端的普通错误继续使用原有强脱敏。
-
-`model_thinking_delta` 与 `client_visible_content_delta` 仅用于易失实时通道，不是持久化 kind。`model_thinking_delta` 只接收上游可读 thinking / reasoning summary 文本，并以 Model Turn、Target attempt、Canonical Item 与项内 part 隔离汇聚状态，不再执行正文凭据增量脱敏。签名、密文、obfuscation 和不透明快照不作为普通思考正文。`client_visible_content_delta` 仍只接收 Client Projection 已交付的可见内容。
-
-普通诊断内容按 Canonical Item 收口持久化为 `model_thinking` 或 `client_visible_content`：每个 item 一行事件，另在 `observation_blocks` 写一行块元数据（`channel` 为 `thinking` / `visible`、`item_ordinal`、`complete`，以及 `model_turn_id` / `attempt_id` 关联，思考块带这两项），item 去掉正文后的外壳存入 `envelope`，正文单元（由 `item_content_units` 决定）以有序引用写入 `observation_event_contents`，事件的 `attrs` 为 NULL；读取投影按引用回填 `text`、`parts`、`block_id`、`item` 与 `complete`。同一 item 的流式碎片汇聚为一项，保留项内 part 的边界和顺序；具有独立身份的 item 即使类型相同也不得合并。正常结束保存完整 item；可处理的失败或取消保存已实际收到的内容并标为未完成，不补造未收到的尾部。item 首次落盘只发生在收口时，不周期性持久化中间快照；进程突然崩溃可以丢失整个尚未落盘的 item。实时与持久内容共享 scope 与真实源 item ordinal：可见内容在 Run 内、thinking 在 attempt 内稳定编号，迟到 provider ID 不改变 block_id。WebSocket 仅累计已成功发送并确认的客户端帧，失败或断线收口为 `complete=false`，不补入未发送正文。
-
-旧封块行不能推断真实 Canonical Item 边界：转换移除随机 block_id 与合成 item，原元数据收进 `legacy_text`，读者按原 scope 与有序 parts 连续呈现，不插入虚构空行。旧提交信号行删除，admission 中的 `client_output_committed_sequence` 与 `legacy_lifecycle` 保留原水位与事实来源；Bundle 仅应用 sequence 不超过 through-sequence 的事实，终态后的迟到提交以更高 sequence 的 `run_finished` 修订承载并保留原完成时间。ADR-0089 的规范化升级把这些旧事件迁入 `attrs` / `observation_blocks` 与引用表，读取投影与新写入保持一致。
-
-物理存储可以为容量、压缩或文件布局分块，但物理块不得成为新的语义 item，也不得改变 item 身份或 part 边界；最终 schema 由迁移与生成的参考 SQL 定义。现有队列容量、背压与 gap 行为继续成立，容量边界不得以时间或字节阈值强制把一个 Canonical Item 持久化成多个内容项。
-
-工具结果批次先对查询 ID 去重，再沿既有祖先与 handoff 边界比较。批内比较引用已接收事件的位置，不再次复制大正文；不按跨交互的相同 payload 全局去重，缺失调用证据、正文变化及 null 边界仍保留。
-
-未收口内容作为选中 Interaction 的累计易失快照发布并替换显示，不带 SSE ID、不推进持久 cursor；界面明确未保存状态。第一段与完成、失败、取消边界立即处理，中间修订按固定首次截止的最多 100ms 发布窗口合并，只发布变化 block 的最新修订；持续输入不延后截止。同一 block 尚未消费的旧修订可被新修订替换，不能让累计全文无限排队或拖累持久通知。发送用的全文构造和编码只在发布时进行，不在每个原始 delta 上重复执行。下游转发与推理不等待观察发布、诊断 item 收口或落盘，也不因有无管理订阅改变记录行为。持久化失败、live gap 与进程崩溃丢失分别表达，不能把易失预览截断误报成已落盘历史丢失。
-
-思考和工具内容不进入可见输出摘要（只有 `channel='visible'` 的块参与），采用普通 Observation 的 Authorization-only 写入过滤及统一的 `log_retention_days`（见 §6.4），不受 Debug 开关控制；原始凭据与业务敏感内容可能保留。普通事件不保存完整 canonical request/response；完整保存本轮连续 User items 的文本单元是这一边界下的明确例外（`user_input_recorded`），它只引用内容存储里的文本单元，不扩大为保存完整 request。
-
-### 5.2 Debug 原始 Wire 捕获
-
-Debug Trace 只记录四个方向的应用协议级收发：Connect Client → Stravia、Stravia → upstream、upstream → Stravia、Stravia → Connect Client。上游包括模型及平台工具的实际远程调用：reqwest / wreq HTTP、远程 MCP 的 HTTP JSON / SSE，以及浏览器 CDP 能观察到的网络内容。WebSocket 与客户端方向在各自实际传输边界捕获 handshake 元数据和应用 message。它不记录 TLS、TCP、HTTP/2 frame 或操作系统 packet，也不采集 decoded/restored/effective/canonical request、canonical content/terminal response、Hook 前后、Platform Tool 中间态、Client Projection、delivery terminal 或 stage timing 等语义阶段。
-
-平台工具继承调用请求的 Run / Trace；Agent 内嵌调用、嵌套 Agent、并发工具及公开执行转后台后产生的远程输入和返回都进入父请求原有的 Debug 包，不新建工具专属包。Agent 执行流在后续或其他任务中消费时恢复创建时的归属；搜索子任务、MCP worker / 重连和 Chromium 页面会话显式携带该归属，不能依赖共享客户端或事件泵的 task-local，也不能串入另一请求。没有父请求的独立 MCP `generate` / `StraviaRead` 才建立独立观测；生成参考图的远程下载也在其作用域内。导出票据仍是固定水位快照，后台尚未发生的收发需在完成后重新导出，不补写已下载的 ZIP。
-
-HTTP / MCP 在业务解析之前捕获实际请求正文、响应头及已读取的响应字节，包括非成功状态、二进制正文和原始 SSE 分隔符。wreq 的显式重定向逐跳记录；reqwest 自动重定向隐藏的中间跳、业务没有消费的正文或不可回放的请求流无法补造，须标记捕获缺口，不为 Debug 额外读取正文或改变执行结果。Debug 关闭时不复制诊断正文，也不追加浏览器正文读取。
-
-Chromium 记录页面及可归属子 frame / dedicated worker 的请求头、可获得的原始 POST 字节、响应头和 `Network.getResponseBody` 返回的实体正文，而非渲染后的 DOM。CDP 不能还原 HTTP 压缩 / 传输分块，也不能完整捕获浏览器流式分片、WebSocket / WebTransport、重定向正文或可靠归属 shared / service worker；这些限制显式使 Trace 标记 `partial`。正文不可得、页面关闭或读取取消同样标记缺口，不把错误文本、CDP 错误事件或重新编码的 POST 文本冒充远程原始字节。此限制不改变既有 Vendor WebSocket 的捕获。
-
-每条 Wire 记录保留必要的关联元数据，包括适用的 Interaction、Run、Model Turn、Target attempt、方向、协议、transport、顺序与 UTC 时间。Trace schema 3 的 Vendor 网络出站 headers 使用有序 `[{"name": string, "bytes": [u8, ...]}]`，保留重复字段、交错顺序及非 UTF-8 字节；每个大小写不敏感的 Authorization 值替换为 `[42, 42, 42]`。其他捕获源仍可使用原有 header map，历史 schema 2 map 记录继续可读。既有 Target attempt 身份与生命周期、usage、工具事件、失败与取消继续由普通 Observation 持久化并随 Bundle 导出，不把旧 `target_selected` 迁入普通 Observation，也不复制到 Debug Trace。Debug 原始字节不等待 Canonical Item 收口，普通 Observation 的内容收口也不阻塞 wire 捕获或下游转发。
-
-Wire 记录直接写入 Debug Trace 队列，不逐条写入普通 `observation_events`，也不占用普通事件队列。普通生命周期、item 内容与工具结果持久化并驱动 SSE；Trace manifest 仅写本地文件，不产生普通事件。Trace 使用下一持久观察边界作为水位，同一 Trace 中排队记录的水位保持非递减；manifest 按既有维护周期或显式生命周期边界持久化。Interaction 导出票据排空目标 Interaction 的 Trace 后固定截止水位；既有 ZIP 截止水位不能包含之后的新捕获。
-
-原始 body chunk、SSE 字节与 WebSocket 应用 message 在传输边界观察到后即可排队，不以完整 JSON、SSE、NDJSON、Connect message 或 Canonical Item 收口作为记录前提。只有 HTTP `Authorization` header 的值在入队前替换，媒体与其他 header、URL、body 和 message 内容原样保留；编码进分段文件与物理批处理不得改变可恢复的字节、方向和顺序。
-
-Trace 继续使用既有有界队列与写入批次；队列、捕获缓冲或存储失败不等待、不反压推理，Trace 标记 `partial` 或 gap。manifest 的字节及事件水位只公布已确认可读取的数据；分段切换、snapshot、finish 与关闭保持显式 flush，不能因后续 finish 成功而把缺失捕获伪装成完整。
-
-### 5.3 顺序与 SSE cursor
-
-准入先取得 Admit、交付收据、执行 Finish 与最终清理的队列容量，再从请求准备有界证据；总队列容量不变。收据与 Finish 各有独立保留槽，正常执行终态及已提交历史关联不等待最后一个后台发布句柄释放。未能排队准入的 Run 不继续投递普通事件、收据或 Finish，只保留既有易失缺口，并清理已捕获的 Trace。Admit 已入队仅证明 FIFO 接纳，不证明 SQL 已提交；SQL 准入失败时撤销内存归属，不接纳其输入窗口或工具结果回放证据。
-
-Client Output Commit 的已确认事实在进入普通事件队列前保留，随 Finish 合并落盘；未正常 finish 的异常析构也保留此前确实发生的提交。不能从 HTTP 200、Delivery 成功或存在 Generation ID 反推该事实。请求完整交付、历史节点已提交与 Observation 不完整可以同时成立，缺口不改写请求或历史结果。
-
-有界队列可能丢失 `model_turn_started`。首个 Target attempt 与 Model Turn 的开始同行写入，不再需要父 Turn 检查；后续 retry / failover attempt 的 `target_attempt_started` / `target_attempt_finished` 仍在同一事件事务内确认其父 Model Turn 属于当前 Run；父事实不可用时，以 `observation_gap`（`reason=model_turn_start_unavailable`）代替孤儿开始事件，不能捏造父 Turn/Attempt，也不能让该外键失败回滚整批事件。实际收到的结束事实及其 usage（并入 `model_turn_finished` 或独立的 `target_attempt_finished`）仍保留；缺失的尝试投影不能补造为零用量。
-
-Observation writer 为持久化事件分配递增 `event_sequence`；持久事件 allocator 不因清历史或到期回收而倒退，已提交事件 ID 不重用。事件及受影响摘要在同一数据库事务内提交后才广播；SSE event ID 等于 sequence。此单调分配契约不同于查询的 `snapshot_sequence`：后者只描述同一读取事务内仍保留的已提交事实，跨清理或 reset 重建不保证单调。
-
-批次先过滤不持久化的事件并完成 `attrs` 与内容引用编码，再用一次数据库调用为实际事件取号；空批次不打开事务。SQLite 使用带整数上界检查的 `UPDATE ... RETURNING` 预留连续范围，单事件也复用同一取号路径，事务回滚不消耗序号。PostgreSQL 在同一查询中逐次调用 `nextval`，使用实际返回的每个值，不假设并发写者之间的序号连续；回滚仍可留下序号空隙。事件、状态投影、终态顺序及提交后广播规则不变，不调整 writer flush 周期；事件按阶段合并为更少的事务（见 §6.1.2），源顺序与 sequence 顺序不变，`FlushInteraction`、`Barrier` 与 `Shutdown` 屏障照旧立即提交。
-
-全局通知的 SSE event 名保持 `observation`，ID 等于持久 sequence，但正文为轻量 `ObservationChange`，不是完整持久事件。先分批重放已提交变化（每批最多 512 条），再接续实时通知；完整 payload 仍由详情事件接口按需读取。通知进度、成功应用的视图水位与正文 revision 分别维护，过滤造成的 sequence 空洞不是持久丢包证明。过旧、超前、清理后失效或无法安全恢复的游标返回 `reset_required`，消费者须重建权威 forest、详情与选中正文，而非把空响应当作恢复成功。
-
-选中作用域的 `live_content`、`live_snapshot`、`live_gap` 与 `live_finished` 不带 SSE ID，不推进持久 cursor。建立作用域先取得当前累计快照（包括空快照），再无遗漏地接续更新；`live_finished` 表达 Run 收口并触发已收到正文立即追平，不替代持久终态事实。重连、reset 或断线时替换或清除旧易失状态，不按文本猜测去重，也不重播历史动画。易失预览不承诺重启恢复。
-
-作用域注册与当前快照读取在同一原子边界完成；正常 delta 更新当前累计镜像，不为每次输入克隆完整正文。收口先立即发布待处理正文，再退役 block 并发送 `live_finished`，保留实际顺序。作用域 mailbox 按 block latest-wins，容量溢出显式发送 `live_gap`，不把易失背压变成全局持久 reset。清历史先清作用域待发正文，再发送空快照与 `history_invalidated` live gap；清 Debug 或历史失效同时要求全局视图重建，不能由重连恢复已删除数据。
-
-SQLite 的 Run admission 使用 `BEGIN IMMEDIATE`，在读取父 Run 状态前取得写锁，使父分支中断与子 Interaction 入库保持原子性，避免并发写入导致读事务升级失败。
-
-同一 Gateway 内，来自同一 SQLite pool 及其克隆的运行期写入口统一通过 `Pool::begin_write` 开启写事务，包括历史、普通 Observation、Artifact、History Marker、凭据映射及管理和后台存储。它先取得共享 FIFO 异步写锁（池级写租约），再取得连接并执行 `BEGIN IMMEDIATE`；单条 autocommit DML 和 `UPDATE ... RETURNING` 同样写在写事务内。调用方不接触租约、BEGIN 语句或完成屏障，切换写协调实现不需要改业务存储代码。独立只读查询和只读事务仍使用普通 pool，不因写协调而串行化。PostgreSQL 上 `begin_write` 等同普通 `BEGIN`，不增加全局写锁，保持原数据库并发与锁协议。
-
-必须在事务外执行的写入（迁移期的 `PRAGMA foreign_keys`、SQLx 迁移器、测试夹具的 `sqlite3_deserialize` 与 `PRAGMA wal_checkpoint`）才使用连接级的 `Pool::acquire_write` 与 `WriteConnection::finish`。仓库 `clippy.toml` 把 `acquire_write` 列入 `disallowed-methods`，例外处须以 `#[expect(clippy::disallowed_methods, reason = …)]` 写明原因。
-
-这一约束由池强制执行，而不是只靠调用方遵守。`db::init_pool` 与无持久存储时的内存历史池以 `PoolOptions::require_write_lease` 创建：连接建立后、驱动与调用方初始化完成时设置 `PRAGMA query_only=ON`；`begin_write`（及连接级 `acquire_write`）取得连接后才设为 `OFF`，写事务结束时再设回 `ON`，并兼作完成屏障。绕过租约的写入（包括 `BEGIN IMMEDIATE` 和延迟事务中的写语句）立即以 `SQLITE_READONLY` 失败，不会持有数据库写锁，也就不会让排队中的租约写者在 `busy_timeout` 后失败，或在延迟事务升级为写事务时立即 `SQLITE_BUSY`。迁移和升级钩子在同一写租约内运行。解除只读失败的连接不会归还池中，而是直接关闭。经 `Pool::connect_options` 建立的直连和离线维护池不受此约束。
-
-`WriteTransaction::commit` 或 `rollback` 结束事务后，在同一 SQLite worker 队列执行完成屏障，确认已退出事务后释放协调权。写事务未结束即被丢弃（`?` 早退、请求取消）时向驱动排入回滚，租约的清理任务继续持锁，并在回滚完成、归还连接前恢复只读，不能因调用方 future 被丢弃就放行下一笔写入；后台回滚失败或连接状态无法确认时，等待连接关闭后再释放。因此成功路径必须显式提交，丢弃即回滚。健康连接仍归还原池，不因普通取消关闭内存库的唯一连接。
-
-写租约仅覆盖数据库阶段，不覆盖文件／网络 I/O、Artifact 对象锁等待或再次申请同池写租约。清理中的 owner 快照读事务在文件 tombstone 操作前提交；保留期更新也在完成数据库写租约后才改写 manifest。协调范围仅限同源 pool，不替代跨进程或独立连接池的数据库锁；外部写者与底层 I/O 停顿仍可能造成 SQLite 等待或 `SQLITE_BUSY`。现有 `busy_timeout` 和持久性配置不变。
-
-页面先查询快照并取得 `snapshot_sequence`，再从该 sequence 订阅，避免查询与订阅之间丢事件。重连携带最后确认的 sequence：
-
-- cursor 仍在保留范围内：补发缺失事件；
-- cursor 已清理：发送 `reset_required`，前端重新查询当前时间页；只按保留窗口下界判断，不把删除或合并造成的内部稀疏 sequence 当作失效 cursor，范围内正常重放；
-- SSE 断开不影响 Observation 写入。
-
-当前只保证连接到同一 Gateway 实例的实时唤醒；SQLite/PostgreSQL 中已持久化的历史仍由查询接口读取。多实例通知与共享 Trace storage 不在本设计范围内。
-
-## 6. 持久化
-
-### 6.1 关系数据
-
-SQLite 与 PostgreSQL 使用等价 schema 和索引。具体 SQL 由各自迁移拥有，逻辑表如下：
-
-#### `interaction_observations`
-
-- `id`
-- `principal`
-- `generation_root_id`（nullable）
-- `root_run_id`
-- `first_model_id`
-- `first_model_display_name`
-- `status`
-- `started_at`
-- `last_active_at`
-- Confirmed Upstream Usage 各字段及 known 标记
-- `last_event_sequence`
-- `input_sequence`（根 Run 最新的 `user_input_recorded` 事件 sequence，输入摘要的来源）
-
-没有 `input_preview`、`visible_tail` 与 `expires_at` 列（ADR-0089 删除；`interaction_observations_expiry_idx` 由 `interaction_observations_activity_idx (last_active_at, id)` 取代，供保留期扫描使用）。输入摘要取自 `input_sequence` 指向事件的内容引用，输出摘要取自最新 `channel='visible'` 块的引用；Interaction 是保留期的根对象，到期时间由 `last_active_at + N` 在扫描时计算，不落列。
-
-标题固定使用 `started_at + first_model_display_name`；显示名为空时回退首个 Run 的 Route ID。后续模型变化不改标题，在详情中展示。
-
-#### `inference_run_observations`
-
-- `id`（沿用 request ID）
-- `interaction_id`
-- `parent_run_id`（nullable，自关联）
-- `generation_node_id`（nullable）
-- `generation_parent_id`（nullable）
-- `ingress_protocol`
-- `route_id` / `model_display_name`
-- `request_model`（请求的路由 model_id 快照，可空）
-- `failure_json`（最终失败诊断快照，可空；`code` 为 Stravia 稳定失败词表，上游错误体自带的错误码单独保存在 `upstream_code`）
-- `status` / `terminal_reason`
-- `debug_enabled`
-- `client_output_committed`
-- `inferred_retry` / `grouping_reason` / `diagnostic_source_run_id` / `has_new_user`（原先只在 `run_admitted` payload 中，ADR-0089 起为 Run 列，`run_admitted` 不再带 payload）
-- `superseded_by`（nullable，续接 Run 的 ID；`run_state_changed` 不再带 payload）
-- `started_at` / `last_active_at` / `finished_at`
-- `last_event_sequence`
-
-没有 `expires_at` 列；Run 随所属 Interaction 删除。
-
-#### `model_turn_observations`
-
-保存 Run 内每个 Model Turn 的身份、Route、开始/结束、状态和 usage。Route Scheduling Strategy 的 provider/model/latency/usage 聚合已从 `request_logs` 迁到 Observation 原始事实，使用滚动 1h 窗口；不得继续双写旧表。管理用量分析已改读独立 Stats Usage，Model Turn 与 Target attempt 只作为其事务内计量来源与升级回填来源，不再要求详情长期存在。
-
-#### `target_attempt_observations`
-
-保存每个真实上游 attempt 的 Target、Provider、上游模型、协议、状态、耗时、错误分类和已报告 usage。失败、同 Target retry 与 failover 各自保留。
-
-#### `observation_events`
-
-保存 sequence、关联 ID（`interaction_id`、`run_id`、`rejection_id`）、`kind`、`occurred_at`，以及该 kind 独有的小属性 `attrs`（nullable，共用 storage codec 编码的二进制，SQLite BLOB / PostgreSQL BYTEA）；SQL 过滤字段 `tool_id`、`operation_id` 提升为列。`payload` 与 `expires_at` 列已删除（ADR-0089，迁移 0041/0042）：正文不再进入事件行，而是经 `observation_event_contents` / `observation_tool_results` 引用内容存储；thinking / visible 块的元数据在 `observation_blocks`。事件表只记录变更顺序，供 SSE 游标、查询快照水位与 Bundle 截止序号使用。Interaction/Run/sequence 与全局 sequence 索引保留；event expiry 索引已移除，rejection 索引仅覆盖非空行，`observation_events_tool_idx (tool_id, sequence)` 部分索引（`WHERE tool_id IS NOT NULL`）存在：`client_tool_result` 的结果正文按 `tool_id` 走 `observation_tool_results_tool_idx`，但命中详情回溯工具名称、参数与 `platform_tool_finished` 正文仍按 `tool_id` 查 `observation_events`；0042 曾误删它，0043 重建。二进制布局见 [ADR-0076](../adr/0076-deduplicate-turn-chain-items-and-share-binary-storage-codec.md)；规范化结构与升级顺序见 §6.1.2。
-
-#### `rejected_request_observations`
-
-保存无法形成 Inference Run 的请求时间、method、脱敏 path、ingress 协议、失败阶段、稳定错误 code、HTTP status、Debug Trace manifest 关联；没有 `expires_at` 列，保留期按 `occurred_at + N` 计算（扫描复用 `rejected_requests_window_idx (occurred_at DESC, id)`，`rejected_requests_expiry_idx` 已删除）。Migration 0045 起额外保存可空的 `started_at`、`duration_ms`、`failure_json` 与来源快照 `request_model`、`api_key_id`、`api_key_name`，供客户端错误投影使用；这些列全部可空、不回填历史，也不引入新的 Principal 外键。它不保存 Principal，也不伪造 Interaction ID。
-
-#### Debug manifest（文件，不是关系表）
-
-`debug_trace_manifests` 已由迁移 0008 删除。状态存放在 `diagnostics/observation-debug/<trace_id>/manifest.json`，以临时文件加 rename 原子替换，启动扫描建立进程内 `DebugTraceIndex`，writer 增量更新。详情、客户端错误列表和 Bundle 通过索引读取状态，API 结构不变；多实例只在拥有 Trace 文件的实例上可见。Run 终态提交并广播之前先 flush 已排队的 Wire 并写入当前 manifest，不再持久化或广播 `trace_manifest_updated`。客户端结束不关闭仍由后台执行持有的 Trace；最后一个 observer 释放后的 `Finalize` 才关闭捕获并更新最终 manifest，父请求结束时确定的保留截止时间不因后台字节续期。Rejected Request 保留 `debug_enabled` 准入快照，不再保存冗余 `debug_status` 列。运行时逐文件扫描隔离损坏或不可读 manifest，仅警告并跳过，不覆盖坏文件，不影响健康 Trace 查询与新捕获；升级导出则严格核对已有文件与数据库权威事实，匹配后才允许删表。升级的有界并发、临时查询索引和中断续迁契约见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
-
-### 6.1.1 独立长期 Stats Usage
-
-Core 的 `UsageStatsStore` 在现有 SQLite/PostgreSQL 数据库内拥有长期管理汇总，不新建统计服务、第二个数据库或前端事实源。配对迁移 `0018_stats_usage.sql` 建立 `stats_usage_buckets` 和 `stats_usage_checkpoints` 及来源视图、触发器；全局、模型、Provider、API Key 的基础桶按绝对时间每 `900000` 毫秒划分。永久桶只保存维度身份、非秘密展示标签、时间、计数、已知值计数及指标的分子/分母，不保存正文、工具内容、Debug 或永久逐请求清单。不设自动过期或长期降采样期限；空间随时间桶和身份维度增长，不承诺固定容量。
-
-- **事实与修订：** 来源为保留中的请求、拒绝请求、Model Turn 和 Target attempt 数值投影。来源 INSERT 及统计相关 UPDATE 的触发器在同一源事务中扣除旧 checkpoint 贡献、替换 checkpoint、计入新贡献；checkpoint 以来源种类和稳定来源 ID 标识，不把重复 usage 帧或迟到修订作为新增消耗。配对迁移 `0025_stats_usage_update_guards.sql` 仅替换 UPDATE 触发条件，不重算历史桶或 checkpoint：统计投影及其关联键、Provider 请求归属依赖字段发生实际变化时才更新，使用 NULL-safe 比较；事件序号、预览等无关更新与同值赋值不再触发汇总写入。未知修订字段保留已知值，明确零替换旧值。`0036_request_recovery` 起触发器以差量刷新取代“扣除旧 checkpoint、删除、重插”：仅写入发生变化的 checkpoint 行，来源不再产出的行删除，长期桶由 checkpoint 的 UPDATE/DELETE 触发器按差额结转。充分聚合信息使跨桶平均耗时、首字延迟、错误率与成功 attempt 加权 TPS 可重新计算，保留全部未知、部分已知和明确零的区别。
-- **清理与并发：** 来源 DELETE 只回收对应 checkpoint，不扣减永久桶。清理与源写入共享数据库事务一致性：汇总或 checkpoint 写入失败时源事务回滚，不能先成功删除来源再丢掉应计贡献。来源仍存在时保留修订所需 checkpoint；删除后该来源不能再合法修订，工作元数据随之回收，不另留永久请求账本。当前进程若发生携带统计事实的持久化失败，使用仅限清理的粘性失败标记拒绝清理：不能证明待处理统计事实已可靠汇总时，手动或自动清理明确失败。该标记不持久化，不新增重试或正常推理准入门槛；单纯正文、Debug、工具诊断的普通缺口不阻止清理。重启后已提交来源与汇总仍一致，但无法恢复此前被丢弃、未保存的已确认事实，因此不承诺完整账本。手动 Clear History、到期回收和保留期修改继续保护活动记录；Debug 清理、管理端本地 Console Chat 清理均不删除长期汇总。
-- **升级与恢复：** 建表、触发器安装及对实际保留事实的回填在同一 SQLx 迁移事务内完成；失败或中断回滚，重入不会重复入账。现有启动迁移完成后才构造存储并开放管理读取，不以空统计掩盖未完成升级；没有独立异步回填游标。只能恢复仍存在且可判定的事实，已删除或从未持久化的历史不可恢复，不调用上游补账、不解析 Debug 猜用量、不把缺口补零，也不自动重放模型调用。
-- **历史身份：** 以模型内部 Route ID、Provider ID、API Key ID 归属，不按可复用的客户端模型名或展示名称合并。桶不依赖配置外键级联；删除配置后保留非秘密名称与可信身份，不保留凭据或授权能力。同名重建是新身份，更名不拆分身份；旧事实无法证明归属时保留未知边界，不凭同名关联当前对象。分类返回 `deleted`，历史 `model_id` / `provider_id` 可为 `null`；已删除对象仍可识别，但不提供失效配置操作。
-
-**过滤读取。** 管理统计的 `provider_ids` / `api_key_ids` 不引入新表或新桶：`provider` scope 已按 Target 尝试记录该 Provider 的上游请求、错误、Token、耗时与金额，`api_key` scope 已记录该 Key 的请求数、Token、耗时与金额。过滤只切换读取的 scope 与 `identity IN (...)`，因此总览与页面上的 Provider / API Key 行一致；请求级分类列在边际桶中不存在，固定返回 0，API key 过滤还把上游计数置零。SQLite 将 ID 列表作为 JSON 数组绑定给 `json_each`，PostgreSQL 绑定 `text[]`，都不拼接 SQL；未知 ID 与重复 ID 不报错。订阅摊销只在 Provider 过滤时保留所选 Provider 的计划；API key 无法归属订阅，过滤时只展示按量成本且 `subscription` 为 `null`。
-
-长期 Stats Usage 与 Observation/Debug 的保留周期独立；清理后只剩汇总，不能再追溯到已删除的具体对话，也不能从 15 分钟桶恢复秒级历史分布。它保留管理分析现有成功 attempt 与请求级口径，不承诺完整财务账本或上游实际收费。Route Scheduling 继续从原始 Observation 读取精确 1h 短窗口并叠加实时在途负载，不读取长期桶替代选路事实。请求记录页面仍以精确到秒的绝对范围筛选并限制跨度 24 小时，不继承统计页的长期范围契约。
-
-### 6.1.2 规范化结构与写入阶段
-
-> [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md) 修订了本节所述 Observation 的存储与写入：事件不再保存 `payload` 与 `expires_at`，正文改为引用共享内容存储，写入按阶段合并事务。早期设计（ADR-0076 的 payload 二进制、ADR-0077 的事件合并）中与此冲突的描述以本节为准；历史迁移说明保持原样。
-
-每个事实只存一处：状态和用量在投影列，正文在内容存储，事件表只记录变更顺序。
-
-```text
-observation_events
-  sequence PK, occurred_at, interaction_id, run_id, rejection_id, kind,
-  tool_id, operation_id,
-  attrs BLOB NULL               -- storage codec；只放该 kind 独有的小属性
-observation_blocks              -- thinking / visible 块元数据
-  sequence PK → observation_events, interaction_id, run_id, model_turn_id,
-  attempt_id, item_ordinal, channel (thinking|visible), complete, envelope NULL
-  INDEX (interaction_id, channel, sequence DESC)
-observation_event_contents (sequence, ordinal, content_id)   -- 事件/块的有序正文引用
-observation_tool_results   (sequence, ordinal, tool_id, is_error, content_id)
-  INDEX (tool_id, sequence)
-interaction_observations      + input_sequence   -- 删除 input_preview、visible_tail、expires_at
-inference_run_observations    + inferred_retry, grouping_reason,
-                                diagnostic_source_run_id, has_new_user, superseded_by
-                              -- 删除 expires_at
-rejected_request_observations -- 删除 expires_at
-```
-
-- **正文即内容单元。** `content_id` 指向共享内容存储 `contents`：不可变、按作用域（Principal）与摘要去重，Observation 的作用域键是 `api-key:<principal>`，与 Turn Chain、History Marker 相同，所以同一段正文三方只存一份；文本单元存 UTF-8 原文、JSON 单元存紧凑 JSON；单元的划分由 `item_content_units` 唯一决定（写入拆出正文，读取按同一指针顺序回填 `envelope`）。引用表对 `content_id` 是 `RESTRICT` 外键并建有反向索引；删除引用的同一事务把失去最后一个引用的正文登记进 `content_gc`，最终删除只发生在内容回收，见 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)。
-- **kind 形态。** `model_thinking` / `client_visible_content` 的块元数据进 `observation_blocks`、item 外壳进 `envelope`、正文进引用，`attrs` 为 NULL；`user_input_recorded` 保存最新 User item 的有序文本单元引用；`client_tool_result` 每批一行、逐条结果进 `observation_tool_results`；`run_admitted`、`request_failed`、`run_state_changed` 不带 payload；`model_turn_started` / `model_turn_finished` 分别携带首个与最后一个 attempt；其余 kind 的 payload 原样迁入 `attrs`。事件列表见 §5.1。
-
-**写入按阶段合并为事务。** 阶段边界由生产方（`RunObserver`）在已有同步点确定，每个阶段向 writer 发一个命令、写一个事务；不引入等待窗口或定时器，不在同一同步点产生的写入不强行合并。
-
-| 阶段 | 同一事务内的写入 |
-|---|---|
-| 准入 | Admit、状态变化、客户端工具结果；Admit 附带的父链缺口与 Retained Tail 诊断事件在同一事务内、`run_admitted` 之后按序写入，经保存点：可选诊断失败只回滚它们，准入照常提交，缺口交给缺口重试 |
-| 轮次开始 | 合并后的 Model Turn 开始行与首个 attempt、用户输入 `user_input_recorded`（首轮；须等凭据映射登记完成后才发布），以及与它同批发布的待回传客户端工具结果；事件序号按生产方到达顺序分配。进入可能长时间阻塞的 RPM 排队等待之前，生产方调用 `RunObserver::commit_turn_start`（`model_turn/live.rs`），缓冲的 Turn 开始随即单独落盘，等待期间 Turn 已可读，等待之后的 attempt 另写自己的行；没有等待时仍与首个 attempt 合并 |
-| 流式 | item 收口事件（thinking、visible、handoff，含最后一个 item）按到达顺序合批，沿用队列中最多 64 条的合批 |
-| 结算 | 用量事务：合并后的 Model Turn 结束行与最后一个 attempt 的用量，单独提交，使可选诊断写入失败不能回滚用量事实；收尾事务（`finish_run_with_completion`）：ClientCompletion、tail 来源、`run_finished` 在同一事务内提交；`finalize_activity` 不在其中，它在最后一个观察句柄释放后单独执行，先读一次，仅当仍有残留运行中活动时才写入 `observation_gap`；此外 `UsageConfirmed` 在发布终态之前（先于 `send_vendor_output().await`）单独提交一次只更新 attempt 用量的事务，是独立同步点，不写事件行 |
-
-事件源顺序与 sequence 顺序不变；writer 对轮次开始、attempt 结束和客户端交付结算的缓冲按 Run 分开（`PhaseBuffers`），并发 Run 的阶段事件在队列中交错到达时互不占用、互不打断，各自仍合并成行。流式事件批次只合并同一 Run 连续到达的事件，遇到另一个 Run 的命令即交还主循环，所以多个 Run 逐事件交错时仍是每个事件行一次提交。`FlushInteraction`、`Barrier`、`Shutdown` 与 Run 收尾照旧立即提交已缓冲的阶段。轮次开始与结算阶段承载 Turn 与用量事实，其事务失败时该阶段的事件一起丢失，记为一个 `observation_gap`，仍归所属诊断任务处理，并阻止依赖这些事实的清理。
-
-- **事务内语句精简。** 不再有每批对 `visible_tail` 的 UPDATE，事件 INSERT 与 Run / Interaction UPDATE 不写 `expires_at`；同一事务内每个 Run 及其 Interaction 只更新一次 `last_active_at` 与 `last_event_sequence`；事件、块、内容与引用行使用多行 INSERT；首个 attempt 与 Model Turn 同行，不再需要 `target_attempt_started` 的父 Turn 存在性检查，后续 attempt 保留该检查以覆盖有界队列丢失父事件的缺口路径。
-- **读取契约。** 列表、changes、详情与 Bundle 里的 `InteractionSummary.input/output` 只返回有序内容引用与 `raw_len`；正文由 `GET /api/v1/observations/contents` 批量取，详情增加 `input_text` / `output_text` 全文，Bundle 导出时把引用展开为正文。存储与响应均不截断（见 §9）。
-- **升级。** 0041 只做加法（新增 `attrs`、`observation_blocks`、新增列与 `interaction_observations_activity_idx`）；随后 Rust 阶段 `upgrade_normalize` 分批把旧 `payload` 转为 `attrs`、块与引用，把首个 attempt 并入 Model Turn 开始行、把先于结束行的最后一个 attempt 与用量并入 Model Turn 结束行并删除 `usage_confirmed`（failover 中被取代的 attempt 开始/结束保持各自独立的行），并回填 `input_sequence`；无法解码的历史载荷按 `{}` 迁移并告警（逐条与汇总数量），因为升级测试要求此类行不阻断升级；进度写入 `observation_normalization_upgrade`（`stage` 0–4，四个阶段），可中断重跑；最后 0042 删除旧列与旧索引。已被截断的旧输入预览保持截断，不从 Turn Chain 回填。
-
-实施后实测（2026-11-04，合成负载；实施前 `aecfc21e`，实施后 `d68284d5`；命令、二进制 SHA256、机器状态与明细见 [ADR-0089 §实施后实测](../adr/0089-share-content-store-and-normalize-observation-writes.md)）：
-
-|每 Inference Run|实施前|实施后|
-|---|---:|---:|
-|事件行：单轮队列（32 个 Run）|11.0|8.0|
-|事件行：6 轮工具调用流（144 个 Run）|13.33|9.42|
-|Observation 写事务：单轮队列（unary / stream）|12.25 / 12.75|6.25 / 6.25|
-|Observation 写事务：工具调用流（SQLite / PostgreSQL）|11.49 / 11.57|8.01 / 8.03|
-|写租约内 Observation 语句：单轮队列 / 工具调用流|约 74.4–74.9 / 80.4|约 53.7–54.0 / 68.0|
-|SQLite 写租约：Observation 每 Run 持有总时长（并发 8，4 次重复）|21.8–36.6 ms|19.5–24.4 ms|
-|SQLite 写租约：Observation 每 Run 排队总时长|27.4–66.7 ms|8.2–15.3 ms|
-
-事务数是外层提交，嵌套保存点的释放不计。写租约次数减半，但单次持有更长（均值 1.6–2.9 → 3.2–4.1 ms），所以持有总时长只降约 18–26%；新二进制 8 个 case 中有 2 个因 SQLite 提交（磁盘同步）停顿出现数十到数百毫秒的持有（每 Run 136.3 与 148.5 ms），基线 8 个 case 没有出现，原因未定，见 ADR。PostgreSQL 32 worker 并发写入加每 0.5 s 强制扫描 120 s，实施前 2 次运行有 18 与 10 次死锁（`pg_stat_database`），实施后 2 次均为 0。ADR-0089 中按开发库估算的 7.7 事件行与 4.7 事务没有被这两个合成队列复现（单轮队列事务 6.25，工具流 8.01），原因与按 kind 的行数变化见 ADR 明细；ADR 的估算是推断，不是本设计的结论。
-
-### 6.2 Debug 分段文件
-
-WebSocket 捕获 handshake 元数据与应用 message；Ping/Pong 控制帧的既有限制保留，只记录事件类型、方向与时间，不保存控制帧载荷，并明确标记策略性省略。该省略不把 Trace 标为 partial；历史 Trace 不回填或改写。
-
-实际收到的 Close 在复用连接的提前失败判定之前捕获一次，保留 code、reason 及所属 attempt。EOF、接收异常、本地取消与连接到期没有收到 Close 时，不得补造入站帧；原因由普通 Observation 表达。本地主动发出的 Close 只归入上游请求方向，不冒充上游响应。
-
-payload 写入 `GatewayConfig.data_dir` 下由 Observation 模块拥有的目录，建议布局：
-
-```text
-diagnostics/observation-debug/
-└── <trace-id>/
-    ├── manifest.json
-    ├── segment-000001.jsonl
-    ├── segment-000002.jsonl
-    └── ...
-```
-
-每条逻辑记录保存原始 Wire 字节及必要的 sequence、recorded_at、方向、transport、protocol、status 和关联身份。除 HTTP `Authorization` header 值外，header、URL、body、SSE 字节、WebSocket 应用 message 与媒体均按捕获边界原样保留；不再产生 canonical、Hook、Client Projection 或其他语义内容记录，也不以 Artifact 引用替换媒体。
-
-既有 Target attempt 身份与生命周期（包括同 Target retry 与 failover 的独立 attempt）、错误、usage 与工具活动继续由普通 Observation 表达；旧 `target_selected` 不迁入普通 Observation。Debug Trace 只把 Wire 记录关联到相应 attempt，不复制或推断普通 Observation 没有提供的语义阶段。
-
-物理分段采用 `trace_storage=1` JSONL：sequence 与 recorded_at 独立存储，元数据与 payload 分别内联或引用本段更早记录的字节偏移。只复用完整内容相等的定义，引用不递归、不跨分段；每个活跃 writer 的候选缓存最多 8 MiB，超限只放弃复用，不删除内容。滚动分段时重置候选缓存。此结构不使用压缩算法；旧 JSONL 仍可读取。快照保持已落盘字节前缀，导出统一还原逻辑记录，外部不会收到存储引用。已有 ZIP 导出封装不变。
-
-`stravia-tools migrate-data --optimize-storage` 可在独占的离线目标副本中去重已有分段：逐条比较还原结果与旧记录，校验成功且字节数减少才替换；失败不发布目标副本。旧记录的 schema version、内容、时间、顺序及独有诊断信息保持不变，manifest 的字节数更新为实际落盘值。
-
-协议专用 parser 可以用于普通执行，但 Debug 不为脱敏或媒体外置等待 NDJSON、Connect、JSON 或 SSE 完整消息，也不另存 decoded frame。既有捕获缓冲、单帧和累计容量上限继续生效；只有捕获链路丢失或截断、捕获缓冲超限、分段写入损坏等捕获不完整才使对应方向标记 `partial`。传输边界已完整收到并原样保存的非法 JSON、SSE、NDJSON 或 Connect 内容仍是完整原始捕获，其协议错误由普通 Observation 表达。
-
-传输失败、协议解码失败和规范化错误沿用普通 Observation 的错误分类、阶段、状态与安全原因摘要，不作为 Debug 内容记录。对应方向没有实际收发时不得补造 Wire；Trace manifest 如实表达缺失或 `partial`。这些诊断不改变重试、回退、超时或成功判定，也不为旧 Trace 补录原因。
-
-宿主网络传输错误的原因摘要保留外层错误及其 `Error::source()` 原因链，避免 WebSocket 包装错误的通用类别名遮蔽异常关闭、协议帧或 I/O 失败等底层原因。推理尝试终态及最终客户端错误的普通 Observation 采用 Authorization-only 写入过滤；进程日志和面向客户端的普通错误仍按既有强脱敏规则处理，不能直接复用观测原文。不改变 Wire Debug 的捕获边界，也不能恢复旧记录中已丢失的原因。
-
-文件路径只接受模块生成的 opaque trace ID 与固定文件名，所有导出读取都在 canonicalized root 内，防止 path traversal。
-
-### 6.3 容量与失败
-
-- Trace 落盘不设 Run 级或全局容量上限；`retained_bytes` 只统计实际落盘字节；
-- 请求体、传输帧或消息的捕获缓冲仍有既定内存上限，超限只截断对应方向的捕获，不等待完整应用消息后才开始记录；
-- 队列溢出不等待 writer，未能入队的捕获内容使 Trace 标记 `partial`；存储错误停止对应 Trace 写入，Inference Run 继续；
-- manifest 使用既有捕获容量超限、捕获丢失或截断、分段写入损坏、writer overflow、storage error 与 debug data cleared 原因表达 `partial`；已完整捕获但协议内容非法不属于 capture partial，策略允许的 Ping/Pong payload 省略也不算失败；
-- 不完整原因只出现在 Interaction 详情和诊断包中，请求记录页不显示常驻告警。
-
-### 6.4 保留与清理
-
-Observation、Rejected Request、Debug manifest 与 Trace 文件跟随同一个保留天数 `log_retention_days`（界面称「历史保留」），并与 Turn Chain、History Marker 等历史记录共用（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）；默认 7 天，最小 1 天，管理端设置小于 1 返回错误 `log_retention_days must be at least 1`，启动时缺失或无法解析按默认、低于 1 按 1。此保留期不适用于独立 Stats Usage；调整保留期不会重置用量。清理确认应明确：删除请求详情或 Debug 后统计汇总仍保留，但无法再由汇总追溯已删除的详情；本地 Console Chat 删除也不撤销服务端消耗。
-
-**根对象计时，不落到期列。** Observation 行不再保存 `expires_at`，到期时间只由根对象的时间与当前 N 在扫描时计算：Interaction 为 `last_active_at + N`，`running` 的 Interaction 不回收；Rejected Request 为 `occurred_at + N`。Run、Model Turn、Target attempt、事件、块与引用随所属 Interaction 删除，事件不再按自身 `occurred_at` 过滤。保证是“最后一次使用后至少保留 N 天”，而不是“到期立即不可读”：
-
-- **扫描是唯一的删除方。** `HistoryMaintenance::sweep_history(now)` 按 Observation、Turn 节点、History Marker、可逆脱敏映射、原生压缩登记、内容回收的顺序执行，先删引用方，使同一轮释放的依赖与正文在同一轮删除：Turn 节点、Marker、映射与原生压缩登记四步重复执行到某一轮没有删除任何行为止，释放出的来源节点与依赖都在同一次扫描内收完，随后内容回收按批（每批至多 512 行或 8 MiB）提交并排空队列；某一步失败只记录告警，其余步骤照常执行，最后合并错误返回；后台每小时一次（`STORE_SWEEP_INTERVAL`），保存保留期设置后立即再执行一次，所以缩短 N 后超出新期限的内容随即被删除。
-- **读取不带时间条件。** 已到期但尚未被扫描删除的 Interaction 仍可读取、续接；不再使用的记录在到期后一个扫描周期（不超过 1 小时加扫描耗时）内删除。
-- **修改 N 不重写 Observation 行。** 保存设置时 `apply_retention_change`（经 `DebugTraceIndex::update_retention`）只重写 Debug manifest 文件的 `expires_at`（语义不变，见下），不触碰任何 Observation 行。
-
-清理不再依赖数据库 manifest 或 tombstone：按 manifest 文件内的 `expires_at` 回收目录（Debug manifest 与 Trace 文件的语义不受 ADR-0089 影响，仍保留该文件字段；Observation 与 Debug Trace 共用保留期）；删除先 rename 为 `.deleting-*`，随后幂等删除，启动补完中断的删除并回收无 manifest 的孤儿目录。关系数据清理后另删 owner 已不存在的 Trace 目录。
-
-周期扫描中的 Observation 回收在 SQLite 与 PostgreSQL 上均分批：每批最多删除 100 条 `occurred_at + N` 已过的 Rejected Request（按 `(occurred_at, id)`，复用 `rejected_requests_window_idx`）和一个 `last_active_at + N` 已过、非 `running` 的 Interaction（按 `(last_active_at, id)`，走 `interaction_observations_activity_idx`），避免把多个大交互的删除工作并入同一事务。Interaction 在同一事务内先记下其事件引用的内容，再按交互身份集合依次删除正文引用（`observation_event_contents`、`observation_tool_results`）、事件（块随事件级联）、凭据复用记录、待回传工具、尾部来源、Target attempt、Model Turn 和 Run，最后删除父记录，减少逐 Run 重复触发的多层外键查找；失去最后一个引用的正文在同一事务登记进 `content_gc`，由随后的内容回收删除。外键约束与统计来源 DELETE 触发器保持启用，子记录删除或父记录删除失败均回滚当前批次，不暴露半个交互。SQLite 的共享写协调器只覆盖该事务及连接归还屏障；PostgreSQL 先通过 `SELECT ... FOR UPDATE` 锁住合格父记录，等待锁后重新核验资格，防止删除已被续接恢复为 `running` 的交互。迁移 `0020_observation_retention_indexes` 提供的自引用及子表外键索引继续复用，到期排序由上述 `last_active_at` 与 `occurred_at` 索引承担（旧 `expires_at` 索引已随 0042 删除）。单个超大 Interaction 仍原子删除，批次边界不构成固定耗时保证。
-
-SQLite 上删除大交互的写事务主要耗在冷读被删行的二级索引页，期间独占全库写租约，新请求的写入都要排队。因此每个批次发出 Purge 命令前，调用方在 writer 任务与写租约之外先做一次只读预读（span `observation.maintenance.purge_read_ahead`）：按同一排序取下一个到期 Interaction，对每张被删表（含随事件级联删除的块表）的每个非部分、非表达式二级索引，用被删行的键以 `INDEXED BY` 回查一遍，并按 `content_gc` 登记时的同一引用检查读一遍将失去引用的正文，把写事务随后要改的页带进 OS 页缓存。部分索引只有把谓词写进查询才能指定，实测是否预读它们对写事务耗时没有可见差别，故不纳入。预读不改变删除语义：写事务仍在租约内重新选择并核验候选，候选在此期间被续接或删除时只是白读；预读失败按该次清理失败返回。总磁盘读取量不变，只是从写租约内移到租约外。PostgreSQL 没有全库写租约，不预读。生产规模硬盘副本（内存上限 1.6 GiB）在启动清理期间并发请求，同样 121 个批次在写租约上的耗时（含排队）由 92.9 s 降到 31.0 s（p99 8.2 s → 2.4 s，单次最长 10.3 s → 8.5 s），`sqlite.write_gate.wait` p99 由 6.3 s 降到 0.96 s，请求额外开销 p50 / p90 由 845 / 8079 ms 降到 144 / 1130 ms。
-
-writer 每次 Purge 命令只处理一个批次，提交后立即失效对应的实时状态和归属索引，并返回是否需要继续；调用方通过同一有界 FIFO 队列提交下一批，不在 writer 内循环清完整个过期窗口。已排队的准入、用量和终态事件因此可以在批次之间执行，续批重新检查清理所需的用量完整性。后续批次失败时明确返回错误，已提交批次不回滚，下一次清理继续处理剩余记录，不自动重试。全部批次成功后统一移除 owner 已不存在的 manifest，避免每批扫描全部 owner。清理前的用量持久化屏障、长期统计不随详情删除的语义，以及手动清除的事务边界保持不变。
-
-“清除历史记录”只删除非活动 Interaction 与 Rejected Request；`running` 和 `waiting_client` 保留，并在结果中报告跳过数量。清理不取消 Inference Run。清除只删除 Observation 自己的行与对内容的引用，不影响用于续接对话的 Turn Chain 与 History Marker；删除交互的同一事务内（`purge_clear_rows`，两个后端相同）把失去最后一个引用的正文登记进 `content_gc`，由内容回收删除，仍被 Turn Chain 或 History Marker 引用的正文保留，待这些引用也消失后再回收。
-
-公开 Tool Execution 与其他执行事实一样独立于诊断生命周期。来源 Inference Run 关联只用于诊断；周期到期或手动清理 Observation 不取消已交接执行、不删除仍有效的执行引用或结果，也不因后台工作而保护来源诊断。普通诊断缺失或写入失败只造成诊断缺口，不是执行取消证据。SQLite／PostgreSQL 配对迁移 `0024_independent_tool_execution_retention` 删除旧来源清理触发器及 fence；执行仍保留 owner／lease、原始 deadline 和终态不可覆盖保护。
-
-执行完成、失败或被判定中断时，从该终态时刻按 `log_retention_days` 独立保留结果；查询不续期，来源诊断剩余寿命不缩短结果寿命。Marker 的本次交付结果、Generation Chain 与独立 Artifact 各自保留，不随执行记录回收而级联删除。升级前仍可查询的旧终态结果以迁移时刻另起完整保留窗口，不伪造未知的实际完成时间，也不恢复已失效或已删除事实。取消与交接分界见 [ADR-0082](../adr/0082-expose-queryable-tool-executions-after-bounded-wait.md)。
-
-“清除 Debug 数据”关闭活动 writer 后删除全部受管目录并清空进程内索引。活动 Run 的 Trace 停止并标记 `debug_data_cleared` partial；请求记录、Rejected Request 与 Debug 开关状态不变，后续准入的 Run 继续正常捕获。
-
-## 7. Debug 开关与脱敏
-
-### 7.1 开关
-
-- 唯一 Debug 开关位于设置页「诊断」，同时控制性能指标采集与原始 Wire 捕获；请求记录页不再提供启停或清除 Debug 数据入口，仍保留已有 Trace 查看及 Bundle 导出。
-- 关闭立即停止新的性能样本，并清空本次性能会话的内存缓冲与临时文件；需要时间线时须先导出再关闭。Wire 捕获继续遵循下述准入快照契约，不中断在途 Run，不删除已有 Trace。普通 Observation 不受影响。
-- 设置页「下载性能数据」一次保存 `stravia-performance.zip`（`GET /api/v1/performance/export`）：Deflate 压缩，内含同一时刻生成的 Prometheus 文本性能快照 `stravia-performance-metrics.prom` 与 Chrome Trace JSON 时间线 `stravia-performance-trace.json`。时间线可达数十 MiB，序列化与压缩在阻塞线程完成；性能记录器未安装时返回 503，压缩失败返回 500，均不产出残缺归档。脚本仍可分别读取 `GET /api/v1/performance/snapshot` 与 `GET /api/v1/performance/timeline`。三者均要求管理员鉴权，以禁止缓存的附件返回，不另开监听端口。关闭 Debug 后仍可下载本进程累计指标，但时间线为空；重启后不会恢复上次性能会话。清除 Debug 数据仍仅清除 Wire Trace，不重置性能指标或当前性能会话。
-- Desktop 下载沿用宿主默认保存位置；设置页等待原生下载完成后提示实际文件路径，取消或失败不报告成功。Web 下载仍交由浏览器处理，管理员鉴权与附件格式不变。
-- 性能指标包含静态命名操作与关键等待耗时、按操作和池角色归因的 SQL driver 查询／连接获取结果，以及每五秒采样的宿主 RSS／CPU、活动推理、观察队列、派生缓存和 Wire 逻辑占用。CPU 在开启后的首个采样点不输出缺少差分基线的读数，多核 CPU 百分比可以超过 100%。不计入浏览器子进程或远端数据库内存；托管资源记账不等于实际堆占用。
-- SQL 采集位于统一池／连接／事务执行边界，不要求业务查询逐处增加包装。性能导出不包含 SQL 正文、绑定参数、数据库错误 Display、请求正文或动态业务身份标签；查询模板用 SHA-256 标识，结果限定为 driver 边界，失败和取消不冒充成功。关闭再开启期间尚未完成的旧 span 及旧队列命令的后代不进入新周期。
-- 开关是当前 Gateway 进程的原子运行态；默认关闭，重启后关闭；
-- 每次开启都显示确认：除 HTTP `Authorization` header 值外，Trace 会原样保存其他 header、URL、body、提示词、工具参数、业务数据与媒体；关闭后已有 Trace 仍按保留期存在；
-- 开启状态下提供「清除 Debug 数据」操作，删除全部已保留 Trace，不影响开关与请求记录；
-- 每个 Inference Run 在准入时独立快照；同一 Interaction 可以完整、部分或完全没有 Trace；
-- Rejected Request 在 ingress 时快照，并可生成只含 client request/platform error response 的独立 Trace；没有上游方向不算缺失；
-- Wire 捕获的关闭只影响之后准入的 Run，不删除已有数据。
-
-#### 7.1.1 统一性能 span 与时间线
-
-命名操作统一使用 `tracing` 的 `stravia::perf` target。`PerformanceLayer` 从同一个 span 生成耗时直方图与采用有界内存缓冲的会话时间线，不再维护独立手写 Timer。覆盖请求根、路由选择、Model Turn、Vendor、Target Attempt／首 token、Agent／工具、客户端交付、历史物化与观察写入。
-
-常规异步函数使用 `#[tracing::instrument(target = "stravia::perf", name = "router.select", skip_all, fields(status))]` 这类静态声明；局部 future、独立任务通过 `.instrument(span)` 传播上下文。不得跨 `.await` 保留 `span.enter()` guard。响应体、WebSocket 与后台 producer 必须持有对应 span，直到真实生命周期结束；有非性能中间 span 时，仍关联最近的性能祖先。
-
-操作 span 只保留静态操作名、内部生成的 span／parent ID、时间、白名单状态，以及 `node_count`、`reference_count`、`candidate_count`、`event_count` 四个非负整数工作量字段；SQL span 另外接收下节列出的诊断白名单。忽略其他字段，不使用 `ret`／`err` 自动记录业务值。操作默认终态为 `closed`，仅表示 span 生命周期结束；业务代码在已知结果时显式记录 `completed`、`error`、`cancelled` 或 `abandoned`。不能把函数返回、future 被丢弃或父 span 关闭自动解释为成功。
-
-时间线的活动区及三类内存批次缓冲分别有界，容量均可在进程启动时调整；这些容量不是整个会话的保留条数，也不按分钟截断历史：
-
-| 内存区域                           | 默认容量              | 环境变量                                |
-| ---------------------------------- | --------------------- | --------------------------------------- |
-| 活动 span，含操作、查询与 acquire  | 1,024                 | `STRAVIA_PERF_TRACE_ACTIVE_CAPACITY`    |
-| 已结束操作批次                     | 10,000                | `STRAVIA_PERF_TRACE_COMPLETED_CAPACITY` |
-| 已结束 SQL query／acquire 批次合计 | 2,048                 | `STRAVIA_PERF_SQL_COMPLETED_CAPACITY`   |
-| 资源采样帧批次                     | 720，约每小时写出一批 | `STRAVIA_PERF_RESOURCE_CAPACITY`        |
-
-已结束操作、SQL 明细、资源帧各自积累，达到容量即将整个批次的所有权交给后台 writer，立即换成空缓冲继续采集；后台顺序追加写入匿名临时文件，写完释放该批次及其容器分配，不保留最近 N 条的环形窗口。后台待写队列最多容纳四个批次，另有一个正在写入的批次；业务线程不等待磁盘，不在时间线锁内执行文件 I/O。慢盘导致队列满、writer 不可用或写入失败时，按实际丢失的记录数增加相应 `dropped_*`，失败另计 `storage_errors`，不回退为无界内存积压。活动区满仍拒收新 span（相应耗时也不入直方图）。SQL 明细不会挤掉已结束的业务操作。
-
-导出以会话 epoch 和批次序号截取一致快照，合并已写入文件、后台已接收但尚未写完、以及当前未满内存批次，避免遗漏或重复；HTTP 适配层在阻塞任务中等待文件读取。正常采集的历史只驻留于有界缓冲或临时文件；导出将已拥有的事件数组和参数直接移入 JSON，并在原事件之后追加 causal flow，不再复制完整事件树或另存 flow 缓冲。导出时仍会暂时在内存构造完整 JSON，不保证导出峰值内存固定。磁盘占用随会话增长，不设时间或总条数保留设置。临时文件由操作系统在最后一个句柄关闭时自动删除，包括进程异常退出；关闭 Debug 会使旧 writer 任务失效并释放文件，新开启只接收新 epoch。随后结束的旧 span 不补写终态或直方图；旧队列上下文即使没有 parent ID，也保留原 epoch，其拒收标记传播至后续业务和 SQL span。
-
-`metadata.schema_version=3`、`storage=memory_and_temporary_file` 描述这一会话存储模型。`capacity` 报告活动区、三类批次和 `writer_queue` 容量，`writer_queue_unit=batches` 明确队列以批次计；`buffered` 报告当前三类未满缓冲的记录数；`spilled_completed`、`spilled_sql_completed`、`spilled_resource_samples` 报告成功写入文件的记录数。`storage_status` 为 `ready`、`error` 或 `unavailable`，配合 `storage_errors` 与四项 `dropped_*` 判断真实损失；成功写盘不是丢弃，不承诺在错误或拒收时仍有完整请求树。采集状态计数取自一致快照：`active_spans` 是当前活动 map 数；关闭时不再保留冻结记录，`frozen_spans`、`frozen_total` 均为零，`incomplete`、`incomplete_total` 等于当前活动数。其他请求仍活动不意味着目标请求缺失，不能仅因存在 `B` 事件就拒收导出，应核对目标 span／parent ID 因果树和真实损失。
-
-写盘计数是 writer 处理导出时的会话累计；等待导出期间新写入、超过快照水位的批次不进入本次事件列表，但可能计入写盘累计。因此并发采集时不能用 `spilled_* + buffered` 直接推导本次导出的事件数。
-
-导出使用标准 Chrome Trace 事件：活动 map 快照的 `args.capture_state=active`、`ph=B`，不输出 `dur`；记录到生命周期结束的 span 为 `finished`、`ph=X`，并输出实际墙钟 `dur`。`capture_state` 与业务 `args.status` 独立：`finished` 不代表成功，`error`、`cancelled` 等已记录结果仍保持原值，默认 `closed` 也不代表成功；活动记录不补造业务终态。可见父子间附带 flow；资源曲线使用带时间戳的 `C` counter。每个 span 使用合成 track，`tid` 不是操作系统线程。可导入 Perfetto 或 Chrome trace viewer 查看墙钟时长与异步因果关联；因果 parent 不保证时间包含关系，也不代表请求独占成本。`active_us` 仅表示 span 被 enter 的区间并集（重入或并发 enter 不重复累加），不是 CPU 时间，未 enter 的 span 不输出该值。
-
-元数据还提供应用版本、进程 PID、系统／架构／逻辑 CPU 数、时钟原点、导出时间、保留起点、当前 Debug epoch、采样间隔、帧数及各项观测口径；不包含主机名、启动参数或数据库连接串。进程 CPU／RSS 是全局采样，不能归因到单个 span，也不能保证捕获短于采样周期的峰值。释放批次内存也不保证 allocator 立即将 RSS 归还操作系统。
-
-`stravia_managed_resource_items` 与 `stravia_managed_resource_logical_bytes` 按静态 `resource`／`domain` 分组，并随同一采样帧进入时间线：
-
-- `requests.inference_run`：已进入推理执行、尚未结束交付的数量，包括等待上游的请求；失败、取消和交付流丢弃都会释放。不统计每个 HTTP 管理请求，也不估算请求堆字节。
-- `observation_queue.observation`：真实已入队、未出队的命令及逻辑字节；不含等待容量的 producer 或仅预留的槽位。合并文本更新字节，拒收、出队和 receiver 关闭释放记账，不复制或序列化正文来计数。
-- `runtime_cache_local_estimate.<domain>`：按既有 KiB 准入权重计账、仍由本地缓存条目持有的资源；包含已过期条目及 TinyUFO 移除后等待 epoch GC 的节点，直到条目最终释放才减少，因此可暂时超过准入预算。调用方独立持有的共享值不计为额外缓存占用。
-- `runtime_cache_remote_observed_logical.remote_total`：最近一次成功 Redis 命令返回的逻辑条目数／预算字节及观测时间、年龄；数量、字节和时间作为同一份回复整体提交与读取，复用已有 Lua 回复，不新增 RTT 或扫描。并发回复可能乱序，远端 TTL 和惰性过期不会主动刷新这个值，不能当作 Redis 实时内存或宿主 RSS。
-- `wire_queued_payload`、`wire_writing_payload`、`wire_encoding_payload`、`wire_encoded_buffer`、`wire_dedup_payload` 的 `observation` domain：分别区分捕获排队、写入、临时编码、编码缓冲和段内去重保留；错误、清理、换段与释放跟随真实所有权。
-
-这些字节来自已有长度或预算，不含完整 allocator、容器容量和所有共享关系，不能相加重建 RSS。观测源消失后的下一帧补零，只表示当前托管／可见源的记账结束；不能据此断言远端 Redis namespace 已被删除或 allocator 已归还内存。该时间线仍不是 CPU／堆 profiler。
-
-关键等待与后续处理分开记录：`sqlite.write_gate.wait` 是宿主 SQLite 写协调器等待，不是数据库引擎锁；`rpm.candidate.wait` 是候选准入等待；`upstream.send_admission.wait` 和 `upstream.http.response_headers.wait` 分别覆盖出站准入及发送至收到响应头。`observation.queue.wait` 从真正入队计到出队，不包含等待队列容量；`observation.command.process` 表示后台处理。队列只复制内部 ID／epoch，不保存请求 span，因此请求可以先结束，后台通过因果边关联；同批 SQL 不能据此均摊为每个请求的独占成本。
-
-SQLite 写租约和观测文件写入另外记录以下 `stravia::perf` 阶段；它们描述客户端墙钟边界，不改变写协调、事务、持久性或终态发布顺序：
-
-| 操作 | 计时边界 |
+| 类别 | 口径 |
 | --- | --- |
-| `sqlite.write_gate.hold` | 获得写协调权后开始，释放协调权后结束；包括随后取连接、调用方持有租约及正常结束或异步清理，不包含获得协调权之前的排队 |
-| `sqlite.write_gate.finish` | 写事务提交或回滚后（或连接级租约正常结束时）的完成屏障与事务状态检查：要求写租约的池为恢复 `PRAGMA query_only=ON`，其他池为 driver `ping`；不是 COMMIT |
-| `sqlite.write_gate.cleanup` | 原有取消／错误清理任务的调度与执行；覆盖屏障以及必要的连接关闭，不为正常归还另建后台任务 |
-| `sql.transaction.begin` / `commit` / `rollback` | 显式事务包装边界，包括连接／嵌套事务；池级 begin 包含取连接，隐式 Drop 回滚仍由 driver 执行，不伪装为一条受采集查询 |
-| `observation.manifest.persist` | `write_entry` 的异步生命周期，包括序列化、阻塞任务调度／执行及索引更新；不含调用方此前等待 mutation lock 的时间 |
-| `observation.manifest.write` | 阻塞写文件闭包实际执行时间，不含等待阻塞线程调度 |
-| `observation.manifest.sync` | 上述闭包中的 `sync_all()` 调用 |
-| `observation.trace.flush` / `finish` | Trace barrier 入队与回执等待；finish 还读取最终 manifest，只有存储成功且 manifest 完整时才标记 `completed` |
+| Rejected Request（错误的请求） | 准入前拒绝，或尚未触发上游时的平台校验拒绝，如模型不存在、无权使用、Hook 拒绝或参数错误。 |
+| Failed Request（失败的请求） | 排除上述拒绝及取消、断线后，最终失败的请求；含无可用 Target、额度暂停、真实上游 4xx 或已经发送后的本地错误。 |
+| Client Errors（客户端错误） | 单次请求最终 Failed 或 Rejected；不包括同一请求内已吸收的上游失败。后来另发请求成功不抹掉旧错误。 |
+| Upstream Error（上游错误） | 每次来源为上游的失败 Target 尝试，含独立能力、真实非 2xx、连接／传输失败、首 Token 超时、200 后流错误和凭据拒绝。未发送的本地准备、主动取消、中断或未知来源不入。 |
 
-写租约以创建时解析的内部因果身份关联业务操作，不持有请求父 span；请求取消后，hold 可以继续覆盖实际清理，但不会把请求生命周期延长。SQL 阶段记录 `completed`、`error` 或 `cancelled`；未经成功提交、回滚或 finish 而丢弃的租约为 `cancelled`，不表示已确认数据库回滚失败。事务阶段不进入 tracing 当前上下文，既不让 SQLite worker 延长其生命周期，也不改变既有查询归属或增加 `sql.query` 次数。没有进入执行区间的阶段可以不含 `active_us`，不能据此判为零耗时。
+请求级分母 `T` 是非取消、非断线、非 Rejected 的已终结 Run：最终完成、完整交付工具（`waiting_client` 或 `superseded`）或最终失败。隐藏轮与多次尝试不增加该分母。
+设 `F` 为 Failed Request、`R` 为 Recovered Request：
 
-这些区间存在包含与重叠，不能直接求和作为请求独占耗时；`persist - write` 还包含序列化和索引更新，不能直接称为阻塞线程排队时间。COMMIT 或 `sync_all()` 变慢可以定位等待边界，但仅凭客户端时长不能证明磁盘、WAL checkpoint 或操作系统调度中的哪一项是根因。
+- **Final Success Rate**：`(T - F) / T`。
+- **Recovered Request**：同一请求经自动重试或切换从失败恢复且最终成功；每请求最多一次。后来发起的请求不追改旧行，也不将安全恢复过程中的非上游发送误作上游失败。
+- **First-pass Success Rate**：`(T - F - R) / T`；只在 `recovery_known_request_count = T > 0` 时展示，恢复次数及百分点提升同样要求完整覆盖，未知不填零。
+- **Upstream Attempt Success Rate**：`已完成的 Target 尝试 / (已完成尝试 + 上游错误)`。实际重试和 failover 各计，包含客户端无感的内部错误；不与请求分母混用。
 
-#### 7.1.2 查询次数与调用来源
+请求分类按 Run 开始时间分桶；上游尝试在所属 Model Turn 开始时间入桶。没有 Model Turn 的拒绝仍计入客户端请求量，但不进成功率。
+Provider 汇总用上游口径，不是客户端请求分解。比率从窗口计数重算，不平均桶比率；无有效分母或覆盖未知不当成零。
 
-工作区 `sqlx` 依赖统一指向 `stravia-sql`。业务保持正常的 query／QueryBuilder、池、连接和事务写法，不在每处执行表达式添加 `observe(...)`。查询构造、驱动、原生事务嵌套及 Drop 回滚仍由上游 SQLx 承担；集中边界发出 `stravia::sql` 的 `sql.query`、`sql.pool.acquire` span，关闭 Debug 时直接委托原生执行，不计算指纹或增加诊断 future／stream box。
+## Confirmed Upstream Usage
 
-`stravia_sql_query_duration_seconds` 和 `stravia_sql_pool_acquire_duration_seconds` 使用静态 `operation`、`backend`、`pool`、`status` 标签，归于最近的业务性能操作；没有可归因上下文时标记 `unattributed`。没有按查询 ID、源码路径或业务身份建立 Prometheus 标签。全部操作和状态的 `_count` 求和是本进程已记录的累计次数，不存在另一个无标签并行总量。查询在 driver 终态到达时立即收口，不等待 SQLite worker 释放克隆的 span；旧周期延迟结果不补入新周期。
+每个实际 Target 尝试最多确认一次用量。成功采用 Vendor 完整值，失败、取消或中断只确认最后已收到的报告。
+多帧是同一 attempt 的字段修订，不累加累计值；未知不盖掉既知值，明确零可替换旧值，不以 tokenizer 估算填补。
+后续发布、恢复或交付失败不改写该尝试已确认用量，Model Turn 成功仍取决于其自身发布终态。
 
-这里的查询次数是进入受采集 driver 执行边界的调用次数，不是 SELECT 数、网络往返数或引擎执行的全部语句数；多语句不能按该次数拆成逐条语句。`completed` 是 driver 返回或流被完整消费，`error` 是 driver 错误，未完成的 future／stream 被丢弃为 `cancelled`。流式耗时包括消费生命周期与背压，不是数据库服务器执行时间；QueryAs／Scalar 后续行映射错误和外层 `RowNotFound` 不冒充 driver 错误。原生迁移器、初始化 callback、健康检查及驱动内部事务控制语句不在应用查询覆盖承诺内。连接获取单独统计成功、失败和取消，耗时包含建连和健康检查，不应与 query 次数相加。`stravia_operation_duration_seconds_count` 则是业务操作次数，一个操作可以执行零条或多条 SQL。
+- **Total Input Tokens** 是原始协议归一后的总输入；原始事件、尝试与客户端 wire 保留总输入。输出已包含 reasoning，不再次累加；缓存读、缓存写单列。
+- **Net Input Tokens** 是管理面输入。每 attempt 总输入与缓存读均已知才算 `max(total input - cache read, 0)`，不扣缓存写。聚合累加各已知净值；缺任一操作数计入缺失覆盖，而非把已知部分作全量。UI 不再扣一次。
+- OpenAI-compatible 和 Anthropic 在各自协议归一入口合并累计字段；标准 Gemini 缺缓存字段仍未知。Antigravity 只对确认完整的私有终态 usage 应用 proto3 标量省略为零；整个 usage 缺失或中间帧不补零。见[上游响应证据](../research/antigravity-oauth.md#响应)。
+- Interaction、Run 与 Bundle 累计各尝试已报告字段，含失败、隐藏轮和 failover；全部未报告仍未知。覆盖只反映已观测 attempt，不替代 gap。
+- 客户端终态使用独立 Run 账本，不读 Observation；隐藏轮与重试的用量只合计一次，缺失的缓存及推理分项不冒充完整。见[客户端协议](open-responses.md)。
+- Run TPS 使用已交付全耗时（未交付终态可用实际结束时刻）和已知完整输出；Attempt TPS 用自身全耗时。首 Token 延迟含首次 canonical 输出（含可读思考），不从 TPS 分母扣除；缺少有效耗时或必要用量时不猜。
 
-SQL 明细记录模板实际 UTF-8 字节的 SHA-256 `query_id`（`query_identity=sha256_template`），不规范化空白或 SQL 字面量，不读取绑定值。相同模板的不同参数可聚合，动态构造的不同模板可以有不同 ID。driver 读取 SQL 之前就拒绝参数时可能没有 ID；模板指纹不是自动源码索引，`source_scope=unavailable` 明确不提供虚构的业务文件位置。还可包含 driver 的 `rows_returned`／`rows_affected`、静态错误分类及白名单格式的 SQLite 数值错误码／PostgreSQL SQLSTATE；不保存错误消息、SQL 正文或绑定值。
+管理面保留每项已报告覆盖和缺失信息。迟到报告先修正可查询数值，再发布同 kind 的持久终态修订，不发单独的易失 usage 通道。
+部分观察丢失、确认用量字段本身未知与没有输出是三种不同状态。
 
-池诊断导出 size、idle、受采集 acquire 的 waiting、累计失败和取消。`stravia_sql_pool_size`／`stravia_sql_pool_idle` 是被采样实例；waiting／失败／取消按 SQLite 或 PostgreSQL × `main`／`artifact_lock`／`unregistered` 固定角色聚合，不能当作某实例或引擎内部的全部等待者。主池每五秒采样，其他池可能只有最近 acquire 的观测值，曲线附带年龄，不能默认为实时。累计计数仅覆盖进入采集分支的调用，包含跨开关边界结束的调用，不因关闭或清除 Debug 数据归零。
+请求记录的 Token 筛选取完整根链（含子孙）的已知净输入与输出，不加回缓存项。
+尚运行且未获任何用量的 Model Turn 临时计一次本地输入估算；收到任意报告（含零）或轮次结束即停用估算，链路可能重新不命中。
+估算不进确认用量、卡片计量、统计和计费。计算与路由共享 canonical 输入、instructions 和工具定义的 JSON 字节量口径，不当作模型 tokenizer 结果。
 
-时间线中每个 span 的 `args` 可包含：
+确认用量可以先于尝试终态被写入和查询；终态附带最后一次已知快照。新报告的已知部分替换对应字段，不删除未更新的已知字段。
+Attempt 自身没有聚合 coverage；Run 与 Interaction 的覆盖同时报告已观察尝试数与各字段的缺失数，不能把丢失的观察尝试算作已报告。
 
-| 字段                                                      | 含义                                                                                                               |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `sql_query_count` / `sql_query_duration_us`               | 直属 driver 查询调用数及其累计耗时，包含已记录的错误和取消；没有调用时省略                                         |
-| `sql_pool_acquire_count` / `sql_pool_acquire_duration_us` | 直属 acquire 调用数及其累计耗时，包含已记录的错误和取消；没有调用时省略                                            |
-| `node_count`                                              | 本次底层操作处理的节点数；`turn_chain.ancestor.select` 记录实际从 SQL 读取的新后缀节点数，不含请求上下文命中的祖先 |
-| `reference_count`                                         | 内容写入的引用条目数；不能据此推断读取的外置内容行数                                                               |
-| `candidate_count`                                         | 前缀查询返回或对应发现阶段已统计的候选数；未完成统计时可能省略                                                     |
-| `event_count`                                             | `observation.writer.persist_events` 收到的事件批量大小，包含随后可能被过滤掉的事件                                 |
-| `command_kind`                                            | 仅限 `observation.command.process` 创建时的静态命令分类；事件批次为 `event`，未知值不导出，后续 record 不能覆盖；不增加 Prometheus 标签 |
+### 长期 Stats Usage
 
-SQL 只计入最近的业务操作，不重复累加到祖先或 SQL 自身记录。父操作直属计数为零不表示整条请求没有 SQL；分析总量需要汇总业务操作子树，并检查淘汰、不完整标记及后台因果边界。SQL 耗时是各调用时长之和，并发时可超过操作墙钟，不是 CPU 时间。每次受采集 query／acquire 都有独立有界明细，不能再把明细与操作上的累计计数相加。
+长期统计读取独立数值汇总，不以仍保留的 Observation 明细代替。SQLite 与 PostgreSQL 维护全局、Route、Provider 与 API Key 的绝对时间整刻钟桶，不保存正文、工具内容、Trace 或长期逐请求账本。
 
-用于区分查询来源的主要操作：
+- 用量分析的请求级分类来自请求／拒绝事实；通常展示的 Token、首字与 TPS 从已成功尝试汇总。加权 TPS 是 `Σ output / Σ 完整耗时`；缺输出或耗时、分母无效为未知，已知零保留。
+- 同一来源及修订在事务内以 checkpoint 差额更新桶；删除明细只回收工作 checkpoint，不扣长期累计。历史身份按内部 ID，配置删改不抹掉已累计事实，同名重建不合并。
+- 汇总写入失败回滚来源事务；若进程不能证明携带统计的事实可靠入账，拒绝手动或自动破坏性清理，不能先删来源再丢贡献。纯正文、工具或 Debug 缺口不触发此闸；未保存事实不可从旧 Debug 或上游重建。
+- 查询窗口为绝对时间整刻钟 `[start_at, end_at)`；长窗口合并充分聚合量再算均值与比率。Provider／API Key 边际过滤互斥，不提供不可推导的请求级恢复／成功率或模型占比。
+- 清历史、Debug 或本地聊天都不重置 Stats。选路使用自身短窗口原始事实，不读长期桶冒充实时调度。金额规则见[成本与计费](cost-and-billing.md)。
 
-| 操作                                                                                                        | 用途                                                                                                  |
-| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `generation_chain.parent.*`、`generation_chain.references.resolve_available`、`generation_chain.ancestor.*` | 区分显式父节点、前缀发现、压缩来源、引用恢复及后台祖先访问                                            |
-| `generation_chain.history.load`                                                                             | Generation Materialization Cache 未命中或 Item Reference 恢复所需的祖先历史读取，不能代表所有底层读链 |
-| `turn_chain.materialize` → `turn_chain.ancestor.select`                                                     | 覆盖包括绕过 Generation 缓存的直接物化；请求上下文路径单列祖先查询，父子 `node_count` 不相加          |
-| `turn_chain.commit` → `turn_chain.content.put`                                                              | 区分节点提交与按引用执行的内容 upsert／引用 insert                                                    |
-| `turn_chain.prefix.lookup`                                                                                  | 持久前缀候选查询                                                                                      |
-| `observation.attribution.admit` / `observation.writer.admit_persist`                                        | 区分后台交互归属判定与准入记录落盘                                                                    |
-| `observation.writer.persist_events`、`persist_tail_source`、`filter_client_tool_results` 等                 | 观察事件批次、工具尾迹与工具结果归属查询                                                              |
-| `observation.manifest.*` / `observation.maintenance.*`                                                      | Debug manifest 写入、计数与保留期维护；不在空闲的每个 writer tick 上建立 span                         |
+独立持久汇总不设自动过期或长周期降采样，空间随时间和统计维度增长；只剩汇总时，不能追溯已删除正文或恢复秒级历史。
+统计展示保留未知与零的区别，不以所选范围中的小桶均值代替整体；按量金额与用量各有独立口径。
 
-`turn_chain.content.restore` 是 `stravia::perf` 日志事件，不是时间线 span；其中 `content_read_count` / `reference_count` 表示本次实际从数据库恢复的唯一外置内容行数，不含请求上下文命中。性能时间线不会导出该事件，因此只有时间线的基准不能声称直接测得外置内容行数。
+## 普通事件、内容与实时游标
 
-`stravia_generation_materialization_cache_access_total{result="hit"|"miss"}` 统计普通物化与含 Item Reference 的父节点恢复对 Generation Materialization Cache 的访问。物化对象和按 ingress 隔离的祖先引用目录现共用[统一派生缓存](architecture.md#统一派生缓存与-server-配置)：Memory / SQLite 使用 TinyUFO，PostgreSQL 使用 Redis。普通父节点恢复命中缓存后不再读链；含 Item Reference 时，若对应 ingress 的引用目录也命中则不再读链，否则仍需读取祖先历史构造目录。物化 hit 本身不证明目录 hit。请求准备阶段的有界发现工作区只复用节点与解码材料，不计入该跨请求缓存的 hit/miss 或记账字节；应结合 `generation_chain.history.load` 与底层 `turn_chain.materialize` 的次数及 SQL 归因验证实际减少的读取，不能把 `candidate_count` 当作逐一核验次数。直接调用底层 Turn Chain 物化不会经过该缓存，因此不能仅凭命中率推断底层读取次数。逻辑缓存记账不等于进程或 Redis 实际内存。
+### Canonical Item 与事件形态
 
-调查时，在同一进程、同一 Debug 会话、同一段复现操作前后各导出一次 metrics，按 `operation` 比较 `_count` 和 `_sum` 差值，并在操作完成后、关闭 Debug 前导出 timeline。交给 AI 分析时先核对 PID、版本、epoch、会话时间、存储状态、错误与丢弃数、活动采集状态及因果链完整性，再判断证据覆盖范围：
+普通时间线保存准入／执行／交付／终态、模型轮、尝试、工具、使用量、归属和 gap。事件只保存变更顺序及小属性，正文引用共享内容存储；结构见 [SQLite](../database/sqlite.sql)、[PostgreSQL](../database/postgres.sql) 与[共享正文存储](data-layout-performance.md#共享正文存储与引用回收)。
 
-- 延迟：先区分准入、写协调器、池 acquire、上游响应头和后台队列等待；按业务操作、查询指纹、结果与行数检查高频小查询或慢查询。查询模板与业务源码需要受控对照；指纹不替代 SQL 审查、数据库锁图或执行计划。
-- 内存：将 RSS 与活动请求、队列、缓存、Wire 各自的 items／逻辑字节曲线对齐。逻辑资源下降但 RSS 未降既不能证明泄漏，也不能证明没有泄漏；allocator、映射、未计账对象和真实保留链需专项抓取。
-- CPU：将进程 CPU 曲线与等待／处理阶段对齐，只能判断复现窗口与可疑阶段；不能将 span 墙钟、`active_us` 或 SQL 累计耗时当成 CPU 栈。函数热点和分配栈使用下节专项流程。
+- `model_thinking` 与 `client_visible_content` 按真实 Canonical Item 收口，保留 item 与 part 边界。成功保存完整项；可处理的失败或取消仅保存已收到部分并标未完成。崩溃可丢失未落盘项。
+- 可读思考不是客户端可见输出，不含签名、密文或混淆快照；WS 可见正文仅来自实际发成功的消息。物理分块不制造逻辑项。见 [ADR-0062](../adr/0062-persist-diagnostic-content-at-canonical-item-boundaries.md)。
+- `user_input_recorded` 保存本轮输入的完整文本单元（不含媒体或纯工具结果），只在模型侧凭据映射完成后发布；失败或取消不提前发布。它与客户端工具结果仍保留实际收到的内容，采集不等于模型侧替换。
+- 工具开始与结果保留可解析 JSON 或原始参数；无字段表示未采集，JSON null 是实际值。客户端结果每批一行，依调用 ID 关联；同一调用在 UI 上就地合并，不把结果重复展示为新调用。
+- Model Turn 开始／结束合并首个／最后一个 attempt；仍需独立观察的 retry、failover 或等待中的后续尝试分别保留。用量进入尝试终态，迟到报告以更高 sequence 修订同一事实；交付并入 Run 结束。见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
+- 缺父观察事实时记录 gap，不造孤儿开始事件、假 parent 或零用量。收口并不重新取发生时间：事件保留生产边界的 `occurred_at`，writer 的接收顺序、实际发生时间和持久 sequence 各有意义。
 
-用工作量字段区分大批次与过多小批次，用因果关系识别重复物化，但不将后台 SQL 重复算作同步请求成本。指标是进程累计值，关闭或清除 Debug 数据不会归零；会话 timeline 与累计 metrics 不一定覆盖相同时间窗口，不能直接相除推导每请求查询量。缺失采样、丢弃的 SQL、未知祖先或陈旧远端快照必须明确为证据缺口，不能解读成零成本或零占用。
+用户输入与客户端工具结果共用映射登记后的发布边界；纯工具续接没有新文本时仍可发表真实结果。
+摘要只取起点输入和最新客户端可见块，后续工具结果、思考或 observations 本身不代替客户端输出。
 
-`tests/common/measure_history_paths.py` 对真实 Server 使用隔离数据库与 loopback 上游，分别报告新建或持续连接的 `connect_ms`、不含连接建立的 `http_request_ms` 和总 `latency_ms`；普通模式、连接模式及 SharedCache 容量必须在前后对照中一致。专用进程默认用 `--trace-completed-capacity 20000` 同时配置操作与 SQL 内存批次，不改变产品默认值，成功写盘不判为证据损失。前后快照必须为 schema 3、Debug 开启、同一 epoch 且存储状态 `ready`；存储已有错误或错误增长、实际记录丢失、活动拒收、不完整 span 或缺少完整请求根/子树证据时，报告仍判无效，不能为通过比较而忽略这些标记。历史重建只有完整的独立 `observation.*` 根，或经过 `observation.command.process` 且因果祖先完整时，才单列为后台观测工作，不混入请求同步路径；未知根、缺失祖先或环仍判为归属不完整。正常完整投影场景与将独立测试 Principal 的派生投影置为未知的共享祖先诊断场景分别报告；后者只验证保守回退的读取复用，不代表正常数据的收益。内容、父节点、拒绝时无父关系和完整压缩窗口是正确性依据，候选数量与读链次数只作工作量证据。
+实践中排队准入、交付收据、执行 Finish 和最终清理各有边界；有界队列无法准入时不继续为该 Run 写孤立后续事件。
+后台写入按请求阶段合并，统计事实的写入不由可选诊断是否成功决定。事务与通用写协调详见[数据布局与性能](data-layout-performance.md)。
 
-长历史探针在管理诊断请求前检查 access Cookie 的剩余期限，必要时通过真实 `/api/v1/auth/refresh` 续期。它不修改产品会话 TTL，不重放失败推理，也不以延长认证有效期换取测量通过；已审查的失败只输出阶段和 HTTP 状态，未知异常不输出可能含凭据的正文。
+### SSE 与恢复
 
-历史探针报告 schema 4 默认使用 `--performance-debug enabled`，沿用 schema 3 的整轮采集：每个 repetition 只在开始、结束各导出一次完整时间线，并一次性校验、索引整个因果森林。请求通过已完成 Observation 的 Run ID 匹配 `proxy.inference_run.args.request_id`，不按时间戳、执行顺序或相邻快照猜测归属；请求外的 span 在 `performance_captures` 中单独保留一次。缺失或重复身份、未认领的新增请求根、断父、环、丢失、冻结和未结束的同步请求子树仍拒收。进程 CPU/RSS 窗口包含 provision、推理与 Observation 检查，但排除开始/结束的完整时间线导出及 Python 离线归因；不能与旧报告 schema 2 包含逐请求全量导出的资源窗口直接比较。这里的报告版本与 Server 时间线的 schema 3 是两个独立契约。探针逐请求输出不含正文或凭据的进度，中断和不完整运行不生成有效成绩。
+持久事件与受影响投影同事务提交后广播，ID 为递增 sequence；清理不重用已提交 ID，稀疏不是缺包。
+先取同一数据库快照下的权威视图与 `snapshot_sequence`，再从该游标订阅，先补已提交变化再接续实时。
 
-`--performance-debug disabled` 用于正常运行成本对照，仍执行相同请求数、完整有效上游输入、输出、父节点和压缩窗口校验，等待普通 Observation 完成，并在首尾确认 Debug 关闭、epoch 未变化且没有采集 span。它不提供完整因果链证据，SQL 次数、SQL 时长和阶段成本输出 `null`，不能解释为零；控制证据单列在 `debug_disabled_controls`，不冒充 `performance_captures`。两端必须使用相同 Debug 模式，关闭模式不能替代开启模式的因果归因验收。Linux 额外记录资源窗口内整个服务端进程的 `read_bytes`、`write_bytes` 与 `cancelled_write_bytes` 差值；它们包含所有服务端文件和线程，不是纯数据库 I/O，也不是设备写放大。其他平台明确输出未知。
+- 全局 `observation` SSE 只传轻量变化通知；正文、工具内容和完整事件另按需查。基线过旧、超前、清除后失效或不能安全恢复时返回 `reset_required`。
+- 恢复重新查询 forest、详情及选中实时作用域。采用重建快照的实际水位，即使低于旧水位或为零；订阅分配水位不是已应用事实，过滤产生的内部空隙不是 reset 依据。
+- 仅选中的 Interaction 订阅 `live_content`、`live_snapshot`、`live_gap` 和 `live_finished`。先读累计快照（可为空）再续流；这些信号无 SSE ID，不推进持久游标。
+- 同一块的易失更新以最新累计值替换，不重播历史动画；收口后用对应持久 item 接替，不拼接重复正文。易失溢出是独立 gap，断线或重启不承诺恢复未落盘内容。
+- 事件分页固定 `through_sequence` 后前翻历史或补增量，选择、过滤及窗口变化后拒绝旧上下文响应；恢复失败保留已有视图和明确重试入口，不冒充空结果。
 
-`--history-items tool-json` 在每个新用户消息后增加已完成、由客户端提供的工具调用和结果，包含嵌套 JSON、空值及超出 `u64` 的精确整数；不执行平台工具。工具绑定、原始 arguments 和结果均参加上游输入校验，分支按完整轮次取前缀，不假设每轮只有两个 Item。默认 `text` 保留原文本负载；前后对照的形状必须一致，不能把结构化负载与文本成绩混合。
+易失通道按块保留最近累计更新和显式结束，首段与终态不等待后续合批。
+单作用域实时内容镜像有 8 MiB 边界；超限不扩大队列、不反压推理，也不意味着已保存历史被截断。
 
-#### 7.1.3 CPU 与堆专项抓取
+清理与 reset 使旧通知基线和易失作用域失效。
+全局 SSE 断开不阻止后台持久化；恢复只能重放仍存在的历史，不复活已清除记录。
 
-性能时间线用于定位慢阶段、连接等待、重复查询和托管资源增长，不能替代采样 profiler。`active_us` 不是 CPU 时间，RSS 上升也不能单独证明泄漏。需要函数热点或未释放分配栈时，另行抓取系统 profiler 数据；Debug 开关不会自动启动 profiler、提升权限或修改系统配置。
+### 保留与清理
 
-以下是 Windows WPR／WPA 的人工复现流程。先安装 Windows Performance Toolkit，保留复现时完全匹配的 EXE／PDB；开发构建保留调试符号，生产构建若没有匹配符号，只能得到受限调用栈。CPU 采样和堆采集分开进行，先完成一次再开始另一次。
+普通观测、Rejected Request 和 Debug 使用 `log_retention_days`（默认 7，最少 1）。Interaction 按真实最晚活动时间，拒绝按发生时间判断；Run 与事件随 Interaction 删除，不单独到期。Debug 使用 manifest 的截止时间，后台捕获不为已结束请求续期。
+周期清理分批、写事务内复检资格；过期但尚未被物理删除的记录仍可读，不等于恢复已删除记录。调整保留期触发清理，不改写每条 Observation。共享正文只回收失去全部引用的内容。
 
-开始前取得操作者授权，确认目标进程、复现窗口、输出位置与磁盘余量。WPR 会采集系统级事件，不是仅采集 Stravia；ETL 可能包含其他进程、路径和敏感信息，不受 Debug Wire 的脱敏规则保护。仅在隔离复现场景使用，不自动抓取或上传生产数据。下面采用 file mode，文件会持续增长，短时间复现完成后立即停止。先运行 `wpr -status`；若已有其他人的录制，不覆盖或取消它。
+- 「清除历史记录」保留执行中与真正等待客户端的详情并报告跳过，不取消正在执行的推理。只删除自身诊断引用，不改写 Generation Chain、History Marker 或后台执行结果。
+- 「清除 Debug 数据」停止活动 Trace、删除受管文件并清空当前实例索引；活动 Trace 标记清除缺口。不改开关、不删普通 Observation；后续准入仍按开关捕获。
+- 断线、进程重启、接替及观测收口等状态诊断不推进历史活动时间，不把旧链重新移入最新时间页。长期 Stats 的清理保护与保留周期独立。
 
-在管理员 PowerShell 中开始 CPU 采样，随后在另一个终端复现目标操作：
+周期扫描按小时触发；缩短保留期后另安排清理。
+运行中的 Interaction 不回收；清理按根对象原子删除，不暴露半条链；批与批之间允许正常运行事件继续提交。
+Debug 目录先重命名再删除，启动会完成中断删除并清理孤儿；这不延长已删除资源的授权。
 
-```powershell
-wpr -status
-wpr -start CPU -filemode
-```
+清理后的原始正文不能从长期桶取回；相反，正文仍有历史引用并不意味着普通观测接口仍可查到。
+已删除的内容引用、Trace 和实时索引立即从各自接口失效；客户端须按 SSE 恢复规则重建视图，不保留已删除节点。
 
-复现完成后立即结束自己的录制：
+### 凭据命中摘要
 
-```powershell
-wpr -stop "$env:TEMP\stravia-cpu.etl"
-```
+创建与复用由普通 `credential_mappings_created` / `credential_mappings_reused` 事件投影，不依赖 Debug。记录规则、来源和有限块标识，不持久化秘密、指纹或消息片段来归因。
+列表每行代表一个新映射，后续复用为同映射内位置记录，不冒充新发现；缺失或已清理的记录不证明没有发现。
+映射到期按 **`last_detected_at`（最后一次规则检出）**，不是最后使用；简单替换、还原、查看和遮罩不续期。完整定义、位置回看与管理端遮罩见[凭据保护](credential-protection.md)。
 
-在 WPA 中打开 ETL，按性能时间线中的 `metadata.process_id`、复现时间范围筛选目标 PID，在 CPU Usage (Sampled) 中分析采样调用栈。若重启过进程，使用本次复现对应的 PID；不能把机器总 CPU 或其他同名实例归因到该请求。WPR 的 `CPU` 默认详细配置包含采样栈，不能假定 `CPU.light` 也包含函数调用栈。
+## Wire Debug 与脱敏边界
 
-堆抓取会通过 IFEO 修改机器级、按可执行文件名生效的持久设置，影响之后启动的同名进程，不能靠不同数据目录隔离。必须另行确认管理员授权、精确文件名和影响范围；不要对仍在服务的共享实例直接启用或重启。以下命令针对 `stravia-server.exe`，Desktop 必须明确替换成实际目标文件名。
+设置页「诊断」唯一 Debug 开关是进程态，默认关闭、重启不恢复。每个 Run 在准入时、Rejected Request 在 ingress 时独立快照；关闭只影响之后的新 Wire 捕获，不删除既有 Trace，同一 Interaction 可为混合状态。
 
-先关闭隔离测试实例，在管理员 PowerShell 中启用目标的堆跟踪并开始录制：
+四方向捕获只记录实际应用协议收发：
 
-```powershell
-wpr -HeapTracingConfig stravia-server.exe enable
-wpr -start Heap -filemode
-```
+1. Connect Client → Stravia。
+2. Stravia → 上游。
+3. 上游 → Stravia。
+4. Stravia → Connect Client。
 
-随后启动新的隔离实例，执行同一组可控请求并让请求完成、队列排空。完成后停止录制并撤销 IFEO 设置：
+HTTP/SSE、WebSocket 和远程工具按各自实际传输边界取头、正文、应用消息、顺序与时间，不等待语义解析或 Canonical Item 收口。工具及其后台执行继承原 Run/Trace；绑定实际执行上下文，不串到其他请求。
+不录 TLS/TCP packet、HTTP/2 frame、canonical 阶段、Hook、Client Projection 内部态或工具中间态。WebSocket Ping/Pong 只留类型、方向和时间；只记录实际收到或发出的 Close，不为 EOF 或取消合成帧。见 [ADR-0063](../adr/0063-record-four-direction-wire-debug-at-transport-boundaries.md)。
 
-```powershell
-wpr -stop "$env:TEMP\stravia-heap.etl"
-wpr -HeapTracingConfig stravia-server.exe disable
-```
+- 读取边界拿不到的字节、自动跳转隐藏的中间跳、能力模块无法完整提供的原始内容、队列溢出与文件失败标 `partial`，不为 Debug 额外消耗响应或改变执行。非法协议内容完整捕获后仍是完整字节；拒绝请求无实际出站不算缺失。
+- Trace 不逐条写普通事件；分段文件和 `diagnostics/observation-debug/<trace-id>/manifest.json` 保存可读物理水位与状态。manifest 原子发布，本实例索引支持查询，损坏单文件不阻断其他 Trace。终态发布前 flush 已排队数据；持有观察句柄的后台执行可继续至最后收口。见 [ADR-0077](../adr/0077-slim-interaction-observation-and-file-debug-manifests.md)。
 
-即使复现或保存失败，也要撤销本次启用的 IFEO 设置，并处理自己开启的录制，不能取消来源不明的系统会话。在 WPA 中按目标 PID 比较未释放分配及其分配栈，结合缓存／队列／Wire 的逻辑占用判断保留来源；堆事件不覆盖所有 allocator、映射文件、VirtualAlloc 或 Wasm 线性内存，不能把没有堆记录解释为没有内存增长。向 AI 提供经人工审查的热点／分配统计及匹配时间线，而不是直接上传未经审查的完整 ETL。
+Trace 按方向和实际关联保留上下游、Run、Model Turn、attempt、顺序、时间和传输类型。HTTP 头可保留有序原始字节、重复字段；不以重排后的 JSON 猜测原始内容。
+捕获队列和缓冲有界，落盘量仅统计真实文件字节，不承诺每次 Trace 或整个实例固定磁盘上限。
 
-命令依据：[WPR 命令行选项](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/wpr-command-line-options)、[Recording for Heap Analysis](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/recording-for-heap-analysis)。内置导出是跨平台的；这里的专项采集流程仅适用于 Windows，不声称已提供跨平台的内置 CPU／heap profiler。
+捕获可包括已实际读取的非成功响应、二进制正文、原始 SSE 分隔符及 WebSocket 握手与应用消息。不能读取的正文不回填推测内容。
+可提供浏览器网络证据的扩展只记录可归属的实际观测，不以 DOM、错误字符串或重新编码内容充当原始字节；浏览器协议限制如实标 `partial`。
 
-### 7.2 脱敏
+**Authorization-only 捕获过滤**在进入队列、易失通道或落盘前，只替换实际 HTTP `Authorization` header 的值，头名不分大小写。普通 Observation 和 Wire Debug 对同一字段执行同一规则，**开关开或关都不改变普通 Observation 的过滤**。
+普通 JSON、工具参数中同名字段并不是 HTTP header，不遮；Cookie、API Key 头、URL 与 query、body、媒体、思考、工具输出、上传／下载授权或其他原始凭据可能留在各自捕获范围内。
 
-普通 Observation 与 Debug Trace 采用同一 Authorization-only 写入过滤：只遮盖实际 HTTP `Authorization` header 的值，header 名不区分大小写，并在进入异步队列、实时通道或存储前完成。body、工具参数或普通 JSON 中名为 `Authorization` 的字段不是 HTTP header，按原文保留。其他 header、URL userinfo、query、正文、思考、工具参数和结果不再做结构化凭据、已知秘密或签名 token 的额外替换。因此普通记录的实时展示、落盘、历史查询和 Bundle 事件导出都可能包含下载授权、上传授权及其他原始凭据，必须按敏感诊断处理，关闭 Debug 也不会改变这一点。
+这不是[凭据保护的管理响应遮罩](credential-protection.md)：普通详情、正文、错误列表和实时流在响应边界按有效映射遮罩，但不会改写已捕获或已存储事实。诊断包是原始取证路径，不应用管理响应遮罩；进程日志和普通面向客户端错误继续独立强脱敏。导出及共享前按敏感数据处理，记录下载授权不表示可续签。
 
-这只改变新写入普通 Observation 的过滤标准，不扩展其既有用户输入、Canonical Item、工具和失败诊断的捕获范围，不把它变成完整抓包，也不回写旧记录。已有用户输入的模型侧凭据保护与发布顺序、媒体外置、保留期、鉴权和权限不变；进程 log 与面向客户端的普通错误继续使用原有强脱敏，模型上下文、平台历史及可逆凭据保护不放宽。记录中保留下载授权不表示自动刷新或续签。
+Debug 同时启停独立性能采集：设置页 `GET /api/v1/performance/export` 下载 Prometheus 快照和 Chrome Trace ZIP，不含 SQL 正文、绑定值或请求正文。
+关开关停止新采样、释放会话临时时间线；不清已累计指标。清 Wire Trace 不是重置性能会话。性能时间线的墙钟与逻辑字节不能当 CPU 栈或 RSS 分解。
 
-Debug Trace 沿用仅把 HTTP `Authorization` header 值替换为 `***` 的规则，且必须在进入异步队列、临时文件或分段存储前完成。其他 header（包括 API key、Cookie、Set-Cookie 与 Proxy Authorization）、URL、query、body、prompt、工具参数、工具结果、媒体和 WebSocket message 均按捕获内容保留，不执行结构化字段递归脱敏、协议专用凭据识别、消息重组脱敏或媒体外置。Bundle 原样封装该 Trace；开启确认和导出说明须同时明确普通 Observation 也可能保留凭据，但两者捕获范围不同。
+性能导出把 Prometheus 快照与同一会话时间线封成一个附件。记录器不可用或压缩失败返回明确错误，不生成残缺的成功归档。
+关闭 Debug 后可查本进程累计指标，关闭会话的时间线不保留；重新开启不纳入上一轮迟到 span。
+指标只归因到可观察的宿主边界，例如 SQL driver 操作或池获取，不能当成服务端数据库执行时间、引擎语句数或真正 CPU 耗时。
 
-## 8. Interaction Debug Bundle
+## 诊断包导出
 
-### 8.1 时间点快照
+Interaction Debug Bundle 是按选中 Interaction 的固定截止快照，不包含同根其他独立 Interaction。运行中可导出，完成后须重新签发才能看到其余收发；禁止把运行中快照当最终完整包。
 
-运行中也允许导出。签发票据时固定 `through_event_sequence`，Bundle 只承诺覆盖该 sequence 之前已落盘的事件，并记录：
+1. 等目标 Interaction 的 writer 屏障并固定 `through_event_sequence`；在 Trace snapshot 屏障 flush 并固定分段物理字节前缀。同 sequence 后写入的字节也不能进入旧快照。
+2. 流式 ZIP 含机器可读 `manifest.json`、`interaction.json`、说明和按 Run 的 `events.jsonl`；导出展开正文引用及捕获记录，保持实际字节与事件顺序，不受详情分页限制。
+3. manifest 标记导出时状态、每 Run 的开关快照、文件字节及缺失原因，整体为 `complete`、`partial` 或 `none`。全部未捕获为 none，有期待但缺失、不完整或开关混合为 partial；完成度不等于模型请求成功。
+4. Rejected Request 使用同一家族的 `rejected_request` 包，不伪造 Interaction。导出摘要只聚合快照内事实及每尝试的最新确认用量，不借未来收据解除过去的等待。
 
-- `exported_at`
-- `through_event_sequence`
-- `interaction_status`
-- 每个 Run 的 debug 快照、Trace 状态、字节数和缺失/部分原因
-- Bundle 总体 `complete | partial | none`
+管理会话通过对应 Interaction／Rejection 的 `debug-bundle-tickets` POST 固定快照，签发 60 秒有效、进程内单次下载票据。
+浏览器 GET `/api/v1/observations/debug-bundles/{ticket}` 后消费票据并流式返回 ZIP；它不授予其他管理权限，过期、已消费或重启后不可用，不进日志、Observation、Trace、Referer 或错误文本。
 
-Interaction 结束后可以重新导出新的终态 Bundle。不得把运行中快照称为最终完整包。
+Bundle 摘要从同一快照重新派生，输入与输出引用按需解析，不能直接复用刷新过的在线 Summary。
+导出的原始事件用量保留上游总输入，管理摘要先合并同一尝试的修订，再计算净输入。
+导出读取失败或归档中断不改变普通记录、推理或未来下载的内容。
 
-Trace writer 在 snapshot 屏障处 flush，并固定最后分段及其已落盘字节水位。后台读取不得越过该物理前缀；屏障后的记录即使使用相同 event sequence，也不能进入既有快照。
+## Admin HTTP 与请求记录
 
-#### 8.1.1 导出职责与事实读取
+实现入口为 [Core Observation](../../backend/crates/stravia-core/src/interaction_observation/mod.rs) 与 [Server 管理 HTTP](../../backend/apps/stravia-server/src/admin_routes/observations.rs)。以下是客户端依赖的行为，不是 DTO 字段清单。
 
-`interaction_observation::bundle::BundleExport` 拥有完整导出过程：先等待 Interaction writer 屏障，再固定水位、读取导出事实、派生摘要、获取 Trace 物理前缀、判断完整性、签发票据并流式生成 ZIP。`InteractionObservation::issue_bundle_ticket` 与 `consume_bundle_ticket` 保留原有接口，只委托给该模块；下载阶段使用票据保存的快照，不重新查询当前状态。
+管理路由统一在 `/api/v1/observations`，遵循[管理身份与入口策略](admin-auth-bootstrap.md)。浏览器页面为 `/logs`，提供交互链路、客户端错误和上游错误三个视图。
 
-Storage 的专用读取只返回根身份、截止水位前准入的 Run、按 sequence 排序的管理事件（正文引用在导出时展开为完整正文，凭据遮蔽规则不变，Bundle 仍是原始取证导出）和所属 Trace manifest；不构造 `InteractionDetail`，不加载根下其他 Interaction，也不派生导出状态、用量或输出摘要。普通 detail、forest 和 SSE 继续使用各自既有读取路径。SQLite 与 PostgreSQL 遵循同一读取契约。
+- `interactions` 是完整 forest；`interactions/{id}` 打开单个 Interaction，`interactions/{id}/events` 向较早读取或补增量，`interactions/{id}/live` 只订阅其易失正文。
+- `events` 提供全局通知；`client-errors` 与 `upstream-errors` 独立分页和筛选；`rejections` 直接访问未形成 Run 的记录。原始证据须通过诊断包，不能从普通错误详情反查任意 Trace。
 
-Bundle 的状态、用量与输出摘要在同一轮事件消费中派生，输出摘要来自 `observation_blocks` 的最新可见块（摘要中的 `latest_output_text` 是该块的完整文本，不截断），工具交付分支复用既有 `grouping` 证据规则。每个 Target Attempt 最多计入一次用量：迟到终态修订仅替换新报告的字段，未报告字段保留此前已确认值，显式零值仍有效；不同 attempt 的用量才相加。事件中的管理用量已经完成 cache-read 拆分，导出不得再次扣除。未完成的后台活动、尚未返回的工具分支与 observation gap 不得被后续实时状态掩盖。
+- Forest 按根链游标加载；绝对时间 `[start_at, end_at)` 最大跨度 24 小时。根按最新真实活动归唯一时间页，返回保留期内完整因果上下文，非命中成员弱化而不裁掉祖先。实时 forest 可包含已过查询上边界的新活动；固定历史窗与错误列表仍严格遵守边界。
+- `interactions/changes` 按已知根链返回变化、必要上下文、删失原因与快照，不能证明完整时 reset。物理删除、筛选失效与窗口迁出不同；已打开历史链迁到更新页时保留当前视图并提供跳转，新查询不在两页重复。
+- 摘要只有有序正文引用及长度：输入取根 Run、输出取最新客户端可见块，不是完整回答。`contents` 仅供仍被有效观察引用的资源，不能读取仅被 Turn Chain 或 Marker 引用的历史；按遮罩版本校验私有缓存。无文本但已交付工具等内容时明确「已交付，暂无文本预览」。
+- 详情提供有界最新事件与向上翻页；「对话」按首次接收顺序交错正文、可读思考及工具，结果回填原工具块；「诊断」按发生时刻与 sequence 查 Run、重试、状态和原因。普通详情只展示 Trace 状态，不内嵌原始 Wire，取证用 ZIP。
+- 客户端错误按请求列出 failed／rejected，上游错误按实际尝试列出，可查看该 Run 的尝试时序及其恢复、失败、中断或仍在运行结果。存在所属 Interaction 时可跳转，缺失数据不补造节点。
+- 自动跟随只在有新用户输入或输出时移动到新活动；用户主动浏览、缩放或选旧节点会暂停，显式恢复才追随。时间线向上读历史不被新消息拉走。
+- 深链 `/logs?interaction=<id>` 可定位仍保留的 Interaction，凭据命中可进一步定位 Run 或有证据的块；缺失内容明确提示。无法显示块级命中时定位到 Run，不用相似正文猜位置。无选择不订阅实时正文，错误页不刷新隐藏画布。
 
-### 8.2 ZIP 结构
+### 浏览与实时一致性
 
-```text
-stravia-interaction-<id>.zip
-├── manifest.json
-├── interaction.json
-├── README.txt
-└── runs/
-    ├── 001-<run-id>/events.jsonl
-    ├── 002-<run-id>/events.jsonl
-    └── ...
-```
+画布允许平移、缩放、选择与键盘访问，不允许用户改写节点或因果边。确认执行关系、推断来源与原生压缩关联在诊断中分别显示；跨根的视觉分组不改变后端身份或统计。
 
-`manifest.json` 是机器契约；`README.txt` 只说明 schema version、Debug 仅替换 HTTP `Authorization` header 值、其他内容与媒体原样保留、捕获属于应用协议级而非 TLS/TCP packet capture，以及 partial 的含义。ZIP 使用 stream mode 生成，不在内存中组装整个文件。
+历史页可继续向前读取，已有阅读位置不因补入旧事件跳动。固定时间窗不会随新流量漂移；实时预设保持所选时长。
+实时首尾快照与按状态更新相互独立：单纯状态、用量、思考或工具活动更新可以刷新卡片，但不抢焦点。
 
-Rejected Request 导出使用同一 schema family，但 `kind = rejected_request`，只有一个 trace，不伪造 Interaction。
+检查器显示实际记录的用量、耗时、交付及错误；未知字段与加载错误均不画成零。
+仅为当前选择维护实时正文，选中或重连时先同步快照；普通对话和诊断不需要开 Debug。
 
-### 8.3 一次性下载票据
+客户端错误列表按请求起时倒序；上游错误按尝试开始时间倒序。
+上游错误的 recovered、caused_failure、in_progress 和 interrupted 从所属 Run 现状派生，不重复记为新请求。
+错误筛选的范围与分页与画布各自保留；切换期间不以旧查询结果覆盖新范围。
 
-1. 管理员携带 Admin Bearer token 发起 POST；
-2. Server 固定导出快照并签发 60 秒有效、单次使用的高熵 opaque ticket；
-3. 浏览器以普通导航 GET ticket URL，Server 验证并消费 ticket 后流式返回 ZIP；
-4. ticket 不写入 access log、Observation、Trace、Referer 或错误文本；
-5. 过期、已消费或进程重启后的 ticket 返回统一不可用错误；
-6. ticket 只授权固定 Interaction/Rejected Request、固定 sequence 的一次下载，不授权其他 Admin API。
-
-## 9. Admin HTTP contract
-
-浏览器页面路径继续使用 `/logs`。旧 `/api/v1/logs` 与 `/api/v1/logs/{id}` 删除，不保留 alias。
-
-新资源：
-
-```text
-GET    /api/v1/observations/interactions
-POST   /api/v1/observations/interactions/changes
-GET    /api/v1/observations/interactions/{id}
-GET    /api/v1/observations/interactions/{id}/events
-GET    /api/v1/observations/interactions/{id}/live
-GET    /api/v1/observations/contents?ids=<id>,<id>,...
-GET    /api/v1/observations/rejections
-GET    /api/v1/observations/rejections/{id}
-GET    /api/v1/observations/client-errors
-GET    /api/v1/observations/client-errors/{kind}/{id}
-GET    /api/v1/observations/upstream-errors
-GET    /api/v1/observations/upstream-errors/{attempt_id}
-GET    /api/v1/observations/events?after=<sequence>
-GET    /api/v1/observations/debug
-PUT    /api/v1/observations/debug
-DELETE /api/v1/observations/debug
-DELETE /api/v1/observations/history
-POST   /api/v1/observations/interactions/{id}/debug-bundle-tickets
-POST   /api/v1/observations/rejections/{id}/debug-bundle-tickets
-GET    /api/v1/observations/debug-bundles/{ticket}
-```
-
-Interaction forest 查询参数：
-
-- `start_at` / `end_at`：Unix 毫秒时间，必须同时提供，且 `0 < end_at - start_at <= 86400000`；按 `[start_at, end_at)` 查询，包含起点、不含终点，显式边界优先于旧参数；Interaction forest、Rejected Requests、客户端错误与上游错误使用相同约束；
-- `live_window`：ForestQuery 的可选布尔值，默认 `false`。实时 forest/changes 使用 `true` 时仍校验显式边界及跨度，但不因 `last_active_at >= end_at` 拒绝新活动，避免时钟差或查询在途造成实时遗漏；历史和自定义固定窗口仍遵守上界。此例外不改变客户端错误、上游错误或拒绝请求的固定时间范围语义。
-- `anchor_at` / `window_index`：仅为现有 API 调用者保留的旧窗口参数；未提供显式边界时，0 为下界固定在 `anchor-24h`、无上界的实时页，后续历史页按 24 小时分段。WebUI 始终发送显式边界，包括实时预设；
-- `cursor` / `limit`：同一时间页内按根链游标分批加载；
-- `provider`、`model`、`api_key`、`status`：匹配任一 Interaction/Run 后返回完整根 DAG；
-- 每个节点带 `matched`，前端对非命中节点降噪而不删除；节点另带 `failed_request` 与 `client_output_delivered` 聚合：前者表示该交互含至少一条属于客户端错误视图的终局错误 Run（失败的请求，或已准入但在上游发送前被平台校验拒绝的错误的请求；取消类除外），用于交互链路成员规则，其失败事实归宿于客户端错误视图，后者表示任一 Run 已向客户端提交过输出（首个客户端可见字节）。两者是事实字段，不改变 forest 返回的完整性。
-
-响应同时给出 window bounds、根链总数、next cursor 与 snapshot event sequence。根链按其最新 Interaction 的 `last_active_at` 归入且只归入一个时间页；返回时补全该根 DAG 在保留期内的全部 Interaction。`last_active_at` 只由真实请求准入、请求事件与完成活动推进；断连判定、等待超时、重启恢复、残留观察收口，以及新请求对旧 Run 的打断或接替，不推进旧 Run 的活动时间。Interaction 从所属 Run 聚合活动时间；状态判定事件仍保留实际 `occurred_at` 与递增 sequence，不能因较晚发现中断而把旧链重新归入最近时间窗。旧版本已写入的错误活动时间不自动回填。
-
-**摘要带引用，正文按需取**（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。forest、`changes`、详情与 Bundle 中的 `InteractionSummary.input` / `output` 是 `{ refs: [{ content_id, raw_len }], raw_len }`：`refs` 为有序内容引用（顺序即拼接顺序），`raw_len` 为引用正文原始字节数之和；没有输入或输出时 `refs` 为空、`raw_len` 为 0。`input.refs` 来自根 Run 最新的 `user_input_recorded`（`input_sequence`），读取时以 `\n` 连接；`output.refs` 来自最新一条 `channel='visible'` 块，块内文本单元以 `\n\n` 连接。`input_preview` 与 `visible_tail` 字段已删除，摘要不含正文，因此响应大小随引用数而非全文长度增长，列表与 `changes` 也不再对每条全文做凭据遮蔽。Bundle 摘要改用 `latest_output_text` 字段，值为最新可见块的完整文本。
-
-`GET /api/v1/observations/contents?ids=` 批量读取正文：最多 256 个 id（逗号分隔，允许重复并去重）；缺少 `ids`、空元素、非正整数或超过 256 个返回 400 `invalid_observation_ids`。只返回同时满足以下条件的正文：被 `observation_event_contents` 或 `observation_tool_results` 引用，且引用事件所属的 Interaction 存在；Turn Chain 或 History Marker 独有的 system、完整历史与 signature 不能经此读出，不可见的 id 直接省略，不报错、不泄露是否存在。响应为 `{ data: { contents: [{ content_id, format, raw_len, body }] } }`，`format` 为 `text`（`body` 是字符串）或 `json`（`body` 是解析后的 JSON 值；Core 以枚举 `ObservationContentFormat` 序列化），顺序按请求中的首次出现；文本按当前有效映射把明文遮蔽为 `***`，主体没有有效映射时不扫描。存储的内容不可变，但响应随当前映射变化：`ETag` 为 `sha256(映射版本 + 返回正文的内容摘要)` 的小写十六进制并加引号（摘要只参与 ETag，不进入响应）；200 与 304 都带 `ETag` 和 `Cache-Control: private, no-cache`，客户端可以缓存但每次使用前必须带 `If-None-Match` 重新验证，匹配时返回 304；映射增减会改变 ETag。ETag 覆盖的是本次返回的整批 id，所以只有请求的 id 集合相同时才能得到 304。WebUI 按请求键（升序 id 分片）缓存 ETag 与正文，每次读取都带 `If-None-Match`，304 复用缓存的正文，200 整体替换；不按 id 永久缓存，也不记忆服务端没有返回的 id（之后再读会重新询问），同一 id 的并发读取共用一次请求，缓存按原始字节数设上限并淘汰最久未使用的请求快照。正文加载失败的卡片显示失败原因，并在悬停/固定的提示里提供重试。「普通事件不保存完整 canonical request/response」的边界不变，保存完整的最新用户输入是这一边界下的明确例外，它只引用 Turn 已有的文本单元。
-
-详情 `InteractionDetail` 增加 `input_text` / `output_text` 全文（输入的多个文本单元以 `\n` 连接，输出的块内以及模型轮次之间以 `\n\n` 连接）。`runs[].events[]`、事件分页以及客户端错误与上游错误详情的 `payload` 是回填后的完整视图：`user_input_recorded.payload.text` 不再截断，`client_visible_content` / `model_thinking` 的 `text`、`parts`、`item` 由引用批量回填，`client_tool_result.payload.results` 为逐项结果数组；无论事件来自升级还是新写入，读取投影一致。存储与响应都不截断：`INPUT_PREVIEW_CHARS`（4,096 字符）、`visible_tail`、凭据命中详情的 `MAX_DISCOVERY_TEXT_BYTES`（1 MiB）与 `truncated` 字段均已删除；`live` 的 8 MiB 实时镜像上限与 Wire 抓包的 64 MiB 上限是资源安全阀，保留。
-
-SSE 通过普通 `fetch` 携带 Admin Bearer header，并由 `eventsource-parser` 解析；Admin token 不进入 query string。
-
-全局 `GET /api/v1/observations/events?after=<sequence>` 只发送 `ObservationChange { sequence, occurred_at, interaction_id?, root_id?, run_id?, rejection_id?, kind, boundary, error_source? }` 与显式恢复信号，不发送 `live_*`、完整 payload、正文或工具参数/结果。`root_id` 用于发现尚未加载的新匹配链路，`boundary` 用于首尾立即刷新。`error_source` 只在上游尝试带错误结束时出现：`kind=target_attempt_finished` 取事件载荷的 `error.source`，合并行 `kind=model_turn_finished` 取 `payload.attempt.error.source`，均取自已经解码的事件载荷，不额外读取数据库；成功尝试与其他 kind 省略该字段，上游错误页签据此标记待刷新。通知不是新的事实存储；生命周期、usage、delivery、工具与 Canonical Item 正文仍可由持久时间线读取。选中正文独立使用 `GET /api/v1/observations/interactions/{id}/live`，仅发送该 Interaction 所属 Run 的可见输出、可读 Thinking 与缺口/收口信号；`live_finished` 为 `{ interaction_id, run_id }`。两条订阅独立存续，未选详情或关闭检查器时不订阅完整正文；切换先取消旧作用域，并以 selection epoch 拒绝旧快照和消息。画布选中输出复用此订阅，不增加 HTTP 或 SSE；Thinking 不充当客户端输出，未交付的暂存内容不能提前显示。
-
-`POST /api/v1/observations/interactions/changes` 接收 JSON：
-
-```text
-RootChangesQuery {
-  filters: ForestQuery,
-  roots: [{
-    root_id, after_sequence,
-    known_interactions: [{ id, last_event_sequence, matched, debug_status }]
-  }]
-}
-RootChangesPage {
-  snapshot_sequence, root_total, reset_required,
-  changes: [{
-    root_id, last_active_at, interactions: InteractionSummary[],
-    removed_interaction_ids: string[],
-    removal_reason: null | "deleted" | "filter" | "window"
-  }]
-}
-```
-
-初次加载和必要恢复仍使用完整 forest；常规更新按 root 合并查询，只返回变化节点和必要关系信息，不重发未变化兄弟节点。未知 root 使用空 `known_interactions`，返回必要完整上下文；新节点与必要祖先可首次返回。基线还包含 `matched` 和 `debug_status`，整根筛选结果或 Debug 状态改变时返回所有受影响摘要，即使其直接事件水位未变。移除结果区分物理删除、筛选失效与时间窗变化；历史 root 后续活动仍遵循 §10.3 的迁出提示，不机械删除已加载历史。`root_total` 使用当前筛选和时间窗的真实总数，keyset 分页与深链 reveal 不变。基线无效或不能证明差量完整时设置 `reset_required`，不伪装为空变化。摘要读取和快照水位继续遵守现有提交并发约束，不能用提前读取的全局 sequence 声称覆盖尚未应用的投影。
-
-移除原因按 `deleted > filter > window` 判定。`deleted` 或 `filter` 的 root 移除列出所有已知成员；已知历史 root 仅因活动迁出窗口时，`window` 同时返回变化摘要（包括终态更新），`removed_interaction_ids` 只列物理缺失成员，不把全部已知成员当作删除。筛选失效优先于历史迁出保留，不能保留已不命中的历史 root。未知且在窗口外的 root 不返回摘要，不能借恢复上下文扩大成员范围。
-
-负数或超前基线、已知成员水位超过所声明基线、基线早于保留事件范围均要求 reset。root changes 使用 SQLite 读事务或 PostgreSQL 只读 `REPEATABLE READ` 事务，使 roots、total、节点、matched、Run Debug flags、关联事件与 sequence 上下界来自同一数据库快照；正常并发写入不触发 reset。本地文件 `DebugTraceIndex` 仍表达当前实例文件事实，不声称与数据库共享事务快照。root 不存在对应 `deleted`，root 不再命中对应 `filter`，活动时间离开所选窗口对应 `window`；是否保留已加载历史画布由 Workspace 的既有迁出语义决定，不由后端移除原因自行改写。
-
-forest、root changes 与详情摘要共用上述一致快照读取。其 `snapshot_sequence` 取同一快照内仍保留的已提交 `observation_events` 的最大 sequence，空历史为 0；不使用 SQLite 分配计数器或 PostgreSQL 非事务 `last_value` 代替已提交水位。清除最高事件使旧基线失效并要求一次权威重建，随后以当前已提交最大值建立新基线，不能持续陷入 reset。内部订阅分配计数器与查询快照水位用途不同；稀疏事件 ID 本身不是缺口。
-
-全局 SSE 的 `reset_required.snapshot_sequence` 仍表示订阅分配高水位，不保证等于重建查询的已提交水位。清历史保留活动请求，因此共享实例的 forest 也不保证变为 0。恢复必须读取权威查询快照，而不能把 SSE reset 字段当作已应用视图水位；后续真实事件的 ID 仍严格超过清理前已分配 ID。
-
-清历史、到期回收或 reset 后的 fresh snapshot 可以低于旧视图水位，全部删除时可以为 0；不得以跨重建的 `max(old, fresh)` 保留幽灵节点。PostgreSQL `last_value` 可包含尚未提交的分配，绝不能作为视图已覆盖水位。前端以新 view epoch 明确重建，拒绝旧 epoch 的在途结果，并接受当前权威快照的较低水位；普通同 epoch 增量仍遵守已应用基线，不能把迟到旧响应当作合法重建。
-
-forest、root changes 与详情摘要共用批量 Run Debug flags 读取，并按 Interaction 分组读取本实例 `DebugTraceIndex`。空 Run 集合或全部未启用 Debug 为 `none`；全部 Run 启用且全部对应 Trace 完整为 `complete`；其余为 `partial`。按数据库参数限制分块，SQL 随必要批次数而非逐节点增长；选中摘要复用结果。Trace 索引仍是当前文件事实，不引入共享数据库状态或固定 TTL 缓存；终态与清 Debug 后读取不得保留陈旧 `complete`。认证、权限、脱敏、Wire Capture 与 Bundle 票据及 ZIP 结构保持不变。
-
-普通详情只返回整个 Interaction 最新 200 条事件及 `older_events_cursor`。事件分页使用互斥的 `after_sequence` / `before_sequence`，以及固定快照上界 `through_sequence`；`limit` 默认 200、最大 500。负游标、超出快照的游标及无效 limit 返回 400。返回 `runs`、`snapshot_sequence`、`next_cursor`，每个 Run 包含本页事件，页内按 sequence 升序；仅在仍有后续页时返回游标。增量读取固定同一上界直至分页完成，历史加载向前翻页。诊断包独立读取完整截止历史，不受详情窗口限制。
-
-客户端错误列表 `GET /api/v1/observations/client-errors` 合并准入前 Rejected Request 与最终 `status=failed` 的 Inference Run，是既有观察数据的查询投影，不新建执行记录或重复累计用量：
-
-- 查询参数沿用 Interaction forest 的 `start_at` / `end_at`（或兼容的 `anchor_at` / `window_index`）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 与 `type` 筛选；`type` 取 `failed | rejected`，缺省返回全部，非法值返回 400；`model` 匹配模型路由的 28 位 ASCII 小写字母不透明 ID，`api_key` 匹配 key ID 或名称，`provider` 匹配该 Run 的尝试归属供应商；本地准备阶段被拒绝的请求也可能有尝试记录，无尝试记录的错误请求不会命中供应商筛选；
-- 排序为 `started_at` DESC、`kind` ASC、`id` ASC，`next_cursor` 是不透明的 JSON keyset 游标，相同时间记录跨页不重复、不遗漏；`total` 为当前时间范围与筛选条件下的总数；
-- 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `ClientErrorSummary` 包含 `id`、`kind`（`rejection | run`）、`type`（`failed | rejected`，与 `kind` 正交）、`request_id`、`started_at`、`duration_ms`、`api_key_id`、`api_key_name`、`client`、`model`、`model_display_name`、`services`（实际调用过的供应商去重列表）、`error`（`source` 取 `platform | upstream | null`，附 `code`、`message`、`status_code`）、`interaction_id`、`root_id`、`run_id`、`debug_status`（`none`、`partial` 或 manifest 状态）与 `observation_gap`；
-- 分类以一次客户端请求的最终结果为准：`rejected` 覆盖全部准入前拒绝，以及尚未发送任何上游请求时被平台校验拒绝的 Run（模型不存在、API Key 不允许该模型、请求 Hook 拒绝和参数校验失败）；创建 Target 尝试记录本身不代表已发送上游。运行收口沿用 `rejected_before_target` 存储分类字段，不新增统计路径；参数拒绝使用平台来源的 400/422 或稳定请求校验错误码判定，请求 Hook 的任意拒绝码使用显式标记。上游 4xx、已发送上游后的本地失败、无可用 Target 和额度暂停仍属于 `failed`。扩展分类只作用于升级后收口的请求，既有运行分类与长期统计桶不重算。内部重试或切换供应商后最终成功的请求不进入列表；单纯主动取消或断线（含 499、`request_aborted`、`cancelled`、`client_disconnected`、`websocket_delivery_dropped`）被排除；后来重新发起并成功的请求不抹掉早先失败行；
-- 客户端错误记录的开始时间取 ingress 接收时间，结束时间在终止方截取，不使用 writer 入队时间；历史记录缺少的字段如实表达缺口：0045 之前的 Rejected Request 无 `started_at` 时回退按 `occurred_at` 排序并置 `observation_gap=true`，缺失诊断保持未知，不能补回；
-- `GET /api/v1/observations/client-errors/{kind}/{id}` 返回 `{ data: { request, events, trace, snapshot_sequence } }`；`request` 带 `type`。`trace` 是既有 Debug manifest 元数据。诊断包仍通过既有 Interaction/Rejection ticket 与下载入口获取，该列表不新增 Debug 捕获，也不改变脱敏与保留期规则。
-
-上游错误列表 `GET /api/v1/observations/upstream-errors` 以 Target 尝试为单位，只投影保留期内 `status=failed` 且 `error_source=upstream` 的尝试；包含多模态理解、媒体生成等 capability 经 Provider 发出的尝试：
-
-- 查询参数沿用同一时间窗口（`start_at` / `end_at`，或 `anchor_at` / `window_index`，24 小时上限与非法窗口 400）与 `cursor` / `limit`（默认 50、最大 200），另支持 `provider`、`model`、`api_key` 与 `outcome` 筛选；`outcome` 取 `recovered | caused_failure | in_progress | interrupted`，缺省返回全部，非法值返回 400；
-- 排序为 `started_at` DESC、`id` ASC，游标为不透明的 JSON keyset；`total` 与 `snapshot_sequence` 语义同上；
-- 响应为 `{ data: { items, total, next_cursor, snapshot_sequence } }`；每项 `UpstreamErrorSummary` 包含 `id`（attempt ID）、`run_id`、`interaction_id`、`root_id`、`request_id`、`started_at`、`duration_ms`、`provider_id`、`provider_name`、`upstream_model`、`model`、`model_display_name`、`api_key_id`、`api_key_name`、`client`、`error`（同 `FailureDiagnostic`，含上游错误码）、`outcome`、`debug_status` 与 `observation_gap`；
-- `outcome` 在查询时从所属运行派生，不持久化：运行 `completed`、已把工具调用交给 Connect Client 并以 `waiting_client` 结束、以及随后被续接的 `superseded` 都是 `recovered`；运行 `failed` 为 `caused_failure`；运行尚未结束（`finished_at` 为空）为 `in_progress`；运行被取消或中断为 `interrupted`。取消、断线、中断、本地准备失败、因 RPM 占满未发送、观察丢失与来源未知的尝试不进入列表；
-- 尝试记录不单独保存过期时间，保留期跟随所属 Interaction（`last_active_at + N`，由保留期扫描删除，Run 与 attempt 随之删除）；Interaction 被扫描删除或清除历史后，列表与详情同时消失，统计桶不受影响；
-- `GET /api/v1/observations/upstream-errors/{attempt_id}` 返回 `{ data: { error, attempts, events, trace, snapshot_sequence } }`：`attempts` 是同一运行内全部尝试的时序（按开始时间升序，含状态、耗时、供应商、上游模型、状态码、错误码与来源），`events` 是该运行截至快照的事件（可为空），`trace` 是既有 Debug manifest 元数据。尝试不存在或已被删除返回 404；诊断包仍通过既有 Interaction ticket 与下载入口获取。
-
-## 10. 请求记录页面
-
-### 10.1 信息架构
-
-页面标题和导航继续使用“请求记录”，主体分为：
-
-- `交互链路`：默认页签，Interaction forest 无限画布；
-- `客户端错误`：Client Errors 表格列表与详情，含类型列与筛选，不伪造画布节点；
-- `上游错误`：Upstream Errors 表格列表与详情，按 Target 尝试一行。
-
-页面 header 包含实时状态、时间预设、精确日期时间范围、全屏切换、筛选和“清除历史记录”。Debug 开关及“清除 Debug 数据”统一位于设置页「诊断」。全屏保留当前筛选、选中节点及检查器，支持工具栏退出和 Esc 退出。普通 CSV 导出删除。Debug Bundle 按选中的 Interaction/Rejected Request 提供，上游错误详情通过所属 Interaction 导出。
-
-#### 客户端错误列表
-
-“客户端错误 / Client Errors”页签使用传统表格列表，不使用卡片或拓扑。口径遵循 `GLOSSARY.md` 的「客户端错误」：以每次客户端请求的最终结果判断，而非仅按 HTTP 状态码或内部上游尝试判断。`type=rejected` 覆盖全部准入前拒绝，以及已准入但在上游发送前被平台校验拒绝的「错误的请求」（模型不存在、无权使用该模型、请求 Hook 拒绝、参数校验失败）；其余最终 `status=failed` 的 Run 为 `type=failed`。内部重试或切换供应商后最终成功的请求，以及单纯由客户端主动取消或断线终止的请求不进入列表；后来重新发起并成功的请求不抹掉早先失败行。已归属 Interaction 且交付过客户端可见输出的失败 Run 仍保留在原交互链路中；从未交付任何客户端可见输出且最终失败的交互按「交互链路」成员规则默认不进画布，可从客户端错误列表跳转或深链回看。准入前失败只在客户端错误列表展示，不伪造交互关联。
-
-列表按请求开始时间倒序（`started_at` DESC、`kind` ASC、`id` ASC，契约见第 9 节），每次客户端错误一行，默认八列为：
-
-| 列               | 内容                                                                                    |
-| ---------------- | --------------------------------------------------------------------------------------- |
-| 时间             | 请求开始时间；缺少开始时间的旧拒绝记录回退按 ingress 时间排序并标记 `observation_gap`。 |
-| 类型             | 失败的请求或错误的请求；与记录种类（拒绝记录 / 运行）正交，筛选默认显示全部。           |
-| 客户端 / API Key | API Key 名称或客户端来源；未认证时显示“未认证”，不可得时显示“—”。                       |
-| 模型             | 请求的路由模型；无法解析时显示“—”。                                                     |
-| 供应商           | 实际调用的供应商；未调用上游时显示“—”。                                                 |
-| 错误来源         | 平台错误或上游错误；未知时显示“—”。                                                     |
-| 错误             | 简短原因及可用的 HTTP 状态码，完整内容进入详情。                                        |
-| 耗时             | 请求开始到终止的持续时间；不可得时显示“—”。                                             |
-
-点击行打开客户端错误详情，查看完整错误、请求标识、事件与已有 Debug manifest 状态；存在所属 Interaction 时提供跳转对应交互节点的入口，否则不生成无效跳转。列表不展开大段错误。历史缺失的来源快照与失败诊断不能补回，缺失字段如实显示，不虚构数据。诊断包沿用既有 Interaction/Rejection 下载入口，不新增 Debug 捕获；Debug 保留期与脱敏规则不变。
-
-#### 上游错误列表
-
-“上游错误 / Upstream Errors”页签同样使用传统表格列表，每次失败的 Target 尝试一行，包含多模态理解、媒体生成等 capability 经 Provider 发出的尝试。上游口径遵循 `GLOSSARY.md` 的「上游错误」：HTTP 非 2xx、连接或传输失败、首 token 超时、200 之后的流错误与凭据被拒都进入列表；上游判定请求本身无效的 4xx 也计入。本地准备失败、因 RPM 占满等未发送、取消、中断、观察丢失、进行中与来源未知的尝试不出现。被重试或切换吸收、客户端毫无感知的错误同样保留。
-
-列表按尝试开始时间倒序（`started_at` DESC、`id` ASC，契约见第 9 节），默认九列为：
-
-| 列               | 内容                                                                                    |
-| ---------------- | --------------------------------------------------------------------------------------- |
-| 时间             | 尝试开始时间。                                                                          |
-| 供应商           | 实际调用的供应商；筛选按供应商标识匹配。                                                |
-| 上游模型         | 实际发往上游的模型；未知时显示“—”。                                                     |
-| 路由模型         | 客户端请求的路由模型及显示名；无法解析时显示“—”。                                       |
-| 客户端 / API Key | API Key 名称或客户端来源；不可得时显示“—”。                                             |
-| 状态码           | 上游返回或本地归类的 HTTP 状态码；不可得时显示“—”。                                     |
-| 错误             | 简短原因及可用的错误码，完整内容进入详情。                                              |
-| 结果             | 已恢复、导致请求失败、进行中或请求已中断；查询时从所属运行派生。                        |
-| 耗时             | 尝试开始到终止的持续时间；不可得时显示“—”。                                             |
-
-结果筛选只在 `上游错误` 出现，取 `recovered | caused_failure | in_progress | interrupted`，默认显示全部。点击行打开上游错误详情，查看该尝试的错误来源、状态码、错误码、上游错误码、消息与耗时，以及同一运行内其他尝试的时序；存在所属 Interaction 时提供跳转对应交互节点的入口，否则不生成无效跳转。列表不展开大段错误，历史缺失字段如实显示，不虚构数据。
-
-### 10.2 画布
-
-选中卡片的输出保持有界尾窗，不把详情累计全文每帧复制给画布。尾窗因追加而滑动时，若实际保留后缀仍重叠，继续同轮逐字追赶且不重置 300ms 截止；非追加替换或无重叠直接同步，不能把正常尾窗裁剪误判为替换后瞬间显示全部新尾部。
-
-使用 `@xyflow/svelte`：
-
-- 无限 viewport；
-- 空白处拖拽平移；
-- 滚轮以指针为中心缩放；
-- touch pan 与 pinch zoom；
-- 节点可选、可聚焦，但不可拖动、删除、重连或创建连接；
-- `onlyRenderVisibleElements` 启用；
-- 节点、布局与连线共用固定的 288×256 CSS 像素几何及上下连接点；未取得 worker 布局的新节点不挂到原点，不为测量尺寸或连接点而一次性挂载全量卡片。保留完整图数据，由视口及可见连线端点决定实际挂载，移动与缩放时按需更新；
-- “适配全部”直接按完整布局的已知几何计算视口，不等待屏外节点的 DOM 测量，也不只适配已经挂载的卡片；
-- 未改变的节点沿用原引用；同一确认父节点下的候选共享祖先判定，避免长链反复回溯相同前缀。该缓存仅属于当前判定，不改变确认、推断与原生压缩关联语义；
-- 提供适配已加载内容、回到进行中、缩放、可折叠 minimap；
-- 所有屏宽都使用同一画布；窄屏点击节点后详情全屏。
-
-使用 `@dagrejs/dagre` 在 worker 中计算 top-to-bottom 子树布局。布局使用画布实际显示的全部连接；被诊断关联连接的 Generation Chain 根归入同一视觉分组，后续 Interaction 位于来源下方。同一确认父节点的多个确认子节点横向分叉。若确认父边跳过了更早的推断续接，且该确认子的 `retained_tail` 推断来源指向该中间节点（输入含中间轮，例如切模型后再切回并带上其中间输出），画布把它接到中间节点下方，不并列分叉。推断来源仍是确认父、无匹配或 `ambiguous` 时保持分叉（输入不含中间轮，是从原链真实分叉）。旧记录缺少尾部事件时，仍按时间接到最新推断中间节点。这只改变视觉父边，不改写 `parent_interaction_id` 或 Generation Chain。不相连的分组沿用页面快照的根顺序，实时数据只重排受影响分组；关联变化也必须触发布局更新。视觉分组不改写后端根身份、根计数或执行父链。分组拓扑改变后按当前节点重新计算宽度，收回已消失分叉占用的空间，不保留历史最大宽度。跟随、直接链接与“回到进行中”按目标卡片居中，空间允许时恢复 1:1 缩放；窄小视口按卡片宽高缩小，不为容纳完整视觉分组而压缩目标。“适配全部”仍按完整布局显示总览。
-
-保留尾部推断关联与已确认直连使用相同的底部 source、顶部 target、路径、颜色与线宽，只以虚线区别；单一续接上下对齐，不为跨根关联绕到卡片侧面。连线上与卡片预览中均不附加推断关联说明，具体关联类型仍可在诊断详情中查看。
-
-一个时间页先加载最新一批根链的完整子树；横向接近已加载边缘时按 cursor 加载下一批。画布左上角显示已加载交互中当前运行中（`running`）的条数，不含等待客户端的交互；未加载的根链不计入。“适配全部”先加载剩余根链并显示进度，再计算完整 bounds。
-
-`ObservationWorkspaceController`（`frontend/stravia-webui/src/lib/observation-workspace.ts`）拥有通知、forest、selection、range、客户端错误与上游错误两套列表状态、cursor 和正文编排。常规摘要更新使用 §9 的 root changes；公开的单节点 `/summary` 接口及其客户端路径删除，不保留兼容 alias。选中详情与客户端错误跳转通过 Interaction detail 获取摘要和 root 上下文，并按既有 deep-link reveal 规则定位画布；内部 store summary 只作为详情组成，不是独立管理资源。按 root 汇集通知，最多等待 100ms，截止以第一条待处理变化固定；首段及终态立即触发，已有在途请求不因此无限并发。同一 root 仅一个在途刷新，请求期间的新变化保留，响应只清除实际水位覆盖的待处理变化，未覆盖的继续补拉。
-
-选中详情初次加载有界详情，后续事件按持久 sequence 合并增量补齐，分页固定 `through_sequence` 上界、去重并升序；客户端错误列表沿用对 `request_rejected` / `run_finished` 的单一待刷新状态；上游错误列表只对携带上游错误的 `target_attempt_finished` / `model_turn_finished`（`error_source`）标记待刷新。两者各自拥有请求版本与范围版本，不互相覆盖，也不能把每个 `run_finished` 都判为失败。通知消费不等待每条 HTTP 请求，错误列表不逐事件刷新隐藏画布，切回恢复正确视图。查询失败保留可用数据、待处理变化与可见错误/恢复操作；已收到通知游标不能冒充成功应用水位。切换 selection、range、filter、tab 或关闭详情后，旧响应不得污染新上下文。向上历史分页保持滚动锚点，未变化 Run、消息和节点沿用原引用。易失正文仅更新选中预览，不触发 HTTP。Forest、changes 与 detail 共用有界批量关联事件读取，保持 sequence 顺序与快照上界。点击下载不沿用页面旧截止序号，由服务端完成目标屏障后固定票据快照。
-
-reset 恢复开启新的 view epoch，取消或拒绝旧上下文结果；在权威重建成功前保留当前可用旧数据，并明确未刷新或恢复中的状态，不提前清成看似成功的空视图。恢复失败显示真实错误和显式 Retry，保留恢复需求；成功后以 fresh forest、详情与选中正文替换旧基线，即使其 `snapshot_sequence` 更低或为 0，也不得重新合入已删除旧节点。
-
-#### 10.2.1 通信优化配对测量
-
-测量入口为 `tests/common/measure_observation_http.py` 与 `frontend/stravia-webui/scripts/measure-observation-browser.ts`。使用隔离 SQLite、真实 default-features release 服务、实际 WebUI 和 Chromium，不拦截观测 API。原始版本为 `d04c6a55a0709ca5540b42164173ec356f3b467e`，独立原始 worktree 构建的服务 SHA-256 为 `fc8723672c74f6ce7eeb19c944cf92be627bb4752f94deb1eb77dfb48a62a06c`；最终功能优化工作树服务 SHA-256 为 `8ab52d44fe60f3939b3038efd691b44d6ce9e8ace454c3b85053a921432c6626`，包含固定动画截止 timer 与不切碎限频窗口的读屏障。两者使用 `cargo build --locked --release -p stravia-server`、既有 Provider 构建与实际 WebUI 构建，不混用 test-harness 服务。
-
-两个版本的负载完全一致：每条流 80 个累计正文 delta，首块后保留 2000ms 的本地 Provider 间隔以完成真实选择，后续每 10ms 一块；输入重复 4000 次，Provider 报告 prompt 10000 / completion 12000 tokens，不降低页面默认筛选。深链先完成 12 次间隔 2100ms 的真实 follow-up，两边均形成 14 个 Interaction、深度 12；多根为 8 次请求，多观察者为 4 个独立页面，慢消费者增加 50ms 读取间隔并对 Chromium 施加 4 倍 CPU 节流。数字不是生产流量推断或固定性能阈值。
-
-下表为一次配对运行的实际观测。请求数和字节只来自实际浏览器观测 API；API 字节包含 SSE，SSE 字节是其中的单独诊断维度，不能再次相加。SQL 数量来自服务已有 recorder，包含场景准备及浏览器和显式 HTTP 客户端，排除额外三条只读数据库盘点查询；不能将它称为纯浏览器 SQL。`ScriptDuration` 为所有观察页面的主线程脚本时间增量。
-
-| 场景           | 浏览器请求数，前 → 后 | API 解码字节，前 → 后 |   SSE 字节，前 → 后 | 服务 SQL 数，前 → 后 | 脚本时间 ms，前 → 后 |
-| -------------- | --------------------: | --------------------: | ------------------: | -------------------: | -------------------: |
-| 未选详情       |                 9 → 8 |    2,115,124 → 95,227 |   2,014,362 → 4,275 |            394 → 381 |        59.25 → 38.18 |
-| 长正文选中详情 |               14 → 12 |   2,260,634 → 259,363 | 2,015,468 → 112,982 |            449 → 428 |       183.65 → 89.37 |
-| 失败请求页     |                18 → 5 |      155,504 → 10,075 |      20,528 → 6,676 |            570 → 449 |        18.85 → 18.90 |
-| 深 root        |               15 → 12 |   2,322,977 → 312,094 | 2,011,520 → 126,497 |        2,002 → 1,842 |       240.37 → 85.01 |
-| 多 root        |               20 → 16 |   8,396,935 → 458,284 | 7,913,088 → 117,938 |        1,273 → 1,135 |      251.65 → 121.59 |
-| 四观察者       |               47 → 47 | 8,600,086 → 1,067,394 | 7,748,074 → 468,788 |            868 → 868 |      991.74 → 424.00 |
-| 慢消费者       |               10 → 12 |   2,192,309 → 265,730 | 1,998,104 → 119,726 |            439 → 420 |      817.97 → 434.18 |
-| 断线重连       |               14 → 14 |   2,227,927 → 290,360 |  2,015,481 → 92,755 |            491 → 481 |        56.03 → 39.96 |
-
-实际机制证据：未选详情与失败页不再收到任何 `live_snapshot` / `live_content`；失败页不再请求隐藏画布摘要；长正文实际 `live_content` 从两个请求共 160 次变为选中请求的 9 次，四观察者的正文更新为 36 次而非 576 次。所有场景的浏览器错误和 SSE 捕获错误均为空，服务 timeline 无丢弃记录，结束时 writer queue depth 为 0。
-
-首段显示以所选 A/B 的真实 Provider 首块写入时间到详情首次出现正文计算；终段以该 Provider 终块写入到详情最后正文变化计算，包括传输、选择、查询与实际呈现，不等同纯调度等待。四观察者给出范围；后续页面依次选中，首段结果含真实选择准备时间。慢消费者保留 CPU 节流，重连场景保留真实离线与恢复时间。
-
-| 场景           |            首段可见 ms，前 → 后 |          终段可见 ms，前 → 后 | 全局连接建立数，前 → 后 | 正文连接建立数，前 → 后 | reset 帧，前 / 后 |
-| -------------- | ------------------------------: | ----------------------------: | ----------------------: | ----------------------: | ----------------: |
-| 未选详情       |                          不适用 |                        不适用 |                   1 → 1 |                   0 → 0 |             0 / 0 |
-| 长正文选中详情 |                 362.04 → 260.89 |               446.00 → 182.48 |                   2 → 2 |                   0 → 1 |             0 / 0 |
-| 失败请求页     |                          不适用 |                        不适用 |                   1 → 1 |                   0 → 0 |             0 / 0 |
-| 深 root        |                 379.81 → 273.03 |               362.16 → 120.71 |                   2 → 2 |                   0 → 1 |             0 / 0 |
-| 多 root        |                      未可靠配对 |                    未可靠配对 |                   2 → 2 |                   0 → 1 |             0 / 0 |
-| 四观察者       | 624.41–2465.61 → 345.79–1365.79 | 197.60–449.58 → 272.31–287.31 |                   8 → 8 |                   0 → 4 |             0 / 0 |
-| 慢消费者       |                1297.45 → 859.04 |             1216.72 → 1191.98 |                   2 → 2 |                   0 → 1 |             0 / 0 |
-| 断线重连       |               3510.00 → 3410.87 |               674.74 → 587.59 |                   3 → 3 |                   0 → 2 |             0 / 0 |
-
-连接数包含打开页面和既有 deep-link 导航，不把普通选中时的两次全局连接称为断线恢复。断线场景显式执行一次离线/恢复，两边实际全局连接比普通选中多一次，优化侧正文也重建一次。多 root 使用重复 A/B marker，不能可靠地把所选 ID 与八条 Provider emission 一对一配对，故保留原始时间但不报告可能为负数的错误延迟。
-
-服务时间另列，不从累计服务 CPU 简单相减来制造“纯等待”。布局与样式为所有页面的 Chromium `LayoutDuration + RecalcStyleDuration` 增量，SQL 为 recorder 中实际累计查询时间。
-
-| 场景           | SQL 服务时间 ms，前 → 后 | 布局与样式 CPU ms，前 → 后 | 节点 / 持久事件，前后相同 |
-| -------------- | -----------------------: | -------------------------: | ------------------------: |
-| 未选详情       |            45.82 → 72.09 |            108.66 → 171.04 |                    2 / 18 |
-| 长正文选中详情 |            71.41 → 64.71 |            817.94 → 718.72 |                    2 / 18 |
-| 失败请求页     |            55.20 → 69.57 |               10.68 → 9.13 |                    2 / 28 |
-| 深 root        |          174.91 → 183.47 |            695.79 → 499.53 |                  14 / 126 |
-| 多 root        |           116.90 → 99.39 |            742.62 → 772.17 |                    8 / 72 |
-| 四观察者       |          104.06 → 126.58 |          2881.95 → 3096.56 |                    2 / 18 |
-| 慢消费者       |            74.79 → 61.58 |          1459.48 → 1756.04 |                    2 / 18 |
-| 断线重连       |            59.84 → 52.50 |             101.42 → 80.79 |                    2 / 18 |
-
-主动安排的等待独立采用后端发布最多 100ms、Workspace 合并最多 100ms、动画追赶最多 300ms，合计最多 500ms。各自固定截止及首尾绕过路径通过受控时间回归验证；真实 SSE/HTTP 接收和上述 DOM 时间仍包含服务成本，不能倒推出精确的单层等待。实际正文直接消费选中 scope，不必串行经过一次摘要 HTTP；这里保留的是保守合成上界，而不是声称每一更新实际等待了 500ms。
-
-受控预算证据与真实时延表分开：`fixed_publish_deadline_coalesces_revisions_without_stale_scope_snapshot` 在准入数据库工作结束后暂停 Tokio 时间，40ms 时再追加、99ms 时不发布、100ms 时一次发布最新全文，输出 `backend_publish_wait_ms=100`；中途新订阅拿到尚未发布的当前全文。Workspace 的持续同 root 通知用例记录实际 changes 调用时刻，输出 `frontend_merge_wait_ms=100`。Chromium 用 MutationObserver 记录最新追加真正进入 DOM 的受控时间，正文、Thinking 和滑动卡片在 300ms 内完成，动画轮的固定 timer 不等待下一个 rAF，持续追加不延后它。三层受控等待合成上界为 100 + 100 + 300 = 500ms。读己之写屏障排空观测队列并刷新 Debug，不额外发布中间正文以切碎窗口。
-
-这些数据只证明本次同负载通信与执行结果，不证明每项资源都下降：慢消费者请求数增加；未选详情、失败页、深 root 和四观察者的 SQL 累计服务时间上升，未选详情、多 root、四观察者和慢消费者的浏览器布局与样式 CPU 上升，失败页 ScriptDuration 也略增。四观察者的部分终段可见耗时增加。最终 RSS 和 Chromium heap 有混合结果。单次运行受调度、GC 与宿主负载影响。当前服务 recorder 只提供 RSS，没有独立序列化 CPU 或分配器 instrumentation，也未精确分离端到端延迟中的每一层实际等待；这些维度不宣称已经精确测量。500ms 调度预算与真实可见延迟分别报告，不把服务时间排除解释成统一端到端承诺。
-
-原始 JSON、SQL timeline、接收/呈现时间、资源采样与实际页面截图保存在忽略的 `target/observation-measurements/baseline-release*` 和 `optimized-final-release*`；`optimized-release*` 是收紧最后截止与屏障之前的中间测量，不与最终表混用。重新测量须显式指定各自源码构建的 executable、对应 `--web-dist`、`--browser-script`、版本标签与输出路径；优化版本增加 `--optimized`，保持上面的负载参数及默认页面筛选不变。显式 HTTP 客户端请求与浏览器刷新请求分别记录，不合并统计或用前者代替产品页面。
-
-### 10.3 时间页与迁移
-
-实时预设的 forest/changes 携带 `live_window=true`，适用 §9 的上界例外；所显示窗口宽度仍随当前时间推进，不扩大用户所选时长。下述固定 `[start_at, end_at)` 上界适用于历史/自定义范围及失败、拒绝请求列表。
-
-实时预设包括 5、10、30 分钟以及 1、4、12、24 小时；前端随当前时间推进起止边界并发送显式 `[start_at, end_at)`，窗口宽度始终保持所选时长，不会因长时间打开而扩大。自定义范围通过本地日期时间输入转换为 Unix 毫秒，应用后保持固定边界，起点必须早于终点且跨度不得超过 24 小时；恰好 24 小时有效，超限不能应用。Interaction Chains、Rejected Requests、客户端错误与上游错误使用相同时间窗语义。时间边界只决定根链成员资格，不截断返回的因果上下文，也不限制详情中的完整 DAG。
-
-根链若因新活动跨入更新的时间页：
-
-- 当前已打开画布不立即删除或移动它；
-- 显示“此链已迁移到较新的时间页”提示；
-- 点击提示跳转新时间页并聚焦该链；
-- 新查询严格按新的 last activity 归页，不在两页重复。
-
-### 10.4 Interaction 卡片
-
-固定尺寸卡片显示：
-
-- `本地开始时间 · 首个 Run 的 Model Display Name`；为空回退 Route ID；模型名字号比原卡片标题缩小一级，为正文预览留出空间；
-- 主状态；只有真实执行时显示绿色呼吸圆点；含终局错误 Run（客户端错误视图中的运行类记录）的交互终态显示为「失败」（destructive 菱形），运行中与等待客户端保持过程状态；
-- 模型名下显示用户输入框，约两行，展示本次交互用户消息开头；内容来自摘要 `input.refs`，卡片按可见范围经 `GET /api/v1/observations/contents` 批量取正文并以 `content_id` 缓存（正文不可变）；`raw_len` 为 0 的旧记录或没有文本输入时明确显示未记录，不从历史消息或工具结果伪造；
-- Confirmed Upstream Usage；未知字段显示等待上游，不显示 0；
-- 用量栏下显示同宽的输出框，约三行，底部对齐并裁去上方溢出，内容更新及字体或尺寸变化后仍显示最新一行；内容来自摘要 `output.refs`（最新一条可见块），与输入框同样经 `contents` 取正文；
-- 两个正文框以安全过滤后的 Markdown 渲染，不加载图片或嵌入资源；悬停或键盘聚焦时通过 Tooltip 查看完整正文（打开时才经 `contents` 读取，列表与 `changes` 的响应不携带全文），触控点按打开可关闭的内容浮层；长内容限高滚动，不误触卡片详情；
-- 输入取自准入时客户端窗口最后一条 User item 的完整文本单元，不再截断为前 4,096 字符（该限制已由 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md) 取消；升级前已截断的旧记录保持截断，不从 Turn Chain 回填），并沿用既有模型侧凭据保护完成后的发布边界，不再另做观测正文脱敏；普通 Debug 关闭时也记录。同一交互的工具续跑不得覆盖初始输入，新用户子交互记录自己的输入。输入随所属 Interaction 的保留期（最后活动后至少 N 天，见 §6.4）一并删除；
-- 输出框及其浮层使用最新一条客户端可见内容块的完整文本，不因 Debug 开关扩大为 canonical payload，也不宣称完整回答（它只是最新可见块，不是整次交互的全部输出）；
-- 不显示底部 Debug 捕获、筛选命中或因果上下文标签；
-- 保留选中路径、键盘 focus 与非命中节点弱化样式。
-
-卡片不会因完整输出增长高度。Interaction 内多 Run 分支只在详情展开，不在卡片显示计数。
-
-### 10.5 实时跟随
-
-选择实时预设时，默认聚焦最新活动或正在执行的节点。用户一旦平移、缩放或选择旧节点，自动跟随暂停；程序定位产生的无输入源移动结束事件不暂停跟随，也不触发边缘分页。
-
-跟随中，只有卡片上的用户输入（摘要 `input.refs`）或模型输出（摘要 `output.refs`）实际变化时，视口才居中到该卡片；同一批刷新里有多张卡片变化时取 `last_active_at` 最新的一张。新出现但还没有任何输入或输出文本的卡片、以及状态、用量、思考或工具调用等不改变这两个引用的更新，都只刷新卡片，不移动视口。暂停跟随时，同样的变化才显示“有新活动 · 跟随”。点击后恢复并聚焦当前最新的真实执行节点。
-
-### 10.6 右侧检查器
-
-桌面使用可调宽、可关闭的右侧检查器，默认宽约 40rem，可按工作区宽度在 28–56rem 间调整；画布始终保留至少 18rem 宽度，放不下时整页改用全屏详情。切换依据所在工作区的容器宽度，不按 viewport。
-
-以下数据获取与订阅分层是已确认的目标边界；当前接口仍返回统一的分页详情快照，尚未按 Run 拆分：
-
-- 画布只需要 Interaction 摘要；打开交互卡片后，检查器加载足以直接阅读会话的首屏、可分页的会话历史与 Run 摘要。会话文本不要求用户逐个展开 Run。
-- 只有用户显式展开某个 Run 的诊断详情时，才进入该 Run 的重型诊断内容需求，包括可读思考、工具参数与结果、Target attempt 详细内容。现有「对话」页中的思考或工具 Marker 展开，以及「诊断」页中对应 Run 的展开，均属于这项显式详情需求；不增加额外操作层级。
-- 关闭检查器时退出该 Interaction 的会话与 Run 详情需求；收起对应 Marker 或 Run 诊断时退出该层的重型诊断内容需求。此分层只约束管理页何时获取和订阅所需详情，不改变后台 Interaction Observation 的记录、保留、Debug 开关或 Debug Trace 契约。
-
-默认「对话」页与控制台复用只读消息框架展示当前 Interaction：用户靠右使用低对比度气泡，模型正文靠左平铺、不使用装饰气泡。两侧均不显示头像或独立身份行，也不保留头像占位；消息保留用户或模型的可访问名称。数据、分组与展开策略保持各自边界。连续同一模型的 Run 共用一组消息，正文和工具继续追加在同一块内，只在末尾显示最后一条消息的时间；换模型或出现用户消息时重新分组。时间旁不显示任何执行状态或预览说明，执行状态仍在画布与诊断中保留。初始用户消息取详情的 `input_text`（全文），缺失时可用初始 Run 的 `user_input_recorded.payload.text` 补足；后续 Run 的输入事件在所属回复前生成独立用户消息，不因文本相同而去重。每个 Run 的回复遵循前文的接收顺序规则，并以稳定 block 身份叠加尚未落盘的选中易失正文；收口落盘后对应易失 block 退役，不重复显示同一正文。不把 Debug 或 Thinking 当作客户端回复。没有用户正文时不生成用户消息；仍有更早事件尚未加载时同样不显示初始用户消息，避免它悬在被省略的历史之前，更早历史读完后才出现在对话起点；没有助手正文时隐藏正文块，但保留流式组件实例，保证首个实时增量仍可逐字显示。
-
-思考和工具使用官方 shadcn-svelte Marker，默认折叠；有真实详情才提供展开操作，没有可读思考则不显示条目，只有工具名称时显示静态行，不增加「未记录」说明。Marker 在所属 Run 的接收位置展示；展开显示普通观察事件记录的可读思考、工具输入和返回，无需开启 Debug。详情与对话不读取 Debug Trace，也不从旧 Trace 补充内容或补录未采集的历史。签名、密文不进入普通思考正文。
-
-活动转圈只表示有证据的进行中状态：平台工具有开始而无结束，客户端工具已交接且所属 Run 当前为 `waiting_client`。工具结果（包括错误）结束对应等待；`superseded`、断线、保留期删除和进程恢复等权威终结停止转圈并保留真实原因，不冒充成功返回。响应交付不等于平台工具结束；后台开始尚未结束时继续显示活动，只有真实结束或已有未完成活动收口证据才终结。晚到客户端结果仍关联原调用，并就地补进原调用块（此前的断线等原因随结果到达被替换）。状态展示不自动展开 Marker、不改变人工展开记忆，也不为转圈加载重型详情。
-
-工具调用按 Run 和调用 ID 关联：普通平台事件的 `tool_id` 就是调用 ID，客户端返回来自 `client_tool_result`。返回仅匹配明确 `parent_run_id` 祖先，祖先路径上的历史重放不重复展示，兄弟分支各自收到的返回独立保留。工具输入与返回以安全纯文本或 JSON 呈现，不递归猜测业务 JSON、不执行 HTML 或加载远程媒体。每条 Marker 以稳定活动 ID 独立保存 localStorage 展开布尔值，折叠时删除该项；不保存正文，存储失败明确提示但不阻断展开。展开已有内容不制造「新活动」提示；后续真实内容变化仍可提示，且不收起已展开条目或抢走阅读位置。
-
-正文复用 `StreamingMarkdown` 的安全 Markdown、追加识别、Unicode grapheme 与 reduced-motion 能力，lexer 与 parser 均显式启用 GFM，表格继续经过既有 HTML 安全白名单。正文与展开 Thinking 共用按需加载、随应用打包的公式／Mermaid 渲染；流式完整片段才生成只读结构，不完整或无效片段保留安全源码，不加载远端资源或执行模型提供的交互。仅选中详情正文、展开的 Thinking 与选中卡片输出预览逐字显示；未选卡片、输入、用量和工具结构化数据不动画。后端发布最多 100ms、Workspace 合并最多 100ms、动画追赶最多 300ms，共享最多 500ms 主动等待预算；I/O、计算与实际渲染另测，不以不同主机墙钟同步解释预算。大量追加自适应增加每帧 grapheme 数，持续更新不无限推迟追平，不设置固定字符速度的新队列。首段尽快呈现，历史首次打开、作用域/重连快照、非追加替换、完成/失败/取消及 reduced-motion 直接同步已收到最新内容，不补造尾部。离开选中表面、隐藏或卸载时取消动画积压，恢复不慢放历史；不每字符重解析全部历史或深链路。处于底部时随逐字增长跟随；用户向上翻阅或展开活动后保持阅读位置，只有点击「回到最新」或主动滚到底部才恢复。切换 Interaction 重置跟随，不滚动外层页面。通用动画规则见 [`DESIGN.md`](../../DESIGN.md)。
-
-「对话」与「诊断」共用基于 TanStack Virtual 的虚拟列表，控制台聊天页复用其通用层。「对话」以行为单位虚拟化：每个 Markdown 分段（按顶层 token 边界合并相邻块至约 8192 字符，不拆开代码块、列表、表格和公式）、每个思考或工具活动、每条消息末尾的时间各是一行；「诊断」以 Run 为一行。只挂载视口附近的行，屏外行使用估算或已测量高度的占位并随滚动回收，同一条消息的各行在视觉上仍连成一个气泡或一段平铺正文。单个大型分段仍可能占用较多内存，这不是严格的内存上限。获得焦点、被选择或持有打开图片对话框的行保留挂载，避免打断操作。因此浏览器查找、完整复制与辅助技术连续阅读只覆盖当前已挂载的行；不提供挂载全部已加载正文的开关，也不隐式读取尚未加载的历史。展开状态不留在会被回收的行内：对话活动沿用 localStorage 记忆，诊断中的事件、分组与 Run 展开状态保存在列表之外，行回收再挂载后保持不变，在底部展开或收起时触发点保持在读者点击的位置。这里延后的是呈现，不改变普通事件的采集、接口返回、保留或 Debug 契约。
-
-「对话」与「诊断」共用同一种向上加载的记录视图：打开时停在最新内容，处于底部时随新事件自动滚动；向上翻阅（方向键、翻页、滚轮）即停止跟随，Home 与 End 由视图接管并分别到达已加载记录的起点与末尾。详情只带最新一页事件；仍有更早事件时，已加载记录的起点保留一行固定高度的加载行（位于列表起始内边距内，不是列表项），向上滚到该行即显示转圈并读取更早一页。读取完成后在绘制前保持读者正在阅读的行不动；屏外行挂载、释放或高度修正不移动读者，也不把尚未派发滚动事件的原生键盘、滚轮滚动拉回旧位置。仍有更早事件时对话页不显示初始用户消息，它在更早历史读完后才出现在最前。加载行在转圈、失败与移除前后高度不变；读取失败时改为「重试」操作，不在视口顶部反复请求。补入的历史与单纯呈现变化均不算新活动，不触发「回到最新」提示。
-
-「诊断」页默认呈现可读的事件摘要、时间与已记录的关键事实和结果。`parent_run_id` 表达续接与因果而非包含关系：Run 按 `started_at` 拍平为并列分段并依序编号（R1、R2…），不再嵌套缩进；续接关系以分段上的「续接自 Rₙ」标记表达，父 Run 属于同一 Interaction 时可点击回跳，属于其他 Interaction 或尚在未加载的更早历史中时仅显示静态标记。编号覆盖整个 Interaction 的全部 Run；排在最新事件页最早 Run 之前、尚无已加载事件的 Run 不显示为空分段，随更早事件加载在加载行下方出现。相邻 Run 交付结束与下次开始之间超过快速续接窗口（2 秒）的等待显示为间隔行：上一请求以客户端工具调用结束时标注所执行的工具名，否则只标注间隔时长。
-
-每个 Run 内的事件统一按 `occurred_at` 升序、同一时刻按 `sequence` 升序排列，不再将 Model Turn、Target attempt 或工具的子树整体提前展开，以免把较晚的完成事件放到较早的客户端输出之前。拒绝请求的事件采用相同排序规则。每个事件的「原始事件数据」默认折叠，展开后保留原始 kind 与完整 payload，因果关联字段不丢失；Run 和 Interaction ID 收在默认折叠的「技术标识」中。未知事件仍保留原始数据入口，不推断成功或其他未记录的结果。关闭的 Run、事件分组与原始事件折叠区只保留摘要和操作入口，不预先构造内部事件 DOM 或格式化完整 JSON；展开时才挂载，收起时释放。仅切换页签不销毁已打开的诊断层，以保留阅读位置与展开状态。
-
-Run 分段默认折叠为摘要：标题行只显示编号、模型显示名（缺失时使用 Route ID）与开始偏移，不放状态、中断或 Debug 标签：Run 状态由主干圆点的形状与颜色表达并为读屏保留状态文字，用户中断见事件流，记录不完整见 Run 告警，Debug 捕获状态见交互概览；其下两行小字分别显示实际服务的上游模型与供应商、耗时、首 Token 与 Token 速度，以及输入、输出、缓存读取与缓存写入用量，未报告的值显示中性破折号。上游模型取该 Run 已完成的 Target attempt（平台工具循环可有多个），没有已完成 attempt 时取最近开始的 attempt，回退前失败的 attempt 不冒充服务方；同一 attempt 的修订完成事件以最后一条为准。首 Token 取第一个服务 attempt；Run Token 速度使用 Run 已确认输出除以客户端完整请求耗时，遵循 §3.3 的缺失覆盖规则，不借服务 attempts 的速度代替。展开 Run 才显示技术标识与事件流；Trace 不完整的提示不随之折叠。
-
-排序后相邻、已经分别按 Canonical Item 收口的 `client_visible_content` 只在界面上组成默认折叠的计数分组，不改写或合并独立 item；相邻且 `name` 相同、非空的 `client_tool_handoff` 同样仅作展示分组，例如「Bash × 4 · 已交给客户端」。分组显示首次和末次事件时间，不跨越其他事件、工具名称或 Run。展开分组保留每条事件的时间与完整原文入口，实时追加保持已有分组的展开状态。事件行将原始数据入口收至标题右侧箭头，不再重复占用一行按钮；展开 Run 后，关键结果和错误直接可见，不因精简而隐藏。
-
-Target attempt 结束（`target_attempt_finished`，或合并了最后一个 attempt 的 `model_turn_finished`）的耗时后显示 Token 速度。输出用量来自同一 Run、相同 `attempt_id` 的结束行 `usage`（合并行位于 `attempt.usage`），迟到修订按 sequence 应用并保留此前已确认而新修订未提供的字段，不累加同一 attempt 的累计快照，也不借用整个 Run 或其他 attempt 的用量。速度复用 `computeTps` / `formatTps`，分母始终为该 attempt 的完整 `duration_ms`；缺少用量或有效正耗时显示未知。Run 摘要的耗时与 TPS 同用实际交付生命周期，首 Token 继续单独显示。卡片输出浮层使用「模型输出」名称；画布的已确认执行来源边保留连线、取消重复文字标签。
-
-普通诊断显示生命周期、Route/Target、协议、状态、耗时、Confirmed Upstream Usage、客户端可见事件。Debug 的四方向 Wire headers 与原始 body/frame 只通过 Debug Bundle 下载提供，不再内嵌展示、复制或提供单事件下载；Bundle 不包含 canonical、Hook 或 Client Projection 中间阶段。Interaction 与 Rejected Request 详情不返回 `debug_events`，不打开或解析 Trace 分段；保留 manifest 状态与缺失原因，运行中 manifest 可从内存捕获状态更新。下载沿用有界快照与单次 ticket，不改变捕获、脱敏、保留或清理规则。未开启 Debug 不影响普通诊断访问，实时刷新不得把选中的诊断页签切回对话。Rejected Request 默认显示简洁失败摘要，不伪造成模型对话；技术原因仍在诊断中。
-
-### 10.7 视觉方向
-
-视觉沿用当前 Stravia 冷灰蓝 token、IBM Plex Sans / Condensed / Mono 和轻边框，不建立黑绿终端主题。签名元素是“因果脊线”：
-
-- 浅色参考色板：Canvas `#F3F5F6`、Ink `#171A1D`、Route Blue `#315F83`、Hairline `#D8DEE1`、Running `#2F6B53`、Waiting `#8A621E`；深色模式继续由现有语义 token 映射，不另建平行色板；
-- IBM Plex Sans 承担正文与控件，IBM Plex Sans Condensed 承担结构标题，IBM Plex Mono 承担时间、ID、usage 与 wire；
-- 默认连线使用低对比冷灰蓝；
-- 选中节点后，从根到该 Interaction 的因果路径加深，其余节点与连线降噪；
-- 执行状态绿只用于圆点，不把整条画布染成绿色；
-- 背景使用稀疏点阵帮助判断平移和缩放；
-- 唯一环境动画是运行圆点呼吸；遵守 reduced motion。
-
-自检：黑底荧光绿、渐变统计卡和可拖便签都属于可套用到任意 AI 控制台的默认答案；本页只把视觉风险用在真实因果拓扑和选中路径上，其余继续服从现有管理面。
-
-## 11. 迁移与删除
-
-SQLite 与 PostgreSQL 新迁移执行：
-
-1. 删除全部旧 `request_logs` 数据与表；
-2. 创建 Observation 关系表和等价索引；
-3. 不从 Turn Chain 回填旧 Interaction；升级后的请求记录从空状态开始；
-4. 每次新增或修改 migration，使用 `stravia-tools dump-schema` 从全部 migrations 同步重新生成 `docs/database/postgres.sql` 与 `docs/database/sqlite.sql`，不手改 schema 正文；
-5. 验证相关 SQLite 与 PostgreSQL 存储测试。
-
-代码 clean cutover：
-
-- 删除旧 LogStore、RequestLog DTO、查询/详情/clear endpoints；
-- 删除旧 WebUI table、LogDetailDialog 和 CSV；
-- 删除 `STRAVIA_WIRE_CAPTURE_DIR`、`--wire-capture-dir` 与 debug-build 自动 capture；
-- release 与 debug 构建都编译 Observation/Trace，运行时默认关闭；
-- dev wire replay 需要时从版本化 Trace event 读取，不保留第二套旧 JSONL schema；
-- 更新 `README.md` 与 `README_CN.md`，删除“开发命令自动开启 `.scratch/wire-captures`”说明；
-- 更新 architecture、agent-core、ADR-0034 的实现引用：Route scheduling 读取 Observation 的原始 Model Turn/Target attempt 短窗口；管理 stats 读取独立长期 Stats Usage 汇总。
-
-## 12. 依赖
-
-前端新增：
-
-- `@xyflow/svelte` 1.6.6
-- `@dagrejs/dagre` 3.1.1
-- `eventsource-parser` 4.1.0
-
-Rust workspace 新增：
-
-- `zip` 8.6.0，关闭默认重型 features，只开启流式写出所需的 deflate 能力。
-
-依赖与 lockfile 必须由 Bun/Cargo 正常解析更新，不手改 lockfile。
-
-## 13. 验收场景
-
-### 13.1 分组与拓扑
-
-- 一个 User 输入跨三次 client tool round-trip，只出现一个 Interaction 卡片；详情有三个 Run。
-- 同一父响应并发两次工具结果，卡片仍唯一，详情显示 Run 子树与两个最终回答。
-- 超出快速续接窗口且不提交待完成工具结果的新 User 输入创建子 Interaction；原未完成分支显示 user interrupted。
-- 工具结果夹带 User 提醒时仍归入原 Interaction，工具执行耗时不影响判断；历史中的旧工具结果不能触发此规则。
-- 精确父响应完整交付后 2,000 毫秒到达的新 User 输入归并，2,001 毫秒到达且不满足工具续接的请求分开；排队处理耗时不改变判定。
-- 已完成响应后两秒内精确续接可重新激活原 Interaction（父 node 已有其他续接时除外，该请求作为 child Interaction）；真人快速追问与自动提醒遵循同一规则，原 Run 完成记录不变。
-- 明确 Generation parent 的失败重试恢复原 Interaction。
-- 无 parent 根失败在两分钟、同 Principal、精确 fingerprint、无 Client Output Commit 时归并；超时、不同 Principal、已有 output commit、并发相同请求均不归并。
-- 同一父 Interaction 的两个不满足归并条件的新 User 分支在画布真实分叉，不复制祖先。
-
-### 13.2 时间与加载
-
-- anchor 边界使用左闭右开规则，无重复和遗漏。
-- 跨多个 24h 窗口的根 DAG 只按最后活动时间归一页，页面内显示保留期内完整链。
-- 打开旧页后链发生新活动，视图固定并显示迁移提示。
-- cursor 分批加载不改变已加载根的相对顺序；筛选返回完整根 DAG并正确标记 matched。
-
-### 13.3 实时与状态
-
-- 本机正常负载下，文字、状态和 usage 从 core event 到 UI 可见不超过 1 秒；实时内容不等待诊断 item 落盘，也不推进持久 cursor。
-- 同一 Canonical Item 的 delta 在收口时形成一条持久诊断内容，独立 item 与项内 part 边界保持不变；失败或取消保存已收到部分并标为未完成，硬崩溃允许丢失未收口 item。
-- 真实执行时绿点呼吸；等待客户端工具结果时静态琥珀；reduced motion 下不呼吸。
-- 用户操作画布后停止自动跟随，新活动不抢镜头；点击跟随恢复。
-- SSE 查询/订阅无缝衔接，断线按 cursor 补齐；过期 cursor 触发完整重载。
-
-### 13.4 Debug
-
-- 每个 Run 独立快照开关；同一 Interaction 的 ON/OFF/ON 形成明确 partial Bundle。
-- HTTP/SSE 在客户端边界及上游 reqwest 请求/响应边界、WebSocket 在相应传输边界覆盖四方向原始收发、顺序、时间和 attempt 关联。
-- Debug Trace 只含 Wire 与必要关联元数据，不含 canonical request/response、Hook 前后、Platform Tool、Client Projection 或其他语义中间阶段；普通 Observation 继续保存生命周期、usage、工具事件和按 item 收口的诊断内容。
-- 原始 Wire 到达即可排队，不等待完整应用消息或 Canonical Item 收口；媒体原样保留，只有 HTTP `Authorization` header 值在落盘前替换，ZIP 明确披露其他凭据与业务内容不脱敏。
-- Trace 落盘不设容量上限，只统计保留字节；既有捕获缓冲、队列、writer 或存储限制继续生效，丢失时请求继续、Trace partial；不完整原因只出现在详情和诊断包中。
-- 运行中票据固定 sequence；ZIP manifest 与 events 一致。
-- 下载 ticket 60 秒、单次、固定资源；过期/重放/跨资源使用失败。
-- 清除历史只删除非活动 Observation 及 Trace，活动请求不中断。
-- Observation writer、Trace writer、ZIP 生成失败均不改变推理响应或 Generation Chain。
-
-### 13.5 产品表面
-
-- 1280×800 Desktop、常见桌面浏览器和窄屏触控都能平移、缩放、选择节点与打开详情。
-- 键盘可聚焦节点、打开详情、关闭检查器和操作画布控制；状态不只靠颜色。
-- 英文与中文文案意图一致；页面仍名“请求记录”。
-- 升级删除旧日志后，空状态明确说明新请求会在此出现，不暗示迁移失败。
-
-## 14. 跨 Generation Chain 根归属
-
-本节落实 [ADR-0053](../adr/0053-keep-one-interaction-across-generation-roots.md)：Generation Chain 仍只记录真实执行父边；Interaction Observation 优先用当前工具续接做诊断分组，只有该证据不成立且没有执行父边时才用保留尾部决定归属。新规则只作用于启用后准入的请求。
-
-### 14.1 范围
-
-- 只对启用新规则后准入的请求执行新归属判定，不重新分配已有 Run、不改写已有来源关系，也不提供存量 Observation 重建工具。
-- 新请求正常续接已有 Interaction 时，继续按现有生命周期更新活动状态和汇总；这不表示重算历史 Run 的归属。
-- 不改写 Generation Chain 节点、恢复裁剪内容、重放 Hook 或据此启用 Target Continuation。
-- 不从 User 正文中的通知标签推断可信请求用途，不按 session、模型、Route 或时间最近猜测来源；标题、摘要、子代理不因共用 session 而归入主任务。
-- 实现保持 SQLite/PostgreSQL 等价，不新增生产依赖；具体 schema 或公共响应字段如需扩展，在实施前明确变更契约。
-
-### 14.2 实现要点
-
-1. **归属判定集中在 Observation 模块。** 先独立核验当前工具来源；不成立时，已有 Generation parent 走原路径，没有执行父边才用保留尾部决定归并、创建有来源的新 Interaction 或保持独立。Server、Desktop 与 WebUI 不复制判定规则。
-2. **当前工具续接。** 用同 Principal 已交付调用的未完成工具 ID 与当前输入尾段精确匹配；旧结果回放、重复或冲突来源、缺失交付证据不能宣称唯一。确认后优先归入来源 Interaction，以来源 Run 作为 `parent_run_id`，即使已有 Generation parent、夹带 User 或超过尾部五分钟窗口；`generation_parent_id` 不变。
-3. **尾部指纹索引。** 以最后 canonical 单元哈希筛选候选，再做完整语义核验。同 Principal 历史超过 128 个不再导致全部匹配失败。指纹不代替核验，也不按时间窗口排除潜在冲突来源。
-4. **按需物化。** 缺失窗口从仍保留的 Generation Chain `client_items` 重建；先合并内存和持久化候选、去重并检查候选预算，再批量读取缺失窗口。已确认父节点本身属于候选时优先展开其父链，在完整校验后按 root 到 head 折叠客户端历史，同链祖先候选复用本次遍历的窗口，不各自重新展开整链。只保留本次候选窗口，不缓存所有完整历史前缀，也不引入跨请求缓存；重复来源和其他分支仍参与原有歧义核验。进程缓存可淘汰，过期或已清理来源不复活。核验超过资源预算时返回 `resource_limit` 或 `index_unavailable`，不把部分检查包装成唯一匹配。
-5. **准入时持久化。** `run_admitted` 同时保存 `grouping_reason` 与 `diagnostic_source_run_id`；尾部核验结果以 `retained_tail_associated` 同轮写入。诊断来源不是 `generation_parent_id`。只有新增 User 打断父交互时才 `interrupt_predecessors`；归入本 Interaction 的续接准入在同一事务内把仍等待的父 Run 终结为 `superseded`（见 3.2），不归入中断。
-6. **派生视图。** 合并后的 Interaction 共用状态与用量；诊断连接的新子交互分别汇总。失败、取消和交付事实不因后续成功改写。
-7. **契约。** README 两种语言、schema 文档与 `0047_observation_tail_sources` 迁移同步。页面继续区分确认边与诊断边。
-
-### 14.3 决策表
-
-本表按顺序判定。当前工具续接不要求缺少执行父边；保留尾部归属路径仅在工具证据不成立且没有 Generation parent 时适用。
-
-| 条件                                                                       | 结果                                                                 |
-| -------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| 唯一确认当前工具续接，包括已有 Generation parent 或夹带新增 User           | 归入来源 Interaction，观测父节点指向来源 Run，不受尾部五分钟窗口限制 |
-| 未满足工具续接；已有 Generation parent                                     | 按 3.1 的父观察规则分组，不用保留尾部覆盖归属                        |
-| 未满足工具续接；唯一完整尾部匹配，无新增 User，间隔在 `[0, 300000]` 毫秒内 | 归入来源 Interaction                                                 |
-| 未满足工具续接；唯一完整尾部匹配，匹配区间之后有新增 User                  | 新 Interaction，诊断连接来源                                         |
-| 未满足工具续接；唯一完整尾部匹配，无新增 User，但超出五分钟窗口            | 新 Interaction，诊断连接来源                                         |
-| 无法证明满足时间窗口，但完整唯一的来源证据仍成立                           | 不自动归并，保留来源连接                                             |
-| 来源缺失、匹配不完整、有歧义或候选核验未完成                               | 不自动归并，不猜诊断父节点                                           |
-
-### 14.4 回归与运行验证
-
-三个实际断点转为不含凭据或业务原文的隔离样本，通过真实准入、归属、持久化和查询路径验证，不将执行 ID、正文或源文件内容写成特例。
-
-- 删除首条 User 图片，保留原文本并提交来源的三个当前工具结果：同一 Interaction、新 Generation 根，裁剪图片不重新进入模型输入。
-- 删除旧工具截图，同时新增另一张工具截图且图片总数不变，并提交四个当前工具结果：仍正确确认来源，最终回复留在同一 Interaction。
-- 连续改写旧工具结果，使严格前缀反复退回较早父节点，同时回传最新工具调用的结果：Generation 父边保持原样，观测父节点逐轮跟随最新来源，最终回复留在同一 Interaction，改写后的输入原样交给模型。
-- 旧历史被摘要替换，保留精确连续尾部并提交当前工具结果：正确续接；另设没有当前工具结果的样本单独验证尾部归并，避免工具路径掩盖尾部缺陷。
-- 尾部无新增 User：恰好 `300000` 毫秒归并，`300001` 毫秒创建新交互但仍连接来源；缺少有效时间证据不自动归并。
-- 尾部后新增 User：窗口内外都创建子交互；同时满足当前工具续接时，验证工具续接优先。
-- 同 Principal 超过 128 个保留调用、进程重启或缓存淘汰后，具备完整证据的来源仍可被发现；核验预算耗尽时不误报唯一来源。
-- 旧工具结果回放、重复 handoff ID、不同 Principal、并列来源、仅短文本或不完整交互均不能触发误归并；窗口外的冲突候选不能因时间过滤被忽略。
-- 同模型或 session 的标题、摘要及独立子代理不被错误归入主交互；模型或 Route 不同也不单独成为拒绝合法来源的理由。
-- 合并后的状态、用量与 Debug Bundle 不重复计算，子交互分别汇总；历史失败与交付记录保持原事实。SSE 和刷新后的详情、forest 得到一致归属。
-- 来源过期或被清理后不复活节点；新规则不重分配既有 Run。诊断失败不改变客户端响应、执行重试或 Generation Chain。
-
-验证先运行最直接的 Rust 回归，再扩大到 core 检查和相关 SQLite/PostgreSQL 存储用例。使用隔离、非生产的供应商进行实际 HTTP 请求和浏览器检查，观察新请求形成的交互、父子连接及最终回复；实现触及 Desktop 特有行为时再验证实际桌面应用。
+凭据深链从命中记录显式携带 `highlight=credential-hits`，可向前翻页寻找对应块。
+清除高亮或改选后停止高亮；无法定位的命中保留摘要与 Run 入口。

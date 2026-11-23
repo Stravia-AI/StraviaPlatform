@@ -1,1021 +1,321 @@
-# Stravia Agent Core 融合设计
+# Agent Core
 
-> 状态：Core、SQL persistence、内部／S3 ArtifactStore、HTTP/Admin/MCP/PlatformTool/Responses adapters、StraviaRead、Web Search 与 Media Understanding 已实施；generic Agent Admin API 已删除；不提供 generic Agent WebUI
-> 决策记录：[`ADR-0007`](../adr/0007-own-agent-execution-behind-native-seams.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md)  
-> 调研快照：2026-08-10  
-> 范围：`stravia-core`、Server/Desktop adapters、持久化与协议 surface  
-> 非目标：用户创建 Definition、generic Agent WebUI、后台 Task adapter
+Stravia 在同一套 Gateway 中运行代码内置的 Agent。AgentRunner 拥有有界模型—工具循环，Model Turn Executor 拥有单次模型调用，Turn Chain 保存可续接前缀。
+产品能力提供自己的 Definition 和输入输出验证，不把业务语义写进循环。
+决策见 [ADR-0007](../adr/0007-own-agent-execution-behind-native-seams.md)。
 
----
+| 模块 | 契约 |
+| --- | --- |
+| [Agent Core](../../backend/crates/stravia-core/src/agent/) | Definition 注册、AgentRunner、Turn Chain、Artifact Store 和入口适配。 |
+| [Model Turn Executor](../../backend/crates/stravia-core/src/model_turn/) | 一次 canonical 请求到终态的执行，不运行工具或负责交付。 |
+| [stravia-runtime-contract](../../backend/crates/stravia-runtime-contract/) | 共享 canonical IR、Agent、Artifact、Hook 和执行接口。 |
+| 产品模块 | [Web Search](web-search.md)、[多模态理解](media-understanding.md)、[媒体生成](media-generation.md)分别拥有其公开业务结果。 |
 
-## 1. 结论
-
-Stravia 不应直接嵌入 Rig、Swiftide 或非 Rust sidecar。目标方案是在现有 canonical protocol、routing、Hook、Platform Tool 与 storage 能力之上，原生增加两个 deep modules：
-
-1. `ModelTurnExecutor`：完成一次 transport-neutral model turn，按显式 authorization policy 应用 client Model binding 或产品 capability grant，并复用 Target 选择、provider codec、重试、streaming 与 usage 计量。
-2. `AgentRunner`：按代码内置 `AgentDefinition` 执行有界 model→tool→model loop，并把成功结果提交为可分支、可复用的 `Agent Turn`。
-
-会话复用不引入 `AgentSession`。每次成功或预算收束成功只返回一个 `AgentTurnId`；后续调用显式传入该 ID，沿不可变父链恢复精确前缀。无 ID 创建新根，同一父节点允许多个分支，不提供合并或隐式 latest。
-
-现有 `Response Chain` 与 Agent Turn 父链共享同一 `TurnChain` deep module。Responses 状态从进程内 TTL store 迁入 SQL，保留期由统一的历史保留天数 N（`log_retention_days`，默认 7，最小 1）决定，不再是固定的 1 小时或 7 天（见 [ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。`ToolContinuation` 仍保持现有进程内语义；本设计不引入客户端工具穿透。
-
-图片、视频和未来联网研究不是 AgentRunner 的分支逻辑：
-
-- 图片、视频通过 `AgentInput.artifacts` 引用 opaque Artifact；Runner 在模型调用前 materialize 为 canonical multimodal content；
-- 内部能力只通过版本化 `PlatformTool` 进入 Definition allowlist；
-- 不支持的媒体在 negotiation 阶段 typed reject；
-- 抽帧、转录、WebAccess research 都是后续显式 leaf PlatformTool，不在 core 或 codec 中静默降级。
-
----
-
-## 2. 目标与非目标
-
-### 2.1 目标
-
-- Rust 原生、provider-neutral、Desktop/Server 共用。
-- 一个 `AgentRunner` interface 承载开放式多轮 agent loop，而非硬编码图片、视频或研究 workflow。
-- 已完成 Turn 可在进程重启后继续；正在执行的 Run 不持久化、不恢复，也不产生失败 Turn。
-- 复用现有 `PlatformTool`、Hook、canonical IR、Route/Target、Principal 与 admission seam。
-- 同一逻辑 Model 可继续使用现有 Target failover 与 provider codec。
-- 支持 canonical text/image/audio/video/file 输入和不可变 Artifact。
-- 为未来 MCP Tasks/background adapter 保留稳定的 Run/Turn/Event seam，但当前仍为 request-bound 执行。
-
-### 2.2 非目标
-
-- 不实现用户可创建的 agent/workflow/prompt template。
-- 不引入 `AgentSession`、workflow graph、multi-agent handoff 或 agent-as-tool nesting。
-- 不支持 AgentRunner 内部客户端工具 continuation 或出站 MCP client tools。
-- 不设计 WebAccess→AgentRunner 的具体 research workflow。
-- 不选择首个生产内置 Definition；实施前必须另行选择真实 vertical slice。
-- 不实现 UI、后台队列、durable task handle、自动 context compaction、幂等调用或显式 Turn/Artifact 删除。
-
----
-
-## 3. 当前能力与缺口
-
-### 3.1 当前调用链
-
-当前 Server 与 Desktop 共用同一 HTTP application：
+普通推理与 Agent 共用单轮推理接口，而不是让 Agent 重新进入 Gateway。模块调用顺序为：
 
 ```text
-stravia-server::build_http_app
-  or DesktopGatewayRuntime
-        │
-        ▼
-proxy::server::create_router
-        │
-        ▼
-ingress decoder + ProtocolTransform
-        │
-        ▼
-proxy::dispatcher::dispatch_pipeline
-        │
-        ▼
-inference_run::execute / engine::dispatch_pipeline
-        │
-        ├─ Principal / model binding / root admission
-        ├─ HookRuntime
-        ├─ TargetSelector / negotiate
-        ├─ installed Wasm Vendor descriptor / execute_vendor
-        ├─ controlled Vendor HTTP/WebSocket host transport
-        ├─ PlatformTool hidden rounds
-        └─ delivery encoder
+Ingress / PlatformTool / MCP
+  → 产品 adapter（解析、授权和固定 Definition）
+    → AgentRunner（上下文、模型—工具循环、提交）
+      → Model Turn Executor（单次模型请求及 Target 尝试）
+      → PlatformToolRegistry（版本化叶工具）
+      → Turn Chain / Artifact Store（不可变历史与文件）
 ```
 
-相关实现：
-
-- `backend/crates/stravia-core/src/proxy/dispatcher/inference_run.rs`
-- `backend/crates/stravia-core/src/proxy/dispatcher/inference_run/engine/mod.rs`
-- `backend/crates/stravia-core/src/hook/runtime/mod.rs`
-- `backend/crates/stravia-core/src/hook/tool.rs`
-- `backend/crates/stravia-core/src/hook/response_chain.rs`
-- `backend/crates/stravia-core/src/hook/continuation.rs`
-- `backend/crates/stravia-runtime-contract/src/protocol/ir/`
-
-### 3.2 可直接复用的 seam
-
-| 现有模块 | 可复用能力 | Agent Core 中的角色 |
-|---|---|---|
-| canonical IR | message、tool call/result、image/audio/file/document、stream delta、usage | Agent transcript 与 ModelTurn 输入输出 |
-| Route / TargetSelector | 逻辑模型映射、健康感知、failover | Definition 绑定逻辑 Model ID |
-| Vendor / codec | provider 认证、URL、请求/响应与 stream 转换 | `ModelTurnExecutor` implementation |
-| HookRuntime | canonical request/response policy 与 stream transform | 每个内部 ModelTurn 的治理；禁止动态注入工具 |
-| PlatformToolRegistry | 平台拥有、隐藏执行的工具 | Definition 的唯一内部工具来源 |
-| Response Chain | 父 ID、分支、materialize、principal scope | 抽取共享 `TurnChain` |
-| Security seam | Principal、key 状态、Model binding、root admission | 每个隐藏 step 动态重查 |
-| SQLite/PostgreSQL storage | Desktop/Server 双后端 | Definition、Run、Turn 与 Artifact metadata |
-
-### 3.3 明确缺口
-
-- 没有 transport-neutral 的单次 model-turn interface；现有 provider call 被包在完整 `InferenceRun` 内。
-- 没有通用 AgentRunner、AgentDefinition、AgentRun/AgentTurn 状态。
-- `ResponseChainStore` 与 `ToolContinuationStore` 是进程内 TTL 状态；前者不能跨重启。
-- 没有 Artifact/上传 surface；媒体只可 inline、URL 或 provider file ID。
-- canonical IR 没有 `Video`，endpoint capability 也没有 native-video 位。
-- Responses `background`、conversation 与 server-side context management 当前显式拒绝。
-- `PlatformTool` 没有稳定 ToolVersion、agent artifact context 或 `parallel_safe` descriptor。
-
-这些缺口说明新 seam 应位于 canonical dispatcher 与 provider call 之间，而不是 ingress、Vendor 或 WebAccess 内部。
-
----
-
-## 4. 现有 Agent 方案比较
-
-调研只采用官方文档、官方仓库与一手协议资料。版本与能力为 2026-08-10 快照；快速变化项在落地前必须复核。
-
-| 方案 | Rust/部署 | 优点 | 与 Stravia 的冲突 | 结论 |
-|---|---|---|---|---|
-| 原生实现，借鉴外部契约 | 单 Rust 进程 | 保留现有 provider、Hook、IR、quota 与 Desktop 部署；interface 可按本项目语义收紧 | 需要实现 loop、TurnChain persistence 与 ArtifactStore | **采用** |
-| Rig | Rust，MIT | `AgentRunner`/可序列化 AgentRun、typed hook、structured output、streaming 较完整 | 自带 provider client；与 Gateway 争夺模型调用所有权；其 `rmcp` 2.x 与项目 3.x 类型不共享；无开箱 durable backend | 不直接依赖；借鉴 AgentRun step/hook 契约 |
-| Swiftide | Rust，MIT | RAG pipeline、task/state、structured tools | 更偏 RAG/task graph；自带 integrations；其 `rmcp` 1.x 与项目 3.x 跨两个 major | 不直接依赖 |
-| LangGraph | Python/JS，MIT | checkpointer 与 durable execution 成熟 | 需要 sidecar、额外 runtime/运维；重复 provider client；不符合 Desktop 单进程形态 | 仅借鉴 checkpoint/thread 语义 |
-| OpenAI Agents SDK | Python/JS，MIT | session、handoff、typed output、tracing、MCP | 无 Rust runtime；provider/runtime 归属与 Gateway 冲突 | 借鉴 Runner/session/hook interface |
-| Google ADK | Python/JS/Go/Java，Apache-2.0 | agent loop、session、A2A、多 agent | 无 Rust runtime；Gemini/Vertex 优先；引入 sidecar | 不集成 |
-| Microsoft Agent Framework | Python/.NET/Go，MIT | workflow、handoff、OTel、durable 扩展 | 无 Rust runtime；能力面远超单 Orchestrator 目标 | 不集成 |
-| Claude Agent SDK | Python/TS，MIT | Claude Code 工具环境完整 | Claude-only，包装 bundled CLI 子进程，不是通用嵌入式 runtime | 排除 |
-
-### 4.1 采用“协议借鉴”的原因
-
-删除 Agent Core 后，其复杂度应重新出现在多个调用方，才说明模块有深度。Stravia 已拥有 provider-neutral model call、canonical tool semantics、Hook 与 storage；直接引入另一个 runtime 会保留两套 provider client、两套工具类型和两套观测路径，反而降低 locality。
-
-原生方案借鉴但不复制：
-
-- Rig：`AgentRunner`、可序列化 run step、typed hooks；
-- LangGraph：immutable checkpoint/thread lineage；
-- OpenAI Agents SDK：Definition/Runner/session 分离、structured output；
-- MCP Tasks：未来 request-bound adapter 之外的 durable task shape。
-
-### 4.2 外部方案来源
-
-- [Rig](https://github.com/0xPlaygrounds/rig)
-- [Swiftide](https://github.com/bosun-ai/swiftide)
-- [LangGraph](https://github.com/langchain-ai/langgraph)
-- [OpenAI Agents SDK](https://github.com/openai/openai-agents-python)
-- [Google ADK](https://github.com/google/adk-python)
-- [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)
-- [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
-- [MCP Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview)
-
----
-
-## 5. 领域模型
-
-### 5.1 Agent Definition
-
-`AgentDefinition` 是程序拥有的稳定用例身份，不是用户脚本。外部 tool name 为不可变、全局唯一的 `agent_<slug>`；slug 删除后不得复用为不同契约。
-
-一个 Definition 包含稳定 interface：
-
-- slug、description；
-- 统一 `AgentInput` contract；
-- 可选且不可破坏变更的 `OutputSchema`；
-- current Revision identity。
-
-`AgentDefinitionRevision` 是不可变 implementation contract：
-
-- 显式单调版本；
-- 完整 spec hash；
-- instructions；
-- `PlatformTool ID@version` allowlist；
-- hard budgets 与 finalization reserve；
-- Artifact policy；
-- structured-output repair policy。
-
-代码发布在启动时幂等注册并持久化 Revision。新 spec hash 使用递归排序 JSON 对象键后的内容计算，数组顺序保持不变。已有 hash 不一致时，比较持久化 spec 的 JSON 内容；仅对象键顺序或编码差异不构成改版，且不重写已有记录。相同 slug+version 的实际 spec 内容不一致时 readiness 失败，禁止静默覆写旧语义。
-
-`AgentDefinitionConfig` 是唯一用户可配置状态：
-
-```text
-enabled: bool
-model_id: Option<LogicalModelId>
-```
-
-首次发现 Definition 时默认 disabled 且无 Model ID。Admin 不可创建、修改 instructions/tools/schema/budget 或删除 Definition。
-
-Release 可停止注册某个 Definition：
-
-- 不再允许新根，也不再进入 discovery；
-- 当前已启动 Run 使用启动快照完成；
-- 尚未被回收的 Turn 仍按已持久化 Revision 和根 Model ID 续接；
-- 活跃 Revision 引用的 ToolVersion 必须继续随 binary 注册，否则实例不 ready；
-- Revision 在最后引用的 Turn 被回收并经过 grace 后可回收。
-
-不引入显式 `Retired` 状态；registry absence 只决定能否创建新根，不删除持久化 Revision。
-
-### 5.2 Agent Run
-
-`AgentRun` 是一次 `AgentRunner` 调用的 request-bound 运行尝试。`RunStarted` 会携带一个预分配的 `AgentTurnId` 用于当前 Event Stream 关联；只有 Completed/Partial 提交成功后，该 ID 才成为可恢复的 Turn。不存在独立 `AgentRunId`、lease 或 Run record。
-
-Run 可包含多个 Model Turns 和 AgentTool calls。失败、取消、stream drop 或进程退出只返回当前 terminal error，不产生可续接节点。
-
-### 5.3 Agent Turn
-
-`AgentTurn` 是一次 AgentRun 成功结束后提交的不可变 continuation point：
-
-- `completion=complete`：模型正常完成且输出通过 schema；
-- `completion=partial`：working budget 用尽，预留 finalization 成功收束；
-- 其他终止状态不创建 Turn。
-
-每个 Turn 有 `AgentTurnId`、可选 parent ID、principal、Definition Revision、根 Model ID、canonical transcript（Artifact 以内部 opaque marker 保存）与 usage/completion metadata。
-
-### 5.4 Turn Chain
-
-`TurnChain` 是 principal-scoped、不可变、有向无环的历史 deep module。它负责：
-
-- append immutable node；
-- 按 parent chain materialize 精确 canonical prefix；
-- 从任意旧节点自然分支；
-- 授权、统一保留期（只由 `created_at + N` 计时，祖先因有子节点而保留，提交不刷新祖先）与扫描回收；
-- 对外隐藏 not-found/已回收/forbidden/mismatch 的存在性差异。
-
-它不拥有 model call、Hook、tool loop 或 delivery。
-
-`Response Chain` 是 TurnChain 的 Responses adapter；`Agent Turn` 是 Agent adapter。二者共享存储行为，但保留各自 ID 与 payload contract。
-
-### 5.5 Model Turn
-
-`ModelTurn` 是一次完整、transport-neutral 的 model request/response。普通 Target retry 仍属于同一个 ModelTurn；AgentRunner 的下一次模型调用才是新的 ModelTurn。
-
-Runner 消费 canonical stream，并在唯一 `Completed` 后立即停止。该终态保证还原和所需可逆脱敏映射发布已经成功，不等待 EOF，也不要求提交 Agent Turn；ephemeral execution 同样遵循此契约。发布期间取消或 deadline 可抢占成功，已发布映射不回滚。Model Turn 成功与后续 Agent / 客户端交付及历史提交保持分离。
-
-### 5.6 Artifact
-
-`Artifact` 是不可变、principal-scoped 的媒体或大对象。公共引用为 `stravia://artifacts/<55-letter-content-id>`，不授予访问权，也不走 DNS／公网抓取；读取选项使用引用后的 `:` 选择器，fragment 一律拒绝。同 Principal 可跨对话使用；签名下载授权和仅限上传的授权分别具有固定期限，不与文件保留期合并。相同 Principal、逐字节相同的声明 MIME 与完整内容确定同一最终 ID，不受收存入口、并发或重启影响；暂存记录不具备幂等语义。
-
-SQLite 的 ready 对象清理以每个 Artifact 的独占对象锁作为删除声明，读取、grant 签发、续期及内容发布先持有共享侧；对象删除期间不持有 SQLite 写事务。删除任务拥有该锁直到对象 I/O 与最终元数据删除真正结束，调用方取消不能提前释放锁，因为 SQLite worker 和远端 DELETE 可能继续执行。对象删除失败保留元数据；元数据删除失败留下的过期对象不能直接复活，只有完整重新收存并校验字节后才修复底层对象并延长保留期。本地修复先写独立临时文件再发布；正常未过期复用不增加对象 I/O。PostgreSQL 沿用 advisory lock 与事务协调，保持相同可见性及保留语义。
-
-同样的取消边界适用于持锁的 SQLite 续期、grant 提交与完整上传的最终发布：已启动的持锁操作负责收口并持有自己的 guard，取消等待结果的调用方不能让清理者抢先取得对象。该边界不继续接收已经取消的上传 body，也不增加重试或改变授权、TTL 与内容校验规则。
-
-完整收存时，以版本域 `stravia-artifact-v1`、带长度前缀的 Principal/MIME 和全部内容计算 SHA-256，最终 ID 是完整 256 bit 摘要按大端整数编码并左补齐的 55 位小写 base26 字母。28 位小写字母随机暂存身份及物理 `backend_key` 与逻辑 ID 分离，发布在同一内容身份下串行化；上传发布锁和读取／清理锁使用不同命名空间，发布与既有 Reader 的对象锁兼容。系统按全新数据库契约运行，不接受或兼容旧随机 Artifact ID。
-
-`ArtifactStore` 是保存／读取 bytes 的 seam，隐藏内部文件与 S3 后端，复用同一暂存配额和完整收存规则。SQL 保存 metadata、owner、MIME、size、state、TTL、后端位置和下载授权 hash。重复完整收存取已有期限与本次上传保留期限的较大值；过期或已清理内容也可经完整校验重新保留同一身份。Reader guard 与持久化下载授权只协调物理清理，不能单独恢复过期内容。Runner 与新历史保留稳定引用，只有实际 Target 调用前生成签名 URL／base64。
-
----
-
-## 6. 目标架构
-
-```mermaid
-flowchart TB
-    Client[Client / Parent Model]
-    Ingress[Ingress / MCP]
-    IR[Canonical IR]
-    Inference[InferenceRun]
-    AgentAdapter[Agent Capability Adapter]
-    Runner[AgentRunner]
-    TurnExec[ModelTurnExecutor]
-    Hook[HookRuntime]
-    Tools[PlatformToolRegistry]
-    Route[Route / TargetSelector]
-    Provider[Installed Wasm Vendor / Host Capabilities]
-    TurnChain[TurnChain]
-    AgentStore[AgentStore]
-    Artifacts[ArtifactStore]
-
-    Client --> Ingress --> IR
-    IR --> Inference
-    Inference --> AgentAdapter --> Runner
-    Runner --> TurnExec
-    Inference --> TurnExec
-    TurnExec --> Hook
-    TurnExec --> Route --> Provider
-    Runner --> Tools
-    Runner --> TurnChain
-    Inference --> TurnChain
-    TurnChain --> AgentStore
-    Runner --> Artifacts
-    TurnChain --> Artifacts
-```
-
-### 6.1 责任划分
-
-| Module | Interface 负责 | Implementation 隐藏 | 明确不负责 |
-|---|---|---|---|
-| `ModelTurnExecutor` | canonical request→event/final response | auth refresh、route、target retry、provider codec、usage | tool loop、history、delivery |
-| `AgentRunner` | AgentInput→AgentEvent stream | bounded loop、tool calls、schema repair、finalization、Turn commit | transport、Definition CRUD、background task |
-| `TurnChain` | append/materialize/branch/sweep | DAG、principal scope、统一保留期、引用保留、GC | model/tool execution |
-| `ArtifactStore` | stage/open/attach/release | LocalFS/S3、hash、staging、refcount | model encoding、media analysis |
-| `PlatformToolRegistry` | versioned descriptor/execute | executor lookup、parallel policy | client tool continuation、agent nesting |
-| adapters | wire↔AgentInput/ToolResult | protocol-specific declaration与错误映射 | Agent loop |
-
-### 6.2 禁止的调用路径
-
-- AgentRunner 不递归调用 `dispatch_pipeline` 或 HTTP ingress。
-- AgentRunner 不直接调用 Vendor/reqwest；必须经过 `ModelTurnExecutor`。
-- ModelTurnExecutor 不执行 PlatformTool。
-- AgentRunner 不接受 Hook 动态注入工具。
-- provider codec 不执行视频抽帧、URL 下载或 context compaction。
-- ArtifactStore 不解释 prompt 或模型协议。
-
----
-
-## 7. Core interfaces
-
-以下摘录当前 Rust interface 的关键字段；完整定义以 `backend/crates/stravia-core/src/agent/` 为准。
-
-### 7.1 AgentDefinition registry
-
-```rust
-pub struct AgentDefinitionSpec {
-    pub id: AgentDefinitionId,
-    pub slug: AgentSlug,
-    pub revision: AgentDefinitionRevisionId,
-    pub description: String,
-    pub instructions: String,
-    pub output_schema: Option<JsonSchema>,
-    pub tools: Vec<VersionedToolId>,
-    pub budgets: AgentBudgets,
-    pub artifact_policy: ArtifactPolicy,
-    pub repair_attempts: u32,
-}
-
-pub struct AgentDefinitionConfig {
-    pub enabled: bool,
-    pub model_id: Option<ModelId>,
-}
-
-pub struct AgentBindingSnapshot {
-    pub definition_id: AgentDefinitionId,
-    pub revision: AgentDefinitionRevisionId,
-    pub model_id: ModelId,
-}
-```
-
-启动注册必须验证：
-
-- slug 和生成的 `agent_<slug>` 全局唯一；
-- version/hash 一致；
-- OutputSchema 与公开 contract 兼容；
-- ToolVersion 全部存在、不是 agent capability tool；
-- budget 与 finalization reserve 合法；
-- Artifact policy 不超过实例绝对上限。
-
-### 7.2 AgentRunner
-
-```rust
-pub struct AgentInput {
-    pub principal: Principal,
-    pub definition_id: AgentDefinitionId,
-    pub parent_turn_id: Option<AgentTurnId>,
-    pub prompt: String,
-    pub artifacts: Vec<ArtifactId>,
-    pub cancellation: CancellationToken,
-}
-
-impl AgentRunner {
-    pub fn run(&self, input: AgentInput) -> AgentEventStream;
-}
-```
-
-`definition` 由 adapter 固定，不来自模型 tool arguments。调用方只控制 prompt、artifacts 与 optional previous Turn。
-
-Stream 为 poll-driven：不 poll 不推进；drop 触发 cancellation。实现不得在 `run()` 时创建脱离调用方生命周期的 background execution task。
-
-### 7.3 Events 与 terminal
-
-```rust
-pub enum AgentEvent {
-    RunStarted { turn_id: AgentTurnId },
-    ModelStepStarted { ordinal: u32 },
-    PublicOutputDelta { text: String },
-    ToolStarted { tool: VersionedToolId, ordinal: u32 },
-    ToolFinished { tool: VersionedToolId, ordinal: u32, is_error: bool },
-    UsageUpdated { usage: Usage },
-    Completed(AgentResult),
-    Partial(AgentResult),
-    Failed { error: AgentRunError },
-}
-
-pub struct AgentResult {
-    pub turn_id: AgentTurnId,
-    pub completion: AgentCompletion,
-    pub output: Value,
-    pub usage: Usage,
-}
-```
-
-不变量：
-
-- 每个被完整 poll 的 stream 恰好一个 Completed/Partial/Failed terminal；
-- terminal 后无事件；
-- 只有 Completed/Partial 对应已提交、可续接的 Turn；
-- stream 不包含 private reasoning、provider raw、credential、完整 tool args/results；
-- 当前 adapters 缓冲 stream 并只返回 `AgentResult` 或 typed error。
-
-### 7.4 ModelTurnExecutor
-
-```rust
-pub enum ModelAuthorizationPolicy {
-    ClientModelBinding,
-    CapabilityOwned(CapabilityId),
-}
-
-pub struct ModelRunInput {
-    pub principal: Principal,
-    pub run_id: String,
-    pub request: AiRequest,
-    pub authorization: ModelAuthorizationPolicy,
-    pub cancellation: CancellationToken,
-}
-
-pub struct ModelTurnInput {
-    pub principal: Principal,
-    pub model_id: String,
-    pub request: AiRequest,
-    pub accumulated_usage: Usage,
-    pub allowed_tools: Vec<ToolSpec>,
-    pub cancellation: CancellationToken,
-    pub deadline: Instant,
-}
-
-pub trait ModelTurnExecutor: Send + Sync {
-    fn begin_run(&self, input: ModelRunInput) -> Result<Arc<dyn ModelTurnRun>, ModelTurnError>;
-}
-```
-
-`ModelAuthorizationPolicy` 是 crate-internal、由 ingress/产品 adapter 固定的执行策略，不从客户端 payload 反序列化。Media/Local Web Search 只能选择各自的 `CapabilityId`；generic Agent 继续使用 `ClientModelBinding`。
-
-职责：
-
-1. 每个 ModelTurn 开始前重读 API key enabled/expiry，按固定 authorization policy 校验 client Model binding 或产品 capability grant，并执行实时 quota；
-2. 使用逻辑 Model ID 进入现有 TargetSelector/negotiation；
-3. 普通可重试上游失败沿现有 Route failover；
-4. 复用 Vendor codec、stream parsing、usage 与 request log；
-5. 返回 canonical response/delta，不执行任何 tool call。
-
-### 7.5 TurnChain
-
-```rust
-pub trait TurnChainStore: Send + Sync {
-    async fn materialize(
-        &self,
-        principal: &Principal,
-        id: TurnNodeId,
-    ) -> Result<MaterializedChain, TurnUnavailable>;
-
-    async fn commit(
-        &self,
-        transaction: TurnCommit,
-    ) -> Result<TurnNodeId, TurnCommitError>;
-}
-```
-
-`commit` 必须在一个数据库事务中校验 parent 仍可用、principal 与 kind 匹配，插入 immutable node 及其 Marker、可逆脱敏映射、原生压缩登记的引用行；不更新祖先，保留只由新节点的 `created_at` 与子节点关系决定。AgentRunner 必须在发送 Completed/Partial terminal 前完成 commit。
-
-Adapter delivery 失败不回滚已提交 Turn；当前没有独立 Run/delivery record，调用方仍可在保留期内（节点被扫描回收之前）用已返回或已产生的 TurnId 重试读取。
-
-### 7.6 ArtifactStore
-
-```rust
-pub trait ArtifactStore: Send + Sync {
-    async fn ingest(
-        &self,
-        principal: &Principal,
-        mime_type: &str,
-        size: Option<u64>,
-        bytes: ArtifactByteStream,
-        retention: Duration,
-    ) -> Result<ArtifactRef, ArtifactError>;
-
-    async fn open(
-        &self,
-        principal: &Principal,
-        id: &ArtifactId,
-    ) -> Result<ArtifactReader, ArtifactError>;
-
-    async fn sweep_expired(&self) -> Result<u64, ArtifactError>;
-}
-```
-
-当前外部 ingest 只接受 API-key 或临时 Upload Grant 认证的单请求上传（见 §11.3）；AgentInput 只接受同 principal 的 opaque ArtifactId。LocalFS path 只存在于 `ArtifactReader` 内部，不暴露给调用方；不接受 `file://`、任意本地路径、客户端 URL 或 provider file ID 作为持久化身份。
-
----
-
-## 8. Agent Run 状态机
-
-```mermaid
-stateDiagram-v2
-    [*] --> Running: first poll
-    Running --> Running: model turn or tool result
-    Running --> Repairing: output schema invalid
-    Repairing --> Running: valid repaired output
-    Running --> Finalizing: working budget or loop budget reached
-    Repairing --> Failed: repair budget exhausted
-    Finalizing --> Partial: valid no-tool summary
-    Finalizing --> Failed: reserve exhausted or invalid output
-    Running --> Completed: valid final output
-    Running --> Failed: cancellation / stream drop / internal error
-    Repairing --> Failed: cancellation
-    Finalizing --> Failed: cancellation
-    Completed --> [*]
-    Partial --> [*]
-    Failed --> [*]
-```
-
-### 8.1 正常 loop
-
-1. Adapter 固定 Definition ID，解析统一 AgentInput。
-2. 校验 principal 非 anonymous、Definition 已启用且 Model 已配置。
-3. 若有 previous Turn：materialize exact parent chain；若无则创建 root binding snapshot。
-4. 对 inline/HTTPS artifacts 做 staging snapshot。
-5. 建立一个 HookSession，并在整个 AgentRun 的每个 ModelTurn 复用。
-6. ContextBuilder 组装 Definition instructions、完整 prefix、新 user content、允许的 ToolVersion schemas 与 finalization reserve；若 Definition 声明 OutputSchema，则每个 Model Turn 的 system instructions 还携带其完整 JSON Schema，使不支持原生 Structured Outputs 的 Target 也能遵循相同输出契约，最终结果仍由本地 validator 校验并按预算修复。
-7. `ModelTurnExecutor` 执行一个 model turn。
-8. 无 tool call 且输出合法：提交 complete Turn。
-9. 有 tool calls：按 descriptor 受控并行执行，按原 call ordinal 回填 canonical ToolResult，进入下一 ModelTurn。
-10. 达到 working budget：进入 finalization；禁用全部工具，只允许一次收束调用。
-
-### 8.2 Context 规则
-
-- 不做截断、摘要或原地替换。
-- 父链在首次 model call 前已经超过 context window：typed `context_limit_exceeded`，不调用模型。
-- working loop 必须同时预留 finalizer 所需 prompt context 与 output tokens；不能等 context 已满才尝试总结。
-- finalizer 读取完整当前 canonical transcript，不得截断历史。
-- `partial` Turn 保存 canonical `completion=partial, reason=limit_reached`；下一轮 ContextBuilder 通过受控 metadata 告知模型，不修改 user/assistant 原文。
-
-### 8.3 Budget
-
-Revision 固定至少以下上限：
-
-- total wall time；
-- working/finalization wall-time partition；
-- max ModelTurns；
-- max PlatformTool calls；
-- max parallel tool calls；
-- input/output/total tokens；
-- finalization context/output reserve；
-- structured-output repair attempts。
-
-调用方不能扩大。设计不增加确定性重复-call detector；异常循环只由硬预算停止。
-
-### 8.4 Tool 规则
-
-- Definition allowlist 是 AgentRunner 的完整工具权限；不再与 per-key capability allowlist 取交集。
-- `PlatformTool` descriptor 必须包含 ToolVersion 与 `parallel_safe`。
-- `parallel_safe=true` 的 calls 可在 Revision 并行上限内运行；其他 calls 串行。结果始终按模型原 call 顺序写回。
-- agent capability PlatformTool 不得出现在任何 Definition allowlist，启动校验阻止直接或跨 Definition nesting。
-- 内部 Hook 的 `ExposeTool` 一律返回 typed policy failure；外层 InferenceRun Hook 仍可暴露 agent capability PlatformTool。
-- 可恢复业务错误作为 canonical tool error 返回模型；权限、策略、取消和内部不变量错误终止 Run。
-
----
-
-## 9. Definition 与安全快照
-
-### 9.1 启动快照
-
-Run 启动时冻结：
-
-- Definition Revision；
-- 根 Model ID；
-- instructions、OutputSchema；
-- Tool ID@version allowlist；
-- budget、repair 与 Artifact policy；
-- Run 开始时的 Definition enabled 状态。
-
-Run 期间管理员修改 Definition config 不改变当前执行。Definition disabled 后：
-
-- 已启动 Run 继续；
-- 新根与后续基于旧 Turn 的新 Run 均拒绝；
-- 重新启用后，尚未被回收的 Turn 可继续。
-
-### 9.2 动态 Principal 检查
-
-每个隐藏 ModelTurn 动态检查 API key 状态、根逻辑 Model 当前可用性与固定 authorization policy。generic Agent 使用 `ClientModelBinding`；Media/Local Web Search 等产品能力使用 code-owned `CapabilityOwned` policy，不要求 key 的 `model_ids` 包含 hidden Model。每个 PlatformTool side effect 前继续复查适用授权；MCP 的 `mcp_access_enabled` 在 invocation 入口检查。隐藏 ModelTurn 复用外层 RootRequest，不重复计 API Key Root RPM；每次实际上游发送仍独立经过目的地 RPM。
-
-任何检查失败立即终止 Run，不提交 Turn。这保持 `docs/adr/0005-client-credential-security-seam.md` 的现有不变量。
-
-### 9.3 Capability 授权
-
-generic `agent_<slug>` 本身不增加 per-key capability allowlist；产品 capability 可以定义专用 ACL：
-
-- anonymous 永久禁止；
-- Definition 必须全局 enabled；
-- MCP 仍要求既有 `mcp_access_enabled`；
-- generic Agent Definition Model 继续要求 principal 的现有 model binding；
-- Media/Web Search 分别由平台 Gate 授权有效 API key 间接使用 hidden Model，不创建额外入口 RPM 记录；Transparent Injection 只控制自动暴露；
-- Definition allowlist 即内部工具授权。
-
-未授权或 unavailable Definitions 从 discovery 中过滤；显式请求未授权 tool 返回 typed forbidden。Turn lookup 则统一返回 `TurnUnavailable`，避免 ID existence oracle。
-
----
-
-## 10. 持久化模型
-
-以下为逻辑实体，不锁定最终表名；实施时新增或修改 SQLite/PostgreSQL migration，必须使用 `stravia-tools dump-schema` 同步重新生成 `docs/database/postgres.sql` 与 `docs/database/sqlite.sql`，不得手工修改 schema 正文。
-
-| 实体 | 关键字段 | 说明 |
-|---|---|---|
-| Agent Definition Revision | definition_id、slug、version、spec_hash、spec_json、created_at | 程序注册的 immutable spec |
-| Agent Definition Config | definition_id、enabled、model_id、thinking_level、updated_at | Admin 唯一可改字段 |
-| Turn Chain Node | node_id、kind、parent_id、principal、payload_version、payload、created_at | kind 至少 response/agent |
-| Artifact | artifact_id、principal、mime、size、backend_key、state、expires_at | opaque public ID；LocalFS/S3；物理 key 独立于最终 ID |
-| Artifact Upload | upload_id、artifact_id、principal、token_hash、declared/received size、expires_at | ingest 内部暂存记录（流式写入的 part 仅作内部实现）；artifact_id 仅为内部暂存身份，不公开 |
-
-当前不持久化运行中的 Agent Run、失败尝试、instance lease 或 event chunks。只有成功/预算收束成功的 Turn 会进入 Turn Chain；失败、取消或进程退出不会产生可续接节点。
-
-### 10.1 Canonical transcript payload
-
-Agent Turn 保存完整 semantic transcript：
-
-- user/assistant messages；
-- tool call 与 tool result；
-- public reasoning summary 与协议续接必需 signature/encrypted state；
-- 主体约束的 Artifact 引用（canonical FileId/URL，不保存展开的媒体字节）；
-- Request Hook 已处理前缀的位置；
-- usage、stop/completion metadata。
-
-不保存：
-
-- provider raw request/response/SSE；
-- private chain-of-thought；
-- credential/header；
-- token chunk event stream。
-
-Failed/Cancelled Run 不持久化；其 typed error 只通过当前 Event Stream 返回。Model Turn 的 provider/model/status/usage 继续写入既有 request log，且不记录 Agent transcript、tool arguments 或 Artifact bytes。
-
-### 10.2 TTL 与 GC
-
-- Agent Turn 与 Response Chain 共用历史保留天数 N（`log_retention_days`，默认 7，最小 1）：节点按 `created_at + N` 计时，提交与续接都不刷新祖先；只要子树中还有未到期的后代，祖先就因有子节点而保留，未使用的 sibling branch 各自到期。到期不等于立即不可读：读取没有时间条件，由每小时的扫描回收没有子节点、也不是原生压缩来源的到期节点，扫描前仍可读、可续接（[ADR-0089](../adr/0089-share-content-store-and-normalize-observation-writes.md)）。
-- Artifact 默认保留 7 天；ingest 暂存使用 1 小时 idle TTL，每次成功写入 part 都会刷新。
-- Gateway lifecycle 每小时驱动历史（Observation、Turn 节点、依赖与共享正文）与 Artifact sweep；失败记录 warning 并在下一周期重试。
-- 当前 Artifact 没有引用计数或显式删除；到期后由 sweeper 清理 metadata、object 与未完成 staging。
-- Revision 当前不自动回收，以保证已存活 Turn 可按固定 Revision 续接。
-- 不提供显式 Turn/Artifact 删除 API。
-
----
-
-## 11. Artifact 与多模态
-
-### 11.1 Canonical IR 扩展
-
-已实施的 canonical media 变更：
-
-```text
-ContentBlock::Video
-EndpointCapabilities::native_video
-```
-
-`ArtifactId` 保持在 `AgentInput.artifacts` envelope 中，而不进入通用 protocol IR。AgentRunner 通过 principal-scoped ArtifactStore 打开对象，校验 Definition policy，并在 Model Turn 前 materialize 为 canonical image/audio/video/file Base64 content block；backend key 不暴露给模型或客户端。
-
-### 11.2 Provider negotiation
-
-截至 2026-08-10：
-
-- OpenAI、Anthropic、Gemini 均支持图片输入；
-- Gemini 官方支持原生视频输入；
-- OpenAI/Anthropic 没有通用原生视频理解输入；跨 provider 最小公分母是 frames + timestamped transcript；
-- provider file ID、public URL 支持与大小限制不同，不能作为 canonical 持久化身份。
-
-因此：
-
-- target 支持 native modality：codec 从 ArtifactStore materialize provider request；
-- target 不支持：在 negotiation 前 typed `unsupported_modality`；
-- 不自动切换 Definition Model；根 Model ID 固定；
-- 不在 codec 内做下载、抽帧、转录或 OCR；
-- 未来 portable video Definition 必须显式包含版本化 media preprocessing PlatformTool。
-
-附件的交付方式由 `protocol-codec` 的 `attachment` 模块按（协议，附件种类）给出，是 Core 每次 Target 调用前选择签名下载 URL 或内联 base64、以及跨协议请求裁剪判断媒体能否被目标承载的唯一事实源，Core 不再维护第二份矩阵。取值以各 encoder 的实际 wire 承载为准，且只在官方 schema 定义了 URL 载体时才声明 URL：
-
-| 协议 | Image | Audio | File | Video | Document |
-|---|---|---|---|---|---|
-| Anthropic Messages | URL/内联 | — | URL（仅 PDF）/内联 | — | URL（仅 PDF）/内联 |
-| Google Gemini | URL/内联 | URL/内联 | URL/内联 | URL/内联 | URL/内联 |
-| OpenAI Compatible | URL/内联 | 内联（WAV/MP3） | 内联 | — | 内联 |
-| Open Responses | URL/内联 | — | URL/内联 | URL/内联 | URL/内联 |
-| Bedrock Converse | 内联 | — | 内联 | — | 内联 |
-| Cohere Chat | URL/内联 | — | — | — | — |
-| watsonx Text Chat | URL/内联 | 内联（WAV/MP3） | — | — | — |
-| Gateway Language Model | URL/内联 | — | URL/内联 | URL/内联 | — |
-
-内联时部分协议还限制 MIME（Anthropic 与 Bedrock 的图片只接受 JPEG/PNG/GIF/WebP，Anthropic 与 Bedrock 的 Document 只接受 PDF 等），不满足时明确失败。没有共享标准 endpoint 的 guest 无法假定支持 URL，一律内联 canonical bytes，该语义属于 Core。
-
-`stravia://artifacts/<id>` 既可作为 URL 来源也可作为 FileId 来源：二者经同一准入（校验引用格式、归属并延长保留期）与同一交付路径，按上表改写为签名下载 URL 或 base64，并同样向本次交付副本补稳定引用；带查询串、fragment 或后缀的引用、以及其他 `stravia://` 值无效。供应商自己的 file id 原样透传。
-
-官方来源：
-
-- [OpenAI image inputs](https://platform.openai.com/docs/guides/images-vision)
-- [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision)
-- [Gemini video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)
-- [Gemini Files API](https://ai.google.dev/gemini-api/docs/files)
-
-### 11.3 Upload surface
-
-当前 API 只有一个端点（[ADR-0092](../adr/0092-replace-multipart-artifact-upload-with-single-request.md)）：
-
-```text
-POST /v1/artifacts
-Content-Type: <MIME>
-
-<原始字节>
-```
-
-实现满足：
-
-- 请求体就是文件字节，`Content-Type` 就是 MIME；缺少 Content-Type、`application/x-www-form-urlencoded`（curl `--data-binary` 不带 `-H` 时的默认值）或 `multipart/*` 返回 415，避免把表单边界写进文件内容。MIME 校验与归一化沿用 ingest 现有规则；
-- 使用 inference API key principal 或临时 Upload Grant；anonymous 在读取上传 body 前拒绝；
-- 请求体流式写入 `ArtifactStore::ingest`，不整体缓冲；单 Artifact 100 MiB absolute limit，per-principal 16 个/400 MiB staging reservation，并叠加 Definition size/count/declared MIME policy，均由 ingest 路径执行；
-- 请求体可带 `Content-Encoding: gzip | deflate | br | zstd`，解压后才进入 ingest，内容身份与限制都按解码后的文件字节计算；此时没有声明长度。压缩数据损坏返回 400，其它编码返回 415；
-- ingest 的 staging idle TTL 为 1 小时，覆盖大文件单请求上传的耗时；Gateway sweeper 清理过期 staging 与 metadata；
-- Artifact 保留期跟随 `log_retention_days`；
-- 内容身份由服务端对完整内容计算，同一 principal 重复上传相同内容得到同一 `path`；不接受客户端声明的内容摘要；
-- 成功返回 201，响应体为 `{"path","mime_type","size"}`；错误体为 JSON，复用 Gateway 统一的 `error_response`；
-- 不提供断点续传。
-
-当前不提供 S3 presigned multipart、客户端 URL ingest 或 content-based MIME sniffing；这些能力必须在对应 backend/validator 实施后再开放。
-
-直接 Artifact HTTP 接口与模型请求的附件归一化共享错误分类：`Invalid`、`NotFound`、`Forbidden`、`Unauthorized`、`Storage` 分别对应 400、404、403、401、500。附件归一化保留 `attachment_ingest_failed` code；存储故障的客户端消息不含数据库或底层存储详情，内部诊断先脱敏后保留原因，不把平台存储故障归因为上游 Provider 或客户端输入。
-
----
-
-## 12. Adapter 设计
-
-Agent Runner 的内部 `AgentTool::execute` 返回 `AgentToolOutput`，同时提供 `content` 和 `ToolResultContentKind`。MCP structured content 是业务 JSON；远程 MCP 没有 structured content 时保留原生 content blocks，只扫描文本和嵌入资源的文本，不扫描图片、音频及资源 blob。PlatformTool adapter 复用普通平台路径的转换，保留类型化文本与媒体块的语义。Runner 不根据业务 JSON 的 `type` 字段重新分类；可逆脱敏因而能保护可读文字而不改写媒体。内容块序列化失败作为工具错误进入后续回合，不导致执行任务 panic。这些内部字段不改变客户端或 Provider 的协议报文。
-
-### 12.1 统一 tool contract
-
-所有 Definition 使用：
+## Definition、Revision 与 Admin Config
+
+Agent Definition 是代码注册的稳定身份，有唯一 slug、描述与公开结果契约。公开 Definition 可使用 `agent_<slug>`；
+内部 Definition 不生成通用工具。不要把同一 slug 重新赋给不同契约。
+
+Revision 是不可变执行规格，含版本、spec hash、指令、OutputSchema、带版本的工具 allowlist、预算、Artifact policy 和修复策略。
+启动幂等注册：对象键顺序不构成变更，数组顺序有意义；同一 slug/version 若实际规格改变则启动就绪失败，不覆写历史。
+能被续接的 Revision 所需工具版本必须仍可解析；注册时也检查预算、工具身份和 Artifact policy。
+定义不再注册时不能创建新根，不因此删除已持久化的 Revision。
+
+Agent Definition Config 保存启停、逻辑 Model 绑定及适用的 Thinking Level，默认停用、无绑定。
+管理员通过各产品页面配置，不可创建 Definition 或修改指令、工具、schema 与预算；
+不提供通用 Agent 管理 API 或页面。
+
+## AgentRunner 与单轮执行
+
+1. 入口确定 Definition 身份，把问题和附件追加为一条 user message；调用方不能伪造 system、assistant 或 tool 历史。
+   无父 Turn 时冻结新根绑定；续接时恢复指定历史前缀。
+2. 预处理显式媒体，组装 Revision 指令、完整前缀、工具 schema 及收束预留。
+   若有 OutputSchema，模型收到完整约束，结果仍须由本地校验器验证。
+3. 调用 Model Turn Executor；无工具且输出有效则提交 complete Turn。
+   格式错误可在修复预算内重试，不能绕过 schema 结束。
+4. 按版本化 allowlist 执行工具。只有声明并行安全的工具在上限内并行；其他串行。结果按原调用顺序写回。
+   可恢复业务失败返回工具错误，授权、策略、取消与内部不变量失败终止 Run。
+5. 工作预算耗尽后仅用预留执行一次无工具收束。成功提交 `partial` 并记录 `limit_reached`；
+   收束失败不提交。续接时以受控元数据说明该状态，不修改原消息。
+
+Revision 约束总时长、工作与收束时间、Model Turn 和工具调用次数、工具并行度、输入／输出／总 token 及修复次数。调用者不能扩容。
+必须给收束预留上下文及输出额度。完整前缀连同预留无法放入窗口时，在首次上游调用前报错；
+不自动截断、摘要或原地改写历史。
+
+**禁止 Agent→Agent 嵌套。** Definition allowlist 不得包含 Agent capability 工具，Runner 不递归调用 HTTP ingress 或外层 dispatcher，不直接发送 Vendor 请求。
+内部 Hook 不得以 `ExposeTool` 改写工具集合；Runner 的叶工具不代表客户端工具续接。
+
+Run 是请求驱动的尝试，不产生独立 Run 记录。事件流只有在 poll 时推进，丢弃时取消；
+预分配的 Turn ID 只有在提交成功后才可续接。
+完全消费的流恰有一个 Completed、Partial 或 Failed 终态，终态后无事件。
+事件不含私有推理、原始报文、凭据或完整工具正文。
+取消、失败、进程退出不持久化执行中的 Runner，也不创建失败 Turn。
+公开工具的后台所有权是外层[工具执行交接](#工具执行交接)，不改变 Runner 本身的契约。
+
+### Model Turn Executor 与 Hook
+
+Model Turn Executor 接收 canonical 请求和调用方固定的授权策略，复用 Target 选择、协议协商、上游重试、codec、流与用量。
+同一 Model Turn 内的 Target retry 不开启新轮，也不执行工具。成功流在唯一 `Completed` 后停止，不等待 EOF；
+产物交付和 Turn 提交是之后的独立动作。
+`Completed` 前完成必要的可逆脱敏还原和映射发布，取消或时限仍可在发布前抢占；
+发布边界见[凭据保护](credential-protection.md)。
+
+同一 AgentRun 复用一个 HookSession。Hook 可修改 canonical 请求、响应与工具结果，也可拒绝或安全地提前返回，但不会取得上游凭据、原始 API Key 或 Artifact 存储键。
+Request Hook 可读取完整上下文，只从宿主给出的 `input_start` 修改未处理输入。历史保存处理后的前缀及边界；
+续接处理上一轮最后输出与新增输入，不把展开的媒体字节回写历史。
+工具结果的文本和媒体类型由可信适配器保留，不按业务 JSON 的 `type` 猜测；文本脱敏不改写媒体块。
+
+### 安全快照与 Principal
+
+- 启动时冻结 Revision、根 Model、启停及执行规格。Admin 改配置不改写在途 Run；
+  停用后拒绝新根和新续接，重新启用后可按仍可用的父 Turn 续接。
+- 有历史时沿用根 Model 和原 Revision。创建新根才采用新的默认 Revision 或模型绑定；
+  历史不会把其他 Principal、Definition 或 Turn 类型的权限带入本次执行。
+- 在每一隐藏 Model Turn 前重查 API Key 状态、模型可用性、适用绑定或 capability grant 及实时额度；
+  工具副作用前重查适用权限。普通 Target retry 不扩展该轮权限快照。
+- 通用 Agent 受调用者的 Model binding 约束；产品隐藏模型只由代码拥有的 capability policy 间接授予，不能从输入指定，也不变成 Key 的普通模型权限。
+- 隐藏执行复用外层 RootRequest 的入口准入及 RPM，实际上游发送各自经过目的地 RPM。
+  子轮观测见[交互链路](interaction-observation.md#归属与交互链路)，不重复计量外层工具调用。
+
+## Turn Chain 与 Turn Reference
+
+Agent Turn 是一次输出通过校验的 Run 提交的不可变续接点，记录父节点、Principal、Definition Revision、根 Model、canonical 对话、引用及用量。
+公共 Turn Reference 为 `stravia://turns/<id>`。续接精确恢复父链，可从任一可用节点分支，没有可变 Session head、隐式 latest、合并或请求幂等。
+
+Turn Chain 事务内校验父节点可用及身份匹配，提交节点及所需历史引用后才交付成功终态。交付失败不回滚已提交节点。
+不存在、回收、越权或类型失配统一为不可用，不提供存在性探测。Agent 保存 canonical 消息和工具状态、续接所需协议状态与媒体引用，不保存原始上游流、私有推理或媒体正文。
+普通观测及诊断边界见[交互观测](interaction-observation.md)。
+
+已提交节点可跨重启读取。保留期跟随 `log_retention_days`（默认 7 天，最小 1 天），按创建时间计算，不因读取、提交子节点或续接刷新。
+有子节点或受保留依赖引用的节点不清理；到期叶节点等扫描回收，独立分支各自到期。共享存储见[数据布局](data-layout-performance.md#共享正文存储与引用回收)；
+Responses 的业务语义见 [Open Responses](open-responses.md)。
+
+通用 `agent_<slug>` adapter 可接收以下输入（引用为占位符）：
 
 ```json
 {
   "prompt": "继续核对结论中的时间线",
-  "artifacts": [
-    { "path": "stravia://artifacts/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc" }
-  ],
-  "previous_path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab"
+  "artifacts": [{"path": "stravia://artifacts/<artifact-id>"}],
+  "previous_path": "stravia://turns/<parent-id>"
 }
 ```
 
-`previous_path` 可省略。Runner 固定把输入追加为一条 user message；调用者不能伪造 assistant/tool/system history。
+`previous_path` 可省略，只属于通用 Agent 接口，不是 StraviaRead 字段。成功返回 `path`、`completion` 与 `output`；
+输出为 schema 对应值或文本，内部用量、事件不进入模型上下文。
+PlatformTool 的调用和结果留在父模型的隐藏上下文；MCP 直接接收工具结果。
+Responses adapter 可以通过 `stravia:agent_result` 输出 Turn path，其他聊天协议不增加此元数据。
 
-统一 ToolResult：
+## 平台能力门禁与透明注入
+
+Platform Capability Gate 决定平台是否提供高级能力；有效 Key 在 Gate 开启且能力已配置时可走支持的显式入口。
+透明注入只决定未显式声明时本次自动暴露哪些能力，不授予显式调用权限；关闭 Gate 不删除已保存的注入项。
+参见 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md) 与 [ADR-0097](../adr/0097-store-api-key-transparent-injections-as-a-set.md)。
+
+| 能力 | 平台范围 | Key 注入项 |
+| --- | --- | --- |
+| Web Search / Web Fetch | 共用 Web Search 开关 | `web_search` |
+| Media Understanding | 图片/文档和音频可分别启停 | `media_understanding` |
+| Media Generation | 独立开关 | `media_generation` |
+| Reversible Redaction | 独立保护开关，不是可发现的工具 | 无；见[凭据保护](credential-protection.md) |
+| History Recall | 没有独立平台 Gate | `history_recall`，仅透明注入 |
+
+API Key 的 `transparent_injection_enabled` 是总开关；`transparent_injections` 是已选集合，不含总开关或 MCP 权限。
+创建省略该集合表示空；部分更新省略表示保留，提供时整体替换。未知或重复项拒绝。
+关闭透明注入或平台 Gate 保留已选项；满足条件后重新生效。
+
+| 调用面 | 权限与暴露 |
+| --- | --- |
+| 客户端显式声明 `StraviaRead`、`generate` 或支持的 hosted/native 声明 | 有效 Key 加适用 Gate；不要求对应透明注入项，不追加 History Recall。 |
+| 模型请求透明注入 | Key 总开关、已选项和适用 Gate 决定本次暴露范围；基础 Read 不要求选中高级工具。 |
+| `POST /mcp` | 另要求 `mcp_access_enabled`，高级工具仍检查平台 Gate；不读取透明注入选择，永不提供 History Recall。 |
+| 内部 Agent | 由可信 registry 和不可变 Definition 装配，不继承父模型的透明注入或 MCP 工具集合。 |
+
+工具描述、发现与执行都限定在本次范围；知道路径不等于可执行。基础 Read 允许所属 Artifact 下载和自己执行结果查询，不因此开启高级能力。
+[History Recall](history-recall.md#暴露与凭据)只对选中该项的透明注入范围可用，不出现在显式 Read、MCP 或内部 Agent。
+
+## StraviaRead 统一读取契约
+
+公开工具的 wire name 为 `StraviaRead`、source Tool ID 为 `stravia-read`。顶层只接受必填字符串 `path` 和可省略或为 `null` 的对象 `body`。
+参见 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)及[路径解析器](../../backend/crates/stravia-web-access-contract/src/read_path.rs)。
+
+| `body` 字段 | 用途 |
+| --- | --- |
+| `question` | 搜索文本、资源问题、续接追问或历史检索，取决于目标。 |
+| `attachments` | 媒体续接新增的精确 Artifact 引用或公网 URL，不带读取选择器；重复项拒绝。 |
+| `allowed_domains` | 搜索来源限制，语义见 [Web Search](web-search.md#搜索输入与报告)。 |
+| `wait` | 工具执行查询最多等待的秒数，非负整数。 |
+
+不认识的字段、错误类型及该路径不适用的非零值均拒绝；缺省、`null`、空白问题、空数组和零等待按未传处理。
+模型声明使用 `strict: false`，允许声明 `path` 与可空 `body` 均必填；MCP schema 只要求 `path`。
+描述按范围列出可用字段；宽松 schema 不替代运行时校验。
+
+`stravia://search`、`stravia://turns/<id>`、`stravia://artifacts/<id>`、HTTP(S)、`stravia://tool-executions/<id>` 与获授权的 `stravia://history/` 按已知目标路由。
+续接直接用 Turn Reference，先查 Turn kind 再分派；Responses Turn 不是 Read 的续接目标。
+不解析旧 query／fragment 平台选项或裸 ID。
+
+外层 Hook/Platform 和 MCP 装配公开 router；内层 Agent 单独装配同名基础读取 router。
+内层 `stravia://search` 只取基础检索列表，不启动研究 Agent；它拒绝研究续接，不暴露历史范围和公开执行等待。
+网页 URL 共用 Web Access。模型不能选择 registry 或执行层级；
+插件贡献的可判定 Read domain 必须无冲突。
+
+### Path 选择器
+
+从 `path` 末尾按冒号剥离合法选择器，authority 内端口不是选择器。裸 `host:port` 要先加 `/`；
+源 URL 字面以类似选择器结尾时，将那个冒号写为 `%3A`。源 URL 自身的 query 和 fragment 保留，`body.question` 不发给源站。
+
+| 选择器 | 规则 |
+| --- | --- |
+| `:raw` | 读取支持的严格文本表示，可配行范围，不能与 `question` 同用。 |
+| `:download` | 只下载，不执行模型；不能与其他选择器或问题同用。 |
+| `:cursor=<base64url>` | 平台生成的文本快照或历史回看分页；不能与其他选择器或问题同用。 |
+| `:N`、`:N-M`、`:N+K`、`:-K` | 从 N 到末尾、闭区间、从 N 取 K 行、最后 K 行。1-based；逗号合并最多 16 段，每种选择器只提供一次。 |
+
+例如 `https://example.com:8443/doc:1-20` 读取前 20 行；若资源路径实际为 `/doc:20`，应写 `/doc%3A20`。
+取得结果后直接使用平台给出的 `next_path`，不手写游标。
+
+各内容类型仍可拒绝不适用的选择器。行范围排序并合并重叠或相邻段；LF 计行，保留 CRLF；
+末尾 LF 不产生空行。起点越 EOF 报错，终点可截到 EOF；空文本裸读成功、显式行范围失败。
+
+### Read Snapshot 与分页
+
+首次文本读取建立所属 Principal 的不可变 Read Snapshot。复用快照不重新抓取、转换或调用模型；
+历史转录因只追加，按[历史回看](history-recall.md#行号稳定性)的实时游标读取。
+
+- 每页最多 32 KiB UTF-8 和 200 个源行。长单行按 UTF-8 边界续读，不漏字节。
+  字节范围为 0-based 半开区间，行号从 1 开始。
+- 输出含 `content`、`read_path`、`returned_ranges`、`representation`、`has_more`、`source_truncated`、`limitations`，可附 `source_url`、`question_applied`、`next_path`。
+  正文不插行号、补上下文或省略符。
+- 直接复用 `next_path`，末页不返回它。`source_truncated` 独立说明源数据不完整，不表示还有续页。
+- 快照用 `application/vnd.stravia.read-snapshot` 封装。正文为 UTF-8，前置四字节大端 header 长度和最多 16 KiB 的版本化 JSON；下载只导出正文。
+- 游标是无填充 base64url JSON（最多 8 KiB），定位 Artifact、范围与偏移，不签名、不授权。
+  每次读取复验归属、期限、快照格式和边界。`source_url` 只是注记，不能由上传者自行签发证据。
+
+搜索和媒体先验证并保存完整报告；长 `report.answer` 只在交付副本分页，来源、限制、Turn 引用和完成状态不变。
+首包顶层 `pagination` 提供分页元数据，续页读答案正文；短报告不建立分页快照。
+
+## Artifact 与单请求上传
+
+Artifact 是归属 Principal 的不可变内容；引用 `stravia://artifacts/<id>` 不授权，不走 DNS 或本地路径解析。
+同一 Principal 可跨对话复用。
+最终 ID 用版本域、带长度的 Principal 与声明 MIME 及完整内容计算 SHA-256，编码为 55 位小写 base26；
+不接受客户端摘要或旧随机 ID。暂存身份和物理存储键不公开，完整收存才发布稳定引用；同一身份并发发布串行。
+
+### 上传
+
+```http
+POST /v1/artifacts
+Content-Type: <MIME>
+
+<原始文件字节>
+```
+
+- 使用 inference API Key 或临时 Upload Grant；匿名请求在读取文件体前拒绝。
+- 请求体就是文件，缺少 Content-Type、`multipart/*` 或 `application/x-www-form-urlencoded` 返回 415。
+  不提供断点续传或独立分片 API。
+- 流式 ingest，不整体缓冲。`Content-Encoding` 支持 gzip、deflate、br、zstd，按解码字节校验身份与上限；损坏报 400，其他编码报 415。
+- 单对象上限 100 MiB；每 Principal 暂存至多 16 项、合计 400 MiB。
+  适用时叠加 Definition 的数量、大小、声明 MIME 策略。不按 MIME 嗅探替换声明。
+- 成功为 HTTP 201 与 `{path, mime_type, size}`。暂存空闲 TTL 为一小时；
+  成功写入刷新暂存，不代表已有可读对象。
+- 无效、未找到、禁止、未认证、存储故障分别映射至 400、404、403、401、500。
+  附件归一化使用 `attachment_ingest_failed`，不把平台存储错误归给用户或 Provider，也不回显底层详情。
+
+上传协议决策见 [ADR-0092](../adr/0092-replace-multipart-artifact-upload-with-single-request.md)，实现见 [HTTP Artifact 接口](../../backend/crates/stravia-core/src/proxy/artifacts.rs)。
+
+### Upload Grant 与 Download Grant
+
+- **Upload Grant** 仅能为指定 Principal 上传，不能读取、推理或管理。固定 15 分钟，可在期间并行上传多个文件，不因使用续期。
+  上传授权注入默认关闭；关闭后不撤销已签发授权。
+- **Download Grant** 在归属鉴权后签发，单文件、固定期限、持有即授权；平台签名链接默认 15 分钟。
+  文件引用本身不是 grant；通过已有链接下载不会续期文件。
+
+上传授权使用占位符：仅交付普通回答和客户端工具参数时可替换为真实凭据，思考与 Platform Tool 参数不替换。
+同一响应复用未到期授权，仍需验证 API Key；真实授权回传时，发给模型前恢复占位符，不依赖注入或脱敏开关。
+授权不进入模型上下文、平台业务历史、普通错误或进程日志；诊断面边界见[授权分离决策](../adr/0048-separate-artifact-references-from-transfer-grants.md)及[交互观测](interaction-observation.md#wire-debug-与脱敏边界)。
+
+默认内部存储，可选 S3；「外部签名下载」默认关闭，配置 S3 不自动开启。
+
+| 下载模式 | Provider 文件交付 | StraviaRead 客户端下载 |
+| --- | --- | --- |
+| 关闭外部签名 | 内联 base64 | 已配置客户端入口的平台签名 URL |
+| 开启，内部存储 | 文件公开入口的平台签名 URL | 同入口的平台签名 URL |
+| 开启，S3 | 原生 S3 预签名 URL | 原生 S3 预签名 URL |
+
+S3 直连不经平台中转，不要求存储桶公开。实际下载方须能访问该地址。
+客户端入口包含协议、端口及部署前缀，保存后不从请求 Host 或转发头重算。
+仅开启外部签名时才需配置文件公开入口；平台预填不证明下载方可达。
+参见 [ADR-0050](../adr/0050-configure-s3-direct-download.md)。
+
+Provider 发送或重试时签名地址必须还至少有五分钟有效期，必要时重新签发；S3 同时受签名凭据到期限制。
+不支持该协议表示时以内联交付或明确拒绝，不发不可用的地址。
+
+### 显式媒体快照与保留
+
+按 [ADR-0049](../adr/0049-snapshot-explicit-media-inputs-as-artifacts.md)，只收存结构化媒体、显式上传或导入；
+普通消息里出现的 URL 不触发抓取。
+公网媒体需要通过 [Web Access 公网规则](web-access-providers.md#公网读取安全)，收存失败终止请求，不透传短命 URL 或丢弃附件继续。
+Artifact URL 与 FileId 来源使用同一归属与保留检查；供应商自己的 file ID 保留原义。
+
+发送前以目标协议允许的签名 URL 或 inline bytes 交付；[codec attachment 模块](../../backend/crates/stravia-protocol-codec/src/attachment.rs)是表示能力的事实源。
+不能表达的模态明确拒绝，不在 codec 抽帧、转录或 OCR；历史只留稳定引用，不存展开的媒体。
+媒体预处理见[多模态理解](media-understanding.md)。
+
+保留期跟随 `log_retention_days`；经归属鉴权的实际使用或重新完整收存可延长期限。
+已到期拒绝新使用，不因签名访问、Reader 或 Turn 引用复活。无公开删除操作。
+清理保护正在进行的读取和未到期授权；对象删除失败保留元数据，完整校验重新收存才能修复已过期对象。
+持锁的发布、续期和清理操作在调用者取消后仍负责收口，不继续接收已取消的网络请求体。
+SQLite/PostgreSQL 须提供同样的可见性语义。
+
+## 工具执行交接
+
+公开工具的 MCP、显式调用与透明注入共享有界等待。工具可声明同步等待窗口，缺省 60 秒，包含排队及输入准备；
+它不改变工具原 deadline。窗口内完成仍返回原结果或原错误。内部 Agent 的基础读取不走公开后台交接。
+见 [ADR-0082](../adr/0082-expose-queryable-tool-executions-after-bounded-wait.md)。
+
+### 交接与取消
+
+- 窗口结束后，只有持久化交接成功才返回 `{path: "stravia://tool-executions/<id>", status: "pending"}` 或 `running`；
+  引用标识一次平台执行，不是模型 call ID、History Marker 或 Artifact。
+- 交接前取消或断连会取消本地执行。交接在不可逆提交前复查取消；提交与断连并发时以事务实际结果为准。
+  提交报错但可读回确认的交接继续，否则报告存储故障，不虚构引用或自动重放。
+- 交接后执行独立继续，即使引用未送达客户端。保留原 Principal、RootRequest、路由、安全与 RPM 归属、原执行 deadline；
+  Gateway 关闭仍可中断。不保证已发往供应商的操作停止或不计费。
+
+隐藏调用的 History Marker 先持久化，经发送确认后发布，才启动领域工作。Marker 发布不是交接；
+此后交接前若原请求取消，仍保存明确的取消输出。终态不被晚到的取消改写。
+
+领域终态与 Marker 当次交付各自保存。常规工具结果由本次请求的 ToolResult Hook 处理后封存；
+交付的是执行引用则以后仍恢复该引用，不替换为后台结果。
+原请求消失而 Hook 无法完成时，除系统已确定的取消输出外，Marker 保存交付处理错误，不放行未处理结果。
+后台不重用旧 Hook，也不因 Marker 失败而撤销已交接执行；查询输出由查询所属请求处理。
+
+### 查询与保留
 
 ```json
-{
-  "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
-  "completion": "complete",
-  "output": {}
-}
+{"path": "stravia://tool-executions/<id>", "body": {"wait": 120}}
 ```
 
-`output` 为 Definition OutputSchema value 或文本。usage 与内部事件不进入模型上下文。
-
-### 12.2 PlatformTool adapter
-
-- 代码为每个已注册 Definition 建立 `agent_<slug>` capability PlatformTool。
-- `AgentDefinitionHook` 只对 enabled 且已绑定逻辑 Model 的 Definition 暴露工具。
-- 平台拦截调用，执行 AgentRunner，把统一 ToolResult 作为 hidden canonical ToolResult 送回父模型。
-- 父模型若要继续，必须在下一次调用时显式回传 `previous_path`；Runner 不猜最近节点。
-- 普通 PlatformTool contract 不改变：客户端看不到 call/result。
-
-### 12.3 MCP adapter
-
-- `/mcp` discovery 只列 enabled、model available、principal 有入口/模型权限的 `agent_<slug>`。
-- MCP 客户端直接调用 tool，因此会直接收到包含 AgentTurnId 的 ToolResult。
-- 首期使用普通 request-bound `tools/call`；父 request deadline/cancellation 生效。
-- 支持将现有入站 `McpTool` 注册进 AgentRunner，也支持通过 streamable HTTP discovery 把远程 MCP server tools 映射成版本化 `AgentTool`。
-- 未来长任务 adapter 应采用 MCP Tasks extension，而不是改变 AgentRunner。
-
-### 12.4 Responses adapter
-
-Responses 与 Chat/Anthropic/Gemini 共用 `AgentDefinitionHook` 和 hidden PlatformTool 路径，不新增 client-owned function call。AgentRunner 的 ToolResult 只进入父模型隐藏上下文：
-
-- 不输出 client-visible agent call activity；
-- 不伪装成 client-owned standard function call；
-- Responses final output 额外包含一个 `stravia:agent_result` item，公开 Turn `path`；
-- SQL Response Chain 保存隐藏 tool state，`previous_response_id` materialize 后父模型仍可看到 Turn path。
-
-Chat/Anthropic/Gemini 不增加 metadata extension；只有父模型通过 canonical ToolResult 看见 Turn path。
-
----
-
-## 13. Hook 与现有 InferenceRun 融合
-
-### 13.1 Hook session
-
-一个 AgentRun 创建一个 HookSession，并在其全部 ModelTurns 中复用。Hook 可继续：
-
-- patch canonical request/response/tool result；
-- reject；
-- 提前 respond；
-- transform public-safe stream。
-
-Hook 不获得 provider credential、Artifact backend key、原始 API key 或任意 storage handle。
-
-Request Hook 读取完整上下文，但内容变换使用宿主提供的 `input_start`，通过 `SpliceInput` 仅处理未处理输入。Runner 保存实际处理后的 canonical transcript；Artifact 引用仅在模型发送前展开，不把展开的媒体字节写回历史。Agent Turn payload 的 `processed_input_items` 标量记录最后模型输出之前的位置，后续 parent Turn 恢复时复用已处理前缀，并首次处理最后模型输出与新增输入。旧 payload 缺少该标量时从零处理，因为旧 transcript 不能证明已经保留 Hook 结果；无启动数据转换或 SQL schema 迁移。模型与工具 allowlist 限制、每步授权不因历史复用而跳过。
-
-### 13.2 工具暴露
-
-- 外层 InferenceRun：保留现有 `ExposeTool`，可暴露 agent capability PlatformTool。
-- 内层 AgentRun：`ExposeTool` 无条件 typed reject，即使 Tool ID 已在 Definition allowlist。
-- 内部可见工具完全由固定 Revision 决定；Hook 不能扩大或动态缩小集合。
-
-### 13.3 现有安全 seam
-
-`ModelTurnExecutor` 必须保留：
-
-- Request Hook 前建立 Principal；
-- 最终 Model 绑定授权；
-- 每个隐藏 ModelTurn 重读 key/model authorization；
-- 普通 Target retry 不重复改变该 ModelTurn 的授权快照；
-- usage 按真实 ModelTurn 计入 request log；入口 RPM 由外层根请求计一次，所有轮次共享 RootRequest 的累计等待和每 Target 冷却额外尝试预算，上游 RPM 按真实发送计数。
-
-外层 capability tool invocation 不重复计算模型 token，但 AgentRun aggregate 关联全部 child request logs。
-
----
-
-## 14. Admin surface
-
-ADR-0009 接受 clean cutover：删除当前已实施的 generic Agent Admin routes：
-
-```text
-GET   /api/v1/agent-definitions
-PATCH /api/v1/agent-definitions/{slug}
-```
-
-删除范围包含对应 Core Admin methods、HTTP DTO/routes、测试与文档，不保留 alias/shim。仓库当前没有 generic Agents WebUI 页面。
-
-Agent Definition Config 仍是 internal registry 的唯一 enabled/Model binding 事实源，但管理员只通过产品专用 surface 修改它：
-
-- Web Search 由 `/api/v1/web-search/*` 与独立 WebUI 页面拥有；
-- Media Understanding 由 [`media-understanding.md`](media-understanding.md) 定义的专用 Admin API/WebUI 拥有；
-- 未来内置能力必须先拥有清晰的产品 contract 与专用 Admin owner，不能重新暴露 generic Definition editor。
-
-保留 AgentDefinitionRegistry、revision/config persistence、AgentRunner 与 generic `agent_<slug>` PlatformTool/MCP adapters。删除 generic Admin surface 不删除 Agent Core。
-
-该 clean cutover 已实施；generic Agent Admin routes 与 Core methods 已删除。
-
----
-## 15. 错误 taxonomy
-
-建议新增 typed categories；最终名称按现有 `GatewayError` convention 调整：
-
-| Category | 触发 | 是否提交 Turn |
-|---|---|---|
-| `agent_definition_unavailable` | disabled、无 Model、registry 不允许新根 | 否 |
-| `agent_turn_unavailable` | 不存在、过期、越权、Definition mismatch | 否 |
-| `agent_context_limit_exceeded` | 完整 prefix + reserve 无法装入 context | 否 |
-| `agent_output_schema_invalid` | repair budget 后仍不合法 | 否 |
-| `agent_budget_finalization_failed` | reserve 内无法形成合法 partial | 否 |
-| `agent_tool_policy_violation` | nested agent、Hook ExposeTool、未知 ToolVersion | 否 |
-| `artifact_invalid` | MIME/size/hash/source/owner 不合法 | 否 |
-| `artifact_quota_exceeded` | staging/instance/principal quota | 否 |
-| `unsupported_modality` | Model/egress 无法表达 canonical media | 否 |
-| `agent_cancelled` | parent cancellation/stream drop | 否 |
-
-外部 Turn lookup 统一为 `agent_turn_unavailable`；内部诊断保留 not_found/expired/forbidden/mismatch 子原因。
-
-MCP execution failure使用 tool `isError`/structured error；JSON-RPC error 仅用于无效协议请求。HTTP/Responses 复用 GatewayError renderer。
-
----
-
-## 16. 可观测性
-
-- 每个实际 Agent Model Turn upstream attempt 继续写既有 request log：API key、provider、Model、upstream protocol、status、usage 与 timing。
-- failover 的每个真实 upstream attempt 分别记账；根 Inference Run 持有唯一 Principal admission slot，隐藏 Model Turn 不重复获取。
-- prompt、tool arguments/results、transcript、Artifact bytes 与私有 reasoning 不进入普通 request log。
-- Agent Event Stream 与 token chunks 不持久化；失败/取消只产生一个 terminal event，不产生 Turn。
-
----
-
-## 17. 实施状态
-
-阶段 A–E 的 Core 路径已实施，并由 core 全量测试、Server 测试、Desktop/Server 编译检查和隔离 HTTP 烟测覆盖；以下列表保留实施契约与未完成边界。
-
-### 阶段 A：提取公共执行 seam，保持行为不变
-
-1. 从 `InferenceRun` 提取 `ModelTurnExecutor`。
-2. 让现有 InferenceRun 通过新 interface 调用 provider path。
-3. 抽取 generic TurnChain interface，并以现有 memory adapter 接回 Responses。
-4. 保持所有协议、Hook、PlatformTool、Target retry 与 delivery 行为一致。
-
-验收：现有窄测试与 smoke proxy 请求全部通过；没有 Agent surface。
-
-### 阶段 B：持久化 TurnChain
-
-1. 增加 SQLite/PostgreSQL TurnChain store。
-2. 迁移 Responses nodes，保留期改为统一的 N 天（默认 7；原先的固定 7 天 TTL 已由 ADR-0089 取消）。
-3. 增加 principal scope、branch、GC 与事务测试（原设计的 ancestor refresh 已由 ADR-0089 的“祖先因有子节点而保留”取代）。
-4. 删除旧 `ResponseChainStore` implementation。
-
-验收：`previous_response_id` 跨进程重启可恢复；旧节点可分支；越权不可探测。
-
-### 阶段 C：ArtifactStore 与 canonical video
-
-已完成内部／S3 bytes、SQLite/PostgreSQL metadata、认证的单请求上传 HTTP、稳定 Artifact Reference、限时下载与上传授权、canonical `Video`、Gemini native-video 映射与非原生 typed reject。清理通过进行中读取保护与未过期下载授权协调，不采用引用计数续期。
-
-验收 seam 包括公开 HTTP／MCP 的上传、收存与下载，以及 Artifact Store 的 Principal 隔离、暂存配额、固定授权期限、读取／清理竞争、SQLite/PostgreSQL 重建与真实 S3 预签名下载；不以 refcount 或签名访问刷新逻辑保留期。
-
-### 阶段 D：AgentDefinition 与 AgentRunner
-
-已完成 code registry/startup sync、当前 generic config list/patch Admin interface、poll-driven bounded loop、repair、finalization、Agent Turn commit 与 TurnChain adapter。Run 是 request-bound 执行，不建立 durable task、owner lease 或失败 Run record；ADR-0009 已接受后续删除 generic Admin interface。
-
-验收：deterministic model/tool adapters 覆盖 loop、会话分支与 Artifact input；测试工具不注册为生产 Definition。
-
-### 阶段 E：协议 adapters
-
-已完成 PlatformTool、入站/远程 MCP tool adapters、hidden Responses integration 与当前 Admin HTTP list/patch。Desktop 复用同一个内嵌 HTTP application；generic Admin routes 的 clean cutover 删除尚未实施。
-
-验收：PlatformTool/MCP 使用同一 AgentInput/ToolResult 语义；MCP 直接返回 TurnId，Responses final item 返回 TurnId，其他协议只让父模型看见。
-
-### 阶段 F：Web Search vertical slice
-
-Web Search 已作为首个生产 vertical slice 实施。上层 `WebSearchRunner` 统一 Local Agent 与 Codex Agentic Search backends，而不把任务语义嵌入 AgentRunner 状态机；Local backend 使用 internal-only、ephemeral Agent Definition 和隐藏 WebAccess leaves。
-
-完整 interface、clean cutover、迁移与验收见 [`web-search.md`](web-search.md) 和 [`ADR-0017`](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)。
-
-Media Understanding 通过 `StraviaRead` 的图片 path 分流调用 internal-only Agent Definition：裸图片默认描述与 OCR，具体问题放在 `body.question` 字段，在 AgentRunner 前执行显式 Media preprocessing，并直接复用 Agent Turn。搜索和媒体完整报告先验证、持久化，再对长 answer 的工具交付副本分页；文本续页不创建 Turn 或重复执行模型。完整 contract、JPEG normalization、Gate、Admin surface 与验收见 [`media-understanding.md`](media-understanding.md)、[`ADR-0009`](../adr/0009-add-media-understanding-as-capability-tool.md) 和 [`ADR-0051`](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
-
----
-
-## 18. 验收场景
-
-当前实现与后续 adapter 必须持续满足以下 observable contracts：
-
-1. **新根与续接**：无 TurnId 创建根；给定成功 TurnId 恢复精确完整 prefix。
-2. **分支**：同一 parent 并发产生两个独立 children，不存在 implicit latest 或 merge。
-3. **Principal isolation**：其他 API key 使用 TurnId 只得到 TurnUnavailable。
-4. **进程重启**：已提交 Turn 与 Responses chain 可恢复；运行中的 Run 不持久化、不恢复，也不产生失败 Turn。
-5. **失败不提交**：provider/tool/schema/cancel failure 均无 AgentTurnId。
-6. **预算收束**：working budget 到达后只使用 reserve；成功提交 partial，失败不提交；总硬上限不突破。
-7. **Context 拒绝**：无法保留完整 prefix+reserve 时在 model call 前失败，不截断/摘要。
-8. **Definition snapshot**：新根使用新 Revision/Model；旧 Turn 继续固定旧 Revision/Model。
-9. **Definition 删除**：新根 discovery 消失；旧 Turn 在被扫描回收前仍可按持久化 Revision 续接。
-10. **动态撤权**：Run 中途禁用 key/撤销 Model binding，下一隐藏 step 终止；Definition config 更新不改变已启动 Run。
-11. **Hook policy**：内层 Hook ExposeTool typed reject；其他受支持 Hook actions 每个 ModelTurn 生效。
-12. **ToolVersion**：缺活跃 Revision 所需实现时 readiness 失败；agent nesting 在启动校验拒绝。
-13. **Tool 并行**：仅 parallel-safe tools 并行，结果顺序稳定；取消传播到全部已启动 calls。
-14. **Artifact**：opaque ID、principal scope、inline/HTTPS/upload snapshot、SSRF、quota、staging TTL、refcount/grace。
-15. **Media negotiation**：native video target 成功编码；不支持 target typed reject，不静默抽帧。
-16. **Adapter visibility**：父模型在所有 PlatformTool flow 看见 TurnId；MCP 直调客户端看见；Responses/Chat/Anthropic/Gemini 隐藏客户端看不见。
-17. **Delivery failure**：Turn commit 后 adapter delivery 失败，Turn 不回滚，Run 记录 delivery_failed，Turn 按统一保留期由扫描回收。
-18. **无幂等保证**：相同调用重试产生新 Run/分支，文档与测试不得暗示去重。
-
----
-
-## 19. 已接受风险
-
-| 风险 | 已确认决策 | 影响 |
-|---|---|---|
-| Agent 活跃并发无上限 | API Key 与上游仅限制请求频率；RPM 等待队列默认 128 个根请求，不限制活跃流 | 长流仍可累积内存、连接池、provider/tool 资源；未设置池 RPM 时没有本地发送速率保护 |
-| 无显式删除 | Turn/Artifact 只能等待保留期与 sweep | 敏感媒体误上传后无法立即清除；默认暴露窗口 7 天（Turn 为 N 天加一个扫描周期） |
-| 无 idempotency | tool/HTTP/MCP 重试不去重 | 重复 provider 成本与重复分支 |
-| Response 保留期从 1h 变为 N 天 | 所有 Responses chain 默认保留 7 天（`log_retention_days`） | SQL 存储、隐私与 GC 压力扩大 |
-| 无 context compaction | 超窗直接拒绝 | 长会话最终不可继续，即使 Artifact/Turn 尚未到期或回收 |
-| 无 deterministic loop detector | 只靠硬预算 | 重复昂贵 tool call 可耗尽全部工作预算 |
-| Generic Agent 无 per-key capability ACL | 全局 enabled + Model binding | 能使用模型的认证 key 可使用该 generic Definition；Media/Web Search 等产品 capability 使用各自的平台 Gate |
-| request-bound 首期 | disconnect 即取消 | 大视频/深度研究仍受客户端/proxy deadline；需后续 Tasks/background adapter |
-| TurnId client visibility 有限 | hidden PlatformTool 只送父模型 | 非 MCP 客户端不能显式管理 AgentTurnId；依赖父模型隐藏上下文 |
-| Definition 删除仍允许旧续接 | Revision/ToolVersion 必须保留到引用过期 | 发布与 readiness 负担增加，不能立即删除旧实现 |
-| provider-native video 不一致 | 不静默降级 | 非 native target 直接失败，直到显式 preprocessing tool 落地 |
-
----
-
-## 20. 拒绝方案
-
-- **直接依赖 Rig/Swiftide**：重复 provider client 与 MCP major 类型分裂，不能让 Stravia 保持唯一模型调用 owner。
-- **LangGraph/ADK/OpenAI Agents sidecar**：破坏 Rust/Desktop 单进程部署，引入额外生命周期、IPC、凭据与观测面。
-- **递归调用 `dispatch_pipeline`**：嵌套完整 InferenceRun，重复 auth/Hook/delivery，并产生 agent tool 自递归风险。
-- **把 InferenceRun 扩成 AgentRunner**：transport delivery、会话 DAG 与 agent loop 混成浅 interface。
-- **新增平行 AgentTool**：现有 PlatformTool 已表达平台拥有的隐藏工具；第二套 registry/context 会重复。
-- **Provider conversation ID 作为事实源**：绑定 provider，无法跨 Target、重启或审计完整上下文。
-- **Session ID + mutable head**：与显式 TurnId prefix 形成两个事实源，并产生并发 latest 竞态。
-- **自动媒体降级**：隐藏 ffmpeg/transcription 成本和语义，不符合 provider-neutral negotiation。
-- **伪装 client function tool**：平台拦截并执行客户端声明的 function，破坏标准 tool ownership。
-- **把 Web Search 语义嵌入 AgentRunner**：AgentRunner 只拥有通用 loop；Search Report、双 backend、来源校验和外部 tool adapters 由上层 `WebSearchRunner` 拥有。
-
----
-
-## 21. 参考资料
-
-### Stravia
-
-- [`docs/design/architecture.md`](architecture.md)
-- [`docs/adr/0001-inference-run-lifecycle-seam.md`](../adr/0001-inference-run-lifecycle-seam.md)
-- [`docs/adr/0002-web-access-provider-seam.md`](../adr/0002-web-access-provider-seam.md)
-- [`docs/adr/0003-general-mcp-tool-server.md`](../adr/0003-general-mcp-tool-server.md)
-- [`docs/adr/0004-emulate-responses-web-search.md`](../adr/0004-emulate-responses-web-search.md)
-- [`docs/adr/0005-client-credential-security-seam.md`](../adr/0005-client-credential-security-seam.md)
-- [`docs/adr/0006-own-protocol-conversion-behind-canonical-stages.md`](../adr/0006-own-protocol-conversion-behind-canonical-stages.md)
-- [PostgreSQL 参考 schema](../database/postgres.sql) 与 [SQLite 参考 schema](../database/sqlite.sql)
-- [`docs/design/web-search.md`](web-search.md)
-- [`docs/adr/0008-unify-web-research-behind-one-runner.md`](../adr/0008-unify-web-research-behind-one-runner.md)
-
-### Agent runtimes
-
-- [OpenAI Agents SDK](https://github.com/openai/openai-agents-python)
-- [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
-- [Google ADK](https://github.com/google/adk-python)
-- [LangGraph](https://github.com/langchain-ai/langgraph)
-- [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)
-- [Rig](https://github.com/0xPlaygrounds/rig)
-- [Swiftide](https://github.com/bosun-ai/swiftide)
-
-### Protocol 与媒体能力
-
-- [MCP architecture/specification](https://modelcontextprotocol.io/docs/learn/architecture)
-- [MCP Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview)
-- [OpenAI vision](https://platform.openai.com/docs/guides/images-vision)
-- [OpenAI web search](https://platform.openai.com/docs/guides/tools-web-search)
-- [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision)
-- [Anthropic web search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)
-- [Gemini video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)
-- [Gemini Google Search](https://ai.google.dev/gemini-api/docs/google-search)
+- `wait` 省略或为 0 时立即返回；正整数最多等待所给秒数，受查询和原执行剩余期限共同限制，可超过初次同步窗口。
+- 终态提前唤醒等待者；取消查询只停止本次等待。查询不重放、不另建后台查询任务，也不延长执行或保留期。
+- 未完成返回实际 `pending` / `running` 和稳定 `path`；完成返回 `completed` 及原工具 `result`。
+  失败或进程中断返回 `failed` / `interrupted` 加 `error`，并非本次读取失败。
+- 未知、过期、已清理或越权的引用是查询错误，不能用错误区分未知与其他 Principal。
+
+未完成执行在重启后标为中断，不接管或重放；旧 owner 或迟到结果不能覆盖终态。
+终态从完成、失败或判定中断时起按历史保留天数独立计时，不与来源诊断寿命绑定。
+来源诊断清理、缺失或写入失败不取消已交接工作，也不使有效查询失效。
+清理执行记录不删除独立 Artifact，文件也可能先到期。
+Debug 保持来源归属和固定导出截止水位，参见[诊断包导出](interaction-observation.md#诊断包导出)。
+
+数据库参考：[SQLite](../database/sqlite.sql)、[PostgreSQL](../database/postgres.sql)。

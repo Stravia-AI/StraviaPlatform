@@ -38,4 +38,4 @@ Artifact 的外部上传只保留一个端点：`POST /v1/artifacts`。请求体
 ## 与既有决策的关系
 
 - [ADR-0049](0049-snapshot-explicit-media-inputs-as-artifacts.md)：暂存额度（16 个、400 MiB、单文件 100 MiB）不变；“一个文件的多个上传分片只计一个任务”不再适用，因为不再有分片，一次上传请求就是一个任务。
-- [ADR-0048](0048-separate-artifact-references-from-transfer-grants.md)：Upload Grant 的授权范围、15 分钟有效期与凭据交付边界不变；“上传会话仍各自独立”改为“每次上传请求相互独立”，完整收存后按 Principal、声明 MIME 与全部字节复用文件身份的规则不变。
+- [ADR-0048](0048-separate-artifact-references-from-transfer-grants.md)：Upload Grant 的授权范围、15 分钟有效期与凭据交付边界不变；“上传会话仍各自独立”改为“每次上传请求相互独立”，完整收存后按 Principal、声明 MIME 与全部字节复用文件身份的规则不变。完整上传与读取契约见 [Agent Core 设计](../design/agent-core.md)。

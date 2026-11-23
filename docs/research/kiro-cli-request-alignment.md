@@ -60,7 +60,7 @@ AWS 两种通道使用区域 [SSO OIDC](https://docs.aws.amazon.com/singlesignon
 - 该推理分支在请求 API 层观察到的顺序为 `content-type`、`x-amz-target`、`content-length`、`x-amzn-kiro-client-attribution`、`x-amzn-kiro-mode-identifier`、`x-amz-user-agent`、`user-agent`、`host`、`amz-sdk-invocation-id`、`amz-sdk-request`、`x-amzn-kiro-attempt`、`Authorization`。Node 在封包时还可加入连接头。双 UA 包含 CLI、KAS 与 ACP client 版本/身份；额度的 SDK 最大尝试数是 1，模型目录和此次推理是 3。不要把这一组登录头当作 API-key 分支的固定字段。
 - 原生账号环境中，`chat --v3 --list-models` 报 `Not logged in`，官方 `acp --agent-engine=v3 --auth-method=cli` 也在 `session/new` 报未登录。有效浏览器会话应交由 CLI 自行复用；失效令牌不能靠复制登录库恢复，CLI 登录不能换算为 Stravia API key。按[官方认证方式](https://kiro.dev/docs/getting-started/authentication/#api-key-authentication-cli)重新授权或配置有资格账号的 API key，不从 CLI 缓存抽取令牌。
 
-独立的 [工具与多轮捕获](kiro-cli-tool-conversation.md) 在隔离服务中完成了完整回合；[额度映射](kiro-cli-credits.md)及 UI 验证使用合成数值，不代表该账号余额。
+隔离服务的工具与多轮行为边界见[Vendor 插件设计](../design/vendor-plugins.md#kiro--kiro)；[额度映射](kiro-cli-credits.md)及 UI 验证使用合成数值，不代表该账号余额。
 
 ## 2.35.1 官方 CLI 真实服务探针
 

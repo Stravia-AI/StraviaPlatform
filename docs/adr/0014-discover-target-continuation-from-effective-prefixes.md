@@ -17,7 +17,7 @@ status: accepted
 
 - 显式 continuation 始终优先；自动发现不会推断下游连接、IP 或缺失会话 ID，也不会构造空 delta。
 - 只有完整交付、上游 terminal 为 `completed`、存在 upstream response ID 且 UpstreamResponse/ClientOutput Hook 未改变输出的节点进入索引。`incomplete`、`failed`、取消与 delivery failure 可以按既有契约保存审计/历史，但不能成为 Reusable Response Prefix。
-- 索引按 Principal 与 hashed effective namespace 隔离；候选按 `item_count DESC, completed_at DESC, node_id DESC` 确定性排序。升级前节点不回填。
+- 索引按 Principal 与有效目标空间隔离；使用确定性的最长前缀优先顺序。
 - 上游 continuation 只是优化。Target 当前不可续接、`store=false` socket affinity 丢失、配置变化或任何语义不等价时，发送完整 Effective Model Request。
-- Hook 始终观察完整逻辑历史；协议转换仍先执行 representability gate。无法等价表达的请求保持 typed reject，不以关闭检查换取前缀命中。
+- Hook 始终观察完整逻辑历史。Target Continuation 必须与本次目标请求的实际编码视图等价；协议的[省略规则](../design/open-responses.md#表达能力与省略规则)不因前缀命中而改变。
 - 该决策与 [`ADR-0013`](0013-own-provider-transport-behind-model-turn-executor.md) 正交：Response Chain 选择 continuation state，Provider Transport 决定通过 HTTP/SSE 或 Responses WebSocket 执行同一 Model Turn。

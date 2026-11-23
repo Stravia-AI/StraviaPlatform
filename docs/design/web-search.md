@@ -1,206 +1,116 @@
-# Web Search 设计
+# Web Search 与 Web Fetch
 
-> 状态：Local 与 External Route 契约已实施；外部完整搜索统一经 Vendor Wasm 与 Route 执行。
-> 更新：2026-09-15
-> 相关决策：[ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)、[ADR-0017](../adr/0017-rename-web-research-to-web-search-and-split-tool-identities.md)
+Web Search 执行一次完整研究并返回带来源的报告；Web Fetch 读取具体公网 URL，不启动研究会话。
+两者经同一个 [StraviaRead](agent-core.md#straviaread-统一读取契约) 入口，共用 Web Search 平台 Gate 和 `web_search` 注入项；
+显式调用与 MCP 的权限见[平台能力门禁与透明注入](agent-core.md#平台能力门禁与透明注入)。
 
-## 1. 结论
+[stravia-web-search](../../backend/crates/stravia-web-search/) 拥有研究执行、Local/External backend、配置策略和报告校验。
+Core 通过宿主接口提供 Agent、权限与来源快照，并装配 MCP 和管理入口。
+基础来源及网络执行归 [Web Access Provider](web-access-providers.md)，不用完整研究接口替代基础检索。
 
-实现归属独立 `stravia-web-search` crate，包含 Runner、Local/External Backend、Definition、报告与证据校验、公开工具、透明注入及配置策略。`stravia-core` 在编译期注入 Agent、Provider 快照、设置与授权的 Host Adapter，并保留 MCP/管理面 Adapter；能力不反向依赖 core。共享执行类型来自 `stravia-runtime-contract`，域名规范化、内部工具 ID、Web Provider 工厂契约与静态地址规则归 `stravia-web-access-contract`，公共重定向解析与资源读取工具归 `stravia-web-access`（具体 Web Provider 适配器通过 `GatewayBuilder::web_provider_factory` 外部注入，见[Web Access Provider 外部化与解耦重构设计](web-access-providers.md)）。
+## 搜索输入与报告
 
-Web Search 是一个由平台总开关控制的 Advanced Capability。普通模型请求与 MCP 通过 `StraviaRead` 的 `stravia://search` path 并在 `body.question` 中给出搜索文本，执行完整研究并返回带来源的 `SearchReport`；Local 与 External backend 的差异不进入公开 contract。网页读取共用该开关和透明注入选择。参见 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md) 与 [ADR-0091](../adr/0091-read-paths-with-colon-selectors-and-plain-fields.md)。
+`path: "stravia://search"` 开始新研究；`body.question` 是非空白搜索文本，最多 64 KiB。
+可用 `body.allowed_domains` 约束报告来源：原始列表最多 20 个非空条目，域名规范化并去重；
+空列表与省略等价。该列表不授予网络访问权限，也不支持 `blocked_domains`。
 
-平台总开关决定联网能力是否存在。开关开启后，每个有效 API Key 都可以显式调用；关闭后，普通请求和 MCP 的联网分流均不可用。API Key 的 Transparent Injection 只决定是否自动暴露 `StraviaRead` 的联网分流，不承担显式调用授权；执行层强制检查本次暴露范围。
-
-## 2. 公开 contract
-
-公开 wire name 为 `StraviaRead`，不保留旧平台工具调用别名。输入字段：
-
-```json
-{
-  "path": "stravia://search",
-  "body": {
-    "question": "question or topic",
-    "allowed_domains": ["example.com"]
-  }
-}
-```
-
-所有读取入口的顶层只接受 `path` 和可省略、可为 `null` 的 `body` 对象；自由文本放在 `body.question`，其余选项放在 `body` 内，未知字段明确拒绝，旧顶层字段不兼容。`allowed_domains` 原始列表最多 20 项、每项非空白，规范化后去重；空数组、省略或 `null` 都表示继承或不限制。搜索文本必须非空白且不超过 `MAX_SEARCH_TEXT_BYTES`，空白按未传处理并报缺少 `question`。续接直接把上一份报告的 `stravia://turns/<turn-id>` 作为 `path`，`question` 是后续问题，不再有独立的续接参数；续接省略允许域名或传空列表则继承父策略，显式非空列表替换。不能用空列表清空允许域名，需要时启动新根。续接仅适用于 Local 搜索；External Route 不提供续接，尝试续接其结果时明确拒绝，不忽略参数后启动新请求。旧 URL scheme 与旧 query／fragment 选项给出可执行的报错，不保留别名。
-
-`blocked_domains` 已从 Stravia 搜索输入、策略、Provider 执行和结果过滤中删除。新输入及原生转工具声明携带该字段时明确拒绝；历史 payload 不重写，读取时忽略旧黑名单，不恢复执行。普通 Provider 原生不透明 JSON 直通不做全局字段剥离。允许域名是来源约束，不是网络访问授权。
-
-成功结果：
+成功结果包含 Turn `path`、`completion` 及 `report`。示例中的 ID 是占位符：
 
 ```json
 {
-  "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab",
+  "path": "stravia://turns/<id>",
   "completion": "complete",
   "report": {
-    "answer": "Verified answer [stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1]",
+    "answer": "已核对的结论 [stravia://turns/<id>/sources/1]",
     "sources": [
-      {
-        "path": "stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1",
-        "url": "https://example.com/source",
-        "title": "Source title"
-      }
+      {"path": "stravia://turns/<id>/sources/1", "url": "https://example.com/source", "title": "来源标题"}
     ],
     "limitations": []
   }
 }
 ```
 
-`SearchReportValidator` 保证：
+- `SearchReport` 对答案、来源数量和限制说明设上限。`partial` 必须注明预算、时限等原因；不把不完整的研究报为完成。
+- `Search Source` 使用当前 Turn Path 加 `/sources/<ordinal>`（十进制编号）；
+  答案中的方括号引用与来源列表一一对应。
+- 来源必须是规范化的公网 HTTP(S) URL，且通过 DNS 和已解析的允许域名约束。
+  域名越界报 `source_outside_allowed_domains`，不删来源后发布貌似完整的报告。
+- Local 仅采用当前或祖先 Turn 的已验证工具证据；标题取有界证据标题，缺失或过长可省略。
+  External 采用供应商来源与标题，不按 Local 证据匹配，但同样校验报告和公网地址。
 
-- answer、sources、limitations 满足大小和数量边界；
-- 每个 source path 为当前 Turn URI 加 `/sources/` 和十进制 ordinal（`stravia://turns/<turn-id>/sources/<ordinal>`）；
-- answer 以 `[stravia://turns/<turn-id>/sources/<ordinal>]` 引用 source，且 marker 与 sources 一一对应；
-- URL 是规范化后的公网 HTTP(S) URL；
-- source 满足本次研究已解析的允许域名策略，越界报 `source_outside_allowed_domains`，不删来源后伪装完整报告；
-- Local 的 source URL 必须来自当前或祖先 Turn 的已验证 evidence；展示标题采用证据标题，缺失或超过标题大小上限时省略，不要求模型生成的标题与证据相同；
-- External 采用供应商返回的来源和标题，不执行 Local 工具证据匹配或标题一致性检查；上述报告结构、公网地址、DNS 与允许域名检查仍适用；
-- partial 结果必须说明预算或超时限制。
+完整报告先校验并提交；长答案交付复用 [Read Snapshot](agent-core.md#straviaread-统一读取契约)。
+来源列表不会为了答案分页而被裁剪。
 
-`SearchTurn` 是 principal-scoped、不可变的报告记录。Local 根 Turn 固定 backend、binding、配置 revision 和 Local budget snapshot；子 Turn 可继续或从任一可访问父节点分支。外部搜索目标契约仅保留报告、引用与历史身份，不保存跨请求研究会话，不因返回报告 ID 就承诺续接。当前持久化 identity 为 `kind = "web_search"`；ID 使用平台统一的 28 位小写字母裸格式，不带类型前缀。
+## Search Turn 与续接
 
-### 统一资源读取与文本分页
+Search Turn 是 Principal 内不可变的研究结果，存储类型是 `web_search`。
+成功报告的 `stravia://turns/<id>` 为显式引用；没有隐式 latest。
 
-资源 path 使用 `<HTTP(S) URL 或 Artifact Reference>[:<选择器>...]`，Artifact Reference 使用 `stravia://artifacts/<artifact-id>`，源 URL 的 query 与 fragment 原样保留，平台问题通过 `question` 字段传递，不发送给源站。选择器从 path 末尾按 `:` 剥离：`raw`、`download`、`cursor=<base64url>` 与行范围（`N`、`N-M`、`N+K`、`-K`，逗号分隔多段）。`raw` 与 `question` 互斥；`download`、`cursor` 各自与其他选项互斥，cursor 仅用于文本快照与历史回看路径（`stravia://history/`，见[历史回看设计](history-recall.md)）。authority 内的 `:` 不剥离；源 URL 字面以选择器形态结尾时把属于 URL 的 `:` 写成 `%3A`，裸 `host:port` 后加 `/` 再追加选择器。资源 path 不接受续接；媒体续接使用 Turn path 加 `attachments`，HTML／文本不接受媒体续接。旧平台调用别名、顶层 `url` 和 Artifact query 选项不再执行。示例：`{"path": "stravia://artifacts/<artifact-id>:1-50", "question": "What does this section say?"}`。
+| 场景 | 行为 |
+| --- | --- |
+| Local 新根 | 固定 backend、模型绑定、配置 Revision 和研究预算。 |
+| Local 续接 | 以父 Turn 引用作为 path，附后续问题。恢复指定父链，可从任一可读且兼容的父节点分支。 |
+| Local 域名策略 | 省略或传空数组继承父策略；非空列表替换。要清除继承限制，应新建根。 |
+| External 结果 | 仍有报告与来源引用，但没有跨请求研究会话。对其发起续接会明确失败。 |
 
-公网与所属 Artifact 按内容类型一致读取：JPEG/PNG/WebP 默认理解并提取文字；HTML 默认 Markdown，附问题只返回 `question_applied=false`；JSON/XML/text 类文件读取原文本。未知二进制返回未读取说明与下载信息，不能用下载冒充指定内容操作。显式下载不执行模型。公网默认 HTML 保留现有 Provider／渲染路径；raw 直接取得正文一次，再严格按 BOM、Content-Type charset、HTML meta、缺省 UTF-8 解码，支持既有 UTF-8、Latin1、Windows-1252、UTF-16LE/BE；未知或无效编码失败。raw 正文不加行号或提示。
+不兼容的 Definition Revision 明确要求重新开始，不改写历史、不静默重开根。
+续接授权与保留规则见 [Turn Chain](agent-core.md#turn-chain-与-turn-reference)。
 
-首次文本读取建立所属 Principal 的不可变 Artifact 快照，每页最多 32KiB UTF-8 和 200 个源行。行范围选择器支持 1-based `N`（到 EOF）、`N-M`、`N+K`（K 行）、`-K`、逗号多段，最多 16 段，排序并合并相邻／重叠范围。LF 计行，CRLF 原样保留，末尾 LF 不增加空行；范围开始越 EOF 失败，结束越 EOF 截到 EOF。空文本裸读成功，显式范围失败。超长单行在 UTF-8 边界切开，续页不漏字节。
+## 搜索后端
 
-结果为 `content`、`read_path`、`returned_ranges`、`representation`、`has_more`、`source_truncated`、`limitations`，以及可选 `source_url`、`next_path`、`question_applied`。字节范围 0-based 半开、行号 1-based；正文没有额外上下文或分段省略符。直接复制 `next_path` 续读，不重新抓取、转换或调用模型。最后页没有 `next_path`，源截断状态独立保留。内部网页请求允许 500,000 字符，其他请求缺省仍为 8,000；批量抓取保留公平限额，显式大预算可提升总量。Exa 保留[官方 10,000 字符上限](https://exa.ai/docs/reference/get-contents)，触顶时报告源截断，不捏造后续页。
+一次搜索只执行所配置的 backend。两者互不回退；External Route 内的 Target 切换与 backend 切换不是一回事。
 
-私有 MIME `application/vnd.stravia.read-snapshot` 的封装是 4 字节大端 header 长度、最多 16KiB JSON header、UTF-8 正文。header 包含 version=1、representation、可选 source_url、source_truncated、limitations、text_bytes；过长 source_url 省略并附限制。游标是无 padding base64url JSON，含 v、artifact_id、ranges、range_index、offset，编码最多 8192 字节；它不签名，也不授予权限。每次校验归属、有效期、封装、正文 UTF-8、游标身份及边界；以有界内存扫描本地读取句柄，S3 复用既有本地缓存，不新增数据库或 Session。快照下载只导出 UTF-8 正文，空文件合法。`source_url` 是来源注记，不是上传者可自行授予的证据：Local 校验器仅从对应真实公网读取调用采集新的来源证据，不信任上传快照伪造的来源。
+### Local Agent
 
-搜索／媒体完整报告先验证和落盘；只有工具交付副本中的长 `report.answer` 被分页，来源、限制、Turn ID 和完成状态保留，顶层 `pagination` 提供除 content 外的分页元数据。后续页只返回 answer 文本。短报告保持原形，不创建分页快照。内部基础检索列表不裁剪来源项。
+Local backend 使用内部 Agent Definition，调用基础搜索与抓取，在预算内收集、核对证据并生成报告。
 
-## 3. 能力门控与透明注入
+- 需要已保存、启用的对话推理模型，且实际执行 Target 支持工具调用；
+  搜索和读取各需要至少一个可用来源。
+- `backend.model_id` 使用模型的内部记录键 `models.id`，不按公开名称或供应商 selector 回退。
+  公开改名不影响绑定，停用或删除后不得执行。
+- `max_turns` 限制研究轮数；时限取 `total_time_seconds` 和调用方 deadline 的较早值。
+- 内部 Agent 的同名 Read 只执行基础检索，不再发起一层完整研究，见[读取运行层级](agent-core.md#straviaread-统一读取契约)。
 
-一次公开调用必须同时满足：
+### External Route
 
-1. `web_search_config.enabled = true`；
-2. API Key 存在、启用且未过期；
-3. `WebSearchRunner` 已配置。
+绑定用途为 `web_search` 的 Route；`backend.route_id` 记录 Route 公开名称 `models.model_id`。
+合格 Target 必须选择具备完整搜索能力的 [Vendor Plugin](vendor-plugins.md) 渠道与真实、非空的上游模型。
+该用途不凭文本或图片输出模态判断，也不进入普通推理目录。
 
-调用面规则：
+- 插件复用所选 Provider 的认证和连接，返回归一答案、引用与实际已知用量。
+  基础链接列表不是完整报告；缺失用量不能伪造为零。
+- 调用受请求取消、deadline、响应大小与终态校验约束，不执行 Local 研究预算。结果提交前可按 Route 策略对明确可重试的上游错误重试或切换 Target；
+  取消、参数及权限错误不触发重试，提交后不重放。重试可能重复消费额度。
+- Google grounding 的特定跳转来源在报告前通过 Web Access 解析为最终地址。同一结果中的重复地址复用解析；
+  先检查数量、长度，沿用成功 Target 的代理快照、取消与时限。
+  解析失败不发布原跳转地址，也不丢弃该来源后假报成功。
+- 外部搜索不续接上游会话，即使上游支持续接标识；Web Fetch 独立选择自己的来源，不借用完整搜索 Route 抓页面。
 
-| 调用面 | 额外条件 | Transparent Injection 的作用 |
-|---|---|---|
-| 客户端显式 `StraviaRead` 联网分流 | 平台 Gate 开启 | 无 |
-| Hosted/native web search 声明 | 平台 Gate 开启 | 无 |
-| Stravia 自动暴露联网分流 | Key 的 `transparent_injection_enabled` 开启，且注入选择包含 `web_search` | 同时暴露搜索和网页读取 |
-| MCP 联网调用 | `mcp_access_enabled` 与平台 Gate 均开启 | 无；所属 Artifact 显式下载独立可用 |
+## Web Fetch
 
-关闭平台 Gate 后，Key 上已保存的 `web_search` 注入选择不删除；运行时忽略它。重新开启 Gate 后，该选择恢复生效。
+Web Fetch 读取公开 HTTP(S) 资源。HTML 通常提取正文并转为 Markdown；JSON、XML 与纯文本读文本。
+HTML 附问题不会替用户回答，返回 `question_applied=false`；
+图片或 Office 问答由[多模态理解](media-understanding.md)处理。
 
-Web Access 不另设总开关。`WebAccessSettings` 只包含 `search_provider_ids` 与 `fetch_provider_ids`，分别表示搜索与网页读取来源的有序选择；管理 HTTP 与 Desktop 使用同一结构。旧实例的 `web_access_enabled` 设置不再读写，也不再决定运行时可用性。该调整不自动启用 `web_search_config.enabled`，不改变 API Key、MCP 或网络安全校验。
+`:raw` 获取一次正文并严格解码，依次采用 BOM、Content-Type charset、HTML meta、默认 UTF-8；
+未知或损坏编码失败。默认阅读转换可有损，raw 正文不插入行号或提示。
+未知二进制明确返回未读取信息，不能用下载冒充读取；下载不启动模型。
 
-管理界面仅保留顶部 Web Search 启停开关。尚未绑定搜索目标时，页面与绑定编辑器默认呈现 External Route；用户需选择并保存有效 Route 才能启用搜索，不自动选择目标、启用能力或改写已有 Local／External 绑定。仅已保存的 Local 绑定显示来源与预算。Local 模式开启前必须有有效的已保存模型绑定，以及可用的搜索与网页读取来源；缺少配置时就地提供补齐入口。来源选择与排序独立即时保存，模型绑定和预算仍显式保存；启停不提交表单草稿，External Route 模式不依赖 Local 来源。
+响应受来源、批量公平预算与超时限制。内部研究网页请求允许 500,000 字符，其他读取缺省为 8,000 字符。
+显式较大预算可以提高批量总量，但不能超过供应商限制。
 
-## 4. Tool identity 与 surface
+例如 Exa 的 [Get Contents](https://exa.ai/docs/reference/get-contents) 结果保留 10,000 字符上限。
+触顶时如实报告源截断，不把源截断伪造成还有续页。
 
-统一入口与内部 Local 检索使用相同 wire name，但 registry 由受信执行环境分别装配，模型不能选择执行层级：
+## 安全与管理
 
-| Owner | Source Tool ID | Wire name | Hook/Platform | MCP | AgentToolRegistry |
-|---|---|---|---:|---:|---:|
-| Public router | `stravia-read` | `StraviaRead` | 是 | 是 | 否 |
-| Internal read router | `stravia-read` | `StraviaRead` | 否 | 否 | 是 |
-
-`GatewayBuilder` 先为内部 Agent 装配基础读取 router，再在外层 Hook/MCP registry 装配公开 router。外层 `stravia://search` 调用完整 Web Search owner；内部相同 path 只调用基础检索并拒绝研究续接 ID。两者的网页 URL 均复用现有 Web Access owner。插件通过 `PlatformTool::read_domain()` 贡献可判定领域、非空简短描述与处理入口；重复领域或冲突身份显式失败，不通过描述或加载顺序路由。
-
-Local Definition 使用 `id = "web-search-local"`、`slug = "web_search_local"`、Revision 3，并且 `exposure = Internal`。旧 Revision 续接报 `incompatible_definition_revision`，要求启动新研究；不改写历史指令或静默重开根。
-
-## 5. Backend
-
-### 5.1 Local
-
-`LocalSearchBackend` 通过 internal Agent Definition 执行 search/fetch loop：
-
-- 管理员选择一个对话推理用途的已启用逻辑 Model；模型执行 Local 研究时需能调用工具；
-- Web Access 设置提供 Local search/fetch Provider 与优先级；
-- `max_turns` 和 `total_time_seconds` 作为 `LocalSearchLimits` 传入；
-- deadline 取调用方 request deadline 与 Local total time 的较早值；
-- `SearchReportValidator` 对最终报告保留 URL 证据溯源，但不因模型改写或补写标题拒绝已验证的 URL。展示标题只取工具证据中的有界标题，没有则省略。
-
-Local 配置的 `backend.model_id` 保存逻辑模型的内部记录键 `models.id`，不是客户端请求使用的公开名称 `models.model_id`，也不是上游模型名。鉴权及每次能力推理均按内部键精确解析，不使用公开名称优先的回退查询。更改公开名称不改变已保存配置或 Local 续接的绑定；另一模型的公开名称即使等于该内部键，也不能接管搜索。所绑定模型停用或删除后仍拒绝执行。
-
-### 5.2 外部完整搜索：Vendor Plugin 与 Route
-
-本节是已实施的插件化契约，取代原 Codex 固定 Provider/账号与 upstream Model 的接入方式。详见 [Vendor 插件设计](vendor-plugins.md)。
-
-- 管理员为外部完整搜索绑定 Route，`backend.route_id` 仍保存公开名称 `models.model_id`，不改为 Local 使用的内部记录键。由宿主选择具备完整搜索能力的 Target；Codex hosted search 由其 Vendor Plugin 提供，与推理、媒体生成复用同一 Provider 的认证和连接设置。
-- 绑定只接受用途为 `web_search`（联网搜索）的 Route。Target 必须绑定 Provider 与非空白的真实上游模型；所选供应商渠道与模型须符合完整搜索能力，不检查文本、图片输出模态。Route 不参与普通推理目录或 Local Search；同一个供应商模型若也支持推理，可以分别绑定到不同用途的 Route。
-- 两种数据库的 `0057_route_purpose.sql` 保留现有 Route 和其他引用，把已存在的外部搜索目标复制到独立联网搜索 Route 并更新该绑定。曾被原 Route 输出模态排除的 Target 保留为禁用项，避免升级后意外纳入调度；失联绑定不重写，启停状态、预算和其他来源不变。被绑定的 Route 即使在搜索停用时也须先解绑才可切换用途。DDL 和数据转换在同一迁移事务中完成，使用既有不定进度。失败回滚，重启可重试；已完成的迁移不会在启动时重复执行。
-- 迁移验证使用 10,000 条 Route、10,000 条 Target 和 10,000 条 Provider Model 的合成快照，外部绑定有 30 个目标，其中 15 个在升级前符合输出模态。最终迁移保留原数据及这 15 个启用目标。文件型 SQLite（WAL、`synchronous=FULL`）实测迁移事务约 72 ms；PostgreSQL 16 的临时表夹具约 120 ms。SQLite 进程 RSS 高水位未变；PostgreSQL backend 已分配内存上下文约增加 0.2 MB。临时表及简化 schema 不代表生产写盘、内存峰值或完整启动时长。
-- [Parallel Responses](https://docs.parallel.ai/responses-api/responses-quickstart) 一类服务返回带引用的综合答案，属于完整搜索后端，不是基础检索来源。正式接入必须提供可选择的真实 Provider Model；该服务是设计参考，不自动列入本期正式供应商交付清单。
-- Google grounding 的 `https://vertexaisearch.cloud.google.com/grounding-api-redirect/<id>` 来源在生成报告前由宿主还原为重定向链的最终 URL；仅匹配精确来源形态，普通来源不额外请求。同次结果内复用重复地址的解析结果，先执行来源数量与 URL 长度限制，解析失败不删除来源或回退发布跳转 URL。解析复用 Web Access 的无正文安全重定向循环，沿用实际成功 Target 执行时的代理快照、取消与 deadline；直连校验全部 DNS 地址并固定连接，代理继续由代理解析源站，不伪称本地 DNS 固定。最终来源仍通过完整报告的公网 DNS 与允许域名检查。
-- 外部搜索每次独立执行，不提供续接或跨请求上游会话恢复，即使上游支持 previous_response_id 也不使用。Local 搜索续接及基础 search/fetch 配置保持独立，本次不扩展其 Provider 插件化。
-- 外部搜索沿用 Route 的选择、重试和 Target 切换策略；插件提供错误分类，宿主在结果提交前对明确可重试的上游错误决定重试或切换。取消、参数错误及权限错误不触发，结果提交后不重放；接受重复执行与重复消耗额度风险。
-- 插件归一答案和引用，宿主校验报告结构、引用、公网 URL、DNS 与允许域名策略，并继续执行平台 Gate、Principal 隔离及交付。External 不构造本地 evidence，也不要求来源 URL 或标题匹配 Local 工具记录；来源可靠性由供应商负责。基础链接列表不能冒充完整报告，缺失用量不能伪造为零。
-
-所有外部后端仍受调用方 cancellation、外层 request deadline、Target 能力资格、连接凭据、传输和响应大小限制及完整结果校验约束；流式接入还须验证其完成状态。不把供应商扩展权限视为平台工具注册权限。
-
-配置仍保存 Local budget 数值。外部搜索不执行 Local turns/time budget；切回 Local 后重新显示并校验原值。
-
-## 6. Admin 与持久化
-
-Admin REST canonical paths：
-
-- `GET` / `PUT /api/v1/web-search/config`
-- `GET /api/v1/web-search/eligible-models`
-- `GET /api/v1/web-search/external-routes`
-
-settings canonical key：`web_search_config`。配置包含 `revision`、`enabled`、backend binding、`max_turns`、`total_time_seconds` 和 `updated_at`。
-
-SQLite 与 PostgreSQL migration `0018_advanced_capabilities_web_search.sql`：
-
-- 把旧 settings 值移到 `web_search_config`；
-- 把 Turn kind 约束切换为 `web_search`；
-- 删除旧 Research Turn，因为 clean cutover 不允许跨 identity continuation；
-- 同时迁移 API Key 的 Transparent Injection 字段。
-
-## 7. 安全与日志
-
-### Web Access 静态规则与执行检查
-
-`stravia-web-access-contract::address_policy`（由 `stravia-web-access` 重导出）是 Web Access IP 分类与 HTTP(S) URL 静态规则的唯一所有者。`is_public_ip(IpAddr)` 分类一个地址；`allows_url(&Url)` 接受已解析 URL，只返回静态允许或拒绝，不分配、不重新解析 URL、不执行 DNS。域名静态通过不代表实际目的地址安全。
-
-core 保留输入修整、错误映射、准入与异步解析调度；`stravia-web-access` 的重定向解析与外部注入的 `WebProviderFactory` 适配器保留解析错误映射、每次重定向、已取得的全部 DNS 地址检查、连接地址固定和代理 DNS 分工。fetch 经代理时仍不新增本地 origin DNS；其他原有入口的解析检查也不删除。外部浏览器类适配器的 `about:`、`blob:`、`data:` 及子资源出口边界由各自适配器负责，不进入共享 HTTP(S) 规则。
-
-迁移前发现 `http://127.0.0.1../`、`http://192.168.1.1../` 的实际差异：core 去除尾随点后按 IP 拒绝，adapter 原先按域名静态接受。经维护者明确授权，共享规则采用 core 的既有拒绝语义；这是 adapter 静态接受范围的一项收紧，不是完全行为等价的重构，也不构成已证明的 SSRF 绕过结论。core 的 Unicode `trim()` 与 adapter 原始输入解析差异保留。
-
-维护时先运行共享分类和现有 fetch/browser 执行测试，再运行受影响 crate 检查与仓库工作流。分类测试不能替代混合/空/失败 DNS、私网重定向、代理不解析 origin、socket 出口与真实浏览器子资源的行为验证。有限输入的迁移前后比较不是所有地址和 URL 的形式化等价证明。
-
-### Search Source 与日志
-
-- URL normalization 和 DNS 检查拒绝 localhost、私网、非 HTTP(S) 和解析到非公网地址的 source；
-- Local 网页内容是不可信数据，不得作为指令执行；
-- progress event 只包含 call ID、phase 和 ordinal；不包含 query、URL、报告、usage 或凭据；
-- audit identity 使用 `web_search` / `search_turn_id`，上游尝试沿用 Route / Vendor 观测身份；
-- 对外错误使用 `WEB_SEARCH_*` 或 `web_search_*` identity，不返回 Provider raw body、OAuth token、API key、headers 或堆栈。
-
-## 8. Breaking upgrade 与回滚
-
-这是 clean cutover，不提供 alias：
-
-- 旧 `/web-research/*` REST path 不再存在；
-- 旧 `web_research_config` settings key 只由 migration 读取一次；
-- 旧 `kind = "web_research"` Turn 被删除，不能续接；
-- 旧 `allow_web_research` 和 `web_search_injection_enabled` API Key 字段被删除；
-- 旧二进制不能安全读取迁移后的 schema。
-
-升级前必须同时备份数据库和当前二进制。回滚必须停止新二进制，并恢复 migration 18 之前的数据库备份与匹配的旧二进制；不能只回退应用文件，也不能把新 schema 手工解释为旧权限模型。
-
-## 9. 验证边界
-
-- 插件化目标：真实 Wasm 经公开搜索入口执行，覆盖同连接多能力、必填上游模型及能力资格、Route 重试切换、外部续接拒绝与 Local 续接保留；使用本地上游，不调用收费生产服务。
-- 能力移除：保留受影响绑定并明确不可用；内置 `base` 自动更新不为能力移除或按格式版本差异重置数据暂停确认；本地包更新和手动恢复仍须确认数据丢弃。兼容在途搜索使用旧版完成，不兼容更新取消并阻止迟到报告提交。
-- Admin API：配置读写、Local/External Route validation、旧字段拒绝；
-- Gateway public contract：Gate、有效 Key、显式调用、Transparent Injection 与 MCP 组合；
-- Search contract：Search Report provenance、continuation、branch、`stravia://turns/<turn-id>`，以及 `stravia://turns/<turn-id>/sources/<ordinal>` / `[stravia://turns/<turn-id>/sources/<ordinal>]` 的 Source 对应关系；
-- registry：三个 source Tool ID 不同，public composite 不进入 Agent registry，internal leaves 不进入 MCP；
-- migration：SQLite/PostgreSQL schema parity、settings 值迁移和旧 Turn 失效；
-- WebUI：Advanced Features 导航、Local/External Route 切换、失效 Route 显示和 Local 值恢复。
+- [Web Access 公网规则](web-access-providers.md#公网读取安全)适用于实际读取和重定向；
+  静态筛查不能代替执行时检查。Local 证据必须由真实工具调用获得，上传快照的来源注记不能授予证据身份。
+- 网页及供应商输出不可信。普通进度事件只暴露标识、阶段、序号；
+  错误不返回原始报文、凭据、请求头或堆栈。
+- Admin 使用 `GET/PUT /api/v1/web-search/config`、`GET /api/v1/web-search/eligible-models` 与 `GET /api/v1/web-search/external-routes`；
+  `web_search_config` 拥有 Revision、启停、backend 绑定与 Local 预算。
+- 未绑定时配置页默认呈现 External Route，不自动选择、绑定或启用。仅已保存的 Local 绑定显示来源和预算；
+  来源优先级独立保存，模型和预算显式保存，启停不会提交草稿。
+- 已绑定 Search Route 即使停用也须先解绑才能改用途。External 不要求 Web Provider；
+  切回 Local 时重新校验保留的 Local 预算与来源。

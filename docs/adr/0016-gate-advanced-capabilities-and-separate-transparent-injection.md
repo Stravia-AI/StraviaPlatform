@@ -4,22 +4,12 @@ status: accepted
 
 # Gate advanced capabilities at platform level and separate transparent injection
 
-> **有意例外。** [ADR-0096](0096-recall-interaction-chains-through-read-paths.md) 的历史回看只经透明注入提供，没有显式调用或 MCP 入口，因此 Key 上的「历史回看」选择同时决定它是否可用；本 ADR 对 Advanced Capability、Platform Capability Gate 与其他注入项的决定不变。
+## 背景与决策
 
-Stravia 将用户可见的“多模态理解”和“联网搜索”定义为两个独立的 platform-gated Advanced Capability。每个总开关打开后，所有有效 API Key 都可以显式使用对应能力；关闭后任何 Key 都不可用。API Key 不再持有 `allow_web_research` 或 `allow_media_understanding` 能力授权，只保留独立的 MCP 访问开关，以及“透明注入”总开关和多模态理解/联网搜索的功能选择。透明注入只控制客户端未显式声明时的自动工具暴露，不影响显式工具调用或 MCP；平台能力关闭时，既有 Key 的注入选择保留并置灰，重新开启后恢复。
+Platform Capability Gate 决定一项高级能力是否可用；Gate 开启后，有效 API Key 可走该能力支持的显式入口。MCP 单独检查 Key 的访问开关。透明注入只决定未显式声明时自动暴露哪一项能力，不充当显式授权，也不会在平台 Gate 关闭时绕过它。Key 记录透明注入选择集合；平台关闭某项时不丢掉已保存选择。
 
-## Considered options
+基础 `StraviaRead` 不依赖联网搜索、多模态理解或媒体生成被选中，也不因此获得跨 Principal 读取或高级能力权限。历史回看是透明注入专用能力，没有显式或 MCP 入口（[ADR-0096](0096-recall-interaction-chains-through-read-paths.md)）。
 
-- **保留 API Key 能力授权**：权限更细，但与“平台开启后所有 API Key 可用”的产品模型重复，并造成平台总开关、Key grant、透明注入三层难以解释的权限。
-- **让透明注入控制全部调用面**：开关更少，但会把客户端显式工具调用和 MCP 意外绑定到自动暴露策略。
-- **开启透明注入即暴露全部能力**：新增 Advanced Capability 可能自动暴露给已有 Key；功能多选能保持最小自动暴露范围。
-- **保留图片能力细节卡片**：格式、大小、像素和处理限制属于运行时约束，不应占据管理员配置主界面；本期名称可扩展到 PDF、视频和音频，但运行时仍只支持 JPEG/PNG/WebP。
+## 权衡
 
-## Consequences
-
-- API Key 权限 schema 是 clean cutover：删除旧 `allow_*` 与旧单布尔注入语义，迁移既有自动行为到新的注入选择；旧能力授权字段不再控制显式可用性。
-- MCP 发现和调用仍要求 API Key 的 MCP 开关，并受平台总开关约束；透明注入关闭不会隐藏已允许的 MCP 工具。
-- 透明注入总开关开启即自动提供基础 `StraviaRead`，支持所属 Artifact 下载与工具执行状态／结果查询，不依赖联网搜索、多模态理解或媒体生成是否被选中。联网与媒体理解仍仅在相应选择和平台 Gate 均允许时进入本次执行范围；基础 Read 不赋予跨 Principal 读取、联网或媒体理解权限。
-- 平台配置在“高级功能”分组下保留多模态理解与联网搜索独立页面；多模态页面只保留总开关、逻辑模型、状态和保存动作。
-- “多模态理解”是当前 Media Understanding 的用户可见名称；未来格式扩展使用新的 Definition Revision，不把长期目标误报为本期支持。
-- 平台开启高级能力会扩大所有有效 API Key 的显式权限；这是有意接受的管理员级风险，必须在平台总开关上保持清晰状态。
+逐 Key 授权与平台 Gate、透明注入重叠，易误解；启用注入时自动暴露所有能力，则可能向已有 Key 静默加入新工具。独立 Gate 与显式选择集合分开可用性和自动暴露，管理员须了解开启平台能力会扩大显式权限。详见 [平台能力门禁与透明注入](../design/agent-core.md#平台能力门禁与透明注入)及[集合决策](0097-store-api-key-transparent-injections-as-a-set.md)。

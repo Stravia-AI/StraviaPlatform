@@ -1,45 +1,16 @@
 # 媒体生成
 
-本文记录媒体生成的功能契约，不作为验证结果报告。架构取舍见 [ADR-0061](../adr/0061-bind-media-generation-to-routes.md)，领域术语见 [CONTEXT.md](../../CONTEXT.md)。
+媒体生成目前只支持文本生图与参考图编辑。公开工具的 wire name 是 `generate`；两种操作使用同一个工具和图片 Route。
+显式调用、MCP 与自动暴露见[平台能力门禁与透明注入](agent-core.md#平台能力门禁与透明注入)；
+有界等待及后台状态查询见[工具执行交接](agent-core.md#工具执行交接)。
 
-## 1. 范围与入口
-
-Media Generation 的用户可见名称为“媒体生成”，属于 Advanced Capability。统一工具名为 `generate`；本期只支持图片生成与参考图编辑，首个接入后端为 Codex，不提前公布音频或视频类型。
-
-当前接入 Codex 托管图片工具、Antigravity 原生图片模型，以及内置 `base` 的 MiniMax、火山引擎（Volcengine Ark / BytePlus ModelArk 及相关 Plan）与阿里云百炼（Alibaba / DashScope 及 Token Plan）图片模型。文生图与参考图编辑共用同一个 `generate` 入口和图片模型；是否提供 `reference_images` 决定本次操作，不拆出独立的编辑工具或模型。工具通过平台执行，支持显式调用、MCP 及可选透明注入。媒体生成使用独立平台总开关，关闭时所有入口均不可执行。总开关开启后，所有有效 API Key 可显式调用；MCP 另受既有 MCP 开关约束。API Key 增加“媒体生成”透明注入选项，新建及已有 Key 均默认不勾选；该选项只控制自动暴露，不是能力授权。沿用 [ADR-0016](../adr/0016-gate-advanced-capabilities-and-separate-transparent-injection.md)。
-
-透明注入总开关开启时同时提供基础 `StraviaRead`：所属 Artifact 的下载及公开工具执行状态／原始结果查询不依赖联网、多模态理解或媒体生成选择。联网与媒体理解仍按各自 Gate 和注入选择限制，不因基础 Read 自动开放。
-
-## 2. 工具输入
-
-按 `type` 与 `input` 建立判别联合，不采用任意 JSON 参数袋，不将不同媒体类型的所有字段平铺为可选项。
-
-```ts
-type GenerateInput = {
-  type: "image";
-  input: {
-    prompt: string;
-    aspect_ratio?: "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
-    resolution?: "1K" | "2K" | "4K";
-    reference_images?: string[];
-  };
-};
-```
-
-- `type`、`input`、非空 `input.prompt` 必填；未知类型和未知字段明确拒绝。
-- `aspect_ratio`、`resolution` 为生成偏好，不保证精确输出；省略时采用当前后端默认行为。
-- 比例、分辨率档位及上游尺寸字段的转换由对应 Provider 的媒体生成适配实现拥有，允许近似映射。统一工具不维护供应商映射表，不新增 `image_size` 或供应商专用字段。
-- `reference_images` 省略或为空表示文字生图；有参考图时按提示词执行编辑或参考生成。数组顺序对应“图 1、图 2……”；不得静默忽略或截断参考图，超出后端能力时明确失败。
-- 不接受工具级 `model`、`provider`、`route`、`count`、`action` 或历史图片数量索引。每次成功返回一张图片。
-- 未来新增类型时增加其专属输入分支；不要求音频、视频沿用图片的 `prompt` 或参考图角色，也不改变已有图片字段语义。
-
-结构示例（引用 ID 为占位，不是有效调用值）：
+## 工具输入
 
 ```json
 {
   "type": "image",
   "input": {
-    "prompt": "保留参考图中的小屋，将背景改为雪山，水彩风格",
+    "prompt": "保留参考图中的小屋，把背景改为雪山",
     "aspect_ratio": "16:9",
     "resolution": "2K",
     "reference_images": ["stravia://artifacts/<artifact-id>"]
@@ -47,197 +18,142 @@ type GenerateInput = {
 }
 ```
 
-## 3. 文件输入与输出
+| 字段 | 规则 |
+| --- | --- |
+| `type` | 必填，目前只接受 `image`。 |
+| `input.prompt` | 必填非空白。 |
+| `input.aspect_ratio` | 可选，`1:1`、`3:4`、`4:3`、`9:16`、`16:9`。 |
+| `input.resolution` | 可选，`1K`、`2K`、`4K`。 |
+| `input.reference_images` | 最多 5 项；顺序对应「图 1、图 2……」。省略或空数组表示文生图。 |
 
-参考图接受所属 Principal 的 Artifact Reference（`stravia://artifacts/<artifact-id>`）或公网 HTTP(S) 图片 URL，不接受客户端本地路径。客户端本地文件先通过现有上传入口取得引用；工具不另设 base64 或上传参数。
+拒绝未知字段；不接受调用方覆盖 model、provider、route，也不接受 count、action 或历史图片索引。
+尺寸档位只是偏好，映射由所选适配器决定，可能近似或使用供应商默认值。
+每次成功只返回一张图片，不能静默截断参考图或忽略它们改做文生图。
 
-- Artifact Reference 必须校验当前 Principal 的归属、保留期及图片内容可用性，引用本身不授予访问权。
-- 公网图片 URL 必须沿用既有网络安全与大小限制，先收存为当前 Principal 的 Artifact，再开始上游生成；收存失败不透传原 URL、不忽略附件继续执行。
-- 输入是图片来源，不承载 `StraviaRead` 的 `question`、`download` 等操作选项。
-- 向 Provider 交付输入内容时复用现有媒体传输规则，不把 `stravia://` 引用直接交给上游，也不将客户端或服务端本地路径作为上游可读地址。
-- 上游返回的图片必须完整收存为当前 Principal 的 Artifact 后才能成功。上游 URL、base64 和本地存储路径不是工具的公开产物身份。
+## 图片输入与产物
 
-成功结果：
+接受不带选择器的所属 Principal Artifact 引用或公网 HTTP(S) 图片 URL。参考图只支持 JPEG、PNG、WebP，每张最多 32 MiB、25 百万像素，单边不超过 8,192 像素；供应商可有更严限制。
+不接受客户端路径或 inline base64；本地文件走 [Artifact 上传](agent-core.md#artifact-与单请求上传)。
+公网输入先安全收存并校验，不透传原始 URL；上游不接收 `stravia://` 引用。
 
-```ts
-type ImageGenerateOutput = {
-  path: string; // stravia://artifacts/<artifact-id>
-  mime_type: string;
-  size: number; // 文件字节数
-  download_url: string; // 15 分钟 bearer 下载授权，不是稳定身份
-  media: {
-    width: number; // 实际像素宽度
-    height: number; // 实际像素高度
-  };
-};
-```
+成功前验证图片并完整收存到当前 Principal。结果包含：
 
-`media.width` 与 `media.height` 从实际生成文件读取，不以请求参数代填。结果不重复返回裸 Artifact ID，也不重复返回推算比例或分辨率档位。其他媒体类型的 `media` 字段随对应能力定义。
+- `path`：稳定、可复用的 `stravia://artifacts/<id>`。
+- `mime_type` 与 `size`：实际格式和字节数。
+- `media.width` 与 `media.height`：解码所得实际像素，不以请求参数代填。
+- `download_url`：15 分钟 bearer 下载链接，不是文件身份，不另返回 `expires_at`。
 
-新生成结果直接附带 `download_url`，不增加 `expires_at`。它使用所属 Principal 的既有 15 分钟 bearer 下载授权，固定从配置的完整 `client_base_url`（含协议、端口及部署路径）经过平台读取实际存储文件，即使开启外部签名下载也不改用 S3 或文件公开入口。此规则不改变 Provider 交付及 `StraviaRead({"path": "stravia://artifacts/<artifact-id>:download"})` 的既有下载策略，也不回写历史结果；异步执行查询原样保留生成结果中的链接，不自动续期或重新生成。
+工具结果的链接始终从已配置完整 `client_base_url` 通过平台读取，即使启用 S3 直连也不改用外部地址。
+生成前校验该入口。展示用 `![图片描述](download_url "stravia://artifacts/<artifact-id>")`，在 title 中保留稳定引用；
+失效后用 StraviaRead 取得新链接，不重新生成。后台查询原样返回链接，不自动续签。
 
-工具描述要求用 `![图片描述](download_url "stravia://artifacts/<artifact-id>")` 展示结果，代入实际链接和稳定 `path`；title 在链接失效后保留产物身份，不代表自动续签或重新生成。有效链接的展示不要求额外调用 Read，稳定 `path` 仍用于后续参考图复用。
+产物已保存但链接签发失败时，返回 `artifact_download_failed` 并携带 `artifact` 的路径、MIME、大小和像素规格；
+保留产物，不重跑上游。文件和签名授权的生命周期见 [Artifact 契约](agent-core.md#artifact-与单请求上传)。
 
-调用上游前必须校验客户端入口非空且有效。图片已落盘但链接签发失败时，工具返回 `error.code = "artifact_download_failed"` 及 `artifact`（包含原 `path`、`mime_type`、`size`、`media`），保留图片与 Artifact，不重跑生成；调用方可使用保留的引用获取新的下载授权。保留期、归属、上传与下载授权沿用 [ADR-0048](../adr/0048-separate-artifact-references-from-transfer-grants.md)、[ADR-0049](../adr/0049-snapshot-explicit-media-inputs-as-artifacts.md) 和 [ADR-0051](../adr/0051-disambiguate-artifact-download-and-understanding.md)。
+## Route 与 Provider 接入
 
-### 公开工具的等待与执行引用
+管理员在「高级功能 → 媒体生成」绑定一个已保存、启用且有可执行 Target 的 `image_generation` Route。
+Route 的 `purpose` 是单一用途，不和 `inference`（对话推理）或 `web_search`（联网搜索）混用。
+媒体配置引用存在时，即使关闭总开关也不能改为其他用途；需明确解绑，停用或删除 Target 不等于解绑。
 
-`generate` 与 `StraviaRead` 的 MCP、显式调用及透明注入共享 Core 执行模块。工具元数据可声明同步等待窗口，未声明时为 60 秒；等待包括平台排队与输入准备，不改变原有 15 分钟执行期限。窗口内完成继续返回原结果或原错误，不强制增加任务封装。内部 Agent 的基础读取保持同步内容契约。
+- 图片输出资格按 Provider Model 的原始登记判定。缺失、空输出集合、仅有图片输入都不等于图片输出；
+  强制可用不能绕过资格。绑定、候选查询和执行前均校验。
+- 一个图片 Route 可混合文本输入与支持参考图的模型。带参考图时还要求实际模型明确登记图片输入；
+  资格在重新选路与发送前复验，不依据旧附件标志。
+- 输出模态漂移时保留 Target 及绑定，排除失配项，兼容目标仍可执行。
+  适配器能力与输出登记分开校验：其他适配器不兼容不能静默跳过，禁用项不参与运行态适配器检查。
+- 没有可执行目标时在上游发送前失败。`media_generation_targets_purpose_mismatch` 指向登记或 Target 失配，不是启用状态错误。
+- 合格 Target 使用同一套优先级、均衡/延迟偏好、冷却、重试和切换规则。原生、托管、文生图与图生图不各排优先级；
+  独立生成不建立 Continuation 或 Affinity。
 
-窗口耗尽且后台交接已持久化时，返回 `{"path":"stravia://tool-executions/<id>","status":"pending"}` 或 `running`。执行引用标识一次平台执行，不是模型 Tool Call ID、History Marker 或 Artifact；它不代表图片已生成。交接前原调用断连或取消会取消本地执行，交接后执行独立继续，即使引用未能发送给客户端。交接存储失败明确报错，不返回未持久化的引用。
+管理创建 Route 时显式提交用途，表单默认对话推理。仅一键接入可在创建时按推理、图片、搜索顺序推断首个合格用途；
+显式绑定只向既有 Route 添加 Target，缺失返回 `ROUTE_NOT_FOUND`。切换用途前须校验所有保留的 Target，包括禁用项；
+可同次替换失配项，不自动删除绑定。
 
-交接使用显式事务：等待数据库锁及更新期间仍可由原请求取消；不可逆 `COMMIT` 前在短同步临界区检查取消事实，已取消则回滚。进入提交后，断连与尚未决议的提交属于并发操作，由实际事务结果收敛，不把 ACK 返回后的调度先后当作物理落盘时刻。成功提交不能被晚到取消推翻；提交报错时，若读回能确认已经持久交接则保留后台执行，否则明确报告存储故障，不声称已经回滚，也不自动重放。原执行期限和 Gateway 关闭仍可中断执行；来源诊断清理不拥有执行生命周期。
+**既有 Route 的用途。** SQLite 与 PostgreSQL 的 `0022_default_existing_routes_to_text.sql` 仅把未配置输出的历史 Route 回填为文字，保留明确选择的文字或图片；
+`0057_route_purpose.sql` 分别映射为 `inference` 与 `image_generation`。原 Route、Target、启用状态、调度设置及图片绑定保留；
+外部搜索使用独立复制的 `web_search` Route，不改写原目标用途。原先不具备输出资格的搜索目标在副本中保持不可调度。
+若旧图片引用指向了现在的对话 Route，需修复用途与失配目标、改绑或解绑；这不使历史对话 Route 本身不可执行。
+通用的备份与耐久规则见[升级迁移原则](data-layout-performance.md#升级迁移原则与约束)。
 
-隐藏调用的 History Marker 必须先持久化、实际交付并经 Sent 确认后 publish，之后才能启动领域工作。Marker 发布不是后台交接：交接前原请求断开且取消获胜时，即使 Marker 已发布，也保存原调用与明确的取消 tool output；恢复不依赖旧 Hook 会话，不改成笼统的交付处理错误。已完成的终态不被随后断线改写。
+[Vendor Plugin](vendor-plugins.md) 拥有发现、上游参数与结果解析，宿主拥有工具、权限、输入处理和产物。
+同步只更新未固定的规格；目录能力、当前账号授权与实际生成成功是三件事。
+更新后失去能力的绑定保留并显示不可用，不自动改绑。
 
-领域最终结果与 Marker 的本次交付结果分别持久化。常规交付由所属 Inference Run 的 ToolResult Hook 处理后封存；交付的是执行引用时，Marker 以后仍恢复该次引用，不随后台完成而替换。除系统确定的取消结果外，原请求消失导致 Hook 无法完成时，Marker 保存明确交付处理错误，不放行原始成功结果；这不取消已交接工作，也不改写其独立最终结果。后台完成不调用旧 Hook，后续查询输出由查询所属请求的 Hook 处理。
+### Codex OAuth
 
-用 `StraviaRead({"path":"stravia://tool-executions/<id>","body":{"wait":120}})` 查询。省略 `wait` 或设为 `0` 立即返回；正整数表示本次查询最多等待的秒数，可超过初次 60 秒窗口，但不得越过查询请求与原执行的剩余期限。完成会提前唤醒所有等待者；取消查询只停止自己的等待。重复查询不重新执行、不创建后台查询任务、不延长执行或保留期。`wait` 只适用于执行引用，其他 path 携带正整数 `wait` 时明确拒绝，`0` 与 `null` 视为未传；非法值与未知字段同样明确拒绝。
+复用 Route 所选 Codex Provider 账号和连接，以 Responses 的 `tool_choice` 强制 `image_generation`，从完成的流式结果提取单图；
+不调用 Codex CLI，也不切换到独立 Images API 或其他 API Key。
 
-未完成时返回稳定 `path` 与真实 `pending` / `running` 状态；完成时返回 `{"path":"…","status":"completed","result":<原工具结果>}`。原结果中的 Artifact、报告与分页引用继续按原规则消费。原任务失败或进程重启中断时，查询本身成功，返回 `failed` / `interrupted` 与 `error`，不设置本次读取的工具错误标志。未知、过期、被清理或不属于当前 Principal 的引用是查询错误；未知与其他 Principal 的引用不泄露存在性。
+同步只用明确的 `media_image`、图片输出声明或 `experimental_supported_tools` 中的 `image_generation` 判断能力，不猜型号前缀和版本。
+`input_modalities` 与 `supports_image_detail_original` 只说明输入。保留真实文字输出；
+不会把图片专用或显式空输出的条目补成聊天模型。
 
-已完成结果在保留期内跨重启可读；重启中断未完成执行，不自动接管或重放，旧 owner 或迟到完成不能覆盖已确定的终态。MCP 与 Inference Run 的公开执行均独立于来源诊断：诊断被保留期回收、手动清理、缺失或写入失败不取消已交接工作、不使有效引用失效。运行中沿用原始 deadline；完成、失败或被判定中断时，从该时刻按现有历史保留时长独立保留结果，不借用来源诊断剩余寿命，不因查询续期，也不新增 TTL 配置。
+### Antigravity
 
-清理执行引用不删除独立 Artifact；Artifact 仍可能按自己的保留期先到期。取消仅保证本地停止和迟到提交隔离，不保证供应商已停止或不再计费。后台任务保留创建时的 Principal、RootRequest、权限、路由、安全和 RPM 归属。
+从账号 `fetchAvailableModels.imageGenerationModelIds` 发现能力，解析已声明的废弃 ID 重定向并过滤禁用项。
+使用真实模型 selector，不按推理档位折叠、猜测图片输入或取广告列表首项。相同 ID 的真实文字能力保留。
 
-启用 Debug 时，执行同样保留来源 Run / Trace：Agent 或其他请求内调用工具，其参考输入的远程读取及供应商收发写入来源请求的诊断包；转后台不建立新的工具包。无父请求的独立 MCP 调用才建立独立观测。Debug 导出保留既有固定截止水位，后台完成后的内容需要重新导出；历史缺失字节不补录。
+复用 OAuth、project 和连接。`POST /v1internal:generateContent` 使用定长 JSON，`requestType: image_gen`，提示词在有序 `inlineData` 参考图之前，`candidateCount: 1`；
+缺省 `aspectRatio: "1:1"`，显式档位映射为 `imageSize`。不加 SSE、system 指令或 `responseModalities`。
+响应必须以 `STOP` 完成且恰有一张有效 `inlineData` 图片，解码上限 32 MiB。
 
-SQLite / PostgreSQL 的增量迁移 `0024_independent_tool_execution_retention.sql` 在既有公开身份与结果之上，移除来源删除触发器、清理 fence 与来源 lifetime 计算，保留执行 owner／lease、deadline 及终态不可覆盖保护。升级前仍可查询的旧终态结果保留原引用与结果，从迁移时刻获得完整的新保留窗口；迁移起点单独记录，未知的实际完成时间保持未知。已不可查询或已删除的结果不复活、不补造。升级前停机备份完整数据根与外部数据库；回退必须恢复备份，不能以旧二进制打开升级后 schema。
+### MiniMax
 
-## 4. Route 与 Provider 接入
+内置 `base` 的普通国际/中国区和 Coding Plan Profile 共用此适配器。同步读取官方[文生图](https://platform.minimax.io/docs/api-reference/image/generation/api/h3-image-generations.json)和[参考图编辑](https://platform.minimax.io/docs/api-reference/image/generation/api/h3-image-edits.json) OpenAPI（中国区使用对应文档域），仅沿已实现 request schema 读取 `model.enum`。
+编辑枚举只为已发现同型号增加图片输入。两份 schema 都必须成功；
+失败保留上次库存，不伪报同步成功。
 
-管理员按生成类型分别绑定 Route，当前仅有图片绑定。调用方不能覆盖该绑定。Route 持久化单一的 `purpose`：`inference`（对话推理）、`image_generation`（图片生成）或 `web_search`（联网搜索）。新建表单默认对话推理，管理创建请求必须显式提交用途。Provider Model 可以同时登记文字和图片输出，能接收图片不等于能生成图片。这一用途约束取代先前不引入 Route 输出类型的限制，但维持图片 Route 的现有协议行为；联网搜索 Route 不参与普通推理。
+按参考图有无选择 `/v1/images/generations` 或 `/v1/images/edits`，固定单图非流式 base64 返回；
+`aspect_ratio` 直接映射，分辨率映射到 `area`，参考图用有序 data URI。官方区服使用对应图片域，自定义基址保留部署前缀。
+上游可等待最长 600 秒，仍受平台时限约束。
 
-候选及写入资格以 Provider Model 原始持久化快照的输出登记为准；缺失模态、缺失输出、显式空输出列表和仅登记其他输出均不赋予推理或图片生成用途资格。联网搜索用途不检查输出模态，由供应商的 Search 能力决定。既有读取场景的文字回退不是能力登记；准备流程已实际保存的文字输出则按真实登记处理。Effective Availability 等既有约束继续生效，强制可用不能绕过模态要求。Core 统一校验所有管理入口；新增绑定和切换用途时，所有提交保留的 Target（包括禁用项）均须匹配。允许同次替换失配项，不自动删除绑定，失败不更改原配置且编辑器保留草稿。
+Plan 使用订阅额度和已有 Credits，按量 Key 使用账户余额。图片本身受周额度限制；
+若开启五小时 Provider 级守护，耗尽仍会连带暂停同连接图片 Target，见[额度守护决策](../adr/0078-suspend-provider-routing-on-guarded-allowance-exhaustion.md)。
 
-已有 Target 的读取投影提供 `route_purposes`，由 Core 解析其模型身份（含历史别名）后按原始登记计算，不与当前可用性混合；新候选的 Provider Model 摘要仍同时约束可用性。历史 Target 可在保留原模型标识的情况下明确保存匹配用途，不要求客户端复制别名匹配或重写绑定。
+### 火山引擎 / BytePlus
 
-只有 OneClick（一键接入）可为新 Route 推断用途：按对话推理、图片生成、联网搜索的顺序选择首个合格用途，均不合格则拒绝。不添加 Route ID 后缀；已有 Route 以其已配置用途为准，不能通过重复绑定绕过待配置或失配检查。显式绑定只向已有 Route 增加 Target；Route 不存在时返回 `ROUTE_NOT_FOUND`，不隐式创建或推断用途。
+内置 `base` 的标准 Ark 与 BytePlus 通过 `GET {base}/models` 的图片输出、接口或领域声明发现图片模型，以明确图片输入或 `image_to_image` 判定编辑资格。
+Agent/Token Plan 尝试 `/api/plan/v3/models`，404 时保留目录已声明或人工登记的资格；
+Coding Plan 不广告未开放的图片操作。
 
-图片生成绑定只接受用途为图片生成、已启用且有可执行 Target 的 Route，并在候选读取、配置保存和每次执行前校验。图片输出声明不能替代真实媒体生成适配器资格。后续规格变化导致输出模态失配时，保留 Target 并显示原因，执行时先将其排除；其余合格 Target 继续按既有调度、重试和切换策略执行，全部失配或无可执行 Target 时在上游发送前明确失败。登记修复后原绑定可恢复资格。仅输出模态失配采用该排除规则：对剩余已启用 Target 仍执行原有适配器检查，其他适配器不兼容仍使媒体路由校验或执行失败，不静默跳过；禁用 Target 不参与该适配器检查。
+生成和编辑统一请求 `{normalized_base}/images/generations`，Plan 规范化到 `/api/plan/v3`，自定义前缀保留。
+固定 `response_format: "b64_json"`；比例和档位近似映射为 `size`，参考图通过 `image` 传单字符串或数组（适配器单张 30 MiB、整包 64 MiB）。
+32 MiB 响应上限；缺少 `output_format` 时按 PNG/JPEG/WebP 字节头识别，再由宿主解码校验。
 
-图片 Route 可同时绑定文字输入、图片输出的文生图模型，以及文字和图片输入、图片输出的图生图模型。`reference_images` 省略或为空时，两类均参与调度；有参考图时，只保留原始 `modalities.input` 明确登记图片输入的 Target，不以旧附件标志或扩展能力代替登记，也不通过忽略参考图降级执行。每次重新选路及实际上游发送前均复核资格，规格漂移后立即排除；没有合格 Target 时在上游发送前失败。
+### 阿里云百炼 / DashScope
 
-输出和本次输入资格仅决定候选集合，不为原生生图、托管图片工具、文生图或图生图另设优先顺序。合格 Target 复用文字 Route 的优先级、组内流量均衡或延迟偏好、冷却、重试与失败切换；独立 `generate` 操作没有对话历史，不凭空建立 Continuation 或 Affinity。`media_generation_targets_purpose_mismatch` 表示应修复输出登记或替换失配 Target；它不是启用状态错误，不应引导管理员重复启用已经启用的 Route 或 Target。
+内置 `base` 的标准国际/中国区和 Token Plan 支持同步图片接口，Coding Plan 不声明此能力。
+目录 `GET {api_root}/api/v1/models` 根据 `IG`、Image 输出和 Text 输入发现候选，Image 输入登记编辑能力；
+排除旧异步或已下线模型。Token Plan 缺少 Key 或 404 时保留目录已声明及人工登记的条目。
 
-媒体生成配置对 Route 的引用即使总开关关闭也阻止修改为其他用途。必须先清空图片生成 Route 引用；管理页支持解除绑定并同时关闭功能，关闭总开关或删除 Target 均不等于解绑。失效旧引用保留供修复，仍允许关闭功能或明确解绑，不将管理员锁在无效配置中。
+文生图和编辑共用 `/api/v1/services/aigc/multimodal-generation/generation`。参考图先于提示词，以 data URI 放入 `input.messages[0].content`；
+适配器单张限 20 MiB、整包 64 MiB。尺寸按型号映射 `宽*高`；
+Wan 2.7 仅指定分辨率时传档位，`wan2.7-image-pro` 的 4K 仅限文生图。
 
-**升级迁移：SQLite 和 PostgreSQL 的 `0022_default_existing_routes_to_text.sql` 将全部未配置输出用途的历史 Route 统一设为文字，已明确配置的文字或图片先保留：随后 `0057_route_purpose.sql` 将文字和图片分别映射到对话推理和图片生成。** 它覆盖尚未应用和已经应用 `0021_route_output_modality.sql` 的实例，不改写旧迁移 checksum。Route ID、展示名、Target、启用偏好、优先级、超时、重试及其他调度参数和图片生成引用均保留；不自动启用禁用项，也不修改 Provider Model 规格或绕过资格校验。历史图片生成引用若指向被回填为文字的 Route，须明确改为图片用途并修正失配目标，或更换、清空引用。重启不会重置已保存用途。升级前停机备份完整数据根和外部数据库；回退须恢复备份，不能让旧二进制打开升级后 schema。冻结基线和增量升级规则见 [ADR-0073](../adr/0073-cutover-to-single-baseline-schema.md)。
+接受单张 Data URL 或符合插件白名单的临时 OSS 结果；后者用无凭据 GET，限制 32 MiB 并验证实际格式。
+不会把任意返回 URL 当作可信下载地址。
 
-按照已确认的 [Vendor 插件设计](vendor-plugins.md)，媒体生成可以与推理、完整搜索由同一 Vendor Plugin 和 Provider 连接提供，也可以是插件唯一的能力。沿用 Provider Model → Target → Route；Provider Model 可表示纯图片模型，不以聊天能力为前提，普通聊天执行不得选择不具备其所需能力的 Target。
+## 失败、重试与额度
 
-插件拥有供应商参数映射、请求及结果解析；宿主继续拥有公开 generate 工具、权限、输入处理、Artifact 收存与交付，不允许插件自行注册 MCP 工具。能力移除更新保留绑定并明确不可用；内置 `base` 自动更新不为此暂停确认，不兼容数据按格式版本差异自动重置；本地包更新和手动恢复仍须确认数据丢弃。兼容在途生成使用旧版本完成，不兼容更新取消生成并阻止迟到结果提交。
+Route 只按既有可重试错误策略重试或切换。参数错误、参考图读取/收存失败和取消不归类为上游可重试错误；
+产物收存或链接失败不为恢复本地写入重跑生成。响应没有恰好一张有效图片，或收存失败，均不能报告成功。
 
-Codex 参考 [OMP image-gen.ts](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/tools/image-gen.ts) 的实现方式：
+上游错误按内容审核、配额、限流、参数/模型等类型处理，明确拒绝不作为断流盲目重试。
+Antigravity 只给明确政策 `finishMessage` 的拒绝也归类为 `ContentFiltered`，不切换或计入共享健康失败。
+公开错误保留已脱敏的可解释原因，认证及 HTTP 401/403 只给安全摘要。
 
-1. 通过 Route 选择 Target，复用相应 Codex Provider 的账号、认证和连接设置。
-2. Target 上游模型须明确具备所选 Responses 托管图片工具能力，不按型号名称或版本猜测。
-3. 调用 Responses，以 `tool_choice` 强制选择 `image_generation`；参考图决定生成或编辑操作。
-4. 消费流式响应，提取图片，收存并返回 Artifact 引用及实际规格。
+取消和超时只约束本地执行，不保证上游停止或不计费；重试及同样输入再次调用可重复生成、扣余额或消耗套餐额度，不保证恰好一次。只记录上游明确给出的使用量。
 
-Codex 模型发现只接受来源明确的 `media_image`、`output_modalities` / `modalities.output` 中的 `image`，或 `experimental_supported_tools` 中的 `image_generation` 作为图片资格；不再按模型前缀、主版本或静态型号清单赋予能力。已有真实文字及其他输出保留，显式空输出不补成文字；图片专用型号不因缺省填充获得聊天能力。生成执行同样不做型号名称拒绝，沿用宿主对所选 Target 的资格校验并原样发送其模型身份。
+## 管理面
 
-公开 [Codex ModelInfo](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs) 的 `input_modalities`、`supports_image_detail_original` 仅说明输入，不能作为图片输出证明；未找到可替代上述明确声明的动态账号图片资格接口。OMP 的 [hosted-image 规则](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/compat/rules/classes/openai.kdl) 仍包含静态 lineage/version 推断，不能冒充上游动态能力。缺少证明表示资格未知，不表示服务端一定不支持；先前按名称登记的候选可能在同步后退出图片列表。仅含模型 ID 的静态清单也不自动授予图片输出，需要来源或管理员明确配置模型能力。
+`GET/PUT /api/v1/media-generation/config` 读写启停和图片 Route，`GET /api/v1/media-generation/eligible-routes` 列出候选。
 
-更新并重新导入 Codex 插件后，Provider Model 的未固定规格字段在下次同步时刷新；人工修改的字段保持固定，可逐字段恢复同步，不强制覆盖。目录声明、历史成功调用与当前账号授权是不同事实，不以固定名单维持过时资格。
+配置页提供总开关、图片 Route 选择/解绑及配置状态。选择有效 Route 即时保存；失败恢复服务器确认值并就地显示原因。
+解绑需确认，同时关闭媒体生成；配置失效仍可关闭或解绑。
 
-不运行 Codex CLI，不采用独立的 `images/generations` 或 `images/edits` 调用链，不切换为另行配置的 OpenAI API Key。实际支持的模型、参数映射及错误分类须以选定链路的源码与协议证据核定；目录声明不能代替接入资格验证，保存配置也不代表已经执行过真实生图验证。
+没有候选时展示缺失条件与模型管理入口；禁止启用的原因在启停控件处可查。
+保存成功后刷新 Route 的媒体绑定状态，编辑器不能以旧快照判定占用，也不能因刷新覆盖草稿。
 
-### Antigravity 原生图片生成
-
-Antigravity 的图片传输与请求形状以 2026-11-06 官方 agy 1.5.1 原生 `generate_image` 抓包为准；OMP 的[原生图片适配器](https://github.com/can1357/oh-my-pi/blob/main/packages/ai/src/images/google-antigravity.ts)仅作对照，不能替代官方样本。图片能力发现另参考其[发现实现](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/discovery/antigravity.ts)：
-
-1. 模型同步读取账号 `fetchAvailableModels` 返回的 `imageGenerationModelIds`，解析已声明的废弃 ID 重定向并过滤禁用目标；图片模型保留真实 ID，不按推理档位折叠，不创建虚拟模型或固定默认型号。广告 ID 缺少详情时保留该模型，但不猜测上下文、图片输入或推理能力。
-2. 图片专用模型登记 `media_image` 和 `modalities.output: ["image"]`；同一 ID 已有 Agent 推理能力时保留文字输出与推理选择表，并增加图片能力。`supportsImages` 只声明图片输入，不能据此赋予图片输出。
-3. 通过图片 Route 选择 Target，复用对应 Provider 的 OAuth、project 和连接设置。调用 `POST /v1internal:generateContent`，使用定长 JSON 请求体，不请求 SSE 或 chunked。上游模型取 Target 的真实 selector，不在生成时另选账号广告列表中的首个型号。
-4. 外层使用 `requestType: image_gen`；每次独立生成使用 `image_gen/<毫秒时间戳>/<UUIDv4>/1` 请求 ID，不伪造 CLI 的共享操作树。内层只发送用户内容和生成配置：提示文本在前，有序 `inlineData` 参考图在后，`candidateCount: 1`，省略比例时采用官方默认 `imageConfig.aspectRatio: "1:1"`。不添加系统提示或 `responseModalities`。显式分辨率保留既有 `imageConfig.imageSize` 映射，但此次官方工具抓包未覆盖分辨率选项；普通 Infer 白名单不变。
-5. 通过宿主解压 gzip JSON 响应，读取图片 `inlineData`，要求 `STOP` 及恰好一张图片，限制解码图片为 32 MiB；空图、非法编码、非图片 MIME、多图、缺失终态或上游错误均不报告成功。完整 JSON 中只有 `finishMessage` 的失败保留原始诊断，不误报为流被截断；策略拒绝仍归类为 ContentFiltered。Core 继续完整解码图片、校验实际规格并收存为 Artifact；HTTP 与响应体内错误沿用 Route 错误分类与重试策略。
-
-已安装实例须重新构建并导入独立 `antigravity` 插件，再同步账号模型，随后将发现的图片模型绑定到图片 Route 并在媒体生成中选择该 Route。未固定的规格字段随同步刷新，人工固定字段不被强制覆盖；不自动创建、改绑或启用 Route。账号是否广告图片模型、配额与真实生图资格仍由上游决定，本地合约验证不能代替真实账号验证。
-
-### MiniMax 统一图片生成
-
-MiniMax 普通 API 与 Plan 共用内置 `base`，沿用 `minimax`、`minimax-cn`、`minimax-coding-plan` 和 `minimax-cn-coding-plan` 四个 Profile，不新增插件、认证字段、工具或图片编辑专用模型。原聊天协议、连接与额度监控不变。
-
-模型同步保留既有文字发现，同时读取对应区域官方公开的 [文生图 OpenAPI](https://platform.minimax.io/docs/api-reference/image/generation/api/h3-image-generations.json) 与 [参考图编辑 OpenAPI](https://platform.minimax.io/docs/api-reference/image/generation/api/h3-image-edits.json)；中国区使用 `https://platform.minimax.cn` 下的同路径文件。读取不携带 Provider 凭据。只沿已实现图片操作的本地 `requestBody` schema 引用提取 `model.enum`，不解析网页、不按型号名称猜测，也不在代码维护图片型号白名单。
-
-- 文生图枚举提供图片模型集合，参考图编辑枚举为其中同一型号增加图片输入能力；每个型号只登记一次。图片模型登记 `media_image` 与图片输出，不凭空获得聊天能力；同 ID 已有真实文字能力时保留。
-- 显式静态模型列表及自定义模型发现源仍限制模型集合，官方 schema 只补齐其中已选型号的图片能力，不擅自增加成员。人工固定的规格继续由既有逐字段规则保护。
-- 两份 schema 必须完整下载并解析成功。失败明确报告同步失败，由 Core 保留上次成功的模型库存，不以旧结果伪装刷新成功；已有 Route 不自动创建、改绑或启用。
-- 官方 schema 只声明供应商协议支持，不证明当前 Key 的套餐权限、剩余额度或生图成功。远端 schema 不得改写连接目的地、鉴权或网络授权；新协议或新路径仍须新增适配。
-
-`generate` 无参考图时调用 `/v1/images/generations`，有参考图时调用 `/v1/images/edits`，两者仍是同一模型与 Route。请求固定单图、非流式 JSON 和 base64 图片返回；比例映射到 `aspect_ratio`，分辨率映射到 `area`，有序参考图片以 data URI 发送。省略的偏好使用上游默认，不增加供应商专用工具参数。国际图片操作使用 `api.minimax.io`，中国区使用当前官方 `api.minimax.cn`；旧中国区官方聊天基址只对图片操作转换，不改写已保存连接。自定义地址保留其部署前缀，不隐式改投官方地址。
-
-成功响应仍须验证恰好一张图片、严格编码与大小，并由 Core 解码实际格式和像素后收存为当前 Principal 的 Artifact。HTTP 200 中的逐图错误不代表成功；内容政策拒绝、套餐不支持、额度不足与速率限制按各自类别交给现有执行策略。上游明确报告的用量按真实计数保存，不估算。
-
-MiniMax 服务端最长等待 600 秒；本地仍服从调用者 deadline 和现有 15 分钟工具总期限。接口不幂等，断连或超时不保证上游取消，Route 重试可能再次生成并计费；适配器不添加隐藏重试。Plan Key 使用订阅额度及已有 Credits，按量 Key 使用账户余额，不自动换 Key 或购买 Credits。图片仅受上游周额度限制，但现有 [Provider 级额度守护](../adr/0078-suspend-provider-routing-on-guarded-allowance-exhaustion.md) 不变：管理员勾选五小时条目后，耗尽仍会连带暂停同连接的图片 Target；只守护周额度可避免这一连带影响。
-
-升级宿主内嵌的 `base` 后重新同步模型，将图片型号绑定到图片 Route，再在媒体生成中选择该 Route。真实生成会消耗上游额度，必须另行取得针对账号与影响的明确授权。
-
-### 火山引擎（Volcengine Ark / BytePlus）统一图片生成
-
-火山引擎标准 Ark、相关 Plan（Agent Plan / Token Plan / Coding Plan）与 BytePlus ModelArk 共用内置 `base`，支持 `volcengine`、`volcengine-coding-plan`、`volcengine-agent-plan`、`volcengine-token-plan`、`volcengine-plan` 和 `byteplus` 六个 Profile，不新增插件、认证字段、工具或图片编辑专用模型。原聊天协议与连接配置不变。
-
-模型同步保留既有文字目录/显式发现，并按连接路径区分发现策略：
-
-- 标准 Ark（`/api/v3`）与 BytePlus（`/api/v3`）：携带 Provider `apiKey` 请求对应基址的 `GET {base}/models`，仅依据上游声明的 `modalities.output_modalities`、`api_supported["images/generations"]` 或 `domain == "ImageGeneration"` 提取图片模型，并按 `modalities.input_modalities` 或 `task_type` 中的 `image_to_image` 登记图片输入（参考图编辑）能力，不在代码中维护图片型号白名单。显式静态模型列表或自定义模型发现源仍限制模型集合，仅补齐其中已选型号的图片能力。请求失败明确报告同步失败，由 Core 保留上次成功的模型库存。
-- Agent Plan / Token Plan（`/api/plan` 或 `/api/plan/v3`）：路径规范化至 `/api/plan/v3/models` 尝试发现；上游当前返回 HTTP 404 时不破坏文字模型同步，保留既有目录中已声明图片输出的型号（补齐 `media_image` 能力）或由管理员手动登记的型号。
-- Coding Plan（`/api/coding` 或 `/api/coding/v3`）：上游当前未开放 `/api/coding/v3/images/generations`，同步时不向该连接广告不可调用的图片模型。
-
-`generate` 的文生图与单图/多图参考编辑共用同一端点 `POST {normalized_base}/images/generations`（Anthropic 风格的 `/api/plan` 或 `/api/plan/v1` 基址自动规范化为 `/api/plan/v3/images/generations`；自定义代理前缀原样保留）。请求使用 `Authorization: Bearer <apiKey>` 鉴权，固定 `response_format: "b64_json"`，不发送 `stream`、`sequential_image_generation`、`output_format` 等非全系兼容参数以兼容 Seedream 4.0 / 4.5 / 5.0 / 5.5 全系列；有参考图时按单图字符串、多图字符串数组以 data URI 传入 `image` 字段（单张上限 30 MiB、最多 14 张、整包上限 64 MiB）。`aspect_ratio` 与 `resolution` 映射为上游 `size` 字段（同时省略时不发送 `size`，按已知模型系列约束做安全档位近似）。
-
-成功响应须验证恰好一张图片、严格 base64 编码与 32 MiB 大小限制；`media_type` 优先读取 `output_format`，旧版模型缺失该字段时按解码字节头识别 PNG / JPEG / WebP，并由 Core 解码实际像素后收存为当前 Principal 的 Artifact。内容审核（`SensitiveContentDetected*` / `*RiskDetection`）、配额耗尽（`QuotaExceeded*` / `AccountQuotaExceeded` / `SetLimitExceeded` / `AccountOverdueError`）、限流（`RateLimitExceeded.*` / `ModelAccount*RateLimitExceeded` / `ServerOverloaded`）与参数/模型未开通错误按各自类别交给现有执行策略；HTTP 401/403 仍返回安全摘要。
-
-升级宿主内嵌的 `base` 后同步目录与模型，将合格的图片型号绑定到图片 Route 并在媒体生成中选择该 Route。真实生图会消耗上游按量余额或 Agent Plan 订阅额度，账号权限与模型开通状态以上游实际配置为准。
-
-### 阿里云百炼（Alibaba / DashScope 与 Token Plan）统一图片生成
-
-阿里云百炼标准 API 与 Token Plan 共用内置 `base`，支持 `alibaba`、`alibaba-cn`、`alibaba-token-plan` 与 `alibaba-token-plan-cn` 四个 Profile，不新增插件、认证字段、工具或图片编辑专用模型。`alibaba-coding-plan` 与 `alibaba-coding-plan-cn` 不包含图像生成模型，不声明 `MediaImage` 能力。原聊天协议与连接配置不变。
-
-模型同步保留既有文字目录/显式发现，并按连接类型区分发现策略：
-
-- 标准百炼（`alibaba`、`alibaba-cn` 及业务空间专属域名）：携带 Provider `apiKey` 分页请求 `GET {api_root}/api/v1/models`，依据上游声明的 `capabilities`（`IG`）、`inference_metadata.response_modality`（`Image`）和 `inference_metadata.request_modality`（要求包含 `Text`，并按是否包含 `Image` 登记参考图编辑能力）动态合并支持同步多模态生成接口的图片型号，自动排除已下线、旧版异步 `wanx*`/`wan2.0`–`wan2.5` 及第三方异步接口模型，不在代码中维护图片型号白名单。显式静态模型列表或自定义模型发现源仍限制模型集合，仅补齐其中已选型号的图片能力。请求失败明确报告同步失败，由 Core 保留上次成功的模型库存。
-- Token Plan（`alibaba-token-plan`、`alibaba-token-plan-cn`）：优先尝试 `GET {api_root}/api/v1/models`；上游当前返回 HTTP 404 或未提供 `apiKey` 时不破坏文字模型同步，保留既有目录中已声明图片输出的型号（补齐 `media_image` 能力）或由管理员手动登记的型号。
-
-`generate` 的文生图与参考图编辑共用 DashScope 同步多模态生成接口 `POST {api_root}/api/v1/services/aigc/multimodal-generation/generation`（兼容从 `/compatible-mode/v1`、`/apps/anthropic/v1`、`/api/v1` 或自定义代理前缀规范化）。请求使用 `Authorization: Bearer <apiKey>` 鉴权，按 `input.messages[0].content` 依次携带参考图（data URI，单张上限 20 MiB、最多 10 张、整包上限 64 MiB）与提示词；省略偏好时不发送多余参数以兼容 Qwen-Image、Wan 2.7/2.6 与 Z-Image 系列，显式比例与分辨率按各模型上限映射为 DashScope 星号格式 `宽*高`（Wan 2.7 仅指定分辨率时映射为 `1K` / `2K` / `4K`，其中 `wan2.7-image-pro` 仅文生图支持 `4K`）。
-
-成功响应要求恰好一张图片，同时兼容 Data URL 解码与临时 OSS URL 下载。URL 下载通过插件声明的阿里云百炼结果 OSS 正则白名单（`https://dashscope-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com`）以无凭据 `GET` 获取字节，校验 32 MiB 上限与魔数/MIME 后由 Core 解码实际像素并收存为当前 Principal 的 Artifact。内容审核（`DataInspectionFailed`、`IPInfringementSuspect`、`*RiskDetection`）、配额/欠费（`Throttling.AllocationQuota`、`AllocationQuota.FreeTierOnly`、`insufficient_quota`、`Arrearage`、`QuotaExceeded`）、限流（`Throttling*`、`LimitRequests`、`rate_limit_exceeded`）与参数/模型错误按各自类别交给现有执行策略；HTTP 401/403 仍返回安全摘要。
-
-升级宿主内嵌的 `base` 后重新同步模型，将合格的图片型号绑定到图片 Route 并在媒体生成中选择该 Route。真实生图会消耗上游按量余额或 Token Plan 订阅 Credits，账号权限、地域与模型开通状态以上游实际配置为准。
-
-## 5. 失败与重试
-
-沿用普通推理的可重试错误分类与 Route 重试、Target 切换策略，参见 [ADR-0034](../adr/0034-layer-route-target-selection.md)。不因请求已发送且执行状态不明而额外阻止原策略允许的重试；明确接受重复生成、重复消耗额度的风险，不承诺恰好执行一次。
-
-- 不将参数校验、参考图读取或收存失败归类为可重试上游错误。
-- 不将用户取消重新归类为重试条件；已有输出提交边界继续适用。
-- 上游没有有效图片、输出图片无效或 Artifact 收存失败，均不能报告成功。
-- 输出图片已生成但本地收存失败时，不以恢复文件保存为由重新调用生成。
-- 使用现有工具错误通道，不返回 `success: true` 的空图结果，不把失败伪装为异步任务成功。
-- 上游明确给出的失败原因经既有凭据结构和本次执行已注册凭据脱敏后，保留在工具结果的 `error.message` 中，不统一替换为泛化的生成失败文案；既有 `error.code`、取消及超时语义不变。认证错误和 HTTP 401/403 仍返回安全摘要，不公开凭据诊断。MCP、请求内平台调用及后台执行查询共享同一结果。
-- Antigravity 的明确内容政策拒绝按 `ContentFiltered` 结束，不重试、不切换 Target，也不改变共享健康失败计数。解析同时覆盖结构化拒绝字段及只有明确 Google 政策拒绝 `finishMessage`、没有 `finishReason` 的响应，并保留公开拒绝原文。其他非成功终态保留其 `finishMessage` 或原因码；未知说明或真正截断仍按原有流错误处理，不把所有无图响应视为内容过滤。
-
-## 6. 管理面范围
-
-遵循根 [DESIGN.md](../../DESIGN.md)，在“高级功能”中提供“媒体生成”配置页。本期仅提供能力总开关、图片生成 Route 选择与解绑、配置校验与当前支持类型的说明，不提供手动试生成、参考图上传、图片预览或图库。
-
-图片路由选择是即时保存：选定完整有效的路由后立即写入，成功不弹 toast，也不出现独立的「保存设置」按钮；保存失败时选择回到服务器确认值，并在原地显示可重试的错误。已保存路由旁提供「解除图片路由」按钮，打开确认 Sheet 写明影响，保存后清空 `image.route_id` 并同时关闭媒体生成，即使当前功能已开启也允许保存。没有可用候选时说明原因并提供模型管理入口，不回显重复的资格说明。配置校验问题通过启停开关上的 Tooltip 按需显示，不再常驻告警卡片或管理快捷按钮；支持悬停、键盘聚焦、触摸查看与 Escape 关闭，配置阻止启用时仍可聚焦并读取原因，保存有效路由后不再显示该提示。配置失效但功能仍开启时，仍允许关闭。加载失败与支持的媒体说明保持不变。
-
-路由保存成功后刷新模型列表与详情的绑定状态，模型编辑器依据最新读取的引用判断占用，不把进入页面时的绑定快照当作当前事实，也不因刷新覆盖编辑草稿。
-
-实际生成通过客户端工具调用、透明注入或 MCP 执行，不以管理员身份另建生成及 Artifact 所有权路径。配置不足必须说明缺失条件与补齐入口；配置保存、功能启用与真实请求成功是不同事实，不自动发送可能收费的上游测试请求。
-
-## 7. 验收范围
-
-实施时须通过产品入口验证以下已确认契约；本节是验收要求，不是已执行的测试报告：
-
-- 统一输入严格按类型校验，图片生成与参考图编辑可经 Codex 托管工具、Antigravity 原生图片模型或 Base MiniMax 图片模型完成；同一图片模型与 `generate` 入口按参考图有无执行，不拆出编辑专用模型。Antigravity 调用所选 Target 的真实图片模型，而非自动改选广告列表首项；MiniMax 从官方 OpenAPI 合并发现型号及参考图资格，不按型号名单猜测，发现失败保留旧库存。
-- 图片 Route 的绑定与运行前资格均校验；输出模态漂移保留绑定但排除执行，剩余合格 Target 可继续执行，其他适配器不兼容仍明确失败。
-- SQLite 和 PostgreSQL 升级后，未配置用途的历史 Route 均自动归为文字；已明确保存的用途、身份、绑定和启停偏好保持不变。失效图片生成引用可关闭、解绑，关闭总开关不等于解绑。
-- 平台 Gate、显式调用、MCP 与透明注入组合符合既有高级能力规则，已有 Key 不自动启用媒体生成注入。
-- 文件归属、收存、保留期及签名下载沿用 Artifact 契约；无跨 Principal 引用和本地路径泄漏。
-- 实际图片像素与返回的 `media` 一致；近似映射不伪报原请求尺寸。
-- 错误分类、重试和切换符合已接受的重复执行风险边界，收存失败不重跑生成。
-- 管理页仅包含本期配置功能；中英文、主题及窄屏行为遵循现有设计规范。
-
-真实 Codex、Antigravity 或 MiniMax 生成验证会调用外部服务并消耗额度，必须在执行前取得针对测试账号与影响的明确授权；不能把本次设计讨论当作生产服务调用授权。
+配置完成不发送测试请求，管理员没有独立的生成、上传、预览或图库入口。实测生成会消耗上游额度；
+保存配置、能力启用和请求成功是不同事实。
