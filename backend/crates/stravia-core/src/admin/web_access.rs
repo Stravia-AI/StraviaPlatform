@@ -176,7 +176,12 @@ impl AdminService {
         };
         validate_config_object(merged_config.as_ref())?;
         factory
-            .validate_config(api_key, api_key_supplied, config_supplied, merged_config.as_mut())
+            .validate_config(
+                api_key,
+                api_key_supplied,
+                config_supplied,
+                merged_config.as_mut(),
+            )
             .map_err(anyhow::Error::msg)?;
         validate_config_object(merged_config.as_ref())?;
         input.name = Some(name);
@@ -444,11 +449,19 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(dup_err.to_string().contains("WEB_PROVIDER_SINGLETON_CONFLICT"));
+        assert!(
+            dup_err
+                .to_string()
+                .contains("WEB_PROVIDER_SINGLETON_CONFLICT")
+        );
 
         // Non-deletable kind cannot be deleted.
         let del_err = admin.delete_web_provider(&worker.id).await.unwrap_err();
-        assert!(del_err.to_string().contains("WEB_PROVIDER_DELETE_FORBIDDEN"));
+        assert!(
+            del_err
+                .to_string()
+                .contains("WEB_PROVIDER_DELETE_FORBIDDEN")
+        );
 
         // Unavailable provider cannot be newly added to Web Access settings.
         let unavail_err = admin

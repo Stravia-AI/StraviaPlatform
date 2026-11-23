@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(
             state(&prepared.app, &session).await?,
             json!({
-                "mode": "server", "authenticated": false,
+                "mode": "server", "auth_mode": "single_admin", "authenticated": false,
                 "setup_authorized": false, "username": null
             })
         );

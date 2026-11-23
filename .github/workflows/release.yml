@@ -49,7 +49,7 @@ jobs:
       include_macos: ${{ steps.release.outputs.include_macos }}
     steps:
       - name: Checkout complete history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -156,7 +156,7 @@ jobs:
       has_plugins: ${{ steps.select.outputs.has_plugins }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -170,7 +170,7 @@ jobs:
         run: python3 .github/scripts/select_vendor_plugins.py
 
       - name: Upload selection marker
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vendor-plugin-selection
           path: stravia-plugin-selection-v1.json
@@ -190,14 +190,16 @@ jobs:
 
       - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
         if: steps.select.outputs.has_plugins == 'true' && steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-release-plugins
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -208,7 +210,7 @@ jobs:
 
       - name: Cache Cargo and sccache
         if: steps.select.outputs.has_plugins == 'true' && steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -309,7 +311,7 @@ jobs:
 
       - name: Upload dedicated plugin assets
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vendor-plugins
           path: dist/*
@@ -347,7 +349,7 @@ jobs:
             archive: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -361,16 +363,17 @@ jobs:
 
       - name: Cache Rust cross-compile toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-release-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-release-server-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+            toolchain-release-server-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 cross-compile toolchain
         id: bootstrap
@@ -382,7 +385,7 @@ jobs:
 
       - name: Cache Cargo, sccache, Bun, and xwin SDK
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -445,7 +448,7 @@ jobs:
           fi
 
       - name: Upload server asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.suffix }}
           path: dist/*
@@ -483,7 +486,7 @@ jobs:
             bundle_directory: nsis
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -497,16 +500,17 @@ jobs:
 
       - name: Cache Rust cross-compile toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-release-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-release-desktop-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+            toolchain-release-desktop-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 cross-compile toolchain
         id: bootstrap
@@ -519,7 +523,7 @@ jobs:
 
       - name: Cache Cargo, sccache, Bun, and xwin SDK
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -621,7 +625,7 @@ jobs:
           cp "${bundles[0]}.sig" "dist/${asset}.sig"
 
       - name: Upload desktop asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist/*
@@ -647,7 +651,7 @@ jobs:
             cmake_file: .github/cmake/macos-x86_64.cmake
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -661,7 +665,7 @@ jobs:
 
       - name: Cache Rust + rcodesign toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
@@ -670,14 +674,16 @@ jobs:
             ~/.local/bin
           key: toolchain-macos-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /opt/osxcross/target
-          key: osxcross-899260ca-sdk15.5-linux-x64-v1
+          key: osxcross-899260ca-sdk15.5-linux-x64-v1-${{ matrix.suffix }}
+          restore-keys: |
+            osxcross-899260ca-sdk15.5-linux-x64-v1-
 
       - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
         id: bootstrap
@@ -690,7 +696,7 @@ jobs:
 
       - name: Cache Cargo, sccache, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -731,7 +737,7 @@ jobs:
             --output-dir dist
 
       - name: Upload macOS release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist/*
@@ -752,7 +758,7 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Login to Container Registry
         if: env.REGISTRY_USER != ''
@@ -790,79 +796,79 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout manifest generator
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download server linux-x86_64-gnu
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: server-linux-x86_64-gnu
           path: release-assets
 
       - name: Download server linux-aarch64-gnu
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: server-linux-aarch64-gnu
           path: release-assets
 
       - name: Download server windows-x86_64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: server-windows-x86_64
           path: release-assets
 
       - name: Download server windows-aarch64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: server-windows-aarch64
           path: release-assets
 
       - name: Download desktop linux-x86_64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-linux-x86_64
           path: release-assets
 
       - name: Download desktop linux-aarch64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-linux-aarch64
           path: release-assets
 
       - name: Download desktop windows-x86_64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-windows-x86_64
           path: release-assets
 
       - name: Download desktop windows-aarch64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-windows-aarch64
           path: release-assets
 
       - name: Download desktop darwin-aarch64
         if: needs.prepare.outputs.include_macos == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-darwin-aarch64
           path: release-assets
 
       - name: Download desktop darwin-x86_64
         if: needs.prepare.outputs.include_macos == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-darwin-x86_64
           path: release-assets
 
       - name: Download selection marker
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vendor-plugin-selection
           path: release-assets
 
       - name: Download dedicated plugin assets
         if: needs.build-vendor-plugins.outputs.has_plugins == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vendor-plugins
           path: release-assets
@@ -888,7 +894,7 @@ jobs:
           LC_ALL=C sha256sum -- * > SHA256SUMS
 
       - name: Upload consolidated release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: release-assets/*
@@ -905,12 +911,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release metadata
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Download release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release-assets
@@ -947,7 +953,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Login to Container Registry
         env:
@@ -995,7 +1001,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout release helper
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Publish completed draft
         env:

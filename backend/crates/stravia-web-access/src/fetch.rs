@@ -313,9 +313,7 @@ impl HttpBackend for RedirectBackend {
     fn pins_origin(&self, url: &Url) -> bool {
         match &self.proxied {
             None => true,
-            Some((_, no_proxy)) => url
-                .host_str()
-                .is_some_and(|host| no_proxy.contains(host)),
+            Some((_, no_proxy)) => url.host_str().is_some_and(|host| no_proxy.contains(host)),
         }
     }
 
@@ -380,11 +378,9 @@ impl HttpBackend for RedirectBackend {
                     .0
                     .clone()
             };
-            let response = client
-                .get(url.as_str())
-                .send()
-                .await
-                .map_err(|error| FetchError::unavailable(format!("HTTP request failed: {error}")))?;
+            let response = client.get(url.as_str()).send().await.map_err(|error| {
+                FetchError::unavailable(format!("HTTP request failed: {error}"))
+            })?;
             if pinned {
                 let connected = response.remote_addr().ok_or_else(|| {
                     FetchError::unavailable("HTTP connection omitted its remote address")

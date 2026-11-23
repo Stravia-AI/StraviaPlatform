@@ -150,9 +150,12 @@ class ReleaseClient:
                 body = resp.read()
                 return json.loads(body.decode("utf-8")) if body else None
         except urllib.error.HTTPError as err:
-            if allow_404 and err.code == 404:
-                return None
-            detail = err.read().decode("utf-8", errors="replace")
+            try:
+                if allow_404 and err.code == 404:
+                    return None
+                detail = err.read().decode("utf-8", errors="replace")
+            finally:
+                err.close()
             raise RuntimeError(
                 f"{self.platform} API {method} {path} failed ({err.code}): {detail}"
             ) from err
@@ -251,7 +254,10 @@ class ReleaseClient:
                 resp_body = resp.read()
                 return json.loads(resp_body.decode("utf-8")) if resp_body else {}
         except urllib.error.HTTPError as err:
-            detail = err.read().decode("utf-8", errors="replace")
+            try:
+                detail = err.read().decode("utf-8", errors="replace")
+            finally:
+                err.close()
             raise RuntimeError(
                 f"Uploading asset {filename} ({self.platform}) failed ({err.code}): {detail}"
             ) from err

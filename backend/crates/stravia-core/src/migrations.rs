@@ -2138,7 +2138,8 @@ mod tests {
 
         super::migrate_sqlite(&pool, None).await.unwrap();
 
-        let rows: Vec<(String, String, Option<String>, bool, Option<String>)> = sqlx::query_as(
+        type WebProviderRow = (String, String, Option<String>, bool, Option<String>);
+        let rows: Vec<WebProviderRow> = sqlx::query_as(
             "SELECT id, kind, api_key, use_proxy, config_json FROM web_providers ORDER BY id",
         )
         .fetch_all(&pool)
@@ -2174,12 +2175,11 @@ mod tests {
             serde_json::from_str::<Vec<String>>(&fetch_ids).unwrap(),
             Vec::<String>::new()
         );
-        let browser_setting: Option<String> = sqlx::query_scalar(
-            "SELECT value FROM settings WHERE name = 'web_access_browser_path'",
-        )
-        .fetch_optional(&pool)
-        .await
-        .unwrap();
+        let browser_setting: Option<String> =
+            sqlx::query_scalar("SELECT value FROM settings WHERE name = 'web_access_browser_path'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
         assert!(browser_setting.is_none());
     }
 

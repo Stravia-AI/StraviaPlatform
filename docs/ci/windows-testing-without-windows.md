@@ -11,7 +11,7 @@
 | Windows 目标编译与链接 (`x86_64-pc-windows-msvc` / `aarch64-pc-windows-msvc`) | `cargo-xwin` + `clang-cl` + `rust-lld` + Windows SDK/CRT | 不需运行，Linux 静态交叉编译 | 否 |
 | `stravia-server.exe` 启动、SQLite、TLS/AWS-LC、HTTP `/healthz` | Win32 文件/Socket/IOCP/Crypto API | **可以**（Wine 10+/11 对 Win32 Socket/SQLite/Rust std 支持成熟） | 否 |
 | `stravia-desktop.exe --smoke-test-runtime`（内置 Wasmtime + SQLite + Core） | Win32 进程/内存页保护/Wasmtime JIT | **可以**（不初始化 WebView2） | 否 |
-| Rust 单元测试 (`stravia-web-access`、`stravia-core`、`stravia-credential-protection` 等) | `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=wine64` | **大部分可以**（纯逻辑、HTTP、SQLite、路径处理） | 否 |
+| Rust 单元测试 (`stravia-web-access`、`stravia-core`、`stravia-credential-protection` 等) | `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER="$(command -v wine64 \|\| command -v wine)"` | **大部分可以**（纯逻辑、HTTP、SQLite、路径处理） | 否 |
 | Tauri Desktop E2E (`wdio.desktop.conf.ts` + `msedgedriver` + WebView2) | 真实 WebView2 Runtime、`msedgedriver.exe`、Win32 窗口消息循环、DWM/托盘 | **不可靠**（WebView2 Evergreen/Fixed 在 Wine 下崩溃率高，且 `msedgedriver` 无法稳定挂载） | **是** |
 | NSIS 安装包 (`*-setup.exe`) 静默安装/卸载验证 | NSIS 脚本、注册表、快捷方式 | **部分可以**（Wine 下可跑 `/S` 静默安装检查文件释放与卸载器） | 完整 UI/UAC/SmartScreen 需真实 Windows |
 
@@ -27,9 +27,9 @@
 2. **Wine 真实 PE 执行**：
    - 在隔离 `WINEPREFIX` 中启动 `stravia-server.exe`，轮询 `http://127.0.0.1:<port>/healthz`，验证 PE 加载、mimalloc 分配器、Tokio IOCP/AFD 网络层、SQLite 初始化与优雅退出。
    - 执行 `stravia-desktop.exe --smoke-test-runtime`，在不依赖 WebView2 的前提下验证桌面二进制的 Wasmtime 可执行内存与内置 Vendor 插件运行时。
-   - 设置 `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=wine64`，运行 `cargo xwin test --target x86_64-pc-windows-msvc` 验证 Windows 路径语义、文件锁、环境变量与协议行为。
+   - 设置 `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER="$(command -v wine64 || command -v wine)"`（Ubuntu 24.04 的 `wine64` 包将可执行包装器提供为 `wine`），运行 `cargo xwin test --target x86_64-pc-windows-msvc` 验证 Windows 路径语义、文件锁、环境变量与协议行为。
 3. **NSIS 安装包结构与 Wine 静默安装验证（发布前可选）**：
-   - 用 Linux 原生 `makensis` 生成 `*-setup.exe` 后，在临时 `WINEPREFIX` 执行 `wine64 installer-setup.exe /S`，断言目标目录释放了 `stravia-desktop.exe` 与卸载程序。
+   - 用 Linux 原生 `makensis` 生成 `*-setup.exe` 后，在临时 `WINEPREFIX` 执行 `wine installer-setup.exe /S`，断言目标目录释放了 `stravia-desktop.exe` 与卸载程序。
 
 **优点**：纯容器、无需特权或 KVM、耗时低（增量几分钟）、适合每次 PR 门禁。  
 **局限**：不覆盖 WebView2 渲染、`msedgedriver`、`Win32_UI_WindowsAndMessaging` 窗口/托盘交互及 Windows ARM64 运行时（Wine x86_64 只能执行 x64 PE）。

@@ -33,7 +33,11 @@ export default defineConfig(({ mode }) => {
         version: { pollInterval: 0 },
       }),
     ],
-    build: { rolldownOptions: { checks: { pluginTimings: false } } },
+    build: {
+      // Lazy-loaded mermaid bundles upstream elkjs (~1.46 MB) and parser (~629 kB); app chunks remain < 500 kB.
+      chunkSizeWarningLimit: 1600,
+      rolldownOptions: { checks: { pluginTimings: false } },
+    },
     optimizeDeps: {
       include: ['style-to-object'],
       // Styled Svelte libraries must stay eligible for prebundling or cold starts can expose component source as virtual CSS.

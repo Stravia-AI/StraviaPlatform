@@ -185,6 +185,7 @@ def create_dmg(app_dir: Path, output_dmg: Path, volume_name: str) -> None:
         subprocess.run(
             [
                 genisoimage,
+                "-quiet",
                 "-V",
                 volume_name,
                 "-D",

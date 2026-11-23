@@ -51,7 +51,7 @@ jobs:
       full: ${{ steps.filter.outputs.full }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -120,7 +120,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -134,12 +134,14 @@ jobs:
 
       - name: Cache lightweight toolchain (Bun & Task)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
+          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-check-fast
+          restore-keys: |
+            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-
 
       - name: Bootstrap Bun & Task (no Rust)
         id: bootstrap
@@ -151,7 +153,7 @@ jobs:
 
       - name: Cache Bun packages & ESLint content cache
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/install/cache
@@ -205,7 +207,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -219,14 +221,16 @@ jobs:
 
       - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-check-rust
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 Rust toolchain
         id: bootstrap
@@ -237,7 +241,7 @@ jobs:
 
       - name: Cache Cargo & sccache
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -278,7 +282,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -292,14 +296,16 @@ jobs:
 
       - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-unit-tests
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 Rust toolchain
         id: bootstrap
@@ -309,7 +315,7 @@ jobs:
 
       - name: Cache Cargo & sccache
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -347,10 +353,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -364,14 +370,16 @@ jobs:
 
       - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-e2e-build
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -381,7 +389,7 @@ jobs:
 
       - name: Cache Cargo, sccache, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -394,24 +402,22 @@ jobs:
             ci-e2e-build-v1-
             ci-rust-unit-v1-
 
-      - name: Build shared services, release server, and vendor fixtures
+      - name: Build shared services and vendor fixtures
         run: |
           task prepare:crates
           task build:test:services
-          task build:test:release
           task build:vendor-fixtures
 
       - name: Upload shared E2E binaries & fixtures
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-binaries-linux-x64
           path: |
             target/test-artifacts/services
-            target/test-artifacts/release
             target/vendor-plugins
             target/vendor-plugins-all
-            target/vendor-fixtures
-          if-no-files-found: ignore
+            target/vendor-test-fixtures
+          if-no-files-found: error
           retention-days: 1
 
       - name: Show sccache stats
@@ -432,7 +438,7 @@ jobs:
           - storage:sqlite
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -446,12 +452,14 @@ jobs:
 
       - name: Cache lightweight toolchain (Bun & uv)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
+          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-${{ matrix.suite == 'storage:sqlite' && 'storage-sqlite' || matrix.suite }}
+          restore-keys: |
+            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -464,15 +472,16 @@ jobs:
 
       - name: Cache uv
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/uv
-          key: ci-uv-v1-${{ hashFiles('uv.lock') }}
+          key: ci-uv-v1-${{ matrix.suite == 'storage:sqlite' && 'storage-sqlite' || matrix.suite }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
+            ci-uv-v1-${{ matrix.suite == 'storage:sqlite' && 'storage-sqlite' || matrix.suite }}-
             ci-uv-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-binaries-linux-x64
           path: target
@@ -503,7 +512,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -517,16 +526,17 @@ jobs:
 
       - name: Cache Rust + uv toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1-admin-e2e
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -537,7 +547,7 @@ jobs:
 
       - name: Cache Cargo, sccache, Bun, and uv
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -552,7 +562,7 @@ jobs:
             ci-e2e-build-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-binaries-linux-x64
           path: target
@@ -604,7 +614,7 @@ jobs:
           --health-retries 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -618,12 +628,14 @@ jobs:
 
       - name: Cache lightweight toolchain (Bun & uv)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
+          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-postgres
+          restore-keys: |
+            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -636,15 +648,16 @@ jobs:
 
       - name: Cache uv
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/uv
-          key: ci-uv-v1-${{ hashFiles('uv.lock') }}
+          key: ci-uv-v1-postgres-${{ hashFiles('uv.lock') }}
           restore-keys: |
+            ci-uv-v1-postgres-
             ci-uv-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-binaries-linux-x64
           path: target
@@ -669,7 +682,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -683,12 +696,14 @@ jobs:
 
       - name: Cache lightweight toolchain (Bun & Task)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
+          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-webui-e2e
+          restore-keys: |
+            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-
 
       - name: Bootstrap Bun & Task (no Rust needed)
         id: bootstrap
@@ -700,7 +715,7 @@ jobs:
 
       - name: Cache Bun & Playwright
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.bun/install/cache
@@ -710,17 +725,18 @@ jobs:
             ci-webui-e2e-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-binaries-linux-x64
           path: target
 
       - name: Ensure executable permissions
-        run: chmod +x target/test-artifacts/services/* target/test-artifacts/release/*
+        run: chmod +x target/test-artifacts/services/*
 
-      - name: Install locked WebUI dependencies & Chromium
+      - name: Install locked WebUI dependencies, build WebUI & install Chromium
         run: |
           task install:web
+          task build:web
           bun run playwright:install:web -- --with-deps chromium
 
       - name: Run WebUI E2E tests
@@ -737,7 +753,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -751,16 +767,17 @@ jobs:
 
       - name: Cache Rust + cargo-xwin toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-smoke
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+            toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 cross-compile + Wine toolchain
         id: bootstrap
@@ -772,7 +789,7 @@ jobs:
 
       - name: Cache Cargo, sccache, xwin SDK, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -799,10 +816,29 @@ jobs:
             target/x86_64-pc-windows-msvc/debug/stravia-server.exe
 
       - name: Run Windows target unit tests under Wine
+        shell: bash
         env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: wine64
           WINEDEBUG: -all
-        run: cargo xwin test --locked -p stravia-web-access --target x86_64-pc-windows-msvc --lib
+        run: |
+          set -euo pipefail
+          WINE_BIN="$(command -v wine64 || command -v wine || true)"
+          if [[ -z "${WINE_BIN}" ]]; then
+            echo "ERROR: wine64/wine is required to run Windows target unit tests" >&2
+            exit 1
+          fi
+          TMP_WINE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/stravia-wine-test.XXXXXX")"
+          export WINEPREFIX="${TMP_WINE_ROOT}/prefix"
+          export WINEARCH="win64"
+          export XDG_RUNTIME_DIR="${TMP_WINE_ROOT}/runtime"
+          mkdir -p "${WINEPREFIX}" "${XDG_RUNTIME_DIR}"
+          chmod 700 "${XDG_RUNTIME_DIR}"
+          cleanup() {
+            WINEPREFIX="${WINEPREFIX}" wineserver -k >/dev/null 2>&1 || true
+            rm -rf "${TMP_WINE_ROOT}"
+          }
+          trap cleanup EXIT
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER="${WINE_BIN}" \
+            cargo xwin test --locked -p stravia-web-access --target x86_64-pc-windows-msvc --lib
 
       - name: Show sccache stats
         if: always()
@@ -815,7 +851,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -829,14 +865,17 @@ jobs:
 
       - name: Cache Rust + cargo-xwin toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-kvm
+          restore-keys: |
+            toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 cross-compile toolchain
         id: bootstrap
@@ -847,7 +886,7 @@ jobs:
 
       - name: Cache Cargo, sccache, xwin SDK, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -907,7 +946,7 @@ jobs:
             cmake_file: .github/cmake/macos-x86_64.cmake
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -921,7 +960,7 @@ jobs:
 
       - name: Cache Rust + rcodesign toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup
@@ -930,14 +969,16 @@ jobs:
             ~/.local/bin
           key: toolchain-macos-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
         if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /opt/osxcross/target
-          key: osxcross-899260ca-sdk15.5-linux-x64-v1
+          key: osxcross-899260ca-sdk15.5-linux-x64-v1-${{ matrix.suffix }}
+          restore-keys: |
+            osxcross-899260ca-sdk15.5-linux-x64-v1-
 
       - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
         id: bootstrap
@@ -950,7 +991,7 @@ jobs:
 
       - name: Cache Cargo, sccache, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index

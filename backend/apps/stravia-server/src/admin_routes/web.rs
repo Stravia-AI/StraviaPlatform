@@ -74,7 +74,11 @@ pub(super) async fn create_web_provider_handler(
     match gw.admin().create_web_provider(input).await {
         Ok(value) => {
             let view = gw.admin().web_provider_view(value).await;
-            (StatusCode::CREATED, Json(serde_json::json!({ "data": view }))).into_response()
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "data": view })),
+            )
+                .into_response()
         }
         Err(error) => err(error),
     }

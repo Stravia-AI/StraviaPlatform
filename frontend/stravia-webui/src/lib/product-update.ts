@@ -1,3 +1,6 @@
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+
 export type UpdateCheckStatus = 'idle' | 'up-to-date' | 'available' | 'error'
 export type ProductUpdatePhase =
   'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error'
@@ -278,22 +281,13 @@ export class ProductUpdateController {
 
 export function createDesktopUpdateBridge(): DesktopUpdateBridge {
   return {
-    snapshot: async () => {
-      const { invoke } = await import('@tauri-apps/api/core')
-      return invoke<DesktopUpdateSnapshot>('get_desktop_update_state')
-    },
-    download: async (version) => {
-      const { invoke } = await import('@tauri-apps/api/core')
-      return invoke<DesktopUpdateSnapshot>('download_product_update', { version })
-    },
+    snapshot: () => invoke<DesktopUpdateSnapshot>('get_desktop_update_state'),
+    download: (version) => invoke<DesktopUpdateSnapshot>('download_product_update', { version }),
     install: async () => {
-      const { invoke } = await import('@tauri-apps/api/core')
       await invoke<void>('install_product_update')
     },
-    onProgress: async (listener) => {
-      const { listen } = await import('@tauri-apps/api/event')
-      return listen<DesktopUpdateProgress>('stravia://product-update-progress', (event) => listener(event.payload))
-    },
+    onProgress: (listener) =>
+      listen<DesktopUpdateProgress>('stravia://product-update-progress', (event) => listener(event.payload)),
   }
 }
 

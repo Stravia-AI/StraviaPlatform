@@ -1,3 +1,4 @@
+import path from 'node:path'
 import js from '@eslint/js'
 import paraglide from '@inlang/paraglide-js/eslint'
 import pluginQuery from '@tanstack/eslint-plugin-query'
@@ -7,7 +8,35 @@ import globals from 'globals'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
-const svelteConfig = (await loadConfig('./', { traverse: false }))?.config
+/**
+ * Strip non-serializable functions (`adapter.adapt`, `preprocess`, `typescript.config`)
+ * and volatile timestamps (`version.name`) from SvelteKit's loaded config so ESLint's
+ * `--cache` serializer succeeds and produces deterministic cache hashes.
+ */
+function serializeSvelteConfig(config) {
+  if (!config || typeof config !== 'object') return undefined
+  const serializable = {}
+  if (Array.isArray(config.extensions)) {
+    serializable.extensions = config.extensions
+  }
+  if (config.compilerOptions && typeof config.compilerOptions === 'object') {
+    const compilerOptions = Object.fromEntries(
+      Object.entries(config.compilerOptions).filter(([, value]) => typeof value !== 'function'),
+    )
+    if (Object.keys(compilerOptions).length > 0) {
+      serializable.compilerOptions = compilerOptions
+    }
+  }
+  const routes = config.kit?.files?.routes ?? config.files?.routes
+  if (typeof routes === 'string' && routes.length > 0) {
+    serializable.kit = {
+      files: { routes: path.isAbsolute(routes) ? path.relative(import.meta.dirname, routes) : routes },
+    }
+  }
+  return serializable
+}
+
+const svelteConfig = serializeSvelteConfig((await loadConfig('./', { traverse: false }))?.config)
 
 export default defineConfig([
   globalIgnores(['.svelte-kit', 'build', 'dist', 'dist-desktop-e2e', 'src/lib/paraglide']),

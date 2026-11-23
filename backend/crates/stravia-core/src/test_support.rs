@@ -45,10 +45,12 @@ pub(crate) struct StubWebProviderFactory {
     available: std::sync::Arc<std::sync::atomic::AtomicBool>,
     unavailable_reason: Option<String>,
     adapters: parking_lot::Mutex<
-        std::collections::HashMap<String, std::sync::Arc<dyn stravia_web_access::WebProviderAdapter>>,
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<dyn stravia_web_access::WebProviderAdapter>,
+        >,
     >,
-    recorded_outbounds:
-        parking_lot::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
+    recorded_outbounds: parking_lot::Mutex<Vec<(String, stravia_web_access::OutboundProxyMode)>>,
 }
 
 impl StubWebProviderFactory {
@@ -101,7 +103,9 @@ impl StubWebProviderFactory {
         self.adapters.lock().insert(provider_id.into(), adapter);
     }
 
-    pub(crate) fn recorded_outbounds(&self) -> Vec<(String, stravia_web_access::OutboundProxyMode)> {
+    pub(crate) fn recorded_outbounds(
+        &self,
+    ) -> Vec<(String, stravia_web_access::OutboundProxyMode)> {
         self.recorded_outbounds.lock().clone()
     }
 }

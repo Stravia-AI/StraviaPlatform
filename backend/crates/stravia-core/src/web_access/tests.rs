@@ -424,7 +424,9 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
         .expect("Primary empty result succeeds");
     assert!(empty.results.is_empty());
     assert_eq!(
-        empty_primary.calls.load(std::sync::atomic::Ordering::SeqCst),
+        empty_primary
+            .calls
+            .load(std::sync::atomic::Ordering::SeqCst),
         1
     );
     assert_eq!(

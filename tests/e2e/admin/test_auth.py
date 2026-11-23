@@ -349,6 +349,7 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
             assert status == 200
             assert state == {
                 "mode": "server",
+                "auth_mode": "single_admin",
                 "authenticated": False,
                 "setup_authorized": False,
                 "username": None,
@@ -370,6 +371,7 @@ def test_fresh_server_is_claimed_once_then_completed_and_logged_in(
             assert status == 200
             assert state == {
                 "mode": "server",
+                "auth_mode": "single_admin",
                 "authenticated": True,
                 "setup_authorized": False,
                 "username": "owner",
