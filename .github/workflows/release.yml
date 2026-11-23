@@ -11,6 +11,10 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+  actions: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -746,6 +750,7 @@ jobs:
 
   docker-build:
     name: Docker cross-validation (${{ matrix.platform }})
+    if: needs.prepare.outputs.publish != 'true'
     needs: prepare
     runs-on: ubuntu-24.04
     strategy:
@@ -753,24 +758,23 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            arch: amd64
           - platform: linux/arm64
-            arch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Login to Container Registry
-        if: env.REGISTRY_USER != ''
-        env:
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_PASS: ${{ secrets.CONTAINER_REGISTRY_TOKEN || github.token }}
-        run: echo "${REGISTRY_PASS}" | docker login "${CONTAINER_REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
+      - name: Set up QEMU
+        if: matrix.platform == 'linux/arm64'
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Build image via BuildKit cross-compilation without publishing
         env:
           PLATFORM: ${{ matrix.platform }}
-          ARCH: ${{ matrix.arch }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           docker buildx build \
@@ -781,7 +785,6 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=${VERSION}" \
             --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
-            --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache-${ARCH}" \
             .
 
   collect-assets:
@@ -907,8 +910,9 @@ jobs:
     needs:
       - prepare
       - collect-assets
-      - docker-build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout release metadata
         uses: actions/checkout@v7
@@ -951,9 +955,20 @@ jobs:
       - prepare
       - prepare-draft
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Container Registry
         env:
@@ -970,12 +985,13 @@ jobs:
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           set -euo pipefail
-          tags=(--tag "${IMAGE_NAME}:${VERSION}")
+          image_name="${IMAGE_NAME,,}"
+          tags=(--tag "${image_name}:${VERSION}")
           if [[ "${PRERELEASE}" == "false" ]]; then
             tags+=(
-              --tag "${IMAGE_NAME}:${MAJOR}.${MINOR}"
-              --tag "${IMAGE_NAME}:${MAJOR}"
-              --tag "${IMAGE_NAME}:latest"
+              --tag "${image_name}:${MAJOR}.${MINOR}"
+              --tag "${image_name}:${MAJOR}"
+              --tag "${image_name}:latest"
             )
           fi
           docker buildx build \
@@ -987,8 +1003,6 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=${VERSION}" \
             --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
-            --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache-amd64" \
-            --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache-arm64" \
             "${tags[@]}" \
             .
 
@@ -999,6 +1013,8 @@ jobs:
       - prepare
       - publish-image
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout release helper
         uses: actions/checkout@v7
