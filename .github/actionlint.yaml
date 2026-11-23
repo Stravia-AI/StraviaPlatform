@@ -1,5 +1,3 @@
-paths:
-  .github/workflows/release.yml:
-    ignore:
-      # actionlint 尚未收录 GitHub 官方 Windows 11 + VS 2026 ARM64 runner。
-      - 'label "windows-11-vs2026-arm" is unknown'
+self-hosted-runner:
+  labels:
+    - linux-x64-kvm

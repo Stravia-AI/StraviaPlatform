@@ -6,14 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
-      macos_only:
-        description: Build and validate only macOS assets without publishing
+      skip_checks:
+        description: Skip CI verification before dry-run build (workflow_dispatch only)
         type: boolean
         default: false
-
-permissions:
-  contents: read
-  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,17 +19,24 @@ env:
   RUST_VERSION: "1.99.1"
   BUN_VERSION: "1.4.2"
   TASK_VERSION: "3.52.0"
-  IMAGE_NAME: ghcr.io/stravia-ai/straviaplatform
+  PATCH_CRATE_VERSION: "0.1.13"
+  SCCACHE_VERSION: "0.10.0"
+  CARGO_XWIN_VERSION: "0.22.0"
+  APPLE_CODESIGN_VERSION: "0.29.0"
+  XWIN_VERSION: "16"
+  CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY || (github.server_url == 'https://github.com' && 'ghcr.io' || 'codeberg.org') }}
+  IMAGE_NAME: ${{ vars.CONTAINER_IMAGE_NAME || format('{0}/{1}', vars.CONTAINER_REGISTRY || (github.server_url == 'https://github.com' && 'ghcr.io' || 'codeberg.org'), github.repository) }}
 
 jobs:
   checks:
     name: Release checks
-    if: github.event_name != 'workflow_dispatch' || !inputs.macos_only
+    if: github.event_name != 'workflow_dispatch' || !inputs.skip_checks
     uses: ./.github/workflows/ci.yml
 
   prepare:
     name: Validate release inputs
     needs: checks
+    if: ${{ !cancelled() && (needs.checks.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.skip_checks)) }}
     runs-on: ubuntu-24.04
     outputs:
       publish: ${{ steps.release.outputs.publish }}
@@ -43,18 +46,21 @@ jobs:
       minor: ${{ steps.release.outputs.minor }}
       prerelease: ${{ steps.release.outputs.prerelease }}
       published_at: ${{ steps.release.outputs.published_at }}
+      include_macos: ${{ steps.release.outputs.include_macos }}
     steps:
       - name: Checkout complete history
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Require official plugin identity
+      - name: Require bundled plugin catalog public key
         if: github.event_name == 'push'
         shell: bash
         run: |
-          [[ -s backend/crates/stravia-core/assets/stravia-plugin-catalog.pub ]] || { echo 'Missing bundled plugin catalog public key' >&2; exit 1; }
-          [[ "${GITHUB_REPOSITORY_ID}" == '1350654373' ]] || { echo 'Unexpected official repository ID' >&2; exit 1; }
+          [[ -s backend/crates/stravia-core/assets/stravia-plugin-catalog.pub ]] || {
+            echo 'Missing bundled plugin catalog public key' >&2
+            exit 1
+          }
 
       - name: Fetch main branch
         if: github.event_name == 'push'
@@ -125,6 +131,7 @@ jobs:
               "major": match.group("major"),
               "minor": match.group("minor"),
               "prerelease": str(match.group("prerelease") is not None).lower(),
+              "include_macos": "true",
               "published_at": subprocess.check_output(
                   [
                       "git",
@@ -142,52 +149,75 @@ jobs:
           PY
 
   build-vendor-plugins:
-    name: Standalone vendor plugins
+    name: Standalone vendor plugins (wasm32-wasip2)
     needs: prepare
     runs-on: ubuntu-24.04
     outputs:
       has_plugins: ${{ steps.select.outputs.has_plugins }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Select changed plugins
         id: select
         env:
-          GH_TOKEN: ${{ github.token }}
+          FORGEJO_API_URL: ${{ github.api_url }}
+          FORGEJO_REPOSITORY: ${{ github.repository }}
+          FORGEJO_TOKEN: ${{ github.token }}
           PUBLISH: ${{ needs.prepare.outputs.publish }}
         run: python3 .github/scripts/select_vendor_plugins.py
 
       - name: Upload selection marker
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: vendor-plugin-selection
           path: stravia-plugin-selection-v1.json
           if-no-files-found: error
           retention-days: 7
 
-      - name: Setup Rust
+      - name: Detect persistent host cache volume
+        id: host-cache
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
-          cache: 'false'
-
-      - name: Setup Task
-        if: steps.select.outputs.has_plugins == 'true'
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
-
-      - name: Install native build dependencies
-        if: steps.select.outputs.has_plugins == 'true'
+        shell: bash
         run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev python3 pkg-config minisign
+          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
+        if: steps.select.outputs.has_plugins == 'true' && steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.bun/bin
+            ~/.local/bin
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+
+      - name: Bootstrap Linux x64 toolchain
+        id: bootstrap
+        if: steps.select.outputs.has_plugins == 'true'
+        env:
+          RUST_TARGETS: "wasm32-wasip2"
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo and sccache
+        if: steps.select.outputs.has_plugins == 'true' && steps.bootstrap.outputs.host_cache != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/sccache
+          key: release-plugins-v1-${{ hashFiles('Cargo.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          restore-keys: |
+            release-plugins-v1-
 
       - name: Prepare patched crates
         if: steps.select.outputs.has_plugins == 'true'
@@ -213,7 +243,16 @@ jobs:
 
           directory = Path("target/vendor-plugins-all")
           records = json.loads((directory / "manifest.json").read_text())
-          names = {"openai-codex": "OpenAI Codex", "xai-grok": "xAI Grok", "command-code": "Command Code", "devin": "Devin", "opencode-free": "OpenCode Zen Free", "claude-code": "Claude Code", "antigravity": "Antigravity", "kiro": "Kiro"}
+          names = {
+              "openai-codex": "OpenAI Codex",
+              "xai-grok": "xAI Grok",
+              "command-code": "Command Code",
+              "devin": "Devin",
+              "opencode-free": "OpenCode Zen Free",
+              "claude-code": "Claude Code",
+              "antigravity": "Antigravity",
+              "kiro": "Kiro",
+          }
           dedicated = [record for record in records if record["vendor_id"] != "base"]
           selected = set(os.environ["SELECTED"].split(","))
           if not selected <= set(names) or len(dedicated) != len(selected) or {record["vendor_id"] for record in dedicated} != selected:
@@ -225,7 +264,12 @@ jobs:
               source = directory / record["file"]
               if hashlib.sha256(source.read_bytes()).hexdigest() != record["sha256"]:
                   raise SystemExit(f"Plugin digest mismatch: {record['vendor_id']}")
-              declarations.append({"file": str(source), "vendor_id": record["vendor_id"], "version": record["version"], "display_name": names[record["vendor_id"]]})
+              declarations.append({
+                  "file": str(source),
+                  "vendor_id": record["vendor_id"],
+                  "version": record["version"],
+                  "display_name": names[record["vendor_id"]],
+              })
           Path("plugin-input.json").write_text(json.dumps(declarations))
           PY
 
@@ -239,9 +283,10 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           PUBLISHED_AT: ${{ needs.prepare.outputs.published_at }}
+          REPOSITORY_ID: ${{ vars.OFFICIAL_REPOSITORY_ID || '1350654373' }}
         run: |
           cargo run --release -p stravia-devtools --bin stravia-tools -- plugin-catalog \
-            --repository-id 1350654373 --release-tag "${RELEASE_TAG}" \
+            --repository-id "${REPOSITORY_ID}" --release-tag "${RELEASE_TAG}" \
             --host-version-req ">=${RELEASE_VERSION}" --published-at "${PUBLISHED_AT}" \
             --input plugin-input.json --output dist
 
@@ -264,7 +309,7 @@ jobs:
 
       - name: Upload dedicated plugin assets
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: vendor-plugins
           path: dist/*
@@ -272,106 +317,135 @@ jobs:
           retention-days: 7
 
   build-server:
-    name: Server (${{ matrix.suffix }})
+    name: Server cross-build (${{ matrix.suffix }})
     needs: prepare
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            suffix: linux-x86_64-gnu
-            binary: target/release/stravia-server
-          - runner: ubuntu-24.04-arm
-            suffix: linux-aarch64-gnu
-            binary: target/release/stravia-server
-          - runner: windows-2022
-            suffix: windows-x86_64
-            binary: target/release/stravia-server.exe
-          - runner: windows-11-vs2026-arm
-            suffix: windows-aarch64
-            binary: target/release/stravia-server.exe
+          - suffix: linux-x86_64-gnu
+            target: x86_64-unknown-linux-gnu
+            kind: linux-native
+            binary: target/x86_64-unknown-linux-gnu/release/stravia-server
+            archive: tar.gz
+          - suffix: linux-aarch64-gnu
+            target: aarch64-unknown-linux-gnu
+            kind: linux-arm64
+            binary: target/aarch64-unknown-linux-gnu/release/stravia-server
+            archive: tar.gz
+          - suffix: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            kind: windows-xwin
+            binary: target/x86_64-pc-windows-msvc/release/stravia-server.exe
+            archive: zip
+          - suffix: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            kind: windows-xwin-arm64
+            binary: target/aarch64-pc-windows-msvc/release/stravia-server.exe
+            archive: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Install NASM for BoringSSL
-        if: runner.os == 'Windows' && runner.arch == 'X64'
-        shell: pwsh
+      - name: Detect persistent host cache volume
+        id: host-cache
+        shell: bash
         run: |
-          choco install nasm --yes --no-progress
-          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
-          & (Join-Path $nasmDirectory 'nasm.exe') -v
-          $nasmDirectory >> $env:GITHUB_PATH
+          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Cache Rust cross-compile toolchain binaries
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v4
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
-          cache: 'false'
-          cache-save-if: 'false'
-          cache-on-failure: 'false'
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.bun/bin
+            ~/.local/bin
+          key: toolchain-release-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Bootstrap Linux x64 cross-compile toolchain
+        id: bootstrap
+        env:
+          NEED_XWIN: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
+          NEED_LINUX_ARM64: ${{ matrix.kind == 'linux-arm64' && '1' || '0' }}
+          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo, sccache, Bun, and xwin SDK
+        if: steps.bootstrap.outputs.host_cache != 'true'
+        uses: actions/cache@v4
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-          no-cache: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/sccache
+            ~/.cache/cargo-xwin
+            ~/.bun/install/cache
+          key: release-server-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          restore-keys: |
+            release-server-${{ matrix.suffix }}-v1-
 
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
-
-      - name: Configure BoringSSL for native Windows ARM64
-        if: matrix.suffix == 'windows-aarch64'
-        shell: pwsh
+      - name: Prepare patched crates, WebUI, and bundled vendors
         run: |
-          $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
-          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
+          task prepare:crates
+          task build:web
+          task build:vendors
 
-      - name: Install native HTTP build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake clang libclang-dev python3 pkg-config
+      - name: Build server (Linux native)
+        if: matrix.kind == 'linux-native'
+        run: cargo build --locked -p stravia-server --release --target ${{ matrix.target }}
 
-      - name: Prepare patched crates
-        run: task prepare:crates
+      - name: Build server (Linux aarch64 cross)
+        if: matrix.kind == 'linux-arm64'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: cargo build --locked -p stravia-server --release --target ${{ matrix.target }}
 
-      - name: Build server
-        run: task build:server
+      - name: Build server (Windows x86_64 MSVC via cargo-xwin)
+        if: matrix.kind == 'windows-xwin'
+        run: cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
 
-      - name: Package Unix server
-        if: runner.os != 'Windows'
+      - name: Build server (Windows aarch64 MSVC via cargo-xwin)
+        if: matrix.kind == 'windows-xwin-arm64'
+        env:
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/.github/cmake/windows-arm64.cmake
+          AWS_LC_SYS_NO_ASM: "1"
+        run: cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
+
+      - name: Package server artifact
         shell: bash
         env:
           ASSET_BASENAME: stravia-server-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
           BINARY_PATH: ${{ matrix.binary }}
+          ARCHIVE_KIND: ${{ matrix.archive }}
         run: |
+          set -euo pipefail
           mkdir -p "package/${ASSET_BASENAME}" dist
-          install -m 0755 "${BINARY_PATH}" "package/${ASSET_BASENAME}/stravia-server"
-          install -m 0644 LICENSE "package/${ASSET_BASENAME}/LICENSE"
-          tar -C package -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
-
-      - name: Package Windows server
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          ASSET_BASENAME: stravia-server-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
-          BINARY_PATH: ${{ matrix.binary }}
-        run: |
-          $packageDirectory = Join-Path package $env:ASSET_BASENAME
-          New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item $env:BINARY_PATH (Join-Path $packageDirectory 'stravia-server.exe')
-          Copy-Item LICENSE (Join-Path $packageDirectory 'LICENSE')
-          Compress-Archive -Path $packageDirectory -DestinationPath "dist/$($env:ASSET_BASENAME).zip"
+          if [[ "${ARCHIVE_KIND}" == "tar.gz" ]]; then
+            install -m 0755 "${BINARY_PATH}" "package/${ASSET_BASENAME}/stravia-server"
+            install -m 0644 LICENSE "package/${ASSET_BASENAME}/LICENSE"
+            tar -C package -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
+          else
+            cp "${BINARY_PATH}" "package/${ASSET_BASENAME}/stravia-server.exe"
+            cp LICENSE "package/${ASSET_BASENAME}/LICENSE"
+            (cd package && zip -r "../dist/${ASSET_BASENAME}.zip" "${ASSET_BASENAME}")
+          fi
 
       - name: Upload server asset
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: server-${{ matrix.suffix }}
           path: dist/*
@@ -379,179 +453,254 @@ jobs:
           retention-days: 7
 
   build-desktop:
-    name: Desktop (${{ matrix.suffix }})
+    name: Desktop cross-build (${{ matrix.suffix }})
     needs: prepare
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            suffix: linux-x86_64
+          - suffix: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            kind: linux-native
             bundle: appimage
             bundle_directory: appimage
-          - runner: ubuntu-24.04-arm
-            suffix: linux-aarch64
+          - suffix: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            kind: linux-arm64
             bundle: appimage
             bundle_directory: appimage
-          - runner: windows-2022
-            suffix: windows-x86_64
+          - suffix: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            kind: windows-xwin
             bundle: nsis
             bundle_directory: nsis
-          - runner: windows-11-vs2026-arm
-            suffix: windows-aarch64
+          - suffix: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            kind: windows-xwin-arm64
             bundle: nsis
             bundle_directory: nsis
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Install NASM for BoringSSL
-        if: runner.os == 'Windows' && runner.arch == 'X64'
-        shell: pwsh
+      - name: Detect persistent host cache volume
+        id: host-cache
+        shell: bash
         run: |
-          choco install nasm --yes --no-progress
-          $nasmDirectory = Join-Path $env:ProgramFiles 'NASM'
-          & (Join-Path $nasmDirectory 'nasm.exe') -v
-          $nasmDirectory >> $env:GITHUB_PATH
+          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Cache Rust cross-compile toolchain binaries
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v4
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
-          cache: 'false'
-          cache-save-if: 'false'
-          cache-on-failure: 'false'
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.bun/bin
+            ~/.local/bin
+          key: toolchain-release-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Bootstrap Linux x64 cross-compile toolchain
+        id: bootstrap
+        env:
+          NEED_LINUX_DESKTOP: ${{ startsWith(matrix.kind, 'linux-') && '1' || '0' }}
+          NEED_LINUX_ARM64: ${{ matrix.kind == 'linux-arm64' && '1' || '0' }}
+          NEED_XWIN: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
+          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo, sccache, Bun, and xwin SDK
+        if: steps.bootstrap.outputs.host_cache != 'true'
+        uses: actions/cache@v4
         with:
-          bun-version: ${{ env.BUN_VERSION }}
-          no-cache: true
-
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
-
-      - name: Install Linux desktop dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/google-chrome*
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            xdg-utils cmake clang libclang-dev python3 \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - name: Configure BoringSSL for native Windows ARM64
-        if: matrix.suffix == 'windows-aarch64'
-        shell: pwsh
-        run: |
-          $toolchain = Join-Path $env:GITHUB_WORKSPACE '.github/cmake/windows-arm64.cmake'
-          "CMAKE_TOOLCHAIN_FILE=$toolchain" >> $env:GITHUB_ENV
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/sccache
+            ~/.cache/cargo-xwin
+            ~/.bun/install/cache
+          key: release-desktop-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          restore-keys: |
+            release-desktop-${{ matrix.suffix }}-v1-
 
       - name: Validate updater signing credentials
-        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: python3 .github/scripts/configure_updater_signing.py
 
-      - name: Prepare patched crates
-        run: task prepare:crates
+      - name: Prepare patched crates, WebUI, and bundled vendors
+        run: |
+          task prepare:crates
+          task install:web
+          task build:vendors
 
-      - name: Build desktop bundle
+      - name: Build desktop bundle (Linux native AppImage)
+        if: matrix.kind == 'linux-native'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES=appimage RUST_TARGET=${{ matrix.target }}
+
+      - name: Build desktop bundle (Linux aarch64 cross AppImage)
+        if: matrix.kind == 'linux-arm64'
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES=appimage RUST_TARGET=${{ matrix.target }}
+
+      - name: Build desktop bundle (Windows x86_64 NSIS via cargo-xwin)
+        if: matrix.kind == 'windows-xwin'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES="${{ matrix.bundle }}"
+        run: |
+          cd backend/apps/stravia-desktop
+          bunx --bun @tauri-apps/cli@2.12.3 build \
+            --runner cargo-xwin \
+            --target ${{ matrix.target }} \
+            --config tauri.release.conf.json \
+            --bundles nsis -- --locked
 
-      - name: Collect Linux desktop bundle
-        if: runner.os == 'Linux'
+      - name: Build desktop bundle (Windows aarch64 NSIS via cargo-xwin)
+        if: matrix.kind == 'windows-xwin-arm64'
+        env:
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/.github/cmake/windows-arm64.cmake
+          AWS_LC_SYS_NO_ASM: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cd backend/apps/stravia-desktop
+          bunx --bun @tauri-apps/cli@2.12.3 build \
+            --runner cargo-xwin \
+            --target ${{ matrix.target }} \
+            --config tauri.release.conf.json \
+            --bundles nsis -- --locked
+
+      - name: Collect desktop bundle
         shell: bash
         env:
-          ASSET_NAME: stravia-desktop-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}.AppImage
+          TARGET_TRIPLE: ${{ matrix.target }}
+          BUNDLE_DIR: ${{ matrix.bundle_directory }}
+          IS_WINDOWS: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SUFFIX: ${{ matrix.suffix }}
         run: |
+          set -euo pipefail
           shopt -s nullglob
-          bundles=(target/release/bundle/${{ matrix.bundle_directory }}/*.AppImage)
+          mkdir -p dist
+          if [[ "${IS_WINDOWS}" == "1" ]]; then
+            bundles=(target/"${TARGET_TRIPLE}"/release/bundle/"${BUNDLE_DIR}"/*-setup.exe)
+            asset="stravia-desktop-v${VERSION}-${SUFFIX}-setup.exe"
+          else
+            bundles=(target/"${TARGET_TRIPLE}"/release/bundle/"${BUNDLE_DIR}"/*.AppImage)
+            asset="stravia-desktop-v${VERSION}-${SUFFIX}.AppImage"
+          fi
           if [[ ${#bundles[@]} -ne 1 ]]; then
-            printf 'Expected exactly one AppImage, found %s\n' "${#bundles[@]}" >&2
+            printf 'Expected exactly one bundle in target/%s/release/bundle/%s, found %s\n' \
+              "${TARGET_TRIPLE}" "${BUNDLE_DIR}" "${#bundles[@]}" >&2
             exit 1
           fi
-          mkdir -p dist
-          cp "${bundles[0]}" "dist/${ASSET_NAME}"
-          cp "${bundles[0]}.sig" "dist/${ASSET_NAME}.sig"
-
-      - name: Collect Windows desktop bundle
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          ASSET_NAME: stravia-desktop-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}-setup.exe
-        run: |
-          $bundles = @(Get-ChildItem 'target/release/bundle/${{ matrix.bundle_directory }}/*-setup.exe' -File)
-          if ($bundles.Count -ne 1) {
-            throw "Expected exactly one NSIS installer, found $($bundles.Count)"
-          }
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item $bundles[0].FullName (Join-Path dist $env:ASSET_NAME)
-          Copy-Item "$($bundles[0].FullName).sig" (Join-Path dist "$($env:ASSET_NAME).sig")
+          cp "${bundles[0]}" "dist/${asset}"
+          cp "${bundles[0]}.sig" "dist/${asset}.sig"
 
       - name: Upload desktop asset
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist/*
           if-no-files-found: error
           retention-days: 7
 
-  build-macos:
-    name: Desktop (${{ matrix.suffix }})
+  build-macos-cross:
+    name: Desktop cross-build (${{ matrix.suffix }}, osxcross)
     needs: prepare
-    if: ${{ !cancelled() && (needs.prepare.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.macos_only)) }}
-    runs-on: ${{ matrix.runner }}
-    env:
-      APPLE_SIGNING_IDENTITY: "-"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            suffix: darwin-aarch64
-            binary_arch: arm64
-          - runner: macos-15-intel
-            suffix: darwin-x86_64
-            binary_arch: x86_64
+          - suffix: darwin-aarch64
+            target: aarch64-apple-darwin
+            arch: arm64
+            cmake_file: .github/cmake/macos-aarch64.cmake
+          - suffix: darwin-x86_64
+            target: x86_64-apple-darwin
+            arch: x86_64
+            cmake_file: .github/cmake/macos-x86_64.cmake
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Validate repository versions
-        id: version
-        env:
-          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+      - name: Detect persistent host cache volume
+        id: host-cache
+        shell: bash
         run: |
-          python3 <<'PY'
-          import json
-          import os
-          import tomllib
-          from pathlib import Path
+          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          version = json.loads(Path("package.json").read_text())["version"]
-          cargo = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
-          desktop = json.loads(Path("backend/apps/stravia-desktop/tauri.conf.json").read_text())["version"]
-          if version != cargo or version != desktop:
-              raise SystemExit("Repository versions must match before building macOS assets")
-          expected = os.environ["EXPECTED_VERSION"]
-          if expected and version != expected:
-              raise SystemExit("Repository version does not match the release")
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write(f"version={version}\n")
-          PY
+      - name: Cache Rust + rcodesign toolchain binaries
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.bun/bin
+            ~/.local/bin
+          key: toolchain-macos-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+
+      - name: Restore osxcross toolchain cache (when not prebuilt in image)
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /opt/osxcross/target
+          key: osxcross-899260ca-sdk15.5-linux-x64-v1
+
+      - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
+        id: bootstrap
+        env:
+          NEED_MACOS_CROSS: "1"
+          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
+          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL || 'https://github.com/joseluisq/macosx-sdks/releases/download/15.5/MacOSX15.5.sdk.tar.xz' }}
+          MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo, sccache, and Bun
+        if: steps.bootstrap.outputs.host_cache != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/sccache
+            ~/.bun/install/cache
+          key: release-macos-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          restore-keys: |
+            release-macos-${{ matrix.suffix }}-v1-
 
       - name: Validate updater signing credentials
         env:
@@ -559,71 +708,30 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: python3 .github/scripts/configure_updater_signing.py
 
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
-          cache: 'false'
-          cache-save-if: 'false'
-          cache-on-failure: 'false'
+      - name: Prepare patched crates, WebUI, and bundled vendors
+        run: |
+          task prepare:crates
+          task build:web
+          task build:vendors
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-          no-cache: true
+      - name: Cross-compile macOS desktop binary via osxcross
+        env:
+          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/${{ matrix.cmake_file }}
+        run: cargo build --locked -p stravia-desktop --release --target ${{ matrix.target }}
 
-      - name: Setup Task
-        uses: go-task/setup-task@v2
-        with:
-          version: ${{ env.TASK_VERSION }}
-
-      - name: Prepare patched crates
-        run: task prepare:crates
-
-      - name: Build macOS application, DMG, and signed updater archive
+      - name: Package .app, rcodesign (Hardened Runtime + entitlements), updater archive, and .dmg
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES="app,dmg"
-
-      - name: Verify and collect macOS release assets
-        env:
-          ASSET_BASENAME: stravia-desktop-v${{ steps.version.outputs.version }}-${{ matrix.suffix }}
-          BINARY_ARCH: ${{ matrix.binary_arch }}
         run: |
-          shopt -s nullglob
-          apps=(target/release/bundle/macos/*.app)
-          archives=(target/release/bundle/macos/*.app.tar.gz)
-          dmgs=(target/release/bundle/dmg/*.dmg)
-          if [[ ${#apps[@]} -ne 1 || ${#archives[@]} -ne 1 || ${#dmgs[@]} -ne 1 ]]; then
-            printf 'Expected one app, updater archive, and DMG; found %s, %s, %s\n' \
-              "${#apps[@]}" "${#archives[@]}" "${#dmgs[@]}" >&2
-            exit 1
-          fi
-          codesign --verify --deep --strict "${apps[0]}"
-          lipo "${apps[0]}/Contents/MacOS/stravia-desktop" -verify_arch "${BINARY_ARCH}"
-          python3 .github/scripts/verify_macos_runtime.py "${apps[0]}"
-          hdiutil verify "${dmgs[0]}"
-          tar -tzf "${archives[0]}" > /dev/null
-          test -s "${archives[0]}.sig"
-          extracted="$(mktemp -d)"
-          trap 'rm -rf "$extracted"' EXIT
-          tar -xzf "${archives[0]}" -C "$extracted"
-          archived_apps=("$extracted"/*.app)
-          if [[ ${#archived_apps[@]} -ne 1 ]]; then
-            printf 'Expected one app in the updater archive\n' >&2
-            exit 1
-          fi
-          python3 .github/scripts/verify_macos_runtime.py "${archived_apps[0]}"
-          mkdir -p dist
-          cp "${dmgs[0]}" "dist/${ASSET_BASENAME}.dmg"
-          cp "${archives[0]}" "dist/${ASSET_BASENAME}.app.tar.gz"
-          cp "${archives[0]}.sig" "dist/${ASSET_BASENAME}.app.tar.gz.sig"
+          python3 .github/scripts/package_macos_cross.py \
+            --binary "target/${{ matrix.target }}/release/stravia-desktop" \
+            --arch "${{ matrix.arch }}" \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --output-dir dist
 
       - name: Upload macOS release assets
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist/*
@@ -631,52 +739,44 @@ jobs:
           retention-days: 7
 
   docker-build:
-    name: Docker validation (${{ matrix.platform }})
+    name: Docker cross-validation (${{ matrix.platform }})
     needs: prepare
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: read
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            platform: linux/amd64
+          - platform: linux/amd64
             arch: amd64
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
+          - platform: linux/arm64
             arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Login to GHCR for cache reads
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build image without publishing
-        uses: docker/build-push-action@v7
+      - name: Login to Container Registry
+        if: env.REGISTRY_USER != ''
         env:
-          DOCKER_BUILD_RECORD_UPLOAD: "false"
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          push: false
-          provenance: false
-          sbom: false
-          labels: |
-            org.opencontainers.image.source=https://github.com/Stravia-AI/StraviaPlatform
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
-            org.opencontainers.image.licenses=AGPL-3.0-only
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASS: ${{ secrets.CONTAINER_REGISTRY_TOKEN || github.token }}
+        run: echo "${REGISTRY_PASS}" | docker login "${CONTAINER_REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
+
+      - name: Build image via BuildKit cross-compilation without publishing
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          docker buildx build \
+            --platform "${PLATFORM}" \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
+            --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache-${ARCH}" \
+            .
 
   collect-assets:
     name: Collect release assets
@@ -684,53 +784,111 @@ jobs:
       - prepare
       - build-server
       - build-desktop
-      - build-macos
+      - build-macos-cross
       - build-vendor-plugins
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build-server.result == 'success' && needs.build-desktop.result == 'success' && needs.build-vendor-plugins.result == 'success' && (needs.build-macos-cross.result == 'success' || needs.build-macos-cross.result == 'skipped') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout manifest generator
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Download server assets
-        uses: actions/download-artifact@v8
+      - name: Download server linux-x86_64-gnu
+        uses: actions/download-artifact@v4
         with:
-          pattern: server-*
+          name: server-linux-x86_64-gnu
           path: release-assets
-          merge-multiple: true
 
-      - name: Download desktop assets
-        uses: actions/download-artifact@v8
+      - name: Download server linux-aarch64-gnu
+        uses: actions/download-artifact@v4
         with:
-          pattern: desktop-*
+          name: server-linux-aarch64-gnu
           path: release-assets
-          merge-multiple: true
+
+      - name: Download server windows-x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: server-windows-x86_64
+          path: release-assets
+
+      - name: Download server windows-aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: server-windows-aarch64
+          path: release-assets
+
+      - name: Download desktop linux-x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-x86_64
+          path: release-assets
+
+      - name: Download desktop linux-aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-aarch64
+          path: release-assets
+
+      - name: Download desktop windows-x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows-x86_64
+          path: release-assets
+
+      - name: Download desktop windows-aarch64
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows-aarch64
+          path: release-assets
+
+      - name: Download desktop darwin-aarch64
+        if: needs.prepare.outputs.include_macos == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-darwin-aarch64
+          path: release-assets
+
+      - name: Download desktop darwin-x86_64
+        if: needs.prepare.outputs.include_macos == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-darwin-x86_64
+          path: release-assets
 
       - name: Download selection marker
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           name: vendor-plugin-selection
           path: release-assets
 
       - name: Download dedicated plugin assets
         if: needs.build-vendor-plugins.outputs.has_plugins == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           name: vendor-plugins
           path: release-assets
 
-      - name: Generate SHA256SUMS
+      - name: Generate updater manifest and SHA256SUMS
         shell: bash
+        env:
+          INCLUDE_MACOS: ${{ needs.prepare.outputs.include_macos }}
         run: |
+          set -euo pipefail
+          platforms="linux-x86_64,linux-aarch64,windows-x86_64,windows-aarch64"
+          if [[ "${INCLUDE_MACOS}" == "true" ]]; then
+            platforms="${platforms},darwin-aarch64,darwin-x86_64"
+          fi
           python3 .github/scripts/generate_updater_manifest.py \
             --artifacts release-assets \
             --version "${{ needs.prepare.outputs.version }}" \
             --published-at "${{ needs.prepare.outputs.published_at }}" \
+            --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --platforms "${platforms}" \
             --output release-assets/stravia-updater.json
           cd release-assets
           LC_ALL=C sha256sum -- * > SHA256SUMS
 
       - name: Upload consolidated release assets
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: release-assets
           path: release-assets/*
@@ -745,268 +903,108 @@ jobs:
       - collect-assets
       - docker-build
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - name: Checkout release metadata
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download release assets
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           name: release-assets
           path: release-assets
 
-      - name: Compose release notes
+      - name: Compose release notes & sync draft release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          python3 <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = re.escape(os.environ["VERSION"])
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          match = re.search(
-              rf"^## \[{version}\](?: - [^\n]+)?\n(?P<body>.*?)(?=^## |\Z)",
-              changelog,
-              flags=re.MULTILINE | re.DOTALL,
-          )
-          if match is None:
-              raise SystemExit(f"CHANGELOG.md has no section for {os.environ['VERSION']}")
-
-          notes = match.group("body").strip()
-          if not notes:
-              raise SystemExit(f"CHANGELOG.md section for {os.environ['VERSION']} is empty")
-
-          Path(os.environ["RUNNER_TEMP"], "curated-release-notes.md").write_text(
-              notes + "\n",
-              encoding="utf-8",
-          )
-          PY
-
-          gh api \
-            --method POST \
-            "repos/${GH_REPO}/releases/generate-notes" \
-            -f "tag_name=${TAG_NAME}" \
-            --jq '.body' \
-            > "${RUNNER_TEMP}/generated-release-notes.md"
-
-          {
-            cat "${RUNNER_TEMP}/curated-release-notes.md"
-            printf '\n---\n\n'
-            cat "${RUNNER_TEMP}/generated-release-notes.md"
-          } > "${RUNNER_TEMP}/release-notes.md"
-
-      - name: Create or refresh draft release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG_NAME: ${{ needs.prepare.outputs.tag }}
           IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
-          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-            if [[ "${IS_PRERELEASE}" == "true" ]]; then
-              gh release edit "${TAG_NAME}" --draft --prerelease --latest=false --notes-file "${RELEASE_NOTES_FILE}"
-            else
-              gh release edit "${TAG_NAME}" --draft --prerelease=false --latest=false --notes-file "${RELEASE_NOTES_FILE}"
-            fi
-          else
-            args=(
-              "${TAG_NAME}"
-              --verify-tag
-              --draft
-              --title "Stravia ${TAG_NAME}"
-              --notes-file "${RELEASE_NOTES_FILE}"
-              --latest=false
-            )
-            if [[ "${IS_PRERELEASE}" == "true" ]]; then
-              args+=(--prerelease)
-            fi
-            gh release create "${args[@]}"
-          fi
-          # A retried draft may have selected a different subset, or none at all.
-          gh release view "${TAG_NAME}" --json assets --jq '.assets[].name' | while IFS= read -r asset; do
-            case "${asset}" in
-              stravia-plugin-catalog.json|stravia-plugin-catalog.json.minisig|stravia-plugin-catalog.pub|stravia-vendor-*.wasm.zst)
-                gh release delete-asset "${TAG_NAME}" "${asset}" --yes ;;
-            esac
-          done
-          gh release upload "${TAG_NAME}" release-assets/* --clobber
-          gh release view "${TAG_NAME}" --json assets > "${RUNNER_TEMP}/draft-assets.json"
-          python3 <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          local = {p.name: p.stat().st_size for p in Path("release-assets").iterdir() if p.is_file()}
-          assets = json.loads(Path(os.environ["RUNNER_TEMP"], "draft-assets.json").read_text())["assets"]
-          remote = {asset["name"]: asset["size"] for asset in assets}
-          if len(remote) != len(assets) or remote != local:
-              raise SystemExit(f"Draft release assets do not match prepared inventory: expected {local}, got {remote}")
-          PY
+          set -euo pipefail
+          python3 .github/scripts/release_api.py compose-notes \
+            --changelog CHANGELOG.md \
+            --version "${VERSION}" \
+            --tag "${TAG_NAME}" \
+            --output "${RUNNER_TEMP}/release-notes.md"
+          python3 .github/scripts/release_api.py upsert-draft \
+            --tag "${TAG_NAME}" \
+            --title "Stravia ${TAG_NAME}" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            --prerelease "${IS_PRERELEASE}" \
+            --assets-dir release-assets
 
   publish-image:
-    name: Publish image digest (${{ matrix.platform }})
+    name: Publish multi-arch container image
     if: needs.prepare.outputs.publish == 'true'
     needs:
       - prepare
       - prepare-draft
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            platform: linux/amd64
-            arch: amd64
-            artifact: docker-digest-amd64
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            arch: arm64
-            artifact: docker-digest-arm64
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build and push image by digest
-        id: build
-        uses: docker/build-push-action@v7
+      - name: Login to Container Registry
         env:
-          DOCKER_BUILD_RECORD_UPLOAD: "false"
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          provenance: false
-          sbom: false
-          labels: |
-            org.opencontainers.image.source=https://github.com/Stravia-AI/StraviaPlatform
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
-            org.opencontainers.image.licenses=AGPL-3.0-only
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push=true,push-by-digest=true,name-canonical=true
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASS: ${{ secrets.CONTAINER_REGISTRY_TOKEN || github.token }}
+        run: echo "${REGISTRY_PASS}" | docker login "${CONTAINER_REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
 
-      - name: Export digest
+      - name: Build and push multi-architecture image from Linux x64
         shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR: ${{ needs.prepare.outputs.major }}
+          MINOR: ${{ needs.prepare.outputs.minor }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          test -n "${IMAGE_DIGEST}"
-          mkdir -p "${RUNNER_TEMP}/digests"
-          touch "${RUNNER_TEMP}/digests/${IMAGE_DIGEST#sha256:}"
+          set -euo pipefail
+          tags=(--tag "${IMAGE_NAME}:${VERSION}")
+          if [[ "${PRERELEASE}" == "false" ]]; then
+            tags+=(
+              --tag "${IMAGE_NAME}:${MAJOR}.${MINOR}"
+              --tag "${IMAGE_NAME}:${MAJOR}"
+              --tag "${IMAGE_NAME}:latest"
+            )
+          fi
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            --provenance=false \
+            --sbom=false \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
+            --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache-amd64" \
+            --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache-arm64" \
+            "${tags[@]}" \
+            .
 
-      - name: Upload digest
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 7
-
-  publish-image-manifest:
-    name: Publish multi-architecture image
+  publish-release:
+    name: Publish release
+    if: needs.prepare.outputs.publish == 'true'
     needs:
       - prepare
       - publish-image
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - name: Download image digests
-        uses: actions/download-artifact@v8
-        with:
-          pattern: docker-digest-*
-          path: ${{ runner.temp }}/digests
-          merge-multiple: true
+      - name: Checkout release helper
+        uses: actions/checkout@v4
 
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Generate image tags
-        id: metadata
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=${{ needs.prepare.outputs.major }}.${{ needs.prepare.outputs.minor }},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
-            type=raw,value=${{ needs.prepare.outputs.major }},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
-            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
-
-      - name: Create and inspect multi-architecture manifest
-        shell: bash
-        env:
-          TAGS_JSON: ${{ steps.metadata.outputs.json }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          mapfile -t tags < <(jq -r '.tags[]' <<< "${TAGS_JSON}")
-          tag_args=()
-          for tag in "${tags[@]}"; do
-            tag_args+=(--tag "${tag}")
-          done
-
-          shopt -s nullglob
-          digest_files=("${RUNNER_TEMP}"/digests/*)
-          if [[ ${#digest_files[@]} -ne 2 ]]; then
-            printf 'Expected two image digests, found %s\n' "${#digest_files[@]}" >&2
-            exit 1
-          fi
-          sources=()
-          for digest_file in "${digest_files[@]}"; do
-            sources+=("${IMAGE_NAME}@sha256:$(basename "${digest_file}")")
-          done
-
-          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
-          docker buildx imagetools inspect "${IMAGE_NAME}:${VERSION}"
-
-  publish-release:
-    name: Publish GitHub Release
-    needs:
-      - prepare
-      - publish-image-manifest
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
       - name: Publish completed draft
-        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare.outputs.tag }}
           IS_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          if [[ "${IS_PRERELEASE}" == "true" ]]; then
-            gh release edit "${TAG_NAME}" --draft=false --prerelease --latest=false
-          else
-            gh release edit "${TAG_NAME}" --draft=false --prerelease=false --latest
-          fi
+          python3 .github/scripts/release_api.py publish \
+            --tag "${TAG_NAME}" \
+            --prerelease "${IS_PRERELEASE}"

@@ -97,7 +97,7 @@ updater 的插件路由部署、镜像白名单及 WorkBuddy 发布迁移由相�
 
 1. 确保 `Cargo.toml`、`package.json` 和 `backend/apps/stravia-desktop/tauri.conf.json` 版本一致，并在 `CHANGELOG.md` 中存在该版本的非空章节。
 2. 从 `main` 中的目标 commit 创建 `vMAJOR.MINOR.PATCH` 或合法 SemVer prerelease tag。
-3. 推送 tag。`release.yml` 会确认完整 CI 通过，签署六个平台产物，执行 `.github/scripts/generate_updater_manifest.py`，创建 draft Release，发布容器镜像，最后公开 Release。
+3. 推送 tag。`.github/workflows/release.yml`（同时兼容 GitHub Actions 与 Forgejo Actions）会确认完整 CI 通过，签署平台产物，执行 `.github/scripts/generate_updater_manifest.py`，通过 `.github/scripts/release_api.py` 创建 draft Release，发布容器镜像，最后公开 Release。
 4. 任一签名 secret、`.sig`、平台产物或清单字段缺失时 workflow 必须失败。不要通过移除校验、手工上传无签名安装包或发布部分清单来绕过失败。
 
 发布回归必须遵循当前产品契约：已开始的 Responses 流只以单个 `response.failed` 收口，并保留部分输出和原生错误详情；重启恢复用例必须在上游请求仍受事件门控、尚未交付时模拟进程中断，不能以固定延迟或优雅关闭后的已完成请求代替崩溃场景。修复失败后先运行对应定向检查，再重新执行完整发布矩阵。
