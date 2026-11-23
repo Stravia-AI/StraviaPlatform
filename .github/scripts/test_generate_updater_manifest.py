@@ -18,35 +18,37 @@ PLATFORMS = {
 
 
 class GenerateUpdaterManifestTests(unittest.TestCase):
-    def create_artifacts(self, root: Path) -> None:
-        for platform, filename in PLATFORMS.items():
+    def create_artifacts(self, root: Path, platforms: dict[str, str] = PLATFORMS) -> None:
+        for platform, filename in platforms.items():
             (root / filename).write_bytes(f"artifact:{platform}".encode())
             (root / f"{filename}.sig").write_text(f"signature:{platform}\n", encoding="utf-8")
 
-    def run_generator(self, root: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPT),
-                "--artifacts",
-                str(root),
-                "--version",
-                VERSION,
-                "--published-at",
-                "2026-09-05T00:00:00Z",
-                "--output",
-                str(root / "stravia-updater.json"),
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+    def run_generator(
+        self, root: Path, extra_args: list[str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        cmd = [
+            sys.executable,
+            str(SCRIPT),
+            "--artifacts",
+            str(root),
+            "--version",
+            VERSION,
+            "--published-at",
+            "2026-09-05T00:00:00Z",
+            "--output",
+            str(root / "stravia-updater.json"),
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+        return subprocess.run(cmd, text=True, capture_output=True, check=False)
 
     def test_generates_signed_https_platform_entries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.create_artifacts(root)
-            result = self.run_generator(root)
+            result = self.run_generator(
+                root, ["--repository-url", "https://git.example.com/org/StraviaPlatform"]
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
 
             manifest = json.loads((root / "stravia-updater.json").read_text(encoding="utf-8"))
@@ -57,8 +59,18 @@ class GenerateUpdaterManifestTests(unittest.TestCase):
                 self.assertEqual(entry["signature"], f"signature:{platform}")
                 self.assertEqual(
                     entry["url"],
-                    f"https://github.com/Stravia-AI/StraviaPlatform/releases/download/v{VERSION}/{filename}",
+                    f"https://git.example.com/org/StraviaPlatform/releases/download/v{VERSION}/{filename}",
                 )
+
+    def test_generates_subset_when_platforms_explicitly_selected(self) -> None:
+        subset = {k: v for k, v in PLATFORMS.items() if not k.startswith("darwin-")}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.create_artifacts(root, subset)
+            result = self.run_generator(root, ["--platforms", ",".join(subset)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((root / "stravia-updater.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(manifest["platforms"]), set(subset))
 
     def test_fails_when_any_signature_is_missing(self) -> None:
         for platform, filename in PLATFORMS.items():

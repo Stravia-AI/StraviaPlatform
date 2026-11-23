@@ -5,28 +5,45 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location("selector", Path(__file__).with_name("select_vendor_plugins.py"))
+spec = importlib.util.spec_from_file_location(
+    "selector", Path(__file__).with_name("select_vendor_plugins.py")
+)
 selector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selector)
 
 
-def tree(version="1.0.0", without=()):
-    names = [package for package, _ in selector.PLUGINS.values() if package not in without] + ["stravia-vendor-common"]
+def tree(version="1.0.0", without=(), workflow_path=".github/workflows/release.yml"):
+    names = [
+        package for package, _ in selector.PLUGINS.values() if package not in without
+    ] + ["stravia-vendor-common"]
     paths = [f"backend/crates/{name}" for name in names]
     files = {
-        "Cargo.toml": f'[workspace]\nmembers = {json.dumps(paths)}\n[workspace.package]\nversion = "{version}"\nedition = "2024"\n[workspace.dependencies]\nserde = "1"\n',
+        "Cargo.toml": (
+            f'[workspace]\nmembers = {json.dumps(paths)}\n'
+            f'[workspace.package]\nversion = "{version}"\nedition = "2024"\n'
+            f'[workspace.dependencies]\nserde = "1"\n'
+        ),
         "Taskfile.yml": "tasks:\n  brand:generate:\n",
-        ".github/workflows/release.yml": '  RUST_VERSION: "1"\n',
+        workflow_path: '  RUST_VERSION: "1"\n',
         "frontend/stravia-webui/src/unrelated.ts": "ui",
     }
     lock = ["version = 4\n"]
     for name, path in zip(names, paths):
-        files[f"{path}/Cargo.toml"] = f'[package]\nname = "{name}"\nversion.workspace = true\n'
+        files[f"{path}/Cargo.toml"] = (
+            f'[package]\nname = "{name}"\nversion.workspace = true\n'
+        )
         files[f"{path}/src/lib.rs"] = name
-        deps = 'dependencies = ["stravia-vendor-common", "serde 1.0.0"]\n' if name != "stravia-vendor-common" else ""
+        deps = (
+            'dependencies = ["stravia-vendor-common", "serde 1.0.0"]\n'
+            if name != "stravia-vendor-common"
+            else ""
+        )
         lock.append(f'[[package]]\nname = "{name}"\nversion = "{version}"\n{deps}')
     for number in ("1.0.0", "2.0.0"):
-        lock.append(f'[[package]]\nname = "serde"\nversion = "{number}"\nsource = "registry+https://example.com"\n')
+        lock.append(
+            f'[[package]]\nname = "serde"\nversion = "{number}"\n'
+            f'source = "registry+https://example.com"\n'
+        )
     files["Cargo.lock"] = "".join(lock)
     for _, icon in selector.PLUGINS.values():
         if icon:
@@ -37,17 +54,28 @@ def tree(version="1.0.0", without=()):
 class SelectionTests(unittest.TestCase):
     def select(self, old, new):
         trees = {"old": old, "new": new}
+
         def git(*args):
             return "\n".join(trees[args[-1]])
+
         def blob(rev, path):
             return trees[rev][path]
-        with patch.object(selector, "git", side_effect=git), patch.object(selector, "blob", side_effect=blob):
+
+        with (
+            patch.object(selector, "git", side_effect=git),
+            patch.object(selector, "blob", side_effect=blob),
+        ):
             return selector.select("old", "new")
 
     def test_first_release_and_host_only_change(self):
         self.assertEqual(selector.select(None), list(selector.PLUGINS))
         old, new = tree(), tree("3.0.0")
         new["frontend/stravia-webui/src/unrelated.ts"] = b"changed"
+        self.assertEqual(self.select(old, new), [])
+
+    def test_migrated_forgejo_workflow_matches_legacy_github_baseline(self):
+        old = tree(workflow_path=".github/workflows/release.yml")
+        new = tree(workflow_path=".github/workflows/release.yml")
         self.assertEqual(self.select(old, new), [])
 
     def test_new_plugin_selected_against_older_baseline(self):
@@ -68,8 +96,12 @@ class SelectionTests(unittest.TestCase):
     def test_nested_fixtures_and_tests_are_not_inputs(self):
         old, new = tree(), tree()
         base = "backend/crates/stravia-vendor-common/"
-        for path in ("fixtures/example/src/lib.rs", "fixtures/example/Cargo.toml",
-                     "fixtures/example/build.rs", "tests/src/helper.rs"):
+        for path in (
+            "fixtures/example/src/lib.rs",
+            "fixtures/example/Cargo.toml",
+            "fixtures/example/build.rs",
+            "tests/src/helper.rs",
+        ):
             old[base + path] = b"before"
             new[base + path] = b"after"
         self.assertEqual(self.select(old, new), [])
@@ -78,27 +110,54 @@ class SelectionTests(unittest.TestCase):
 
     def test_exact_lock_version_closure(self):
         old, new = tree(), tree()
-        new["Cargo.lock"] = new["Cargo.lock"].replace(b'version = "2.0.0"\nsource', b'version = "2.1.0"\nsource')
+        new["Cargo.lock"] = new["Cargo.lock"].replace(
+            b'version = "2.0.0"\nsource', b'version = "2.1.0"\nsource'
+        )
         self.assertEqual(self.select(old, new), [])
         new = tree()
-        new["Cargo.lock"] = new["Cargo.lock"].replace(b'"serde 1.0.0"', b'"serde 2.0.0"')
+        new["Cargo.lock"] = new["Cargo.lock"].replace(
+            b'"serde 1.0.0"', b'"serde 2.0.0"'
+        )
         self.assertEqual(self.select(old, new), list(selector.PLUGINS))
 
     def test_release_baseline_selection(self):
         def release(tag, **kwargs):
-            return {"tag_name": tag, "published_at": "today", "assets": [{"name": selector.MARKER}], **kwargs}
-        releases = [release("old"), release("draft", draft=True), release("fork"), release("near")]
+            return {
+                "tag_name": tag,
+                "published_at": "today",
+                "assets": [{"name": selector.MARKER}],
+                **kwargs,
+            }
+
+        releases = [
+            release("old"),
+            release("draft", draft=True),
+            release("fork"),
+            release("near"),
+        ]
+
         def git(*args):
             if args[0] == "rev-parse":
                 return args[-1].split("/")[-1].split("^")[0]
             return {"old..HEAD": "10", "near..HEAD": "2"}[args[-1]]
+
         def run(args):
             return subprocess.CompletedProcess(args, 1 if args[-2] == "fork" else 0)
-        with patch.object(selector, "git", side_effect=git), patch.object(selector.subprocess, "run", side_effect=run):
+
+        with (
+            patch.object(selector, "git", side_effect=git),
+            patch.object(selector.subprocess, "run", side_effect=run),
+        ):
             self.assertEqual(selector.choose_baseline(releases), "near")
-            self.assertIsNone(selector.choose_baseline([release("near", assets=[]), release("old")]))
-            self.assertIsNone(selector.choose_baseline([release("draft", draft=True), release("fork")]))
-        with patch.object(selector, "git", side_effect=subprocess.CalledProcessError(1, "git")):
+            self.assertIsNone(
+                selector.choose_baseline([release("near", assets=[]), release("old")])
+            )
+            self.assertIsNone(
+                selector.choose_baseline([release("draft", draft=True), release("fork")])
+            )
+        with patch.object(
+            selector, "git", side_effect=subprocess.CalledProcessError(1, "git")
+        ):
             self.assertIsNone(selector.choose_baseline([release("unknown")]))
 
 

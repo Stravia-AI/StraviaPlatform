@@ -2,7 +2,7 @@
 
 ARG BUN_VERSION=1.4.2
 ARG RUST_VERSION=1.99.1
-FROM oven/bun:${BUN_VERSION}-debian AS web-builder
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION}-debian AS web-builder
 WORKDIR /src
 
 # Keep dependency installation cached until workspace manifests, the lockfile, or patches change.
@@ -15,13 +15,17 @@ RUN --mount=type=cache,id=stravia-bun,target=/root/.bun/install/cache,sharing=lo
 COPY frontend/stravia-webui frontend/stravia-webui
 RUN bun run build:web
 
-FROM rust:${RUST_VERSION}-bookworm AS rust-builder
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS rust-builder
+ARG TARGETARCH
 WORKDIR /src
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake libclang-dev python3 pkg-config \
+    && apt-get install -y --no-install-recommends \
+        cmake libclang-dev python3 pkg-config \
+        $([ "${TARGETARCH}" = "arm64" ] && echo "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross") \
     && rm -rf /var/lib/apt/lists/*
 
 RUN rustup target add wasm32-wasip2 \
+    && ([ "${TARGETARCH}" != "arm64" ] || rustup target add aarch64-unknown-linux-gnu) \
     && cargo install patch-crate --version 0.1.13 --locked
 
 COPY Cargo.toml Cargo.lock ./
@@ -36,13 +40,24 @@ COPY --from=web-builder /src/frontend/stravia-webui/static/stravia-logo.svg fron
 # Cache downloads and compiled dependencies without carrying build artifacts into the runtime image.
 RUN --mount=type=cache,id=stravia-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=stravia-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=stravia-cargo-target,target=/src/target,sharing=locked \
-    cargo patch-crate --force \
-    && cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors \
-    && cargo build --locked --release -p stravia-server \
-    && install -Dm755 target/release/stravia-server /out/stravia-server \
-    && strip /out/stravia-server \
-    && install -d -m 0750 /out/data
+    --mount=type=cache,id=stravia-cargo-target-${TARGETARCH},target=/src/target,sharing=locked \
+    set -eux; \
+    cargo patch-crate --force; \
+    cargo run --locked -p stravia-vendor-base --bin stravia-build-vendors; \
+    if [ "${TARGETARCH}" = "arm64" ]; then \
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc; \
+      export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc; \
+      export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++; \
+      export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar; \
+      cargo build --locked --release -p stravia-server --target aarch64-unknown-linux-gnu; \
+      install -Dm755 target/aarch64-unknown-linux-gnu/release/stravia-server /out/stravia-server; \
+      aarch64-linux-gnu-strip /out/stravia-server; \
+    else \
+      cargo build --locked --release -p stravia-server; \
+      install -Dm755 target/release/stravia-server /out/stravia-server; \
+      strip /out/stravia-server; \
+    fi; \
+    install -d -m 0750 /out/data
 
 FROM debian:bookworm-slim AS runtime
 

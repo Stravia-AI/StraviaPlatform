@@ -20,6 +20,7 @@ PLUGINS = {
     "kiro": ("stravia-vendor-kiro", None),
 }
 MARKER = "stravia-plugin-selection-v1.json"
+WORKFLOW_PATHS = (".github/workflows/release.yml",)
 
 
 def git(*args):
@@ -28,6 +29,13 @@ def git(*args):
 
 def blob(rev, path):
     return subprocess.check_output(["git", "show", f"{rev}:{path}"])
+
+
+def read_release_workflow(rev, files):
+    for workflow_path in WORKFLOW_PATHS:
+        if workflow_path in files:
+            return blob(rev, workflow_path).decode()
+    return blob(rev, WORKFLOW_PATHS[0]).decode()
 
 
 def snapshot(rev, package, icon, allow_missing=False):
@@ -96,6 +104,7 @@ def snapshot(rev, package, icon, allow_missing=False):
         "locked": sorted(records, key=lambda x: (x["name"], x.get("version", ""), x.get("source", ""))),
     }
     prefixes = [f"{members[name]}/" for name in seen if name in members]
+
     def is_crate_input(path, prefix):
         if not path.startswith(prefix):
             return False
@@ -103,6 +112,7 @@ def snapshot(rev, package, icon, allow_missing=False):
         return relative in ("Cargo.toml", "build.rs") or relative.startswith(
             ("src/", "messages/", "wit/", "build-support/")
         )
+
     selected = [path for path in files if any(is_crate_input(path, p) for p in prefixes)]
     selected += [p for p in files if p.startswith("patches/")
                  and p.rsplit("/", 1)[-1].split("+", 1)[0] in seen]
@@ -127,7 +137,7 @@ def snapshot(rev, package, icon, allow_missing=False):
                 queue.append(resource)
     if icon:
         selected.append("frontend/stravia-webui/src/assets/icons/" + icon)
-    workflow = blob(rev, ".github/workflows/release.yml").decode()
+    workflow = read_release_workflow(rev, files)
     config["tool_versions"] = re.findall(r'^  (?:RUST_VERSION|TASK_VERSION):.*$', workflow, re.M)
     return json.dumps(config, sort_keys=True), [(p, blob(rev, p)) for p in sorted(set(selected))]
 
@@ -163,16 +173,31 @@ def select(baseline, head="HEAD"):
 
 
 def releases():
+    api_url = (
+        os.environ.get("FORGEJO_API_URL")
+        or os.environ.get("GITHUB_API_URL")
+        or "https://api.github.com"
+    ).rstrip("/")
+    repo = os.environ.get("FORGEJO_REPOSITORY") or os.environ["GITHUB_REPOSITORY"]
+    token = (
+        os.environ.get("FORGEJO_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN", "")
+    )
+    auth_scheme = "Bearer" if "api.github.com" in api_url else "token"
+    page_size = 50
     result = []
     page = 1
     while True:
-        url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/releases?per_page=100&page={page}"
-        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                                                       "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(request) as response:
+        url = f"{api_url}/repos/{repo}/releases?limit={page_size}&per_page={page_size}&page={page}"
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"{auth_scheme} {token}"
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=30) as response:
             batch = json.load(response)
         result.extend(batch)
-        if len(batch) < 100:
+        if len(batch) < page_size:
             return result
         page += 1
 
