@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -505,6 +505,20 @@ fn artifact() -> std::path::PathBuf {
     dir.join(entry["file"].as_str().unwrap())
 }
 
+async fn load_plugin() -> (&'static VendorRuntime, &'static LoadedPlugin) {
+    static RUNTIME: OnceLock<VendorRuntime> = OnceLock::new();
+    // The runtime cache holds weak references; keep the compiled component pinned.
+    static PLUGIN: tokio::sync::OnceCell<LoadedPlugin> = tokio::sync::OnceCell::const_new();
+    let runtime = RUNTIME.get_or_init(|| VendorRuntime::new().expect("runtime"));
+    let plugin = PLUGIN.get_or_init(|| load_component(runtime)).await;
+    (runtime, plugin)
+}
+
+async fn load_component(runtime: &VendorRuntime) -> LoadedPlugin {
+    let bytes = std::fs::read(artifact()).unwrap();
+    runtime.load(&bytes).await.expect("component loads")
+}
+
 const IMAGE_PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const IMAGE_POLICY_MESSAGE: &str = "Unable to show the generated image. The image was filtered out because it violated Google's [Generative AI Prohibited Use policy](https://policies.google.com/terms/generative-ai/use-policy). You will not be charged for blocked images. Try rephrasing the prompt. If you think this was an error, [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting).";
@@ -529,11 +543,7 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
         .fallback(upstream)
         .with_state(Arc::clone(&fixture));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let mut provider = provider();
     provider.credentials = BTreeMap::from([
         ("access_token".into(), json!("test-token")),
@@ -575,8 +585,8 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
         .decode_request(json!({"contents":[{"role":"user","parts":[{"text":"first"}]}]}))
         .unwrap();
     run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
@@ -606,8 +616,8 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
     let request = ProtocolTransform::global().bind(endpoint, endpoint).unwrap()
         .decode_request(json!({"contents":[{"role":"user","parts":[{"text":"first"}]},{"role":"user","parts":[{"text":"after other provider"}]}]})).unwrap();
     run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer { provider, request },
     )
@@ -650,19 +660,15 @@ async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
         deltas: Mutex::new(Vec::new()),
     });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let mut provider = provider();
     provider.credentials = BTreeMap::from([
         ("access_token".into(), json!("test-token")),
         ("project_id".into(), json!("test-project")),
     ]);
     let OperationOutput::Discover(catalog) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Discover {
             provider: provider.clone(),
@@ -743,8 +749,8 @@ async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
             ..Default::default()
         });
         let OperationOutput::Search(output) = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Search {
                 provider: provider.clone(),
@@ -791,8 +797,8 @@ async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
     let mut missing = provider.clone();
     missing.model_metadata = None;
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Search {
             provider: missing,
@@ -834,8 +840,8 @@ async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
     ] {
         *fixture.search_response.lock() = Some((StatusCode::OK, bad));
         let error = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Search {
                 provider: provider.clone(),
@@ -857,8 +863,8 @@ async fn search_discovery_grounding_and_errors_at_real_http_boundary() {
             json!({"error":{"message":"upstream rejected request"}}),
         ));
         let error = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Search {
                 provider: provider.clone(),
@@ -896,19 +902,15 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let mut provider = provider();
     provider.credentials = BTreeMap::from([
         ("access_token".into(), json!("test-token")),
         ("project_id".into(), json!("test-project")),
     ]);
     let OperationOutput::Discover(catalog) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Discover {
             provider: provider.clone(),
@@ -957,8 +959,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
             resolution: Some(MediaImageResolution::TwoK),
         };
         let OperationOutput::MediaImage(output) = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::MediaImage {
                 provider: provider.clone(),
@@ -1031,8 +1033,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     ] {
         *fixture.image_refusal.lock() = Some(refusal);
         let error = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::MediaImage {
                 provider: provider.clone(),
@@ -1049,8 +1051,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
         "finishReason":"OTHER","finishMessage":failure_message
     }]}}));
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::MediaImage {
             provider: provider.clone(),
@@ -1064,8 +1066,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     *fixture.image_refusal.lock() =
         Some(json!({"response":{"candidates":[{"content":{},"finishMessage":failure_message}]}}));
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::MediaImage {
             provider: provider.clone(),
@@ -1079,8 +1081,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     *fixture.image_refusal.lock() = None;
     fixture.truncated.store(true, Ordering::Relaxed);
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::MediaImage {
             provider: provider.clone(),
@@ -1095,8 +1097,8 @@ async fn native_images_preserve_selected_model_and_references_at_real_http_bound
     );
     fixture.error_stream.store(true, Ordering::Relaxed);
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::MediaImage { provider, request },
     )
@@ -1132,11 +1134,7 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     for (signature, unverified) in [
         (None, false),
         (Some("opaque-native+/=="), false),
@@ -1186,8 +1184,8 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
             .decode_request(body)
             .unwrap();
         let result = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request },
         )
@@ -1226,8 +1224,8 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
     let before = fixture.received.lock().len();
     assert!(
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request }
         )
@@ -1264,11 +1262,7 @@ async fn tool_schemas_match_official_projection_at_real_http_boundary() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let mut provider = provider();
     provider.credentials = BTreeMap::from([
         ("access_token".into(), json!("test-token")),
@@ -1312,8 +1306,8 @@ async fn tool_schemas_match_official_projection_at_real_http_boundary() {
                 })).unwrap(),
         };
         let OperationOutput::Infer(output) = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: provider.clone(),
@@ -1370,11 +1364,7 @@ async fn system_instruction_without_prefix_preserves_text_history_and_tools() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let mut provider = provider();
     provider.credentials = BTreeMap::from([
         ("access_token".into(), json!("test-token")),
@@ -1419,8 +1409,8 @@ async fn system_instruction_without_prefix_preserves_text_history_and_tools() {
             }))
             .unwrap();
         let OperationOutput::Infer(output) = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: provider.clone(),
@@ -1478,11 +1468,7 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
     });
     let app = Router::new().fallback(upstream).with_state(fixture.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let option = plugin.descriptor().providers[0]
         .config_fields
         .iter()
@@ -1598,8 +1584,8 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         }
         let has_tools = request.tools.is_some();
         let result = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: provider.clone(),
@@ -1684,15 +1670,11 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         fail_conversation: AtomicBool::new(false),
         deltas: Mutex::new(Vec::new()),
     });
-    let runtime = VendorRuntime::new().unwrap();
-    let plugin = runtime
-        .load(&std::fs::read(artifact()).unwrap())
-        .await
-        .unwrap();
+    let (runtime, plugin) = load_plugin().await;
     let mut provider = provider();
     let AuthResponse::Authorization { url, .. } = auth(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         &provider,
         AuthStep::Start {
@@ -1715,12 +1697,12 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     );
     assert_eq!(query["code_challenge_method"], "S256");
     assert_ne!(query["state"], "downstream-state");
-    let rejected = run(&runtime,&plugin,&services,OperationInput::Auth{provider:provider.clone(),request:AuthRequest{step:AuthStep::Exchange{callback_url:"https://antigravity.google/oauth-callback?state=wrong&code=test-authorization-code".into()}}}).await;
+    let rejected = run(runtime,plugin,&services,OperationInput::Auth{provider:provider.clone(),request:AuthRequest{step:AuthStep::Exchange{callback_url:"https://antigravity.google/oauth-callback?state=wrong&code=test-authorization-code".into()}}}).await;
     assert!(rejected.is_err());
     assert!(fixture.received.lock().is_empty());
     let AuthResponse::Credentials { values, .. } = auth(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         &provider,
         AuthStep::ManualInput {
@@ -1734,8 +1716,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     provider.credentials = values;
     assert!(!provider.credentials.contains_key("project_id"));
     let OperationOutput::Discover(catalog) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Discover {
             provider: provider.clone(),
@@ -1763,8 +1745,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     assert_eq!(image.capabilities, ["media_image"]);
     assert_eq!(image.metadata["modalities"]["output"], json!(["image"]));
     let OperationOutput::Allowance(quota) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Allowance {
             provider: provider.clone(),
@@ -1793,7 +1775,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         })
     );
     let AuthResponse::Credentials { values, .. } =
-        auth(&runtime, &plugin, &services, &provider, AuthStep::Refresh).await
+        auth(runtime, plugin, &services, &provider, AuthStep::Refresh).await
     else {
         panic!("refresh")
     };
@@ -1817,8 +1799,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     })).unwrap();
     let inference_started_ms = chrono::Utc::now().timestamp_millis();
     let OperationOutput::Infer(output) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
@@ -1977,8 +1959,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         let mut zero_limit = request.clone();
         zero_limit.generation.max_tokens = Some(0);
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: provider.clone(),
@@ -2019,8 +2001,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         }))
         .unwrap();
     let OperationOutput::Infer(openai_output) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
@@ -2180,8 +2162,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
                 },
             );
         let OperationOutput::Infer(output) = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2304,8 +2286,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             },
         );
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2345,8 +2327,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         selected_request.reasoning.target_control =
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 2048 });
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2456,8 +2438,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None)
         };
         let OperationOutput::Infer(_) = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2517,8 +2499,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             },
         );
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2574,8 +2556,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         );
         let before = fixture.received.lock().len();
         let error = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2616,8 +2598,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         );
         let before = fixture.received.lock().len();
         let error = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: selected_provider,
@@ -2637,8 +2619,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     }
     fixture.truncated.store(true, Ordering::Relaxed);
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
@@ -2652,8 +2634,8 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     );
     fixture.error_stream.store(true, Ordering::Relaxed);
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer { provider, request },
     )

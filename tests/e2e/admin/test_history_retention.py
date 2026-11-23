@@ -82,8 +82,7 @@ def test_retention_days_below_one_is_rejected(isolated: dict[str, Any]) -> None:
         # 设置接口沿用管理面约定：校验失败返回带 ``error`` 的响应体，且不落库。
         status, body = save_retention(env, invalid)
         assert status == 200 and "error" in body and "data" not in body, (invalid, status, body)
-        if invalid == "0":
-            assert body["error"] == "log_retention_days must be at least 1", body
+        assert "log_retention_days" in body["error"], body
     status, after = http_request("GET", f"{env['admin']}/api/v1/settings/log_retention_days", headers=env["auth"])
     assert after["data"] is None, "a rejected value must not be stored"
     status, body = save_retention(env, "1")

@@ -1786,6 +1786,7 @@ def test_upstream_errors_report_interrupted_outcome(admin_env: dict[str, Any]) -
     model = "observation-upstream-interrupted"
     hang_port = find_free_port()
     hang_mock, _ = minimal_mock_provider(hang_port)
+    release = threading.Event()
 
     class HangingStream(hang_mock.RequestHandlerClass):
         def do_POST(self) -> None:  # noqa: N802
@@ -1808,7 +1809,7 @@ def test_upstream_errors_report_interrupted_outcome(admin_env: dict[str, Any]) -
             }
             self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
             self.wfile.flush()
-            time.sleep(30.0)
+            release.wait(timeout=30)
 
     hang_mock.RequestHandlerClass = HangingStream
     try:
@@ -1898,6 +1899,7 @@ def test_upstream_errors_report_interrupted_outcome(admin_env: dict[str, Any]) -
         # 取消与断线不是客户端错误。
         assert _client_errors(admin_env, **window, model=route_id)["items"] == []
     finally:
+        release.set()
         hang_mock.shutdown()
         hang_mock.server_close()
 

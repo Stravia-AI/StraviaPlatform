@@ -26,6 +26,7 @@ from tests.common.helpers import (
     stop_stravia_server,
     wait_until_ready,
 )
+from tests.e2e.admin.test_observations import _wait_for
 
 @contextmanager
 def _model_probe_endpoint(*, forward: bool = False):
@@ -1121,6 +1122,15 @@ def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> Non
     model_id = _create_model(admin_env, provider_id, "test-model-log")
     api_key = _create_api_key(admin_env, model_id, "test-key-log")
 
+    def stats(view: str) -> Any:
+        status, body = http_request(
+            "GET", f"{admin_env['admin']}/api/v1/stats/{view}", headers=admin_env["auth"],
+        )
+        assert status == 200, body
+        return body["data"]
+
+    before = stats("overview")
+
     status, resp = http_request(
         "POST",
         f"{admin_env['proxy']}/v1/chat/completions",
@@ -1132,93 +1142,40 @@ def test_proxy_request_updates_usage_analytics(admin_env: dict[str, str]) -> Non
     )
     assert status == 200, f"proxy request failed: {status} {resp}"
 
-    attributed_usage: dict[str, Any] | None = None
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        status, stats_resp = http_request(
-            "GET",
-            f"{admin_env['admin']}/api/v1/stats/api-keys",
-            headers=admin_env["auth"],
-        )
-        if status == 200:
-            attributed_usage = next(
-                (
-                    item
-                    for item in stats_resp.get("data", [])
-                    if item.get("api_key_id") == api_key["id"]
-                ),
-                None,
-            )
-            if (
-                attributed_usage is not None
-                and attributed_usage.get("request_count")
-                and attributed_usage.get("total_output_tokens") is not None
-            ):
-                break
-        time.sleep(0.3)
+    def api_key_usage():
+        return next((
+            row for row in stats("api-keys")
+            if row["api_key_id"] == api_key["id"] and row["total_output_tokens"] is not None
+        ), None)
 
-    assert attributed_usage is not None
+    attributed_usage = _wait_for("usage attributed to the new API key", api_key_usage)
     assert attributed_usage["api_key_name"] == "test-key-log"
-    assert attributed_usage["request_count"] >= 1
+    assert attributed_usage["request_count"] == 1
     # 未报告缓存读取时无法计算净输入；不能把原始总输入当成管理输入。
     assert attributed_usage["total_input_tokens"] is None
-    assert attributed_usage["total_output_tokens"] is not None
-    assert attributed_usage["total_output_tokens"] >= 2
+    assert attributed_usage["total_output_tokens"] == 2
     assert attributed_usage["cache_read_tokens"] is None
     assert attributed_usage["cache_write_tokens"] is None
 
+    # Admission precedes completion and usage persistence on the shared server.
+    def completed_overview():
+        current = stats("overview")
+        if (current["terminal_request_count"] > before["terminal_request_count"]
+                and current["total_output_tokens"] != before["total_output_tokens"]):
+            return current
+        return None
 
-@pytest.mark.e2e
-@pytest.mark.admin
-def test_stats_overview_incremented(admin_env: dict[str, str]) -> None:
-    provider_id = _create_provider(admin_env, "test-provider-stats")
-    model_id = _create_model(admin_env, provider_id, "test-model-stats")
-    api_key = _create_api_key(admin_env, model_id, "test-key-stats")
+    after = _wait_for("request completion in overview", completed_overview)
+    assert after["total_requests"] - before["total_requests"] == 1
+    assert after["terminal_request_count"] - before["terminal_request_count"] == 1
+    assert after["total_output_tokens"] - (before["total_output_tokens"] or 0) == 2
+    assert after["total_input_tokens"] is None
+    assert after["total_cache_read_tokens"] is None
+    assert after["total_cache_write_tokens"] is None
+    assert after["avg_duration_ms"] is not None and after["avg_duration_ms"] >= 0
 
-    status, _ = http_request(
-        "POST",
-        f"{admin_env['proxy']}/v1/chat/completions",
-        payload={
-            "model": "test-model-stats",
-            "messages": [{"role": "user", "content": "stats-trigger"}],
-        },
-        headers={"authorization": f"Bearer {api_key['key']}"},
-    )
-    assert status == 200
-
-    # Request admission is persisted before usage and completion observations.
-    data: dict[str, Any] = {}
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        status, resp = http_request(
-            "GET",
-            f"{admin_env['admin']}/api/v1/stats/overview",
-            headers=admin_env["auth"],
-        )
-        assert status == 200, resp
-        data = resp["data"]
-        if all(data.get(field) is not None for field in (
-            "total_output_tokens", "avg_duration_ms",
-        )):
-            break
-        time.sleep(0.3)
-
-    assert data["total_input_tokens"] is None, data
-    assert data.get("total_output_tokens") is not None, data
-    assert data.get("avg_duration_ms") is not None, data
-    assert data.get("total_requests", 0) >= 1
-    assert data.get("total_output_tokens", 0) >= 2
-    assert data["total_cache_read_tokens"] is None
-    assert data["total_cache_write_tokens"] is None
-    assert data["avg_duration_ms"] >= 0
-
-    status, resp = http_request(
-        "GET",
-        f"{admin_env['admin']}/api/v1/stats/series?start_at={int(time.time() * 1000) // 900000 * 900000 - 86400000}&end_at={int(time.time() * 1000) // 900000 * 900000 + 900000}&bucket=3600",
-        headers=admin_env["auth"],
-    )
-    assert status == 200
-    series = resp.get("data", [])
+    bucket_start = int(time.time() * 1000) // 900_000 * 900_000
+    series = stats(f"series?start_at={bucket_start - 86_400_000}&end_at={bucket_start + 900_000}&bucket=3600")
     assert series
     assert series[-1]["total_cache_read_tokens"] is None
     assert series[-1]["total_cache_write_tokens"] is None

@@ -350,12 +350,6 @@ tasks:
     cmds:
       - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
 
-  test:browser:
-    desc: Run the real headless Chrome Web Access regression tests.
-    deps: [prepare:crates]
-    cmds:
-      - bun tests/common/run-in-tempdir.ts cargo test --locked -p stravia-web-access browser::tests -- --ignored
-
   test:e2e:admin:
     desc: Run the Admin service E2E tests.
     # The development-origin E2E starts `cargo run`; prebuild that profile so a
@@ -365,7 +359,7 @@ tasks:
       STRAVIA_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-server{{if eq OS "windows"}}.exe{{end}}'
       STRAVIA_STORAGE_HARNESS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-storage-test-harness{{if eq OS "windows"}}.exe{{end}}'
     cmds:
-      - CARGO_TARGET_DIR="{{.ROOT_DIR}}/target/test-development" bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
+      - CARGO_TARGET_DIR="{{.ROOT_DIR}}/target/test-development" bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin
 
   test:e2e:storage:sqlite:
     desc: Run the SQLite storage E2E tests.
@@ -375,7 +369,7 @@ tasks:
       STRAVIA_TOOLS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-tools{{if eq OS "windows"}}.exe{{end}}'
       STRAVIA_STORAGE_HARNESS_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/services/stravia-storage-test-harness{{if eq OS "windows"}}.exe{{end}}'
     cmds:
-      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k sqlite
+      - bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -n auto --dist loadgroup --durations=0 -m storage -k sqlite
 
   test:e2e:storage:postgres:
     desc: Run the PostgreSQL storage E2E tests.

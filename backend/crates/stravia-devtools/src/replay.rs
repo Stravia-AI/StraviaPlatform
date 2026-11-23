@@ -12,7 +12,7 @@
 
 use crate::fixture::{Fixture, scan_jsonl_files};
 use crate::protocol::ProtocolKind;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Body,
@@ -54,6 +54,27 @@ struct ReplayState {
     index: HashMap<String, Fixture>,
 }
 
+#[derive(Debug)]
+struct DuplicateReplayModel {
+    replay_model: String,
+    fixture_path: PathBuf,
+    previous_vendor: String,
+}
+
+impl std::fmt::Display for DuplicateReplayModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "duplicate replay_model `{}` found in two fixtures:\n  - {}\n  - (already loaded for vendor {})",
+            self.replay_model,
+            self.fixture_path.display(),
+            self.previous_vendor
+        )
+    }
+}
+
+impl std::error::Error for DuplicateReplayModel {}
+
 impl ReplayState {
     fn load(protocol: ProtocolKind, input_dir: &std::path::Path) -> Result<Self> {
         let files = scan_jsonl_files(input_dir)
@@ -69,12 +90,12 @@ impl ReplayState {
                 continue;
             }
             if let Some(prev) = index.get(&fx.replay_model) {
-                bail!(
-                    "duplicate replay_model `{}` found in two fixtures:\n  - {}\n  - (already loaded for vendor {})",
-                    fx.replay_model,
-                    path.display(),
-                    prev.vendor
-                );
+                return Err(DuplicateReplayModel {
+                    replay_model: fx.replay_model,
+                    fixture_path: path.clone(),
+                    previous_vendor: prev.vendor.clone(),
+                }
+                .into());
             }
             index.insert(fx.replay_model.clone(), fx);
         }
@@ -311,7 +332,13 @@ mod tests {
         fx.save(&dir2.join("basic-stream.jsonl")).unwrap();
 
         let err = ReplayState::load(ProtocolKind::OpenAiChat, tmp.path()).unwrap_err();
-        assert!(err.to_string().contains("duplicate replay_model"));
+        let duplicate = err.downcast::<DuplicateReplayModel>().unwrap();
+        assert_eq!(
+            duplicate.replay_model,
+            "deepseek--openai-chat--basic-stream"
+        );
+        assert_eq!(duplicate.fixture_path, dir1.join("basic-stream.jsonl"));
+        assert_eq!(duplicate.previous_vendor, "azure");
     }
 
     #[test]
@@ -347,8 +374,6 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
-        // give the server a moment to start accepting
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         (addr, handle)
     }
 

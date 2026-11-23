@@ -15,6 +15,15 @@ from tests.common.helpers import http_request, responses_compaction
 from tests.e2e.admin.test_observations import _detail, _client_errors, _route_interactions, _wait_for
 
 
+COMPACTION_UPSTREAM_ERROR = {
+    "code": "upstream_compaction_unavailable",
+    "type": "provider_capacity_error",
+    "message": "Compaction capacity is exhausted.",
+    "param": "context_management",
+    "details": {"retryable": True},
+}
+
+
 def _window_semantics(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = json.loads(json.dumps(items))
     for item in normalized:
@@ -103,13 +112,7 @@ def compaction_provider():
             else:
                 result, status = {"error": {"code": "unsupported_path"}}, 404
             if body.get("instructions") in ("reject-compaction", "reject-compaction-secret"):
-                result = {"error": {
-                    "code": "upstream_compaction_unavailable",
-                    "type": "provider_capacity_error",
-                    "message": "Compaction capacity is exhausted.",
-                    "param": "context_management",
-                    "details": {"retryable": True},
-                }}
+                result = {"error": dict(COMPACTION_UPSTREAM_ERROR)}
                 if body["instructions"] == "reject-compaction-secret":
                     result["error"]["message"] = "rejected " + self.headers["Authorization"].removeprefix("Bearer ")
                 status = 503
@@ -446,11 +449,7 @@ def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_e
         items.append({"type": "compaction_trigger"})
     status, result = _request(admin_env, key, model, items, **extra)
     assert status == 503, result
-    assert result == {"error": {
-        "code": "upstream_compaction_unavailable", "type": "provider_capacity_error",
-        "message": "Compaction capacity is exhausted.", "param": "context_management",
-        "details": {"retryable": True},
-    }}
+    assert result == {"error": COMPACTION_UPSTREAM_ERROR}
     assert len(compaction_provider[2]) == 1, "neither the current nor fallback Target may retry compaction"
     failure = _wait_for(
         "upstream compaction failure",
@@ -458,7 +457,7 @@ def test_compaction_upstream_error_is_returned_without_retry_or_failover(admin_e
     )
     assert failure["error"]["source"] == "upstream"
     assert failure["error"]["status_code"] == 503
-    assert failure["error"]["message"] == "Compaction capacity is exhausted."
+    assert failure["error"]["message"] == result["error"]["message"]
 
 
 @pytest.mark.e2e

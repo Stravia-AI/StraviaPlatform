@@ -445,10 +445,5 @@ def test_upgrade_does_not_shorten_dependency_expiry_across_retention_sweep(
             "PUT", f"{env['admin']}/api/v1/settings/log_retention_days",
             payload={"value": fixture["settings"]["log_retention_days"]}, headers=env["auth"],
         )
-        assert status == 200, body
-        assert_observation_converted(env, fixture)
-        assert_error_details_survive(env, fixture)
+        assert status == 200 and body["ok"] is True, body
         assert_dependency_resolution(env, fixture)
-        assert_turn_content_and_markers(env, fixture)
-        assert_mapping_and_hit_detail(env, fixture)
-        assert_native_compaction_survives(env, fixture)

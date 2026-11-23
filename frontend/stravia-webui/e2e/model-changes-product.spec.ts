@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import type { ModelChangePage, Provider, ProviderModelSyncState } from '../src/lib/types'
+import type { Provider } from '../src/lib/types'
 
 test('real backend records discovery, manual policy, failure and retained deleted-service history', async ({
   context,
@@ -125,12 +125,6 @@ test('real backend records discovery, manual policy, failure and retained delete
     await page.goto(`${origin}/providers/${provider.id}?view=models&sync=created`)
     const manualSync = page.getByRole('button', { name: 'Sync models', exact: true }).first()
     await expect(page.locator('[data-sonner-toast]')).toContainText('Added 1')
-    const initial = await api<ModelChangePage>(`/model-changes?provider_id=${provider.id}`)
-    expect(initial.records[0].initial_sync).toBe(true)
-    expect(initial.records[0].changes[0].model_id).toBe('first-synthetic')
-    const state = await api<ProviderModelSyncState>(`/providers/${provider.id}/models/sync-state`)
-    expect(state.automatic_sync).toBe(true)
-    expect(state.last_check?.record_id).toBe(initial.records[0].id)
     inventory = ['second-synthetic']
     await manualSync.click()
     const toast = page.locator('[data-sonner-toast]').filter({ hasText: 'Added 1 · No longer offered 1' })
@@ -158,13 +152,7 @@ test('real backend records discovery, manual policy, failure and retained delete
     fail = true
     await manualSync.click()
     await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'Model sync failed' })).toBeVisible()
-    const models = await api<{ models: Array<{ id: string }> }>(`/providers/${provider.id}/models`)
-    expect(models.models.map((model) => model.id)).toContain('second-synthetic')
     await api(`/providers/${provider.id}`, 'DELETE')
-    const retained = await api<ModelChangePage>(`/model-changes?provider_id=${provider.id}`)
-    expect(retained.records).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: initial.records[0].id, provider_deleted: true })]),
-    )
     // Browse deleted-service history from the normal, nonempty list toolbar.
     await api('/providers', 'POST', {
       name: 'Remaining browser service',

@@ -177,16 +177,21 @@ test('desktop port controls stay hidden outside the Tauri shell', async ({ page 
 test('system theme follows browser color-scheme changes', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' })
   await page.goto('/settings')
-  await expect(page.locator('html')).not.toHaveClass(/\bdark\b/)
+  const root = page.locator('html')
+  const body = page.locator('body')
+  await expect(root).not.toHaveClass(/\bdark\b/)
+  const lightBackground = await body.evaluate((element) => getComputedStyle(element).backgroundColor)
   await page.locator('#theme-preference').click()
   await page.getByRole('option', { name: 'System' }).click()
 
   await page.emulateMedia({ colorScheme: 'dark' })
-  await expect(page.locator('html')).toHaveClass(/\bdark\b/)
+  await expect(root).toHaveClass(/\bdark\b/)
+  await expect(body).not.toHaveCSS('background-color', lightBackground)
 
   await page.locator('#theme-preference').click()
   await page.getByRole('option', { name: 'Light' }).click()
-  await expect(page.locator('html')).not.toHaveClass(/\bdark\b/)
+  await expect(root).not.toHaveClass(/\bdark\b/)
+  await expect(body).toHaveCSS('background-color', lightBackground)
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-theme'))).toBe('light')
 })
 

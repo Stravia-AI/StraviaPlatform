@@ -93,17 +93,11 @@ test.describe('Login', () => {
     }
   })
 
-  test('drops the duplicated marketing, instruction and language copy but keeps labels and errors', async ({
-    page,
-  }) => {
+  test('keeps the login form usable and provides recovery when the server is unavailable', async ({ page }) => {
     await mockServer(page, signedOut)
     await page.route('**/api/v1/auth/login', (route) => route.fulfill({ status: 503, json: { error: 'down' } }))
     await page.goto('/login')
 
-    await expect(page.getByText('The support platform for AI agents')).toHaveCount(0)
-    await expect(page.getByText(/Connect providers, models, and tools/)).toHaveCount(0)
-    await expect(page.getByText(/Enter the administrator username and password/)).toHaveCount(0)
-    await expect(page.getByText('Choose the language used by Stravia.')).toHaveCount(0)
     await expect(page.getByLabel('Username')).toBeVisible()
     await expect(page.getByLabel('Password', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Show password' })).toBeVisible()

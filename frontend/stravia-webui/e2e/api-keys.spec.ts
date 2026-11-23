@@ -62,7 +62,8 @@ test('API Key editor preserves disabled transparent injection selections', async
   expect(await tableContainer.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(
     await tableContainer.evaluate((element) => element.clientWidth),
   )
-  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
+  const advancedClient = page.getByRole('cell', { name: 'Advanced client', exact: true })
+  await advancedClient.click()
   const editor = page.locator('[data-slot="sheet-content"]')
   await expect(editor.getByRole('heading', { name: 'Edit API Key' })).toBeVisible()
   await expect(page).toHaveURL(/\/api-keys$/)
@@ -84,7 +85,7 @@ test('API Key editor preserves disabled transparent injection selections', async
     .click()
   await expect(editor).toBeHidden()
   expect(writes).toBe(0)
-  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
+  await advancedClient.click()
   await expect(secret).toHaveAttribute('type', 'password')
   await expect(secret).toHaveValue('sk-advanced')
   await expect(page.locator('#api-key-mcp-access')).toHaveAttribute('aria-checked', 'true')
@@ -120,7 +121,7 @@ test('API Key editor preserves disabled transparent injection selections', async
   await expect(editor).toBeHidden()
   await expect(page).toHaveURL(/\/api-keys$/)
   await page.reload()
-  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(2).click()
+  await advancedClient.click()
   await expect(page.locator('#api-key-transparent-injection')).toHaveAttribute('aria-checked', 'false')
   await page.locator('#api-key-transparent-injection').click()
   await expect(page.locator('#api-key-inject-media-understanding')).toHaveAttribute('aria-checked', 'true')
@@ -133,7 +134,7 @@ test('API Key editor preserves disabled transparent injection selections', async
   expect(persistedKey.transparent_injection_enabled).toBe(true)
   expect(submittedInjections).toEqual(['web_search', 'media_understanding', 'media_generation', 'history_recall'])
   await page.reload()
-  await page.getByRole('row').filter({ hasText: 'Advanced client' }).getByRole('cell').nth(1).click()
+  await advancedClient.click()
   await expect(historySelection).toHaveAttribute('aria-checked', 'true')
 })
 

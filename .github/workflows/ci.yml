@@ -502,7 +502,7 @@ jobs:
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
           STRAVIA_STORAGE_HARNESS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness
-        run: bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k sqlite
+        run: bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -n auto --dist loadgroup --durations=0 -m storage -k sqlite
 
   admin-e2e:
     name: Backend E2E (admin)
@@ -577,7 +577,7 @@ jobs:
           CARGO_TARGET_DIR="${{ github.workspace }}/target/test-development" \
             STRAVIA_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-server" \
             STRAVIA_STORAGE_HARNESS_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness" \
-            bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -m admin
+            bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin
 
       - name: Show sccache stats
         if: always()

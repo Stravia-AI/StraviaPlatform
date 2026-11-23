@@ -2555,32 +2555,41 @@ async fn paginated_discovery_exhausts_one_minute_without_replacing_inventory() -
         .await
         .expect("confirmed discovery request");
 
+    tokio::time::pause();
     let sync_gateway = gateway.clone();
     let provider_id = provider.id.clone();
-    let started_at = std::time::Instant::now();
+    let started_at = tokio::time::Instant::now();
     let mut sync = tokio::spawn(async move {
-        sync_gateway
+        let result = sync_gateway
             .admin()
             .sync_provider_models(&provider_id)
-            .await
+            .await;
+        (started_at.elapsed(), result)
     });
-    tokio::time::timeout(Duration::from_secs(10), server.requests.recv())
+    // Drive real TLS I/O without letting Tokio auto-advance past the request barriers.
+    with_real_time_limit(server.requests.recv())
         .await?
         .expect("first discovery page request");
-    // 首页消耗真实31秒；第二页只能使用同一次60秒预算的剩余部分，不能重计时。
-    tokio::time::sleep(Duration::from_secs(31)).await;
+    tokio::time::advance(Duration::from_secs(31)).await;
     first_page.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), server.requests.recv())
+    with_real_time_limit(server.requests.recv())
         .await?
         .expect("second discovery page request");
-    let completed = tokio::time::timeout(Duration::from_secs(35), &mut sync).await;
-    let elapsed = started_at.elapsed();
-    // 无论同步完成或超时，都释放本地fixture，避免响应任务挂起。
+
+    // The second page shares the first page's budget rather than starting a new one.
+    tokio::time::advance(Duration::from_secs(28)).await;
+    assert!(
+        !sync.is_finished(),
+        "discovery must still be pending at 59 seconds"
+    );
+    tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
+    let completed = with_real_time_limit(&mut sync).await;
     second_page.notify_one();
-    server.task.await??;
-    let error = completed
-        .context("paginated discovery must fail within its single 60-second budget")??
-        .expect_err("an unfinished final page must be an explicit discovery failure");
+    with_real_time_limit(server.task).await???;
+    tokio::time::resume();
+    let (elapsed, result) =
+        completed.context("paginated discovery must fail within its single 60-second budget")??;
+    let error = result.expect_err("an unfinished final page must be an explicit discovery failure");
     let failure = error
         .downcast_ref::<crate::provider_models::ProviderModelSyncFailure>()
         .context("admin API must expose a persisted sync failure summary")?;
@@ -2633,26 +2642,26 @@ async fn devin_slow_model_discovery_publishes_the_confirmed_inventory() -> anyho
             devin_oauth_provider("Devin slow discovery"),
         )
         .await?;
+    tokio::time::pause();
     gateway
         .start_provider_model_sync(tokio::time::Instant::now())
         .await?;
-    let request = tokio::time::timeout(Duration::from_secs(10), server.requests.recv())
+    // Wake the initial interval tick without letting the clock run during TLS I/O.
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let request = with_real_time_limit(server.requests.recv())
         .await?
         .expect("Devin discovery request");
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, DEVIN_MODELS_PATH);
-    let sync_gateway = gateway.clone();
-    let provider_id = provider.id.clone();
-    let sync = tokio::spawn(async move {
-        sync_gateway
-            .admin()
-            .sync_provider_models(&provider_id)
-            .await
-    });
-    // 真实上游延迟跨过旧的 30 秒发现上限；不缩短产品 deadline 来模拟。
-    tokio::time::sleep(Duration::from_secs(31)).await;
+    let admin = gateway.admin();
+    let mut sync = std::pin::pin!(admin.sync_provider_models(&provider.id));
+    assert!(futures::poll!(sync.as_mut()).is_pending());
+    // Cross the old 30-second limit without reducing the production budget.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert!(futures::poll!(sync.as_mut()).is_pending());
     release.notify_one();
-    let summary = tokio::time::timeout(Duration::from_secs(10), sync).await???;
+    let summary = with_real_time_limit(sync).await??;
+    tokio::time::resume();
     assert_eq!(
         summary.outcome,
         crate::provider_models::ModelChangeOutcome::Success

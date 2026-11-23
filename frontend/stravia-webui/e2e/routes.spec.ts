@@ -1962,9 +1962,17 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
     pointer: dragPointer,
     y: dockCenterY,
   })
-  const settledScroll = await main.evaluate((element) => element.scrollTop)
-  await page.waitForTimeout(200)
-  expect(await main.evaluate((element) => element.scrollTop)).toBe(settledScroll)
+  const stoppedScrolling = await main.evaluate(async (element) => {
+    const scrollTop = element.scrollTop
+    for (let frame = 0; frame < 3; frame += 1) {
+      const { promise, resolve } = Promise.withResolvers<number>()
+      requestAnimationFrame(resolve)
+      await promise
+      if (element.scrollTop !== scrollTop) return false
+    }
+    return true
+  })
+  expect(stoppedScrolling).toBe(true)
   await page.mouse.up()
   await expect(enabledCards).toHaveCount(2)
   await expect(dock.locator('[data-slot="target-card"]')).toHaveCount(2)

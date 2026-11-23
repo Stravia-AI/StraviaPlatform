@@ -717,36 +717,35 @@ test('API Key editor keeps compact controls and help inside the editor', async (
   await page.getByRole('button', { name: 'Create first API Key' }).click()
 
   const overlay = page.locator('[data-slot="sheet-content"]')
-  await expect(overlay.getByRole('heading', { name: 'Create API Key' })).toBeVisible()
-  // Sheet 滑入动画结束后再测量：动画期间逐次 boundingBox 会落在不同帧，横向对齐不可比。
-  await expect
-    .poll(async () => {
-      const first = (await overlay.boundingBox())!.x
-      await page.waitForTimeout(60)
-      return Math.abs((await overlay.boundingBox())!.x - first) < 0.5
-    })
-    .toBe(true)
-
-  const nameBox = await page.locator('#api-key-name').boundingBox()
-  const overlayBox = await overlay.boundingBox()
-  const rem = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize))
-  expect(nameBox?.width ?? 0).toBeGreaterThan(8)
-  // 名称是自由文本，占满 Sheet 的内容宽度；短控件仍保持各自的语义宽度。
-  expect(nameBox?.width ?? 0).toBeGreaterThan((overlayBox?.width ?? 0) * 0.8)
-  expect(nameBox?.width ?? 0).toBeLessThan(overlayBox?.width ?? 0)
-
   const rpm = page.locator('#api-key-rpm-limit')
-  const expiresAt = page.getByLabel('Expires at')
+  await expect(overlay.getByRole('heading', { name: 'Create API Key' })).toBeVisible()
   await expect(rpm).toBeVisible()
-  await expect(expiresAt).toBeVisible()
+  await expect(overlay.getByLabel('Expires at')).toBeVisible()
+  // Measure all horizontal coordinates in the same frame while the Sheet can still be sliding.
+  const { nameBox, overlayBox, rpmBox, expiresAtBox, rem } = await overlay.evaluate((element) => {
+    const measure = (target: Element) => {
+      const { x, width } = target.getBoundingClientRect()
+      return { x, width }
+    }
+    return {
+      nameBox: measure(element.querySelector('#api-key-name')!),
+      overlayBox: measure(element),
+      rpmBox: measure(element.querySelector('[data-slot="input-group"]:has(#api-key-rpm-limit)')!),
+      expiresAtBox: measure(element.querySelector('#api-key-expires')!),
+      rem: parseFloat(getComputedStyle(document.documentElement).fontSize),
+    }
+  })
+  expect(nameBox.width).toBeGreaterThan(8)
+  // 名称是自由文本，占满 Sheet 的内容宽度；短控件仍保持各自的语义宽度。
+  expect(nameBox.width).toBeGreaterThan(overlayBox.width * 0.8)
+  expect(nameBox.width).toBeLessThan(overlayBox.width)
+
   // RPM 是 7rem 的输入组（含单位后缀），过期时间是 18rem；两者都不随 Sheet 宽度拉伸。
-  const rpmBox = await page.locator('[data-slot="input-group"]:has(#api-key-rpm-limit)').boundingBox()
-  const expiresAtBox = await expiresAt.boundingBox()
-  expect(Math.abs((rpmBox?.width ?? 0) - 7 * rem)).toBeLessThanOrEqual(1)
-  expect(Math.abs((expiresAtBox?.width ?? 0) - 18 * rem)).toBeLessThanOrEqual(1)
-  expect(rpmBox?.width ?? 0).toBeLessThan(nameBox?.width ?? 0)
-  expect(Math.abs((rpmBox?.x ?? 0) - (nameBox?.x ?? 0))).toBeLessThan(1)
-  expect(Math.abs((expiresAtBox?.x ?? 0) - (nameBox?.x ?? 0))).toBeLessThan(1)
+  expect(Math.abs(rpmBox.width - 7 * rem)).toBeLessThanOrEqual(1)
+  expect(Math.abs(expiresAtBox.width - 18 * rem)).toBeLessThanOrEqual(1)
+  expect(rpmBox.width).toBeLessThan(nameBox.width)
+  expect(Math.abs(rpmBox.x - nameBox.x)).toBeLessThan(1)
+  expect(Math.abs(expiresAtBox.x - nameBox.x)).toBeLessThan(1)
   const help = page
     .locator('[data-slot="field"]')
     .filter({ has: rpm })
@@ -758,8 +757,8 @@ test('API Key editor keeps compact controls and help inside the editor', async (
   const cancel = overlay.getByRole('button', { name: 'Cancel' })
   const saveBox = await save.boundingBox()
   const cancelBox = await cancel.boundingBox()
-  expect(saveBox?.width ?? 0).toBeLessThan((overlayBox?.width ?? 0) * 0.5)
-  expect(cancelBox?.width ?? 0).toBeLessThan((overlayBox?.width ?? 0) * 0.5)
+  expect(saveBox?.width ?? 0).toBeLessThan(overlayBox.width * 0.5)
+  expect(cancelBox?.width ?? 0).toBeLessThan(overlayBox.width * 0.5)
   expect(Math.abs((saveBox?.y ?? 0) - (cancelBox?.y ?? 0))).toBeLessThan(8)
 })
 

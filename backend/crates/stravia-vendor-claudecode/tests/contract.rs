@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -407,11 +407,18 @@ fn unified_tools_and_summary_cross_the_anthropic_codec_boundary() {
     }
 }
 
-async fn load_plugin() -> (VendorRuntime, LoadedPlugin) {
-    let bytes = std::fs::read(artifact()).unwrap();
-    let runtime = VendorRuntime::new().expect("runtime");
-    let plugin = runtime.load(&bytes).await.expect("component loads");
+async fn load_plugin() -> (&'static VendorRuntime, &'static LoadedPlugin) {
+    static RUNTIME: OnceLock<VendorRuntime> = OnceLock::new();
+    // The runtime cache holds weak references; keep the compiled component pinned.
+    static PLUGIN: tokio::sync::OnceCell<LoadedPlugin> = tokio::sync::OnceCell::const_new();
+    let runtime = RUNTIME.get_or_init(|| VendorRuntime::new().expect("runtime"));
+    let plugin = PLUGIN.get_or_init(|| load_component(runtime)).await;
     (runtime, plugin)
+}
+
+async fn load_component(runtime: &VendorRuntime) -> LoadedPlugin {
+    let bytes = std::fs::read(artifact()).unwrap();
+    runtime.load(&bytes).await.expect("component loads")
 }
 
 async fn run(
@@ -463,8 +470,8 @@ async fn allowance_read_queries_reset_status_without_consuming() {
         ..MockServices::default()
     });
     let output = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Allowance {
             provider: signed_in(),
@@ -514,8 +521,8 @@ async fn failed_reset_status_lookup_leaves_balance_unknown() {
         ..MockServices::default()
     });
     let output = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Allowance {
             provider: signed_in(),
@@ -561,8 +568,8 @@ async fn reset_posts_once_to_profile_organization_and_rejects_unknown_result() {
             ..MockServices::default()
         });
         let output = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Allowance {
                 provider: signed_in(),
@@ -615,8 +622,8 @@ async fn invalid_reset_request_never_contacts_upstream() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices::default());
     let result = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Allowance {
             provider: signed_in(),
@@ -639,8 +646,8 @@ async fn compact_is_unsupported_without_upstream_request() {
     let (runtime, plugin) = load_plugin().await;
     let services = Arc::new(MockServices::default());
     let error = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Compact {
             provider: signed_in(),
@@ -685,8 +692,8 @@ async fn responses_tail_prefill_is_dropped_without_losing_completed_tool_history
     let mut provider = signed_in();
     provider.model = Some("claude-sonnet-5-5".into());
     let output = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer { provider, request },
     )
@@ -736,8 +743,8 @@ async fn responses_auto_truncation_sends_complete_tool_continuation_history() {
         }))
         .expect("Responses client request decodes");
     let output = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: signed_in(),
@@ -815,8 +822,8 @@ async fn always_on_summary_preserves_explicit_display_intent() {
         let mut provider = signed_in();
         provider.model = Some("claude-opus-5-5".into());
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request },
         )
@@ -858,8 +865,8 @@ async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() 
         ..MockServices::default()
     });
     let OperationOutput::Discover(catalog) = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &discovery,
         OperationInput::Discover {
             provider: signed_in(),
@@ -924,8 +931,8 @@ async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() 
             ..Default::default()
         });
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request },
         )
@@ -1021,8 +1028,8 @@ async fn declared_future_native_effort_survives_claude_code_normalization() {
                 .insert("reasoning_efforts".into(), declared);
         }
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request },
         )
@@ -1056,7 +1063,8 @@ async fn scoped_ids_survive_reload_without_forwarding_injected_request_ids() {
     });
     let source = " 空白\0\r\n会话😀 ";
     for _ in 0..2 {
-        let (runtime, plugin) = load_plugin().await;
+        let runtime = &VendorRuntime::new().expect("fresh runtime");
+        let plugin = &load_component(runtime).await;
         let mut provider = signed_in();
         provider
             .operation_metadata
@@ -1076,8 +1084,8 @@ async fn scoped_ids_survive_reload_without_forwarding_injected_request_ids() {
         request.parameters.session.id = Some("injected-session".into());
         request.parameters.session.request_id = Some("injected-request".into());
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request },
         )
@@ -1146,8 +1154,8 @@ async fn inference_defaults_follow_model_effort_and_beta_capabilities() {
             "messages": [{"role": "user", "content": "Read a."}]
         }));
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer { provider, request },
         )
@@ -1223,8 +1231,8 @@ async fn explicit_inference_controls_override_cli_defaults() {
             .unwrap()
             .extend(controls.as_object().unwrap().clone());
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider,
@@ -1269,8 +1277,8 @@ async fn discovered_capabilities_can_disable_cli_defaults() {
         "messages": [{"role": "user", "content": "Read a."}]
     }));
     run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer { provider, request },
     )
@@ -1338,8 +1346,8 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
         .client_headers
         .push(("x-claude-code-session-id".into(), "client-session".into()));
     let output = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
@@ -1434,8 +1442,8 @@ async fn inference_is_sent_in_claude_code_shape_and_tool_names_round_trip() {
         ]}
     ]);
     run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider,
@@ -1481,8 +1489,8 @@ async fn failed_or_cancelled_tool_state_write_never_delivers_completed_tool() {
             .cancel_tool_handoff
             .store(cancelled, Ordering::SeqCst);
         let result = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: signed_in(),
@@ -1509,7 +1517,8 @@ async fn failed_or_cancelled_tool_state_write_never_delivers_completed_tool() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn retry_fork_and_reload_preserve_visible_prompt_and_tool_lineage() {
-    let (runtime, plugin) = load_plugin().await;
+    let runtime = &VendorRuntime::new().expect("fresh runtime");
+    let plugin = &load_component(runtime).await;
     let services = Arc::new(MockServices {
         script: Mutex::new(VecDeque::from([
             (
@@ -1542,8 +1551,8 @@ async fn retry_fork_and_reload_preserve_visible_prompt_and_tool_lineage() {
     let request = history_request(&[json!({"role":"user","content":"Read a."})]);
     assert!(
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: provider.clone(),
@@ -1554,8 +1563,8 @@ async fn retry_fork_and_reload_preserve_visible_prompt_and_tool_lineage() {
         .is_err()
     );
     run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer {
             provider: provider.clone(),
@@ -1601,7 +1610,8 @@ async fn retry_fork_and_reload_preserve_visible_prompt_and_tool_lineage() {
         .operation_metadata
         .insert("user_turn_index".into(), json!(2));
     let next = history_request(&[json!({"role":"user","content":"What next?"})]);
-    let (reloaded_runtime, reloaded_plugin) = load_plugin().await;
+    let reloaded_runtime = VendorRuntime::new().expect("fresh runtime after reload");
+    let reloaded_plugin = load_component(&reloaded_runtime).await;
     run(
         &reloaded_runtime,
         &reloaded_plugin,
@@ -1730,8 +1740,8 @@ async fn provider_device_id_is_independent_of_oauth_account_and_target() {
             json!(format!("target-{index}")),
         );
         run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider,
@@ -1805,8 +1815,8 @@ async fn typed_server_tool_history_is_projected_without_mutation() {
     );
     let provider = signed_in();
     run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         OperationInput::Infer { provider, request },
     )
@@ -1836,8 +1846,8 @@ async fn unrelated_upstream_failures_are_not_reclassified_as_continuation_loss()
             ..Default::default()
         });
         let result = run(
-            &runtime,
-            &plugin,
+            runtime,
+            plugin,
             &services,
             OperationInput::Infer {
                 provider: signed_in(),
@@ -1898,8 +1908,8 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
         request: AuthRequest { step },
     };
     let started = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         auth(AuthStep::Start {
             redirect_uri: "http://localhost:54545/callback".into(),
@@ -1927,8 +1937,8 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
     assert!(url.contains(&format!("&state={state}&")));
 
     let rejected = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         auth(AuthStep::Exchange {
             callback_url: "http://localhost:54545/callback?code=c&state=other".into(),
@@ -1942,8 +1952,8 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
     assert!(services.requests.lock().is_empty());
 
     let exchanged = run(
-        &runtime,
-        &plugin,
+        runtime,
+        plugin,
         &services,
         auth(AuthStep::Exchange {
             callback_url: format!("http://localhost:54545/callback?code=c&state={state}"),

@@ -187,6 +187,15 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# E2E 测试服务专用 profile：继承 release（保留 debug_assertions = false 与嵌入式 WebUI 行为），
+# 关闭 LTO 与单 codegen-unit 以大幅缩短本地与 CI 的增量构建链接耗时。
+[profile.e2e]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false
+
 [profile.dev]
 opt-level = 0
 debug = true

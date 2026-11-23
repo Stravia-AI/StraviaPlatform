@@ -28,6 +28,7 @@ from tests.e2e.admin.test_observations import (
 )
 
 pytestmark = [pytest.mark.e2e, pytest.mark.storage]
+SHARED_USAGE = pytest.mark.xdist_group("usage-stats-shared")
 
 
 @contextmanager
@@ -173,9 +174,8 @@ def usage_upstream():
         thread.join()
 
 
-@pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])
-def usage_env(request, stravia_binary: Path, storage_runtime: dict[str, Any], tmp_path: Path):
-    backend = request.param
+@contextmanager
+def _usage_server(backend, stravia_binary: Path, storage_runtime: dict[str, Any], data_dir: Path):
     schema = None
     database: dict[str, Any] = {"backend": "sqlite"}
     if backend == "postgres":
@@ -189,20 +189,33 @@ def usage_env(request, stravia_binary: Path, storage_runtime: dict[str, Any], tm
     try:
         with usage_upstream() as (upstream, entered, release, attempts):
             base = f"http://127.0.0.1:{find_free_port()}"
-            args = ["--data-dir", str(tmp_path), "--host", "127.0.0.1", "--port", base.rsplit(":", 1)[1]]
+            args = ["--data-dir", str(data_dir), "--host", "127.0.0.1", "--port", base.rsplit(":", 1)[1]]
             process, logs = start_stravia_server(stravia_binary=stravia_binary, args=args + storage_runtime["server_args"](backend))
             wait_until_ready(f"{base}/api/v1/auth/state")
             session = initialize_server(base, wait_for_setup_token(logs, process), database)
             yield {"admin": base, "proxy": base, "auth": session.auth_headers(),
                    "mock": f"http://127.0.0.1:{upstream.server_port}", "entered": entered, "release": release,
                    "attempts": attempts,
-                   "backend": backend, "data_dir": tmp_path, "schema": schema,
+                   "backend": backend, "data_dir": data_dir, "schema": schema,
                    "storage_runtime": storage_runtime, "process": process}
     finally:
         if process is not None:
             stop_stravia_server(process, logs)
         if schema is not None:
             storage_runtime["run_schema_action"]("drop", pg_url=storage_runtime["pg_url"], schema=schema)
+
+
+@pytest.fixture(params=["sqlite", "postgres"], ids=["sqlite", "postgres"])
+def usage_env(request, stravia_binary: Path, storage_runtime: dict[str, Any], tmp_path: Path):
+    with _usage_server(request.param, stravia_binary, storage_runtime, tmp_path) as env:
+        yield env
+
+
+@pytest.fixture(scope="module", params=["sqlite", "postgres"], ids=["sqlite", "postgres"])
+def usage_env_shared(request, stravia_binary: Path, storage_runtime: dict[str, Any], tmp_path_factory):
+    # Shared cases must scope queries to their own resources or compare counter deltas.
+    with _usage_server(request.param, stravia_binary, storage_runtime, tmp_path_factory.mktemp("usage")) as env:
+        yield env
 
 
 @contextmanager
@@ -301,6 +314,14 @@ SPLIT_COUNTERS = (
     "upstream_request_count", "upstream_error_count",
     "recovery_known_request_count", "recovered_request_count",
 )
+
+
+def request_stats_delta(env, before):
+    current = stats(env)
+    for field in ("total_requests", *SPLIT_COUNTERS):
+        current[field] -= before[field]
+    return current
+
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 TOOLS = [{"type": "function", "function": {"name": "local_probe", "parameters": {"type": "object"}}}]
@@ -570,8 +591,10 @@ def test_clear_during_inflight_request_keeps_both_contributions(usage_env):
     assert overview["total_output_tokens"] == 14
 
 
-def test_every_stats_view_rejects_invalid_absolute_window(usage_env):
-    env = usage_env
+@SHARED_USAGE
+@pytest.mark.parametrize("usage_env_shared", ["sqlite"], indirect=True)
+def test_every_stats_view_rejects_invalid_absolute_window(usage_env_shared):
+    env = usage_env_shared
     invalid_windows = [
         {"start_at": 900000}, {"end_at": 1800000},
         {"start_at": 1800000, "end_at": 900000},
@@ -590,8 +613,9 @@ def test_every_stats_view_rejects_invalid_absolute_window(usage_env):
         assert status == 400, (bucket, body)
 
 
-def test_stats_filters_scope_overview_and_series_to_selected_identities(usage_env):
-    env = usage_env
+@SHARED_USAGE
+def test_stats_filters_scope_overview_and_series_to_selected_identities(usage_env_shared):
+    env = usage_env_shared
     _, proxy_key_a = _create_route(env, "usage-filter-a")
     _, proxy_key_b = _create_route(env, "usage-filter-b")
     for scenario, model, proxy_key in (
@@ -830,8 +854,10 @@ def test_switch_then_success_counts_absorbed_upstream_error(usage_env):
     assert rows[second_provider]["upstream_error_count"] == 0
 
 
-def test_waiting_client_counts_as_terminal_success(usage_env):
-    env = usage_env
+@SHARED_USAGE
+def test_waiting_client_counts_as_terminal_success(usage_env_shared):
+    env = usage_env_shared
+    before = stats(env)
     model = "usage-waiting-client"
     _route, key = _create_route(env, model, retry_budget=0)
     status, body = _proxy(
@@ -843,7 +869,7 @@ def test_waiting_client_counts_as_terminal_success(usage_env):
     assert assistant.get("tool_calls"), body
 
     def waiting_stats():
-        current = stats(env)
+        current = request_stats_delta(env, before)
         return current if current["terminal_request_count"] == 1 else None
 
     waiting = _wait_for("waiting_client terminal stats", waiting_stats)
@@ -863,7 +889,7 @@ def test_waiting_client_counts_as_terminal_success(usage_env):
     assert status == 200, body
 
     def continued_stats():
-        current = stats(env)
+        current = request_stats_delta(env, before)
         return current if current["terminal_request_count"] == 2 else None
 
     after = _wait_for("superseded parent counted once", continued_stats)
@@ -872,8 +898,10 @@ def test_waiting_client_counts_as_terminal_success(usage_env):
     assert_split(after, terminal=2, failed=0, upstream=2, errors=0)
 
 
-def test_switch_then_tool_call_and_supersede_are_terminal_successes(usage_env):
-    env = usage_env
+@SHARED_USAGE
+def test_switch_then_tool_call_and_supersede_are_terminal_successes(usage_env_shared):
+    env = usage_env_shared
+    before = stats(env)
     model = "usage-switch-tool-call"
     first_provider = provider(env, f"{model}-first", env["mock"])
     second_provider = provider(env, f"{model}-second", env["mock"])
@@ -892,7 +920,7 @@ def test_switch_then_tool_call_and_supersede_are_terminal_successes(usage_env):
     assert assistant.get("tool_calls"), body
 
     def waiting_stats():
-        current = stats(env)
+        current = request_stats_delta(env, before)
         return current if current["terminal_request_count"] == 1 else None
 
     waiting = _wait_for("switch to waiting_client", waiting_stats)
@@ -917,7 +945,7 @@ def test_switch_then_tool_call_and_supersede_are_terminal_successes(usage_env):
     assert status == 200, body
 
     def continued_stats():
-        current = stats(env)
+        current = request_stats_delta(env, before)
         return current if current["terminal_request_count"] == 2 else None
 
     after = _wait_for("superseded switch parent counted once", continued_stats)

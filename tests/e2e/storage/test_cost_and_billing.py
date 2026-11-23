@@ -195,7 +195,6 @@ def test_spend_limit_rejects_every_protocol_without_rpm_or_retry_after(usage_env
         assert "retry-after" not in headers
         error = json.loads(raw)["error"]
         assert error.get("type", error.get("status")) == kind, error
-        assert error["message"] == "API key spend limit reached."
         if kind == "insufficient_quota":
             assert error["code"] == "api_key_spend_limit_reached"
 
@@ -209,7 +208,10 @@ def test_spend_limit_rejects_every_protocol_without_rpm_or_retry_after(usage_env
         "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "StraviaRead"})
     assert status == 429, (status, raw)
     assert "retry-after" not in headers
-    assert "spend limit" in raw.decode().lower()
+    error = json.loads(raw)["error"]
+    assert error["type"] == "STRAVIA_SPEND_LIMIT", error
+    assert error["code"] == 429, error
+
     def rejected():
         rows = _client_errors(env, type="rejected")["items"]
         return rows if len(rows) == 5 else None

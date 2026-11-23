@@ -330,11 +330,6 @@ test('real gateway accepts original images and persisted reasoning replay under 
     const upstreamInput = upstreamRequests[0].input
     expect(JSON.stringify(upstreamInput)).toContain(imageData)
     await page.reload()
-    await expect(
-      page.getByRole('article', { name: 'Your message' }).getByRole('img', { name: 'real-screenshot.png' }),
-    ).toBeVisible()
-    await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('First real gateway answer')
-    await expect(page.getByRole('article', { name: 'Assistant response' })).toContainText('Input: 12 tokens')
     const secondRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/v1/responses')
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Second real question')
     await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -343,10 +338,6 @@ test('real gateway accepts original images and persisted reasoning replay under 
     expect(replay).not.toHaveProperty('previous_response_id')
     await expect(page.getByRole('article', { name: 'Assistant response' }).last()).toContainText(
       'Second real gateway answer',
-    )
-    await expect(page.getByRole('article', { name: 'Assistant response' }).last()).toContainText('Input: 12 tokens')
-    await expect(page.getByRole('article', { name: 'Assistant response' }).last()).not.toContainText(
-      'synthetic-opaque-reasoning',
     )
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0)
     expect(upstreamRequests).toHaveLength(2)

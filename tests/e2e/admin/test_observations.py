@@ -2159,7 +2159,7 @@ def test_running_bundle_is_fixed_at_its_watermark_and_never_claims_completion(
 
 @pytest.mark.e2e
 @pytest.mark.admin
-def test_bundle_tickets_expire_after_real_ttl_and_fail_uniformly(
+def test_bundle_tickets_advertise_ttl_and_reject_replay_uniformly(
     admin_env: dict[str, Any],
 ) -> None:
     route_id, api_key = _create_route(admin_env, "observation-ticket-contract")
@@ -2174,20 +2174,17 @@ def test_bundle_tickets_expire_after_real_ttl_and_fail_uniformly(
         "ticket Interaction", lambda: _route_interactions(admin_env, route_id)
     )[0]
 
-    def issue_ticket() -> dict[str, Any]:
-        status_, body = http_request(
-            "POST",
-            f"{admin_env['admin']}/api/v1/observations/interactions/{interaction['id']}/debug-bundle-tickets",
-            payload={},
-            headers=admin_env["auth"],
-        )
-        assert status_ == 200, body
-        return body["data"]
-
+    # Rust Core tests expiration at exactly 60 seconds with a controlled clock.
     issued_at = int(time.time() * 1000)
-    expiring = issue_ticket()
-    assert 59_000 <= expiring["expires_at"] - issued_at <= 61_000
-    usable = issue_ticket()
+    status, body = http_request(
+        "POST",
+        f"{admin_env['admin']}/api/v1/observations/interactions/{interaction['id']}/debug-bundle-tickets",
+        payload={},
+        headers=admin_env["auth"],
+    )
+    assert status == 200, body
+    usable = body["data"]
+    assert 59_000 <= usable["expires_at"] - issued_at <= 61_000
     usable_url = str(usable["download_url"])
     if usable_url.startswith("/"):
         usable_url = f"{admin_env['admin']}{usable_url}"
@@ -2205,18 +2202,9 @@ def test_bundle_tickets_expire_after_real_ttl_and_fail_uniformly(
         "GET",
         f"{admin_env['admin']}/api/v1/observations/debug-bundles/{'0' * 64}",
     )
-    assert (replay[0], replay[2]) == (random[0], random[2])
+    assert replay[0] == random[0] == 404
+    assert replay[2] == random[2]
     assert replay[1]["cache-control"] == random[1]["cache-control"] == "no-store"
-
-    remaining = (expiring["expires_at"] - int(time.time() * 1000)) / 1000
-    if remaining > 0:
-        time.sleep(remaining + 0.1)
-    expiring_url = str(expiring["download_url"])
-    if expiring_url.startswith("/"):
-        expiring_url = f"{admin_env['admin']}{expiring_url}"
-    expired = http_bytes("GET", expiring_url)
-    assert (expired[0], expired[2]) == (random[0], random[2])
-    assert expired[1]["cache-control"] == "no-store"
 
 
 @pytest.mark.e2e

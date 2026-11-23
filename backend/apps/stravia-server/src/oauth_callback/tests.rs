@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::*;
 use axum::body::to_bytes;
 use stravia_core::storage::MemoryStorage;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 async fn memory_gateway(data_dir: &Path) -> anyhow::Result<Gateway> {
     Gateway::from_storage(
@@ -62,20 +63,42 @@ async fn callback_success_copy_uses_only_the_supported_locale_allow_list() -> an
     Ok(())
 }
 
-fn fixed_policy(primary: u16, fallback: u16) -> AuthCallback {
+fn fixed_policy(primary: u16, fallback: Option<u16>) -> AuthCallback {
     AuthCallback {
         bind_host: "127.0.0.1".into(),
         redirect_host: "localhost".into(),
         path: "/auth/callback".into(),
-        port: AuthCallbackPort::Fixed {
-            primary,
-            fallback: Some(fallback),
-        },
+        port: AuthCallbackPort::Fixed { primary, fallback },
         manual_redirect_uri: Some("http://localhost:1457/auth/callback".into()),
         cancel_path: Some("/cancel".into()),
     }
 }
 
+async fn assert_cancel_request(stream: &mut TcpStream, path: &str) -> io::Result<()> {
+    let mut request = BufReader::new(stream);
+    let mut line = Vec::new();
+    request.read_until(b'\n', &mut line).await?;
+    assert_eq!(
+        line.as_slice(),
+        format!("GET {path} HTTP/1.1\r\n").as_bytes()
+    );
+    // Consume the headers before closing the connection to avoid a TCP reset.
+    loop {
+        line.clear();
+        request.read_until(b'\n', &mut line).await?;
+        if line == b"\r\n" {
+            return Ok(());
+        }
+        if !line.ends_with(b"\r\n") {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete cancel request",
+            ));
+        }
+    }
+}
+
+// An explicit fallback port must be free when the production binder takes it.
 async fn unused_port() -> io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     Ok(listener.local_addr()?.port())
@@ -86,21 +109,16 @@ async fn fixed_callback_reclaims_a_stale_primary_listener_via_declared_cancel_pa
 -> anyhow::Result<()> {
     let stale = TcpListener::bind(("127.0.0.1", 0)).await?;
     let primary = stale.local_addr()?.port();
-    let fallback = unused_port().await?;
     let cancelled = tokio::spawn(async move {
         let (mut stream, _) = stale.accept().await?;
-        let mut request = [0_u8; 128];
-        let count = stream.read(&mut request).await?;
-        assert!(
-            String::from_utf8_lossy(&request[..count])
-                .starts_with("GET /oauth/cancel/custom HTTP/1.1")
-        );
+        assert_cancel_request(&mut stream, "/oauth/cancel/custom").await?;
+        drop(stale);
         stream
             .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
             .await?;
         Ok::<_, io::Error>(())
     });
-    let mut policy = fixed_policy(primary, fallback);
+    let mut policy = fixed_policy(primary, None);
     policy.cancel_path = Some("/oauth/cancel/custom".into());
 
     let binding = bind_callback_listener(policy).await?;
@@ -123,18 +141,18 @@ async fn fixed_callback_does_not_reclaim_primary_after_failed_cancel_response() 
     let rejected_cancel = tokio::spawn(async move {
         let (mut stream, _) = tokio::select! {
             accepted = primary.accept() => accepted?,
-            _ = &mut stop_primary => return Ok::<_, io::Error>(()),
+            _ = &mut stop_primary => return Err(io::Error::other("cancel request not received")),
         };
-        let mut request = [0_u8; 128];
-        let count = stream.read(&mut request).await?;
-        assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /cancel HTTP/1.1"));
+        assert_cancel_request(&mut stream, "/cancel").await?;
+        // Make the primary available so an erroneous reclaim cannot fail on AddrInUse.
+        drop(primary);
         stream
             .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n")
             .await?;
         Ok::<_, io::Error>(())
     });
 
-    let binding = bind_callback_listener(fixed_policy(primary_port, fallback_port)).await?;
+    let binding = bind_callback_listener(fixed_policy(primary_port, Some(fallback_port))).await?;
     let _ = release_primary.send(());
     match binding {
         CallbackBinding::Listening { port, .. } => assert_eq!(port, fallback_port),
@@ -151,7 +169,7 @@ async fn fixed_callback_without_cancel_path_does_not_contact_the_primary_listene
     let primary = TcpListener::bind(("127.0.0.1", 0)).await?;
     let primary_port = primary.local_addr()?.port();
     let fallback_port = unused_port().await?;
-    let mut policy = fixed_policy(primary_port, fallback_port);
+    let mut policy = fixed_policy(primary_port, Some(fallback_port));
     policy.cancel_path = None;
 
     let binding = bind_callback_listener(policy).await?;
@@ -178,11 +196,9 @@ async fn fixed_callback_falls_back_to_manual_when_both_registered_ports_are_busy
     let occupied_primary = tokio::spawn(async move {
         let (mut stream, _) = tokio::select! {
             accepted = primary.accept() => accepted?,
-            _ = &mut keep_primary_busy => return Ok::<_, io::Error>(()),
+            _ = &mut keep_primary_busy => return Err(io::Error::other("cancel request not received")),
         };
-        let mut request = [0_u8; 128];
-        let count = stream.read(&mut request).await?;
-        assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /cancel HTTP/1.1"));
+        assert_cancel_request(&mut stream, "/cancel").await?;
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .await?;
@@ -192,7 +208,7 @@ async fn fixed_callback_falls_back_to_manual_when_both_registered_ports_are_busy
         Ok::<_, io::Error>(())
     });
 
-    let binding = bind_callback_listener(fixed_policy(primary_port, fallback_port)).await?;
+    let binding = bind_callback_listener(fixed_policy(primary_port, Some(fallback_port))).await?;
     match binding {
         CallbackBinding::ManualFallback { reason } => {
             assert_eq!(reason, "callback_ports_unavailable")

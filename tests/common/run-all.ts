@@ -164,11 +164,8 @@ const localIgnored: Record<string, true> = {
   "interaction_observation::snapshot_tests::postgres_credential_discoveries_match_persisted_contract": true,
   postgres_admin_history_preserves_batches_and_retention: true,
   postgres_upgrade_defaults_unconfigured_routes_to_text_and_preserves_identity: true,
-  "browser::tests::chrome_javascript_redirect_rebinds_readiness": true,
-  "browser::tests::chrome_worlds_timeout_cancel_and_profile_cleanup": true,
-  "browser::tests::chrome_google_challenges_stop_before_deadline": true,
-  "browser::tests::chrome_dynamic_cookie_workers_frames_and_network_policy": true,
-  "browser::tests::chrome_wire_bytes_are_owned_by_concurrent_pages": true,
+  postgres_write_leases_preserve_database_lock_concurrency: true,
+  postgres_queries_transactions_and_database_errors_keep_their_results: true,
   paid_model_passes_through_without_injection: true,
   required_choice_with_complete_tools_does_not_trigger_native_400: true,
   separate_component_stores_derive_session_without_private_state: true,
@@ -271,19 +268,13 @@ async function runRustBinaries(
             ),
           });
           if (selected.length > 0) {
-            // 每个 Chrome 场景启动独立原生进程；与 WebUI/桌面并行时，避免同一测试二进制再同时冷启动四组浏览器。
-            const localThreads = selected.some((name) =>
-              name.startsWith("browser::tests::chrome_"),
-            )
-              ? 1
-              : rustThreads;
             await run(
               `${label}-local-ignored`,
               [
                 binary.executable,
                 "--ignored",
                 "--exact",
-                `--test-threads=${localThreads}`,
+                `--test-threads=${rustThreads}`,
                 ...selected,
               ],
               { env },
@@ -474,42 +465,51 @@ try {
     ...postgresDatabaseCommands,
   ]);
 
-  // 所有构建与 freshness 检查均在总计时内；先统一准备，再并行运行隔离的产品面。
-  const pythonReady = await prepare("python-dependencies", [
-    "uv",
-    "sync",
-    "--locked",
-    "--group",
-    "test",
-  ]);
-  const webReady = await prepare("production-web-assets", [
-    "task",
-    "--color=false",
-    "build:web",
-  ]);
-  const desktopWebReady = await prepare("desktop-web-assets", [
-    "task",
-    "--color=false",
-    "build:web:desktop-e2e",
-  ]);
-  const vendorsReady = await prepare("vendor-base", [
-    "task",
-    "--color=false",
-    "build:vendors",
-  ]);
-  const fixturesReady = await prepare(
-    "vendor-fixtures",
-    ["task", "--color=false", "build:vendor-fixtures"],
-    vendorsReady,
-  );
-  // Paraglide 会清空并重写生成目录；不能与 dev:server 的真实生成过程并发。
-  await prepare("web-unit", [
-    "bun",
-    "run",
-    "--filter",
-    "stravia-webui",
-    "test:unit",
-  ]);
+  // 所有构建与 freshness 检查均在总计时内；按无共享写入目录的依赖 DAG 并行准备，再并行运行隔离的产品面。
+  const [pythonReady, { webReady, desktopWebReady }, { vendorsReady, fixturesReady }] =
+    await Promise.all([
+      prepare("python-dependencies", [
+        "uv",
+        "sync",
+        "--locked",
+        "--group",
+        "test",
+      ]),
+      (async () => {
+        // Paraglide 会清空并重写生成目录；WebUI 相关的构建与单元测试必须互相串行，且在 dev:server 之前完成。
+        const webReady = await prepare("production-web-assets", [
+          "task",
+          "--color=false",
+          "build:web",
+        ]);
+        const desktopWebReady = await prepare("desktop-web-assets", [
+          "task",
+          "--color=false",
+          "build:web:desktop-e2e",
+        ]);
+        await prepare("web-unit", [
+          "bun",
+          "run",
+          "--filter",
+          "stravia-webui",
+          "test:unit",
+        ]);
+        return { webReady, desktopWebReady };
+      })(),
+      (async () => {
+        const vendorsReady = await prepare("vendor-base", [
+          "task",
+          "--color=false",
+          "build:vendors",
+        ]);
+        const fixturesReady = await prepare(
+          "vendor-fixtures",
+          ["task", "--color=false", "build:vendor-fixtures"],
+          vendorsReady,
+        );
+        return { vendorsReady, fixturesReady };
+      })(),
+    ]);
   const workspaceReady = await prepare(
     "rust-build-tests",
     ["task", "--color=false", "build:test:workspace"],
@@ -661,7 +661,7 @@ try {
               "-n",
               String(pythonWorkers),
               "--dist",
-              "load",
+              "loadgroup",
               "--durations=20",
             ],
             {

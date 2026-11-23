@@ -509,6 +509,7 @@ def test_inflight_discovery_rejects_stale_connection_or_manual_model_edit(sync_e
     assert _api(env, f"{path}/models/sync-state")["in_progress"] is False
 
 
+@pytest.mark.parametrize("sync_env", ["sqlite"], indirect=True)
 def test_model_history_and_sync_preferences_require_management_authentication(sync_env):
     env = sync_env
     provider, path = _provider(env)

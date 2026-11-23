@@ -308,9 +308,7 @@ async fn acceptance(http: bool) -> anyhow::Result<()> {
         requests,
         task: tokio::spawn(async { Ok(Vec::new()) }),
     };
-    let storage_directory = tempfile::tempdir()?;
-    let pool = crate::db::init_pool(storage_directory.path()).await?;
-    crate::migrations::migrate_sqlite(&pool, None).await?;
+    let pool = crate::test_support::migrated_sqlite_pool().await?;
     let storage = Arc::new(crate::storage::SqliteStorage::from_pool(pool));
     let (_directory, gateway) = gateway_for_storage(&dummy, &["openai-codex"], storage).await?;
     let provider = synthetic_oauth_provider(&gateway, "openai-codex", false).await?;
@@ -451,6 +449,7 @@ async fn legacy_boundary_continuation(
         requests,
         task: tokio::spawn(async { Ok(Vec::new()) }),
     };
+    // These continuation cases restart the Gateway against persistent storage.
     let storage_directory = tempfile::tempdir()?;
     let pool = crate::db::init_pool(storage_directory.path()).await?;
     crate::migrations::migrate_sqlite(&pool, None).await?;

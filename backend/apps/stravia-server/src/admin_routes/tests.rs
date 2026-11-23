@@ -944,16 +944,15 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let listener = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        let listener = loop {
+        // Completion signals graceful shutdown; the listener runs in a detached task.
+        let mut rebind = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            rebind.tick().await;
             match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-                Ok(listener) => break listener,
-                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-                    tokio::task::yield_now().await;
-                }
-                Err(error) => return Err(error),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                result => break result,
             }
-        };
-        Ok::<_, std::io::Error>(listener)
+        }
     })
     .await??;
     drop(listener);

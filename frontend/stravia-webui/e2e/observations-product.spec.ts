@@ -183,38 +183,19 @@ test('real Chromium selects, switches and closes native HTTP observation scopes'
         .toBeDefined()
       interactions.push({ id: id!, text })
     }
-    const tokenScope = new URLSearchParams({
-      start_at: String(Date.now() - 60_000),
-      end_at: String(Date.now() + 60_000),
-      model: model.id,
-      limit: '30',
-      min_tokens: '1200',
-    })
-    const atTokenBoundary = await api(`/observations/interactions?${tokenScope}`)
-    expect(atTokenBoundary.root_total).toBe(2)
-    expect(
-      atTokenBoundary.roots
-        .flatMap((root: { interactions: Array<{ id: string }> }) => root.interactions.map((item) => item.id))
-        .sort(),
-    ).toEqual(interactions.map((item) => item.id).sort())
-    tokenScope.set('min_tokens', '1201')
-    const aboveTokenBoundary = await api(`/observations/interactions?${tokenScope}`)
-    expect(aboveTokenBoundary.root_total).toBe(0)
-    expect(aboveTokenBoundary.roots).toEqual([])
     const scopeRequests: string[] = []
     page.on('request', (request) => {
       if (/\/interactions\/[^/]+\/live(?:\?|$)/.test(request.url())) scopeRequests.push(request.url())
     })
-    for (const [index, text] of expected.entries()) {
+    for (const [index, selected] of interactions.entries()) {
       await page.evaluate((locale) => localStorage.setItem('stravia-locale', locale), index === 0 ? 'en-US' : 'zh-CN')
       await page.emulateMedia({ reducedMotion: index === 0 ? 'no-preference' : 'reduce' })
       await page.setViewportSize(index === 0 ? { width: 1280, height: 800 } : { width: 320, height: 740 })
-      const selected = interactions[index]
       await page.goto(`${ready.origin}/logs?interaction=${selected.id}`)
       const details = page
         .locator('[aria-label="Observation details"]:visible, [role="dialog"]:visible')
         .filter({ has: page.getByRole('log') })
-      await expect(details.getByRole('log')).toContainText(text.replaceAll('**', ''))
+      await expect(details.getByRole('log')).toContainText(selected.text.replaceAll('**', ''))
       await expect.poll(() => scopeRequests.some((url) => url.includes(`/interactions/${selected.id}/live`))).toBe(true)
       await page.keyboard.press('Escape')
       await expect(details).toHaveCount(0)

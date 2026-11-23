@@ -136,7 +136,11 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
         })
         .await
         .unwrap_err();
-    assert!(stale.to_string().contains("refresh and select"));
+    assert!(matches!(
+        stale.downcast_ref::<CatalogError>(),
+        Some(CatalogError::ChannelChanged { provider_id, channel_id })
+            if provider_id == &openai.id && channel_id == &channel.id
+    ));
 
     gw.shutdown().await;
     drop(gw);

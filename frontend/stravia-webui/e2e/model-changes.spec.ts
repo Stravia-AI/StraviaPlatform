@@ -201,88 +201,70 @@ for (const destination of ['connection', 'providers', 'narrow-settings']) {
     }
   })
 }
-for (const locale of ['en-US', 'zh-CN']) {
-  for (const theme of ['light', 'dark']) {
-    test(`exact toast reveal survives filter races and newer history (${locale}, ${theme})`, async ({ page }) => {
-      await prepareApp(page)
-      await page.addInitScript(
-        ({ locale, theme }) => {
-          localStorage.setItem('stravia-locale', locale)
-          localStorage.setItem('stravia-theme', theme)
+test('exact toast reveal survives filter races and newer history', async ({ page }) => {
+  await prepareApp(page)
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+  await page.route('**/api/v1/providers/history-provider/models', (route) =>
+    route.fulfill({ json: { data: { models: [] } } }),
+  )
+  await page.route('**/api/v1/providers/history-provider/models/sync-state', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          automatic_sync: true,
+          in_progress: false,
+          pause_reason: null,
+          last_check: summary,
+          has_successful_sync: true,
         },
-        { locale, theme },
-      )
-      await page.setViewportSize(theme === 'dark' ? { width: 320, height: 740 } : { width: 1280, height: 800 })
-      await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
-      await page.route('**/api/v1/providers/history-provider/models', (route) =>
-        route.fulfill({ json: { data: { models: [] } } }),
-      )
-      await page.route('**/api/v1/providers/history-provider/models/sync-state', (route) =>
-        route.fulfill({
-          json: {
-            data: {
-              automatic_sync: true,
-              in_progress: false,
-              pause_reason: null,
-              last_check: summary,
-              has_successful_sync: true,
-            },
-          },
-        }),
-      )
-      await page.route('**/api/v1/providers/history-provider/models/sync', (route) =>
-        route.fulfill({ json: { data: summary } }),
-      )
-      let release!: () => void
-      const gate = new Promise<void>((done) => {
-        release = done
-      })
-      let delayed = false
-      await page.route('**/api/v1/model-changes?*', async (route) => {
-        const q = new URL(route.request().url()).searchParams.get('q')
-        if (q === 'slow') {
-          delayed = true
-          await gate
-        }
-        await route.fulfill({
-          json: {
-            data: {
-              records: q ? [] : [{ ...exact, id: 'newer-other', provider_name: 'Newer Service' }],
-              next_cursor: null,
-            },
-          },
-        })
-      })
-      await page.route('**/api/v1/model-changes/exact-result', (route) => route.fulfill({ json: { data: exact } }))
-      await page.goto('/providers/history-provider?view=models')
-      await page
-        .getByRole('button', { name: locale === 'en-US' ? 'Sync models' : '同步模型', exact: true })
-        .first()
-        .click()
-      const toast = page
-        .locator('[data-sonner-toast]')
-        .filter({ hasText: locale === 'en-US' ? 'Model changes saved' : '模型变更已保存' })
-      await expect(toast).toContainText(locale === 'en-US' ? 'Specification updated 1' : '规格更新 1')
-      await page.getByRole('button', { name: locale === 'en-US' ? 'Change history' : '变更记录', exact: true }).click()
-      const panel = page.getByRole('dialog')
-      await panel.locator('#history-search').fill('slow')
-      await expect.poll(() => delayed).toBe(true)
-      // Toast lives outside the modal; escape returns to the original operation.
-      await page.keyboard.press('Escape')
-      await toast.getByRole('button', { name: locale === 'en-US' ? 'View details' : '查看详情' }).click()
-      release()
-      const selected = panel.getByLabel(locale === 'en-US' ? 'View details' : '查看详情', { exact: true })
-      await expect(selected).toContainText('Exact Model')
-      await expect(selected).toContainText('exact-model')
-      const context = selected
-        .getByRole('row')
-        .filter({ has: page.getByRole('rowheader', { name: locale === 'en-US' ? 'Context' : '上下文', exact: true }) })
-      await expect(context.getByRole('cell').nth(1)).toHaveText('0')
-      await expect(selected).not.toContainText('Newer Service')
-      await expect(selected.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+      },
+    }),
+  )
+  await page.route('**/api/v1/providers/history-provider/models/sync', (route) =>
+    route.fulfill({ json: { data: summary } }),
+  )
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>()
+  let delayed = false
+  await page.route('**/api/v1/model-changes?*', async (route) => {
+    const q = new URL(route.request().url()).searchParams.get('q')
+    if (q === 'slow') {
+      delayed = true
+      await gate
+    }
+    await route.fulfill({
+      json: {
+        data: {
+          records: q ? [] : [{ ...exact, id: 'newer-other', provider_name: 'Newer Service' }],
+          next_cursor: null,
+        },
+      },
     })
-  }
-}
+  })
+  await page.route('**/api/v1/model-changes/exact-result', (route) => route.fulfill({ json: { data: exact } }))
+  await page.goto('/providers/history-provider?view=models')
+  await page.getByRole('button', { name: 'Sync models', exact: true }).first().click()
+  const toast = page.locator('[data-sonner-toast]').filter({ hasText: 'Model changes saved' })
+  await expect(toast).toContainText('Specification updated 1')
+  await page.getByRole('button', { name: 'Change history', exact: true }).click()
+  const panel = page.getByRole('dialog')
+  await panel.locator('#history-search').fill('slow')
+  await expect.poll(() => delayed).toBe(true)
+  // Toast lives outside the modal; escape returns to the original operation.
+  await page.keyboard.press('Escape')
+  await toast.getByRole('button', { name: 'View details' }).click()
+  release()
+  const selected = panel.getByLabel('View details', { exact: true })
+  await expect(selected).toContainText('Exact Model')
+  await expect(selected).toContainText('exact-model')
+  const context = selected
+    .getByRole('row')
+    .filter({ has: page.getByRole('rowheader', { name: 'Context', exact: true }) })
+  await expect(context.getByRole('cell').nth(1)).toHaveText('0')
+  await expect(selected).not.toContainText('Newer Service')
+  await expect(selected.getByRole('button')).toHaveAttribute('aria-expanded', 'true')
+})
 test('320px history keeps error, empty and no-match distinct and restores keyboard focus', async ({ page }) => {
   await prepareApp(page)
   await page.setViewportSize({ width: 320, height: 740 })

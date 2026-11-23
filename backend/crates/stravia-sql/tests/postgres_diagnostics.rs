@@ -8,11 +8,11 @@ mod support;
 use support::Captured;
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL"]
 async fn postgres_write_leases_preserve_database_lock_concurrency()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(url) = std::env::var("STRAVIA_TEST_POSTGRES_URL") else {
-        return Ok(());
-    };
+    let url =
+        std::env::var("STRAVIA_TEST_POSTGRES_URL").expect("STRAVIA_TEST_POSTGRES_URL must be set");
     // 同一进程的并发测试须使用一致的 SQL interest，避免首次注册缓存为 never。
     let captured = Captured::default();
     let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
@@ -55,11 +55,11 @@ async fn postgres_write_leases_preserve_database_lock_concurrency()
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL"]
 async fn postgres_queries_transactions_and_database_errors_keep_their_results()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(url) = std::env::var("STRAVIA_TEST_POSTGRES_URL") else {
-        return Ok(());
-    };
+    let url =
+        std::env::var("STRAVIA_TEST_POSTGRES_URL").expect("STRAVIA_TEST_POSTGRES_URL must be set");
     let captured = Captured::default();
     let _subscriber = tracing::subscriber::set_default(captured.subscriber(&["stravia::sql"]));
     let pool = PgPool::connect(&url).await?;

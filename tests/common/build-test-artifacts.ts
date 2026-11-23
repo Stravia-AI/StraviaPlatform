@@ -53,7 +53,8 @@ const plans: Record<string, Plan> = {
       'cargo',
       'build',
       '--locked',
-      '--release',
+      '--profile',
+      'e2e',
       '-p',
       'stravia-server',
       '-p',
@@ -62,7 +63,7 @@ const plans: Record<string, Plan> = {
       'stravia-server/test-harness',
     ],
     binaries: ['stravia-server', 'stravia-tools', 'stravia-storage-test-harness'].map((name) =>
-      join(cargoTarget, 'release', `${name}${suffix}`),
+      join(cargoTarget, 'e2e', `${name}${suffix}`),
     ),
   },
   release: {
@@ -122,8 +123,8 @@ const compilerEnvironment = Object.fromEntries(
   Object.entries({
     ...process.env,
     CARGO_TARGET_DIR: mode === 'development' ? join(repository, 'target', 'test-development') : cargoTarget,
-    // Windows 下多个大型 Core rlib 同时 mmap 会耗尽 commit limit；限制编译峰值而非测试覆盖。
-    CARGO_BUILD_JOBS: '4',
+    // Windows 下多个大型 Core rlib 同时 mmap 会耗尽 commit limit；仅在 Windows 限制编译并发。
+    ...(process.platform === 'win32' ? { CARGO_BUILD_JOBS: '4' } : {}),
   })
     .filter(
       ([key]) =>

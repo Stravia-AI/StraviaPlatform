@@ -12,29 +12,49 @@ pub struct Deadline(Arc<DeadlineState>, Option<Arc<tokio::sync::Notify>>);
 struct DeadlineState {
     at: Mutex<Instant>,
     ttl: Duration,
+    clock: Clock,
     notify: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
+enum Clock {
+    System,
+    Tokio,
+}
+
+impl Clock {
+    fn now(&self) -> Instant {
+        match self {
+            Self::System => Instant::now(),
+            Self::Tokio => tokio::time::Instant::now().into_std(),
+        }
+    }
 }
 
 impl Deadline {
     /// Create a renewable deadline `ttl` from now. Each `renew` re-arms it for
     /// another `ttl`, turning the deadline into an idle timeout.
     pub fn from_now(ttl: Duration) -> Self {
-        Self(
-            Arc::new(DeadlineState {
-                at: Mutex::new(Instant::now() + ttl),
-                ttl,
-                notify: tokio::sync::Notify::new(),
-            }),
-            None,
-        )
+        Self::new(Instant::now() + ttl, ttl, Clock::System)
     }
 
     /// An absolute deadline that `renew` never extends.
     pub fn fixed(at: Instant) -> Self {
+        Self::new(at, Duration::ZERO, Clock::System)
+    }
+
+    /// A non-renewable deadline measured by the Tokio clock.
+    pub fn fixed_after(duration: Duration) -> Self {
+        let clock = Clock::Tokio;
+        Self::new(clock.now() + duration, Duration::ZERO, clock)
+    }
+
+    fn new(at: Instant, ttl: Duration, clock: Clock) -> Self {
         Self(
             Arc::new(DeadlineState {
                 at: Mutex::new(at),
-                ttl: Duration::ZERO,
+                ttl,
+                clock,
                 notify: tokio::sync::Notify::new(),
             }),
             None,
@@ -65,12 +85,12 @@ impl Deadline {
 
     /// Returns `true` if the deadline has already passed.
     pub fn is_exceeded(&self) -> bool {
-        Instant::now() > self.at()
+        self.0.clock.now() > self.at()
     }
 
     /// How much time remains. Returns zero if already exceeded.
     pub fn remaining(&self) -> Duration {
-        self.at().saturating_duration_since(Instant::now())
+        self.at().saturating_duration_since(self.0.clock.now())
     }
 
     /// Extend the deadline to `now + ttl` when that lies beyond the current
@@ -80,7 +100,7 @@ impl Deadline {
             return;
         }
         let mut at = self.0.at.lock().unwrap();
-        *at = (*at).max(Instant::now() + self.0.ttl);
+        *at = (*at).max(self.0.clock.now() + self.0.ttl);
         drop(at);
         self.0.notify.notify_waiters();
     }
@@ -103,14 +123,14 @@ impl Deadline {
             // and the first poll would otherwise be lost.
             notified.as_mut().enable();
             let at = self.at();
-            let now = Instant::now();
+            let now = self.0.clock.now();
             if now >= at {
                 return;
             }
             tokio::select! {
                 biased;
-                // 截止时间属于真实时钟；受控 Tokio 时钟可能已推进，不能把
-                // 真实绝对时间直接转入另一个时钟域而反复立即唤醒。
+                // For system-clock deadlines, a paused Tokio clock may have
+                // advanced independently; sleep for the remaining duration.
                 _ = tokio::time::sleep(at.duration_since(now)) => {}
                 () = notified => {}
             }
@@ -175,6 +195,25 @@ mod tests {
         let deadline = Deadline::fixed(at);
         deadline.renew();
         assert_eq!(deadline.at(), at);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fixed_after_uses_tokio_time_and_does_not_renew() {
+        let ttl = Duration::from_secs(60);
+        let deadline = Deadline::fixed_after(ttl);
+        let mut waiting = std::pin::pin!(deadline.wait());
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+        tokio::time::advance(ttl - Duration::from_secs(1)).await;
+        deadline.renew();
+        assert_eq!(deadline.remaining(), Duration::from_secs(1));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(deadline.is_exceeded());
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the elapsed Tokio deadline should fire");
     }
 
     #[tokio::test]

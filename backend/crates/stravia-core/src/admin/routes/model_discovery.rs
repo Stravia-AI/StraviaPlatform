@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -65,7 +65,7 @@ pub(super) async fn discover_provider_models(
     provider_id: &str,
 ) -> Result<DiscoveredModels, RouteModelDiscoveryError> {
     let cancellation = gw.lifecycle.cancellation.clone();
-    let deadline = stravia_runtime_contract::Deadline::fixed(Instant::now() + DISCOVERY_TIMEOUT);
+    let deadline = stravia_runtime_contract::Deadline::fixed_after(DISCOVERY_TIMEOUT);
     let mut prepared = gw
         .prepare_vendor_execution(
             provider_id,

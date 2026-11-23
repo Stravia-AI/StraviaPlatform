@@ -76,6 +76,40 @@ async fn ticket(observation: &InteractionObservation) -> anyhow::Result<Download
         .await
 }
 
+#[tokio::test(start_paused = true)]
+async fn bundle_tickets_are_single_use_and_expire() -> anyhow::Result<()> {
+    // Set up the SQLite fixture with its normal I/O timeouts.
+    tokio::time::resume();
+    let (_directory, _pool, observation) = fixture().await?;
+    let run = admit(&observation, "ticket-run", None);
+    finish(&run, "completed", Some("root-generation"));
+    let valid = ticket(&observation).await?;
+    let expiring = ticket(&observation).await?;
+    tokio::time::pause();
+
+    let valid_token = valid.download_url.rsplit('/').next().expect("ticket token");
+    let expiring_token = expiring
+        .download_url
+        .rsplit('/')
+        .next()
+        .expect("ticket token");
+    drop(observation.consume_bundle_ticket(valid_token).await?);
+    assert!(matches!(
+        observation.consume_bundle_ticket(valid_token).await,
+        Err(error) if error.is::<super::TicketUnavailable>()
+    ));
+
+    tokio::time::advance(super::TICKET_TTL).await;
+    let unknown_token = "0".repeat(64);
+    for token in [expiring_token, unknown_token.as_str()] {
+        assert!(matches!(
+            observation.consume_bundle_ticket(token).await,
+            Err(error) if error.is::<super::TicketUnavailable>()
+        ));
+    }
+    Ok(())
+}
+
 /// 带新用户输入、生成父节点为 `generation_parent` 的请求。
 fn admit_user_turn(
     observation: &InteractionObservation,

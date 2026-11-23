@@ -737,11 +737,15 @@ mod tests {
             &[],
         );
         let text = media[0]["text"].as_str().unwrap();
-        assert!(text.len() <= MAX_DOCUMENT_PROMPT_BYTES);
+        assert_eq!(text.len(), MAX_DOCUMENT_PROMPT_BYTES);
+        let limitations = media[0]["limitations"]
+            .as_array()
+            .expect("entry limitations");
+        assert_eq!(limitations.len(), 1);
         assert!(
-            media[0]["limitations"].to_string().contains("truncated"),
-            "entry limitations: {}",
-            media[0]["limitations"]
+            limitations[0]
+                .as_str()
+                .is_some_and(|message| !message.is_empty())
         );
     }
 

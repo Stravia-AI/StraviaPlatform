@@ -859,9 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_cache_and_ledger_regressions() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let pool = crate::db::init_pool(directory.path()).await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         cache_and_ledger_regressions(&PluginStore::sqlite(pool)).await
     }
 
@@ -882,17 +880,13 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_transactional_trust_regressions() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let pool = crate::db::init_pool(directory.path()).await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         transactional_trust_regressions(PluginStore::sqlite(pool)).await
     }
 
     #[tokio::test]
     async fn sqlite_source_cas_conflicts_and_install_rollback() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let pool = crate::db::init_pool(directory.path()).await?;
-        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let pool = crate::test_support::migrated_sqlite_pool().await?;
         let store = PluginStore::sqlite(pool);
         let old = source();
         store.put_source(&old, None).await?;

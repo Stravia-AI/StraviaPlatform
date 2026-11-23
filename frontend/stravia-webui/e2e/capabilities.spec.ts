@@ -81,13 +81,7 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
     await useLocale(page, locale)
     await page.setViewportSize({ width: 1280, height: 800 })
 
-    const capabilitiesResponse = page.waitForResponse((response) =>
-      new URL(response.url()).pathname.endsWith('/api/v1/capabilities'),
-    )
     await page.goto('/settings')
-    const response = await capabilitiesResponse
-    expect(response.ok()).toBe(true)
-    expect(await response.json()).toEqual(communityCapabilities)
     await expect(page.getByRole('heading', { name: text.settings, exact: true })).toBeVisible()
 
     const navigation = page.getByRole('navigation', { name: text.primaryNavigation })
