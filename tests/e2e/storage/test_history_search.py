@@ -335,16 +335,40 @@ def test_history_search_reads_hits_excludes_issuer_isolates_keys_and_clears(
 def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
     """删除 0051 创建的对象与迁移记录，得到升级前（≤0050）的真实库形态与已有历史。
 
-    迁移历史必须是连续前缀，因此也回退 0052–0057。0055 只清理凭据数据，
-    该场景不生成凭据映射；0053 会丢弃旧使用时间，所以只允许在映射表为空时重建旧结构。
+    迁移历史必须是连续前缀，因此也回退 0052–0058。0055 只清理凭据数据，
+    该场景不生成凭据映射；0053 会丢弃旧使用时间，所以只允许在映射表为空时重建旧结构；
+    0058 会泛化 web_providers 并清理内置本地种子，只允许在 web_providers 为空时重建旧结构。
     """
     if server.dsn is not None:
         import psycopg
 
         with psycopg.connect(server.dsn) as connection:
             versions = connection.execute("SELECT version FROM _sqlx_migrations WHERE version >= 51 ORDER BY version").fetchall()
-            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,)], versions
+            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,), (58,)], versions
             assert connection.execute("SELECT COUNT(*) FROM reversible_redaction_mappings").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM web_providers").fetchone() == (0,)
+            connection.execute("ALTER TABLE web_providers DROP CONSTRAINT web_providers_kind_check")
+            connection.execute("ALTER TABLE web_providers DROP CONSTRAINT web_providers_api_key_check")
+            connection.execute("ALTER TABLE web_providers DROP CONSTRAINT web_providers_config_json_check")
+            connection.execute("ALTER TABLE web_providers RENAME COLUMN config_json TO local_engines")
+            connection.execute(
+                "ALTER TABLE web_providers ADD CONSTRAINT web_providers_credentials_check CHECK ("
+                "((kind = 'local'::text) AND (api_key IS NULL) AND (local_engines IS NOT NULL))"
+                " OR ((kind = ANY (ARRAY['exa'::text, 'zhipu'::text])) AND (api_key IS NOT NULL)"
+                " AND (length(TRIM(BOTH FROM api_key)) > 0) AND (local_engines IS NULL)))"
+            )
+            connection.execute(
+                "ALTER TABLE web_providers ADD CONSTRAINT web_providers_kind_check"
+                " CHECK (kind = ANY (ARRAY['local'::text, 'exa'::text, 'zhipu'::text]))"
+            )
+            connection.execute(
+                "ALTER TABLE web_providers ADD CONSTRAINT web_providers_local_engines_contract CHECK ("
+                "kind <> 'local' OR COALESCE(jsonb_typeof(local_engines) = 'object', false))"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX idx_web_providers_local_singleton"
+                " ON web_providers USING btree (kind) WHERE (kind = 'local'::text)"
+            )
             connection.execute(
                 "ALTER TABLE models ADD COLUMN output_modality TEXT"
                 " CHECK (output_modality IS NULL OR output_modality IN ('text', 'image'))"
@@ -372,7 +396,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
                 "ALTER TABLE vendor_plugins ADD CONSTRAINT vendor_plugins_source_check"
                 " CHECK (source IN ('builtin', 'local'))"
             )
-            connection.execute("DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 57")
+            connection.execute("DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 58")
             [(latest,)] = connection.execute("SELECT MAX(version) FROM _sqlx_migrations").fetchall()
     else:
         # 0012 定义的 Target 表正是 0054 之前的形态；复用其建表、复制和约束。
@@ -380,11 +404,40 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
         target_schema = migration[migration.index("CREATE TABLE model_backends_new"):migration.index("-- RPM")]
         with closing(sqlite3.connect(server.data_dir / "db" / "gateway.db")) as connection, connection:
             versions = connection.execute("SELECT version FROM _sqlx_migrations WHERE version >= 51 ORDER BY version").fetchall()
-            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,)], versions
+            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,), (58,)], versions
             assert connection.execute("SELECT COUNT(*) FROM reversible_redaction_mappings").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM web_providers").fetchone() == (0,)
             connection.executescript(target_schema)
             connection.executescript(
-                "ALTER TABLE models ADD COLUMN output_modality TEXT"
+                "DROP TABLE web_providers;"
+                " CREATE TABLE web_providers ("
+                " id TEXT PRIMARY KEY,"
+                " name TEXT NOT NULL UNIQUE,"
+                " kind TEXT NOT NULL CHECK (kind IN ('local', 'exa', 'zhipu')),"
+                " api_key TEXT,"
+                " use_proxy INTEGER NOT NULL DEFAULT 0 CHECK (use_proxy IN (0, 1)),"
+                " local_engines TEXT,"
+                " last_test_success INTEGER,"
+                " last_test_at TEXT,"
+                " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                " updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                " CHECK ("
+                " (kind = 'local' AND api_key IS NULL AND local_engines IS NOT NULL AND json_valid(local_engines))"
+                " OR (kind IN ('exa', 'zhipu') AND api_key IS NOT NULL AND length(trim(api_key)) > 0 AND local_engines IS NULL)"
+                " )"
+                ");"
+                " CREATE UNIQUE INDEX idx_web_providers_local_singleton ON web_providers(kind) WHERE kind = 'local';"
+                " CREATE TRIGGER web_providers_boolean_insert BEFORE INSERT ON web_providers"
+                " WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1))"
+                " OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))"
+                " OR (NEW.kind = 'local' AND CASE WHEN json_valid(NEW.local_engines) THEN json_type(NEW.local_engines) <> 'object' ELSE 1 END)"
+                " BEGIN SELECT RAISE(ABORT, 'invalid boolean or local engine configuration'); END;"
+                " CREATE TRIGGER web_providers_boolean_update BEFORE UPDATE ON web_providers"
+                " WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1))"
+                " OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))"
+                " OR (NEW.kind = 'local' AND CASE WHEN json_valid(NEW.local_engines) THEN json_type(NEW.local_engines) <> 'object' ELSE 1 END)"
+                " BEGIN SELECT RAISE(ABORT, 'invalid boolean or local engine configuration'); END;"
+                " ALTER TABLE models ADD COLUMN output_modality TEXT"
                 " CHECK (output_modality IS NULL OR output_modality IN ('text', 'image'));"
                 " UPDATE models SET output_modality ="
                 " CASE purpose WHEN 'inference' THEN 'text' WHEN 'image_generation' THEN 'image' END;"
@@ -407,7 +460,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
                 " INSERT INTO vendor_plugins_old SELECT vendor_id, version, source, descriptor, digest,"
                 " revision, data_epoch, installed_at FROM vendor_plugins;"
                 " DROP TABLE vendor_plugins; ALTER TABLE vendor_plugins_old RENAME TO vendor_plugins;"
-                " DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 57;"
+                " DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 58;"
             )
             [(latest,)] = connection.execute("SELECT MAX(version) FROM _sqlx_migrations").fetchall()
     assert latest == 50, latest
