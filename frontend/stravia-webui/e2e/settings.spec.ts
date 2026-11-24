@@ -2782,3 +2782,74 @@ test('switching settings groups with a dirty inline input asks first and stays q
   await expect(page).toHaveURL(/view=data$/)
   await expect(discardDialog(page)).toHaveCount(0)
 })
+
+test('platform task model setting supports configure, unavailable recovery, clear, and failed save', async ({
+  page,
+}) => {
+  const routes = [
+    { id: 'route-fast-id', model_id: 'fast-chat', display_name: 'Fast Chat' },
+    { id: 'route-smart-id', model_id: 'smart-chat', display_name: 'Smart Chat' },
+  ]
+  let current = {
+    route_id: null as string | null,
+    status: 'unset' as 'unset' | 'available' | 'unavailable',
+    route: null as (typeof routes)[number] | null,
+    eligible_routes: routes,
+  }
+  let rejectNextSave = false
+  const writes: (string | null)[] = []
+
+  await page.route('**/api/v1/platform-llm', async (route) => {
+    if (route.request().method() === 'PUT') {
+      if (rejectNextSave) {
+        rejectNextSave = false
+        return route.fulfill({
+          status: 400,
+          json: { code: 'platform_llm_route_invalid', error: 'Selected route is no longer eligible' },
+        })
+      }
+      const body = route.request().postDataJSON() as { route_id: string | null }
+      writes.push(body.route_id)
+      const matched = routes.find((item) => item.id === body.route_id) ?? null
+      current = matched
+        ? { route_id: matched.id, status: 'available', route: matched, eligible_routes: routes }
+        : { route_id: null, status: 'unset', route: null, eligible_routes: routes }
+    }
+    await route.fulfill({ json: { data: current } })
+  })
+
+  await page.goto('/settings?view=general')
+  const section = page.locator('#platform-llm')
+  await expect(section).toContainText('Not configured')
+
+  // Configure a model; first attempt fails inline, retry succeeds.
+  await section.getByRole('button').click()
+  const dialog = page.getByRole('dialog')
+  await dialog.locator('#platform-llm-route').click()
+  await page.getByRole('option', { name: /Fast Chat/ }).click()
+
+  rejectNextSave = true
+  await dialog.getByRole('button', { name: 'Save' }).click()
+  await expect(dialog).toContainText('Selected route is no longer eligible')
+  await expect(dialog).toBeVisible()
+
+  await dialog.getByRole('button', { name: 'Save' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(section).toContainText('Fast Chat')
+  await expect(section).toContainText('fast-chat')
+  expect(writes).toEqual(['route-fast-id'])
+
+  // Simulate stale/unavailable route on reload, then clear back to unset.
+  current = { route_id: 'removed-route-id', status: 'unavailable', route: null, eligible_routes: routes }
+  await page.reload()
+  await expect(section).toContainText('Unavailable')
+  await expect(section).toContainText('removed-route-id')
+
+  await section.getByRole('button', { name: /Edit/ }).click()
+  const clearDialog = page.getByRole('dialog')
+  await clearDialog.getByRole('button', { name: 'Clear model selection' }).click()
+  await clearDialog.getByRole('button', { name: 'Save' }).click()
+  await expect(clearDialog).toBeHidden()
+  await expect(section).toContainText('Not configured')
+  expect(writes).toEqual(['route-fast-id', null])
+})

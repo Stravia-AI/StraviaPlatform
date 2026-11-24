@@ -10,6 +10,7 @@ import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import { DraftGuard } from '#lib/draft-guard.svelte.js'
 import { provideInlineDraftRegistry } from '#lib/inline-draft-registry.svelte.js'
 import { getAuthState } from '#lib/auth.js'
+import AboutSettings from '#lib/components/settings/about-settings.svelte'
 import AdminCredentialsSettings from '#lib/components/settings/admin-credentials-settings.svelte'
 import AppearanceSettings from '#lib/components/settings/appearance-settings.svelte'
 import ArtifactSettings from '#lib/components/settings/artifact-settings.svelte'
@@ -17,6 +18,7 @@ import CurrencySettings from '#lib/components/settings/currency-settings.svelte'
 import DesktopServiceSettings from '#lib/components/settings/desktop-service-settings.svelte'
 import DesktopStartupSettings from '#lib/components/settings/desktop-startup-settings.svelte'
 import DiagnosticsSettings from '#lib/components/settings/diagnostics-settings.svelte'
+import PlatformLlmSettings from '#lib/components/settings/platform-llm-settings.svelte'
 import ProxySettings from '#lib/components/settings/proxy-settings.svelte'
 import RequestHistorySettings from '#lib/components/settings/request-history-settings.svelte'
 import SettingsSection from '#lib/components/settings/settings-section.svelte'
@@ -160,8 +162,10 @@ $effect(() => {
         {@render extensionSlotList('settings:general:top', generalTopSlots)}
         <AppearanceSettings />
         <CurrencySettings />
+        <PlatformLlmSettings />
         {#if isTauri}<DesktopStartupSettings />{/if}
         <ProductUpdateSettings />
+        <AboutSettings />
         {#if extensionSettingsGroups.length > 0}
           {#each extensionSettingsGroups as extGroup (extGroup.id)}
             {@render extensionSettingsGroupSection(extGroup)}

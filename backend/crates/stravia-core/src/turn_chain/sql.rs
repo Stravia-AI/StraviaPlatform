@@ -407,6 +407,344 @@ fn prefix_rebuild_order(nodes: &mut [PrefixRebuildNode]) -> Vec<usize> {
     order
 }
 
+const PREFIX_REBUILD_STALE_EXISTS_SQL: &str = "\
+    SELECT EXISTS(\
+        SELECT 1 FROM turn_nodes n \
+        WHERE n.kind='response' \
+        AND n.prefix_namespace IS NOT NULL AND n.prefix_namespace NOT LIKE $1 \
+        AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)\
+    )";
+
+const PREFIX_REBUILD_ANCESTORS_SQL: &str = "\
+    WITH RECURSIVE ancestors(node_pk,scope_id,parent_pk,completed_at,stale) AS (\
+        SELECT n.node_pk,n.scope_id,n.parent_pk,n.prefix_completed_at,1 FROM turn_nodes n \
+        WHERE n.kind='response' \
+        AND n.prefix_namespace IS NOT NULL AND n.prefix_namespace NOT LIKE $1 \
+        AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting) \
+        UNION SELECT n.node_pk,n.scope_id,n.parent_pk,\
+        CASE WHEN n.prefix_namespace IS NOT NULL THEN n.prefix_completed_at ELSE NULL END,\
+        CASE WHEN n.prefix_namespace IS NOT NULL AND n.prefix_namespace NOT LIKE $1 THEN 1 ELSE 0 END \
+        FROM ancestors a JOIN turn_nodes n ON n.node_pk=a.parent_pk AND n.scope_id=a.scope_id \
+        WHERE n.kind='response' \
+        AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)\
+    ) \
+    SELECT n.node_pk,n.id,n.scope_id,n.parent_pk,p.id AS parent_id,a.completed_at,a.stale \
+    FROM ancestors a JOIN turn_nodes n ON n.node_pk=a.node_pk \
+    LEFT JOIN turn_nodes p ON p.node_pk=n.parent_pk";
+
+struct PrefixUpdateRow {
+    node_pk: i64,
+    namespace: String,
+    fingerprint: String,
+    item_count: i64,
+    projection_version: Option<i64>,
+    controls_fingerprint: Option<String>,
+    context_fingerprint: Option<String>,
+}
+
+macro_rules! prefix_rebuild_io {
+    ($fetch:ident, $clear:ident, $update:ident, $db:ty, $conn:ty) => {
+        async fn $fetch(
+            connection: &mut $conn,
+            nodes: &[PrefixRebuildNode],
+            indices: &[usize],
+        ) -> Result<Vec<content::StoredNode>, TurnUnavailable> {
+            if indices.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut payload_query = sqlx::QueryBuilder::<$db>::new(
+                "SELECT n.node_pk, n.payload_version, p.payload \
+                 FROM turn_nodes n LEFT JOIN turn_node_payloads p ON p.node_pk=n.node_pk \
+                 WHERE n.node_pk IN (",
+            );
+            let mut list = payload_query.separated(",");
+            for &index in indices {
+                list.push_bind(nodes[index].node_pk);
+            }
+            list.push_unseparated(")");
+            let payload_rows: Vec<(i64, i64, Option<Vec<u8>>)> = payload_query
+                .build_query_as()
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(storage)?;
+            let mut payloads: HashMap<i64, (i64, Option<Vec<u8>>)> =
+                HashMap::with_capacity(payload_rows.len());
+            for (node_pk, version, payload) in payload_rows {
+                payloads.insert(node_pk, (version, payload));
+            }
+
+            let mut ref_query = sqlx::QueryBuilder::<$db>::new(
+                "SELECT node_pk, scope_id, ordinal, content_id \
+                 FROM turn_node_contents WHERE node_pk IN (",
+            );
+            let mut list = ref_query.separated(",");
+            for &index in indices {
+                list.push_bind(nodes[index].node_pk);
+            }
+            list.push_unseparated(")");
+            let ref_rows: Vec<(i64, i64, i64, i64)> = ref_query
+                .build_query_as()
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(storage)?;
+            let mut refs_by_pk: HashMap<i64, Vec<[i64; 3]>> = HashMap::with_capacity(indices.len());
+            for (node_pk, scope_id, ordinal, content_id) in ref_rows {
+                refs_by_pk
+                    .entry(node_pk)
+                    .or_default()
+                    .push([scope_id, ordinal, content_id]);
+            }
+
+            let mut stored = Vec::with_capacity(indices.len());
+            for &index in indices {
+                let metadata = &nodes[index];
+                let (version, payload) = payloads
+                    .remove(&metadata.node_pk)
+                    .ok_or_else(|| storage("missing history node"))?;
+                stored.push(content::StoredNode {
+                    node_pk: metadata.node_pk,
+                    scope_id: metadata.scope_id,
+                    references: refs_by_pk.remove(&metadata.node_pk).unwrap_or_default(),
+                    id: TurnNodeId::new(metadata.id.clone()),
+                    kind: TurnNodeKind::Response,
+                    parent_id: metadata.parent_id.as_ref().map(TurnNodeId::new),
+                    payload_version: u32::try_from(version).map_err(storage)?,
+                    payload: payload.ok_or_else(|| storage("missing history payload"))?,
+                });
+            }
+            Ok(stored)
+        }
+
+        async fn $clear(
+            connection: &mut $conn,
+            node_pks: &[i64],
+            stale_guard: Option<&str>,
+        ) -> Result<(), TurnUnavailable> {
+            for chunk in node_pks.chunks(400) {
+                let mut query = sqlx::QueryBuilder::<$db>::new(
+                    "UPDATE turn_nodes SET prefix_namespace=NULL,prefix_fingerprint=NULL,\
+                     prefix_item_count=NULL,prefix_completed_at=NULL,prefix_projection_version=NULL,\
+                     prefix_controls_fingerprint=NULL,prefix_context_fingerprint=NULL \
+                     WHERE node_pk IN (",
+                );
+                let mut list = query.separated(",");
+                for &pk in chunk {
+                    list.push_bind(pk);
+                }
+                list.push_unseparated(")");
+                if let Some(stale) = stale_guard {
+                    query
+                        .push(" AND prefix_namespace IS NOT NULL AND prefix_namespace NOT LIKE ")
+                        .push_bind(stale);
+                }
+                query.build().execute(&mut *connection).await.map_err(storage)?;
+            }
+            Ok(())
+        }
+
+        async fn $update(
+            connection: &mut $conn,
+            updates: &[PrefixUpdateRow],
+            stale_guard: Option<&str>,
+        ) -> Result<(), TurnUnavailable> {
+            for chunk in updates.chunks(100) {
+                let mut query = sqlx::QueryBuilder::<$db>::new(
+                    "WITH v(pk,ns,fp,cnt,pv,cf,xf) AS (",
+                );
+                query.push_values(chunk, |mut row, item| {
+                    row.push_bind(item.node_pk)
+                        .push_bind(&item.namespace)
+                        .push_bind(&item.fingerprint)
+                        .push_bind(item.item_count)
+                        .push_bind(item.projection_version)
+                        .push_bind(item.controls_fingerprint.as_deref())
+                        .push_bind(item.context_fingerprint.as_deref());
+                });
+                query.push(
+                    ") UPDATE turn_nodes SET \
+                     prefix_namespace=v.ns,\
+                     prefix_fingerprint=v.fp,\
+                     prefix_item_count=v.cnt,\
+                     prefix_projection_version=v.pv,\
+                     prefix_controls_fingerprint=v.cf,\
+                     prefix_context_fingerprint=v.xf \
+                     FROM v WHERE turn_nodes.node_pk=v.pk",
+                );
+                if let Some(stale) = stale_guard {
+                    query
+                        .push(
+                            " AND turn_nodes.prefix_namespace IS NOT NULL \
+                             AND turn_nodes.prefix_namespace NOT LIKE ",
+                        )
+                        .push_bind(stale);
+                }
+                query.build().execute(&mut *connection).await.map_err(storage)?;
+            }
+            Ok(())
+        }
+    };
+}
+
+prefix_rebuild_io!(
+    fetch_rebuild_batch_sqlite,
+    clear_prefixes_batch_sqlite,
+    update_prefixes_batch_sqlite,
+    sqlx::Sqlite,
+    sqlx::SqliteConnection<'_>
+);
+prefix_rebuild_io!(
+    fetch_rebuild_batch_postgres,
+    clear_prefixes_batch_postgres,
+    update_prefixes_batch_postgres,
+    sqlx::Postgres,
+    sqlx::PgConnection<'_>
+);
+
+impl SqlTurnChainStore {
+    /// 启动期前缀重建优化路径：只读快路径判空，按批读取与多核槽位过滤恢复，
+    /// 仅在每批写回时短暂持有写事务，批提交后推进真实启动进度；中断可从剩余旧节点续跑。
+    pub(crate) async fn rebuild_prefixes_batched(
+        &self,
+        namespace_prefix: &str,
+        slot_filter: Option<content::SlotFilter>,
+        progress: Option<(&'static str, &'static str)>,
+        decode: &mut (
+                 dyn FnMut(TurnNode, Option<i64>) -> Result<Option<ReusablePrefixMetadata>, String>
+                     + Send
+             ),
+    ) -> Result<(), TurnUnavailable> {
+        let stale = format!("{namespace_prefix}%");
+        let report_progress = |completed: u64, total: Option<u64>| {
+            if let Some((phase, label)) = progress {
+                crate::startup_progress::report(phase, label, completed, total);
+            }
+        };
+        macro_rules! rebuild_batched {
+            ($pool:expr, $fetch:ident, $restore:ident, $clear:ident, $update:ident, $lock:literal) => {{
+                let has_stale: bool = sqlx::query_scalar(PREFIX_REBUILD_STALE_EXISTS_SQL)
+                    .bind(&stale)
+                    .fetch_one($pool)
+                    .await
+                    .map_err(storage)?;
+                if !has_stale {
+                    return Ok(());
+                }
+                report_progress(0, None);
+                let mut reader = $pool.acquire().await.map_err(storage)?;
+                let mut nodes: Vec<PrefixRebuildNode> =
+                    sqlx::query_as(PREFIX_REBUILD_ANCESTORS_SQL)
+                        .bind(&stale)
+                        .fetch_all(&mut *reader)
+                        .await
+                        .map_err(storage)?;
+                let order = prefix_rebuild_order(&mut nodes);
+                let unavailable: Vec<i64> = nodes
+                    .iter()
+                    .filter(|node| node.stale != 0 && node.state == PrefixRebuildVisit::Unavailable)
+                    .map(|node| node.node_pk)
+                    .collect();
+                let total_stale = nodes.iter().filter(|node| node.stale != 0).count() as u64;
+                if total_stale == 0 {
+                    return Ok(());
+                }
+                let mut completed = 0u64;
+                report_progress(0, Some(total_stale));
+                drop(reader);
+
+                for chunk in unavailable.chunks(400) {
+                    let mut transaction = $pool.begin_write().await.map_err(storage)?;
+                    if !$lock.is_empty() {
+                        sqlx::query($lock)
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(storage)?;
+                    }
+                    $clear(&mut transaction, chunk, Some(&stale)).await?;
+                    transaction.commit().await.map_err(storage)?;
+                    completed += chunk.len() as u64;
+                    report_progress(completed, Some(total_stale));
+                }
+
+                let mut cache = content::UpgradeContentCache::default();
+                for chunk in order.chunks(content::UPGRADE_NODE_BATCH) {
+                    let restored = {
+                        let mut reader = $pool.acquire().await.map_err(storage)?;
+                        let stored = $fetch(&mut reader, &nodes, chunk).await?;
+                        content::$restore(&mut reader, stored, Some(&mut cache), slot_filter)
+                            .await
+                            .map_err(storage)?
+                    };
+                    let mut to_clear = Vec::new();
+                    let mut to_update = Vec::new();
+                    let mut batch_stale = 0u64;
+                    for (&index, node) in chunk.iter().zip(restored) {
+                        let metadata = &nodes[index];
+                        let prefix = decode(node, metadata.completed_at)
+                            .map_err(TurnUnavailable::Storage)?;
+                        if metadata.stale == 0 {
+                            continue;
+                        }
+                        batch_stale += 1;
+                        let Some(prefix) = prefix else {
+                            to_clear.push(metadata.node_pk);
+                            continue;
+                        };
+                        let proof = prefix.projection.as_ref();
+                        to_update.push(PrefixUpdateRow {
+                            node_pk: metadata.node_pk,
+                            namespace: prefix.namespace,
+                            fingerprint: prefix.fingerprint,
+                            item_count: i64::from(prefix.item_count),
+                            projection_version: proof.map(|p| i64::from(p.version)),
+                            controls_fingerprint: proof.map(|p| p.controls_fingerprint.clone()),
+                            context_fingerprint: proof.map(|p| p.context_fingerprint.clone()),
+                        });
+                    }
+                    if !to_clear.is_empty() || !to_update.is_empty() {
+                        let mut transaction = $pool.begin_write().await.map_err(storage)?;
+                        if !$lock.is_empty() {
+                            sqlx::query($lock)
+                                .execute(&mut *transaction)
+                                .await
+                                .map_err(storage)?;
+                        }
+                        if !to_clear.is_empty() {
+                            $clear(&mut transaction, &to_clear, Some(&stale)).await?;
+                        }
+                        if !to_update.is_empty() {
+                            $update(&mut transaction, &to_update, Some(&stale)).await?;
+                        }
+                        transaction.commit().await.map_err(storage)?;
+                    }
+                    if batch_stale > 0 {
+                        completed += batch_stale;
+                        report_progress(completed, Some(total_stale));
+                    }
+                }
+            }};
+        }
+        match &self.backend {
+            Backend::Sqlite(pool) => rebuild_batched!(
+                pool,
+                fetch_rebuild_batch_sqlite,
+                restore_upgrade_cached_sqlite,
+                clear_prefixes_batch_sqlite,
+                update_prefixes_batch_sqlite,
+                ""
+            ),
+            Backend::Postgres(pool) => rebuild_batched!(
+                pool,
+                fetch_rebuild_batch_postgres,
+                restore_upgrade_cached_postgres,
+                clear_prefixes_batch_postgres,
+                update_prefixes_batch_postgres,
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
+            ),
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl TurnChainStore for SqlTurnChainStore {
     async fn redaction_references(
@@ -849,74 +1187,95 @@ impl TurnChainStore for SqlTurnChainStore {
                      + Send
              ),
     ) -> Result<(), TurnUnavailable> {
+        let stale = format!("{namespace_prefix}%");
         macro_rules! rebuild {
-            ($pool:expr, $restore:ident, $backend:ident, $lock:literal) => {{
-                let mut transaction = $pool.begin_write().await.map_err(storage)?;
-                if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(storage)?; }
-                let stale = format!("{namespace_prefix}%");
-                let mut nodes: Vec<PrefixRebuildNode> = sqlx::query_as(
-                    "WITH RECURSIVE ancestors(node_pk,scope_id,parent_pk,completed_at,stale) AS (\
-                     SELECT n.node_pk,n.scope_id,n.parent_pk,n.prefix_completed_at,1 FROM turn_nodes n \
-                     WHERE n.kind='response' \
-                     AND n.prefix_namespace IS NOT NULL AND n.prefix_namespace NOT LIKE $1 \
-                     AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting) \
-                     UNION SELECT n.node_pk,n.scope_id,n.parent_pk,\
-                     CASE WHEN n.prefix_namespace IS NOT NULL THEN n.prefix_completed_at ELSE NULL END,\
-                     CASE WHEN n.prefix_namespace IS NOT NULL AND n.prefix_namespace NOT LIKE $1 THEN 1 ELSE 0 END \
-                     FROM ancestors a JOIN turn_nodes n ON n.node_pk=a.parent_pk AND n.scope_id=a.scope_id \
-                     WHERE n.kind='response' \
-                     AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)) \
-                     SELECT n.node_pk,n.id,n.scope_id,n.parent_pk,p.id AS parent_id,a.completed_at,a.stale \
-                     FROM ancestors a JOIN turn_nodes n ON n.node_pk=a.node_pk \
-                     LEFT JOIN turn_nodes p ON p.node_pk=n.parent_pk",
-                ).bind(&stale).fetch_all(&mut *transaction).await.map_err(storage)?;
-                let order = prefix_rebuild_order(&mut nodes);
-                for node in nodes.iter().filter(|node| node.stale != 0 && node.state == PrefixRebuildVisit::Unavailable) {
-                    sqlx::query("UPDATE turn_nodes SET prefix_namespace=NULL,prefix_fingerprint=NULL,prefix_item_count=NULL,prefix_completed_at=NULL,prefix_projection_version=NULL,prefix_controls_fingerprint=NULL,prefix_context_fingerprint=NULL WHERE node_pk=$1")
-                        .bind(node.node_pk).execute(&mut *transaction).await.map_err(storage)?;
+            ($pool:expr, $fetch:ident, $restore:ident, $clear:ident, $update:ident, $lock:literal) => {{
+                let has_stale: bool = sqlx::query_scalar(PREFIX_REBUILD_STALE_EXISTS_SQL)
+                    .bind(&stale)
+                    .fetch_one($pool)
+                    .await
+                    .map_err(storage)?;
+                if !has_stale {
+                    return Ok(());
                 }
-                for index in order {
-                    let metadata = &nodes[index];
-                    let (version,payload,references): (i64,Option<Vec<u8>>,sqlx::types::Json<Vec<[i64; 3]>>) = sqlx::query_as(
-                        concat!("SELECT n.payload_version,p.payload,",content::reference_projection!($backend),
-                        " FROM turn_nodes n LEFT JOIN turn_node_payloads p ON p.node_pk=n.node_pk WHERE n.node_pk=$1"),
-                    ).bind(metadata.node_pk).fetch_one(&mut *transaction).await.map_err(storage)?;
-                    let node = content::StoredNode {
-                        node_pk: metadata.node_pk,
-                        scope_id: metadata.scope_id,
-                        references: references.0,
-                        id: TurnNodeId::new(metadata.id.clone()),
-                        kind: TurnNodeKind::Response,
-                        parent_id: metadata.parent_id.as_ref().map(TurnNodeId::new),
-                        payload_version: u32::try_from(version).map_err(storage)?,
-                        payload: payload.ok_or_else(|| storage("missing history payload"))?,
-                    };
-                    let restored = content::$restore(&mut transaction, vec![node]).await.map_err(storage)?;
-                    let node = restored.into_iter().next().expect("restored node");
-                    let prefix = decode(node, metadata.completed_at).map_err(TurnUnavailable::Storage)?;
-                    if metadata.stale == 0 { continue; }
-                    let Some(prefix) = prefix else {
-                        sqlx::query("UPDATE turn_nodes SET prefix_namespace=NULL,prefix_fingerprint=NULL,prefix_item_count=NULL,prefix_completed_at=NULL,prefix_projection_version=NULL,prefix_controls_fingerprint=NULL,prefix_context_fingerprint=NULL WHERE node_pk=$1")
-                            .bind(metadata.node_pk).execute(&mut *transaction).await.map_err(storage)?;
-                        continue;
-                    };
-                    let proof = prefix.projection.as_ref();
-                    sqlx::query("UPDATE turn_nodes SET prefix_namespace=$1,prefix_fingerprint=$2,prefix_item_count=$3,prefix_projection_version=$5,prefix_controls_fingerprint=$6,prefix_context_fingerprint=$7 WHERE node_pk=$4")
-                        .bind(&prefix.namespace).bind(&prefix.fingerprint).bind(i64::from(prefix.item_count)).bind(metadata.node_pk)
-                        .bind(proof.map(|proof| i64::from(proof.version)))
-                        .bind(proof.map(|proof| proof.controls_fingerprint.as_str()))
-                        .bind(proof.map(|proof| proof.context_fingerprint.as_str()))
-                        .execute(&mut *transaction).await.map_err(storage)?;
+                let mut transaction = $pool.begin_write().await.map_err(storage)?;
+                if !$lock.is_empty() {
+                    sqlx::query($lock)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(storage)?;
+                }
+                let mut nodes: Vec<PrefixRebuildNode> =
+                    sqlx::query_as(PREFIX_REBUILD_ANCESTORS_SQL)
+                        .bind(&stale)
+                        .fetch_all(&mut *transaction)
+                        .await
+                        .map_err(storage)?;
+                let order = prefix_rebuild_order(&mut nodes);
+                let unavailable: Vec<i64> = nodes
+                    .iter()
+                    .filter(|node| node.stale != 0 && node.state == PrefixRebuildVisit::Unavailable)
+                    .map(|node| node.node_pk)
+                    .collect();
+                if !unavailable.is_empty() {
+                    $clear(&mut transaction, &unavailable, None).await?;
+                }
+                let mut cache = content::UpgradeContentCache::default();
+                for chunk in order.chunks(content::UPGRADE_NODE_BATCH) {
+                    let stored = $fetch(&mut transaction, &nodes, chunk).await?;
+                    let restored =
+                        content::$restore(&mut transaction, stored, Some(&mut cache), None)
+                            .await
+                            .map_err(storage)?;
+                    let mut to_clear = Vec::new();
+                    let mut to_update = Vec::new();
+                    for (&index, node) in chunk.iter().zip(restored) {
+                        let metadata = &nodes[index];
+                        let prefix = decode(node, metadata.completed_at)
+                            .map_err(TurnUnavailable::Storage)?;
+                        if metadata.stale == 0 {
+                            continue;
+                        }
+                        let Some(prefix) = prefix else {
+                            to_clear.push(metadata.node_pk);
+                            continue;
+                        };
+                        let proof = prefix.projection.as_ref();
+                        to_update.push(PrefixUpdateRow {
+                            node_pk: metadata.node_pk,
+                            namespace: prefix.namespace,
+                            fingerprint: prefix.fingerprint,
+                            item_count: i64::from(prefix.item_count),
+                            projection_version: proof.map(|p| i64::from(p.version)),
+                            controls_fingerprint: proof.map(|p| p.controls_fingerprint.clone()),
+                            context_fingerprint: proof.map(|p| p.context_fingerprint.clone()),
+                        });
+                    }
+                    if !to_clear.is_empty() {
+                        $clear(&mut transaction, &to_clear, None).await?;
+                    }
+                    if !to_update.is_empty() {
+                        $update(&mut transaction, &to_update, None).await?;
+                    }
                 }
                 transaction.commit().await.map_err(storage)?;
             }};
         }
         match &self.backend {
-            Backend::Sqlite(pool) => rebuild!(pool, restore_sqlite, sqlite, ""),
+            Backend::Sqlite(pool) => rebuild!(
+                pool,
+                fetch_rebuild_batch_sqlite,
+                restore_upgrade_cached_sqlite,
+                clear_prefixes_batch_sqlite,
+                update_prefixes_batch_sqlite,
+                ""
+            ),
             Backend::Postgres(pool) => rebuild!(
                 pool,
-                restore_postgres,
-                postgres,
+                fetch_rebuild_batch_postgres,
+                restore_upgrade_cached_postgres,
+                clear_prefixes_batch_postgres,
+                update_prefixes_batch_postgres,
                 "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE"
             ),
         }

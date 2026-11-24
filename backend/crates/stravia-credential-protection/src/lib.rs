@@ -11,11 +11,11 @@ pub use custom::{
     CustomRule, CustomRuleError, CustomRuleInput, CustomRuleSpec,
     ID_PREFIX as CUSTOM_RULE_ID_PREFIX, SqlCustomRuleStore,
 };
-pub use detection::rule_catalog;
 pub use detection::{
     CredentialMatch, CredentialRule, CredentialRuleCatalog, CredentialRuleComponent,
     CredentialTextMatch, advance_position,
 };
+pub use detection::{builtin_rule_ids, rule_catalog};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;

@@ -124,8 +124,10 @@ async fn ensure_sqlite_foreign_keys(
 }
 
 fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> bool {
-    // 重建表及其数据转换（2、7、8、12、24、32、33）仍需 FK-off 和完整审计。
+    // 重建表及其数据转换（2、7、8、12、24、32、33、37、38、40）仍需 FK-off 和完整审计。
+    // 46、47、48 仅新增表、列与索引，不删除或重建父表，始终保持外键约束开启。
     // 52 只重建没有入站外键的 vendor_plugins，其余为新表，FK 保持开启即可。
+    // 54 只重建没有入站外键的 model_backends 以调整首输出空闲窗口默认值，FK 保持开启即可。
     // 56 仅增加可空 cursor 元数据列，不回填数据，也不改动外键。
     // 57 修改 Route 列并克隆受引用的配置，始终保持外键约束开启。
     // 58 重建无入站外键的 web_providers（local_engines 泛化为 config_json）并清理已移除种子设置，保持外键约束开启。
@@ -133,7 +135,7 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=45 | 49..=53 | 55..=59
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=59
     ) {
         return false;
     }
@@ -225,7 +227,7 @@ pub async fn run_sqlite_migrator(
             .execute(pinned.connection())
             .await?;
     }
-    if runner.version_exists(7) {
+    if runner.version_exists(7) && last_applied < 33 {
         report("history_schema", "Preparing history schema", 0, None);
         runner
             .run_direct(Some(6), pinned.connection(), false)
@@ -236,7 +238,7 @@ pub async fn run_sqlite_migrator(
         report("history_data", "Checking history conversion", 0, None);
         crate::turn_chain::upgrade::convert_history_sqlite(pinned.connection()).await?;
     }
-    if runner.version_exists(8) {
+    if runner.version_exists(8) && last_applied < 42 {
         report("debug_manifests", "Checking diagnostic manifests", 0, None);
         crate::interaction_observation::upgrade::export_debug_manifests_sqlite(
             pinned.connection(),
@@ -284,7 +286,7 @@ pub async fn run_sqlite_migrator(
         )
         .await?;
     }
-    if runner.version_exists(30) {
+    if runner.version_exists(30) && last_applied < 31 {
         runner
             .run_direct(Some(30), pinned.connection(), false)
             .await?;
@@ -296,7 +298,7 @@ pub async fn run_sqlite_migrator(
         );
         crate::provider_models::pinning_migration::run_sqlite(pinned.connection()).await?;
     }
-    if runner.version_exists(32) {
+    if runner.version_exists(32) && last_applied < 33 {
         runner
             .run_direct(Some(32), pinned.connection(), false)
             .await?;
@@ -310,7 +312,7 @@ pub async fn run_sqlite_migrator(
             crate::turn_chain::upgrade::normalize_sqlite(pinned.connection()).await?;
         }
     }
-    if runner.version_exists(35) {
+    if runner.version_exists(35) && last_applied < 35 {
         // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
         runner
             .run_direct(Some(34), pinned.connection(), false)
@@ -333,7 +335,7 @@ pub async fn run_sqlite_migrator(
             .await?;
         }
     }
-    if runner.version_exists(37) {
+    if runner.version_exists(37) && last_applied < 38 {
         runner
             .run_direct(Some(37), pinned.connection(), false)
             .await?;
@@ -352,7 +354,7 @@ pub async fn run_sqlite_migrator(
             crate::content_upgrade::run_sqlite(pinned.connection()).await?;
         }
     }
-    if runner.version_exists(39) {
+    if runner.version_exists(39) && last_applied < 40 {
         // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
         runner
             .run_direct(Some(39), pinned.connection(), false)
@@ -367,7 +369,7 @@ pub async fn run_sqlite_migrator(
             crate::turn_chain::upgrade::retention_sqlite(pinned.connection()).await?;
         }
     }
-    if runner.version_exists(41) {
+    if runner.version_exists(41) && last_applied < 42 {
         report(
             "observation_schema",
             "Preparing normalized observation schema",
@@ -395,7 +397,7 @@ pub async fn run_sqlite_migrator(
             .await?;
         }
     }
-    if runner.version_exists(53) {
+    if runner.version_exists(53) && last_applied < 53 {
         runner
             .run_direct(Some(52), pinned.connection(), false)
             .await?;
@@ -415,7 +417,7 @@ pub async fn run_sqlite_migrator(
             }
         }
     }
-    if runner.version_exists(55) {
+    if runner.version_exists(55) && last_applied < 55 {
         runner
             .run_direct(Some(54), pinned.connection(), false)
             .await?;
@@ -515,14 +517,14 @@ pub async fn run_postgres_migrator(
         );
         return Ok(());
     }
-    if runner.version_exists(7) {
+    if runner.version_exists(7) && last_applied < 33 {
         report("history_schema", "Preparing history schema", 0, None);
         runner.run_direct(Some(6), &mut *connection, false).await?;
         runner.run_direct(Some(7), &mut *connection, false).await?;
         report("history_data", "Checking history conversion", 0, None);
         crate::turn_chain::upgrade::convert_history_postgres(&mut connection).await?;
     }
-    if runner.version_exists(8) {
+    if runner.version_exists(8) && last_applied < 42 {
         report("debug_manifests", "Checking diagnostic manifests", 0, None);
         crate::interaction_observation::upgrade::export_debug_manifests_postgres(
             &mut connection,
@@ -566,7 +568,7 @@ pub async fn run_postgres_migrator(
         )
         .await?;
     }
-    if runner.version_exists(30) {
+    if runner.version_exists(30) && last_applied < 31 {
         runner.run_direct(Some(30), &mut *connection, false).await?;
         report(
             "model_pinning",
@@ -576,7 +578,7 @@ pub async fn run_postgres_migrator(
         );
         crate::provider_models::pinning_migration::run_postgres(&mut connection).await?;
     }
-    if runner.version_exists(32) {
+    if runner.version_exists(32) && last_applied < 33 {
         runner.run_direct(Some(32), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=33 AND success)",
@@ -588,7 +590,7 @@ pub async fn run_postgres_migrator(
             crate::turn_chain::upgrade::normalize_postgres(&mut connection).await?;
         }
     }
-    if runner.version_exists(35) {
+    if runner.version_exists(35) && last_applied < 35 {
         // 先应用凭据迁移之前的 schema，清理才能依赖已存在的观察与映射表。
         runner.run_direct(Some(34), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
@@ -609,7 +611,7 @@ pub async fn run_postgres_migrator(
             .await?;
         }
     }
-    if runner.version_exists(37) {
+    if runner.version_exists(37) && last_applied < 38 {
         runner.run_direct(Some(37), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=38 AND success)",
@@ -626,7 +628,7 @@ pub async fn run_postgres_migrator(
             crate::content_upgrade::run_postgres(&mut connection).await?;
         }
     }
-    if runner.version_exists(39) {
+    if runner.version_exists(39) && last_applied < 40 {
         // 0039 只新增列与引用表；回填读取旧 expires_at，0040 才移除它并收紧约束。
         runner.run_direct(Some(39), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
@@ -639,7 +641,7 @@ pub async fn run_postgres_migrator(
             crate::turn_chain::upgrade::retention_postgres(&mut connection).await?;
         }
     }
-    if runner.version_exists(41) {
+    if runner.version_exists(41) && last_applied < 42 {
         report(
             "observation_schema",
             "Preparing normalized observation schema",
@@ -663,7 +665,7 @@ pub async fn run_postgres_migrator(
                 .await?;
         }
     }
-    if runner.version_exists(53) {
+    if runner.version_exists(53) && last_applied < 53 {
         runner.run_direct(Some(52), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=53 AND success)",
@@ -674,7 +676,7 @@ pub async fn run_postgres_migrator(
             crate::credential_mapping_upgrade::run_postgres(&mut connection).await?;
         }
     }
-    if runner.version_exists(55) {
+    if runner.version_exists(55) && last_applied < 55 {
         runner.run_direct(Some(54), &mut *connection, false).await?;
         let finalized: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=55 AND success)",
@@ -1656,14 +1658,8 @@ mod tests {
                 .bind(bits & 1 != 0)
                 .execute(&pool).await.unwrap();
         }
-        let error = migrate_sqlite(&pool, None)
-            .await
-            .expect_err("migration must reject existing foreign key violations");
-        assert!(
-            error
-                .to_string()
-                .contains("database already has foreign key violations")
-        );
+        // 49..=59 全部保持外键开启，增量升级不扫描无关历史表的既有孤儿，但新写入仍强制校验外键。
+        migrate_sqlite(&pool, None).await.unwrap();
         let retained: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM provider_models WHERE provider_id = 'missing-provider'",
         )
@@ -1671,11 +1667,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(retained, 1);
-        sqlx::query("DELETE FROM provider_models WHERE provider_id = 'missing-provider'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        migrate_sqlite(&pool, None).await.unwrap();
         let error = sqlx::query("INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json) VALUES ('missing-provider','another-orphan','manual','present','{}')")
             .execute(&pool).await.expect_err("foreign keys remain enforced after migration");
         assert!(
@@ -3851,6 +3842,87 @@ mod tests {
                 std::panic::resume_unwind(error.into_panic());
             }
             panic!("0059 Postgres migration test panicked: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_incremental_upgrades_from_v45_v52_and_v57_skip_full_fk_audit_and_historical_phases()
+     {
+        let prefix = |version| {
+            Migrator::with_migrations(
+                SQLITE_MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= version)
+                    .cloned()
+                    .collect(),
+            )
+        };
+        for (from, to) in [(45, 48), (52, 59), (57, 59)] {
+            let directory = tempfile::tempdir().unwrap();
+            let pool = sqlite_file_pool(directory.path()).await;
+            super::run_sqlite_migrator(&pool, &prefix(from), None)
+                .await
+                .unwrap();
+            // 既有无关孤儿会被全库 PRAGMA foreign_key_check 拒绝；白名单增量升级必须跳过全库扫描。
+            sqlx::raw_sql(
+                "PRAGMA foreign_keys=OFF;
+                 INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+                 VALUES ('missing-provider','orphan','manual','present','{}');
+                 PRAGMA foreign_keys=ON;",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = events.clone();
+            crate::startup_progress::observe_startup(
+                move |event| observed.lock().unwrap().push(event.phase),
+                super::run_sqlite_migrator(&pool, &prefix(to), None),
+            )
+            .await
+            .expect("whitelisted incremental upgrades must skip full-database foreign key audits");
+
+            let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(fk, 1);
+            let error = sqlx::query(
+                "INSERT INTO provider_models(provider_id,model_id,source_kind,presence,metadata_json)
+                 VALUES ('missing-provider','new-orphan','manual','present','{}')",
+            )
+            .execute(&pool)
+            .await
+            .expect_err("foreign key enforcement must remain active");
+            assert!(
+                error
+                    .as_database_error()
+                    .unwrap()
+                    .is_foreign_key_violation()
+            );
+
+            if from == 57 {
+                let phases = events.lock().unwrap();
+                for historical in [
+                    "history_schema",
+                    "history_data",
+                    "debug_manifests",
+                    "observation_schema",
+                    "observation_data",
+                    "model_pinning",
+                    "content_store",
+                    "retention_data",
+                    "credential_expiry",
+                    "credential_cleanup",
+                ] {
+                    assert!(
+                        !phases.contains(&historical),
+                        "v57->v59 must not emit historical phase {historical:?}: {phases:?}"
+                    );
+                }
+            }
+            pool.close().await;
         }
     }
 }

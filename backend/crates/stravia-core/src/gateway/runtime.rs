@@ -464,8 +464,9 @@ impl Gateway {
             )
         };
         let history_content = turn_chains.content_gc();
+        let sql_turn_chains = Arc::new(turn_chains);
         let turn_chains: Arc<dyn stravia_runtime_contract::turn_chain::TurnChainStore> =
-            Arc::new(turn_chains);
+            Arc::clone(&sql_turn_chains) as _;
         let history_markers: Arc<dyn history_marker::HistoryMarkerStore> =
             if let Some(pool) = history_sqlite_pool.as_ref() {
                 Arc::new(history_marker::SqlHistoryMarkerStore::sqlite(pool.clone()))
@@ -583,8 +584,8 @@ impl Gateway {
                     .clone(),
             )
         };
-        let generation_chains = generation_chain::GenerationChain::from_turn_chain(
-            Arc::clone(&turn_chains),
+        let generation_chains = generation_chain::GenerationChain::from_sql_turn_chain(
+            Arc::clone(&sql_turn_chains),
             artifact_store.clone(),
             runtime_cache.clone(),
             retention.clone(),

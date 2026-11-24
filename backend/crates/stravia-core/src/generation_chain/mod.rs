@@ -511,6 +511,28 @@ impl GenerationChain {
         }
     }
 
+    pub(crate) fn from_sql_turn_chain(
+        sql_turn_chain: Arc<crate::turn_chain::SqlTurnChainStore>,
+        artifacts: Option<Arc<dyn stravia_runtime_contract::artifact::ArtifactStore>>,
+        runtime_cache: RuntimeCache,
+        retention: crate::history_retention::HistoryRetention,
+    ) -> Self {
+        Self {
+            store: GenerationChainStore::from_sql_turn_chain(
+                sql_turn_chain,
+                runtime_cache,
+                retention,
+            ),
+            pending_commits: PendingGenerationCommits::default(),
+            artifacts,
+            history_markers: None,
+            records_redaction_references: false,
+            compaction: None,
+            prompt_admissions: None,
+            atomic_state: None,
+        }
+    }
+
     pub(crate) fn with_prompt_admissions(
         mut self,
         store: Arc<dyn crate::storage::PromptAdmissionStore>,

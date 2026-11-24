@@ -10,6 +10,7 @@ export * from './types/media-generation'
 export * from './types/plugin'
 export * from './types/money'
 export * from './types/capabilities'
+export * from './types/platform-llm'
 
 export interface CredentialRule {
   id: string

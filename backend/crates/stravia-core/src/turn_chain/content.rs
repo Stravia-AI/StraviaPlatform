@@ -427,7 +427,17 @@ struct RestorePlan {
     needed: Vec<i64>,
 }
 
+/// 槽位过滤函数：返回 false 时仍核验槽位与引用完整性，但不拉取或恢复该槽正文。
+pub(crate) type SlotFilter = fn(&Value, &Slot) -> bool;
+
 fn plan_restore(nodes: &mut [StoredNode]) -> anyhow::Result<RestorePlan> {
+    plan_restore_filtered(nodes, None)
+}
+
+fn plan_restore_filtered(
+    nodes: &mut [StoredNode],
+    filter: Option<SlotFilter>,
+) -> anyhow::Result<RestorePlan> {
     let scope_id = nodes[0].scope_id;
     let mut identities = HashSet::with_capacity(nodes.len());
     let mut mappings = Vec::with_capacity(nodes.len());
@@ -459,19 +469,23 @@ fn plan_restore(nodes: &mut [StoredNode]) -> anyhow::Result<RestorePlan> {
         let descriptor: Descriptor = content_store::decode_descriptor(&encoded)?;
         let mapping = &mappings[index];
         let mut seen = vec![false; mapping.len()];
-        for slot in &descriptor.slots {
+        let mut kept = Vec::with_capacity(descriptor.slots.len());
+        for slot in descriptor.slots {
             ensure!(
                 slot.ordinal < mapping.len(),
                 "history slot ordinal out of range"
             );
             seen[slot.ordinal] = true;
-            *uses.entry(mapping[slot.ordinal]).or_default() += 1;
+            if filter.is_none_or(|keep| keep(&descriptor.data, &slot)) {
+                *uses.entry(mapping[slot.ordinal]).or_default() += 1;
+                kept.push(slot);
+            }
         }
         ensure!(
             seen.iter().all(|referenced| *referenced),
             "unreferenced history content ordinal"
         );
-        plans.push((descriptor.data, descriptor.slots));
+        plans.push((descriptor.data, kept));
     }
     let mut needed: Vec<i64> = uses.keys().copied().collect();
     needed.sort_unstable();
@@ -661,13 +675,41 @@ restore_backend!(
 );
 
 /// 迁移只保留当前节点批次；不能让调用方意外把整库送入 blocking 队列。
-const UPGRADE_NODE_BATCH: usize = 128;
+pub(super) const UPGRADE_NODE_BATCH: usize = 128;
 /// 沿用共享正文 GC 的 8 MiB 工作批次；超大单元独占一批，不拒绝合法大正文。
 const UPGRADE_CONTENT_BYTES: usize = 8 * 1024 * 1024;
+/// 跨批共享正文缓存的逻辑字节预算；共享 system / tools 等只解码一次，超预算整清。
+const UPGRADE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+pub(super) struct UpgradeContentCache {
+    entries: HashMap<(i64, i64), std::sync::Arc<Value>>,
+    bytes: usize,
+}
+
+impl UpgradeContentCache {
+    fn get(&self, scope_id: i64, id: i64) -> Option<std::sync::Arc<Value>> {
+        self.entries.get(&(scope_id, id)).cloned()
+    }
+
+    fn insert(&mut self, scope_id: i64, id: i64, value: std::sync::Arc<Value>) {
+        let entry_bytes = crate::memory::json_retained_bytes(&value);
+        if entry_bytes > UPGRADE_CACHE_BYTES / 2 {
+            return;
+        }
+        if self.bytes.saturating_add(entry_bytes) > UPGRADE_CACHE_BYTES {
+            self.entries.clear();
+            self.bytes = 0;
+        }
+        if self.entries.insert((scope_id, id), value).is_none() {
+            self.bytes = self.bytes.saturating_add(entry_bytes);
+        }
+    }
+}
 
 /// 同时在途的 blocking 工作至多为可用 CPU 数且不超过 8；输入所有权只移动，
 /// 不为每个 worker 克隆整个节点批次。序号在完成时恢复，不依赖任务调度顺序。
-async fn upgrade_cpu<T: Send + 'static, U: Send + 'static>(
+pub(crate) async fn upgrade_cpu<T: Send + 'static, U: Send + 'static>(
     jobs: Vec<T>,
     work: fn(T) -> anyhow::Result<U>,
 ) -> anyhow::Result<Vec<U>> {
@@ -695,9 +737,11 @@ async fn upgrade_cpu<T: Send + 'static, U: Send + 'static>(
 
 type UpgradeNode = (usize, Vec<StoredNode>, RestorePlan);
 
-fn plan_upgrade_node((index, node): (usize, StoredNode)) -> anyhow::Result<UpgradeNode> {
+fn plan_upgrade_node(
+    (index, node, filter): (usize, StoredNode, Option<SlotFilter>),
+) -> anyhow::Result<UpgradeNode> {
     let mut nodes = vec![node];
-    let plan = plan_restore(&mut nodes)?;
+    let plan = plan_restore_filtered(&mut nodes, filter)?;
     Ok((index, nodes, plan))
 }
 
@@ -727,13 +771,26 @@ fn apply_upgrade_node(
 }
 
 macro_rules! restore_upgrade_backend {
-    ($restore:ident, $backend:ident, $conn:ty) => {
+    ($restore:ident, $restore_cached:ident, $backend:ident, $conn:ty) => {
         /// 启动迁移专用：单连接读取、按 scope 共享去重、CPU 有界多核恢复。
         /// 调用方持迁移锁；不使用运行期 TurnReadContext，不创建连接或 writer。
         pub(super) async fn $restore(
             connection: &mut $conn,
             nodes: Vec<StoredNode>,
         ) -> anyhow::Result<Vec<TurnNode>> {
+            $restore_cached(connection, nodes, None, None).await
+        }
+
+        /// 启动迁移与前缀重建专用：支持跨批共享正文缓存与按槽位过滤。
+        pub(super) async fn $restore_cached(
+            connection: &mut $conn,
+            nodes: Vec<StoredNode>,
+            mut cache: Option<&mut UpgradeContentCache>,
+            filter: Option<SlotFilter>,
+        ) -> anyhow::Result<Vec<TurnNode>> {
+            if nodes.is_empty() {
+                return Ok(Vec::new());
+            }
             ensure!(
                 nodes.len() <= UPGRADE_NODE_BATCH,
                 "upgrade node batch too large"
@@ -745,8 +802,15 @@ macro_rules! restore_upgrade_backend {
                     "duplicate history node identity"
                 );
             }
-            let planned =
-                upgrade_cpu(nodes.into_iter().enumerate().collect(), plan_upgrade_node).await?;
+            let planned = upgrade_cpu(
+                nodes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, node)| (index, node, filter))
+                    .collect(),
+                plan_upgrade_node,
+            )
+            .await?;
             let mut scopes: HashMap<i64, Vec<UpgradeNode>> = HashMap::new();
             for node in planned {
                 scopes.entry(node.2.scope_id).or_default().push(node);
@@ -759,30 +823,48 @@ macro_rules! restore_upgrade_backend {
                     .collect();
                 needed.sort_unstable();
                 needed.dedup();
-                let lengths = content_store::$backend::lengths(connection, &needed).await?;
-                let mut ids = needed.into_iter().peekable();
-                let mut loaded = HashMap::new();
-                while ids.peek().is_some() {
-                    let mut chunk = Vec::new();
-                    let mut bytes = 0usize;
-                    while let Some(&id) = ids.peek() {
-                        let length = *lengths.get(&id).context("missing history content")?;
-                        let length =
-                            usize::try_from(length).context("invalid stored content length")?;
-                        if !chunk.is_empty()
-                            && (chunk.len() == 256
-                                || bytes.saturating_add(length) > UPGRADE_CONTENT_BYTES)
-                        {
-                            break;
-                        }
-                        chunk.push(id);
-                        ids.next();
-                        bytes = bytes.saturating_add(length);
+                let mut loaded = HashMap::with_capacity(needed.len());
+                let mut missing = Vec::new();
+                for id in needed {
+                    if let Some(value) = cache.as_deref().and_then(|c| c.get(scope_id, id)) {
+                        loaded.insert(id, RestoredContent::Shared(value));
+                    } else {
+                        missing.push(id);
                     }
-                    let encoded =
-                        content_store::$backend::read_upgrade_encoded(connection, scope_id, &chunk)
-                            .await?;
-                    loaded.extend(upgrade_cpu(encoded, decode_upgrade_body).await?);
+                }
+                if !missing.is_empty() {
+                    let lengths = content_store::$backend::lengths(connection, &missing).await?;
+                    let mut ids = missing.into_iter().peekable();
+                    while ids.peek().is_some() {
+                        let mut chunk = Vec::new();
+                        let mut bytes = 0usize;
+                        while let Some(&id) = ids.peek() {
+                            let length = *lengths.get(&id).context("missing history content")?;
+                            let length =
+                                usize::try_from(length).context("invalid stored content length")?;
+                            if !chunk.is_empty()
+                                && (chunk.len() == 256
+                                    || bytes.saturating_add(length) > UPGRADE_CONTENT_BYTES)
+                            {
+                                break;
+                            }
+                            chunk.push(id);
+                            ids.next();
+                            bytes = bytes.saturating_add(length);
+                        }
+                        let encoded = content_store::$backend::read_upgrade_encoded(
+                            connection, scope_id, &chunk,
+                        )
+                        .await?;
+                        for (id, body) in upgrade_cpu(encoded, decode_upgrade_body).await? {
+                            if let (Some(cache), RestoredContent::Shared(value)) =
+                                (cache.as_deref_mut(), &body)
+                            {
+                                cache.insert(scope_id, id, value.clone());
+                            }
+                            loaded.insert(id, body);
+                        }
+                    }
                 }
                 for (index, nodes, plan) in nodes {
                     let mut contents = HashMap::with_capacity(plan.needed.len());
@@ -805,8 +887,18 @@ macro_rules! restore_upgrade_backend {
     };
 }
 
-restore_upgrade_backend!(restore_upgrade_sqlite, sqlite, sqlx::SqliteConnection<'_>);
-restore_upgrade_backend!(restore_upgrade_postgres, postgres, sqlx::PgConnection<'_>);
+restore_upgrade_backend!(
+    restore_upgrade_sqlite,
+    restore_upgrade_cached_sqlite,
+    sqlite,
+    sqlx::SqliteConnection<'_>
+);
+restore_upgrade_backend!(
+    restore_upgrade_postgres,
+    restore_upgrade_cached_postgres,
+    postgres,
+    sqlx::PgConnection<'_>
+);
 
 #[cfg(test)]
 mod upgrade_tests {

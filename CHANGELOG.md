@@ -10,6 +10,8 @@
 
 ### Added
 
+- Added platform task model configuration (`GET`/`PUT /api/v1/platform-llm` and Settings panel) and automatic Console Chat conversation title generation (`POST /api/v1/platform-llm/conversation-title`) backed by a configured logical Route.
+- Added an **About** section to Settings displaying brand, edition/license status, and official website/GitHub repository links, plus a **Model Picker** quick-launch button (`https://model-picker.stravia.cn/`) on the Models page.
 - Connect page now includes an **MCP** tab for the built-in `/mcp` endpoint, displaying the endpoint URL, the selected API Key's MCP access status (with a direct link to edit access when disabled), and copyable `mcpServers` JSON and `cURL` client snippets.
 - Added core, server, and WebUI extension seams (`GET /api/v1/capabilities`, `PolicyEvaluator`, `McpCatalogProvider`, `GatewayExtensionFactory`, multiple `DynamicPlatformToolLoader` registrations, `HttpAppExtensions`, and WebUI build-time extension registry with dynamic `/ext/[...slug]` routes and `ExtensionSlot`), while keeping the default community edition scoped to built-in capabilities.
 
@@ -23,6 +25,10 @@
 
 ### Fixed
 
+- Reduced startup upgrade latency across SQLite and PostgreSQL without weakening durability (`synchronous=FULL`) or foreign-key enforcement:
+  - Added a zero-lock steady-state check, 128-node batched reads/writes, a 64 MiB cross-batch content cache, selective client-delta/output slot restoration, chunked idempotent commits, and localized `history_index` startup progress reporting (`en-US` / `zh-CN`) for Generation prefix index rebuilds (`stravia-generation-history-v6:`).
+  - Audited SQLite migrations `0046`–`0048` and `0054` into the foreign-key-preserving whitelist to avoid redundant full-database `PRAGMA foreign_key_check` scans on incremental upgrades, and gated historical SQLite/PostgreSQL upgrade hooks behind their finalizing migration versions so already-upgraded instances skip retired phases.
+  - Eliminated per-row N+1 reads/writes across shared content store conversion (`content_store`), observation normalization (`observation_data`), and retired credential rule cleanup (`credential_cleanup`), added bounded cross-batch decoding caches and parallel CPU workers, skipped regex/Aho-Corasick detector compilation when checking built-in rule IDs during migration, and reported committed batch progress.
 - Antigravity inference with `system_prompt_prefix` enabled now also moves standalone `Role::System` and `Role::Developer` messages (including OpenAI Chat Completions `system`/`developer` messages and Open Responses `input[]` `developer` items) out of `systemInstruction` into the leading synthetic history turn, preventing upstream HTTP 429 rejections triggered by client identity text left in `systemInstruction`. Rebuild and re-import the standalone Antigravity plugin to apply this change.
 - DeepSeek Harness client configuration generation now targets `$DSH_HOME/cordis.patch.yml` (preserving unrelated patch entries and other `llm-pi-ai` providers while keeping `$DSH_HOME/.credentials.yaml`), uses `api: "openai-responses"` instead of `openai-completions`, removes the completions-only `compat` keys rejected by DSH 0.2.3+, and writes per-model `name` and `reasoningEfforts` from each Route's supported thinking levels (mapping `off` to `"none"` and omitting `reasoningEfforts` for non-reasoning or `off`-only models). Re-apply the DeepSeek Harness client configuration to update existing files.
 - Interaction observation user-input extraction now skips `system`/`developer` context-injection items interleaved within a turn without truncating the turn's user input text.

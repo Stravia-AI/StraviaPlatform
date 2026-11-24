@@ -4,6 +4,7 @@ import { goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { renderSnippet } from '@tanstack/svelte-table'
+import ExternalLinkIcon from '@lucide/svelte/icons/external-link'
 import MoreHorizontalIcon from '@lucide/svelte/icons/more-horizontal'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import SearchIcon from '@lucide/svelte/icons/search'
@@ -13,6 +14,7 @@ import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { effectiveModelDisplayName, routePurposeLabels, sortLogicalModels } from '#lib/logical-model.js'
 import { formatSpecificationTokens } from '#lib/model-specification.js'
+import { openExternalUrl } from '#lib/open-external.js'
 
 import {
   formatRouteDestinations,
@@ -40,6 +42,7 @@ import * as Empty from '#lib/components/ui/empty/index.js'
 import * as InputGroup from '#lib/components/ui/input-group/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 
+const modelPickerUrl = 'https://model-picker.stravia.cn/'
 const queryClient = useQueryClient()
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: admin.providers.list }))
@@ -254,10 +257,15 @@ async function deleteModel(): Promise<void> {
 
 <svelte:head><title>{m.common_models()} · Stravia</title></svelte:head>
 
-{#snippet addModelAction()}
-  <Button href="/models/new" disabled={providers.length === 0 || providersQuery.isPending}>
-    <PlusIcon data-icon="inline-start" />{m.common_add_model()}
+{#snippet pageActions()}
+  <Button type="button" variant="outline" onclick={() => void openExternalUrl(modelPickerUrl)}>
+    <ExternalLinkIcon data-icon="inline-start" />{m.models_model_picker()}
   </Button>
+  {#if models.length > 0}
+    <Button href="/models/new" disabled={providers.length === 0 || providersQuery.isPending}>
+      <PlusIcon data-icon="inline-start" />{m.common_add_model()}
+    </Button>
+  {/if}
 {/snippet}
 
 {#snippet modelActions(model: Route)}
@@ -347,7 +355,7 @@ async function deleteModel(): Promise<void> {
 {/snippet}
 
 <div class={['route-page', resourcesEmpty ? 'route-page-empty' : 'models-page']}>
-  <PageHeader title={m.common_models()} actions={models.length > 0 ? addModelAction : undefined} />
+  <PageHeader title={m.common_models()} actions={pageActions} />
 
   <section class="route-section models-workspace" aria-labelledby="model-route-table-title">
     <h2 id="model-route-table-title" class="sr-only">{m.models_configured_models()}</h2>

@@ -62,6 +62,7 @@ export type ConsoleMessage = ConsoleUserMessage | ConsoleAssistantMessage
 export interface ConsoleConversation {
   id: string
   title: string
+  titleSource?: 'fallback' | 'generated' | 'manual'
   apiKeyId: string
   apiKeyName: string
   selectedModelId: string
@@ -175,6 +176,11 @@ export interface ConsoleChatControllerOptions {
   store: ConversationStore
   transport: ResponsesTransport
   catalog: ConsoleAdminCatalog
+  generateTitle?: (input: {
+    apiKeyId: string
+    userMessage: string
+    assistantMessage?: string
+  }) => Promise<string | null>
   onSnapshot?: (snapshot: ConsoleChatSnapshot) => void
   now?: () => number
   createId?: () => string

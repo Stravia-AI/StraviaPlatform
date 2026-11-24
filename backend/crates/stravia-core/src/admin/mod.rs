@@ -24,6 +24,7 @@ mod media_generation;
 mod model_data;
 mod money;
 mod oauth;
+mod platform_llm;
 pub(crate) use oauth::runtime::{OAuthRefreshRuntime, provider_oauth_needs_refresh};
 mod observability;
 mod observation_masking;

@@ -403,6 +403,10 @@ export async function prepareApp(page: Page): Promise<void> {
       await route.fulfill({ json: { data: { custom: null } } })
       return
     }
+    if (path === '/platform-llm') {
+      await route.fulfill({ json: { data: { route_id: null, status: 'unset', route: null, eligible_routes: [] } } })
+      return
+    }
 
     if (/^\/providers\/[^/]+\/models\/sync-state$/.test(path)) {
       await route.fulfill({

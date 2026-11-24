@@ -104,6 +104,32 @@ fn detector() -> Result<&'static Detector> {
         .map_err(|error| *error)
 }
 
+/// 仅解析并规范化内置规则目录的 ID 集合，不编译正则、Aho-Corasick 或分词器；
+/// 供启动迁移快速校验规则归因使用。
+pub fn builtin_rule_ids() -> Result<Vec<String>> {
+    static IDS: std::sync::LazyLock<Result<Vec<String>>> = std::sync::LazyLock::new(|| {
+        let mut snapshot: Snapshot = toml::from_str(include_str!("detection/betterleaks.toml"))
+            .map_err(|_| RedactionError::Detection)?;
+        if snapshot.title.is_empty()
+            || snapshot.min_version.is_empty()
+            || snapshot.betterleaks_min_version.is_empty()
+        {
+            return Err(RedactionError::Detection);
+        }
+        canonicalize_betterleaks(&mut snapshot);
+        let mut seen = HashSet::with_capacity(snapshot.rules.len());
+        let mut out = Vec::with_capacity(snapshot.rules.len());
+        for rule in snapshot.rules {
+            if rule.id.is_empty() || !seen.insert(rule.id.clone()) {
+                return Err(RedactionError::Detection);
+            }
+            out.push(rule.id);
+        }
+        Ok(out)
+    });
+    IDS.as_ref().cloned().map_err(|error| *error)
+}
+
 pub async fn rule_catalog() -> Result<CredentialRuleCatalog> {
     tokio::task::spawn_blocking(|| Ok(detector()?.catalog.clone()))
         .await
@@ -993,5 +1019,18 @@ mod tests {
             .unwrap();
         assert_eq!((multiline.start_line, multiline.start_column), (3, 1));
         assert_eq!((multiline.end_line, multiline.end_column), (5, 26));
+    }
+
+    #[tokio::test]
+    async fn builtin_rule_ids_match_compiled_rule_catalog() {
+        let fast = builtin_rule_ids().expect("parse builtin rule ids");
+        let compiled: Vec<String> = rule_catalog()
+            .await
+            .expect("compile rule catalog")
+            .rules
+            .into_iter()
+            .map(|rule| rule.id)
+            .collect();
+        assert_eq!(fast, compiled);
     }
 }
