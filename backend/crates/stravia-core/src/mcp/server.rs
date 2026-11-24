@@ -353,7 +353,10 @@ async fn authenticate_request(
         return *response;
     }
 
-    let Some(scope) = gateway.mcp_catalog_provider.parse_scope(request.uri().path()) else {
+    let Some(scope) = gateway
+        .mcp_catalog_provider
+        .parse_scope(request.uri().path())
+    else {
         return (
             StatusCode::NOT_FOUND,
             axum::Json(json!({

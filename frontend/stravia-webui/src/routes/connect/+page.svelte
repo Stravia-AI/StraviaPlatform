@@ -174,16 +174,7 @@ const generatedMcpSnippet = $derived.by(() => {
   const token = selectedMcpKey?.key || '<YOUR_STRAVIA_API_KEY>'
   if (mcpSnippetFormat === 'json') {
     return JSON.stringify(
-      {
-        mcpServers: {
-          stravia: {
-            url: builtinMcpUrl,
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
-        },
-      },
+      { mcpServers: { stravia: { url: builtinMcpUrl, headers: { Authorization: `Bearer ${token}` } } } },
       null,
       2,
     )

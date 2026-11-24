@@ -681,7 +681,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(res.status(), StatusCode::NOT_FOUND, "path {path} must be 404 in CE");
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_FOUND,
+                "path {path} must be 404 in CE"
+            );
         }
 
         // Create an API key with built-in MCP enabled to verify /mcp works while scoped subpaths 404

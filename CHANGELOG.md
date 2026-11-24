@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [0.7.6] - 2026-11-24
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
+### Added
+
+- Connect page now includes an **MCP** tab for the built-in `/mcp` endpoint, displaying the endpoint URL, the selected API Key's MCP access status (with a direct link to edit access when disabled), and copyable `mcpServers` JSON and `cURL` client snippets.
+- Added core, server, and WebUI extension seams (`GET /api/v1/capabilities`, `PolicyEvaluator`, `McpCatalogProvider`, `GatewayExtensionFactory`, multiple `DynamicPlatformToolLoader` registrations, `HttpAppExtensions`, and WebUI build-time extension registry with dynamic `/ext/[...slug]` routes and `ExtensionSlot`), while keeping the default community edition scoped to built-in capabilities.
+
 ### Changed
 
 - Converged thinking-level controls across core IR, route mappings, vendor plugins, and WebUI onto canonical effort levels (`TargetThinkingControl::Effort` and `Hidden` only), removing `budget_tokens`, `mode`, `ThinkingLevel::from_budget`, and `MODEL_CAPABILITY_THINKING_TOGGLE` from internal state.
@@ -14,6 +25,7 @@
 
 - Antigravity inference with `system_prompt_prefix` enabled now also moves standalone `Role::System` and `Role::Developer` messages (including OpenAI Chat Completions `system`/`developer` messages and Open Responses `input[]` `developer` items) out of `systemInstruction` into the leading synthetic history turn, preventing upstream HTTP 429 rejections triggered by client identity text left in `systemInstruction`. Rebuild and re-import the standalone Antigravity plugin to apply this change.
 - DeepSeek Harness client configuration generation now targets `$DSH_HOME/cordis.patch.yml` (preserving unrelated patch entries and other `llm-pi-ai` providers while keeping `$DSH_HOME/.credentials.yaml`), uses `api: "openai-responses"` instead of `openai-completions`, removes the completions-only `compat` keys rejected by DSH 0.2.3+, and writes per-model `name` and `reasoningEfforts` from each Route's supported thinking levels (mapping `off` to `"none"` and omitting `reasoningEfforts` for non-reasoning or `off`-only models). Re-apply the DeepSeek Harness client configuration to update existing files.
+- Interaction observation user-input extraction now skips `system`/`developer` context-injection items interleaved within a turn without truncating the turn's user input text.
 
 ## [0.7.5] - 2026-11-22
 

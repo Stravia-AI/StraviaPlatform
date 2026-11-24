@@ -82,11 +82,7 @@ describe('WebUiExtensionRegistry', () => {
         },
       ],
       settingsGroups: [
-        {
-          id: 'reports-settings',
-          capability: ['audit_log', 'compliance_export'],
-          label: () => 'Report Settings',
-        },
+        { id: 'reports-settings', capability: ['audit_log', 'compliance_export'], label: () => 'Report Settings' },
       ],
       slots: [
         {

@@ -407,14 +407,8 @@
   "models_destinations_allowance_suspended": "Allowance paused: {count}",
   "models_destinations_multiple": [
     {
-      "declarations": [
-        "input count",
-        "input strategy",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} destination · {strategy}",
         "countPlural=other": "{count} destinations · {strategy}"
@@ -423,14 +417,8 @@
   ],
   "models_destinations_fallback": [
     {
-      "declarations": [
-        "input layers",
-        "input targets",
-        "local layersPlural = layers: plural"
-      ],
-      "selectors": [
-        "layersPlural"
-      ],
+      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
+      "selectors": ["layersPlural"],
       "match": {
         "layersPlural=one": "{layers} fallback layer ({targets} available)",
         "layersPlural=other": "{layers} fallback layers ({targets} available)"
@@ -439,13 +427,8 @@
   ],
   "models_destinations_unavailable": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} destination unavailable",
         "countPlural=other": "{count} destinations unavailable"
@@ -1738,13 +1721,8 @@
   "common_this_service": "This service",
   "models_removed_service_destinations": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "This removes {count} destination and updates other settings that use this model.",
         "countPlural=other": "This removes {count} destinations and updates other settings that use this model."
@@ -1753,13 +1731,8 @@
   ],
   "models_removed_api_key_permissions": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} API Key permission will be removed",
         "countPlural=other": "{count} API Key permissions will be removed"
@@ -1768,13 +1741,8 @@
   ],
   "providers_model_compatibility_warnings": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} model compatibility warning",
         "countPlural=other": "{count} model compatibility warnings"
@@ -1783,13 +1751,8 @@
   ],
   "providers_model_destinations_in_use": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} destination still uses this provider.",
         "countPlural=other": "{count} destinations still use this provider."
@@ -1798,28 +1761,15 @@
   ],
   "provider_model_catalog_used_by_models": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
-      "match": {
-        "countPlural=one": "Used by 1 model",
-        "countPlural=other": "Used by {count} models"
-      }
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": { "countPlural=one": "Used by 1 model", "countPlural=other": "Used by {count} models" }
     }
   ],
   "provider_model_catalog_remove_manual_references": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "Remove this manually added model from the list. {count} configured model will continue using the same upstream model ID.",
         "countPlural=other": "Remove this manually added model from the list. {count} configured models will continue using the same upstream model ID."
@@ -1865,13 +1815,8 @@
   "backend_error_auth_refresh_token_not_supported": "This provider channel does not support signing in with a refresh token.",
   "backend_error_provider_in_use_routes": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "This provider is still used by {count} model. Choose another provider for that model first.",
         "countPlural=other": "This provider is still used by {count} models. Choose another provider for those models first."

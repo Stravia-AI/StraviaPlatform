@@ -59,7 +59,10 @@ impl GatewayBuilder {
         self
     }
 
-    pub fn mcp_catalog_provider(mut self, provider: Arc<dyn crate::mcp::McpCatalogProvider>) -> Self {
+    pub fn mcp_catalog_provider(
+        mut self,
+        provider: Arc<dyn crate::mcp::McpCatalogProvider>,
+    ) -> Self {
         self.mcp_catalog_provider = Some(provider);
         self
     }
