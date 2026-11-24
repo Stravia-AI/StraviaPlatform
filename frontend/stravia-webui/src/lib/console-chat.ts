@@ -649,6 +649,7 @@ export class ConsoleChatController {
       conversation = {
         id: this.id(),
         title,
+        titleSource: 'fallback',
         apiKeyId: key.id,
         apiKeyName: key.name,
         selectedModelId: model.id,
@@ -689,8 +690,42 @@ export class ConsoleChatController {
       this.conversations = this.conversations.filter((item) => item !== conversation)
       if (this.currentId === conversation.id) this.currentId = null
       this.publish()
+    } else if (result && conversation.titleSource === 'fallback' && this.options.generateTitle) {
+      const lastMessage = conversation.messages.at(-1)
+      const assistantText =
+        lastMessage?.role === 'assistant' ? consoleAssistantContent(lastMessage).text.trim() : undefined
+      void this.maybeGenerateTitle(conversation.id, conversation.apiKeyId, text, assistantText || undefined)
     }
     return result
+  }
+  private async maybeGenerateTitle(
+    conversationId: string,
+    apiKeyId: string,
+    userMessage: string,
+    assistantMessage?: string,
+  ): Promise<void> {
+    const generateTitle = this.options.generateTitle
+    if (!generateTitle) return
+    let generated: string | null
+    try {
+      generated = await generateTitle({ apiKeyId, userMessage, assistantMessage })
+    } catch {
+      return
+    }
+    const nextTitle = generated?.trim()
+    if (!nextTitle || this.clearing || this.deleting.has(conversationId)) return
+    const conversation = this.conversations.find((candidate) => candidate.id === conversationId)
+    if (!conversation || conversation.titleSource === 'manual') return
+    await this.write(async () => {
+      const latest = this.conversations.find((candidate) => candidate.id === conversationId)
+      if (!latest || latest.titleSource === 'manual' || this.clearing || this.deleting.has(conversationId)) return
+      const checkpoint = structuredClone(latest)
+      checkpoint.title = nextTitle
+      checkpoint.titleSource = 'generated'
+      await this.options.store.saveConversation(checkpoint)
+      latest.title = nextTitle
+      latest.titleSource = 'generated'
+    })
   }
   async retry(): Promise<void> {
     const conversation = this.current()
@@ -944,8 +979,10 @@ export class ConsoleChatController {
       !(await this.write(async () => {
         const checkpoint = structuredClone(conversation)
         checkpoint.title = nextTitle
+        checkpoint.titleSource = 'manual'
         await this.options.store.saveConversation(checkpoint)
         conversation.title = nextTitle
+        conversation.titleSource = 'manual'
       }))
     )
       throw this.storageError

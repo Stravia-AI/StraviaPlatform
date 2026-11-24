@@ -2586,5 +2586,21 @@
   "connect_mcp_snippet_json_tab": "mcpServers JSON",
   "connect_mcp_snippet_curl_tab": "cURL",
   "connect_mcp_copy_json": "复制 mcpServers JSON",
-  "connect_mcp_copy_curl": "复制 cURL"
+  "connect_mcp_copy_curl": "复制 cURL",
+  "platform_llm_section_title": "平台任务",
+  "platform_llm_model_title": "平台任务模型",
+  "platform_llm_model_description": "用于生成对话标题等平台内部任务。",
+  "platform_llm_not_loaded": "无法加载平台任务模型设置。",
+  "platform_llm_saved_unavailable": "已配置的平台任务模型当前不可用。请选择符合条件的模型，或清除选择。",
+  "platform_llm_configure_title": "配置平台任务模型",
+  "platform_llm_edit_title": "编辑平台任务模型",
+  "platform_llm_eligible_models_help": "这里只显示用途为「对话推理」、已启用且至少包含一个已启用请求目标的模型。",
+  "platform_llm_clear_selection": "清除已选模型",
+  "platform_llm_clear_impact": "未选择模型时保存，将清除当前平台任务模型。",
+  "platform_llm_draft_unavailable": "已保存的模型当前不可用。请选择符合条件的模型，或清除选择。",
+  "platform_llm_no_eligible_models": "暂无符合条件的对话推理模型。请先添加已启用且至少包含一个已启用请求目标的对话推理模型。",
+  "platform_llm_no_eligible_models_empty": "没有符合条件的模型。",
+  "platform_llm_manage_models": "管理模型",
+  "platform_llm_saved": "平台任务模型已保存。",
+  "platform_llm_cleared": "已清除平台任务模型。"
 }

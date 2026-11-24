@@ -11,6 +11,7 @@ import type {
   ConsoleAdminCatalog,
   ConsoleApiKey,
   ConsoleChatBlocker,
+  ConsoleChatControllerOptions,
   ConsoleChatPreferences,
   ConsoleChatSnapshot,
   ConsoleConversation,
@@ -174,6 +175,7 @@ function harness(
     models?: Route[]
     store?: MemoryStore
     providers?: { id: string; is_enabled: boolean }[]
+    generateTitle?: ConsoleChatControllerOptions['generateTitle']
     onSnapshot?: (snapshot: ConsoleChatSnapshot) => void
     script?: (
       signal: AbortSignal,
@@ -211,6 +213,7 @@ function harness(
     store,
     catalog,
     transport,
+    generateTitle: options.generateTitle,
     now: () => clock,
     createId: () => `id-${++id}`,
     onSnapshot: options.onSnapshot,
@@ -1541,5 +1544,73 @@ describe('failures, authorization and local history', () => {
     await h.controller.delete(first)
     await h.controller.clearAll()
     expect(h.store.conversations).toEqual([])
+  })
+  test('new conversation asynchronously updates title from platform LLM only once and preserves fallback on failure', async () => {
+    const calls: { apiKeyId: string; userMessage: string; assistantMessage?: string }[] = []
+    const h = harness({
+      generateTitle: (input) => {
+        calls.push(input)
+        return Promise.resolve('SQLite Lock Troubleshooting')
+      },
+    })
+    await h.controller.start()
+    await h.controller.send('Why does SQLite say database is locked?')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(calls).toEqual([
+      { apiKeyId: 'key-a', userMessage: 'Why does SQLite say database is locked?', assistantMessage: 'Answer' },
+    ])
+    expect(h.controller.snapshot.currentConversation?.title).toBe('SQLite Lock Troubleshooting')
+    expect(h.controller.snapshot.currentConversation?.titleSource).toBe('generated')
+
+    // Second turn in the same conversation should not regenerate title.
+    await h.controller.send('Follow-up question')
+    await Promise.resolve()
+    expect(calls).toHaveLength(1)
+
+    // Failure or unset keeps the local fallback title without surfacing an error.
+    const failing = harness({ generateTitle: () => Promise.reject(new Error('not configured')) })
+    await failing.controller.start()
+    await failing.controller.send('Keep local title')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(failing.controller.snapshot.currentConversation?.title).toBe('Keep local title')
+    expect(failing.controller.snapshot.currentConversation?.titleSource).toBe('fallback')
+    expect(failing.controller.snapshot.storageError).toBeNull()
+
+    // Deferred title (e.g. bare greeting) stays fallback and retries on a later turn.
+    let attempt = 0
+    const deferredTitle = harness({
+      generateTitle: () => {
+        attempt += 1
+        return Promise.resolve(attempt === 1 ? null : 'Postgres Migration Plan')
+      },
+    })
+    await deferredTitle.controller.start()
+    await deferredTitle.controller.send('hi')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(deferredTitle.controller.snapshot.currentConversation?.title).toBe('hi')
+    expect(deferredTitle.controller.snapshot.currentConversation?.titleSource).toBe('fallback')
+
+    await deferredTitle.controller.send('Help me plan a Postgres migration')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(attempt).toBe(2)
+    expect(deferredTitle.controller.snapshot.currentConversation?.title).toBe('Postgres Migration Plan')
+    expect(deferredTitle.controller.snapshot.currentConversation?.titleSource).toBe('generated')
+  })
+  test('late generated title never overwrites a manual rename', async () => {
+    const pendingTitle = deferred<string | null>()
+    const h = harness({ generateTitle: () => pendingTitle.promise })
+    await h.controller.start()
+    await h.controller.send('Original prompt')
+    const id = h.controller.snapshot.currentConversationId!
+    await h.controller.rename(id, 'My Manual Title')
+    pendingTitle.resolve('Late Generated Title')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.controller.snapshot.currentConversation?.title).toBe('My Manual Title')
+    expect(h.controller.snapshot.currentConversation?.titleSource).toBe('manual')
   })
 })

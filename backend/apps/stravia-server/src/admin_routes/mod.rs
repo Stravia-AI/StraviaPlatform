@@ -34,6 +34,7 @@ use stravia_core::db::models::*;
 mod connect_clients;
 mod money;
 mod performance;
+mod platform_llm;
 mod provider_allowances;
 use connect_clients::preview_connect_client_handler;
 use provider_allowances::{
@@ -104,6 +105,15 @@ fn create_router_inner(
         .route(
             "/media-understanding/{kind}",
             put(update_media_understanding_handler),
+        )
+        .route(
+            "/platform-llm",
+            get(platform_llm::get_platform_llm_config)
+                .put(platform_llm::update_platform_llm_config),
+        )
+        .route(
+            "/platform-llm/conversation-title",
+            post(platform_llm::generate_conversation_title),
         )
         .route("/catalog/providers", get(catalog_providers_handler))
         .route("/catalog/models", get(canonical_models_handler))
