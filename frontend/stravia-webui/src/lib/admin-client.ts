@@ -9,7 +9,11 @@ import type {
   ApiKey,
   ApiKeySpend,
   CapabilitiesResponse,
+  ConversationTitleInput,
+  ConversationTitleResult,
   CustomCurrency,
+  PlatformLlmConfigView,
+  UpdatePlatformLlmConfig,
   NewProviderCostPlan,
   ProviderCostPlan,
   CredentialRuleCatalog,
@@ -618,6 +622,12 @@ export const admin = {
     check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
     skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
+  platformLlm: {
+    get: () => request<PlatformLlmConfigView>('GET', '/platform-llm'),
+    update: (data: UpdatePlatformLlmConfig) => request<PlatformLlmConfigView>('PUT', '/platform-llm', data),
+    generateConversationTitle: (data: ConversationTitleInput) =>
+      request<ConversationTitleResult>('POST', '/platform-llm/conversation-title', data),
+  },
   capabilities: { get: () => request<CapabilitiesResponse>('GET', '/capabilities') },
 }
 
@@ -627,6 +637,12 @@ export function capabilitiesQueryOptions() {
   return { queryKey: capabilitiesQueryKey, queryFn: admin.capabilities.get, staleTime: 60_000, retry: false }
 }
 
+export const platformLlmQueryKey = ['platform-llm-config'] as const
+
+export function platformLlmQueryOptions() {
+  return { queryKey: platformLlmQueryKey, queryFn: admin.platformLlm.get, staleTime: 60_000 }
+}
+
 /** Changing a route can also change which routes can be bound in the advanced settings. */
 export function invalidateRouteCatalogs(client: QueryClient) {
   return Promise.all([
@@ -634,6 +650,7 @@ export function invalidateRouteCatalogs(client: QueryClient) {
     client.invalidateQueries({ queryKey: ['media-generation-eligible-routes'] }),
     client.invalidateQueries({ queryKey: ['web-search-external-routes'] }),
     client.invalidateQueries({ queryKey: ['web-search-eligible-models'] }),
+    client.invalidateQueries({ queryKey: platformLlmQueryKey }),
   ])
 }
 

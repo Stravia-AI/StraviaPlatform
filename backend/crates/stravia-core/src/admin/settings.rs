@@ -21,6 +21,9 @@ impl AdminService {
         if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
             anyhow::bail!("custom_currency is managed through the currency API");
         }
+        if key == crate::platform_llm::SETTINGS_KEY {
+            anyhow::bail!("platform_llm_config is managed through the platform LLM API");
+        }
         reject_removed_proxy_setting(key)?;
         if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {
             anyhow::bail!("{key} is managed through the credential rules API");
@@ -62,6 +65,9 @@ impl AdminService {
         }
         if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
             anyhow::bail!("custom_currency is managed through the currency API");
+        }
+        if key == crate::platform_llm::SETTINGS_KEY {
+            anyhow::bail!("platform_llm_config is managed through the platform LLM API");
         }
         reject_removed_proxy_setting(key)?;
         if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {

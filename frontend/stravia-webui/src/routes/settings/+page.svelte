@@ -18,6 +18,7 @@ import CurrencySettings from '#lib/components/settings/currency-settings.svelte'
 import DesktopServiceSettings from '#lib/components/settings/desktop-service-settings.svelte'
 import DesktopStartupSettings from '#lib/components/settings/desktop-startup-settings.svelte'
 import DiagnosticsSettings from '#lib/components/settings/diagnostics-settings.svelte'
+import PlatformLlmSettings from '#lib/components/settings/platform-llm-settings.svelte'
 import ProxySettings from '#lib/components/settings/proxy-settings.svelte'
 import RequestHistorySettings from '#lib/components/settings/request-history-settings.svelte'
 import SettingsSection from '#lib/components/settings/settings-section.svelte'
@@ -161,6 +162,7 @@ $effect(() => {
         {@render extensionSlotList('settings:general:top', generalTopSlots)}
         <AppearanceSettings />
         <CurrencySettings />
+        <PlatformLlmSettings />
         {#if isTauri}<DesktopStartupSettings />{/if}
         <ProductUpdateSettings />
         <AboutSettings />

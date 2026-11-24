@@ -1,6 +1,8 @@
 import { createContext } from 'svelte'
+import { admin } from '#lib/admin-client.js'
 import { ConsoleChatController } from '#lib/console-chat.js'
 import { consoleAdminCatalog, fetchResponsesTransport, IndexedDbConversationStore } from '#lib/console-chat-adapters.js'
+import { getLocale } from '#lib/paraglide/runtime.js'
 import type {
   ConsoleChatControllerOptions,
   ConsoleChatSnapshot,
@@ -50,5 +52,18 @@ export function createConsoleChat(): ConsoleChat {
     store: new IndexedDbConversationStore(),
     transport: fetchResponsesTransport,
     catalog: consoleAdminCatalog,
+    generateTitle: async ({ apiKeyId, userMessage, assistantMessage }) => {
+      try {
+        const result = await admin.platformLlm.generateConversationTitle({
+          api_key_id: apiKeyId,
+          user_message: userMessage,
+          assistant_message: assistantMessage ?? null,
+          locale: getLocale(),
+        })
+        return result.title
+      } catch {
+        return null
+      }
+    },
   })
 }

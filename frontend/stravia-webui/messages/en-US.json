@@ -2547,5 +2547,21 @@
   "connect_mcp_snippet_json_tab": "mcpServers JSON",
   "connect_mcp_snippet_curl_tab": "cURL",
   "connect_mcp_copy_json": "Copy mcpServers JSON",
-  "connect_mcp_copy_curl": "Copy cURL"
+  "connect_mcp_copy_curl": "Copy cURL",
+  "platform_llm_section_title": "Platform tasks",
+  "platform_llm_model_title": "Platform task model",
+  "platform_llm_model_description": "Used for internal platform tasks such as conversation title generation.",
+  "platform_llm_not_loaded": "Platform task model settings could not be loaded.",
+  "platform_llm_saved_unavailable": "The configured platform task model is unavailable. Choose an eligible model or clear the selection.",
+  "platform_llm_configure_title": "Configure platform task model",
+  "platform_llm_edit_title": "Edit platform task model",
+  "platform_llm_eligible_models_help": "Only enabled inference models with at least one enabled destination are listed.",
+  "platform_llm_clear_selection": "Clear model selection",
+  "platform_llm_clear_impact": "Saving with no model selected clears the platform task model.",
+  "platform_llm_draft_unavailable": "The saved model is no longer available. Choose an eligible model or clear the selection.",
+  "platform_llm_no_eligible_models": "No eligible inference models yet. Add an enabled inference model with at least one enabled destination.",
+  "platform_llm_no_eligible_models_empty": "No eligible models.",
+  "platform_llm_manage_models": "Manage models",
+  "platform_llm_saved": "Platform task model saved.",
+  "platform_llm_cleared": "Platform task model cleared."
 }
