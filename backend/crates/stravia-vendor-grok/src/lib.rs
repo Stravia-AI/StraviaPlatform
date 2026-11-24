@@ -195,13 +195,7 @@ fn execute_inference(
         .filter(|model| !model.is_empty())
         .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "inference requires a model"))?;
     request.model = model.to_owned();
-    thinking::apply(
-        VENDOR_ID,
-        CHANNEL_ID,
-        provider,
-        OPEN_RESPONSES_PROTOCOL,
-        &mut request,
-    )?;
+    thinking::apply(VENDOR_ID, provider, OPEN_RESPONSES_PROTOCOL, &mut request)?;
     let web_search_tools: Vec<Value> = std::mem::take(&mut request.parameters.native_tools)
         .into_iter()
         .filter_map(project_native_tool)

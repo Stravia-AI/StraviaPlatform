@@ -589,17 +589,8 @@ fn private_thinking_control_only_encodes_effort() {
         .encode_request(request.clone())
         .unwrap();
     assert_eq!(body["params"]["reasoning_effort"], "high");
-    for control in [
-        TargetThinkingControl::Budget { value: 1024 },
-        TargetThinkingControl::Enabled,
-        TargetThinkingControl::Disabled,
-        TargetThinkingControl::Hidden,
-    ] {
-        request.reasoning.target_control = Some(control);
-        let body = CommandCodeGenerateV1
-            .encode_request(request.clone())
-            .unwrap();
-        assert!(body["params"].get("reasoning_effort").is_none());
-        assert!(body["params"].get("thinking").is_none());
-    }
+    request.reasoning.target_control = Some(TargetThinkingControl::Hidden);
+    let body = CommandCodeGenerateV1.encode_request(request).unwrap();
+    assert!(body["params"].get("reasoning_effort").is_none());
+    assert!(body["params"].get("thinking").is_none());
 }

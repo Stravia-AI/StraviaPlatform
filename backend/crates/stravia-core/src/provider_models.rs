@@ -309,6 +309,7 @@ fn legacy_metadata_key(key: &str) -> bool {
             | "reasoning_options"
             | "reasoning_levels"
             | "thinking_toggle"
+            | "reasoning_efforts_fallback"
     )
 }
 

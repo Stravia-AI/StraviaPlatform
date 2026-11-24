@@ -49,18 +49,18 @@ impl ModelCapabilities {
                 .pointer(&format!("{path}/supported"))
                 .and_then(Value::as_bool)
         };
-        let efforts = efforts.or_else(|| match supported("/effort") {
+        let efforts = match supported("/effort") {
             Some(false) => Some(Vec::new()),
-            Some(true) => {
+            Some(true) => efforts.or_else(|| {
                 let levels = EFFORTS
                     .into_iter()
                     .filter(|level| supported(&format!("/effort/{level}")) == Some(true))
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
                 (!levels.is_empty()).then_some(levels)
-            }
-            None => None,
-        });
+            }),
+            None => efforts,
+        };
         Self {
             thinking: supported("/thinking"),
             adaptive: supported("/thinking/types/adaptive"),
@@ -87,20 +87,39 @@ impl ModelCapabilities {
             return Self::default();
         };
         // 标准模型声明是推理时的授权来源；显式空列表同样覆盖发现时的原生能力。
-        let efforts = extensions
+        // 旧手动预算型号和显式声明仅手动思考的未知型号在未声明 /effort/supported=true 时
+        // 不把用于档位表暴露的 reasoning_efforts 泄漏为线上 output_config.effort。
+        let declared_efforts = extensions
             .get("reasoning_efforts")
             .and_then(Value::as_array)
             .map(|efforts| {
                 efforts
                     .iter()
                     .filter_map(Value::as_str)
+                    .filter(|value| !stravia_runtime_contract::thinking::effort_is_off(value))
                     .map(str::to_owned)
                     .collect()
             });
-        match extensions.get(METADATA_KEY) {
-            Some(capabilities) => Self::from_wire_with_efforts(capabilities, efforts),
+        let raw = extensions.get(METADATA_KEY);
+        let shared =
+            stravia_protocol_codec::codec::thinking::AnthropicThinkingCapabilities::from_wire_for_model(
+                provider.model.as_deref().unwrap_or_default(),
+                raw,
+                declared_efforts,
+            );
+        match raw {
+            Some(capabilities) => {
+                let mut caps = Self::from_wire_with_efforts(capabilities, shared.efforts);
+                caps.thinking = shared.thinking;
+                caps.adaptive = shared.adaptive;
+                caps.enabled = shared.enabled;
+                caps
+            }
             None => Self {
-                efforts,
+                thinking: shared.thinking,
+                adaptive: shared.adaptive,
+                enabled: shared.enabled,
+                efforts: shared.efforts,
                 ..Self::default()
             },
         }
@@ -193,7 +212,7 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
             model.capabilities.push(name.to_owned());
         }
     }
-    if let Some(efforts) = thinking::reasoning_efforts(&caps) {
+    if let Some(efforts) = thinking::reasoning_efforts(id, &caps) {
         model
             .metadata
             .insert("reasoning_efforts".into(), Value::Array(efforts));
@@ -354,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_offers_off_and_budget_where_the_model_allows_them() {
+    fn discovery_publishes_canonical_efforts_for_legacy_manual_budget_models() {
         let model = discovered_model(&json!({
             "id": "claude-sonnet-4-5",
             "display_name": "Claude Sonnet 4.5",
@@ -365,7 +384,31 @@ mod tests {
             },
         }))
         .unwrap();
-        assert_eq!(model.metadata["reasoning_efforts"], json!([]));
+        assert_eq!(
+            model.metadata["reasoning_efforts"],
+            json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+        );
+
+        let opus_4_6 = discovered_model(&json!({
+            "id": "claude-opus-4-6",
+            "display_name": "Claude Opus 4.6",
+            "capabilities": {
+                "thinking": {"supported": true, "types": {
+                    "adaptive": {"supported": true}, "enabled": {"supported": true}}},
+                "effort": {
+                    "supported": true,
+                    "low": {"supported": true},
+                    "medium": {"supported": true},
+                    "high": {"supported": true},
+                    "max": {"supported": true}
+                },
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            opus_4_6.metadata["reasoning_efforts"],
+            json!(["none", "low", "medium", "high", "max"])
+        );
 
         let plain = discovered_model(&json!({
             "id": "claude-haiku-3",
@@ -399,5 +442,34 @@ mod tests {
         constrain(body.as_object_mut().unwrap(), &no_management);
         assert!(body.get("context_management").is_none());
         assert_eq!(body["max_tokens"], 200_000, "未知上限时不改动 max_tokens");
+    }
+
+    #[test]
+    fn legacy_manual_model_snapshot_without_wire_capabilities_suppresses_effort_leak() {
+        let mut extensions = std::collections::BTreeMap::new();
+        extensions.insert(
+            "reasoning_efforts".into(),
+            json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+        );
+        let provider = ProviderSnapshot {
+            provider_id: "p1".into(),
+            channel: "default".into(),
+            base_url: "https://api.anthropic.com".into(),
+            protocol: "anthropic-messages".into(),
+            options: Default::default(),
+            credentials: Default::default(),
+            model: Some("claude-sonnet-4-5".into()),
+            model_metadata: Some(stravia_vendor_sdk::ModelMetadata {
+                extensions,
+                ..Default::default()
+            }),
+            client_headers: Vec::new(),
+            operation_metadata: Default::default(),
+        };
+        let caps = ModelCapabilities::from_snapshot(&provider);
+        assert!(
+            caps.efforts.is_none(),
+            "legacy claude-sonnet-4-5 without /effort/supported=true must not inherit reasoning_efforts as wire efforts"
+        );
     }
 }

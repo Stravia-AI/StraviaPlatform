@@ -460,7 +460,7 @@ fn canonical_presence_and_reasoning_mode_project_without_native_maps() {
     request
         .parameters
         .reset(stravia_runtime_contract::protocol::ir::ParameterReset::NativeTools);
-    request.reasoning.mode = Some("disabled".into());
+    request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::Off);
     let profile = effective_response_profile_from_request(&request);
     let (body, _) = ResponsesEncoder.encode_request(request).unwrap();
     for output in [&profile, &body] {
@@ -531,7 +531,14 @@ fn responses_summary_respects_explicit_intent_and_disabled_target() {
             }),
             None,
         ),
-        (None, None, Some(TargetThinkingControl::Disabled), None),
+        (
+            None,
+            None,
+            Some(TargetThinkingControl::Effort {
+                value: "none".into(),
+            }),
+            None,
+        ),
     ] {
         let mut request = ResponsesDecoder
             .decode_request(serde_json::json!({"model": "gpt", "input": "hello"}))
@@ -761,7 +768,7 @@ fn anthropic_thinking_defaults_to_responses_auto_summary() {
             "model": "gpt",
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": "hello"}],
-            "thinking": {"type": "enabled", "budget_tokens": 512}
+            "thinking": {"type": "adaptive"}
         }))
         .unwrap();
     request.reasoning.target_control = Some(

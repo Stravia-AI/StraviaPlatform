@@ -5,7 +5,7 @@ fn anthropic_projects_only_explicit_summary_controls() {
     use stravia_runtime_contract::thinking::TargetThinkingControl;
     let mut request = crate::codec::anthropic::messages::decoder::AnthropicDecoder
         .decode_request(serde_json::json!({
-            "model": "claude",
+            "model": "claude-sonnet-4-5",
             "max_tokens": 4096,
             "messages": [{"role": "user", "content": "hello"}]
         }))
@@ -18,9 +18,13 @@ fn anthropic_projects_only_explicit_summary_controls() {
         Some(ReasoningSummary::Concise),
     ] {
         request.reasoning.summary = summary;
-        request.reasoning.target_control = Some(TargetThinkingControl::Budget { value: 2048 });
+        request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "low".into(),
+        });
         let (body, _) = AnthropicEncoder.encode_request(request.clone()).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 2048);
+        assert_eq!(body["max_tokens"], 6048);
         assert_eq!(
             body["thinking"].get("display").and_then(Value::as_str),
             summary.map(|value| if value == ReasoningSummary::None {
@@ -30,10 +34,12 @@ fn anthropic_projects_only_explicit_summary_controls() {
             })
         );
     }
-    request.reasoning.target_control = Some(TargetThinkingControl::Disabled);
+    request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "none".into(),
+    });
     let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
-    assert_eq!(body["thinking"]["type"], "disabled");
-    assert_eq!(body["thinking"]["display"], "summarized");
+    assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+    assert!(body.get("output_config").is_none());
 }
 
 #[test]
@@ -969,41 +975,62 @@ fn unsupported_native_variants_and_service_tiers_are_omitted() {
 }
 
 #[test]
-fn canonical_reasoning_modes_and_levels_project_without_target_controls() {
+fn canonical_reasoning_levels_and_model_generations_project_at_egress() {
     use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
-    for (source, mode, expected) in [
+
+    let adaptive_default = super::super::decoder::AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude", "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "adaptive"}
+        }))
+        .unwrap();
+    assert_eq!(adaptive_default.reasoning.level, Some(ThinkingLevel::High));
+    let (body, _) = AnthropicEncoder.encode_request(adaptive_default).unwrap();
+    assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+    assert_eq!(body["output_config"]["effort"], "high");
+
+    let disabled = super::super::decoder::AnthropicDecoder
+        .decode_request(serde_json::json!({
+            "model": "claude", "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "disabled"}
+        }))
+        .unwrap();
+    assert_eq!(disabled.reasoning.level, Some(ThinkingLevel::Off));
+    let (body, _) = AnthropicEncoder.encode_request(disabled).unwrap();
+    assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+    assert!(body.get("output_config").is_none());
+
+    // Off control handles always-on (Opus >= 5.5) and between_tools (Sonnet >= 5.5)
+    for (model, expected_thinking, expected_effort) in [
         (
-            serde_json::json!({"type": "adaptive"}),
-            "auto",
-            serde_json::json!({"type": "adaptive"}),
+            "claude-opus-4-6",
+            Some(serde_json::json!({"type": "disabled"})),
+            None,
         ),
+        ("claude-opus-5-5", None, Some("low")),
         (
-            serde_json::json!({"type": "enabled", "budget_tokens": 2048}),
-            "enabled",
-            serde_json::json!({"type": "enabled", "budget_tokens": 2048}),
-        ),
-        (
-            serde_json::json!({"type": "disabled"}),
-            "disabled",
-            serde_json::json!({"type": "disabled"}),
+            "claude-sonnet-5-5",
+            Some(serde_json::json!({"type": "between_tools"})),
+            None,
         ),
     ] {
-        let request = super::super::decoder::AnthropicDecoder
-            .decode_request(serde_json::json!({
-                "model": "claude", "max_tokens": 4096,
-                "messages": [{"role": "user", "content": "hello"}], "thinking": source
-            }))
-            .unwrap();
-        assert_eq!(request.reasoning.mode.as_deref(), Some(mode));
+        let mut request = parameter_request();
+        request.model = model.into();
+        request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "none".into(),
+        });
         let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
-        assert_eq!(body["thinking"], expected);
-        assert!(
-            body.get("output_config")
-                .and_then(|config| config.get("effort"))
-                .is_none(),
-            "omitted effort must preserve the model default"
+        assert_eq!(body.get("thinking").cloned(), expected_thinking, "{model}");
+        assert_eq!(
+            body.pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            expected_effort,
+            "{model}"
         );
     }
+
     let mut request = parameter_request();
     for (level, effort) in [
         (ThinkingLevel::Medium, "medium"),
@@ -1014,36 +1041,58 @@ fn canonical_reasoning_modes_and_levels_project_without_target_controls() {
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], effort);
     }
-    request.generation.max_tokens = Some(2048);
-    request.reasoning.mode = Some("enabled".into());
-    request.reasoning.budget_tokens = Some(50_000);
-    let (body, _) = AnthropicEncoder.encode_request(request.clone()).unwrap();
-    assert_eq!(body["thinking"]["budget_tokens"], 2047);
-    request.reasoning.budget_tokens = Some(0);
-    let (body, _) = AnthropicEncoder.encode_request(request.clone()).unwrap();
-    assert_eq!(body["thinking"]["budget_tokens"], 1024);
-    request.reasoning.target_control = Some(TargetThinkingControl::Disabled);
-    let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
-    assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
 }
 
 #[test]
-fn enabled_thinking_without_output_limit_preserves_reasoning_budget() {
-    let mut request = parameter_request();
-    request.reasoning.mode = Some("enabled".into());
-    request.reasoning.budget_tokens = Some(50_000);
+fn manual_only_claude_model_translates_effort_into_static_budget_and_output_limits() {
+    use crate::codec::thinking::ANTHROPIC_AUTO_OUTPUT_LIMIT_EGRESS_KEY;
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
 
-    let (body, _) = AnthropicEncoder.encode_request(request).unwrap();
+    // Explicit client max_tokens is raised by output buffer (+4000) above manual budget.
+    let mut explicit = parameter_request();
+    explicit.model = "claude-sonnet-4-5".into();
+    explicit.generation.max_tokens = Some(4096);
+    explicit.reasoning.level = Some(ThinkingLevel::High);
+    explicit.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "high".into(),
+    });
+    let (body, _) = AnthropicEncoder.encode_request(explicit).unwrap();
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "enabled", "budget_tokens": 16384})
+    );
+    assert_eq!(body["max_tokens"], 20384);
+    assert!(body.get("output_config").is_none());
 
-    assert_eq!(body["thinking"]["budget_tokens"], 50_000);
-}
+    // Auto-filled max_tokens stays capped while budget fits below limit - buffer.
+    let mut auto = parameter_request();
+    auto.model = "claude-sonnet-4-5".into();
+    auto.generation.max_tokens = Some(8192);
+    auto.meta.vendor.egress.insert(
+        ANTHROPIC_AUTO_OUTPUT_LIMIT_EGRESS_KEY.into(),
+        Value::Bool(true),
+    );
+    auto.reasoning.level = Some(ThinkingLevel::High);
+    auto.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "high".into(),
+    });
+    let (body, _) = AnthropicEncoder.encode_request(auto).unwrap();
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "enabled", "budget_tokens": 4192})
+    );
+    assert_eq!(body["max_tokens"], 8192);
 
-#[test]
-fn enabled_thinking_rejects_an_impossible_generation_budget() {
-    let mut request = parameter_request();
-    request.generation.max_tokens = Some(1024);
-    request.reasoning.mode = Some("enabled".into());
-    assert!(AnthropicEncoder.encode_request(request).is_err());
+    // Impossible auto-filled max_tokens (<= 1024) fails closed.
+    let mut impossible = parameter_request();
+    impossible.model = "claude-sonnet-4-5".into();
+    impossible.generation.max_tokens = Some(1024);
+    impossible.meta.vendor.egress.insert(
+        ANTHROPIC_AUTO_OUTPUT_LIMIT_EGRESS_KEY.into(),
+        Value::Bool(true),
+    );
+    impossible.reasoning.level = Some(ThinkingLevel::High);
+    assert!(AnthropicEncoder.encode_request(impossible).is_err());
 }
 
 fn assistant_blocks_request(blocks: Vec<ContentBlock>) -> AiRequest {
@@ -1419,4 +1468,81 @@ fn consuming_instruction_blocks_still_reserves_their_supplied_tool_ids() {
 
     assert_eq!(body["system"], "instruction");
     assert_eq!(body["messages"][0]["content"][0]["id"], "tc_2");
+}
+
+#[test]
+fn legacy_manual_model_ignores_discovery_reasoning_efforts_for_wire_output_config() {
+    let mut request = AiRequest::new("claude-sonnet-4-5", vec![AiItem::output_text("hi")]);
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "high".into(),
+        },
+    );
+    request.meta.vendor.egress.insert(
+        crate::codec::thinking::ANTHROPIC_EFFORTS_EGRESS_KEY.into(),
+        serde_json::json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+    );
+
+    let (body, _) = AnthropicEncoder.encode_request(request).expect("encode");
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "enabled", "budget_tokens": 16384})
+    );
+    assert!(
+        body.get("output_config").is_none(),
+        "legacy Claude Sonnet 4.5 must not emit output_config.effort: {body}"
+    );
+}
+
+#[test]
+fn sonnet_five_five_between_tools_never_attaches_display() {
+    let mut request = AiRequest::new("claude-sonnet-5-5", vec![AiItem::output_text("hi")]);
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "none".into(),
+        },
+    );
+    request.reasoning.summary = Some(ReasoningSummary::Detailed);
+
+    let (body, _) = AnthropicEncoder.encode_request(request).expect("encode");
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "between_tools"})
+    );
+}
+
+#[test]
+fn unknown_manual_only_wire_model_without_effort_block_never_leaks_output_config() {
+    let mut request = AiRequest::new("custom-claude-manual-1", vec![AiItem::output_text("hi")]);
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "high".into(),
+        },
+    );
+    request.meta.vendor.egress.insert(
+        crate::codec::thinking::ANTHROPIC_CAPABILITIES_EGRESS_KEY.into(),
+        serde_json::json!({
+            "thinking": {
+                "supported": true,
+                "types": {
+                    "adaptive": {"supported": false},
+                    "enabled": {"supported": true}
+                }
+            }
+        }),
+    );
+    request.meta.vendor.egress.insert(
+        crate::codec::thinking::ANTHROPIC_EFFORTS_EGRESS_KEY.into(),
+        serde_json::json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+    );
+
+    let (body, _) = AnthropicEncoder.encode_request(request).expect("encode");
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({"type": "enabled", "budget_tokens": 16384})
+    );
+    assert!(
+        body.get("output_config").is_none(),
+        "manual-only wire model without /effort/supported=true must not leak output_config.effort: {body}"
+    );
 }

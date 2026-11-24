@@ -102,7 +102,11 @@ impl CommandCodeGenerateV1 {
         insert_optional(&mut params, "temperature", request.generation.temperature);
         match request.reasoning.target_control {
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
-                let value = if value == "none" { "off".into() } else { value };
+                let value = if stravia_runtime_contract::thinking::effort_is_off(&value) {
+                    "off".into()
+                } else {
+                    value
+                };
                 params.insert("reasoning_effort".into(), Value::String(value));
             }
             None => {
@@ -116,7 +120,7 @@ impl CommandCodeGenerateV1 {
                     params.insert("reasoning_effort".into(), Value::String(effort.into()));
                 }
             }
-            _ => {}
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => {}
         }
         // command-code 1.82.1's shipped createModelClient emits no native
         // tool_choice or parallel_tool_calls controls.

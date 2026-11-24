@@ -82,18 +82,11 @@ function extractNamedStrings(
 }
 
 function thinkingControlKindLabel(kind: string, locale: Locale): string {
-  const options = { locale }
   switch (kind) {
     case 'effort':
-      return m.model_editor_thinking_effort({}, options)
-    case 'budget':
-      return m.model_editor_thinking_budget({}, options)
-    case 'enabled':
-      return m.model_editor_thinking_enabled({}, options)
-    case 'disabled':
-      return m.model_editor_thinking_disabled({}, options)
+      return m.model_editor_thinking_effort({}, { locale })
     case 'hidden':
-      return m.model_editor_thinking_hidden({}, options)
+      return m.model_editor_thinking_hidden({}, { locale })
     default:
       return kind
   }
@@ -313,22 +306,14 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
       )
     case 'THINKING_CONTROL_UNREPRESENTABLE': {
       const levels = extractNamedStrings(payload.params, 'levels', 'level')
-      const controls = extractNamedStrings(payload.params, 'controls', 'control')
       const supported = extractStringArray(payload.params, 'supported_controls')
       return m.backend_error_thinking_control_unrepresentable(
         {
           provider_id: extractString(payload.params, 'provider_id'),
           model_id: extractString(payload.params, 'model_id'),
-          levels: formatList(levels, locale) || extractString(payload.params, 'level'),
-          controls:
-            formatList(
-              controls.map((kind) => thinkingControlKindLabel(kind, locale)),
-              locale,
-            ) || (locale === 'zh-CN' ? '当前控制' : 'the current control'),
+          levels: formatList(levels, locale),
           supported: formatList(
-            (supported.length > 0 ? supported : ['effort', 'hidden']).map((kind) =>
-              thinkingControlKindLabel(kind, locale),
-            ),
+            (supported.length ? supported : ['effort', 'hidden']).map((kind) => thinkingControlKindLabel(kind, locale)),
             locale,
           ),
         },

@@ -257,7 +257,7 @@
 
 ### 思考强度控制体系（Thinking Level / Map / Summary）
 - **思考等级（Thinking Level）**：平台统一的规范思考强度档位（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`），不是任何单一协议的原生字段名。
-- **思考等级映射（Thinking Level Map）**：单个目标上从规范思考等级到上游原生控制（effort / toggle / budget）的对照表，每行分为目录推导（Generated）、人工覆盖（Overridden）或显式隐藏（Hidden）。未精确命中时先向上取最近可用档，无更高档再向下取。
+- **思考等级映射（Thinking Level Map）**：单个目标上从规范思考等级到上游努力度（Effort）或显式隐藏（Hidden）的对照表，每行分为目录推导（Generated）或人工覆盖（Overridden）。旧型号预算与开关形态仅在出口协议层翻译，不进入核心映射。未精确命中时先向上取最近可用档，无更高档再向下取。
 - **支持思考等级（Supported Thinking Levels）**：路由下全部已启用目标非隐藏映射的并集，仅供展示与客户端配置导出，不是运行时强制钳制集合。
 - **默认思考等级（Default Thinking Level）**：客户端请求完全未给推理控制时生效的路由级默认规范档位；客户端任何显式推理指令优先于它。
 - **思考摘要（Thinking Summary）**：上游返回的可公开推理概述，独立于思考强度控制，也不等同于完整内部推理或加密签名。

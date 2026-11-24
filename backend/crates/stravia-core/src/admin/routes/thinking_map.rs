@@ -68,7 +68,6 @@ impl RouteModule<'_> {
                         .collect();
                 }
                 hide_unwritable_generated_controls(
-                    self.gw,
                     &provider,
                     &provider_model.metadata,
                     &mut target.thinking_level_map,
@@ -77,12 +76,7 @@ impl RouteModule<'_> {
             }
 
             let mut generated = generate_thinking_level_map(&provider_model.metadata);
-            hide_unwritable_generated_controls(
-                self.gw,
-                &provider,
-                &provider_model.metadata,
-                &mut generated,
-            );
+            hide_unwritable_generated_controls(&provider, &provider_model.metadata, &mut generated);
             let submitted = std::mem::take(&mut target.thinking_level_map);
             target.thinking_level_map = ThinkingLevel::ALL
                 .into_iter()
@@ -118,7 +112,6 @@ impl RouteModule<'_> {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
             ensure_thinking_map_representable(
-                self.gw,
                 &provider,
                 model,
                 &provider_model.metadata,
@@ -169,12 +162,7 @@ impl RouteModule<'_> {
             .ok_or_else(|| anyhow::anyhow!("Provider Model not found"))?;
         let provider = self.get_provider(target.provider_id().as_str()).await?;
         let mut generated = generate_thinking_level_map(&provider_model.metadata);
-        hide_unwritable_generated_controls(
-            self.gw,
-            &provider,
-            &provider_model.metadata,
-            &mut generated,
-        );
+        hide_unwritable_generated_controls(&provider, &provider_model.metadata, &mut generated);
         let mut targets = route_targets_for_update(&route);
         let edited = targets
             .iter_mut()
@@ -206,17 +194,15 @@ impl RouteModule<'_> {
 }
 
 pub(super) fn ensure_thinking_map_representable(
-    gw: &Gateway,
     provider: &crate::db::models::Provider,
     model_id: &str,
     metadata: &crate::provider_models::ProviderModelMetadata,
     map: &[crate::thinking::ThinkingLevelMapping],
 ) -> anyhow::Result<()> {
-    let toggle_declared = thinking_toggle_declared(gw, provider, metadata);
     let mut levels = Vec::new();
     let mut controls = Vec::new();
     for row in map {
-        if thinking_control_writable(provider, metadata, toggle_declared, &row.control) {
+        if thinking_control_writable(provider, metadata, &row.control) {
             continue;
         }
         levels.push(row.level.as_str());
@@ -241,7 +227,6 @@ pub(super) fn ensure_thinking_map_representable(
             "supported_controls": writable_thinking_control_kinds(
                 provider,
                 metadata,
-                toggle_declared,
             ),
             "protocol": provider.protocol,
         }),
@@ -253,15 +238,13 @@ pub(super) fn ensure_thinking_map_representable(
 /// guessing a wire shape. Rows the user explicitly submits stay fail-closed in
 /// `ensure_thinking_controls_representable`.
 pub(super) fn hide_unwritable_generated_controls(
-    gw: &Gateway,
     provider: &crate::db::models::Provider,
     metadata: &crate::provider_models::ProviderModelMetadata,
     map: &mut [crate::thinking::ThinkingLevelMapping],
 ) {
-    let toggle_declared = thinking_toggle_declared(gw, provider, metadata);
     for row in map.iter_mut() {
         if row.source == ThinkingMappingSource::Generated
-            && !thinking_control_writable(provider, metadata, toggle_declared, &row.control)
+            && !thinking_control_writable(provider, metadata, &row.control)
         {
             row.control = stravia_runtime_contract::thinking::TargetThinkingControl::Hidden;
         }
@@ -271,83 +254,32 @@ pub(super) fn hide_unwritable_generated_controls(
 fn thinking_control_writable(
     provider: &crate::db::models::Provider,
     metadata: &crate::provider_models::ProviderModelMetadata,
-    toggle_declared: bool,
     control: &stravia_runtime_contract::thinking::TargetThinkingControl,
 ) -> bool {
-    crate::thinking::control_is_writable(&provider.protocol, metadata, toggle_declared, control)
-}
-
-fn thinking_toggle_declared(
-    gw: &Gateway,
-    provider: &crate::db::models::Provider,
-    metadata: &crate::provider_models::ProviderModelMetadata,
-) -> bool {
-    let model_declares = metadata
-        .extensions
-        .get("capabilities")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|capabilities| {
-            capabilities.iter().any(|capability| {
-                capability.as_str() == Some(stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE)
-            })
-        });
-
-    let Some(vendor_id) = provider
-        .vendor
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-    let Some(channel_id) = provider
-        .channel
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-    gw.vendor_plugins
-        .descriptor(vendor_id)
-        .ok()
-        .and_then(|descriptor| {
-            descriptor
-                .channels
-                .into_iter()
-                .find(|channel| channel.id == channel_id)
-        })
-        .is_some_and(|channel| {
-            model_declares
-                || channel
-                    .model_capabilities
-                    .contains(stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE)
-        })
+    crate::thinking::control_is_writable(&provider.protocol, metadata, control)
 }
 
 fn writable_thinking_control_kinds(
     provider: &crate::db::models::Provider,
     metadata: &crate::provider_models::ProviderModelMetadata,
-    toggle_declared: bool,
 ) -> Vec<&'static str> {
     use stravia_runtime_contract::thinking::TargetThinkingControl;
 
-    const KINDS: [(&str, TargetThinkingControl); 5] = [
-        (
-            "effort",
-            TargetThinkingControl::Effort {
-                value: String::new(),
-            },
-        ),
-        ("budget", TargetThinkingControl::Budget { value: 0 }),
-        ("enabled", TargetThinkingControl::Enabled),
-        ("disabled", TargetThinkingControl::Disabled),
-        ("hidden", TargetThinkingControl::Hidden),
-    ];
-    KINDS
-        .into_iter()
-        .filter_map(|(kind, control)| {
-            thinking_control_writable(provider, metadata, toggle_declared, &control).then_some(kind)
-        })
-        .collect()
+    let mut kinds = Vec::with_capacity(2);
+    let effort_writable = match metadata.reasoning_efforts.as_deref() {
+        Some(efforts) => efforts.iter().any(|value| !value.trim().is_empty()),
+        None => {
+            stravia_runtime_contract::protocol::ids::Protocol::from_identifier(&provider.protocol)
+                .is_some_and(|protocol| {
+                    protocol.represents_target_thinking_control(&TargetThinkingControl::Effort {
+                        value: "high".into(),
+                    })
+                })
+        }
+    };
+    if effort_writable {
+        kinds.push("effort");
+    }
+    kinds.push("hidden");
+    kinds
 }

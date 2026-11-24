@@ -15,6 +15,7 @@
 - [ADR-0080](0080-try-protected-reasoning-once-and-block-only-foreign-origins.md)：乐观重放受保护推理，按来源记忆拒绝。
 - [ADR-0081](0081-unify-request-controls-without-vendor-parameters.md)：统一请求控制，不暴露供应商参数。
 - [0088-carry-responses-thinking-markers-in-encrypted-content.md](0088-carry-responses-thinking-markers-in-encrypted-content.md)：在 Responses encrypted content 中携带 Thinking Marker。
+- [ADR-0099](0099-simplify-thinking-level-map.md)：收敛思考等级映射为 Effort/Hidden，移除内部 Budget 计算并下沉旧协议翻译到出口层。
 
 ## 历史链与上下文
 

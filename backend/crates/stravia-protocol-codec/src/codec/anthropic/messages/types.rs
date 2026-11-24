@@ -14,9 +14,9 @@ pub struct CacheControl {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ThinkingConfig {
     #[serde(rename = "type")]
-    pub kind: String, // "enabled" | "disabled" | "adaptive"
+    pub kind: String, // "adaptive" | "disabled" ("enabled" rejected with 400 migration hint)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<u32>,
+    pub budget_tokens: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
 }

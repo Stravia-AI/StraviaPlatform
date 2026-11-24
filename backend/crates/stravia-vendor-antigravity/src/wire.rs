@@ -120,10 +120,8 @@ pub(crate) fn infer(
     // Model families are canonical here; native selectors may be opaque aliases.
     let imported_tool_history = client::root(&provider) == crate::BASE_URL
         && gemini::supports_imported_tool_history(&request.model);
-    let has_explicit_thinking_control = request.reasoning.target_control.is_none()
-        && (request.reasoning.mode.is_some()
-            || request.reasoning.level.is_some()
-            || request.reasoning.budget_tokens.is_some());
+    let has_explicit_thinking_control =
+        request.reasoning.target_control.is_none() && request.reasoning.level.is_some();
     let (selector_thinking, selector_max_output_tokens, model_enum, api_provider, model_provider) =
         if let Some(table) = provider
             .model_metadata
@@ -141,7 +139,6 @@ pub(crate) fn infer(
                 // 真实 ID 与强度都来自所选档位；不能让通用 codec 再按 Effort 生成另一种控制。
                 request.reasoning.target_control = None;
                 request.reasoning.level = None;
-                request.reasoning.budget_tokens = None;
             }
             (
                 selection.thinking,
@@ -178,21 +175,12 @@ pub(crate) fn infer(
                 _ => None,
             }
         }
-        None if request.reasoning.budget_tokens.is_none()
-            && !matches!(
-                request.reasoning.mode.as_deref(),
-                Some("auto" | "disabled" | "enabled")
-            ) =>
-        {
-            match request.reasoning.level {
-                Some(stravia_runtime_contract::thinking::ThinkingLevel::Xhigh) => {
-                    Some("EXTRA_HIGH")
-                }
-                Some(stravia_runtime_contract::thinking::ThinkingLevel::Max) => Some("MAX"),
-                _ => None,
-            }
-        }
-        _ => None,
+        None => match request.reasoning.level {
+            Some(stravia_runtime_contract::thinking::ThinkingLevel::Xhigh) => Some("EXTRA_HIGH"),
+            Some(stravia_runtime_contract::thinking::ThinkingLevel::Max) => Some("MAX"),
+            _ => None,
+        },
+        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => None,
     };
     // CLI 使用 private master Schema，不能让公开 Gemini codec 的能力校验
     // 拒绝 strict 或移除已核对的 schema 约束；这些边界由下方显式构造。

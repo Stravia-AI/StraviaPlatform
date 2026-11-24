@@ -153,7 +153,7 @@ pub(crate) struct ShapedRequest {
 pub(crate) fn prepare(
     mut body: Value,
     caps: &ModelCapabilities,
-    auto_output_limit: bool,
+    options: thinking::NormalizeOptions,
 ) -> Result<Value, String> {
     let object = body
         .as_object_mut()
@@ -162,6 +162,7 @@ pub(crate) fn prepare(
     restrict_to_claude_code_fields(object);
     // CLI 的自动策略先于 caller extra body；显式策略整体优先。
     if !object.contains_key("context_management")
+        && !options.explicit_off
         && caps.context_management != Some(false)
         && caps.thinking != Some(false)
         && caps.context_edits.get("clear_thinking_20251015") != Some(&false)
@@ -169,11 +170,13 @@ pub(crate) fn prepare(
             .get("model")
             .and_then(Value::as_str)
             .is_some_and(|model| model.contains("claude-3-"))
-        && object
-            .get("thinking")
-            .and_then(|thinking| thinking.get("type"))
-            .and_then(Value::as_str)
-            != Some("disabled")
+        && !matches!(
+            object
+                .get("thinking")
+                .and_then(|thinking| thinking.get("type"))
+                .and_then(Value::as_str),
+            Some("disabled" | "between_tools")
+        )
         && object
             .get("output_config")
             .and_then(|config| config.get("effort"))
@@ -190,7 +193,7 @@ pub(crate) fn prepare(
         .get_mut("thinking")
         .and_then(Value::as_object_mut)
         .and_then(|thinking| thinking.remove("block_binding"));
-    thinking::normalize(object, caps, auto_output_limit)?;
+    thinking::normalize(object, caps, options)?;
     if let Some(block_binding) = block_binding
         && let Some(thinking) = object.get_mut("thinking").and_then(Value::as_object_mut)
         && matches!(
@@ -1247,7 +1250,15 @@ mod tests {
     }
 
     fn prep_with(body: Value, caps: &ModelCapabilities, auto: bool) -> Value {
-        prepare(body, caps, auto).expect("request prepares")
+        prepare(
+            body,
+            caps,
+            thinking::NormalizeOptions {
+                auto_output_limit: auto,
+                ..Default::default()
+            },
+        )
+        .expect("request prepares")
     }
 
     fn prep(body: Value) -> Value {
@@ -1406,7 +1417,7 @@ mod tests {
         let error = prepare(
             json!({"model": "m", "system": 7, "messages": []}),
             &ModelCapabilities::default(),
-            false,
+            thinking::NormalizeOptions::default(),
         )
         .unwrap_err();
         assert!(error.contains("system"), "{error}");

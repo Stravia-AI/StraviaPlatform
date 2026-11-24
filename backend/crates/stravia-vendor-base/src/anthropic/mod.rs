@@ -139,14 +139,11 @@ fn infer(
     // Messages-compatible vendors retain their natural return behavior.
     if request.reasoning.summary.is_none()
         && request.reasoning.level != Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
-        && matches!(
-            request.reasoning.target_control,
-            Some(
-                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
-                    | stravia_runtime_contract::thinking::TargetThinkingControl::Budget { .. }
-                    | stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. }
-            )
-        )
+        && request
+            .reasoning
+            .target_control
+            .as_ref()
+            .is_some_and(|control| !control.is_hidden() && !control.is_off())
     {
         request.reasoning.summary =
             Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::Auto);
@@ -163,7 +160,10 @@ fn infer(
     )?;
     let mut body = encoded.body;
     if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut)
-        && thinking.get("type").and_then(Value::as_str) != Some("disabled")
+        && !matches!(
+            thinking.get("type").and_then(Value::as_str),
+            Some("disabled" | "between_tools")
+        )
         && let Some(display) = display
     {
         thinking.insert("display".into(), Value::String(display.into()));
@@ -269,10 +269,28 @@ fn discover(
                 .and_then(Value::as_str)
                 .unwrap_or(id)
                 .to_owned();
-            let metadata = entry
+            let mut metadata = entry
                 .as_object()
                 .map(stravia_vendor_common::thinking::source_metadata)
                 .unwrap_or_default();
+            if !metadata.contains_key("reasoning_efforts")
+                && let Some(caps_obj) = entry.get("capabilities").filter(|value| value.is_object())
+            {
+                let caps =
+                    stravia_protocol_codec::codec::thinking::AnthropicThinkingCapabilities::from_wire(
+                        caps_obj, None,
+                    );
+                let profile =
+                    stravia_protocol_codec::codec::thinking::AnthropicModelProfile::new(id, &caps);
+                let efforts: Vec<Value> = profile
+                    .discovery_efforts()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect();
+                if !efforts.is_empty() {
+                    metadata.insert("reasoning_efforts".into(), Value::Array(efforts));
+                }
+            }
             let capabilities = entry
                 .get("capabilities")
                 .and_then(Value::as_array)

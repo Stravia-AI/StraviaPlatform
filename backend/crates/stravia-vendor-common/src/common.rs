@@ -100,8 +100,31 @@ pub fn encode_inference_request(
 /// 来自 Anthropic `GET /v1/models` 的顶层 `max_tokens`，只接受
 /// `1..=u32::MAX` 的整数；缺失、`0`、负值、超出 `u32` 或错误类型都视为未知
 /// 并保持为空，由 codec 回退到 64000，而不是从上下文窗口推导。
-pub fn apply_anthropic_output_limit(provider: &ProviderSnapshot, request: &mut AiRequest) {
+pub fn apply_anthropic_egress_metadata(provider: &ProviderSnapshot, request: &mut AiRequest) {
     request.normalize_parameters();
+    if let Some(metadata) = provider.model_metadata.as_ref() {
+        if let Some(caps) = metadata
+            .extensions
+            .get("capabilities")
+            .or_else(|| metadata.extensions.get("anthropic_capabilities"))
+            .filter(|value| value.is_object())
+        {
+            request.meta.vendor.egress.insert(
+                stravia_protocol_codec::codec::thinking::ANTHROPIC_CAPABILITIES_EGRESS_KEY.into(),
+                caps.clone(),
+            );
+        }
+        if let Some(efforts) = metadata
+            .extensions
+            .get("reasoning_efforts")
+            .filter(|value| value.is_array())
+        {
+            request.meta.vendor.egress.insert(
+                stravia_protocol_codec::codec::thinking::ANTHROPIC_EFFORTS_EGRESS_KEY.into(),
+                efforts.clone(),
+            );
+        }
+    }
     if request.generation.max_tokens.is_some() {
         return;
     }
@@ -112,6 +135,10 @@ pub fn apply_anthropic_output_limit(provider: &ProviderSnapshot, request: &mut A
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0);
+    request.meta.vendor.egress.insert(
+        stravia_protocol_codec::codec::thinking::ANTHROPIC_AUTO_OUTPUT_LIMIT_EGRESS_KEY.into(),
+        Value::Bool(true),
+    );
 }
 
 /// Converts HeaderMap iteration order and lowercase names to ordered fields.
@@ -1420,13 +1447,16 @@ mod tests {
         for explicit in [2048, 200_000] {
             let mut request = AiRequest::new("claude", vec![]);
             request.generation.max_tokens = Some(explicit);
-            apply_anthropic_output_limit(&anthropic_provider(Some(json!(128_000))), &mut request);
+            apply_anthropic_egress_metadata(
+                &anthropic_provider(Some(json!(128_000))),
+                &mut request,
+            );
             assert_eq!(request.generation.max_tokens, Some(explicit));
         }
 
         for max_tokens in [1, 128_000, u32::MAX] {
             let mut request = AiRequest::new("claude", vec![]);
-            apply_anthropic_output_limit(
+            apply_anthropic_egress_metadata(
                 &anthropic_provider(Some(json!(max_tokens))),
                 &mut request,
             );
@@ -1442,12 +1472,15 @@ mod tests {
             json!(null),
         ] {
             let mut request = AiRequest::new("claude", vec![]);
-            apply_anthropic_output_limit(&anthropic_provider(Some(metadata.clone())), &mut request);
+            apply_anthropic_egress_metadata(
+                &anthropic_provider(Some(metadata.clone())),
+                &mut request,
+            );
             assert_eq!(request.generation.max_tokens, None, "{metadata}");
         }
 
         let mut request = AiRequest::new("claude", vec![]);
-        apply_anthropic_output_limit(&anthropic_provider(None), &mut request);
+        apply_anthropic_egress_metadata(&anthropic_provider(None), &mut request);
         assert_eq!(request.generation.max_tokens, None);
 
         // 规范化先于缺省判断：旧版参数别名仍算显式上限。
@@ -1457,7 +1490,7 @@ mod tests {
             .vendor
             .ingress
             .insert("maxOutputTokens".into(), json!(4096));
-        apply_anthropic_output_limit(&anthropic_provider(Some(json!(128_000))), &mut request);
+        apply_anthropic_egress_metadata(&anthropic_provider(Some(json!(128_000))), &mut request);
         assert_eq!(request.generation.max_tokens, Some(4096));
     }
 

@@ -1,11 +1,9 @@
 use std::collections::BTreeSet;
-use stravia_vendor_common::thinking;
 
 use serde_json::Value;
 use stravia_vendor_sdk::{
     Capability, ChannelDescriptor, ConfigField, ConfigFieldKind, ConfigGroup, DataCompatibility,
-    LocalizedText, MODEL_CAPABILITY_THINKING_TOGGLE, NetworkDeclaration, OriginDeclaration,
-    ProviderDescriptor,
+    LocalizedText, NetworkDeclaration, OriginDeclaration, ProviderDescriptor,
 };
 
 type CustomProtocol = (&'static str, fn() -> LocalizedText);
@@ -112,7 +110,7 @@ pub const CATALOG_VENDOR_IDS: &[&str] = &[
 ];
 
 pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
-    let (display_name, mut channels, fields, network) = match vendor_id {
+    let (display_name, channels, fields, network) = match vendor_id {
         "alibaba" => standard(
             "Alibaba",
             Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
@@ -344,13 +342,6 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         }
         _ => return None,
     };
-    if thinking::supports_all_models(vendor_id) {
-        for channel in &mut channels {
-            channel
-                .model_capabilities
-                .insert(MODEL_CAPABILITY_THINKING_TOGGLE.to_owned());
-        }
-    }
     let capabilities = channels
         .iter()
         .flat_map(|channel| channel.capabilities.iter().copied())
@@ -444,17 +435,12 @@ pub(crate) fn compatible_catalog_descriptor(
     if protocol == "open-responses" {
         capabilities.insert(Capability::Compact);
     }
-    let mut channels = vec![channel(
+    let channels = vec![channel(
         "default",
         Some(protocol),
         api.or(fallback_base_url),
         capabilities.clone(),
     )];
-    if thinking::supports_all_models(id) {
-        channels[0]
-            .model_capabilities
-            .insert(MODEL_CAPABILITY_THINKING_TOGGLE.to_owned());
-    }
     ProviderDescriptor {
         provider_id: id.to_owned(),
         icon_svg: None,
@@ -860,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn only_all_model_profiles_declare_channel_toggle_support() {
+    fn toggle_vendors_no_longer_declare_legacy_thinking_toggle_model_capability() {
         for vendor_id in [
             "baseten",
             "deepseek",
@@ -878,21 +864,14 @@ mod tests {
             "alibaba-coding-plan-cn",
             "alibaba-token-plan",
             "alibaba-token-plan-cn",
+            "lilac",
+            "nvidia",
+            "opencode",
+            "opencode-go",
         ] {
             let descriptor = crate::provider_descriptor(vendor_id).unwrap();
             assert!(
-                descriptor.channels[0]
-                    .model_capabilities
-                    .contains(MODEL_CAPABILITY_THINKING_TOGGLE),
-                "{vendor_id}"
-            );
-        }
-        for vendor_id in ["lilac", "nvidia", "opencode", "opencode-go"] {
-            let descriptor = crate::provider_descriptor(vendor_id).unwrap();
-            assert!(
-                !descriptor.channels[0]
-                    .model_capabilities
-                    .contains(MODEL_CAPABILITY_THINKING_TOGGLE),
+                descriptor.channels[0].model_capabilities.is_empty(),
                 "{vendor_id}"
             );
         }

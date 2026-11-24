@@ -124,8 +124,9 @@ fn decode(bytes: &[u8]) -> Result<DiscoverResponse, PluginError> {
                     });
                 if thinking_toggleable {
                     metadata.insert("kiro_thinking_toggleable".into(), serde_json::json!(true));
-                    // Core 用 canonical none 生成 off 档；编码时转换为 thinking.disabled。
-                    if !efforts.contains(&"none") {
+                    if efforts.is_empty() {
+                        efforts = vec!["none", "high"];
+                    } else if !efforts.contains(&"none") {
                         efforts.truncate(127);
                         efforts.insert(0, "none");
                     }
@@ -243,7 +244,7 @@ mod tests {
         assert_eq!(page.models[0].metadata["kiro_thinking_toggleable"], true);
         assert_eq!(
             page.models[0].metadata["reasoning_efforts"],
-            serde_json::json!(["none"])
+            serde_json::json!(["none", "high"])
         );
         assert!(!page.models[0].metadata.contains_key("kiro_effort_group"));
         assert!(

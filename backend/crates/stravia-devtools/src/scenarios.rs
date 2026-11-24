@@ -223,7 +223,8 @@ const ANTHROPIC_REASONING_STREAM: &str = r#"{
   "model": "{{MODEL}}",
   "stream": true,
   "max_tokens": 2048,
-  "thinking": {"type": "enabled", "budget_tokens": 1024},
+  "thinking": {"type": "adaptive"},
+  "output_config": {"effort": "low"},
   "messages": [
     {"role": "user", "content": "Solve step by step then say STRAVIA_PROBE_REASONING_STREAM as the final line: what is 17 times 23?"}
   ]
@@ -234,7 +235,7 @@ const GOOGLE_REASONING_STREAM: &str = r#"{
     {"role": "user", "parts": [{"text": "Solve step by step then say STRAVIA_PROBE_REASONING_STREAM as the final line: what is 17 times 23?"}]}
   ],
   "generationConfig": {
-    "thinkingConfig": {"includeThoughts": true, "thinkingBudget": 1024}
+    "thinkingConfig": {"includeThoughts": true, "thinkingLevel": "LOW"}
   }
 }"#;
 

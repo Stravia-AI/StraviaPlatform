@@ -713,9 +713,6 @@ impl AiRequest {
         }
     }
     pub fn normalize_parameters(&mut self) {
-        if self.reasoning.mode.as_deref() == Some("adaptive") {
-            self.reasoning.mode = Some("auto".into());
-        }
         let mut fields = std::mem::take(&mut self.parameters.legacy.fields);
         self.import_controls("legacy", &mut fields);
         if let Some(Value::Object(extensions)) = fields.remove("extensions") {
@@ -1122,26 +1119,6 @@ impl AiRequest {
         }
     }
     fn import_thinking(&mut self, value: &Value) {
-        if let Some(enabled) = value
-            .as_bool()
-            .or_else(|| value.get("enabled").and_then(Value::as_bool))
-            .or_else(|| value.get("enable_thinking").and_then(Value::as_bool))
-        {
-            prefer(
-                &mut self.reasoning.mode,
-                Some(if enabled { "enabled" } else { "disabled" }.into()),
-            );
-        }
-        if let Some(mode) = value
-            .get("type")
-            .or_else(|| value.get("thinking_mode"))
-            .and_then(Value::as_str)
-        {
-            prefer(
-                &mut self.reasoning.mode,
-                Some(if mode == "adaptive" { "auto" } else { mode }.into()),
-            );
-        }
         for key in ["effort", "thinkingLevel"] {
             if let Some(effort) = value.get(key).and_then(Value::as_str) {
                 prefer(
@@ -1150,17 +1127,21 @@ impl AiRequest {
                 );
             }
         }
-        for key in ["budget_tokens", "max_tokens", "thinkingBudget"] {
-            if let Some(budget) = value.get(key).and_then(Value::as_i64) {
-                if budget == -1 {
-                    prefer(&mut self.reasoning.mode, Some("auto".into()));
-                } else if budget == 0 {
-                    prefer(&mut self.reasoning.mode, Some("disabled".into()));
-                } else if let Ok(budget) = u32::try_from(budget) {
-                    prefer(&mut self.reasoning.budget_tokens, Some(budget));
-                    prefer(&mut self.reasoning.mode, Some("enabled".into()));
-                }
-            }
+        let explicitly_disabled = value
+            .as_bool()
+            .or_else(|| value.get("enabled").and_then(Value::as_bool))
+            .or_else(|| value.get("enable_thinking").and_then(Value::as_bool))
+            == Some(false)
+            || value
+                .get("type")
+                .or_else(|| value.get("thinking_mode"))
+                .and_then(Value::as_str)
+                == Some("disabled");
+        if explicitly_disabled {
+            prefer(
+                &mut self.reasoning.level,
+                Some(crate::thinking::ThinkingLevel::Off),
+            );
         }
         if let Some(display) = value.get("summary").or_else(|| value.get("display")) {
             prefer(&mut self.reasoning.summary, summary(display));

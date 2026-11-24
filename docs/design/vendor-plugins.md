@@ -178,13 +178,13 @@ Responses 标准 codec 将出站 system message 原位写为 developer；消息�
 
 ### Thinking Level Map
 
-Target 的 Thinking Level Map 将规范档位映射为上游 effort、开关或预算。Generated 来自有效模型规格；Overridden 由管理员指定；Hidden 不参与选择。
+Target 的 Thinking Level Map 仅包含两类目标控制：映射到上游等级（`Effort`）或关闭此等级（`Hidden`）。Generated 来自有效 `reasoning_efforts` 规格；Overridden 由管理员指定；Hidden 不参与选择。声明了 `reasoning_efforts` 的模型以声明集合为严格白名单；开关型与旧手动预算型号在发现阶段发布规范 effort 集合，并在出口编解码器／插件中翻译为对应上游开关或静态预算。
 规范档位未精确命中时先选最近的更高可用档，没有更高再向下。不要把某供应商私有示例做成全局档位清单。
 
-- **Default Thinking Level** 是 Route 上仅在客户端完全没给推理控制时生效的默认档；显式客户端控制优先。
+- **Default Thinking Level** 是 Route 上仅在客户端完全没给推理控制（且未显式重置推理参数）时生效的默认档；显式客户端控制或重置优先。
 - **Supported Thinking Levels** 是启用 Target 的非隐藏映射并集，供展示和客户端配置导出，不是运行时强制钳制集合。
-- 发现、修改或恢复同步使有效 `reasoning_efforts` 变化时，同事务重算 Generated 行，保留人工覆盖和隐藏。最终映射仍由所选目标 codec 按其能力编码。
-- 合法受保护思考先试一次；明确拒绝时由宿主只剥离外来或来源不明的载荷并受控重放，不移除本上游载荷。见 [ADR-0080](../adr/0080-try-protected-reasoning-once-and-block-only-foreign-origins.md)。
+- 发现、修改或恢复同步使有效 `reasoning_efforts` 变化时，同事务重算 Generated 行，保留人工覆盖和隐藏。最终映射由所选目标 codec／插件在出口按型号能力编码（Anthropic 新旧代自适应／静态预算与 `max_tokens` 约束、Gemini 3+ `thinkingLevel` 与 2.5 `thinkingBudget` 互斥、开关型供应商翻译等）。
+- 合法受保护思考先试一次；明确拒绝时由宿主只剥离外来或来源不明的载荷并受控重放，不移除本上游载荷。见 [ADR-0080](../adr/0080-try-protected-reasoning-once-and-block-only-foreign-origins.md) 与 [ADR-0099](../adr/0099-simplify-thinking-level-map.md)。
 
 ## 动态表单、认证与私有状态
 

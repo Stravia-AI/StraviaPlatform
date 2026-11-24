@@ -214,62 +214,59 @@ impl GoogleEncoder {
             None => {}
         }
         let mut thinking_config = serde_json::json!({});
-        if req.reasoning.mode.as_deref() == Some("auto") {
-            thinking_config["thinkingBudget"] = (-1).into();
-        } else if req.reasoning.mode.as_deref() == Some("disabled") {
-            thinking_config["thinkingBudget"] = 0.into();
-        } else if let Some(budget) = req.reasoning.budget_tokens {
-            thinking_config["thinkingBudget"] = budget.into();
-        } else if req.reasoning.mode.as_deref() == Some("enabled") {
-            thinking_config["thinkingBudget"] = (-1).into();
-        } else if let Some(level) = req.reasoning.level {
-            use stravia_runtime_contract::thinking::ThinkingLevel;
-            if level == ThinkingLevel::Off {
-                thinking_config["thinkingBudget"] = 0.into();
-            } else {
-                thinking_config["thinkingLevel"] = match level {
-                    ThinkingLevel::Xhigh | ThinkingLevel::Max => "HIGH".into(),
-                    _ => level.as_str().to_ascii_uppercase().into(),
-                };
+        let resolved_level = match req.reasoning.target_control.as_ref() {
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
+                Some(stravia_runtime_contract::thinking::ThinkingLevel::from_wire(value)?)
             }
-        }
-        if let Some(control) = req.reasoning.target_control.as_ref() {
-            thinking_config = match control {
-                stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value } => {
-                    serde_json::json!({"thinkingBudget": value})
-                }
-                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled => {
-                    serde_json::json!({})
-                }
-                stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => {
-                    serde_json::json!({"thinkingBudget": 0})
-                }
-                stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value } => {
-                    match stravia_runtime_contract::thinking::ThinkingLevel::from_wire(value)? {
-                        stravia_runtime_contract::thinking::ThinkingLevel::Off => {
-                            serde_json::json!({"thinkingBudget": 0})
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => {
+                anyhow::bail!(
+                    "Google Gemini cannot represent Target Thinking Control {:?}",
+                    req.reasoning.target_control.as_ref().unwrap()
+                );
+            }
+            None => req.reasoning.level,
+        };
+        let resolved_off =
+            resolved_level == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off);
+        if let Some(level) = resolved_level {
+            use crate::codec::thinking::{
+                GeminiThinkingModel, MIN_THINKING_BUDGET, classify_gemini_thinking_model,
+                static_budget_for_level,
+            };
+            use stravia_runtime_contract::thinking::ThinkingLevel;
+            match classify_gemini_thinking_model(&req.model) {
+                GeminiThinkingModel::Level { can_disable } => {
+                    if level == ThinkingLevel::Off {
+                        if can_disable {
+                            thinking_config["thinkingBudget"] = 0.into();
+                        } else {
+                            thinking_config["thinkingLevel"] = "LOW".into();
                         }
-                        stravia_runtime_contract::thinking::ThinkingLevel::Xhigh
-                        | stravia_runtime_contract::thinking::ThinkingLevel::Max => {
-                            serde_json::json!({"thinkingLevel": "HIGH"})
-                        }
-                        level => {
-                            serde_json::json!({"thinkingLevel": level.as_str().to_ascii_uppercase()})
-                        }
+                    } else {
+                        thinking_config["thinkingLevel"] = match level {
+                            ThinkingLevel::Xhigh | ThinkingLevel::Max => "HIGH".into(),
+                            _ => level.as_str().to_ascii_uppercase().into(),
+                        };
                     }
                 }
-                stravia_runtime_contract::thinking::TargetThinkingControl::Hidden => anyhow::bail!(
-                    "Google Gemini cannot represent Target Thinking Control {control:?}"
-                ),
-            };
+                GeminiThinkingModel::Budget {
+                    max_budget,
+                    off_budget,
+                } => {
+                    let budget = if level == ThinkingLevel::Off {
+                        off_budget
+                    } else {
+                        static_budget_for_level(level)
+                            .unwrap_or(MIN_THINKING_BUDGET)
+                            .min(max_budget)
+                    };
+                    thinking_config["thinkingBudget"] = budget.into();
+                }
+            }
         }
         let summary_disabled = req.reasoning.summary == Some(ReasoningSummary::None)
-            || req.reasoning.level == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
-            || req.reasoning.mode.as_deref() == Some("disabled")
-            || matches!(
-                req.reasoning.target_control,
-                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
-            );
+            || resolved_off
+            || req.reasoning.level == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off);
         thinking_config["includeThoughts"] = Value::Bool(!summary_disabled);
         gen_config.insert("thinkingConfig".into(), thinking_config);
 

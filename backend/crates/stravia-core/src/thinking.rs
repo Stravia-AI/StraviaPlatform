@@ -93,38 +93,34 @@ fn effort_map(values: &[String]) -> Vec<ThinkingLevelMapping> {
         .collect()
 }
 
-/// Host-side authorization for a resolved Target Thinking Control. Standard
-/// protocol semantics and explicit model/plugin metadata are both valid
-/// evidence; the host does not require a proprietary guest codec to be present.
+/// Host-side authorization for a resolved Target Thinking Control.
+/// When the Provider Model declares `reasoning_efforts`, it acts as a strict
+/// allowlist for `Effort` values; otherwise any non-empty `Effort` is writable
+/// if the target protocol natively represents `Effort`. `Hidden` is always writable.
 pub(crate) fn control_is_writable(
     protocol: &str,
     metadata: &ProviderModelMetadata,
-    toggle_declared: bool,
-    control: &TargetThinkingControl,
-) -> bool {
-    if control.is_hidden() {
-        return true;
-    }
-    stravia_runtime_contract::protocol::ids::Protocol::from_identifier(protocol)
-        .is_some_and(|protocol| protocol.represents_target_thinking_control(control))
-        || model_declares_control(metadata, toggle_declared, control)
-}
-
-fn model_declares_control(
-    metadata: &ProviderModelMetadata,
-    toggle_declared: bool,
     control: &TargetThinkingControl,
 ) -> bool {
     match control {
         TargetThinkingControl::Hidden => true,
-        TargetThinkingControl::Enabled | TargetThinkingControl::Disabled => toggle_declared,
-        TargetThinkingControl::Effort { value } => metadata
-            .reasoning_efforts
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(value)),
-        TargetThinkingControl::Budget { .. } => false,
+        TargetThinkingControl::Effort { value } => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            match metadata.reasoning_efforts.as_deref() {
+                Some(efforts) => efforts
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(trimmed)),
+                None => {
+                    stravia_runtime_contract::protocol::ids::Protocol::from_identifier(protocol)
+                        .is_some_and(|protocol| {
+                            protocol.represents_target_thinking_control(control)
+                        })
+                }
+            }
+        }
     }
 }
 
@@ -134,7 +130,6 @@ pub(crate) fn resolve_runtime_thinking_level<'a>(
     mappings: &'a [ThinkingLevelMapping],
     requested: ThinkingLevel,
     metadata: &ProviderModelMetadata,
-    toggle_declared: bool,
     protocol: Option<&str>,
 ) -> Option<(ThinkingLevel, &'a TargetThinkingControl)> {
     let mut supported = ThinkingLevel::ALL;
@@ -146,21 +141,25 @@ pub(crate) fn resolve_runtime_thinking_level<'a>(
         let available = match control {
             TargetThinkingControl::Hidden => false,
             TargetThinkingControl::Effort { value } => {
-                match metadata.reasoning_efforts.as_deref() {
-                    Some(efforts) => efforts
-                        .iter()
-                        .any(|effort| effort.eq_ignore_ascii_case(value)),
-                    None => protocol.is_none_or(|protocol| {
-                        stravia_runtime_contract::protocol::ids::Protocol::from_identifier(protocol)
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    false
+                } else {
+                    match metadata.reasoning_efforts.as_deref() {
+                        Some(efforts) => efforts
+                            .iter()
+                            .any(|effort| effort.eq_ignore_ascii_case(trimmed)),
+                        None => protocol.is_none_or(|protocol| {
+                            stravia_runtime_contract::protocol::ids::Protocol::from_identifier(
+                                protocol,
+                            )
                             .is_some_and(|protocol| {
                                 protocol.represents_target_thinking_control(control)
                             })
-                    }),
+                        }),
+                    }
                 }
             }
-            _ => protocol.is_none_or(|protocol| {
-                control_is_writable(protocol, metadata, toggle_declared, control)
-            }),
         };
         if available {
             supported[count] = level;
@@ -220,25 +219,50 @@ mod tests {
     }
 
     #[test]
-    fn explicit_target_protocol_controls_remain_writable() {
-        let metadata = ProviderModelMetadata::default();
+    fn control_writability_enforces_declared_efforts_and_protocol_baseline() {
+        let empty = ProviderModelMetadata::default();
         assert!(control_is_writable(
-            "anthropic",
-            &metadata,
-            true,
-            &TargetThinkingControl::Enabled
+            "anthropic-messages",
+            &empty,
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
         ));
-        assert!(control_is_writable(
-            "acme/private",
-            &metadata,
-            true,
-            &TargetThinkingControl::Disabled
+        assert!(!control_is_writable(
+            "anthropic-messages",
+            &empty,
+            &TargetThinkingControl::Effort { value: " ".into() }
         ));
         assert!(!control_is_writable(
             "acme/private",
-            &metadata,
-            false,
-            &TargetThinkingControl::Budget { value: 4096 }
+            &empty,
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
+        assert!(control_is_writable(
+            "acme/private",
+            &empty,
+            &TargetThinkingControl::Hidden
+        ));
+
+        let strict = ProviderModelMetadata {
+            reasoning_efforts: Some(vec!["none".into(), "high".into()]),
+            ..Default::default()
+        };
+        assert!(control_is_writable(
+            "acme/private",
+            &strict,
+            &TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        ));
+        assert!(!control_is_writable(
+            "openai-compatible",
+            &strict,
+            &TargetThinkingControl::Effort {
+                value: "medium".into()
+            }
         ));
     }
 }

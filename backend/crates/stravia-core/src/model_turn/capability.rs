@@ -959,21 +959,16 @@ fn resolved_search_thinking_level(
             .find(|row| row.level == level)
     }) {
         match &mapping.control {
-            TargetThinkingControl::Disabled => return Some(ThinkingLevel::Off.as_str().to_owned()),
-            TargetThinkingControl::Enabled => return Some(level.as_str().to_owned()),
             TargetThinkingControl::Effort { value } => {
                 let normalized = value.trim();
-                if normalized.eq_ignore_ascii_case("none") {
+                if stravia_runtime_contract::thinking::effort_is_off(normalized) {
                     return Some(ThinkingLevel::Off.as_str().to_owned());
                 }
                 if !normalized.is_empty() {
                     return Some(normalized.to_owned());
                 }
             }
-            TargetThinkingControl::Budget { value: 0 } => {
-                return Some(ThinkingLevel::Off.as_str().to_owned());
-            }
-            TargetThinkingControl::Budget { .. } | TargetThinkingControl::Hidden => {}
+            TargetThinkingControl::Hidden => {}
         }
     }
     Some(level.as_str().to_owned())

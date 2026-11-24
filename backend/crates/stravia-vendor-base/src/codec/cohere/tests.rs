@@ -2,15 +2,15 @@ use super::*;
 
 #[test]
 fn cohere_explicit_disabled_reasoning_is_not_default_enabled() {
-    let mut request = CohereChatV2
+    use stravia_runtime_contract::thinking::ThinkingLevel;
+    let request = CohereChatV2
         .decode_request(json!({
             "model": "command-a-reasoning", "messages": [],
             "thinking": {"type": "disabled"}
         }))
         .unwrap();
     assert!(!request.reasoning.is_enabled());
-    assert_eq!(request.reasoning.mode.as_deref(), Some("disabled"));
-    request.reasoning.target_control = None;
+    assert_eq!(request.reasoning.level, Some(ThinkingLevel::Off));
     assert_eq!(
         CohereChatV2.encode_request(request).unwrap().0["thinking"],
         json!({"type": "disabled"})
@@ -18,19 +18,32 @@ fn cohere_explicit_disabled_reasoning_is_not_default_enabled() {
 }
 
 #[test]
-fn cohere_native_enabled_preserves_mode_without_budget_inference() {
+fn cohere_native_enabled_maps_effort_to_static_egress_budget() {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
     let mut request = CohereChatV2
         .decode_request(json!({
             "model": "command-a-reasoning", "messages": [],
             "thinking": {"type": "enabled"}
         }))
         .unwrap();
-    assert_eq!(request.reasoning.mode.as_deref(), Some("enabled"));
-    assert_eq!(request.reasoning.budget_tokens, None);
-    request.reasoning.target_control = None;
+    assert_eq!(request.reasoning.level, Some(ThinkingLevel::High));
+    assert_eq!(
+        CohereChatV2.encode_request(request.clone()).unwrap().0["thinking"],
+        json!({"type": "enabled", "token_budget": 16384})
+    );
+    request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "low".into(),
+    });
+    assert_eq!(
+        CohereChatV2.encode_request(request.clone()).unwrap().0["thinking"],
+        json!({"type": "enabled", "token_budget": 2048})
+    );
+    request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "none".into(),
+    });
     assert_eq!(
         CohereChatV2.encode_request(request).unwrap().0["thinking"],
-        json!({"type": "enabled"})
+        json!({"type": "disabled"})
     );
 }
 
@@ -137,18 +150,19 @@ fn canonical_logprobs_enable_boolean_wire_output() {
 }
 
 #[test]
-fn thinking_budget_uses_canonical_reasoning() {
+fn thinking_budget_comes_from_canonical_effort_ladder_at_egress() {
+    use stravia_runtime_contract::thinking::ThinkingLevel;
     let mut request = CohereChatV2
         .decode_request(json!({
             "model": "command-a-reasoning", "messages": [],
             "thinking": {"type": "enabled", "token_budget": 1024}
         }))
         .unwrap();
-    assert_eq!(request.reasoning.budget_tokens, Some(1024));
-    request.reasoning.budget_tokens = Some(2048);
+    assert_eq!(request.reasoning.level, Some(ThinkingLevel::High));
+    request.reasoning.level = Some(ThinkingLevel::Medium);
     assert_eq!(
         CohereChatV2.encode_request(request).unwrap().0["thinking"],
-        json!({"type": "enabled", "token_budget": 2048})
+        json!({"type": "enabled", "token_budget": 8192})
     );
 }
 

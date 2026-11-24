@@ -412,24 +412,26 @@ test('Kiro Builder ID destination validates Sonnet 5.5 efforts against its own m
   await page.getByRole('button', { name: 'Edit destination 1' }).click()
   const dialog = page.getByRole('dialog')
   for (const effort of efforts) {
-    await expect(dialog.getByRole('textbox', { name: `${effort} Effort value`, exact: true })).toHaveValue(effort)
+    await expect(dialog.getByRole('button', { name: `Upstream level for ${effort}`, exact: true })).toHaveText(effort)
   }
+  const map = dialog.locator('[data-slot="thinking-map"]')
+  await expect(map.getByRole('spinbutton')).toHaveCount(0)
+  await expect(map.getByRole('textbox')).toHaveCount(0)
   await expect(dialog.locator('[aria-invalid="true"]')).toHaveCount(0)
-  await expect(dialog.getByText('This provider cannot send', { exact: false })).toHaveCount(0)
-  const off = dialog.getByRole('button', { name: 'off Target Thinking Control', exact: true })
-  await expect(off).toHaveText('Level unsupported')
+  const off = dialog.getByRole('button', { name: 'Mapping for off', exact: true })
+  await expect(off).toHaveText('Disable level')
   await off.click()
-  await expect(page.getByRole('option')).toHaveText(['Effort value', 'Level unsupported'])
-  await page.keyboard.press('Escape')
+  await expect(page.getByRole('option')).toHaveText(['Map to level', 'Disable level'])
+  await page.getByRole('option', { name: 'Map to level' }).click()
+  // No "none" candidate on Sonnet: starting a mapping should pick the first valid effort.
+  await expect(dialog.getByRole('button', { name: 'Upstream level for off' })).toHaveText('low')
 
   await page.setViewportSize({ width: 375, height: 800 })
-  const low = dialog.getByRole('textbox', { name: 'low Effort value', exact: true })
-  await low.fill('minimal')
-  await expect(low).toHaveAttribute('aria-invalid', 'true')
-  await expect(low).toHaveAccessibleDescription(/low.*medium.*high.*xhigh.*max/)
-  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click()
-  await expect(dialog).toBeVisible()
-  await low.fill('medium')
+  const low = dialog.getByRole('button', { name: 'Upstream level for low', exact: true })
+  await low.click()
+  await expect(page.getByRole('option')).toHaveText(efforts)
+  await page.getByRole('option', { name: 'medium', exact: true }).click()
+  await expect(low).toHaveText('medium')
   await dialog.getByRole('button', { name: 'Confirm', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   await page.getByRole('button', { name: 'Save model', exact: true }).click()
@@ -444,6 +446,140 @@ test('Kiro Builder ID destination validates Sonnet 5.5 efforts against its own m
       }),
     ])
 })
+
+for (const locale of ['en-US', 'zh-CN'] as const) {
+  test(`a migrated thinking level blocks enabling until repaired (${locale})`, async ({ page }) => {
+    const zh = locale === 'zh-CN'
+    await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
+    await page.setViewportSize({ width: zh ? 375 : 1024, height: 900 })
+    const provider = geometryProvider('thinking-provider', 'Thinking service')
+    const modelId = 'binary-model'
+    const generated = thinkingMap(new Set(['off', 'high']))
+    const target = {
+      id: 'migrated-target',
+      model_id: 'migrated-route',
+      model: modelId,
+      provider_id: provider.id,
+      enabled: false,
+      priority: 1,
+      first_token_timeout_ms: 60_000,
+      target_retry_budget: 5,
+      target_cooldown_ms: 120_000,
+      route_purposes: ['inference'],
+      thinking_level_map: generated.map((row) =>
+        row.level === 'medium' || row.level === 'high'
+          ? {
+              ...row,
+              control: { type: 'effort', value: row.level === 'medium' ? 'medium' : 'none' },
+              source: 'overridden',
+            }
+          : row,
+      ),
+    }
+    const saved = {
+      id: target.model_id,
+      model_id: target.model_id,
+      purpose: 'inference',
+      balance: 'traffic_equalization',
+      is_enabled: false,
+      supported_thinking_levels: [],
+      targets: [target],
+    }
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: [provider] } }))
+    await page.route('**/api/v1/providers/thinking-provider/models', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            models: [
+              {
+                id: modelId,
+                name: 'Binary model',
+                available: true,
+                route_purposes: ['inference'],
+                specification: { reasoning_efforts: ['none', 'high'] },
+              },
+            ],
+          },
+        },
+      }),
+    )
+    await page.route('**/api/v1/models/migrated-route/target-statuses', (route) =>
+      route.fulfill({ json: { data: [] } }),
+    )
+    await page.route('**/api/v1/models/migrated-route', (route) => route.fulfill({ json: { data: saved } }))
+    await page.route('**/migrated-target/thinking-map/reset', (route) => {
+      const { level } = route.request().postDataJSON()
+      target.thinking_level_map = target.thinking_level_map.map((row, i) => (row.level === level ? generated[i] : row))
+      return route.fulfill({ json: { data: saved } })
+    })
+    await page.route('**/migrated-target/thinking-map/regenerate', (route) => {
+      target.thinking_level_map = generated
+      return route.fulfill({ json: { data: saved } })
+    })
+
+    await page.goto('/models/migrated-route')
+    const card = page.getByRole('button', { name: zh ? '编辑请求目标 1' : 'Edit destination 1', exact: true })
+    await expect(card).toContainText('Binary model')
+    await expect(card).toContainText(zh ? '思考映射需修改' : 'Thinking map needs a change')
+    const emptyLane = page.locator('[data-slot="target-priority-connector"][data-position="empty"]')
+    await card.dragTo(emptyLane)
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await expect(
+      page.getByText(zh ? /无法启用此请求目标.*medium/ : /Can't enable this destination.*medium/),
+    ).toBeVisible()
+    await expect(page.locator('[data-slot="target-lane"]')).toHaveCount(0)
+
+    const map = dialog.locator('[data-slot="thinking-map"]')
+    const kind = map.getByRole('button', { name: zh ? 'medium 的映射方式' : 'Mapping for medium', exact: true })
+    const mapped = zh ? '映射到上游等级' : 'Map to level'
+    const hidden = zh ? '关闭此等级' : 'Disable level'
+    const effort = map.getByRole('button', { name: zh ? 'medium 的上游等级' : 'Upstream level for medium' })
+    await expect(kind).toHaveText(mapped)
+    await expect(effort).toHaveText('medium')
+    await expect(effort).toHaveAttribute('aria-invalid', 'true')
+    expect(await effort.evaluate((node) => getComputedStyle(node).borderColor)).not.toEqual(
+      await kind.evaluate((node) => getComputedStyle(node).borderColor),
+    )
+    await expect(effort).toHaveAccessibleDescription(
+      zh ? /none.*high.*重置此行.*关闭此等级/ : /none.*high.*reset the row.*disable this level/,
+    )
+    const heading = dialog.getByRole('heading', { name: zh ? '思考等级映射' : 'Thinking Level Map' })
+    await heading.locator('..').getByRole('button').click()
+    await expect(page.locator('[data-slot="tooltip-content"]')).toContainText(
+      zh ? '客户端请求的每个思考等级' : 'thinking level a client requests',
+    )
+    await kind.click()
+    await expect(page.getByRole('option')).toHaveText([mapped, hidden])
+    await page.keyboard.press('Escape')
+    expect(await map.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+    expect(await kind.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+
+    await effort.click()
+    await expect(page.getByRole('option')).toHaveText(['none', 'high'])
+    await page.getByRole('option', { name: 'high', exact: true }).click()
+    await expect(effort).toHaveText('high')
+    await expect(effort).not.toHaveAttribute('aria-invalid', 'true')
+    await dialog.getByRole('button', { name: zh ? '确定' : 'Confirm', exact: true }).click()
+    await card.dragTo(emptyLane)
+    await expect(page.locator('[data-slot="target-lane"]')).toContainText('Binary model')
+    await expect(dialog).toHaveCount(0)
+
+    // Reset saves just one row. Cancel doesn't roll it back or clear the other saved override.
+    await card.click()
+    await map.getByRole('button', { name: zh ? '重置此行: medium' : 'Reset row: medium' }).click()
+    await expect(kind).toHaveText(hidden)
+    await dialog.getByRole('button', { name: zh ? '取消' : 'Cancel', exact: true }).click()
+    await card.click()
+    await expect(kind).toHaveText(hidden)
+    const high = map.getByRole('button', { name: zh ? 'high 的上游等级' : 'Upstream level for high' })
+    await expect(high).toHaveText('none')
+    await expect(map.getByText(zh ? '已覆盖' : 'Overridden', { exact: true })).toHaveCount(1)
+    await dialog.getByRole('button', { name: zh ? '重新生成映射' : 'Regenerate map' }).click()
+    await expect(high).toHaveText('high')
+    await expect(map.getByText(zh ? '已覆盖' : 'Overridden', { exact: true })).toHaveCount(0)
+  })
+}
 
 test.beforeEach(async ({ page }) => {
   await prepareApp(page)
@@ -1152,7 +1288,19 @@ test('Model Route editor derives thinking levels and identifies blocking destina
     await expect(thinkingMaps).toHaveCount(1)
     await expect(page.locator('[data-slot="thinking-map-row"]')).toHaveCount(7)
     await expect(page.getByText('Generated', { exact: true })).toHaveCount(0)
-    await page.getByRole('button', { name: 'Confirm' }).click()
+    if (index === 1) {
+      const effort = thinkingMaps.getByRole('textbox', { name: 'Upstream level for off' })
+      await expect(effort).toHaveValue('none')
+      await effort.fill(' ')
+      await expect(effort).toHaveAttribute('aria-invalid', 'true')
+      await page.getByRole('button', { name: 'Confirm' }).click()
+      await expect(effort).toBeVisible()
+      await effort.fill('vendor-custom')
+      await expect(effort).not.toHaveAttribute('aria-invalid', 'true')
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+    } else {
+      await page.getByRole('button', { name: 'Confirm' }).click()
+    }
   }
 
   const levelCards = page.locator('[data-slot="route-thinking-level"]')

@@ -1,15 +1,14 @@
 //! Shared OpenAI-compatible thinking controls for vendor guests.
 //!
-//! Effort is represented by the shared codec. Toggle controls are translated
-//! here because compatible providers use incompatible request shapes.
+//! Effort is represented by the shared codec. Toggle-only and companion-toggle
+//! vendors translate `TargetThinkingControl::Effort` (or canonical level) into
+//! their upstream wire shapes at egress here.
 
 use serde_json::{Value, json};
 use stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1;
 use stravia_runtime_contract::protocol::ir::{AiRequest, Role};
-use stravia_runtime_contract::thinking::TargetThinkingControl;
-use stravia_vendor_sdk::{
-    DiscoveredModel, MODEL_CAPABILITY_THINKING_TOGGLE, PluginError, ProviderSnapshot,
-};
+use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel, effort_is_off};
+use stravia_vendor_sdk::{DiscoveredModel, PluginError, ProviderSnapshot};
 
 use crate::common;
 
@@ -39,7 +38,6 @@ pub fn supports_all_models(vendor_id: &str) -> bool {
 
 pub fn apply(
     vendor_id: &str,
-    channel: &str,
     provider: &ProviderSnapshot,
     protocol: &str,
     request: &mut AiRequest,
@@ -49,42 +47,30 @@ pub fn apply(
     }
 
     let model = provider.model.as_deref().unwrap_or_default();
-    let authorized = toggle_authorized(vendor_id, channel, provider);
-    apply_compatible_control(vendor_id, model, authorized, request);
+    apply_compatible_control(vendor_id, model, request);
     prepare_reasoning_history(vendor_id, model, request);
     Ok(())
 }
 
 pub fn decorate_discovered_model(vendor_id: &str, model: &mut DiscoveredModel) {
-    if !supports_all_models(vendor_id)
-        && toggle_profile(vendor_id, &model.id).is_some()
-        && !model
-            .capabilities
-            .iter()
-            .any(|capability| capability == MODEL_CAPABILITY_THINKING_TOGGLE)
+    let cohere_reasoning = vendor_is(vendor_id, &["cohere"])
+        && (contains_ascii_case_insensitive(&model.id, "reasoning")
+            || model
+                .capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case("reasoning")));
+    if (supports_all_models(vendor_id)
+        || cohere_reasoning
+        || toggle_profile(vendor_id, &model.id).is_some())
+        && !model.metadata.contains_key("reasoning_efforts")
     {
         model
-            .capabilities
-            .push(MODEL_CAPABILITY_THINKING_TOGGLE.to_owned());
+            .metadata
+            .insert("reasoning_efforts".into(), json!(["none", "high"]));
+        model
+            .metadata
+            .insert("reasoning_efforts_fallback".into(), json!(true));
     }
-}
-
-fn toggle_authorized(vendor_id: &str, channel: &str, provider: &ProviderSnapshot) -> bool {
-    let model_declares_capability = provider.model_metadata.as_ref().is_some_and(|metadata| {
-        metadata
-            .capabilities
-            .iter()
-            .any(|capability| capability == MODEL_CAPABILITY_THINKING_TOGGLE)
-            || metadata
-                .extensions
-                .get("capabilities")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|capability| capability == MODEL_CAPABILITY_THINKING_TOGGLE)
-    });
-    model_declares_capability || (channel == "default" && supports_all_models(vendor_id))
 }
 
 /// Normalize upstream discovery rows before publishing the persistent model contract.
@@ -105,6 +91,7 @@ pub fn source_metadata(
                     | "reasoning_options"
                     | "reasoning_levels"
                     | "thinking_toggle"
+                    | "reasoning_efforts_fallback"
             )
         })
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -165,43 +152,26 @@ fn prepare_reasoning_history(vendor_id: &str, model: &str, request: &mut AiReque
     }
 }
 
-fn apply_compatible_control(
-    vendor_id: &str,
-    model: &str,
-    authorized: bool,
-    request: &mut AiRequest,
-) -> bool {
-    if !authorized {
-        return false;
-    }
-    if matches!(
-        request.reasoning.target_control,
-        Some(TargetThinkingControl::Effort { .. })
-    ) && let Some(profile) = toggle_profile(vendor_id, model)
-        && profile.needs_effort_companion()
-    {
-        let (key, value) = encode_toggle(profile, true);
-        request.meta.vendor.egress.insert(key.to_owned(), value);
-        return true;
-    }
-
-    apply_compatible_toggle(vendor_id, model, request)
-}
-
-fn apply_compatible_toggle(vendor_id: &str, model: &str, request: &mut AiRequest) -> bool {
-    let enabled = match request.reasoning.target_control.as_ref() {
-        Some(TargetThinkingControl::Enabled) => true,
-        Some(TargetThinkingControl::Disabled) => false,
-        _ => return false,
-    };
+fn apply_compatible_control(vendor_id: &str, model: &str, request: &mut AiRequest) -> bool {
     let Some(profile) = toggle_profile(vendor_id, model) else {
         return false;
     };
+    let enabled = match request.reasoning.target_control.as_ref() {
+        Some(TargetThinkingControl::Hidden) => return false,
+        Some(TargetThinkingControl::Effort { value }) => !effort_is_off(value),
+        None => match request.reasoning.level {
+            None => return false,
+            Some(ThinkingLevel::Off) => false,
+            Some(_) => true,
+        },
+    };
     let (key, value) = encode_toggle(profile, enabled);
-
     // Route-resolved control is authoritative over raw client extensions.
     request.meta.vendor.egress.insert(key.to_owned(), value);
-    request.reasoning.target_control = None;
+    if !enabled || !profile.needs_effort_companion() {
+        request.reasoning.target_control = None;
+        request.reasoning.level = None;
+    }
     true
 }
 
@@ -325,11 +295,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use stravia_protocol_codec::transform::ProtocolTransform;
-    use stravia_vendor_sdk::ModelMetadata;
 
     use super::*;
 
-    fn provider(model: &str, declared: bool) -> ProviderSnapshot {
+    fn provider(model: &str) -> ProviderSnapshot {
         ProviderSnapshot {
             provider_id: "test-provider".into(),
             channel: "default".into(),
@@ -338,28 +307,19 @@ mod tests {
             options: BTreeMap::new(),
             credentials: BTreeMap::new(),
             model: Some(model.into()),
-            model_metadata: declared.then(|| ModelMetadata {
-                capabilities: vec![MODEL_CAPABILITY_THINKING_TOGGLE.into()],
-                ..ModelMetadata::default()
-            }),
+            model_metadata: None,
             client_headers: Vec::new(),
             operation_metadata: BTreeMap::new(),
         }
     }
 
-    fn encoded_control(
-        vendor_id: &str,
-        model: &str,
-        control: TargetThinkingControl,
-        declared: bool,
-    ) -> Value {
-        let provider = provider(model, declared);
+    fn encoded_control(vendor_id: &str, model: &str, control: TargetThinkingControl) -> Value {
+        let provider = provider(model);
         let mut request = AiRequest::new(model, Vec::new());
         request.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
         request.reasoning.target_control = Some(control);
         apply(
             vendor_id,
-            "default",
             &provider,
             OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string().as_str(),
             &mut request,
@@ -379,7 +339,7 @@ mod tests {
             (
                 "xiaomi",
                 "mimo-v2-pro",
-                true,
+                "high",
                 "thinking",
                 json!({"type": "enabled"}),
                 false,
@@ -387,7 +347,7 @@ mod tests {
             (
                 "deepseek",
                 "deepseek-v4",
-                false,
+                "none",
                 "thinking",
                 json!({"type": "disabled"}),
                 false,
@@ -395,15 +355,15 @@ mod tests {
             (
                 "zai",
                 "glm-4.7",
-                true,
+                "high",
                 "thinking",
                 json!({"type": "enabled", "clear_thinking": false}),
-                false,
+                true,
             ),
             (
                 "alibaba-cn",
                 "qwen3.5-plus",
-                false,
+                "none",
                 "enable_thinking",
                 json!(false),
                 false,
@@ -411,54 +371,62 @@ mod tests {
             (
                 "baseten",
                 "moonshotai/Kimi-K2.5",
-                true,
+                "high",
                 "chat_template_args",
                 json!({"enable_thinking": true}),
-                false,
+                true,
             ),
             (
                 "opencode",
                 "zai-coding-plan/glm-4.6",
-                false,
+                "off",
                 "chat_template_args",
                 json!({"enable_thinking": false}),
-                true,
+                false,
             ),
             (
                 "nvidia",
                 "minimaxai/minimax-m3",
-                true,
+                "high",
                 "chat_template_kwargs",
                 json!({"thinking_mode": "enabled"}),
-                true,
+                false,
             ),
             (
                 "custom",
                 "minimax-m3",
-                true,
+                "high",
                 "thinking",
                 json!({"type": "adaptive"}),
-                true,
+                false,
             ),
         ];
 
-        for (vendor, model, enabled, key, expected, declared) in cases {
-            let control = if enabled {
-                TargetThinkingControl::Enabled
-            } else {
-                TargetThinkingControl::Disabled
-            };
-            let body = encoded_control(vendor, model, control, declared);
+        for (vendor, model, effort, key, expected, keeps_reasoning_effort) in cases {
+            let body = encoded_control(
+                vendor,
+                model,
+                TargetThinkingControl::Effort {
+                    value: effort.into(),
+                },
+            );
             assert_eq!(body[key], expected, "{vendor}/{model}");
+            assert_eq!(
+                body.get("reasoning_effort").is_some(),
+                keeps_reasoning_effort,
+                "{vendor}/{model} body={body}"
+            );
         }
     }
 
     #[test]
     fn route_control_overrides_raw_ingress_extension() {
-        let provider = provider("mimo-v2-pro", false);
+        let provider = provider("mimo-v2-pro");
         let mut request = AiRequest::new("mimo-v2-pro", Vec::new());
         request.meta.source_protocol = Some(OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
-        request.reasoning.target_control = Some(TargetThinkingControl::Disabled);
+        request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "none".into(),
+        });
         request
             .meta
             .vendor
@@ -467,7 +435,6 @@ mod tests {
 
         apply(
             "xiaomi",
-            "default",
             &provider,
             &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
             &mut request,
@@ -480,6 +447,7 @@ mod tests {
         .unwrap()
         .body;
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -490,7 +458,6 @@ mod tests {
             TargetThinkingControl::Effort {
                 value: "high".into(),
             },
-            false,
         );
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(
@@ -501,26 +468,25 @@ mod tests {
 
     #[test]
     fn discovery_ingress_preserves_native_facts_without_legacy_model_flags() {
-        let value = json!({"reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default","low","custom"]}],"limit":{"context":8192,"output":512},"capabilities":["thinking_toggle"],"native":{"mode":"real"}});
+        let value = json!({"reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default","low","custom"]}],"limit":{"context":8192,"output":512},"thinking_toggle":true,"native":{"mode":"real"}});
         let metadata = source_metadata(value.as_object().unwrap());
         assert_eq!(metadata["reasoning_efforts"], json!(["low", "custom"]));
         assert_eq!(metadata["limit"], json!({"context":8192}));
         assert!(!metadata.contains_key("reasoning"));
         assert!(!metadata.contains_key("reasoning_options"));
+        assert!(!metadata.contains_key("thinking_toggle"));
         assert_eq!(metadata["native"], json!({"mode":"real"}));
-        assert_eq!(metadata["capabilities"], json!(["thinking_toggle"]));
     }
 
     #[test]
-    fn undeclared_toggle_is_omitted_without_losing_messages() {
+    fn hidden_target_control_is_omitted_without_losing_messages() {
         let mut message = stravia_runtime_contract::protocol::ir::AiItem::output_text("hello");
         message.role = stravia_runtime_contract::protocol::ir::Role::User;
         let mut unknown = AiRequest::new("custom-model", vec![message]);
-        unknown.reasoning.target_control = Some(TargetThinkingControl::Enabled);
+        unknown.reasoning.target_control = Some(TargetThinkingControl::Hidden);
         apply(
             "custom",
-            "default",
-            &provider("custom-model", false),
+            &provider("custom-model"),
             &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
             &mut unknown,
         )
@@ -535,6 +501,7 @@ mod tests {
         assert!(encoded.body.get("thinking").is_none());
         assert!(encoded.body.get("enable_thinking").is_none());
         assert!(encoded.body.get("reasoning").is_none());
+        assert!(encoded.body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -559,10 +526,9 @@ mod tests {
                 }]
             }))
             .unwrap();
-        let provider = provider("deepseek-v4-flash", false);
+        let provider = provider("deepseek-v4-flash");
         apply(
             "deepseek",
-            "default",
             &provider,
             &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
             &mut request,
@@ -602,8 +568,7 @@ mod tests {
             .unwrap();
         apply(
             "deepseek",
-            "default",
-            &provider("deepseek-flash", false),
+            &provider("deepseek-flash"),
             &OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1.to_string(),
             &mut request,
         )
@@ -630,7 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn discovery_marks_only_model_specific_profiles() {
+    fn discovery_populates_default_off_and_high_for_toggle_profiles_without_overwriting() {
+        let mut deepseek = DiscoveredModel {
+            id: "deepseek-reasoner".into(),
+            display_name: "DeepSeek".into(),
+            family: None,
+            selector: None,
+            capabilities: Vec::new(),
+            metadata: BTreeMap::new(),
+        };
+        decorate_discovered_model("deepseek", &mut deepseek);
+        assert!(deepseek.capabilities.is_empty());
+        assert_eq!(
+            deepseek.metadata["reasoning_efforts"],
+            json!(["none", "high"])
+        );
+        assert_eq!(deepseek.metadata["reasoning_efforts_fallback"], json!(true));
+
         let mut nvidia = DiscoveredModel {
             id: "minimaxai/minimax-m3".into(),
             display_name: "MiniMax M3".into(),
@@ -640,10 +621,27 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         decorate_discovered_model("nvidia", &mut nvidia);
+        assert!(nvidia.capabilities.is_empty());
         assert_eq!(
-            nvidia.capabilities,
-            vec![MODEL_CAPABILITY_THINKING_TOGGLE.to_owned()]
+            nvidia.metadata["reasoning_efforts"],
+            json!(["none", "high"])
         );
+        assert_eq!(nvidia.metadata["reasoning_efforts_fallback"], json!(true));
+
+        let mut existing = DiscoveredModel {
+            id: "glm-5.2".into(),
+            display_name: "GLM".into(),
+            family: None,
+            selector: None,
+            capabilities: Vec::new(),
+            metadata: BTreeMap::from([("reasoning_efforts".into(), json!(["low", "high"]))]),
+        };
+        decorate_discovered_model("zai", &mut existing);
+        assert_eq!(
+            existing.metadata["reasoning_efforts"],
+            json!(["low", "high"])
+        );
+        assert!(!existing.metadata.contains_key("reasoning_efforts_fallback"));
 
         let mut unrelated = DiscoveredModel {
             id: "other-model".into(),
@@ -655,5 +653,6 @@ mod tests {
         };
         decorate_discovered_model("nvidia", &mut unrelated);
         assert!(unrelated.capabilities.is_empty());
+        assert!(!unrelated.metadata.contains_key("reasoning_efforts"));
     }
 }

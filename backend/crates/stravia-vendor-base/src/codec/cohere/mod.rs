@@ -109,16 +109,11 @@ impl ProtocolAdapter for CohereChatV2 {
                 Some("disabled") => false,
                 _ => bail!("unsupported Cohere thinking type"),
             };
-            request.reasoning.mode = Some(if enabled { "enabled" } else { "disabled" }.into());
-            request.reasoning.target_control = Some(if enabled {
-                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
+            request.reasoning.level = Some(if enabled {
+                stravia_runtime_contract::thinking::ThinkingLevel::High
             } else {
-                stravia_runtime_contract::thinking::TargetThinkingControl::Disabled
+                stravia_runtime_contract::thinking::ThinkingLevel::Off
             });
-            request.reasoning.budget_tokens = thinking
-                .get("token_budget")
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok());
         }
         request.generation.stop = body.get("stop_sequences").and_then(string_array);
         request.tools = body
@@ -194,33 +189,38 @@ impl ProtocolAdapter for CohereChatV2 {
                 Value::Array(stop.iter().cloned().map(Value::String).collect()),
             );
         }
-        if matches!(
-            request.reasoning.target_control,
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
-        ) || (request.reasoning.target_control.is_none()
-            && request.reasoning.mode.as_deref() == Some("disabled"))
-        {
-            body.insert("thinking".into(), json!({"type": "disabled"}));
-        } else if request.reasoning.is_enabled()
-            || matches!(
-                request.reasoning.target_control,
-                Some(
-                    stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
-                        | stravia_runtime_contract::thinking::TargetThinkingControl::Budget { .. }
-                )
-            )
-        {
-            let mut thinking = Map::from_iter([("type".into(), Value::String("enabled".into()))]);
-            let budget = match request.reasoning.target_control {
-                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget {
-                    value,
-                }) => Some(value),
-                _ => request.reasoning.budget_tokens,
-            };
-            if let Some(budget) = budget {
-                thinking.insert("token_budget".into(), Value::from(budget));
+        match request.reasoning.target_control.as_ref() {
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => {}
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
+                if stravia_runtime_contract::thinking::effort_is_off(value) {
+                    body.insert("thinking".into(), json!({"type": "disabled"}));
+                } else {
+                    let budget = stravia_protocol_codec::codec::thinking::static_budget_for_effort(
+                        Some(value.as_str()),
+                        request.reasoning.level,
+                    );
+                    body.insert(
+                        "thinking".into(),
+                        json!({"type": "enabled", "token_budget": budget}),
+                    );
+                }
             }
-            body.insert("thinking".into(), Value::Object(thinking));
+            None => match request.reasoning.level {
+                None => {}
+                Some(stravia_runtime_contract::thinking::ThinkingLevel::Off) => {
+                    body.insert("thinking".into(), json!({"type": "disabled"}));
+                }
+                Some(level) => {
+                    let budget = stravia_protocol_codec::codec::thinking::static_budget_for_effort(
+                        None,
+                        Some(level),
+                    );
+                    body.insert(
+                        "thinking".into(),
+                        json!({"type": "enabled", "token_budget": budget}),
+                    );
+                }
+            },
         }
         if let Some(response_format) = &request.response_format {
             body.insert(

@@ -203,10 +203,6 @@ pub struct AuthDescriptor {
     pub supports_refresh_token: bool,
 }
 
-/// Canonical declaration that the guest can encode an enabled/disabled
-/// thinking control for a model, even when its base codec cannot.
-pub const MODEL_CAPABILITY_THINKING_TOGGLE: &str = "thinking_toggle";
-
 /// `models_source` marker selecting the host-owned catalog inventory. Guests
 /// must treat it as an opaque source selector, never as a request URL.
 pub const MODELS_SOURCE_CATALOG: &str = "catalog";

@@ -1369,12 +1369,16 @@ async fn configure_route_with_protocol(
                 vec![
                     ThinkingLevelMapping {
                         level: ThinkingLevel::Off,
-                        control: TargetThinkingControl::Disabled,
+                        control: TargetThinkingControl::Effort {
+                            value: "none".into(),
+                        },
                         source: ThinkingMappingSource::Overridden,
                     },
                     ThinkingLevelMapping {
                         level: ThinkingLevel::Medium,
-                        control: TargetThinkingControl::Enabled,
+                        control: TargetThinkingControl::Effort {
+                            value: "medium".into(),
+                        },
                         source: ThinkingMappingSource::Overridden,
                     },
                 ]

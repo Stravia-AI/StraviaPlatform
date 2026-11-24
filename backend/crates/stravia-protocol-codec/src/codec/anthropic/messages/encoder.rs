@@ -79,7 +79,18 @@ impl AnthropicEncoder {
 
         // Messages 必须携带 max_tokens；已知型号上限由目标适配层填入，
         // 未知时沿用 omp 的 64,000 回退，不把上下文窗口当作输出上限。
-        let max_tokens = req.generation.max_tokens.unwrap_or(64_000);
+        let auto_output_limit = req.generation.max_tokens.is_none()
+            || req
+                .meta
+                .vendor
+                .egress
+                .remove(crate::codec::thinking::ANTHROPIC_AUTO_OUTPUT_LIMIT_EGRESS_KEY)
+                .and_then(|value| value.as_bool())
+                == Some(true);
+        let model_name = req.model.clone();
+        let anthropic_caps =
+            extract_anthropic_capabilities(&model_name, &mut req.meta.vendor.egress);
+        let mut max_tokens = req.generation.max_tokens.unwrap_or(64_000);
 
         let mut body = object([
             ("model", Value::String(req.model)),
@@ -190,9 +201,19 @@ impl AnthropicEncoder {
                 serde_json::json!({"type": "json_schema", "schema": schema}),
             );
         }
-        if let Some(mut thinking) = encode_thinking(&req.reasoning, max_tokens, &mut output_config)?
-        {
-            if let Some(summary) = req.reasoning.summary {
+        if let Some(mut thinking) = encode_thinking(
+            &model_name,
+            &req.reasoning,
+            &anthropic_caps,
+            auto_output_limit,
+            &mut max_tokens,
+            &mut output_config,
+        )? {
+            if !matches!(
+                thinking.get("type").and_then(Value::as_str),
+                Some("disabled" | "between_tools")
+            ) && let Some(summary) = req.reasoning.summary
+            {
                 thinking["display"] = match summary {
                     ReasoningSummary::None => "omitted",
                     ReasoningSummary::Auto
@@ -203,6 +224,7 @@ impl AnthropicEncoder {
             }
             obj.insert("thinking".into(), thinking);
         }
+        obj.insert("max_tokens".into(), max_tokens.into());
 
         if !output_config.is_empty() {
             obj.insert("output_config".into(), Value::Object(output_config));
@@ -406,65 +428,106 @@ fn schema_children<'a>(schema: &'a Value, mut visit: impl FnMut(&'a Value)) {
     }
 }
 
+fn extract_anthropic_capabilities(
+    model: &str,
+    egress: &mut std::collections::HashMap<String, Value>,
+) -> crate::codec::thinking::AnthropicThinkingCapabilities {
+    use crate::codec::thinking::{
+        ANTHROPIC_CAPABILITIES_EGRESS_KEY, ANTHROPIC_EFFORTS_EGRESS_KEY,
+        AnthropicThinkingCapabilities,
+    };
+    let declared_efforts: Option<Vec<String>> = egress
+        .remove(ANTHROPIC_EFFORTS_EGRESS_KEY)
+        .and_then(|value| value.as_array().cloned())
+        .map(|values| {
+            values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .filter(|value| !stravia_runtime_contract::thinking::effort_is_off(value))
+                .collect()
+        });
+    let raw = egress.remove(ANTHROPIC_CAPABILITIES_EGRESS_KEY);
+    AnthropicThinkingCapabilities::from_wire_for_model(model, raw.as_ref(), declared_efforts)
+}
+
 fn encode_thinking(
+    model: &str,
     reasoning: &stravia_runtime_contract::protocol::ir::ReasoningConfig,
-    max_tokens: u32,
+    caps: &crate::codec::thinking::AnthropicThinkingCapabilities,
+    auto_output_limit: bool,
+    max_tokens: &mut u32,
     output: &mut serde_json::Map<String, Value>,
 ) -> Result<Option<Value>> {
-    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
-    let (mode, budget, effort) = match reasoning.target_control.as_ref() {
-        Some(TargetThinkingControl::Budget { value }) => ("enabled", Some(*value), None),
-        Some(TargetThinkingControl::Enabled) => ("enabled", reasoning.budget_tokens, None),
-        Some(TargetThinkingControl::Disabled) => ("disabled", None, None),
-        Some(TargetThinkingControl::Effort { value }) => ("adaptive", None, Some(value.as_str())),
-        Some(TargetThinkingControl::Hidden) => return Ok(None),
-        None => {
-            let mode = match reasoning.mode.as_deref() {
-                Some("enabled") => "enabled",
-                Some("disabled") => "disabled",
-                Some("auto") => "adaptive",
-                Some(other) => anyhow::bail!("unsupported Anthropic thinking mode: {other}"),
-                None if reasoning.level == Some(ThinkingLevel::Off) => "disabled",
-                None if reasoning.level.is_some() => "adaptive",
-                None => return Ok(None),
-            };
-            (mode, reasoning.budget_tokens, None)
-        }
+    use crate::codec::thinking::{
+        AnthropicModelProfile, fit_budget_within_auto_limit, raise_explicit_max_tokens,
+        static_budget_for_effort,
     };
-    if mode == "adaptive" {
-        // Target 控制已按模型能力解析；保留原生值，省略时不覆盖模型默认档位。
-        let effort = effort.or_else(|| {
-            reasoning.level.map(|level| match level {
-                ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
-                ThinkingLevel::Medium => "medium",
-                ThinkingLevel::High => "high",
-                ThinkingLevel::Xhigh => "xhigh",
-                ThinkingLevel::Max => "max",
-            })
-        });
-        if let Some(effort) = effort {
-            output.insert("effort".into(), effort.into());
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel, effort_is_off};
+
+    let (is_off, explicit_effort) = match reasoning.target_control.as_ref() {
+        Some(TargetThinkingControl::Hidden) => return Ok(None),
+        Some(TargetThinkingControl::Effort { value }) => {
+            if effort_is_off(value) {
+                (true, None)
+            } else {
+                (false, Some(value.as_str()))
+            }
         }
-        return Ok(Some(serde_json::json!({"type": "adaptive"})));
+        None => match reasoning.level {
+            None => return Ok(None),
+            Some(ThinkingLevel::Off) => (true, None),
+            Some(_) => (false, None),
+        },
+    };
+
+    if caps.thinking == Some(false) {
+        return Ok(None);
     }
-    if mode == "disabled" {
+
+    let profile = AnthropicModelProfile::new(model, caps);
+
+    if is_off {
+        if profile.always_on() {
+            output.insert("effort".into(), "low".into());
+            return Ok(None);
+        }
+        if profile.between_tools() {
+            return Ok(Some(serde_json::json!({"type": "between_tools"})));
+        }
         return Ok(Some(serde_json::json!({"type": "disabled"})));
     }
-    if max_tokens <= 1024 {
-        anyhow::bail!("Anthropic enabled thinking requires max_tokens greater than 1024");
-    }
-    let budget = budget
-        .unwrap_or(match reasoning.level {
-            Some(ThinkingLevel::Low) => 2048,
-            Some(ThinkingLevel::Medium) => 8192,
-            Some(ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max) => 16384,
-            _ => 1024,
+
+    let requested_effort = explicit_effort.or_else(|| {
+        reasoning.level.map(|level| match level {
+            ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Xhigh => "xhigh",
+            ThinkingLevel::Max => "max",
         })
-        .max(1024)
-        .min(max_tokens - 1);
-    Ok(Some(
-        serde_json::json!({"type": "enabled", "budget_tokens": budget}),
-    ))
+    });
+
+    if !profile.supports_adaptive() {
+        let mut budget = static_budget_for_effort(explicit_effort, reasoning.level);
+        if auto_output_limit {
+            budget = fit_budget_within_auto_limit(*max_tokens, budget).ok_or_else(|| {
+                anyhow::anyhow!("Anthropic enabled thinking requires max_tokens greater than 1024")
+            })?;
+        } else {
+            *max_tokens = raise_explicit_max_tokens(*max_tokens, budget);
+        }
+        if let Some(effort) = requested_effort.and_then(|value| profile.resolve_effort(value)) {
+            output.insert("effort".into(), effort.into());
+        }
+        return Ok(Some(
+            serde_json::json!({"type": "enabled", "budget_tokens": budget}),
+        ));
+    }
+
+    if let Some(effort) = requested_effort.and_then(|value| profile.resolve_effort(value)) {
+        output.insert("effort".into(), effort.into());
+    }
+    Ok(Some(serde_json::json!({"type": "adaptive"})))
 }
 
 fn tool_choice_for_anthropic(tc: ToolChoice) -> Option<Value> {

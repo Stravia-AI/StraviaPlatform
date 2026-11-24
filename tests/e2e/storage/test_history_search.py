@@ -335,16 +335,17 @@ def test_history_search_reads_hits_excludes_issuer_isolates_keys_and_clears(
 def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
     """删除 0051 创建的对象与迁移记录，得到升级前（≤0050）的真实库形态与已有历史。
 
-    迁移历史必须是连续前缀，因此也回退 0052–0058。0055 只清理凭据数据，
+    迁移历史必须是连续前缀，因此也回退 0052–0059。0055 只清理凭据数据，
     该场景不生成凭据映射；0053 会丢弃旧使用时间，所以只允许在映射表为空时重建旧结构；
-    0058 会泛化 web_providers 并清理内置本地种子，只允许在 web_providers 为空时重建旧结构。
+    0058 会泛化 web_providers 并清理内置本地种子，只允许在 web_providers 为空时重建旧结构；
+    0059 仅原地归一化 model_backends.thinking_level_map 中的旧思考控制，不修改表结构。
     """
     if server.dsn is not None:
         import psycopg
 
         with psycopg.connect(server.dsn) as connection:
             versions = connection.execute("SELECT version FROM _sqlx_migrations WHERE version >= 51 ORDER BY version").fetchall()
-            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,), (58,)], versions
+            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,), (58,), (59,)], versions
             assert connection.execute("SELECT COUNT(*) FROM reversible_redaction_mappings").fetchone() == (0,)
             assert connection.execute("SELECT COUNT(*) FROM web_providers").fetchone() == (0,)
             connection.execute("ALTER TABLE web_providers DROP CONSTRAINT web_providers_kind_check")
@@ -396,7 +397,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
                 "ALTER TABLE vendor_plugins ADD CONSTRAINT vendor_plugins_source_check"
                 " CHECK (source IN ('builtin', 'local'))"
             )
-            connection.execute("DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 58")
+            connection.execute("DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 59")
             [(latest,)] = connection.execute("SELECT MAX(version) FROM _sqlx_migrations").fetchall()
     else:
         # 0012 定义的 Target 表正是 0054 之前的形态；复用其建表、复制和约束。
@@ -404,7 +405,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
         target_schema = migration[migration.index("CREATE TABLE model_backends_new"):migration.index("-- RPM")]
         with closing(sqlite3.connect(server.data_dir / "db" / "gateway.db")) as connection, connection:
             versions = connection.execute("SELECT version FROM _sqlx_migrations WHERE version >= 51 ORDER BY version").fetchall()
-            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,), (58,)], versions
+            assert versions == [(51,), (52,), (53,), (54,), (55,), (56,), (57,), (58,), (59,)], versions
             assert connection.execute("SELECT COUNT(*) FROM reversible_redaction_mappings").fetchone() == (0,)
             assert connection.execute("SELECT COUNT(*) FROM web_providers").fetchone() == (0,)
             connection.executescript(target_schema)
@@ -460,7 +461,7 @@ def downgrade_to_pre_search_schema(server: HistoryServer) -> None:
                 " INSERT INTO vendor_plugins_old SELECT vendor_id, version, source, descriptor, digest,"
                 " revision, data_epoch, installed_at FROM vendor_plugins;"
                 " DROP TABLE vendor_plugins; ALTER TABLE vendor_plugins_old RENAME TO vendor_plugins;"
-                " DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 58;"
+                " DELETE FROM _sqlx_migrations WHERE version BETWEEN 51 AND 59;"
             )
             [(latest,)] = connection.execute("SELECT MAX(version) FROM _sqlx_migrations").fetchall()
     assert latest == 50, latest

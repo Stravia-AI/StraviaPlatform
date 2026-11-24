@@ -3403,7 +3403,7 @@ async fn sqlite_0007_upgrade_and_generation_v3_rebuild_find_existing_history() {
     assert!(
         expected
             .namespace
-            .starts_with("stravia-generation-history-v5:")
+            .starts_with("stravia-generation-history-v6:")
     );
     // 迁移 7 已提交、历史转换尚未开始：保留真实旧格式行，让历史转换与
     // 规范化各自走生产路径，而不是在测试里伪造新表内容。

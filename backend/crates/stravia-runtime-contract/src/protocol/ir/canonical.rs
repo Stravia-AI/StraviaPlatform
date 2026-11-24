@@ -1020,7 +1020,7 @@ mod tests {
             history_request_controls_hash(&canonical),
             history_request_controls_hash(&legacy)
         );
-        legacy.reasoning.mode = Some("disabled".into());
+        legacy.reasoning.level = Some(crate::thinking::ThinkingLevel::Off);
         assert_ne!(
             cache_controls_hash(&canonical),
             cache_controls_hash(&legacy)
@@ -1552,10 +1552,8 @@ mod tests {
 
         let mut baseline = AiRequest::new("model", Vec::new());
         baseline.reasoning = ReasoningConfig {
-            mode: Some("enabled".into()),
-            budget_tokens: None,
             summary: Some(ReasoningSummary::Auto),
-            level: None,
+            level: Some(crate::thinking::ThinkingLevel::High),
             target_control: None,
         };
         baseline.response_format = Some(ResponseFormat::JsonSchema {

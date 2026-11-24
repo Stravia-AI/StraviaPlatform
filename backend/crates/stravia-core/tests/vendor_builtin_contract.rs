@@ -522,6 +522,7 @@ struct StandardCase {
 async fn supplemental_discovery_discards_legacy_flags_and_preserves_modalities()
 -> anyhow::Result<()> {
     let (base_url, server) = local_upstream(1, |_| MockResponse::json(json!({"data":[
+        {"id":"generic-model","tool_call":true,"reasoning":true,"attachment":true,"structured_output":true},
         {"id":"minimax-m3","tool_call":true,"reasoning":true,"attachment":true,"structured_output":true},
         {"id":"explicitly-disabled","tool_call":false,"reasoning":false,
             "capabilities":["tools","reasoning"]},
@@ -548,12 +549,22 @@ async fn supplemental_discovery_discards_legacy_flags_and_preserves_modalities()
         })
         .await?;
     gateway.admin().sync_provider_models(&provider.id).await?;
-    let enabled = gateway
+    let generic = gateway
+        .admin()
+        .get_provider_model(&provider.id, "generic-model")
+        .await?;
+    assert!(generic.metadata.reasoning_efforts.is_none());
+    assert!(!generic.metadata.extensions.contains_key("tool_call"));
+    assert!(!generic.metadata.extensions.contains_key("reasoning"));
+    let minimax = gateway
         .admin()
         .get_provider_model(&provider.id, "minimax-m3")
         .await?;
-    assert!(enabled.metadata.reasoning_efforts.is_none());
-    assert!(!enabled.metadata.extensions.contains_key("tool_call"));
+    assert_eq!(
+        minimax.metadata.reasoning_efforts.as_deref(),
+        Some(&["none".to_string(), "high".to_string()][..])
+    );
+    assert!(!minimax.metadata.extensions.contains_key("tool_call"));
     let disabled = gateway
         .admin()
         .get_provider_model(&provider.id, "explicitly-disabled")
@@ -2282,12 +2293,14 @@ async fn deepseek_builtin_applies_thinking_and_tool_history_on_the_real_wire() -
     let saved = gateway.admin().get_model(&route).await?;
     let target = &saved.targets[0];
     let mut thinking_level_map = target.thinking_level_map.clone();
-    // 原生开关由 Target 显式配置，不由未知的 Effort 规格推导。
+    // 开关型厂商统一通过 canonical effort 触发，出口翻译为 thinking.type = "enabled"。
     let medium = thinking_level_map
         .iter_mut()
         .find(|row| row.level == stravia_runtime_contract::thinking::ThinkingLevel::Medium)
         .expect("medium mapping");
-    medium.control = stravia_runtime_contract::thinking::TargetThinkingControl::Enabled;
+    medium.control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+        value: "high".into(),
+    };
     medium.source = stravia_core::thinking::ThinkingMappingSource::Overridden;
     gateway
         .admin()

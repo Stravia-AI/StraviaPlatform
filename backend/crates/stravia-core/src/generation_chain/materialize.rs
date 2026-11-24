@@ -954,21 +954,17 @@ pub(super) fn generation_config_retained_bytes(config: &GenerationConfig) -> usi
 
 pub(super) fn reasoning_config_retained_bytes(config: &ReasoningConfig) -> usize {
     let ReasoningConfig {
-        mode,
-        budget_tokens: _,
         summary: _,
         level: _,
         target_control,
     } = config;
-    std::mem::size_of::<ReasoningConfig>()
-        .saturating_add(option_string_bytes(mode))
-        .saturating_add(target_control.as_ref().map_or(0, |control| match control {
+    std::mem::size_of::<ReasoningConfig>().saturating_add(target_control.as_ref().map_or(
+        0,
+        |control| match control {
             TargetThinkingControl::Effort { value } => value.len(),
-            TargetThinkingControl::Budget { value: _ }
-            | TargetThinkingControl::Enabled
-            | TargetThinkingControl::Disabled
-            | TargetThinkingControl::Hidden => 0,
-        }))
+            TargetThinkingControl::Hidden => 0,
+        },
+    ))
 }
 
 pub(super) fn response_format_retained_bytes(format: &ResponseFormat) -> usize {

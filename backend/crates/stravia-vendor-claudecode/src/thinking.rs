@@ -1,51 +1,45 @@
 //! 把 codec 编码出的思考控制改写为目标 Claude 型号接受的形态。
 //!
-//! 通用 Anthropic 编码器只做一对一转换：`Effort` 写成 `adaptive` 加
-//! `output_config.effort`，`Budget` 写成 `enabled` 加 `budget_tokens`，`Disabled`
-//! 写成 `disabled`。Claude 各代模型对这些值的接受范围不同，直接发送会得到 400。
-//! 规则依据官方文档 *Thinking* 与 *Effort* 的逐型号矩阵（Claude 4.5 至 5.5、
-//! Fable/Mythos 5.x），并沿用 oh-my-pi 的策略：思考关不掉的型号省略 `thinking`
-//! 并把 effort 固定为 `low`，强制工具调用与思考冲突时优先保住工具调用。
-
-use std::borrow::Cow;
+//! 共享型号规则、统一出口静态预算表与 `max_tokens` 缓冲规则由
+//! `stravia_protocol_codec::codec::thinking` 提供；本模块只补充 Claude Code
+//! 专有的上下文管理、强制工具调用降级与摘要显示默认值。
 
 use serde_json::{Map, Value, json};
+use stravia_protocol_codec::codec::thinking::{
+    ANTHROPIC_EFFORTS as EFFORTS, AnthropicModelFamily as Family, AnthropicModelProfile,
+    AnthropicRevision as Revision, AnthropicThinkingCapabilities, MIN_THINKING_BUDGET,
+    cap_anthropic_effort_at_high as cap_at_high, fit_budget_within_auto_limit,
+    parse_anthropic_effort as parse_effort, parse_known_anthropic_model as parse_known,
+    raise_explicit_max_tokens, static_budget_for_effort,
+};
+use stravia_runtime_contract::thinking::effort_is_off;
 
 use crate::capabilities::ModelCapabilities;
 
-type Revision = [u8; 3];
-
-/// Anthropic effort 档位，按强度升序。
-const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-const EFFORTS_WITHOUT_XHIGH: [&str; 4] = ["low", "medium", "high", "max"];
-/// 手动预算模式的最小 `budget_tokens`。
-const MIN_BUDGET: u64 = 1024;
-/// 显式输出上限高于思考预算时为正文与工具调用保留的空间
-/// （与 oh-my-pi `OUTPUT_FALLBACK_BUFFER` 一致）。
-const OUTPUT_BUFFER: u64 = 4000;
+const MIN_BUDGET: u64 = MIN_THINKING_BUDGET as u64;
 const CLEAR_THINKING_EDIT: &str = "clear_thinking_20251015";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Family {
-    Opus,
-    Sonnet,
-    Haiku,
-    Fable,
-    Mythos,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NormalizeOptions {
+    pub auto_output_limit: bool,
+    pub allow_default_effort: bool,
+    pub explicit_off: bool,
 }
 
-const FAMILIES: [(&str, Family); 5] = [
-    ("opus", Family::Opus),
-    ("sonnet", Family::Sonnet),
-    ("haiku", Family::Haiku),
-    ("fable", Family::Fable),
-    ("mythos", Family::Mythos),
-];
+impl Default for NormalizeOptions {
+    fn default() -> Self {
+        Self {
+            auto_output_limit: false,
+            allow_default_effort: true,
+            explicit_off: false,
+        }
+    }
+}
 
-/// 目标型号的线上能力。`/v1/models` 发现到的 [`ModelCapabilities`] 优先；接口没有
-/// 覆盖的规则（能否关闭思考、`between_tools`、强制工具调用、`display` 默认值）以及
-/// 尚未同步发现数据的型号，回退到按型号 ID 解析出的静态规则。
+/// 目标型号的线上能力。共享规则统一委托给 [`AnthropicModelProfile`]；
+/// 本结构只补充 Claude Code 专有的 `per_turn_effort` 与 `mid_conversation_tools`。
 pub(crate) struct ModelProfile<'a> {
+    shared_caps: AnthropicThinkingCapabilities,
     known: Option<(Family, Revision)>,
     caps: &'a ModelCapabilities,
 }
@@ -54,7 +48,20 @@ impl<'a> ModelProfile<'a> {
     /// 型号 ID 与发现数据都无法识别时返回 `None`，调用方应原样透传。
     pub(crate) fn new(model: &str, caps: &'a ModelCapabilities) -> Option<Self> {
         let known = parse_known(model);
-        (known.is_some() || !caps.is_empty()).then_some(Self { known, caps })
+        if known.is_none() && caps.is_empty() {
+            return None;
+        }
+        let shared_caps = AnthropicThinkingCapabilities {
+            thinking: caps.thinking,
+            adaptive: caps.adaptive,
+            enabled: caps.enabled,
+            efforts: caps.efforts.clone(),
+        };
+        Some(Self {
+            shared_caps,
+            known,
+            caps,
+        })
     }
 
     pub(crate) fn of_request(
@@ -64,83 +71,42 @@ impl<'a> ModelProfile<'a> {
         Self::new(object.get("model").and_then(Value::as_str)?, caps)
     }
 
-    /// Anthropic 从 Claude 4.6 起不再接受末尾 assistant 作为响应前缀。
-    /// 未识别型号沿用原生行为，不从思考能力推断 prefill 支持。
-    pub(crate) fn accepts_prefill(&self) -> bool {
-        match self.known {
-            Some((Family::Opus | Family::Sonnet | Family::Haiku, revision)) => revision < [4, 6, 0],
-            Some((Family::Fable | Family::Mythos, _)) => false,
-            None => true,
-        }
+    fn shared(&self) -> AnthropicModelProfile<'_> {
+        AnthropicModelProfile::from_known(self.known, &self.shared_caps)
     }
 
-    /// 只接受 `adaptive`，拒绝 `enabled` 与非默认采样参数的型号：Opus ≥ 4.7、
-    /// Sonnet ≥ 5、Haiku ≥ 5.5、Fable/Mythos。
+    pub(crate) fn accepts_prefill(&self) -> bool {
+        self.shared().accepts_prefill()
+    }
+
     pub(crate) fn adaptive_only(&self) -> bool {
-        if let (Some(adaptive), Some(enabled)) = (self.caps.adaptive, self.caps.enabled) {
-            return adaptive && !enabled;
-        }
-        match self.known {
-            Some((Family::Opus, revision)) => revision >= [4, 7, 0],
-            Some((Family::Sonnet, revision)) => revision >= [5, 0, 0],
-            Some((Family::Haiku, revision)) => revision >= [5, 5, 0],
-            Some((Family::Fable | Family::Mythos, _)) => true,
-            None => false,
-        }
+        self.shared().adaptive_only()
     }
 
     fn supports_adaptive(&self) -> bool {
-        self.caps.adaptive.unwrap_or(match self.known {
-            Some((Family::Opus | Family::Sonnet, revision)) => revision >= [4, 6, 0],
-            Some((Family::Haiku, revision)) => revision >= [5, 5, 0],
-            Some((Family::Fable | Family::Mythos, _)) => true,
-            None => false,
-        })
+        self.shared().supports_adaptive()
     }
 
-    /// “缺省即开启”不等于“不能关闭”：Haiku 5.5 仍接受 high 以下的 disabled。
     fn adaptive_by_default(&self) -> bool {
-        self.supports_adaptive()
-            && match self.known {
-                Some((Family::Opus | Family::Sonnet, revision)) => revision >= [5, 0, 0],
-                Some((Family::Haiku, revision)) => revision >= [5, 5, 0],
-                Some((Family::Fable | Family::Mythos, _)) => true,
-                None => false,
-            }
+        self.shared().adaptive_by_default()
     }
 
-    /// 思考常开：`thinking: disabled` 在任何 effort 下都是 400。
     fn always_on(&self) -> bool {
-        match self.known {
-            Some((Family::Opus, revision)) => revision >= [5, 5, 0],
-            Some((Family::Fable | Family::Mythos, _)) => true,
-            Some((Family::Sonnet | Family::Haiku, _)) | None => false,
-        }
+        self.shared().always_on()
     }
 
-    /// Sonnet 5.5 用 `between_tools` 代替 `disabled` 表示最低思考。
     fn between_tools(&self) -> bool {
-        matches!(self.known, Some((Family::Sonnet, revision)) if revision >= [5, 5, 0])
+        self.shared().between_tools()
     }
 
-    /// Opus 5、Haiku 5.5 仅在 effort ≤ high 时接受 `disabled`。
     fn disabled_requires_effort_cap(&self) -> bool {
-        matches!(
-            self.known,
-            Some((Family::Opus, revision)) if ([5, 0, 0]..[5, 5, 0]).contains(&revision)
-        ) || matches!(self.known, Some((Family::Haiku, revision)) if revision >= [5, 5, 0])
+        self.shared().disabled_requires_effort_cap()
     }
 
-    /// 强制 `tool_choice`（`any`/`tool`）在这些型号上无论思考设置都是 400。
     fn forced_tool_use(&self) -> bool {
-        !match self.known {
-            Some((Family::Opus | Family::Sonnet, revision)) => revision >= [5, 5, 0],
-            Some((Family::Fable | Family::Mythos, revision)) => revision >= [5, 1, 0],
-            Some((Family::Haiku, _)) | None => false,
-        }
+        self.shared().forced_tool_use()
     }
 
-    /// 新型号默认不返回思考文本；沿用 oh-my-pi，客户端未指定时请求摘要。
     fn default_display_summarized(&self) -> bool {
         self.adaptive_only()
     }
@@ -165,146 +131,38 @@ impl<'a> ModelProfile<'a> {
             ))
     }
 
-    /// 型号接受的 effort 原生值；未知词表不推断顺序。
-    fn efforts(&self) -> impl Iterator<Item = &str> {
-        let ladder: &[&str] = if self.caps.efforts.is_some() {
-            &[]
-        } else {
-            match self.known {
-                None => &[],
-                Some((Family::Haiku, revision)) if revision < [5, 5, 0] => &[],
-                Some((Family::Sonnet, revision)) if revision < [4, 6, 0] => &[],
-                Some((Family::Opus, revision)) if revision < [4, 5, 0] => &[],
-                Some((Family::Opus, revision)) if revision < [4, 6, 0] => &EFFORTS[..3],
-                Some((Family::Opus, revision)) if revision < [4, 7, 0] => &EFFORTS_WITHOUT_XHIGH,
-                Some((Family::Sonnet, revision)) if revision < [5, 0, 0] => &EFFORTS_WITHOUT_XHIGH,
-                Some(_) => &EFFORTS,
-            }
-        };
-        ladder
-            .iter()
-            .copied()
-            .chain(self.caps.efforts.iter().flatten().map(String::as_str))
-    }
-
-    /// 取不高于请求档位的最高受支持档位；请求低于全部档位时取最低档。
     fn clamp_effort(&self, requested: &str) -> Option<&str> {
-        let rank = effort_rank(requested);
-        let mut lower: Option<(usize, &str)> = None;
-        let mut lowest: Option<(usize, &str)> = None;
-        // 未来原生值只允许精确命中，不参与邻档比较或最低档回退。
-        for candidate in self.efforts() {
-            if candidate == requested {
-                return Some(candidate);
-            }
-            let (Some(rank), Some(value)) = (rank, effort_rank(candidate)) else {
-                continue;
-            };
-            if lowest.is_none_or(|(current, _)| value < current) {
-                lowest = Some((value, candidate));
-            }
-            if value <= rank && lower.is_none_or(|(current, _)| value > current) {
-                lower = Some((value, candidate));
-            }
+        let clamped = self.shared().clamp_effort(requested)?.to_owned();
+        if let Some(efforts) = &self.caps.efforts
+            && let Some(found) = efforts
+                .iter()
+                .find(|candidate| candidate.as_str() == clamped)
+        {
+            return Some(found.as_str());
         }
-        lower.or(lowest).map(|(_, candidate)| candidate)
+        EFFORTS.into_iter().find(|candidate| *candidate == clamped)
     }
 }
 
-/// 从型号 ID 解析家族与版本。Opus/Sonnet/Haiku 缺少版本号
-/// （`claude-3-opus-20240229`、日期后缀）视为只支持手动预算的旧型号；
-/// Fable/Mythos 缺少版本号（如 `claude-mythos-preview`）能力不明，不猜测。
-fn parse_known(model: &str) -> Option<(Family, Revision)> {
-    let model = if model.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        Cow::Owned(model.to_ascii_lowercase())
-    } else {
-        Cow::Borrowed(model)
+/// 发现阶段发布模型支持的规范 effort 列表（含可关闭型号的 `none` 及旧手动预算型号的规范阶梯）。
+pub(crate) fn reasoning_efforts(model_id: &str, caps: &ModelCapabilities) -> Option<Vec<Value>> {
+    if caps.thinking == Some(false) || caps.efforts.is_none() {
+        return None;
+    }
+    let shared_caps = AnthropicThinkingCapabilities {
+        thinking: caps.thinking,
+        adaptive: caps.adaptive,
+        enabled: caps.enabled,
+        efforts: caps.efforts.clone(),
     };
-    let (name, family) = FAMILIES
-        .into_iter()
-        .find(|(name, _)| model.contains(name))?;
-    let index = model.find(name)?;
-    let tail = &model[index + name.len()..];
-    let tail = tail.strip_prefix(['-', '.']).unwrap_or(tail);
-    match (family, revision_prefix(tail)) {
-        (Family::Fable | Family::Mythos, None) => None,
-        (family, revision) => Some((family, revision.unwrap_or([0; 3]))),
-    }
-}
-
-/// Message Threads 的型号准入按 Anthropic Messages 的已知支持范围；不从思考或压缩能力推断。
-pub(crate) fn supports_message_threads(model: &str) -> bool {
-    model == "claude-mythos-preview"
-        || parse_known(model).is_some_and(|(_, revision)| revision >= [4, 5, 0])
-}
-
-/// 发现阶段仅发布上游明确声明的 effort；预算和开关仍由请求协议编码。
-pub(crate) fn reasoning_efforts(caps: &ModelCapabilities) -> Option<Vec<Value>> {
-    caps.efforts
-        .as_ref()
-        .map(|efforts| efforts.iter().map(|effort| json!(effort)).collect())
-}
-
-fn effort_rank(effort: &str) -> Option<usize> {
-    EFFORTS.iter().position(|candidate| *candidate == effort)
-}
-
-/// 解析型号尾部的 `major[.minor[.patch]]`，分隔符为 `.` 或后接数字的 `-`。
-/// 超过 255 的分量（日期后缀 `20250805`）与紧跟字母的分量（`32b`）不属于版本。
-fn revision_prefix(tail: &str) -> Option<Revision> {
-    let bytes = tail.as_bytes();
-    let mut revision = [0; 3];
-    let mut index = 0;
-    for (count, slot) in revision.iter_mut().enumerate() {
-        let start = index;
-        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
-            index += 1;
-        }
-        let component = if bytes.get(index).is_some_and(u8::is_ascii_alphabetic) {
-            None
-        } else {
-            tail[start..index].parse::<u8>().ok()
-        };
-        let Some(component) = component else {
-            return (count > 0).then_some(revision);
-        };
-        *slot = component;
-        let continues = matches!(bytes.get(index), Some(b'.' | b'-'))
-            && bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
-        if !continues {
-            break;
-        }
-        index += 1;
-    }
-    Some(revision)
-}
-
-/// 请求值归一为 Anthropic 词表：`minimal` 没有对应档位，取最低的 `low`；
-/// `none`、`default`、`adaptive` 等不是 effort，返回 `None`。
-fn parse_effort(value: &str) -> Option<&'static str> {
-    let value = if value == "minimal" { "low" } else { value };
-    EFFORTS.into_iter().find(|effort| *effort == value)
-}
-
-/// 预算到 effort 的近似换算，覆盖 Stravia 预算档位表（1024/2048/8192/16384）。
-fn effort_from_budget(budget: u64) -> &'static str {
-    if budget <= 4096 {
-        "low"
-    } else if budget <= 12288 {
-        "medium"
-    } else {
-        "high"
-    }
-}
-
-/// effort 到预算的换算，与 Stravia 生成预算表的默认值一致。
-fn budget_from_effort(effort: Option<&str>) -> u64 {
-    match effort {
-        Some("low") => 2048,
-        Some("medium") => 8192,
-        Some("high" | "xhigh" | "max") => 16384,
-        _ => MIN_BUDGET,
-    }
+    let profile = AnthropicModelProfile::new(model_id, &shared_caps);
+    Some(
+        profile
+            .discovery_efforts()
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+    )
 }
 
 fn is_forced_tool_choice(object: &Map<String, Value>) -> bool {
@@ -353,34 +211,28 @@ fn drop_clear_thinking(object: &mut Map<String, Value>) {
     }
 }
 
-/// 客户端显式给出输出上限时，为思考预算保留正文空间；未给出上限时保持缺省，
-/// 不根据思考预算或型号规格推导 `max_tokens`（必填回退属于编码器）。
 fn raise_max_tokens(object: &mut Map<String, Value>, budget: u64) {
     let Some(current) = object.get("max_tokens").and_then(Value::as_u64) else {
         return;
     };
-    let floor = budget + OUTPUT_BUFFER;
+    let floor = raise_explicit_max_tokens(
+        u32::try_from(current).unwrap_or(u32::MAX),
+        u32::try_from(budget).unwrap_or(u32::MAX),
+    ) as u64;
     if current < floor {
         object.insert("max_tokens".into(), json!(floor));
     }
 }
 
-/// 自动补出的 `max_tokens` 是发现到的型号上限或编码器的必填回退，不能被思考
-/// 预算抬高；反过来把预算压进上限，并尽量为正文保留 [`OUTPUT_BUFFER`]。
-/// 返回 `None` 表示上限放不下合法预算（预算须不小于 [`MIN_BUDGET`] 且小于上限）。
 fn fit_budget_within_default(object: &Map<String, Value>, budget: u64) -> Option<u64> {
     let Some(limit) = object.get("max_tokens").and_then(Value::as_u64) else {
         return Some(budget);
     };
-    if limit <= MIN_BUDGET {
-        return None;
-    }
-    Some(
-        budget
-            .min(limit.saturating_sub(OUTPUT_BUFFER))
-            .max(MIN_BUDGET)
-            .min(limit - 1),
+    fit_budget_within_auto_limit(
+        u32::try_from(limit).unwrap_or(u32::MAX),
+        u32::try_from(budget).unwrap_or(u32::MAX),
     )
+    .map(u64::from)
 }
 
 /// The CLI accepts an omitted or summarized thinking transcript, not canonical
@@ -427,7 +279,7 @@ pub(crate) fn preserve_implicit_summary_intent(
 pub(crate) fn normalize(
     object: &mut Map<String, Value>,
     caps: &ModelCapabilities,
-    auto_output_limit: bool,
+    options: NormalizeOptions,
 ) -> Result<(), String> {
     sanitize_display(object);
     let Some(profile) = ModelProfile::of_request(object, caps) else {
@@ -445,7 +297,9 @@ pub(crate) fn normalize(
                 .and_then(|config| config.get("effort"))
                 .and_then(Value::as_str);
             if requested.is_none() {
-                set_effort(object, profile.clamp_effort("medium"));
+                if options.allow_default_effort {
+                    set_effort(object, profile.clamp_effort("medium"));
+                }
             } else if requested.is_some_and(|value| !efforts.iter().any(|effort| effort == value)) {
                 set_effort(object, None);
             }
@@ -477,7 +331,7 @@ pub(crate) fn normalize(
         .and_then(Value::as_str)
         .map(str::to_owned);
     // 插件统一采用 medium；显式强度、预算换算及型号能力始终优先。
-    let default_effort = requested.is_none().then_some("medium");
+    let default_effort = (options.allow_default_effort && requested.is_none()).then_some("medium");
 
     let mut forced = is_forced_tool_choice(object);
     if forced && !profile.forced_tool_use() {
@@ -495,7 +349,9 @@ pub(crate) fn normalize(
             .map(|_| value)
             .or_else(|| parse_effort(value))
     });
-    let off = kind.as_deref() == Some("disabled") || requested.as_deref() == Some("none");
+    let off = options.explicit_off
+        || matches!(kind.as_deref(), Some("disabled" | "between_tools"))
+        || requested.as_deref().is_some_and(effort_is_off);
     let on = !off && matches!(kind.as_deref(), Some("adaptive" | "enabled"));
 
     if off {
@@ -561,9 +417,9 @@ pub(crate) fn normalize(
 
     if manual {
         let mut budget = budget
-            .unwrap_or_else(|| budget_from_effort(effort))
+            .unwrap_or_else(|| static_budget_for_effort(effort, None) as u64)
             .max(MIN_BUDGET);
-        if auto_output_limit {
+        if options.auto_output_limit {
             budget = fit_budget_within_default(object, budget)
                 .ok_or("Anthropic enabled thinking requires max_tokens greater than 1024")?;
         }
@@ -573,7 +429,7 @@ pub(crate) fn normalize(
         }
         object.insert("thinking".into(), thinking);
         // 自动补出的上限不得被预算抬高；显式上限沿用既有抬高规则。
-        if !auto_output_limit {
+        if !options.auto_output_limit {
             raise_max_tokens(object, budget);
         }
         set_effort(
@@ -593,9 +449,7 @@ pub(crate) fn normalize(
             thinking["display"] = Value::String(display);
         }
         object.insert("thinking".into(), thinking);
-        let effort = effort
-            .or_else(|| budget.map(effort_from_budget))
-            .or(default_effort);
+        let effort = effort.or(default_effort);
         set_effort(object, effort.and_then(|value| profile.clamp_effort(value)));
     }
     Ok(())
@@ -621,17 +475,12 @@ fn sanitize_display(object: &mut Map<String, Value>) {
     };
 }
 
-fn cap_at_high(effort: &'static str) -> &'static str {
-    if effort_rank(effort) > effort_rank("high") {
-        "high"
-    } else {
-        effort
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stravia_protocol_codec::codec::thinking::ANTHROPIC_OUTPUT_BUFFER;
+
+    const OUTPUT_BUFFER: u64 = ANTHROPIC_OUTPUT_BUFFER as u64;
 
     #[test]
     fn canonical_summary_maps_to_official_display_and_preserves_implicit_intent() {
@@ -653,7 +502,7 @@ mod tests {
             normalize(
                 body.as_object_mut().unwrap(),
                 &ModelCapabilities::default(),
-                false,
+                NormalizeOptions::default(),
             )
             .unwrap();
             assert_eq!(
@@ -679,7 +528,12 @@ mod tests {
         body.as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        normalize(body.as_object_mut().unwrap(), caps, false).unwrap();
+        normalize(
+            body.as_object_mut().unwrap(),
+            caps,
+            NormalizeOptions::default(),
+        )
+        .unwrap();
         body
     }
 
@@ -732,7 +586,10 @@ mod tests {
         normalize(
             implicit.as_object_mut().unwrap(),
             &ModelCapabilities::default(),
-            true,
+            NormalizeOptions {
+                auto_output_limit: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(
@@ -863,13 +720,22 @@ mod tests {
 
     #[test]
     fn automatic_output_limit_is_kept_and_the_budget_fits_below_it() {
+        let auto_opts = NormalizeOptions {
+            auto_output_limit: true,
+            ..Default::default()
+        };
         // 发现到的型号上限：预算超出时压到上限内，并保留正文缓冲。
         let mut body = json!({
             "model": "claude-sonnet-4-5",
             "max_tokens": 32000,
             "thinking": {"type": "enabled", "budget_tokens": 63000},
         });
-        normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).unwrap();
+        normalize(
+            body.as_object_mut().unwrap(),
+            &caps(false, true, &[]),
+            auto_opts,
+        )
+        .unwrap();
         assert_eq!(body["max_tokens"], 32000);
         assert_eq!(body["thinking"]["budget_tokens"], 32000 - OUTPUT_BUFFER);
 
@@ -879,7 +745,12 @@ mod tests {
             "max_tokens": 32000,
             "thinking": {"type": "enabled", "budget_tokens": 16000},
         });
-        normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).unwrap();
+        normalize(
+            body.as_object_mut().unwrap(),
+            &caps(false, true, &[]),
+            auto_opts,
+        )
+        .unwrap();
         assert_eq!(body["max_tokens"], 32000);
         assert_eq!(body["thinking"]["budget_tokens"], 16000);
 
@@ -889,7 +760,12 @@ mod tests {
             "max_tokens": 3000,
             "thinking": {"type": "enabled", "budget_tokens": 16000},
         });
-        normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).unwrap();
+        normalize(
+            body.as_object_mut().unwrap(),
+            &caps(false, true, &[]),
+            auto_opts,
+        )
+        .unwrap();
         assert_eq!(body["max_tokens"], 3000);
         assert_eq!(body["thinking"]["budget_tokens"], MIN_BUDGET);
 
@@ -899,7 +775,14 @@ mod tests {
             "max_tokens": MIN_BUDGET,
             "thinking": {"type": "adaptive"},
         });
-        assert!(normalize(body.as_object_mut().unwrap(), &caps(false, true, &[]), true).is_err());
+        assert!(
+            normalize(
+                body.as_object_mut().unwrap(),
+                &caps(false, true, &[]),
+                auto_opts,
+            )
+            .is_err()
+        );
     }
 
     #[test]

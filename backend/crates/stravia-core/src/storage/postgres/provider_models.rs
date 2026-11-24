@@ -1285,14 +1285,16 @@ mod tests {
             .collect()
     }
 
-    /// A catalog-fresh Generated map: `low` becomes Enabled, the rest Hidden.
+    /// A catalog-fresh Generated map: `low` becomes Effort("low"), the rest Hidden.
     fn fresh_generated_map() -> Vec<ThinkingLevelMapping> {
         ThinkingLevel::ALL
             .into_iter()
             .map(|level| ThinkingLevelMapping {
                 level,
                 control: if level == ThinkingLevel::Low {
-                    TargetThinkingControl::Enabled
+                    TargetThinkingControl::Effort {
+                        value: "low".into(),
+                    }
                 } else {
                     TargetThinkingControl::Hidden
                 },
@@ -1443,7 +1445,12 @@ mod tests {
         );
         let low = map_row(&target.thinking_level_map, ThinkingLevel::Low);
         assert_eq!(low.source, ThinkingMappingSource::Generated);
-        assert_eq!(low.control, TargetThinkingControl::Enabled);
+        assert_eq!(
+            low.control,
+            TargetThinkingControl::Effort {
+                value: "low".into()
+            }
+        );
 
         // 无关模型的 Target 保持不变；已禁用 Route 的匹配 Target 仍原地刷新。
         let other = target_map_in_db(&pool, "target-3").await;
@@ -1455,7 +1462,9 @@ mod tests {
         let disabled = target_map_in_db(&pool, "target-2").await;
         assert_eq!(
             map_row(&disabled, ThinkingLevel::Low).control,
-            TargetThinkingControl::Enabled
+            TargetThinkingControl::Effort {
+                value: "low".into()
+            }
         );
 
         cleanup(admin, pool, &schema).await;
@@ -1588,7 +1597,9 @@ mod tests {
         insert_route(&pool, "route-1", "route-a", true).await;
         let original_map = target_map(&[(
             ThinkingLevel::High,
-            TargetThinkingControl::Budget { value: 2048 },
+            TargetThinkingControl::Effort {
+                value: "max".into(),
+            },
         )]);
         insert_target(
             &pool,
@@ -1601,10 +1612,10 @@ mod tests {
         .await;
 
         let epoch_before = config_epoch(&pool).await;
-        // Generated 行未变，也必须检查协议无法表达的现有 Overridden 行；
+        // Generated 行未变，也必须检查模型不再声明的现有 Overridden 行；
         // 此时快照与成本规则已写入事务，校验失败必须全部回滚。
         let mut input = restore_input(1);
-        input.metadata.reasoning_efforts = None;
+        input.metadata.reasoning_efforts = Some(vec!["low".into()]);
         input.generated_thinking_level_map = Some(target_map(&[]));
         let result = storage
             .restore(
@@ -1616,7 +1627,6 @@ mod tests {
                         map.iter().all(|row| crate::thinking::control_is_writable(
                             "openai-compatible",
                             metadata,
-                            false,
                             &row.control
                         )),
                         "unsupported manual control"
@@ -1739,7 +1749,9 @@ mod tests {
         );
         assert_eq!(
             map_row(map, ThinkingLevel::Low).control,
-            TargetThinkingControl::Enabled
+            TargetThinkingControl::Effort {
+                value: "low".into()
+            }
         );
 
         cleanup(admin, pool, &schema).await;

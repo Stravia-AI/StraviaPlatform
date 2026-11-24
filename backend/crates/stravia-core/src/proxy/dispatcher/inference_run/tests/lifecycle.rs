@@ -1701,7 +1701,9 @@ async fn unrepresentable_thinking_mapping_uses_nearest_protocol_supported_level(
             ThinkingLevel::Low => TargetThinkingControl::Effort {
                 value: "low".into(),
             },
-            ThinkingLevel::Medium => TargetThinkingControl::Budget { value: 8192 },
+            ThinkingLevel::Medium => TargetThinkingControl::Effort {
+                value: "unsupported-legacy-effort".into(),
+            },
             ThinkingLevel::High => TargetThinkingControl::Effort {
                 value: "high".into(),
             },
@@ -1784,10 +1786,12 @@ async fn unrepresentable_thinking_mapping_uses_nearest_protocol_supported_level(
         .iter()
         .find(|row| row.level == ThinkingLevel::Medium)
         .expect("persisted medium row");
-    assert!(matches!(
+    assert_eq!(
         medium.control,
-        TargetThinkingControl::Budget { value: 8192 }
-    ));
+        TargetThinkingControl::Effort {
+            value: "unsupported-legacy-effort".into()
+        }
+    );
     close_test_gateway(gateway, data_dir).await;
 }
 

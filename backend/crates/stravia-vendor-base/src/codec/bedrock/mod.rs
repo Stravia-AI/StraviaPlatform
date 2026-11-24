@@ -180,20 +180,35 @@ impl ProtocolAdapter for BedrockConverseV1 {
                     .get("type")
                     .and_then(Value::as_str)
                     .context("Bedrock thinking is missing type")?;
-                request.reasoning.target_control = Some(match kind {
+                if kind == "enabled"
+                    || thinking
+                        .get("budget_tokens")
+                        .is_some_and(|value| !value.is_null())
+                {
+                    bail!(
+                        "Bedrock thinking.type = \"enabled\" and thinking.budget_tokens are no longer supported; use thinking: {{\"type\": \"adaptive\"}} with output_config.effort or thinking: {{\"type\": \"disabled\"}}"
+                    );
+                }
+                match kind {
                     "disabled" => {
-                        stravia_runtime_contract::thinking::TargetThinkingControl::Disabled
+                        if let Some(level) = request.reasoning.level
+                            && level != stravia_runtime_contract::thinking::ThinkingLevel::Off
+                        {
+                            bail!(
+                                "Bedrock thinking.type = \"disabled\" cannot be combined with non-off output_config.effort"
+                            );
+                        }
+                        request.reasoning.level =
+                            Some(stravia_runtime_contract::thinking::ThinkingLevel::Off);
                     }
-                    "enabled" | "adaptive" => {
-                        stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
+                    "adaptive" => {
+                        if request.reasoning.level.is_none() {
+                            request.reasoning.level =
+                                Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
+                        }
                     }
                     _ => bail!("unsupported Bedrock thinking type"),
-                });
-                request.reasoning.mode = Some(kind.into());
-                request.reasoning.budget_tokens = thinking
-                    .get("budget_tokens")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok());
+                }
             }
         }
         if let Some(config) = body.get("inferenceConfig") {
@@ -236,28 +251,41 @@ impl ProtocolAdapter for BedrockConverseV1 {
     }
 
     fn encode_request(&self, mut request: AiRequest) -> anyhow::Result<(Value, HeaderMap)> {
+        use stravia_protocol_codec::codec::thinking::{
+            AnthropicModelProfile, AnthropicThinkingCapabilities, fit_budget_within_auto_limit,
+            static_budget_for_effort,
+        };
+        use stravia_runtime_contract::thinking::{
+            TargetThinkingControl, ThinkingLevel, effort_is_off,
+        };
+
         request.normalize_parameters();
         let claude = request.model.contains("anthropic.claude");
-        let thinking = claude
-            && match request.reasoning.target_control {
-                Some(
-                    stravia_runtime_contract::thinking::TargetThinkingControl::Disabled
-                    | stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
-                ) => false,
-                Some(
-                    stravia_runtime_contract::thinking::TargetThinkingControl::Enabled
-                    | stravia_runtime_contract::thinking::TargetThinkingControl::Budget { .. }
-                    | stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. },
-                ) => true,
-                None => request.reasoning.is_enabled(),
+        let (is_off, explicit_effort, requested_thinking) =
+            match request.reasoning.target_control.as_ref() {
+                Some(TargetThinkingControl::Hidden) => (false, None, false),
+                Some(TargetThinkingControl::Effort { value }) => {
+                    if effort_is_off(value) {
+                        (true, None, true)
+                    } else {
+                        (false, Some(value.clone()), true)
+                    }
+                }
+                None => match request.reasoning.level {
+                    None => (false, None, false),
+                    Some(ThinkingLevel::Off) => (true, None, true),
+                    Some(_) => (false, None, true),
+                },
             };
-        let budget = match request.reasoning.target_control {
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value }) => {
-                Some(value)
-            }
-            _ => request.reasoning.budget_tokens,
-        };
-        if thinking {
+        let caps = AnthropicThinkingCapabilities::default();
+        let profile = AnthropicModelProfile::new(&request.model, &caps);
+        let thinking = claude && requested_thinking && !is_off;
+        let strip_sampling = thinking
+            || (claude
+                && requested_thinking
+                && is_off
+                && (profile.always_on() || profile.between_tools()));
+        if strip_sampling {
             request.generation.temperature = None;
             request.generation.top_p = None;
         }
@@ -323,54 +351,51 @@ impl ProtocolAdapter for BedrockConverseV1 {
         }
         if claude {
             let mut native = Map::new();
-            if let Some(top_k) = request.parameters.top_k.filter(|_| !thinking) {
+            if let Some(top_k) = request.parameters.top_k.filter(|_| !strip_sampling) {
                 native.insert("top_k".into(), top_k.into());
             }
             if thinking {
-                let config = if matches!(
-                    request.reasoning.mode.as_deref(),
-                    Some("auto" | "adaptive")
-                ) || matches!(
-                    request.reasoning.target_control,
-                    Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
-                ) {
+                let requested_effort = explicit_effort.as_deref().or_else(|| {
+                    request.reasoning.level.map(|level| match level {
+                        ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+                        ThinkingLevel::Medium => "medium",
+                        ThinkingLevel::High => "high",
+                        ThinkingLevel::Xhigh => "xhigh",
+                        ThinkingLevel::Max => "max",
+                    })
+                });
+                let config = if profile.supports_adaptive() {
                     json!({"type": "adaptive"})
-                } else if let Some(budget) = budget {
-                    if let Some(cap) = request.generation.max_tokens {
-                        anyhow::ensure!(
-                            budget < cap,
-                            "Bedrock Claude thinking budget must be below the output token limit"
-                        );
+                } else {
+                    let mut budget = static_budget_for_effort(
+                        explicit_effort.as_deref(),
+                        request.reasoning.level,
+                    );
+                    if let Some(cap) = request.generation.max_tokens
+                        && budget >= cap
+                    {
+                        budget = fit_budget_within_auto_limit(cap, budget).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Bedrock Claude thinking budget must be below the output token limit"
+                            )
+                        })?;
                     }
                     json!({"type": "enabled", "budget_tokens": budget})
-                } else {
-                    bail!(
-                        "Bedrock Claude enabled thinking requires a token budget or adaptive mode"
-                    );
                 };
                 native.insert("thinking".into(), config);
-                let effort = match request.reasoning.target_control.as_ref() {
-                    Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
-                        value,
-                    }) => Some(value.as_str()),
-                    _ => request.reasoning.level.map(|level| {
-                        if level == stravia_runtime_contract::thinking::ThinkingLevel::Off {
-                            "none"
-                        } else {
-                            level.as_str()
-                        }
-                    }),
-                };
-                if let Some(effort @ ("low" | "medium" | "high" | "max")) = effort {
+                if let Some(effort) =
+                    requested_effort.and_then(|value| profile.resolve_effort(value))
+                {
                     native.insert("output_config".into(), json!({"effort": effort}));
                 }
-            } else if matches!(
-                request.reasoning.target_control,
-                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
-            ) || (request.reasoning.target_control.is_none()
-                && request.reasoning.mode.as_deref() == Some("disabled"))
-            {
-                native.insert("thinking".into(), json!({"type": "disabled"}));
+            } else if requested_thinking && is_off {
+                if profile.always_on() {
+                    native.insert("output_config".into(), json!({"effort": "low"}));
+                } else if profile.between_tools() {
+                    native.insert("thinking".into(), json!({"type": "between_tools"}));
+                } else {
+                    native.insert("thinking".into(), json!({"type": "disabled"}));
+                }
             }
             if !native.is_empty() {
                 body.insert("additionalModelRequestFields".into(), Value::Object(native));
