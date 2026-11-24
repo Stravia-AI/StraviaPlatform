@@ -407,30 +407,15 @@
   "models_destinations_allowance_suspended": "额度暂停 {count}",
   "models_destinations_multiple": [
     {
-      "declarations": [
-        "input count",
-        "input strategy",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
-      "match": {
-        "countPlural=one": "{count} 个目标 · {strategy}",
-        "countPlural=other": "{count} 个目标 · {strategy}"
-      }
+      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": { "countPlural=one": "{count} 个目标 · {strategy}", "countPlural=other": "{count} 个目标 · {strategy}" }
     }
   ],
   "models_destinations_fallback": [
     {
-      "declarations": [
-        "input layers",
-        "input targets",
-        "local layersPlural = layers: plural"
-      ],
-      "selectors": [
-        "layersPlural"
-      ],
+      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
+      "selectors": ["layersPlural"],
       "match": {
         "layersPlural=one": "另有 {layers} 层后备（{targets} 个目标）",
         "layersPlural=other": "另有 {layers} 层后备（{targets} 个目标）"
@@ -439,17 +424,9 @@
   ],
   "models_destinations_unavailable": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
-      "match": {
-        "countPlural=one": "{count} 个目标不可用",
-        "countPlural=other": "{count} 个目标不可用"
-      }
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": { "countPlural=one": "{count} 个目标不可用", "countPlural=other": "{count} 个目标不可用" }
     }
   ],
   "console_chat_connect_service_title": "连接供应商",
@@ -1085,6 +1062,7 @@
   "models_loading_models": "正在加载模型",
   "models_model_deleted": "模型已删除。",
   "models_model_not_found": "未找到模型",
+  "models_model_picker": "模型选择器",
   "models_models_not_loaded": "无法加载模型。",
   "models_more_actions_value": "{name} 的更多操作",
   "models_no_models_configured": "尚未配置模型",
@@ -1443,6 +1421,20 @@
   "settings_theme": "主题",
   "settings_theme_preference": "主题偏好",
   "settings_version": "版本",
+  "settings_about": "关于",
+  "settings_about_edition": "发行版",
+  "settings_about_edition_ce": "社区版",
+  "settings_about_edition_pro": "专业版",
+  "settings_about_edition_enterprise": "企业版",
+  "settings_about_edition_commercial": "商业版",
+  "settings_about_license_expired": "已过期",
+  "settings_about_license_invalid": "无效",
+  "settings_about_license_missing": "未激活",
+  "settings_about_website": "官方网站",
+  "settings_about_open_website": "访问官网",
+  "settings_about_github": "GitHub 仓库",
+  "settings_about_github_description": "如果 Stravia 对你有帮助，欢迎在 GitHub 点个 Star 支持。",
+  "settings_about_github_star": "前往 Star",
   "stats_api_key_usage": "API 密钥使用",
   "stats_error_count": "错误数",
   "stats_error_rate": "错误率",
@@ -1738,13 +1730,8 @@
   "common_this_service": "此服务",
   "models_removed_service_destinations": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "这会移除 {count} 个请求目标，并更新使用此模型的其他设置。",
         "countPlural=other": "这会移除 {count} 个请求目标，并更新使用此模型的其他设置。"
@@ -1753,13 +1740,8 @@
   ],
   "models_removed_api_key_permissions": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "将移除 {count} 个 API 密钥权限",
         "countPlural=other": "将移除 {count} 个 API 密钥权限"
@@ -1768,28 +1750,15 @@
   ],
   "providers_model_compatibility_warnings": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
-      "match": {
-        "countPlural=one": "{count} 条模型兼容性警告",
-        "countPlural=other": "{count} 条模型兼容性警告"
-      }
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": { "countPlural=one": "{count} 条模型兼容性警告", "countPlural=other": "{count} 条模型兼容性警告" }
     }
   ],
   "providers_model_destinations_in_use": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "仍有 {count} 个目标使用此供应商。",
         "countPlural=other": "仍有 {count} 个目标使用此供应商。"
@@ -1798,28 +1767,15 @@
   ],
   "provider_model_catalog_used_by_models": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
-      "match": {
-        "countPlural=one": "用于 {count} 个模型",
-        "countPlural=other": "用于 {count} 个模型"
-      }
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": { "countPlural=one": "用于 {count} 个模型", "countPlural=other": "用于 {count} 个模型" }
     }
   ],
   "provider_model_catalog_remove_manual_references": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "从列表中移除此手动添加的模型。现有 {count} 个已配置模型仍会继续使用同一个上游模型 ID。",
         "countPlural=other": "从列表中移除此手动添加的模型。现有 {count} 个已配置模型仍会继续使用同一个上游模型 ID。"
@@ -1865,13 +1821,8 @@
   "backend_error_auth_refresh_token_not_supported": "此供应商渠道不支持直接使用 Refresh Token 登录。",
   "backend_error_provider_in_use_routes": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "此供应商仍被 {count} 个模型使用。请先为这些模型选择其他供应商。",
         "countPlural=other": "此供应商仍被 {count} 个模型使用。请先为这些模型选择其他供应商。"
