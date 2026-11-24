@@ -627,6 +627,7 @@ test.describe('Server startup', () => {
 
         for (const [phase, label] of [
           ['content_store', chinese ? '正在转换共享内容存储' : 'Converting shared content storage'],
+          ['history_index', chinese ? '正在重建历史索引' : 'Rebuilding history index'],
           ['credential_cleanup', chinese ? '正在移除已停用的凭据规则' : 'Removing retired credential rules'],
           ['model_pinning', chinese ? '正在转换已编辑的供应商模型快照' : 'Converting edited provider model snapshots'],
           ['usage_backfill', chinese ? '正在更新用量记录' : 'Updating usage records'],

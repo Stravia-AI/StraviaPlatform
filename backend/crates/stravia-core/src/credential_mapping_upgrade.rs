@@ -39,6 +39,10 @@ macro_rules! backend {
             let mut deleted = 0u64;
             let mut cursor: Option<String> = None;
             report(PHASE, LABEL, deleted, Some(total));
+            if total == 0 {
+                tracing::info!(scanned, expired, retained_by_reference, deleted, "Expired credential mapping upgrade completed");
+                return Ok(());
+            }
             loop {
                 let mut tx = connection.begin().await?;
                 if let Some(lock) = $lock {
@@ -161,8 +165,14 @@ fn clean_event(bytes: &[u8], known: &HashSet<String>) -> anyhow::Result<CleanedE
     )?))
 }
 
+fn clean_event_job(
+    (sequence, payload, known): (i64, Vec<u8>, Arc<HashSet<String>>),
+) -> anyhow::Result<(i64, CleanedEvent)> {
+    Ok((sequence, clean_event(&payload, &known)?))
+}
+
 macro_rules! legacy_backend {
-    ($name:ident, $conn:ty, $trailer:literal) => {
+    ($name:ident, $db:ty, $conn:ty, $trailer:literal) => {
         /// 0055 前移除失去检测器的归因；SQL 随后原子删除空归因映射及其引用。
         pub(crate) async fn $name(connection: &mut $conn) -> anyhow::Result<()> {
             report(CLEANUP_PHASE, CLEANUP_LABEL, 0, None);
@@ -180,8 +190,9 @@ macro_rules! legacy_backend {
                 return Ok(());
             }
             // 停用不是下线：内置目录与所有仍存在的自定义规则都保留，不看 enabled。
-            let mut known: HashSet<String> = stravia_credential_protection::rule_catalog().await?
-                .rules.into_iter().map(|rule| rule.id).collect();
+            // 仅解析规则 ID 集合，不触发正则与 Aho-Corasick 检测器编译。
+            let mut known: HashSet<String> = stravia_credential_protection::builtin_rule_ids()?
+                .into_iter().collect();
             let custom: Vec<String> = sqlx::query_scalar("SELECT id FROM credential_custom_rules")
                 .fetch_all(&mut *connection).await?;
             known.extend(custom);
@@ -198,16 +209,26 @@ macro_rules! legacy_backend {
                     break;
                 }
                 let count = rows.len();
+                let mut updates: Vec<(String, String)> = Vec::new();
                 for (reference, encoded) in rows {
                     let mut ids: Vec<String> = serde_json::from_str(&encoded)?;
                     let before = ids.len();
                     ids.retain(|id| known.contains(id));
                     if before != ids.len() {
-                        sqlx::query("UPDATE reversible_redaction_mappings SET rule_ids=$1 WHERE reference=$2")
-                            .bind(serde_json::to_string(&ids)?).bind(&reference)
-                            .execute(&mut *tx).await?;
+                        updates.push((reference.clone(), serde_json::to_string(&ids)?));
                     }
                     after = reference;
+                }
+                for chunk in updates.chunks(200) {
+                    let mut query = sqlx::QueryBuilder::<$db>::new("WITH v(reference,rule_ids) AS (");
+                    query.push_values(chunk, |mut row, (reference, rule_ids)| {
+                        row.push_bind(reference).push_bind(rule_ids);
+                    });
+                    query.push(
+                        ") UPDATE reversible_redaction_mappings SET rule_ids=v.rule_ids \
+                         FROM v WHERE reversible_redaction_mappings.reference=v.reference",
+                    );
+                    query.build().execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
                 completed += count as u64;
@@ -224,38 +245,63 @@ macro_rules! legacy_backend {
                     break;
                 }
                 let mut bytes = 0usize;
-                let mut through = after;
+                let mut selected: Vec<i64> = Vec::with_capacity(candidates.len());
                 for (sequence, trailer) in candidates {
                     let size = crate::storage_codec::decoded_size_hint(&trailer)?;
                     // 首个大事件独占一批；先读固定尾部，避免先拉取一整批大载荷。
-                    if through != after && size > EVENT_BATCH_BYTES.saturating_sub(bytes) {
+                    if !selected.is_empty() && size > EVENT_BATCH_BYTES.saturating_sub(bytes) {
                         break;
                     }
                     bytes = bytes.saturating_add(size);
-                    through = sequence;
+                    selected.push(sequence);
                 }
-                let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-                    "SELECT sequence,attrs FROM observation_events WHERE kind IN ('credential_mappings_created','credential_mappings_reused') AND attrs IS NOT NULL AND sequence>$1 AND sequence<=$2 ORDER BY sequence",
-                ).bind(after).bind(through).fetch_all(&mut *tx).await?;
+                let through = *selected.last().expect("selected batch is non-empty");
+                let mut fetch = sqlx::QueryBuilder::<$db>::new(
+                    "SELECT sequence,attrs FROM observation_events WHERE sequence IN (",
+                );
+                let mut list = fetch.separated(",");
+                for &sequence in &selected {
+                    list.push_bind(sequence);
+                }
+                list.push_unseparated(") ORDER BY sequence");
+                let rows: Vec<(i64, Vec<u8>)> = fetch.build_query_as().fetch_all(&mut *tx).await?;
                 let count = rows.len();
-                let rules = Arc::clone(&known);
-                let cleaned = tokio::task::spawn_blocking(move || {
-                    rows.into_iter().map(|(sequence, payload)| {
-                        clean_event(&payload, &rules).map(|event| (sequence, event))
-                    }).collect::<anyhow::Result<Vec<_>>>()
-                }).await??;
+                let jobs = rows
+                    .into_iter()
+                    .map(|(sequence, payload)| (sequence, payload, Arc::clone(&known)))
+                    .collect();
+                let cleaned =
+                    crate::turn_chain::content::upgrade_cpu(jobs, clean_event_job).await?;
+                let mut rewritten: Vec<(i64, Vec<u8>)> = Vec::new();
+                let mut to_delete: Vec<i64> = Vec::new();
                 for (sequence, event) in cleaned {
                     match event {
                         CleanedEvent::Unchanged => {}
-                        CleanedEvent::Rewritten(payload) => {
-                            sqlx::query("UPDATE observation_events SET attrs=$1 WHERE sequence=$2")
-                                .bind(payload).bind(sequence).execute(&mut *tx).await?;
-                        }
-                        CleanedEvent::Empty => {
-                            sqlx::query("DELETE FROM observation_events WHERE sequence=$1")
-                                .bind(sequence).execute(&mut *tx).await?;
-                        }
+                        CleanedEvent::Rewritten(payload) => rewritten.push((sequence, payload)),
+                        CleanedEvent::Empty => to_delete.push(sequence),
                     }
+                }
+                for chunk in rewritten.chunks(100) {
+                    let mut query = sqlx::QueryBuilder::<$db>::new("WITH v(seq,attrs) AS (");
+                    query.push_values(chunk, |mut row, (sequence, payload)| {
+                        row.push_bind(*sequence).push_bind(payload);
+                    });
+                    query.push(
+                        ") UPDATE observation_events SET attrs=v.attrs \
+                         FROM v WHERE observation_events.sequence=v.seq",
+                    );
+                    query.build().execute(&mut *tx).await?;
+                }
+                for chunk in to_delete.chunks(400) {
+                    let mut query = sqlx::QueryBuilder::<$db>::new(
+                        "DELETE FROM observation_events WHERE sequence IN (",
+                    );
+                    let mut list = query.separated(",");
+                    for &sequence in chunk {
+                        list.push_bind(sequence);
+                    }
+                    list.push_unseparated(")");
+                    query.build().execute(&mut *tx).await?;
                 }
                 tx.commit().await?;
                 after = through;
@@ -280,11 +326,13 @@ macro_rules! legacy_backend {
 
 legacy_backend!(
     retire_sqlite,
+    sqlx::Sqlite,
     sqlx::SqliteConnection<'_>,
     "substr(attrs,-14)"
 );
 legacy_backend!(
     retire_postgres,
+    sqlx::Postgres,
     sqlx::PgConnection<'_>,
     "substr(attrs,octet_length(attrs)-13)"
 );

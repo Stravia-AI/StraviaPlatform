@@ -550,6 +550,7 @@
   "startup_phase_migration_validate": "正在检查已有数据",
   "startup_phase_history_schema": "正在准备历史存储",
   "startup_phase_history_data": "正在迁移历史记录",
+  "startup_phase_history_index": "正在重建历史索引",
   "startup_phase_debug_manifests": "正在更新诊断清单",
   "startup_phase_observation_schema": "正在准备观测存储",
   "startup_phase_observation_data": "正在迁移观测记录",

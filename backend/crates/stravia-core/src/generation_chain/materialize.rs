@@ -521,6 +521,47 @@ impl Default for PrefixRebuild {
     }
 }
 
+/// 前缀重建只读取客户端输入/输出增量与历史元数据，跳过 system / tools / effective_request
+/// 等大槽位；历史节点缺失 client_output 时再回退恢复 effective_output。
+pub(super) fn prefix_rebuild_slot_filter(
+    data: &serde_json::Value,
+    slot: &crate::content_store::Slot,
+) -> bool {
+    let path = slot.pointer.as_str();
+    let has_mutation = data
+        .get("client_history_mutation")
+        .is_some_and(|value| !value.is_null());
+    if has_mutation {
+        if path == "/client_history_mutation" || path.starts_with("/client_history_mutation/") {
+            return true;
+        }
+    } else if path == "/client_delta/messages" || path.starts_with("/client_delta/messages/") {
+        return true;
+    }
+    let has_client_output = data
+        .get("client_output")
+        .is_some_and(|value| !value.is_null());
+    if has_client_output {
+        path == "/client_output" || path.starts_with("/client_output/")
+    } else {
+        path == "/effective_output" || path.starts_with("/effective_output/")
+    }
+}
+
+#[derive(Deserialize)]
+struct PrefixRebuildPayload {
+    #[serde(default)]
+    client_delta: Option<serde_json::Value>,
+    #[serde(default)]
+    client_output: Option<Vec<FrozenItem>>,
+    #[serde(default)]
+    client_history_mutation: Option<EffectiveHistoryMutation<'static>>,
+    #[serde(default)]
+    effective_output: Option<serde_json::Value>,
+    #[serde(default)]
+    client_history: Option<ClientHistoryState>,
+}
+
 impl PrefixRebuild {
     pub(crate) fn decode(
         &mut self,
@@ -534,16 +575,38 @@ impl PrefixRebuild {
                 .ok_or_else(|| "generation parent was not rebuilt".to_string())?,
             None => self.empty,
         };
-        let (id, mut persisted) = decode_response_node(node)?;
-        let (replace, input) = owned_mutation(persisted.client_history_mutation.take())
-            .unwrap_or_else(|| (false, std::mem::take(&mut persisted.client_delta.messages)));
+        if node.payload_version != RESPONSE_PAYLOAD_VERSION {
+            return Err("unsupported generation payload version".into());
+        }
+        let id = node.id;
+        let mut persisted = serde_json::from_value::<PrefixRebuildPayload>(node.payload)
+            .map_err(|_| "invalid generation payload".to_string())?;
+        let (replace, input) = match owned_mutation(persisted.client_history_mutation.take()) {
+            Some(mutation) => mutation,
+            None => {
+                let messages = persisted
+                    .client_delta
+                    .and_then(|mut delta| delta.get_mut("messages").map(serde_json::Value::take))
+                    .ok_or_else(|| "invalid generation payload".to_string())?;
+                let messages = serde_json::from_value::<Vec<FrozenItem>>(messages)
+                    .map_err(|_| "invalid generation payload".to_string())?;
+                (false, Cow::Owned(messages))
+            }
+        };
         if replace {
             context = self.empty;
         }
-        let output = persisted
-            .client_output
-            .take()
-            .unwrap_or_else(|| client_output_fallback(&persisted.effective_output));
+        let output = match persisted.client_output.take() {
+            Some(items) => items,
+            None => {
+                let effective = persisted
+                    .effective_output
+                    .ok_or_else(|| "invalid generation payload".to_string())?;
+                let effective = serde_json::from_value::<FrozenResponse>(effective)
+                    .map_err(|_| "invalid generation payload".to_string())?;
+                client_output_fallback(&effective)
+            }
+        };
         // 只折叠此节点的客户端增量；分支复制固定大小的父摘要，不物化或保留祖先正文。
         for item in input.iter().chain(&output) {
             let (hash, units) =

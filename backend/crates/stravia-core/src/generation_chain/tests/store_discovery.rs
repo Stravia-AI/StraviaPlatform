@@ -1964,6 +1964,197 @@ async fn prefix_rebuild_preserves_branch_mutations_and_unindexed_ancestor_contex
 }
 
 #[tokio::test]
+async fn sql_batched_prefix_rebuild_matches_full_restore_reports_history_index_and_skips_clean_restart()
+{
+    let owner = principal("batched-rebuild-owner");
+    let seed_backend = Arc::new(crate::turn_chain::test_store().await);
+    let seed = GenerationChainStore::from_turn_chain(
+        seed_backend.clone(),
+        crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
+    let mut root_input = responses_request(vec![user_message("root prompt")]);
+    root_input.instructions = Some("x".repeat(4096));
+    let mut root_output = AiResponse::new("upstream-root", "model");
+    root_output.push_output_text("root reply");
+    seed.save(GenerationChainCommit {
+        principal: owner.clone(),
+        id: "batched-root".into(),
+        parent: &ActiveGenerationChain::default(),
+        request_delta: &root_input,
+        effective_request: None,
+        response: root_output,
+        upstream_response_id: None,
+        effective_state: GenerationChainState::default(),
+        marker_references: Vec::new(),
+        redaction_references: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    for (id, input, answer, replace) in [
+        ("batched-append", "append prompt", "append reply", false),
+        ("batched-replace", "replace prompt", "replace reply", true),
+    ] {
+        let mut request = continuation_to("batched-root", vec![user_message(input)]);
+        request.instructions = Some("x".repeat(4096));
+        let mut parent = seed.materialize_parent(&owner, &mut request).await.unwrap();
+        if replace {
+            parent.replace_effective_history = true;
+            parent.replacement_client_items = Some(freeze_items(vec![user_message(input)]));
+        }
+        let delta = responses_request(vec![user_message(input)]);
+        let mut output = AiResponse::new(id, "model");
+        output.push_output_text(answer);
+        seed.save(GenerationChainCommit {
+            principal: owner.clone(),
+            id: id.into(),
+            parent: &parent,
+            request_delta: &delta,
+            effective_request: Some(if replace { &delta } else { &request }),
+            response: output,
+            upstream_response_id: None,
+            effective_state: GenerationChainState::default(),
+            marker_references: Vec::new(),
+            redaction_references: Vec::new(),
+        })
+        .await
+        .unwrap();
+    }
+
+    let pool_full = crate::test_support::migrated_sqlite_pool().await.unwrap();
+    let pool_batched = crate::test_support::migrated_sqlite_pool().await.unwrap();
+    let full_store = Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
+        pool_full.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    ));
+    let batched_store = Arc::new(crate::turn_chain::SqlTurnChainStore::sqlite(
+        pool_batched.clone(),
+        crate::history_retention::HistoryRetention::for_tests(),
+    ));
+
+    for id in ["batched-root", "batched-append", "batched-replace"] {
+        let mut node = seed_backend
+            .materialize(&owner, TurnNodeKind::Response, &TurnNodeId::new(id))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        // 覆盖缺失 client_output 回退 effective_output 的历史节点路径。
+        if id == "batched-root" {
+            node.payload
+                .as_object_mut()
+                .unwrap()
+                .remove("client_output");
+        }
+        for store in [&full_store, &batched_store] {
+            store
+                .commit(TurnCommit {
+                    atomic_checkpoint_id: None,
+                    principal: owner.clone(),
+                    id: node.id.clone(),
+                    kind: node.kind,
+                    parent_id: node.parent_id.clone(),
+                    payload_version: node.payload_version,
+                    payload: node.payload.clone(),
+                    marker_references: Vec::new(),
+                    redaction_references: Vec::new(),
+                    compaction_record_ids: Vec::new(),
+                    reusable_prefix: Some(ReusablePrefixMetadata {
+                        namespace: "stravia-generation-history-v5:legacy".into(),
+                        fingerprint: id.into(),
+                        item_count: 1,
+                        completed_at: 456,
+                        projection: None,
+                    }),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    let full_chain = GenerationChain::from_turn_chain(
+        full_store.clone(),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
+    full_chain.rebuild_prefixes().await.unwrap();
+
+    let batched_chain = GenerationChain::from_sql_turn_chain(
+        batched_store.clone(),
+        None,
+        crate::runtime_cache::RuntimeCache::tinyufo(1),
+        crate::history_retention::HistoryRetention::for_tests(),
+    );
+    let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = progress.clone();
+    crate::startup_progress::observe_startup(
+        move |event| observed.lock().unwrap().push(event),
+        batched_chain.rebuild_prefixes(),
+    )
+    .await
+    .unwrap();
+    {
+        let events = progress.lock().unwrap();
+        let history_index: Vec<_> = events
+            .iter()
+            .filter(|event| event.phase == "history_index")
+            .collect();
+        assert!(
+            !history_index.is_empty(),
+            "batched prefix rebuild must report history_index progress"
+        );
+        assert_eq!(history_index.last().unwrap().total, Some(3));
+        assert_eq!(history_index.last().unwrap().completed, 3);
+        assert!(
+            history_index
+                .windows(2)
+                .all(|pair| pair[0].completed <= pair[1].completed)
+        );
+    }
+
+    type PrefixRow = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    let fetch_prefixes = |pool: sqlx::SqlitePool| async move {
+        sqlx::query_as::<_, PrefixRow>(
+            "SELECT id, prefix_namespace, prefix_fingerprint, prefix_item_count, \
+             prefix_projection_version, prefix_controls_fingerprint, prefix_context_fingerprint \
+             FROM turn_nodes ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        fetch_prefixes(pool_batched).await,
+        fetch_prefixes(pool_full).await,
+        "filtered batched prefix rebuild must match full restore bit-for-bit"
+    );
+
+    // 稳态重启无旧前缀时必须走零锁快路径，不上报 history_index 阶段。
+    let restart_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_restart = restart_events.clone();
+    crate::startup_progress::observe_startup(
+        move |event| observed_restart.lock().unwrap().push(event),
+        batched_chain.rebuild_prefixes(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        restart_events.lock().unwrap().is_empty(),
+        "clean restart must not emit history_index progress"
+    );
+}
+
+#[tokio::test]
 async fn reasoning_tracking_metadata_does_not_fork_generation_history() {
     let backend = Arc::new(crate::turn_chain::test_store().await);
     let chain = GenerationChain::from_turn_chain(

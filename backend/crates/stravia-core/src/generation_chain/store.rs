@@ -262,6 +262,7 @@ impl DiscoveryWorkspace {
 #[derive(Clone)]
 pub(super) struct GenerationChainStore {
     pub(super) turn_chain: Arc<dyn TurnChainStore>,
+    sql_turn_chain: Option<Arc<crate::turn_chain::SqlTurnChainStore>>,
     /// 与 Turn Chain 共享的内存保留天数；缓存命中时按当前值重算有效期。
     pub(super) retention: crate::history_retention::HistoryRetention,
     runtime_cache: RuntimeCache,
@@ -518,6 +519,21 @@ impl GenerationChainStore {
     ) -> Self {
         Self {
             turn_chain,
+            sql_turn_chain: None,
+            retention,
+            runtime_cache,
+        }
+    }
+
+    pub(super) fn from_sql_turn_chain(
+        sql_turn_chain: Arc<crate::turn_chain::SqlTurnChainStore>,
+        runtime_cache: RuntimeCache,
+        retention: crate::history_retention::HistoryRetention,
+    ) -> Self {
+        let turn_chain: Arc<dyn TurnChainStore> = Arc::clone(&sql_turn_chain) as _;
+        Self {
+            turn_chain,
+            sql_turn_chain: Some(sql_turn_chain),
             retention,
             runtime_cache,
         }
@@ -527,6 +543,16 @@ impl GenerationChainStore {
     /// The store visits each ancestor once; the fold retains only its hash and count.
     pub(super) async fn rebuild_prefixes(&self) -> Result<(), TurnUnavailable> {
         let mut rebuild = PrefixRebuild::default();
+        if let Some(sql_store) = self.sql_turn_chain.as_ref() {
+            return sql_store
+                .rebuild_prefixes_batched(
+                    GENERATION_PREFIX_NAMESPACE,
+                    Some(prefix_rebuild_slot_filter),
+                    Some(("history_index", "Rebuilding history index")),
+                    &mut |node, completed_at| rebuild.decode(node, completed_at),
+                )
+                .await;
+        }
         self.turn_chain
             .rebuild_prefixes(GENERATION_PREFIX_NAMESPACE, &mut |node, completed_at| {
                 rebuild.decode(node, completed_at)

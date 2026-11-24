@@ -27,6 +27,8 @@ export function startupPhaseLabel(progress: StartupProgress): string {
       return m.startup_phase_history_schema()
     case 'history_data':
       return m.startup_phase_history_data()
+    case 'history_index':
+      return m.startup_phase_history_index()
     case 'debug_manifests':
       return m.startup_phase_debug_manifests()
     case 'observation_schema':
