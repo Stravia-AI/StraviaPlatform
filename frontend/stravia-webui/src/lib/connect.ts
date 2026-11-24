@@ -85,7 +85,7 @@ export const CLI_TOOLS: ReadonlyArray<{
   {
     id: 'deepseek-harness',
     name: 'DeepSeek Harness',
-    protocol: 'openai-compatible',
+    protocol: 'open-responses',
     description: m.connect_tool_deepseek_harness_description,
   },
   { id: 'pi', name: 'Pi', protocol: 'open-responses', description: m.connect_tool_pi_description },

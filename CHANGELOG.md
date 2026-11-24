@@ -8,7 +8,8 @@
 
 ### Fixed
 
-- DeepSeek Harness client configuration generation (`$DSH_HOME/settings.yaml`) now writes per-model `reasoningEfforts` from each Route's supported thinking levels (mapping `off` to `"none"` and omitting `reasoningEfforts` for non-reasoning or `off`-only models) and sets OpenAI `compat` (`supportsReasoningEffort: true`, `thinkingFormat: "openai"`). Re-apply the DeepSeek Harness client configuration to update existing files.
+- Antigravity inference with `system_prompt_prefix` enabled now also moves standalone `Role::System` and `Role::Developer` messages (including OpenAI Chat Completions `system`/`developer` messages and Open Responses `input[]` `developer` items) out of `systemInstruction` into the leading synthetic history turn, preventing upstream HTTP 429 rejections triggered by client identity text left in `systemInstruction`. Rebuild and re-import the standalone Antigravity plugin to apply this change.
+- DeepSeek Harness client configuration generation now targets `$DSH_HOME/cordis.patch.yml` (preserving unrelated patch entries and other `llm-pi-ai` providers while keeping `$DSH_HOME/.credentials.yaml`), uses `api: "openai-responses"` instead of `openai-completions`, removes the completions-only `compat` keys rejected by DSH 0.2.3+, and writes per-model `name` and `reasoningEfforts` from each Route's supported thinking levels (mapping `off` to `"none"` and omitting `reasoningEfforts` for non-reasoning or `off`-only models). Re-apply the DeepSeek Harness client configuration to update existing files.
 
 ## [0.7.5] - 2026-11-22
 

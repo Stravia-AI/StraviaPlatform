@@ -1547,34 +1547,81 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         }),
     );
     gemini.items.insert(0, developer);
+    let responses_developer_only = decode(
+        OPEN_RESPONSES_2026_04_24,
+        json!({
+            "model": "test-route",
+            "input": [
+                {"role":"developer","content":developer_policy},
+                {"role":"user","content":"First task"},
+                {"role":"assistant","content":"Prior reply"},
+                {"role":"user","content":"Second task"}
+            ]
+        }),
+    );
+    let bare_gemini = decode(
+        GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+        json!({ "contents": history }),
+    );
     let mut edited_gemini = gemini.clone();
     edited_gemini.instructions = Some("Replaced effective policy".into());
     let mut cleared_gemini = gemini.clone();
     cleared_gemini.instructions = None;
 
     for (name, request, enabled, expected_moved) in [
-        ("OMP", responses(omp), None, json!([{"text":omp}])),
+        (
+            "OMP",
+            responses(omp),
+            None,
+            json!([{"text":omp},{"text":developer_policy}]),
+        ),
         (
             "Responses",
             responses(ordinary),
             None,
-            json!([{"text":ordinary}]),
+            json!([{"text":ordinary},{"text":developer_policy}]),
         ),
-        ("Chat", chat, None, Value::Null),
+        (
+            "Responses developer only",
+            responses_developer_only,
+            None,
+            json!([{"text":developer_policy}]),
+        ),
+        (
+            "Chat",
+            chat,
+            None,
+            json!([{"text":system_policy},{"text":developer_policy}]),
+        ),
         (
             "Anthropic",
             anthropic,
             None,
-            json!([{"text":"Anthropic top-level policy"}]),
+            json!([{"text":"Anthropic top-level policy"},{"text":developer_policy}]),
         ),
-        ("Gemini", gemini, None, gemini_parts),
+        (
+            "Gemini",
+            gemini,
+            None,
+            json!([
+                {"text":"Gemini first part"},
+                {"text":"Gemini second part"},
+                {"text":developer_policy}
+            ]),
+        ),
         (
             "edited Gemini",
             edited_gemini,
             None,
-            json!([{"text":"Replaced effective policy"}]),
+            json!([{"text":"Replaced effective policy"},{"text":developer_policy}]),
         ),
-        ("cleared Gemini", cleared_gemini, None, Value::Null),
+        (
+            "cleared Gemini",
+            cleared_gemini,
+            None,
+            json!([{"text":developer_policy}]),
+        ),
+        ("bare Gemini", bare_gemini, None, Value::Null),
         ("disabled", responses(omp), Some(false), Value::Null),
     ] {
         if let Some(enabled) = enabled {
@@ -1600,12 +1647,6 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         let envelope: Value = serde_json::from_slice(bytes).unwrap();
         let body = &envelope["request"];
         let parts = body["systemInstruction"]["parts"].as_array().unwrap();
-        if name == "Chat" {
-            assert_eq!(parts[1]["text"], system_policy);
-            assert_eq!(parts[2]["text"], developer_policy);
-        } else {
-            assert_eq!(parts[1]["text"], developer_policy, "{name}");
-        }
         if has_tools {
             assert_eq!(
                 body["tools"][0]["functionDeclarations"][0]["name"],
@@ -1615,6 +1656,11 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         let contents = body["contents"].as_array().unwrap();
         let system = parts[0]["text"].as_str().unwrap();
         if enabled != Some(false) {
+            assert_eq!(
+                parts.len(),
+                1,
+                "{name} left client system/developer parts in systemInstruction"
+            );
             let prefix = system.as_bytes().get(..296).expect("full native prefix");
             assert_eq!(
                 sha2::Sha256::digest(prefix)[..],
@@ -1641,6 +1687,7 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
             }
         } else {
             assert_eq!(system, omp);
+            assert_eq!(parts[1]["text"], developer_policy, "{name}");
             assert_eq!(contents, &history);
         }
     }
