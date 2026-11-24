@@ -573,6 +573,7 @@
   "startup_phase_migration_validate": "Checking stored data",
   "startup_phase_history_schema": "Preparing history storage",
   "startup_phase_history_data": "Migrating history records",
+  "startup_phase_history_index": "Rebuilding history index",
   "startup_phase_debug_manifests": "Updating diagnostic manifests",
   "startup_phase_observation_schema": "Preparing observation storage",
   "startup_phase_observation_data": "Migrating observation records",
