@@ -184,7 +184,7 @@ Target 的 Thinking Level Map 仅包含两类目标控制：映射到上游等�
 - **Default Thinking Level** 是 Route 上仅在客户端完全没给推理控制（且未显式重置推理参数）时生效的默认档；显式客户端控制或重置优先。
 - **Supported Thinking Levels** 是启用 Target 的非隐藏映射并集，供展示和客户端配置导出，不是运行时强制钳制集合。
 - 发现、修改或恢复同步使有效 `reasoning_efforts` 变化时，同事务重算 Generated 行，保留人工覆盖和隐藏。最终映射由所选目标 codec／插件在出口按型号能力编码（Anthropic 新旧代自适应／静态预算与 `max_tokens` 约束、Gemini 3+ `thinkingLevel` 与 2.5 `thinkingBudget` 互斥、开关型供应商翻译等）。
-- 合法受保护思考先试一次；明确拒绝时由宿主只剥离外来或来源不明的载荷并受控重放，不移除本上游载荷。见 [ADR-0080](../adr/0080-try-protected-reasoning-once-and-block-only-foreign-origins.md) 与 [ADR-0099](../adr/0099-simplify-thinking-level-map.md)。
+- 合法受保护思考先试一次；明确拒绝时由宿主只剥离外来或来源不明的载荷并受控重放，不移除本上游载荷。见 [ADR-0080](../adr/0080-try-protected-reasoning-once-and-block-only-foreign-origins.md) 与 [ADR-0100](../adr/0100-simplify-thinking-level-map.md)。
 
 ## 动态表单、认证与私有状态
 
