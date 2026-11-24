@@ -6,7 +6,7 @@ import ChevronsUpDownIcon from '@lucide/svelte/icons/chevrons-up-down'
 import CopyIcon from '@lucide/svelte/icons/copy'
 import type { MouseEventHandler } from 'svelte/elements'
 import { toast } from 'svelte-sonner'
-import { admin, currencyQueryOptions } from '#lib/admin-client.js'
+import { admin, capabilitiesQueryOptions, currencyQueryOptions } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { copyText } from '#lib/clipboard.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
@@ -19,6 +19,7 @@ import { displayCurrency, formatAmount } from '#lib/money.js'
 import type { ApiKey, Route } from '#lib/types.js'
 import { TRANSPARENT_INJECTIONS, type TransparentInjection } from '#lib/types/api-key.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
+import ExtensionSlot from '#lib/components/extension-slot.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
@@ -70,6 +71,8 @@ let {
 }: Props = $props()
 
 const queryClient = useQueryClient()
+const capabilitiesQuery = createQuery(() => capabilitiesQueryOptions())
+const capabilities = $derived(capabilitiesQuery.data?.capabilities ?? [])
 const currencyQuery = createQuery(() => currencyQueryOptions())
 const currency = $derived(currencyQuery.data ?? null)
 const display = $derived(displayCurrency(currency))
@@ -512,6 +515,18 @@ async function saveKey(): Promise<void> {
   </div>
 {/snippet}
 
+{#snippet mcpPolicySlot()}
+  <ExtensionSlot
+    slot="api-key:mcp-policy"
+    {capabilities}
+    props={{
+      apiKeyId: apiKey?.id ?? null,
+      mcpAccessEnabled: form.mcpAccessEnabled,
+      transparentInjectionEnabled: form.transparentInjectionEnabled,
+      capabilities,
+    }} />
+{/snippet}
+
 {#snippet editorForm(pageMode: boolean)}
   <form
     class={pageMode ? 'flex flex-1 flex-col gap-6' : 'route-overlay-form'}
@@ -524,6 +539,7 @@ async function saveKey(): Promise<void> {
       <fieldset class="m-0 flex min-w-0 flex-col gap-6 border-0 p-0" disabled={saving}>
         {@render keyFields()}
       </fieldset>
+      {@render mcpPolicySlot()}
       <div
         class="sticky bottom-0 z-20 mt-auto flex translate-y-2 justify-end gap-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
         <Button href={resolve('api-keys')} variant="outline" disabled={saving}>{m.common_cancel()}</Button>
@@ -537,6 +553,7 @@ async function saveKey(): Promise<void> {
         <fieldset class="m-0 flex min-w-0 flex-col gap-6 border-0 p-0" disabled={saving}>
           {@render keyFields()}
         </fieldset>
+        {@render mcpPolicySlot()}
       </div>
       <Sheet.Footer class="route-overlay-footer"
         ><Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => setOpen(false))}

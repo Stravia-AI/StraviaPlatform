@@ -161,12 +161,15 @@ pub async fn prepare_server_app(
         }
         let auth = AdminAuth::new(Arc::clone(prepared.storage()));
         if auth.has_admin().await.map_err(auth_to_anyhow)? {
-            let gateway = prepared.start().await.map_err(|error| {
-                error.context(format!(
-                    "configured Gateway could not start ({})",
-                    startup.config_path.display()
-                ))
-            })?;
+            let gateway = prepared
+                .start_with_extensions(startup.extensions.gateway_extensions.clone())
+                .await
+                .map_err(|error| {
+                    error.context(format!(
+                        "configured Gateway could not start ({})",
+                        startup.config_path.display()
+                    ))
+                })?;
             let auth = AdminAuth::new(gateway.storage.clone());
             let app = normal_app(gateway.clone(), auth, &startup);
             return Ok(PreparedServerApp {
@@ -518,7 +521,10 @@ async fn complete_setup(
     *runtime.setup_token.lock().await = None;
     *runtime.current.write().await = unavailable_router(&runtime);
 
-    let gateway = match prepared.start().await {
+    let gateway = match prepared
+        .start_with_extensions(runtime.startup.extensions.gateway_extensions.clone())
+        .await
+    {
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(error = %redacted_database_error(&error), "gateway initialization failed");

@@ -17,6 +17,25 @@ pub use builder::GatewayBuilder;
 use extensions::configure_gateway_extensions;
 use lifecycle::GatewayLifecycle;
 
+/// Optional runtime extensions supplied by an external host (such as Commercial Edition)
+/// during [`PreparedGateway::start_with_extensions`] or [`GatewayBuilder::extension_factory`].
+#[derive(Default)]
+pub struct GatewayExtensions {
+    pub hooks: Vec<Arc<dyn Hook>>,
+    pub platform_tools: Vec<Arc<dyn PlatformTool>>,
+    pub dynamic_tool_loaders: Vec<Arc<dyn crate::hook::DynamicPlatformToolLoader>>,
+    pub mcp_tools: Vec<Arc<dyn McpTool>>,
+    pub mcp_catalog_provider: Option<Arc<dyn crate::mcp::McpCatalogProvider>>,
+    pub policy_resolver: Option<Arc<dyn crate::policy::PolicyResolver>>,
+}
+
+/// Factory invoked with a background-owned [`Gateway`] clone after storage and pools are
+/// initialized, allowing external hosts to register hooks, dynamic tool loaders,
+/// custom [`crate::mcp::McpCatalogProvider`] implementations, and [`crate::policy::PolicyResolver`].
+pub trait GatewayExtensionFactory: Send + Sync {
+    fn build_extensions(&self, gateway: &Gateway) -> GatewayExtensions;
+}
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -98,6 +117,7 @@ pub struct Gateway {
     pub(crate) media_run_snapshots: stravia_media::MediaRunSnapshotStore,
     hook_runtime: HookRuntime,
     pub(crate) mcp_registry: McpToolRegistry,
+    pub(crate) mcp_catalog_provider: Arc<dyn crate::mcp::McpCatalogProvider>,
     pub(crate) history_markers: Arc<dyn history_marker::HistoryMarkerStore>,
     pub(crate) reasoning_rejections: history_marker::ReasoningRejections,
     pub(crate) redaction: crate::reversible_redaction::ReversibleRedaction,
@@ -161,6 +181,7 @@ impl Gateway {
             media_run_snapshots: self.media_run_snapshots.clone(),
             hook_runtime: self.hook_runtime.clone(),
             mcp_registry: self.mcp_registry.clone(),
+            mcp_catalog_provider: Arc::clone(&self.mcp_catalog_provider),
             history_markers: Arc::clone(&self.history_markers),
             reasoning_rejections: self.reasoning_rejections.clone(),
             redaction: self.redaction.clone(),
@@ -184,8 +205,60 @@ impl Gateway {
         }
     }
 
-    pub(crate) fn background_clone(&self) -> Self {
+    pub fn background_clone(&self) -> Self {
         self.clone_with_owner(false)
+    }
+
+    pub fn storage(&self) -> &DynStorage {
+        &self.storage
+    }
+
+    pub fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        self._sqlite_pool.as_ref()
+    }
+
+    pub fn postgres_pool(&self) -> Option<&Pool<Postgres>> {
+        self._postgres_pool.as_ref()
+    }
+
+    pub fn mcp_registry(&self) -> &McpToolRegistry {
+        &self.mcp_registry
+    }
+
+    /// Executes a [`PlatformTool`] via the shared ADR-0082 bounded synchronous-wait and
+    /// background handoff pipeline with `ExecutionSource::Mcp`.
+    pub async fn dispatch_mcp_platform_tool(
+        &self,
+        platform_tool: Arc<dyn PlatformTool>,
+        arguments: serde_json::Value,
+        context: &crate::mcp::McpContext,
+        timeout: Duration,
+    ) -> Result<stravia_runtime_contract::hook::PlatformToolOutput, crate::mcp::McpToolError> {
+        let accepted = tokio::time::Instant::now();
+        let deadline = std::time::Instant::now() + timeout;
+        let cancellation = context.request_cancellation().unwrap_or_default();
+        let exec_ctx = stravia_runtime_contract::hook::ToolExecutionContext {
+            request_id: stravia_runtime_contract::identifier::new_id(),
+            run_id: stravia_runtime_contract::identifier::new_id(),
+            interaction_id: None,
+            principal: stravia_runtime_contract::Principal::new(context.api_key_id.clone()),
+            read_scope: stravia_runtime_contract::hook::ReadExposureScope::FULL,
+            cancellation,
+            progress: None,
+        };
+        let delivery = crate::tool_execution::scope_execution(
+            accepted,
+            deadline,
+            self.dispatch_platform_tool(
+                platform_tool,
+                arguments,
+                exec_ctx,
+                crate::tool_execution::ExecutionSource::Mcp,
+            ),
+        )
+        .await
+        .map_err(|error| crate::mcp::McpToolError::new("execution_failed", error.message))?;
+        Ok(delivery.output)
     }
 
     /// Evaluate the configured [`crate::policy::PolicyResolver`] for a platform capability

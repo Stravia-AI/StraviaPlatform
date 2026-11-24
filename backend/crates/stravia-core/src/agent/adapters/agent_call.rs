@@ -105,6 +105,19 @@ impl McpTool for AgentCallMcpTool {
         agent_call_input_schema()
     }
 
+    async fn platform_capability_available(&self) -> bool {
+        let Some(model_id) = self.runner.definition_model(&self.definition_id).await else {
+            return false;
+        };
+        self.gateway
+            .model_cache
+            .read()
+            .await
+            .models
+            .iter()
+            .any(|model| model.id == model_id)
+    }
+
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError> {
         let Some(api_keys) = self.gateway.storage.api_keys() else {
             return Ok(false);

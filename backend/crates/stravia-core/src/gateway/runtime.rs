@@ -242,6 +242,14 @@ impl PreparedGateway {
     /// 使用保留的配置与连接池启动 Gateway；初始化错误原样返回。
     /// 不重新连接、迁移数据库，也不把持久存储当作内存存储装配。
     pub async fn start(self) -> anyhow::Result<Gateway> {
+        self.start_with_extensions(None).await
+    }
+
+    /// 使用保留的配置与连接池启动 Gateway，并注入可选的宿主扩展工厂（如商业版扩展）。
+    pub async fn start_with_extensions(
+        self,
+        extension_factory: Option<Arc<dyn GatewayExtensionFactory>>,
+    ) -> anyhow::Result<Gateway> {
         let (kind, storage, sqlite_pool, postgres_pool) = self.runtime;
         Gateway::from_storage_with_kind(
             self.config,
@@ -250,6 +258,7 @@ impl PreparedGateway {
             sqlite_pool,
             postgres_pool,
             None,
+            extension_factory,
         )
         .await
     }
@@ -309,6 +318,7 @@ impl Gateway {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -326,6 +336,7 @@ impl Gateway {
             None,
             None,
             Some(network),
+            None,
         )
         .await
     }
@@ -337,6 +348,7 @@ impl Gateway {
         sqlite_pool: Option<SqlitePool>,
         postgres_pool: Option<Pool<Postgres>>,
         vendor_network: Option<VendorNetworkConfig>,
+        extension_factory: Option<Arc<dyn GatewayExtensionFactory>>,
     ) -> anyhow::Result<Self> {
         // 注入持久存储时沿用同一连接池，避免历史与插件状态落入两个数据库。
         let sqlite_pool = sqlite_pool.or_else(|| storage.vendor_plugins().sqlite_pool().cloned());
@@ -697,6 +709,7 @@ impl Gateway {
             media_understanding: Arc::new(tokio::sync::RwLock::new(None)),
             hook_runtime: HookRuntime::default(),
             mcp_registry: McpToolRegistry::default(),
+            mcp_catalog_provider: Arc::new(crate::mcp::BuiltinMcpCatalogProvider),
             history_markers,
             reasoning_rejections: history_marker::ReasoningRejections::default(),
             redaction,
@@ -747,8 +760,25 @@ impl Gateway {
             0,
             None,
         );
-        configure_gateway_extensions(&mut gw, Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            .await?;
+        let mut ext = extension_factory
+            .as_ref()
+            .map(|factory| factory.build_extensions(&gw.background_clone()))
+            .unwrap_or_default();
+        if let Some(resolver) = ext.policy_resolver.take() {
+            gw.policy_resolver = resolver;
+        }
+        if let Some(provider) = ext.mcp_catalog_provider.take() {
+            gw.mcp_catalog_provider = provider;
+        }
+        configure_gateway_extensions(
+            &mut gw,
+            ext.hooks,
+            ext.platform_tools,
+            ext.dynamic_tool_loaders,
+            ext.mcp_tools,
+            Vec::new(),
+        )
+        .await?;
         // 两类周期任务共用起点，避免各自首次轮询的延迟改变错峰相位。
         let maintenance_started_at = tokio::time::Instant::now();
         gw.start_provider_model_sync(maintenance_started_at).await?;

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream::FuturesUnordered};
+use rmcp::model::Tool as RmTool;
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
@@ -30,12 +31,16 @@ struct McpExecutionContext {
 }
 
 impl McpContext {
-    pub(crate) fn new(api_key_id: String) -> Self {
+    pub fn new(api_key_id: String) -> Self {
         Self {
             api_key_id,
             execution: None,
             request_cancellation: None,
         }
+    }
+
+    pub fn request_cancellation(&self) -> Option<stravia_runtime_contract::CancellationToken> {
+        self.request_cancellation.clone()
     }
 
     fn for_call(
@@ -139,6 +144,11 @@ pub trait McpTool: Send + Sync + 'static {
     fn await_cancellation_cleanup(&self) -> bool {
         false
     }
+    /// Whether the underlying platform capability backing this built-in MCP tool is currently
+    /// configured and enabled at the platform level (independent of any single API key's scope).
+    async fn platform_capability_available(&self) -> bool {
+        true
+    }
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError>;
     async fn call(
         &self,
@@ -183,7 +193,22 @@ impl McpToolRegistry {
         })
     }
 
-    async fn available(&self, context: &McpContext) -> Vec<Arc<dyn McpTool>> {
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort_unstable();
+        names
+    }
+
+    pub fn internal_tools(&self) -> Vec<Arc<dyn McpTool>> {
+        let mut names: Vec<&String> = self.tools.keys().collect();
+        names.sort_unstable();
+        names
+            .into_iter()
+            .map(|name| Arc::clone(&self.tools[name]))
+            .collect()
+    }
+
+    pub async fn available(&self, context: &McpContext) -> Vec<Arc<dyn McpTool>> {
         let deadline = tokio::time::Instant::now() + TOOL_DEADLINE;
         let mut names: Vec<&String> = self.tools.keys().collect();
         names.sort_unstable();
@@ -218,7 +243,7 @@ impl McpToolRegistry {
         available_tools.into_iter().map(|(_, tool)| tool).collect()
     }
 
-    async fn call(
+    pub async fn call(
         &self,
         name: &str,
         arguments: Value,
@@ -291,6 +316,136 @@ impl McpToolRegistry {
                 ))
             }
         }
+    }
+}
+
+/// Tool metadata resolved for an authenticated MCP endpoint scope.
+#[derive(Debug, Clone)]
+pub struct ResolvedMcpTool {
+    pub exposed_name: String,
+    pub description: Option<String>,
+    pub input_schema: Value,
+    pub output_schema: Option<Value>,
+}
+
+impl ResolvedMcpTool {
+    pub fn to_rmcp_tool(&self) -> RmTool {
+        let input_obj = Arc::new(self.input_schema.as_object().cloned().unwrap_or_default());
+        let mut definition = RmTool::new_with_raw(
+            self.exposed_name.clone(),
+            self.description.clone().map(std::borrow::Cow::Owned),
+            input_obj,
+        );
+        if let Some(output_schema) = self
+            .output_schema
+            .as_ref()
+            .and_then(Value::as_object)
+            .cloned()
+        {
+            definition = definition.with_raw_output_schema(Arc::new(output_schema));
+        }
+        definition
+    }
+}
+
+/// Endpoint-level access failure returned by [`McpCatalogProvider::authorize_endpoint`].
+#[derive(Debug)]
+pub enum McpEndpointAccessError {
+    NotFound(String),
+    Forbidden { code: &'static str, message: String },
+    Internal(String),
+}
+
+/// Extension seam resolving `/mcp*` endpoint scopes, visible tools, and tool execution.
+///
+/// Community Edition installs [`BuiltinMcpCatalogProvider`], which exposes only built-in
+/// platform MCP tools on `/mcp`. Commercial or custom hosts can inject an alternative
+/// provider via [`crate::GatewayExtensionFactory`] to govern external MCP servers,
+/// HTTP-to-MCP bridges, groups, and fine-grained scopes.
+#[async_trait]
+pub trait McpCatalogProvider: Send + Sync + 'static {
+    /// Parses a request URI path into an opaque normalized scope key, or returns `None`
+    /// when the path is not served by this provider (404).
+    fn parse_scope(&self, path: &str) -> Option<String>;
+
+    /// Authorizes an authenticated API key for the resolved endpoint scope.
+    async fn authorize_endpoint(
+        &self,
+        gateway: &crate::Gateway,
+        api_key_id: &str,
+        scope: &str,
+    ) -> Result<(), McpEndpointAccessError>;
+
+    /// Lists all MCP tools visible to `context` within `scope`.
+    async fn list_visible_tools(
+        &self,
+        gateway: &crate::Gateway,
+        context: &McpContext,
+        scope: &str,
+    ) -> Result<Vec<ResolvedMcpTool>, McpToolError>;
+
+    /// Executes a visible MCP tool within `scope`.
+    async fn call_visible_tool(
+        &self,
+        gateway: &crate::Gateway,
+        name: &str,
+        arguments: Value,
+        context: &McpContext,
+        scope: &str,
+    ) -> Result<McpToolOutput, McpToolError>;
+}
+
+/// Default Community Edition MCP catalog exposing only built-in tools on `/mcp`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuiltinMcpCatalogProvider;
+
+#[async_trait]
+impl McpCatalogProvider for BuiltinMcpCatalogProvider {
+    fn parse_scope(&self, path: &str) -> Option<String> {
+        let trimmed = path.trim_end_matches('/');
+        (trimmed == "/mcp").then(|| "unified".to_owned())
+    }
+
+    async fn authorize_endpoint(
+        &self,
+        _gateway: &crate::Gateway,
+        _api_key_id: &str,
+        _scope: &str,
+    ) -> Result<(), McpEndpointAccessError> {
+        Ok(())
+    }
+
+    async fn list_visible_tools(
+        &self,
+        gateway: &crate::Gateway,
+        context: &McpContext,
+        _scope: &str,
+    ) -> Result<Vec<ResolvedMcpTool>, McpToolError> {
+        let available = gateway.mcp_registry.available(context).await;
+        let mut resolved = Vec::with_capacity(available.len());
+        for tool in available {
+            let input_schema = tool.input_schema_for(context).await;
+            let description = tool.description_for(context).await;
+            let output_schema = tool.output_schema();
+            resolved.push(ResolvedMcpTool {
+                exposed_name: tool.name().to_owned(),
+                description,
+                input_schema,
+                output_schema,
+            });
+        }
+        Ok(resolved)
+    }
+
+    async fn call_visible_tool(
+        &self,
+        gateway: &crate::Gateway,
+        name: &str,
+        arguments: Value,
+        context: &McpContext,
+        _scope: &str,
+    ) -> Result<McpToolOutput, McpToolError> {
+        gateway.mcp_registry.call(name, arguments, context).await
     }
 }
 

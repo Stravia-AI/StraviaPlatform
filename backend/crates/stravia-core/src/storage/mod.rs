@@ -43,7 +43,7 @@ fn validate_admission(admission: &PromptAdmission) -> anyhow::Result<Option<i64>
 pub const CONFIG_EPOCH_KEY: &str = "config_epoch";
 
 /// 普通配置写入后的刷新通知；原子操作应在自身事务中更新。
-pub(crate) async fn bump_config_epoch(store: &dyn SettingsStore) -> anyhow::Result<()> {
+pub async fn bump_config_epoch(store: &dyn SettingsStore) -> anyhow::Result<()> {
     let current: i64 = store
         .get(CONFIG_EPOCH_KEY)
         .await?

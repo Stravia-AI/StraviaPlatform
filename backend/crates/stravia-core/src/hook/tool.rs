@@ -51,6 +51,33 @@ impl PlatformToolRegistry {
             tools: Arc::new(registered),
         })
     }
+    pub fn extend(&mut self, extra: Vec<Arc<dyn PlatformTool>>) -> Result<(), PlatformToolError> {
+        if extra.is_empty() {
+            return Ok(());
+        }
+        let map = Arc::make_mut(&mut self.tools);
+        for tool in extra {
+            let id = tool.id();
+            if id.as_str().trim().is_empty() {
+                return Err(PlatformToolError::new("tool id cannot be empty"));
+            }
+            let activity = tool.activity_label();
+            if activity.trim() != activity
+                || activity.is_empty()
+                || activity.chars().count() > 120
+                || activity
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '<' | '>' | '`'))
+            {
+                return Err(PlatformToolError::new(format!(
+                    "platform tool activity label is not safe Markdown: {id}"
+                )));
+            }
+            map.insert(id, tool);
+        }
+        Ok(())
+    }
+
     pub fn parallel_safe(&self, id: &ToolId) -> bool {
         self.tools.get(id).is_some_and(|tool| tool.parallel_safe())
     }
@@ -82,6 +109,8 @@ impl PlatformToolRegistry {
             .ok_or_else(|| PlatformToolError::new(format!("platform tool not found: {id}")))?;
         let base = if id.as_str() == "stravia-read" {
             "StraviaRead".to_string()
+        } else if tool.preserve_external_name() {
+            provider_safe_qualified_name(tool.external_name())
         } else {
             provider_safe_name(tool.external_name())
         };
@@ -173,7 +202,7 @@ impl PlatformToolRegistry {
     }
 }
 
-pub(crate) fn blocks_to_value(
+pub fn blocks_to_value(
     mut blocks: Vec<ContentBlock>,
 ) -> Result<(Value, ToolResultContentKind), PlatformToolError> {
     if blocks.len() == 1 {
@@ -195,6 +224,23 @@ pub(crate) fn blocks_to_value(
         .map_err(|error| {
             PlatformToolError::new(format!("tool output serialization failed: {error}"))
         })
+}
+
+fn provider_safe_qualified_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len().min(64));
+    for character in name.chars().take(64) {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            sanitized.push(character);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "ext__tool".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 fn provider_safe_name(name: &str) -> String {

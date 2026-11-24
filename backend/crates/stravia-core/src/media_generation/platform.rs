@@ -220,6 +220,12 @@ impl McpTool for GenerateTool {
     fn await_cancellation_cleanup(&self) -> bool {
         true
     }
+    async fn platform_capability_available(&self) -> bool {
+        config::load(&self.gateway)
+            .await
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(false)
+    }
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError> {
         let Some(keys) = self.gateway.storage.api_keys() else {
             return Ok(false);

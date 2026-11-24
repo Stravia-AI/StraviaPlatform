@@ -1,7 +1,7 @@
 mod runtime;
 pub mod tool;
 
-pub use runtime::HookRuntime;
+pub use runtime::{DynamicPlatformToolLoader, HookRuntime};
 pub(crate) use runtime::{InferenceRun, RequestHookOutcome};
 pub use tool::PlatformToolRegistry;
 

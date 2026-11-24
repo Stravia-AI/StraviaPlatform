@@ -163,6 +163,11 @@ impl PlatformToolError {
 pub trait PlatformTool: Send + Sync + 'static {
     fn id(&self) -> ToolId;
     fn external_name(&self) -> &str;
+    /// When `true`, provider tool exposure preserves `external_name()` (sanitized up to 64 chars)
+    /// instead of prefixing it with `stravia__`.
+    fn preserve_external_name(&self) -> bool {
+        false
+    }
     fn read_domain(&self) -> Option<StraviaReadDomain> {
         None
     }

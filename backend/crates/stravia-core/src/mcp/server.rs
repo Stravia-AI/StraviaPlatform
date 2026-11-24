@@ -8,6 +8,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::routing::any_service;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     DiscoverResult, Implementation, InitializeResult, JsonObject, ListToolsResult, MetaObject,
@@ -20,7 +21,7 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::{Value, json};
 
-use super::{McpContext, McpTool, SUBSCRIPTION_POLL_INTERVAL};
+use super::{McpContext, McpEndpointAccessError, McpTool, SUBSCRIPTION_POLL_INTERVAL};
 use crate::Gateway;
 use crate::error::{AuthFailure, GatewayError};
 use crate::interaction_observation::{IngressStart, RejectedOutcome};
@@ -39,6 +40,9 @@ static SUPPORTED_PROTOCOL_VERSIONS: [ProtocolVersion; 3] = [
 struct AuthenticatedApiKey {
     id: String,
 }
+
+#[derive(Clone)]
+struct ResolvedScope(String);
 
 #[derive(Clone)]
 struct StraviaMcpServer {
@@ -81,7 +85,9 @@ pub(crate) fn router(gateway: Gateway) -> Router {
     );
 
     Router::new()
-        .nest_service("/mcp", service)
+        .route("/mcp", any_service(service.clone()))
+        .route("/mcp/", any_service(service.clone()))
+        .route("/mcp/{*rest}", any_service(service))
         .layer(middleware::from_fn_with_state(
             gateway,
             authenticate_request,
@@ -126,15 +132,14 @@ impl ServerHandler for StraviaMcpServer {
         if request.is_some_and(|request| request.cursor.is_some()) {
             return Err(McpError::invalid_params("invalid cursor", None));
         }
-        let context = mcp_context(&context)?;
-        let available = self.gateway.mcp_registry.available(&context).await;
-        let mut tools = Vec::with_capacity(available.len());
-        for tool in available {
-            let input_schema = tool.input_schema_for(&context).await;
-            let mut definition = tool_definition_with_input(tool.as_ref(), input_schema);
-            definition.description = tool.description_for(&context).await.map(Into::into);
-            tools.push(definition);
-        }
+        let (mcp_ctx, scope) = mcp_context_and_scope(&context)?;
+        let visible = self
+            .gateway
+            .mcp_catalog_provider
+            .list_visible_tools(&self.gateway, &mcp_ctx, &scope)
+            .await
+            .map_err(|error| McpError::internal_error(error.message, None))?;
+        let tools: Vec<Tool> = visible.into_iter().map(|t| t.to_rmcp_tool()).collect();
         let mut result = ListToolsResult::with_all_items(tools)
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private);
@@ -152,15 +157,19 @@ impl ServerHandler for StraviaMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let request_cancellation = context.ct.clone();
-        let mut context = mcp_context(&context)?;
+        let (mut mcp_ctx, scope) = mcp_context_and_scope(&context)?;
         let cancellation = stravia_runtime_contract::CancellationToken::new();
-        context.request_cancellation = Some(cancellation.clone());
+        mcp_ctx.request_cancellation = Some(cancellation.clone());
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let call = crate::rpm::scope_root_request(
             crate::rpm::RootRequest::default(),
-            self.gateway
-                .mcp_registry
-                .call(request.name.as_ref(), arguments, &context),
+            self.gateway.mcp_catalog_provider.call_visible_tool(
+                &self.gateway,
+                request.name.as_ref(),
+                arguments,
+                &mcp_ctx,
+                &scope,
+            ),
         );
         tokio::pin!(call);
         let outcome = tokio::select! {
@@ -174,7 +183,11 @@ impl ServerHandler for StraviaMcpServer {
         match outcome {
             Ok(output) => {
                 let mut result = if output.is_error {
-                    CallToolResult::structured_error(output.structured_content)
+                    let mut err = CallToolResult::structured_error(output.structured_content);
+                    if !output.content.is_empty() {
+                        err.content = output.content;
+                    }
+                    err
                 } else if output.content.is_empty() {
                     CallToolResult::structured(output.structured_content)
                 } else {
@@ -205,37 +218,40 @@ impl ServerHandler for StraviaMcpServer {
     }
 
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
-        let api_key_id = mcp_context(context.request_context())?.api_key_id;
+        let (initial_ctx, scope) = mcp_context_and_scope(context.request_context())?;
+        let api_key_id = initial_ctx.api_key_id;
         let sink = context.sink().clone();
         let mut interval = tokio::time::interval(SUBSCRIPTION_POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut previous: Option<Vec<(String, Value)>> = None;
+        let mut previous: Option<Vec<(String, Option<String>, Value)>> = None;
 
         loop {
             tokio::select! {
                 _ = context.cancelled() => return Ok(()),
                 _ = interval.tick() => {
                     // Availability caches are request-scoped. A subscription poll is a new
-                    // observation and must see permission or provider changes made meanwhile.
+                    // observation and must see permission, catalog, or provider changes made meanwhile.
                     let mcp_context = McpContext::new(api_key_id.clone());
-                    let available = tokio::time::timeout(
+                    let visible = tokio::time::timeout(
                         SUBSCRIPTION_POLL_INTERVAL,
-                        self.gateway.mcp_registry.available(&mcp_context),
-                    ).await;
-                    let Ok(tools) = available else {
+                        self.gateway.mcp_catalog_provider.list_visible_tools(
+                            &self.gateway,
+                            &mcp_context,
+                            &scope,
+                        ),
+                    )
+                    .await;
+                    let Ok(Ok(tools)) = visible else {
                         continue;
                     };
-                    let mut tools_with_schema = Vec::with_capacity(tools.len());
-                    for tool in tools {
-                        tools_with_schema.push((
-                            tool.name().to_owned(),
-                            tool.input_schema_for(&mcp_context).await,
-                        ));
-                    }
-                    if previous.as_ref() == Some(&tools_with_schema) {
+                    let snapshot: Vec<(String, Option<String>, Value)> = tools
+                        .into_iter()
+                        .map(|tool| (tool.exposed_name, tool.description, tool.input_schema))
+                        .collect();
+                    if previous.as_ref() == Some(&snapshot) {
                         continue;
                     }
-                    previous = Some(tools_with_schema);
+                    previous = Some(snapshot);
                     if let Err(error) = sink.notify_tool_list_changed().await {
                         tracing::debug!(%error, "MCP tool-list subscription closed");
                         return Ok(());
@@ -246,7 +262,9 @@ impl ServerHandler for StraviaMcpServer {
     }
 }
 
-fn mcp_context(context: &RequestContext<RoleServer>) -> Result<McpContext, McpError> {
+fn mcp_context_and_scope(
+    context: &RequestContext<RoleServer>,
+) -> Result<(McpContext, String), McpError> {
     let parts = context
         .extensions
         .get::<axum::http::request::Parts>()
@@ -259,22 +277,16 @@ fn mcp_context(context: &RequestContext<RoleServer>) -> Result<McpContext, McpEr
         .ok_or_else(|| {
             McpError::internal_error("authenticated API key context is missing", None)
         })?;
-    Ok(McpContext::new(principal.id.clone()))
+    let scope = parts
+        .extensions
+        .get::<ResolvedScope>()
+        .map(|resolved| resolved.0.clone())
+        .unwrap_or_else(|| "unified".to_owned());
+    Ok((McpContext::new(principal.id.clone()), scope))
 }
 
 fn tool_definition(tool: &dyn McpTool) -> Tool {
     let input_schema = schema_object(tool.input_schema(), tool.name(), "input");
-    let description = tool.description().map(|value| Owned(value.to_owned()));
-    let mut definition = Tool::new_with_raw(tool.name().to_owned(), description, input_schema);
-    if let Some(output_schema) = tool.output_schema() {
-        definition =
-            definition.with_raw_output_schema(schema_object(output_schema, tool.name(), "output"));
-    }
-    definition
-}
-
-fn tool_definition_with_input(tool: &dyn McpTool, input_schema: Value) -> Tool {
-    let input_schema = schema_object(input_schema, tool.name(), "input");
     let description = tool.description().map(|value| Owned(value.to_owned()));
     let mut definition = Tool::new_with_raw(tool.name().to_owned(), description, input_schema);
     if let Some(output_schema) = tool.output_schema() {
@@ -340,6 +352,50 @@ async fn authenticate_request(
     if let Err(response) = validate_origin(&headers) {
         return *response;
     }
+
+    let Some(scope) = gateway.mcp_catalog_provider.parse_scope(request.uri().path()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({
+                "error": {
+                    "code": "mcp_endpoint_not_found",
+                    "message": format!("Unknown MCP endpoint: {}", request.uri().path())
+                }
+            })),
+        )
+            .into_response();
+    };
+
+    if let Err(error) = gateway
+        .mcp_catalog_provider
+        .authorize_endpoint(&gateway, authenticated.principal.api_key_id(), &scope)
+        .await
+    {
+        return match error {
+            McpEndpointAccessError::NotFound(message) => (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({
+                    "error": { "code": "mcp_endpoint_not_found", "message": message }
+                })),
+            )
+                .into_response(),
+            McpEndpointAccessError::Forbidden { code, message } => (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({
+                    "error": { "code": code, "message": message }
+                })),
+            )
+                .into_response(),
+            McpEndpointAccessError::Internal(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({
+                    "error": { "code": "mcp_catalog_error", "message": message }
+                })),
+            )
+                .into_response(),
+        };
+    }
+
     let execution_policy = match gateway
         .policy_resolver
         .resolve(&crate::policy::PolicyRequestContext::mcp(
@@ -392,6 +448,7 @@ async fn authenticate_request(
         parts.extensions.insert(AuthenticatedApiKey {
             id: authenticated.principal.api_key_id().to_owned(),
         });
+        parts.extensions.insert(ResolvedScope(scope));
         let request = Request::from_parts(parts, Body::from(body));
         // Spend admission precedes RPM for `tools/call`, so a rejected call
         // never consumes an RPM window. Other MCP methods are not model calls.
@@ -434,6 +491,7 @@ async fn authenticate_request(
     parts.extensions.insert(AuthenticatedApiKey {
         id: authenticated.principal.api_key_id().to_owned(),
     });
+    parts.extensions.insert(ResolvedScope(scope));
     next.run(Request::from_parts(parts, body)).await
 }
 
@@ -480,6 +538,7 @@ async fn authenticate(
         .await
         .map_err(|error| Box::new(render_authentication_error(error)))
 }
+
 fn render_authentication_error(error: GatewayError) -> Response {
     match error {
         GatewayError::Unauthorized {
@@ -551,6 +610,7 @@ fn validate_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
         ))
     }
 }
+
 fn header_value(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> Option<&str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }

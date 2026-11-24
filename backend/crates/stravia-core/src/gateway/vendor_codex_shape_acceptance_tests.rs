@@ -470,6 +470,7 @@ async fn legacy_boundary_continuation(
             vec![Arc::new(BoundaryTool)],
             vec![],
             vec![],
+            vec![],
         )
         .await?;
     }
@@ -974,6 +975,7 @@ async fn legacy_boundary_continuation(
             &mut gateway,
             vec![Arc::new(BoundaryExposure)],
             vec![Arc::new(BoundaryTool)],
+            vec![],
             vec![],
             vec![],
         )

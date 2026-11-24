@@ -53,5 +53,8 @@ pub mod turn_chain;
 pub(crate) mod web_access;
 pub(crate) mod web_search;
 
-pub use gateway::{Gateway, GatewayBuilder, PreparedGateway, RuntimeStorageKind};
+pub use gateway::{
+    Gateway, GatewayBuilder, GatewayExtensionFactory, GatewayExtensions, PreparedGateway,
+    RuntimeStorageKind,
+};
 pub(crate) use tool_execution::{PreparedMarkerExecution, StartedMarkerDelivery};

@@ -50,7 +50,7 @@ pub(crate) fn create_router(
     gateway: Gateway,
     auth: AdminHttpState,
     capability_provider: Arc<dyn CapabilityProvider>,
-    extra_admin_routes: Option<Router>,
+    extra_admin_routes: Option<Router<Gateway>>,
     extra_public_routes: Option<Router>,
 ) -> Router {
     create_router_inner(
@@ -66,7 +66,7 @@ fn create_router_inner(
     gateway: Gateway,
     auth: Option<AdminHttpState>,
     capability_provider: Arc<dyn CapabilityProvider>,
-    extra_admin_routes: Option<Router>,
+    extra_admin_routes: Option<Router<Gateway>>,
     extra_public_routes: Option<Router>,
 ) -> Router {
     let oauth_callbacks = OAuthCallbackManager::new(gateway.clone());
@@ -380,8 +380,11 @@ fn create_router_inner(
         .route("/updates/skipped-version", put(set_skipped_update_version))
         .route("/settings/{key}", get(get_setting).put(set_setting))
         .route("/status", get(get_status))
-        .layer(Extension(oauth_callbacks))
-        .with_state(gateway.clone());
+        .layer(Extension(oauth_callbacks));
+    if let Some(extra_admin) = extra_admin_routes {
+        api = api.merge(extra_admin);
+    }
+    let mut api = api.with_state(gateway.clone());
     let auth_mode = auth
         .as_ref()
         .map(|state| state.auth_provider.auth_mode())
@@ -410,9 +413,6 @@ fn create_router_inner(
         }),
     );
     api = api.merge(capabilities_route);
-    if let Some(extra_admin) = extra_admin_routes {
-        api = api.merge(extra_admin);
-    }
     if let Some(auth_state) = auth.clone() {
         api = api.layer(middleware::from_fn_with_state(auth_state, require_admin));
     }

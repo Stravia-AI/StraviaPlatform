@@ -8,20 +8,23 @@ import { goto } from '$app/navigation'
 import { untrack } from 'svelte'
 import type { MouseEventHandler } from 'svelte/elements'
 import { createQuery } from '@tanstack/svelte-query'
+import BlocksIcon from '@lucide/svelte/icons/blocks'
 import ClipboardCopyIcon from '@lucide/svelte/icons/clipboard-copy'
 import CheckIcon from '@lucide/svelte/icons/check'
 import Code2Icon from '@lucide/svelte/icons/code-2'
 import TerminalSquareIcon from '@lucide/svelte/icons/terminal-square'
 import { toast } from 'svelte-sonner'
 
-import { admin, isTauri, proxyBase } from '#lib/admin-client.js'
+import { admin, capabilitiesQueryOptions, isTauri, proxyBase } from '#lib/admin-client.js'
 import { getConnectSetup } from '#lib/connect-setup.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { copyText } from '#lib/clipboard.js'
 import { applyConnectClient, asConnectClientApplyError, planConnectClient } from '#lib/connect-client-apply.js'
+import { ensureBuildExtensionsRegistered } from '#lib/extensions/index.js'
 import { logicalModelOption, sortLogicalModels } from '#lib/logical-model.js'
 import {
   apiKeyAllowsModel,
+  apiKeyReadOnlyReason,
   buildCode,
   CLI_TOOLS,
   defineClientModel,
@@ -34,8 +37,11 @@ import {
   type GatewayProtocol,
 } from '#lib/connect.js'
 import ConnectControlRow from '#lib/components/connect-control-row.svelte'
+import ExtensionSlot from '#lib/components/extension-slot.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import SearchCombobox from '#lib/components/search-combobox.svelte'
+import StatusIndicator from '#lib/components/status-indicator.svelte'
+import TechnicalValue from '#lib/components/technical-value.svelte'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
@@ -54,13 +60,21 @@ const proxyQuery = createQuery(() => ({
   queryFn: proxyBase,
   staleTime: Number.POSITIVE_INFINITY,
 }))
-let tab = $state<'cli' | 'code'>(initial?.tab ?? 'cli')
+const capabilitiesQuery = createQuery(() => capabilitiesQueryOptions())
+const capabilities = $derived(capabilitiesQuery.data?.capabilities ?? [])
+const extensions = ensureBuildExtensionsRegistered()
+const hasConnectMcpSlot = $derived(
+  extensions.activeSlots(capabilities, 'connect:mcp-endpoints').some((item) => typeof item.component === 'function'),
+)
+let tab = $state<'cli' | 'code' | 'mcp'>(initial?.tab ?? 'cli')
 let codeLanguage = $state<CodeLanguage>(initial?.codeLanguage ?? 'python')
 let codeProtocol = $state<GatewayProtocol>(initial?.codeProtocol ?? 'openai-compatible')
 let codeModelId = $state(initial?.codeModelId ?? '')
 let codeKeyId = $state(initial?.codeKeyId ?? '')
 let cliToolId = $state<CliToolId>(initial?.cliToolId ?? 'codex-cli')
 let cliKeyId = $state(initial?.cliKeyId ?? '')
+let mcpKeyId = $state(initial?.mcpKeyId ?? '')
+let mcpSnippetFormat = $state<'json' | 'curl'>(initial?.mcpSnippetFormat ?? 'json')
 let applyingClient = $state(false)
 let claudeModelIds = $state<Record<keyof ClaudeModelMappings, string>>(
   initial?.claudeModelIds ?? { defaultModel: '', haikuModel: '', sonnetModel: '', opusModel: '' },
@@ -151,6 +165,48 @@ const generatedCliConfig = $derived.by(() => {
   return connectPlanQuery.data?.preview ?? ''
 })
 
+const mcpActiveKeys = $derived(apiKeys.filter((key) => apiKeyReadOnlyReason(key) === null))
+const selectedMcpKey = $derived(
+  mcpActiveKeys.find((key) => key.id === mcpKeyId) ?? (mcpActiveKeys.length === 1 ? mcpActiveKeys[0] : undefined),
+)
+const builtinMcpUrl = $derived(`${host.replace(/\/+$/, '')}/mcp`)
+const generatedMcpSnippet = $derived.by(() => {
+  const token = selectedMcpKey?.key || '<YOUR_STRAVIA_API_KEY>'
+  if (mcpSnippetFormat === 'json') {
+    return JSON.stringify(
+      {
+        mcpServers: {
+          stravia: {
+            url: builtinMcpUrl,
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        },
+      },
+      null,
+      2,
+    )
+  }
+  const payload = JSON.stringify({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'stravia-curl-check', version: '1.0' },
+    },
+  })
+  return [
+    `curl -sS -X POST '${builtinMcpUrl.replaceAll("'", "'\\''")}' \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -H 'Accept: application/json, text/event-stream' \\`,
+    `  -H 'Authorization: Bearer ${token.replaceAll("'", "'\\''")}' \\`,
+    `  -d '${payload.replaceAll("'", "'\\''")}'`,
+  ].join('\n')
+})
+
 const codeProtocols = [
   { id: 'openai-compatible', name: 'OpenAI Compatible', path: '/v1/chat/completions' },
   { id: 'open-responses', name: 'Open Responses', path: '/v1/responses' },
@@ -169,6 +225,8 @@ const copyGeneratedCliConfig: MouseEventHandler<HTMLElement> = ({ currentTarget 
   void copyOutput(generatedCliConfig, currentTarget)
 const copyGeneratedCode: MouseEventHandler<HTMLElement> = ({ currentTarget }) =>
   void copyOutput(generatedCode, currentTarget)
+const copyGeneratedMcpSnippet: MouseEventHandler<HTMLElement> = ({ currentTarget }) =>
+  void copyOutput(generatedMcpSnippet, currentTarget)
 
 async function copyOutput(value: string, trigger: HTMLElement): Promise<void> {
   try {
@@ -208,6 +266,8 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
     cliToolId,
     cliKeyId: selectedCliKey?.id ?? '',
     claudeModelIds: { ...claudeModelIds },
+    mcpKeyId: selectedMcpKey?.id ?? '',
+    mcpSnippetFormat,
   }
   setup.createKey = createKey
   void goto(resolve(path))
@@ -266,6 +326,7 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
           <Tabs.Trigger value="cli"
             ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
           <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
+          <Tabs.Trigger value="mcp"><BlocksIcon data-icon="inline-start" />{m.connect_mcp_tab()}</Tabs.Trigger>
         </Tabs.List>
 
         <Tabs.Content value="cli" class="mt-6 min-h-0 data-active:flex data-active:flex-col">
@@ -538,6 +599,116 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
               </Tabs.Root>
             </section>
           </div>
+        </Tabs.Content>
+
+        <Tabs.Content value="mcp" class="mt-6 min-h-0 data-active:flex data-active:flex-col">
+          {#if tab === 'mcp'}
+            <div
+              class="grid gap-6 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:flex-1 @min-[68rem]/connect:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)] @min-[68rem]/connect:grid-rows-[minmax(0,1fr)]">
+              <section
+                class="min-w-0 @min-[68rem]/connect:min-h-0 @min-[68rem]/connect:overflow-y-auto"
+                aria-labelledby="mcp-controls-title">
+                <h2 id="mcp-controls-title" class="sr-only">{m.connect_mcp_setup()}</h2>
+                <Field.FieldGroup>
+                  <ConnectControlRow label={m.common_api_key()} labelFor="mcp-key">
+                    <Select.Root
+                      type="single"
+                      bind:value={
+                        () => selectedMcpKey?.id ?? '',
+                        (value: string) => {
+                          mcpKeyId = value
+                        }
+                      }
+                      disabled={mcpActiveKeys.length === 0}>
+                      <Select.Trigger id="mcp-key" class="w-full min-w-0">
+                        <span class="truncate">
+                          {selectedMcpKey
+                            ? `${selectedMcpKey.name} · ${maskApiKey(selectedMcpKey.key)}`
+                            : m.connect_select_api_key()}
+                        </span>
+                      </Select.Trigger>
+                      <Select.Content>
+                        <Select.Group>
+                          {#each mcpActiveKeys as key (key.id)}
+                            <Select.Item value={key.id} label={key.name}>
+                              {key.name} · {maskApiKey(key.key)}
+                            </Select.Item>
+                          {/each}
+                        </Select.Group>
+                      </Select.Content>
+                    </Select.Root>
+                    {#snippet below()}
+                      {#if mcpActiveKeys.length === 0}
+                        <p class="text-sm text-muted-foreground">{m.connect_mcp_no_active_keys()}</p>
+                      {:else if !selectedMcpKey}
+                        <p class="text-sm text-muted-foreground">{m.connect_mcp_select_key_hint()}</p>
+                      {/if}
+                      {@render keyActions(selectedMcpKey !== undefined)}
+                    {/snippet}
+                  </ConnectControlRow>
+                </Field.FieldGroup>
+
+                {#if !hasConnectMcpSlot && selectedMcpKey}
+                  <div class="mt-4">
+                    {#if selectedMcpKey.mcp_access_enabled}
+                      <StatusIndicator tone="healthy" label={m.connect_mcp_auth_ok()} />
+                    {:else}
+                      <Alert.Root variant="warning" role="status">
+                        <Alert.Title>{m.connect_mcp_auth_disabled_title()}</Alert.Title>
+                        <Alert.Description class="flex flex-col items-start gap-2">
+                          <p>{m.connect_mcp_auth_disabled_unified()}</p>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            href={resolve(`api-keys/${encodeURIComponent(selectedMcpKey.id)}`)}>
+                            {m.connect_mcp_edit_key_access()}
+                          </Button>
+                        </Alert.Description>
+                      </Alert.Root>
+                    {/if}
+                  </div>
+                {/if}
+              </section>
+
+              {#if hasConnectMcpSlot}
+                <section class="flex min-h-0 min-w-0 flex-col" aria-labelledby="mcp-output-title">
+                  <ExtensionSlot
+                    slot="connect:mcp-endpoints"
+                    {capabilities}
+                    props={{ host, apiKey: selectedMcpKey, capabilities }}
+                    class="min-h-0 flex-1" />
+                </section>
+              {:else}
+                <section class="flex min-h-0 min-w-0 flex-col gap-4" aria-labelledby="mcp-output-title">
+                  <div class="flex flex-col gap-1 border-b pb-3">
+                    <span class="text-xs font-medium text-muted-foreground">{m.connect_mcp_endpoint_url_label()}</span>
+                    <TechnicalValue value={builtinMcpUrl} copyable />
+                  </div>
+
+                  <div class="flex shrink-0 flex-wrap items-center justify-between gap-4">
+                    <h2 id="mcp-output-title" class="route-section-title font-structural">
+                      {m.connect_mcp_config_heading()}
+                    </h2>
+                    <Button onclick={copyGeneratedMcpSnippet}>
+                      <ClipboardCopyIcon data-icon="inline-start" />{mcpSnippetFormat === 'json'
+                        ? m.connect_mcp_copy_json()
+                        : m.connect_mcp_copy_curl()}
+                    </Button>
+                  </div>
+
+                  <Tabs.Root bind:value={mcpSnippetFormat} class="min-h-0 flex-1">
+                    <Tabs.List class="shrink-0" aria-label={m.connect_mcp_config_heading()}>
+                      <Tabs.Trigger value="json">{m.connect_mcp_snippet_json_tab()}</Tabs.Trigger>
+                      <Tabs.Trigger value="curl">{m.connect_mcp_snippet_curl_tab()}</Tabs.Trigger>
+                    </Tabs.List>
+                    <Tabs.Content value={mcpSnippetFormat} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
+                      <pre class="route-code-plane min-h-96 flex-1">{generatedMcpSnippet}</pre>
+                    </Tabs.Content>
+                  </Tabs.Root>
+                </section>
+              {/if}
+            </div>
+          {/if}
         </Tabs.Content>
       </Tabs.Root>
     {/if}

@@ -77,6 +77,7 @@
 - [0091-read-paths-with-colon-selectors-and-plain-fields.md](0091-read-paths-with-colon-selectors-and-plain-fields.md)：统一读取路径、冒号选择器和纯文本字段。
 - [ADR-0092](0092-replace-multipart-artifact-upload-with-single-request.md)：用单次请求上传 Artifact。
 - [ADR-0097](0097-store-api-key-transparent-injections-as-a-set.md)：将 API Key 的透明注入选择保存为集合。
+- [ADR-0099](0099-centralized-mcp-management-and-http-bridge.md)：集中管理 MCP 服务、多作用域入口与 HTTP 转 MCP 桥接。
 
 ## 凭据保护
 

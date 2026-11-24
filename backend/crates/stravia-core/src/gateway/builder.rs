@@ -5,10 +5,13 @@ pub struct GatewayBuilder {
     storage: Option<DynStorage>,
     hooks: Vec<Arc<dyn Hook>>,
     tools: Vec<Arc<dyn PlatformTool>>,
+    dynamic_tool_loaders: Vec<Arc<dyn crate::hook::DynamicPlatformToolLoader>>,
     mcp_tools: Vec<Arc<dyn McpTool>>,
+    mcp_catalog_provider: Option<Arc<dyn crate::mcp::McpCatalogProvider>>,
     agent_definitions: Vec<stravia_runtime_contract::agent::AgentDefinitionSpec>,
     web_provider_factories: Vec<Arc<dyn stravia_web_access::WebProviderFactory>>,
     policy_resolver: Option<Arc<dyn crate::policy::PolicyResolver>>,
+    extension_factory: Option<Arc<dyn GatewayExtensionFactory>>,
 }
 
 impl GatewayBuilder {
@@ -18,10 +21,13 @@ impl GatewayBuilder {
             storage: None,
             hooks: Vec::new(),
             tools: Vec::new(),
+            dynamic_tool_loaders: Vec::new(),
             mcp_tools: Vec::new(),
+            mcp_catalog_provider: None,
             agent_definitions: Vec::new(),
             web_provider_factories: Vec::new(),
             policy_resolver: None,
+            extension_factory: None,
         }
     }
 
@@ -39,8 +45,27 @@ impl GatewayBuilder {
         self.tools.push(tool);
         self
     }
+
+    pub fn dynamic_tool_loader(
+        mut self,
+        loader: Arc<dyn crate::hook::DynamicPlatformToolLoader>,
+    ) -> Self {
+        self.dynamic_tool_loaders.push(loader);
+        self
+    }
+
     pub fn mcp_tool(mut self, tool: Arc<dyn McpTool>) -> Self {
         self.mcp_tools.push(tool);
+        self
+    }
+
+    pub fn mcp_catalog_provider(mut self, provider: Arc<dyn crate::mcp::McpCatalogProvider>) -> Self {
+        self.mcp_catalog_provider = Some(provider);
+        self
+    }
+
+    pub fn extension_factory(mut self, factory: Arc<dyn GatewayExtensionFactory>) -> Self {
+        self.extension_factory = Some(factory);
         self
     }
 
@@ -72,12 +97,15 @@ impl GatewayBuilder {
         let Self {
             config,
             storage,
-            hooks,
-            tools,
-            mcp_tools,
+            mut hooks,
+            mut tools,
+            mut dynamic_tool_loaders,
+            mut mcp_tools,
+            mut mcp_catalog_provider,
             agent_definitions,
             web_provider_factories,
-            policy_resolver,
+            mut policy_resolver,
+            extension_factory,
         } = self;
         let mut registry = stravia_web_access::WebProviderRegistry::new();
         for factory in web_provider_factories {
@@ -89,8 +117,24 @@ impl GatewayBuilder {
             Gateway::new(config).await?
         };
         gateway.web_provider_registry = Arc::new(registry);
+        if let Some(factory) = extension_factory {
+            let ext = factory.build_extensions(&gateway.background_clone());
+            hooks.extend(ext.hooks);
+            tools.extend(ext.platform_tools);
+            dynamic_tool_loaders.extend(ext.dynamic_tool_loaders);
+            mcp_tools.extend(ext.mcp_tools);
+            if mcp_catalog_provider.is_none() {
+                mcp_catalog_provider = ext.mcp_catalog_provider;
+            }
+            if policy_resolver.is_none() {
+                policy_resolver = ext.policy_resolver;
+            }
+        }
         if let Some(resolver) = policy_resolver {
             gateway.policy_resolver = resolver;
+        }
+        if let Some(provider) = mcp_catalog_provider {
+            gateway.mcp_catalog_provider = provider;
         }
         gateway.generation_chains = generation_chain::GenerationChain::from_turn_chain(
             Arc::clone(&gateway.turn_chains),
@@ -104,8 +148,15 @@ impl GatewayBuilder {
         .with_atomic_state(gateway.storage.vendor_plugins().clone())
         .with_compaction(gateway.compaction.clone());
         gateway.install_model_turn();
-        configure_gateway_extensions(&mut gateway, hooks, tools, mcp_tools, agent_definitions)
-            .await?;
+        configure_gateway_extensions(
+            &mut gateway,
+            hooks,
+            tools,
+            dynamic_tool_loaders,
+            mcp_tools,
+            agent_definitions,
+        )
+        .await?;
         Ok(gateway)
     }
 }

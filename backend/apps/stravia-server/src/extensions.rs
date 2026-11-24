@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use serde::{Deserialize, Serialize};
-use stravia_core::PreparedGateway;
 use stravia_core::admin::identity::{AdminAuthProvider, AdminAuthorizer};
+use stravia_core::{Gateway, GatewayExtensionFactory, PreparedGateway};
 
 /// Distribution edition reported by `GET /api/v1/capabilities`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,9 +93,10 @@ pub struct HttpAppExtensions {
     pub admin_auth_provider: Option<Arc<dyn AdminAuthProvider>>,
     pub admin_authorizer: Option<Arc<dyn AdminAuthorizer>>,
     pub capability_provider: Option<Arc<dyn CapabilityProvider>>,
-    pub extra_admin_routes: Option<Router>,
+    pub extra_admin_routes: Option<Router<Gateway>>,
     pub extra_public_routes: Option<Router>,
     pub post_prepare_hook: Option<Arc<dyn PostPrepareHook>>,
+    pub gateway_extensions: Option<Arc<dyn GatewayExtensionFactory>>,
 }
 
 impl HttpAppExtensions {
@@ -114,9 +115,9 @@ impl HttpAppExtensions {
         self
     }
 
-    /// Mounts extra routes under `/api/v1` protected by `require_admin`, `AdminAuthorizer`,
-    /// `AdminEntryPolicy`, and Origin/CSRF validation.
-    pub fn with_extra_admin_routes(mut self, routes: Router) -> Self {
+    /// Mounts extra routes under `/api/v1` with access to `State<Gateway>`, protected by
+    /// `require_admin`, `AdminAuthorizer`, `AdminEntryPolicy`, and Origin/CSRF validation.
+    pub fn with_extra_admin_routes(mut self, routes: Router<Gateway>) -> Self {
         self.extra_admin_routes = Some(routes);
         self
     }
@@ -130,6 +131,13 @@ impl HttpAppExtensions {
     /// Registers a hook executed after core migrations succeed during startup and `/setup`.
     pub fn with_post_prepare_hook(mut self, hook: Arc<dyn PostPrepareHook>) -> Self {
         self.post_prepare_hook = Some(hook);
+        self
+    }
+
+    /// Registers a [`GatewayExtensionFactory`] invoked when starting `Gateway` during
+    /// server startup and `/setup` completion.
+    pub fn with_gateway_extensions(mut self, factory: Arc<dyn GatewayExtensionFactory>) -> Self {
+        self.gateway_extensions = Some(factory);
         self
     }
 }

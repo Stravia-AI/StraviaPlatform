@@ -1,9 +1,18 @@
 use super::*;
 
+#[async_trait::async_trait]
+pub trait DynamicPlatformToolLoader: Send + Sync + 'static {
+    async fn load(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+    ) -> Vec<Arc<dyn stravia_runtime_contract::hook::PlatformTool>>;
+}
+
 #[derive(Clone, Default)]
 pub struct HookRuntime {
     pub(super) hooks: Arc<[Arc<dyn Hook>]>,
     pub(super) tools: PlatformToolRegistry,
+    pub(super) dynamic_tool_loaders: Arc<[Arc<dyn DynamicPlatformToolLoader>]>,
 }
 
 /// 只由实际成功应用的动作生成；Hook 无法自报历史仍然可信。

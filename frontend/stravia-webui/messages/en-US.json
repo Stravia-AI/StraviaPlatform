@@ -407,8 +407,14 @@
   "models_destinations_allowance_suspended": "Allowance paused: {count}",
   "models_destinations_multiple": [
     {
-      "declarations": ["input count", "input strategy", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "input strategy",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "{count} destination · {strategy}",
         "countPlural=other": "{count} destinations · {strategy}"
@@ -417,8 +423,14 @@
   ],
   "models_destinations_fallback": [
     {
-      "declarations": ["input layers", "input targets", "local layersPlural = layers: plural"],
-      "selectors": ["layersPlural"],
+      "declarations": [
+        "input layers",
+        "input targets",
+        "local layersPlural = layers: plural"
+      ],
+      "selectors": [
+        "layersPlural"
+      ],
       "match": {
         "layersPlural=one": "{layers} fallback layer ({targets} available)",
         "layersPlural=other": "{layers} fallback layers ({targets} available)"
@@ -427,8 +439,13 @@
   ],
   "models_destinations_unavailable": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "{count} destination unavailable",
         "countPlural=other": "{count} destinations unavailable"
@@ -1721,8 +1738,13 @@
   "common_this_service": "This service",
   "models_removed_service_destinations": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "This removes {count} destination and updates other settings that use this model.",
         "countPlural=other": "This removes {count} destinations and updates other settings that use this model."
@@ -1731,8 +1753,13 @@
   ],
   "models_removed_api_key_permissions": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "{count} API Key permission will be removed",
         "countPlural=other": "{count} API Key permissions will be removed"
@@ -1741,8 +1768,13 @@
   ],
   "providers_model_compatibility_warnings": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "{count} model compatibility warning",
         "countPlural=other": "{count} model compatibility warnings"
@@ -1751,8 +1783,13 @@
   ],
   "providers_model_destinations_in_use": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "{count} destination still uses this provider.",
         "countPlural=other": "{count} destinations still use this provider."
@@ -1761,15 +1798,28 @@
   ],
   "provider_model_catalog_used_by_models": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
-      "match": { "countPlural=one": "Used by 1 model", "countPlural=other": "Used by {count} models" }
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
+      "match": {
+        "countPlural=one": "Used by 1 model",
+        "countPlural=other": "Used by {count} models"
+      }
     }
   ],
   "provider_model_catalog_remove_manual_references": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "Remove this manually added model from the list. {count} configured model will continue using the same upstream model ID.",
         "countPlural=other": "Remove this manually added model from the list. {count} configured models will continue using the same upstream model ID."
@@ -1815,8 +1865,13 @@
   "backend_error_auth_refresh_token_not_supported": "This provider channel does not support signing in with a refresh token.",
   "backend_error_provider_in_use_routes": [
     {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
+      "declarations": [
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": [
+        "countPlural"
+      ],
       "match": {
         "countPlural=one": "This provider is still used by {count} model. Choose another provider for that model first.",
         "countPlural=other": "This provider is still used by {count} models. Choose another provider for those models first."
@@ -2517,5 +2572,19 @@
   "allowances_reset_uncertain": "The reset result is unknown. It may have been used; retry the same entitlement to resolve it.",
   "allowances_reset_unknown_request": "This process cannot confirm the previous reset. Check the provider's Usage before taking further action; do not start a new reset.",
   "allowances_reset_uncertain_refresh_failed": "The allowance refresh also failed. Refresh again before retrying.",
-  "allowances_reset_refresh_failed": "The reset result is known, but the allowance refresh failed. Refresh again to see current values."
+  "allowances_reset_refresh_failed": "The reset result is known, but the allowance refresh failed. Refresh again to see current values.",
+  "connect_mcp_tab": "MCP",
+  "connect_mcp_setup": "MCP client setup",
+  "connect_mcp_auth_ok": "This API Key can access the built-in /mcp endpoint.",
+  "connect_mcp_auth_disabled_title": "MCP access is disabled on this API Key",
+  "connect_mcp_auth_disabled_unified": "The /mcp endpoint accepts connections, but tools/list will be empty until MCP access is enabled.",
+  "connect_mcp_edit_key_access": "Edit MCP access",
+  "connect_mcp_endpoint_url_label": "Endpoint URL",
+  "connect_mcp_config_heading": "MCP client snippet",
+  "connect_mcp_select_key_hint": "Select an API Key to embed its Bearer token in the generated configuration.",
+  "connect_mcp_no_active_keys": "No enabled, unexpired API Keys available.",
+  "connect_mcp_snippet_json_tab": "mcpServers JSON",
+  "connect_mcp_snippet_curl_tab": "cURL",
+  "connect_mcp_copy_json": "Copy mcpServers JSON",
+  "connect_mcp_copy_curl": "Copy cURL"
 }

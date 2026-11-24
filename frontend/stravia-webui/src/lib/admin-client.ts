@@ -140,7 +140,7 @@ export interface ArtifactSettings {
   s3: ArtifactS3Settings | null
 }
 
-type HttpMethod = 'DELETE' | 'GET' | 'PATCH' | 'POST' | 'PUT'
+export type HttpMethod = 'DELETE' | 'GET' | 'PATCH' | 'POST' | 'PUT'
 
 function queryString(query: object): string {
   const params = new URLSearchParams()
@@ -159,7 +159,12 @@ function statsPath(path: string, window?: StatsWindow, bucket?: number, filter?:
   return `${path}${queryString({ ...window, bucket, ...ids })}`
 }
 
-async function request<T>(method: HttpMethod, path: string, body?: unknown, retryOnUnauthorized = true): Promise<T> {
+export async function adminRequest<T>(
+  method: HttpMethod,
+  path: string,
+  body?: unknown,
+  retryOnUnauthorized = true,
+): Promise<T> {
   const headers = new Headers()
   if (method !== 'GET') headers.set('X-Stravia-CSRF', '1')
   if (body !== undefined) headers.set('Content-Type', 'application/json')
@@ -170,6 +175,8 @@ async function request<T>(method: HttpMethod, path: string, body?: unknown, retr
   )
   return decodeAdmin<T>(response)
 }
+
+const request = adminRequest
 
 async function uploadWasm<T>(path: string, file: File): Promise<T> {
   const response = await authenticatedFetch(path, {

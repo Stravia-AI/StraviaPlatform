@@ -10,7 +10,16 @@ impl HookRuntime {
         Self {
             hooks: hooks.into(),
             tools,
+            dynamic_tool_loaders: Arc::from([]),
         }
+    }
+
+    pub(crate) fn with_dynamic_tool_loaders(
+        mut self,
+        loaders: Vec<Arc<dyn super::types::DynamicPlatformToolLoader>>,
+    ) -> Self {
+        self.dynamic_tool_loaders = loaders.into();
+        self
     }
 
     pub fn descriptors(&self) -> Vec<HookDescriptor> {
@@ -73,6 +82,8 @@ impl HookRuntime {
             round: 0,
             processed_input_items,
             tools: self.tools.clone(),
+            dynamic_tool_loaders: Arc::clone(&self.dynamic_tool_loaders),
+            dynamic_tools_loaded: false,
             exposed_tools: HashMap::new(),
             exposed_tool_specs: HashMap::new(),
             read_scope: if read_declared {
@@ -104,6 +115,8 @@ pub(crate) struct InferenceRun {
     pub(super) round: u32,
     processed_input_items: usize,
     tools: PlatformToolRegistry,
+    dynamic_tool_loaders: Arc<[Arc<dyn super::types::DynamicPlatformToolLoader>]>,
+    dynamic_tools_loaded: bool,
     exposed_tools: HashMap<String, ToolId>,
     exposed_tool_specs: HashMap<String, ToolSpec>,
     read_scope: ReadExposureScope,
@@ -194,6 +207,15 @@ impl InferenceRun {
         {
             Arc::make_mut(current)
                 .update_from_request(request, ContextCompleteness::from_request(request));
+        }
+        if !self.dynamic_tools_loaded && !self.context.tools_fixed {
+            self.dynamic_tools_loaded = true;
+            for loader in self.dynamic_tool_loaders.iter() {
+                let extra_tools = loader.load(&self.context.principal).await;
+                if let Err(error) = self.tools.extend(extra_tools) {
+                    tracing::warn!(%error, "failed to register dynamic platform tools for inference run");
+                }
+            }
         }
         let mut history_edits = Vec::new();
         for index in 0..self.sessions.len() {

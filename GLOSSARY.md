@@ -311,7 +311,7 @@
 ### 高级能力、平台能力门禁与透明注入
 - **高级能力（Advanced Capability）**：面向用户提供、受平台总开关控制的能力，包括联网搜索（含网页读取）、多模态理解、媒体生成等。
 - **平台能力门禁（Platform Capability Gate）**：实例级能力总开关。关闭时任何 API Key 都不能通过显式调用、MCP 或透明注入使用该能力。
-- **透明注入（Transparent Injection）**：客户端未显式声明工具时，平台按 API Key 的已选集合自动注入工具的偏好设置（不是能力授权，也不限制显式调用或 MCP；唯独历史回看仅经透明注入提供）。
+- **透明注入（Transparent Injection）**：客户端未显式声明工具时，平台按 API Key 的已选集合自动注入工具的偏好设置（不是高级能力授权，也不限制显式调用或 MCP；唯独历史回看由 Key 侧配置决定在推理请求中的可用性）。总开关关闭期间，已选择的注入项保留但不生效，重新打开后恢复。商业版扩展可通过 `DynamicPlatformToolLoader` 扩展外部工具透明注入。
 - **避免混用**：把透明注入开关当成 API Key 的能力权限开关。
 
 ### 联网搜索、网页读取与外部 Web Provider
@@ -330,6 +330,11 @@
 - **历史回看（History Recall）**：允许开启该透明注入项的 API Key 通过 `StraviaRead` 的 `stravia://history/` 路径，只读浏览、读取与检索同一 Principal 在保留期内的交互链路。默认关闭，绝不经 MCP 提供；共用同一 Key 的人可见彼此对话。
 - **交互转录（Interaction Transcript）**：单次交互在历史回看中按观测事件渲染的只追加只读文本文件，已完成交互的行号稳定，用于检索结果定位；它不是调试抓包，也不用于重建模型上下文。
 - **避免混用**：Session 存储、长期记忆（Memory）、控制台对话的浏览器本地历史、调试包。
+
+### 内置 MCP 与商业版集中式 MCP 管控边界（Built-in MCP / Commercial MCP Hub）
+- **内置 MCP（Built-in MCP，社区版 CE）**：社区版仅通过统一 `/mcp` 端点暴露平台内置工具（如 `StraviaRead`、`generate`、联网搜索等），按 API Key 的 `mcp_access_enabled` 总开关控制可见性；不提供外部 MCP 接入、HTTP 转 MCP 桥接、分组编排或细粒度作用域子路径（`/mcp/category/*`、`/mcp/server/*`、`/mcp/group/*` 返回 404）。
+- **集中式 MCP 管控与 HTTP 转 MCP 桥接（商业版 `StraviaPlatformEE` Pro / Enterprise）**：通过社区版暴露的 `McpCatalogProvider`、`DynamicPlatformToolLoader`、`GatewayExtensionFactory`、`HttpAppExtensions` 与 WebUI 扩展点在商业版仓库中实现并受离线 License capability（`mcp_external`、`mcp_http_bridge`）门禁控制，提供外部 MCP（Streamable HTTP）接入与透明注入、HTTP 转 MCP 桥接（含 Artifact 附件上传与纯文本绑定）、自定义分组、多作用域 `/mcp*` 入口及独立的 API Key MCP 策略表。
+- **避免混用**：MCP Provider、插件、Agent Definition、Route、Webhook、模型绑定、Platform Capability Gate。
 
 ---
 

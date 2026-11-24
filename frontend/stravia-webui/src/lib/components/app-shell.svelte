@@ -235,11 +235,24 @@ const breadcrumbItems = $derived.by((): BreadcrumbItem[] => {
 
   const navigationItem = findNavigationItem(currentPath)
 
+  if (currentPath.startsWith('/ext/')) {
+    const matchedExtension = extensions.matchRoute(capabilities, currentPath.slice('/ext'.length))
+    if (navigationItem) {
+      const parent = { label: navigationItem.label() }
+      const itemPath = navigationHrefPath(navigationItem.href)
+      if (currentPath === itemPath) return [parent]
+      const leafLabel = matchedExtension?.route.breadcrumbLabel?.()
+      return leafLabel ? [{ ...parent, href: navigationItem.href }, { label: leafLabel }] : [parent]
+    }
+    const leafLabel = matchedExtension?.route.breadcrumbLabel?.()
+    return leafLabel ? [{ label: leafLabel }] : []
+  }
+
   if (!navigationItem) return []
 
   const parent = { label: navigationItem.label() }
 
-  if (currentPath === navigationItem.href) return [parent]
+  if (currentPath === navigationHrefPath(navigationItem.href)) return [parent]
 
   if (breadcrumbProviderId) {
     const providerName =
@@ -259,10 +272,16 @@ const breadcrumbItems = $derived.by((): BreadcrumbItem[] => {
 
   return [parent]
 })
+
+function navigationHrefPath(href: string): string {
+  return href.split(/[?#]/, 1)[0] ?? href
+}
+
 function findNavigationItem(pathname: string): NavigationItem | undefined {
   for (const group of navigationGroups) {
     for (const item of group.items) {
-      if (pathname === item.href || pathname.startsWith(`${item.href}/`)) {
+      const itemPath = navigationHrefPath(item.href)
+      if (pathname === itemPath || pathname.startsWith(`${itemPath}/`)) {
         return item
       }
     }
@@ -276,7 +295,8 @@ function gatewayLabel(compact: boolean): string {
 }
 
 function isCurrent(href: string): boolean {
-  return href === '/' ? currentPath === '/' : currentPath === href || currentPath.startsWith(`${href}/`)
+  const itemPath = navigationHrefPath(href)
+  return itemPath === '/' ? currentPath === '/' : currentPath === itemPath || currentPath.startsWith(`${itemPath}/`)
 }
 
 async function signOut(): Promise<void> {

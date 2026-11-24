@@ -654,4 +654,117 @@ mod tests {
             .unwrap();
         assert_eq!(public_res.status(), StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn ce_excludes_external_and_http_mcp_management_routes_and_scoped_endpoints() {
+        use axum::body::Body;
+        use axum::http::{Method, Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let (app, token, _dir) =
+            desktop_gateway_and_token(crate::HttpAppExtensions::default()).await;
+
+        // Commercial MCP management endpoints do not exist in CE
+        for path in [
+            "/api/v1/mcp/overview",
+            "/api/v1/mcp/servers",
+            "/api/v1/mcp/groups",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "path {path} must be 404 in CE");
+        }
+
+        // Create an API key with built-in MCP enabled to verify /mcp works while scoped subpaths 404
+        let create_key = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/api-keys")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-stravia-csrf", "1")
+                    .body(Body::from(
+                        r#"{"name":"ce-mcp-key","mcp_access_enabled":true,"transparent_injection_enabled":false,"transparent_injections":[],"model_ids":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_key.status(), StatusCode::OK);
+        let key_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(create_key.into_body(), 1024 * 64)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let api_key = key_json["data"]["key"].as_str().expect("api key token");
+
+        for scoped_path in [
+            "/mcp/category/external",
+            "/mcp/category/http",
+            "/mcp/server/demo",
+            "/mcp/group/demo",
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(scoped_path)
+                        .header(header::AUTHORIZATION, format!("Bearer {api_key}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::ACCEPT, "application/json, text/event-stream")
+                        .body(Body::from(
+                            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_FOUND,
+                "scoped MCP path {scoped_path} must be 404 in CE"
+            );
+        }
+
+        // Built-in /mcp endpoint stays operational in CE
+        let init_res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(header::HOST, "127.0.0.1")
+                    .header(header::AUTHORIZATION, format!("Bearer {api_key}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                    ))
+                    .unwrap(),
+                )
+            .await
+            .unwrap();
+        let init_status = init_res.status();
+        let init_body = axum::body::to_bytes(init_res.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        assert_eq!(
+            init_status,
+            StatusCode::OK,
+            "body: {}",
+            String::from_utf8_lossy(&init_body)
+        );
+    }
 }

@@ -2,7 +2,7 @@ import { createContext } from 'svelte'
 import type { ClaudeModelMappings, CliToolId, CodeLanguage, GatewayProtocol } from '#lib/connect.js'
 
 export interface ConnectDraft {
-  tab: 'cli' | 'code'
+  tab: 'cli' | 'code' | 'mcp'
   codeLanguage: CodeLanguage
   codeProtocol: GatewayProtocol
   codeModelId: string
@@ -10,6 +10,8 @@ export interface ConnectDraft {
   cliToolId: CliToolId
   cliKeyId: string
   claudeModelIds: Record<keyof ClaudeModelMappings, string>
+  mcpKeyId?: string
+  mcpSnippetFormat?: 'json' | 'curl'
 }
 
 export interface ConnectSetup {
