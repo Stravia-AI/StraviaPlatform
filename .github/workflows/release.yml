@@ -424,7 +424,16 @@ jobs:
 
       - name: Build server (Windows MSVC via cargo-xwin)
         if: matrix.kind == 'windows-xwin'
-        run: cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-pc-windows-msvc" ]]; then
+            shim_dir="$(mktemp -d)"
+            trap 'rm -rf "${shim_dir}"' EXIT
+            export STRAVIA_REAL_CLANG="$(command -v clang)"
+            cp .github/scripts/xwin_clang_wrapper.sh "${shim_dir}/clang"
+            chmod +x "${shim_dir}/clang"
+            export PATH="${shim_dir}:${PATH}"
+          fi
+          cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
 
       - name: Package server artifact
         shell: bash
@@ -562,6 +571,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          if [[ "${{ matrix.target }}" == "aarch64-pc-windows-msvc" ]]; then
+            shim_dir="$(mktemp -d)"
+            trap 'rm -rf "${shim_dir}"' EXIT
+            export STRAVIA_REAL_CLANG="$(command -v clang)"
+            cp .github/scripts/xwin_clang_wrapper.sh "${shim_dir}/clang"
+            chmod +x "${shim_dir}/clang"
+            export PATH="${shim_dir}:${PATH}"
+          fi
           cd backend/apps/stravia-desktop
           bunx --bun @tauri-apps/cli@2.12.3 build \
             --runner cargo-xwin \
