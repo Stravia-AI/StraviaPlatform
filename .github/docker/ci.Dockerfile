@@ -52,7 +52,7 @@ EOF
     apt-get update; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl git jq unzip zip tar xz-utils file \
-      build-essential pkg-config cmake clang llvm lld libclang-dev nasm \
+      build-essential pkg-config cmake ninja-build clang llvm lld libclang-dev nasm \
       python3 python3-pip \
       libssl-dev \
       libwebkit2gtk-4.1-dev \

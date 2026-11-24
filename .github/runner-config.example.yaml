@@ -21,6 +21,8 @@ runner:
     - "ubuntu-24.04:docker://ghcr.io/stravia-ai/stravia-ci-x64:latest"
     # Fallback using stock Ubuntu 24.04 (bootstrap_toolchain.sh installs missing tools).
     # - "ubuntu-24.04:docker://ubuntu:24.04"
+    # Native Linux ARM64 AppImage desktop release builds (Tauri linuxdeploy requires ARM64 host/container).
+    # - "ubuntu-24.04-arm:docker://ubuntu:24.04"
     # Optional KVM-enabled runner for Layer-2 Windows Desktop WebView2 E2E.
     - "linux-x64-kvm:host"
 

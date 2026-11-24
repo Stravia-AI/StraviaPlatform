@@ -209,6 +209,7 @@ jobs:
         id: bootstrap
         if: steps.select.outputs.has_plugins == 'true'
         env:
+          NEED_MINISIGN: "1"
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
@@ -348,7 +349,7 @@ jobs:
             archive: zip
           - suffix: windows-aarch64
             target: aarch64-pc-windows-msvc
-            kind: windows-xwin-arm64
+            kind: windows-xwin
             binary: target/aarch64-pc-windows-msvc/release/stravia-server.exe
             archive: zip
     steps:
@@ -421,15 +422,8 @@ jobs:
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
         run: cargo build --locked -p stravia-server --release --target ${{ matrix.target }}
 
-      - name: Build server (Windows x86_64 MSVC via cargo-xwin)
+      - name: Build server (Windows MSVC via cargo-xwin)
         if: matrix.kind == 'windows-xwin'
-        run: cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
-
-      - name: Build server (Windows aarch64 MSVC via cargo-xwin)
-        if: matrix.kind == 'windows-xwin-arm64'
-        env:
-          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/.github/cmake/windows-arm64.cmake
-          AWS_LC_SYS_NO_ASM: "1"
         run: cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
 
       - name: Package server artifact
@@ -460,32 +454,36 @@ jobs:
           retention-days: 7
 
   build-desktop:
-    name: Desktop cross-build (${{ matrix.suffix }})
+    name: Desktop build (${{ matrix.suffix }})
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           - suffix: linux-x86_64
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             kind: linux-native
             bundle: appimage
             bundle_directory: appimage
           - suffix: linux-aarch64
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            kind: linux-arm64
+            kind: linux-native
             bundle: appimage
             bundle_directory: appimage
           - suffix: windows-x86_64
+            runner: ubuntu-24.04
             target: x86_64-pc-windows-msvc
             kind: windows-xwin
             bundle: nsis
             bundle_directory: nsis
           - suffix: windows-aarch64
+            runner: ubuntu-24.04
             target: aarch64-pc-windows-msvc
-            kind: windows-xwin-arm64
+            kind: windows-xwin
             bundle: nsis
             bundle_directory: nsis
     steps:
@@ -502,7 +500,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Cache Rust cross-compile toolchain binaries
+      - name: Cache Rust build toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
@@ -511,16 +509,14 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-release-desktop-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-release-desktop-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-
 
-      - name: Bootstrap Linux x64 cross-compile toolchain
+      - name: Bootstrap desktop build toolchain
         id: bootstrap
         env:
           NEED_LINUX_DESKTOP: ${{ startsWith(matrix.kind, 'linux-') && '1' || '0' }}
-          NEED_LINUX_ARM64: ${{ matrix.kind == 'linux-arm64' && '1' || '0' }}
           NEED_XWIN: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
           RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
         run: bash .github/scripts/bootstrap_toolchain.sh
@@ -536,9 +532,9 @@ jobs:
             ~/.cache/sccache
             ~/.cache/cargo-xwin
             ~/.bun/install/cache
-          key: release-desktop-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
-            release-desktop-${{ matrix.suffix }}-v1-
+            release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-v1-
 
       - name: Validate updater signing credentials
         env:
@@ -560,37 +556,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES=appimage RUST_TARGET=${{ matrix.target }}
 
-      - name: Build desktop bundle (Linux aarch64 cross AppImage)
-        if: matrix.kind == 'linux-arm64'
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES=appimage RUST_TARGET=${{ matrix.target }}
-
-      - name: Build desktop bundle (Windows x86_64 NSIS via cargo-xwin)
+      - name: Build desktop bundle (Windows NSIS via cargo-xwin)
         if: matrix.kind == 'windows-xwin'
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          cd backend/apps/stravia-desktop
-          bunx --bun @tauri-apps/cli@2.12.3 build \
-            --runner cargo-xwin \
-            --target ${{ matrix.target }} \
-            --config tauri.release.conf.json \
-            --bundles nsis -- --locked
-
-      - name: Build desktop bundle (Windows aarch64 NSIS via cargo-xwin)
-        if: matrix.kind == 'windows-xwin-arm64'
-        env:
-          CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/.github/cmake/windows-arm64.cmake
-          AWS_LC_SYS_NO_ASM: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |

@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
-# Idempotent toolchain bootstrap for unified GitHub Actions & Forgejo Actions Linux x64 runners.
+# Idempotent toolchain bootstrap for unified GitHub Actions & Forgejo Actions Linux runners (x86_64 and aarch64).
 # - No-ops quickly inside the prebuilt .github/docker/ci.Dockerfile image or after toolchain cache restore.
-# - Supports persistent host cache volume (/ci-cache) AND standard actions/cache@v4 fallback.
+# - Supports persistent host cache volume (/ci-cache) AND standard actions/cache fallback.
 # - Installs only the apt packages and toolchains requested by NEED_* flags.
 set -euo pipefail
+
+HOST_ARCH="$(uname -m)"
+case "${HOST_ARCH}" in
+  x86_64)
+    SCCACHE_TRIPLE="x86_64-unknown-linux-musl"
+    TASK_ARCH="amd64"
+    UV_TRIPLE="x86_64-unknown-linux-gnu"
+    ;;
+  aarch64|arm64)
+    SCCACHE_TRIPLE="aarch64-unknown-linux-musl"
+    TASK_ARCH="arm64"
+    UV_TRIPLE="aarch64-unknown-linux-gnu"
+    ;;
+  *)
+    echo "Unsupported Linux host architecture: ${HOST_ARCH}" >&2
+    exit 1
+    ;;
+esac
 
 RUST_VERSION="${RUST_VERSION:-1.99.1}"
 BUN_VERSION="${BUN_VERSION:-1.4.2}"
@@ -18,6 +36,7 @@ NEED_RUST="${NEED_RUST:-1}"
 NEED_BUN="${NEED_BUN:-1}"
 NEED_TASK="${NEED_TASK:-1}"
 NEED_UV="${NEED_UV:-0}"
+NEED_MINISIGN="${NEED_MINISIGN:-0}"
 NEED_XWIN="${NEED_XWIN:-0}"
 NEED_LINUX_DESKTOP="${NEED_LINUX_DESKTOP:-0}"
 NEED_LINUX_ARM64="${NEED_LINUX_ARM64:-0}"
@@ -107,9 +126,12 @@ if command -v apt-get >/dev/null 2>&1; then
     done
   fi
   if [[ "$NEED_XWIN" == "1" ]]; then
-    for pkg in llvm lld nasm nsis; do
+    for pkg in llvm lld nasm ninja-build nsis; do
       add_pkg_if_missing "$pkg"
     done
+  fi
+  if [[ "$NEED_MINISIGN" == "1" ]]; then
+    add_pkg_if_missing "minisign"
   fi
   if [[ "$NEED_LINUX_ARM64" == "1" ]]; then
     for pkg in gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; do
@@ -137,8 +159,8 @@ fi
 if [[ "$NEED_RUST" == "1" ]]; then
   if ! command -v sccache >/dev/null 2>&1; then
     mkdir -p "${LOCAL_BIN}"
-    curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-      | tar -xz --strip-components=1 -C "${LOCAL_BIN}" "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" || true
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${SCCACHE_TRIPLE}.tar.gz" \
+      | tar -xz --strip-components=1 -C "${LOCAL_BIN}" "sccache-v${SCCACHE_VERSION}-${SCCACHE_TRIPLE}/sccache" || true
   fi
 fi
 
@@ -238,7 +260,7 @@ fi
 if [[ "$NEED_TASK" == "1" ]]; then
   if ! command -v task >/dev/null 2>&1; then
     mkdir -p "${LOCAL_BIN}"
-    curl -fsSL "https://github.com/go-task/task/releases/download/v${TASK_VERSION}/task_linux_amd64.tar.gz" \
+    curl -fsSL "https://github.com/go-task/task/releases/download/v${TASK_VERSION}/task_linux_${TASK_ARCH}.tar.gz" \
       | tar -xz -C "${LOCAL_BIN}" task
   fi
 fi
@@ -246,8 +268,8 @@ fi
 if [[ "$NEED_UV" == "1" ]]; then
   if ! command -v uv >/dev/null 2>&1; then
     mkdir -p "${LOCAL_BIN}"
-    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
-      | tar -xz --strip-components=1 -C "${LOCAL_BIN}" uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_TRIPLE}.tar.gz" \
+      | tar -xz --strip-components=1 -C "${LOCAL_BIN}" "uv-${UV_TRIPLE}/uv" "uv-${UV_TRIPLE}/uvx"
   fi
 fi
 
@@ -277,7 +299,7 @@ EOF
   if command -v sccache >/dev/null 2>&1; then
     echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
   fi
-  if command -v lld >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
+  if [[ "${HOST_ARCH}" == "x86_64" ]] && command -v lld >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
     echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
     echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
   fi
