@@ -353,7 +353,8 @@ fn unified_tools_and_summary_cross_the_anthropic_codec_boundary() {
     let request = anthropic_client_request(json!({
         "model":"claude-sonnet-4-5",
         "max_tokens":4096,
-        "thinking":{"type":"enabled","budget_tokens":1024,"display":"omitted"},
+        "thinking":{"type":"adaptive","display":"omitted"},
+        "output_config":{"effort":"low"},
         "tools":[
             {"name":"read","input_schema":{"type":"object","properties":{
                 "cache_control":{"type":"string"}}},
@@ -887,30 +888,29 @@ async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() 
     let discovered_extensions = discovered.metadata.clone();
     let invalid_extensions = BTreeMap::from([("max_tokens".into(), json!(0))]);
 
-    for (explicit, requested_budget, extensions, expected_limit, expected_budget) in [
+    for (explicit, requested_effort, extensions, expected_limit, expected_budget) in [
         // 显式上限优先于发现数据；已足够时原样发送。
         (
             Some(24_000),
-            16_000,
+            "high",
             Some(&discovered_extensions),
             24_000,
-            16_000,
+            16_384,
         ),
         // 无显式上限：使用发现到的型号上限。
-        (None, 16_000, Some(&discovered_extensions), 32_000, 16_000),
+        (None, "high", Some(&discovered_extensions), 32_000, 16_384),
         // 自动补出的型号上限不被思考预算抬高，预算收缩到上限内。
         (
             None,
-            63_000,
+            "max",
             Some(&discovered_extensions),
             32_000,
             32_000 - 4_000,
         ),
         // 发现数据缺失或不可信：编码器必填回退 64,000。
-        (None, 16_000, None, 64_000, 16_000),
-        // 编码器的必填回退同样不被预算抬高。
-        (None, 63_000, None, 64_000, 64_000 - 4_000),
-        (None, 16_000, Some(&invalid_extensions), 64_000, 16_000),
+        (None, "high", None, 64_000, 16_384),
+        (None, "max", None, 64_000, 32_768),
+        (None, "high", Some(&invalid_extensions), 64_000, 16_384),
     ] {
         let services = Arc::new(MockServices {
             routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
@@ -918,7 +918,8 @@ async fn required_output_limit_prefers_explicit_then_discovered_then_fallback() 
         });
         let mut body = json!({
             "model": "claude-sonnet-4-5",
-            "thinking": {"type": "enabled", "budget_tokens": requested_budget},
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": requested_effort},
             "messages": [{"role": "user", "content": "Read a."}]
         });
         if let Some(explicit) = explicit {
@@ -1211,7 +1212,7 @@ async fn explicit_inference_controls_override_cli_defaults() {
             clear_context.clone(),
         ),
         (
-            json!({"thinking": {"type": "enabled", "budget_tokens": 16000}}),
+            json!({"thinking": {"type": "adaptive"}}),
             "high",
             json!({"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}),
         ),
@@ -1986,5 +1987,80 @@ async fn authorization_code_exchange_fills_identity_from_bootstrap() {
         requests[1]
             .url
             .starts_with("https://api.anthropic.com/api/claude_cli/bootstrap")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_off_downgrade_holds_for_always_on_and_between_tools_models() {
+    let (runtime, plugin) = load_plugin().await;
+
+    // Always-on Opus 5.5 + Effort("none") + summary=None -> omit thinking, effort=low, no clear_thinking.
+    let services = Arc::new(MockServices {
+        routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+        ..MockServices::default()
+    });
+    let mut request = anthropic_client_request(json!({
+        "model": "claude-opus-5-5",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "Hi"}]
+    }));
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "none".into(),
+        },
+    );
+    request.reasoning.summary = Some(ReasoningSummary::None);
+    let mut provider = signed_in();
+    provider.model = Some("claude-opus-5-5".into());
+    run(
+        runtime,
+        plugin,
+        &services,
+        OperationInput::Infer { provider, request },
+    )
+    .await
+    .expect("always-on off downgrade succeeds");
+    let body: Value = serde_json::from_slice(&services.requests.lock()[0].body).unwrap();
+    assert!(
+        body.get("thinking").is_none(),
+        "always-on off must keep thinking omitted: {body}"
+    );
+    assert_eq!(body["output_config"]["effort"], "low");
+    assert!(
+        body.get("context_management").is_none(),
+        "always-on off must drop clear_thinking_20251015: {body}"
+    );
+
+    // Sonnet 5.5 + Effort("none") + summary=Detailed -> between_tools without display, no clear_thinking.
+    let services = Arc::new(MockServices {
+        routes: vec![(UPSTREAM, 200, "text/event-stream", SSE_TOOL_USE.into())],
+        ..MockServices::default()
+    });
+    let mut request = anthropic_client_request(json!({
+        "model": "claude-sonnet-5-5",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "Hi"}]
+    }));
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "none".into(),
+        },
+    );
+    request.reasoning.summary = Some(ReasoningSummary::Detailed);
+    let mut provider = signed_in();
+    provider.model = Some("claude-sonnet-5-5".into());
+    run(
+        runtime,
+        plugin,
+        &services,
+        OperationInput::Infer { provider, request },
+    )
+    .await
+    .expect("between_tools off downgrade succeeds");
+    let body: Value = serde_json::from_slice(&services.requests.lock()[0].body).unwrap();
+    assert_eq!(body["thinking"], json!({"type": "between_tools"}));
+    assert!(
+        body.get("context_management").is_none(),
+        "between_tools off must drop clear_thinking_20251015: {body}"
     );
 }

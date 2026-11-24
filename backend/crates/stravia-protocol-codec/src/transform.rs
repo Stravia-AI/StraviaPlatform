@@ -842,8 +842,8 @@ fn prune_request(
     if pair.egress.protocol == Protocol::BedrockConverse {
         request.generation.frequency_penalty = None;
         request.generation.presence_penalty = None;
-        request.reasoning = Default::default();
-    } else if !capabilities.reasoning {
+    }
+    if !capabilities.reasoning {
         request.reasoning = Default::default();
     }
     if matches!(
@@ -1260,21 +1260,7 @@ fn thinking_control_representable(
     protocol: Protocol,
     control: &stravia_runtime_contract::thinking::TargetThinkingControl,
 ) -> bool {
-    use stravia_runtime_contract::thinking::TargetThinkingControl;
-    match protocol {
-        Protocol::OpenAICompatible => matches!(control, TargetThinkingControl::Effort { .. }),
-        Protocol::OpenResponses => matches!(
-            control,
-            TargetThinkingControl::Effort { .. } | TargetThinkingControl::Disabled
-        ),
-        Protocol::AnthropicMessages | Protocol::GoogleGemini => {
-            !matches!(control, TargetThinkingControl::Hidden)
-        }
-        Protocol::BedrockConverse
-        | Protocol::CohereChat
-        | Protocol::WatsonxTextChat
-        | Protocol::GatewayLanguageModel => false,
-    }
+    !control.is_hidden() && protocol.represents_target_thinking_control(control)
 }
 
 fn request_block_representable(

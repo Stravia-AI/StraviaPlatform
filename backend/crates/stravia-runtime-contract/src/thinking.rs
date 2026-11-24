@@ -66,32 +66,18 @@ impl ThinkingLevel {
                     .find(|level| supported.contains(level))
             })
     }
+}
 
-    pub fn from_budget(budget: u32) -> Self {
-        if budget == 0 {
-            return Self::Off;
-        }
-        const RUNGS: [(u32, ThinkingLevel); 4] = [
-            (1024, ThinkingLevel::Minimal),
-            (2048, ThinkingLevel::Low),
-            (8192, ThinkingLevel::Medium),
-            (16384, ThinkingLevel::High),
-        ];
-        RUNGS
-            .into_iter()
-            .min_by_key(|(rung, _)| (budget.abs_diff(*rung), std::cmp::Reverse(*rung)))
-            .map(|(_, level)| level)
-            .unwrap_or(Self::High)
-    }
+/// Whether an upstream effort string represents turning thinking off.
+pub fn effort_is_off(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("off")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TargetThinkingControl {
     Effort { value: String },
-    Budget { value: u32 },
-    Enabled,
-    Disabled,
     Hidden,
 }
 
@@ -100,13 +86,100 @@ impl TargetThinkingControl {
         matches!(self, Self::Hidden)
     }
 
+    pub fn is_off(&self) -> bool {
+        matches!(self, Self::Effort { value } if effort_is_off(value))
+    }
+
+    pub fn effort_value(&self) -> Option<&str> {
+        match self {
+            Self::Effort { value } => Some(value.as_str()),
+            Self::Hidden => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Effort { .. } => "effort",
-            Self::Budget { .. } => "budget",
-            Self::Enabled => "enabled",
-            Self::Disabled => "disabled",
             Self::Hidden => "hidden",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effort_off_check_ignores_whitespace_and_ascii_case() {
+        for raw in ["none", "NONE", " off ", "Off", "\tNone\n"] {
+            assert!(effort_is_off(raw), "{raw:?}");
+            assert!(
+                TargetThinkingControl::Effort { value: raw.into() }.is_off(),
+                "{raw:?}"
+            );
+        }
+        for raw in ["low", "high", "minimal", "", "disable"] {
+            assert!(!effort_is_off(raw), "{raw:?}");
+            assert!(
+                !TargetThinkingControl::Effort { value: raw.into() }.is_off(),
+                "{raw:?}"
+            );
+        }
+        assert!(!TargetThinkingControl::Hidden.is_off());
+    }
+
+    #[test]
+    fn public_target_control_rejects_removed_legacy_variants() {
+        for legacy in [
+            r#"{"type":"budget","value":1024}"#,
+            r#"{"type":"enabled"}"#,
+            r#"{"type":"disabled"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<TargetThinkingControl>(legacy).is_err(),
+                "public serde must reject legacy control {legacy}"
+            );
+        }
+        let effort: TargetThinkingControl =
+            serde_json::from_str(r#"{"type":"effort","value":"high"}"#).unwrap();
+        assert_eq!(
+            effort,
+            TargetThinkingControl::Effort {
+                value: "high".into()
+            }
+        );
+        let hidden: TargetThinkingControl = serde_json::from_str(r#"{"type":"hidden"}"#).unwrap();
+        assert_eq!(hidden, TargetThinkingControl::Hidden);
+    }
+
+    #[test]
+    fn protocol_represents_target_thinking_control_covers_effort_and_hidden() {
+        use crate::protocol::ids::Protocol;
+        let effort = TargetThinkingControl::Effort {
+            value: "high".into(),
+        };
+        for protocol in [
+            Protocol::OpenResponses,
+            Protocol::OpenAICompatible,
+            Protocol::AnthropicMessages,
+            Protocol::GoogleGemini,
+            Protocol::BedrockConverse,
+            Protocol::CohereChat,
+            Protocol::GatewayLanguageModel,
+        ] {
+            assert!(
+                protocol.represents_target_thinking_control(&TargetThinkingControl::Hidden),
+                "{protocol:?} must allow hidden"
+            );
+            assert!(
+                protocol.represents_target_thinking_control(&effort),
+                "{protocol:?} must allow effort"
+            );
+        }
+        assert!(
+            Protocol::WatsonxTextChat
+                .represents_target_thinking_control(&TargetThinkingControl::Hidden)
+        );
+        assert!(!Protocol::WatsonxTextChat.represents_target_thinking_control(&effort));
     }
 }

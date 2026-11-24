@@ -1470,12 +1470,16 @@ async fn prepare_attempt(
     {
         Arc::make_mut(&mut provider_request).reasoning.summary = Some(ReasoningSummary::None);
     }
-    // 与 generation_chain 的继承判定一致：任何显式推理指令都阻止默认档介入。
+    // 与 generation_chain 的继承判定一致：任何显式推理指令或重置都阻止默认档介入。
     if provider_request.reasoning.level.is_none()
-        && provider_request.reasoning.mode.is_none()
-        && provider_request.reasoning.budget_tokens.is_none()
         && provider_request.reasoning.summary.is_none()
         && provider_request.reasoning.target_control.is_none()
+        && !provider_request
+            .parameters
+            .resets(stravia_runtime_contract::protocol::ir::ParameterReset::Reasoning)
+        && !provider_request
+            .parameters
+            .resets(stravia_runtime_contract::protocol::ir::ParameterReset::ReasoningLevel)
         && let Some(value) = route.default_thinking_level.as_deref()
     {
         match ThinkingLevel::from_wire(value) {
@@ -1503,29 +1507,11 @@ async fn prepare_attempt(
             .ok()
         })
         .unwrap_or_default();
-    let toggle_declared = requested_thinking_level.is_some()
-        && (execution
-            .descriptor()
-            .channels
-            .iter()
-            .find(|channel| channel.id == execution.provider().channel)
-            .is_some_and(|channel| {
-                channel
-                    .model_capabilities
-                    .contains(stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE)
-            })
-            || provider_model.is_some_and(|metadata| {
-                vendor_metadata_declares_capability(
-                    metadata,
-                    stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE,
-                )
-            }));
     let model_level = requested_thinking_level.and_then(|requested| {
         crate::thinking::resolve_runtime_thinking_level(
             &target.thinking_level_map,
             requested,
             &canonical_model_metadata,
-            toggle_declared,
             None,
         )
         .map(|(level, _)| level)
@@ -1666,7 +1652,6 @@ async fn prepare_attempt(
             &target.thinking_level_map,
             requested,
             &canonical_model_metadata,
-            toggle_declared,
             Some(&protocol_hint),
         )
     });
@@ -3360,21 +3345,6 @@ fn vendor_metadata_declares_only_image_operation(
         }
     }
     declares_image
-}
-
-fn vendor_metadata_declares_capability(
-    metadata: &stravia_vendor_sdk::ModelMetadata,
-    capability: &str,
-) -> bool {
-    metadata
-        .extensions
-        .get("capabilities")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .any(|value| value.as_str() == Some(capability))
-        })
 }
 
 fn vendor_metadata_supports_modality(

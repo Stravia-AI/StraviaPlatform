@@ -33,7 +33,7 @@ pub(crate) fn encode(
     let endpoint =
         stravia_protocol_codec::registry::ProtocolRegistry::global().resolve_alias(protocol);
     if endpoint == Some(stravia_runtime_contract::protocol::ids::ANTHROPIC_MESSAGES_2023_06_01) {
-        stravia_vendor_common::common::apply_anthropic_output_limit(provider, &mut request);
+        stravia_vendor_common::common::apply_anthropic_egress_metadata(provider, &mut request);
     }
     let mut encoded = crate::encode_inference_request(protocol, request)?;
     if let Some(body) = encoded.body.as_object_mut() {

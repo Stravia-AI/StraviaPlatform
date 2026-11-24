@@ -1,27 +1,40 @@
 use super::*;
 
 #[test]
-fn gateway_native_reasoning_keeps_activation_separate_from_intensity() {
-    for (value, mode, level) in [
-        ("none", Some("disabled"), None),
-        ("provider-default", Some("auto"), None),
-        (
-            "high",
-            None,
-            Some(stravia_runtime_contract::thinking::ThinkingLevel::High),
-        ),
+fn gateway_native_reasoning_projects_effort_and_off_levels() {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    for (value, level, expected) in [
+        ("none", Some(ThinkingLevel::Off), Some("none")),
+        ("provider-default", None, None),
+        ("high", Some(ThinkingLevel::High), Some("high")),
     ] {
         let request = GatewayLanguageModelV4
             .decode_request(json!({"prompt": [], "reasoning": value}))
             .unwrap();
-        assert_eq!(request.reasoning.mode.as_deref(), mode);
         assert_eq!(request.reasoning.level, level);
-        assert_eq!(request.reasoning.budget_tokens, None);
-        assert_eq!(
-            GatewayLanguageModelV4.encode_request(request).unwrap().0["reasoning"],
-            value
-        );
+        let (encoded, _) = GatewayLanguageModelV4.encode_request(request).unwrap();
+        assert_eq!(encoded.get("reasoning").and_then(Value::as_str), expected);
     }
+
+    let mut controlled = AiRequest::new("model", vec![]);
+    controlled.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "off".into(),
+    });
+    assert_eq!(
+        GatewayLanguageModelV4
+            .encode_request(controlled.clone())
+            .unwrap()
+            .0["reasoning"],
+        "none"
+    );
+    controlled.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "xhigh".into(),
+    });
+    assert_eq!(
+        GatewayLanguageModelV4.encode_request(controlled).unwrap().0["reasoning"],
+        "xhigh"
+    );
 }
 
 #[test]

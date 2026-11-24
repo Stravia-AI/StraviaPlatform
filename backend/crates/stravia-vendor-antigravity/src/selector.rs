@@ -227,13 +227,12 @@ mod tests {
         assert_eq!(legacy.thinking, None);
         assert_eq!(legacy.api_provider, None);
         assert_eq!(legacy.model_provider, None);
-        for control in [
-            TargetThinkingControl::Budget { value: 2048 },
-            TargetThinkingControl::Disabled,
-            TargetThinkingControl::Enabled,
-        ] {
-            assert_eq!(resolve(&table, Some(&control)).unwrap().thinking, None);
-        }
+        assert_eq!(
+            resolve(&table, Some(&TargetThinkingControl::Hidden))
+                .unwrap()
+                .thinking,
+            None
+        );
     }
 
     #[test]

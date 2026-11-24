@@ -3136,7 +3136,8 @@ async fn route_default_thinking_level_yields_to_other_reasoning_directives() {
     )
     .await;
     let mut request = AiRequest::new("directive-thinking-model", Vec::new());
-    request.reasoning.mode = Some("enabled".into());
+    request.reasoning.summary =
+        Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::Detailed);
 
     let body = captured_reasoning_effort(
         &gateway,
@@ -3151,6 +3152,33 @@ async fn route_default_thinking_level_yields_to_other_reasoning_directives() {
         body.get("reasoning_effort").is_none(),
         "a client-side reasoning directive without level must not trigger the Route default"
     );
+
+    for reset in [
+        stravia_runtime_contract::protocol::ir::ParameterReset::Reasoning,
+        stravia_runtime_contract::protocol::ir::ParameterReset::ReasoningLevel,
+    ] {
+        let (_data_dir, gateway, captured, key) = gateway_with_captured_thinking(
+            "directive-thinking-model",
+            true,
+            "ok",
+            Some(ThinkingLevel::High),
+        )
+        .await;
+        let mut reset_request = AiRequest::new("directive-thinking-model", Vec::new());
+        reset_request.parameters.reset(reset);
+        let body = captured_reasoning_effort(
+            &gateway,
+            &captured,
+            &key.id,
+            "directive-thinking-model",
+            reset_request,
+        )
+        .await;
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "an explicit reasoning reset ({reset:?}) must not trigger the Route default"
+        );
+    }
 }
 
 #[tokio::test]

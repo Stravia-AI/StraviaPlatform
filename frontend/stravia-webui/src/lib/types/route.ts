@@ -50,12 +50,7 @@ export interface Target {
 
 export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
-export type TargetThinkingControl =
-  | { type: 'effort'; value: string }
-  | { type: 'budget'; value: number }
-  | { type: 'enabled' }
-  | { type: 'disabled' }
-  | { type: 'hidden' }
+export type TargetThinkingControl = { type: 'effort'; value: string } | { type: 'hidden' }
 
 export interface ThinkingLevelMapping {
   level: ThinkingLevel

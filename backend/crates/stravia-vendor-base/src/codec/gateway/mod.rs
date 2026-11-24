@@ -119,10 +119,9 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
             .transpose()?;
         if let Some(reasoning) = body.get("reasoning").and_then(Value::as_str) {
             if reasoning == "none" {
-                request.reasoning.mode = Some("disabled".into());
-            } else if reasoning == "provider-default" {
-                request.reasoning.mode = Some("auto".into());
-            } else {
+                request.reasoning.level =
+                    Some(stravia_runtime_contract::thinking::ThinkingLevel::Off);
+            } else if reasoning != "provider-default" {
                 request.reasoning.level =
                     Some(stravia_runtime_contract::thinking::ThinkingLevel::from_wire(reasoning)?);
             }
@@ -209,32 +208,26 @@ impl ProtocolAdapter for GatewayLanguageModelV4 {
         if let Some(choice) = request.tool_choice.as_ref().and_then(encode_tool_choice) {
             body.insert("toolChoice".into(), choice);
         }
-        if request.reasoning.is_enabled()
-            || request.reasoning.mode.as_deref() == Some("disabled")
-            || request.reasoning.level
-                == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
-        {
-            body.insert(
-                "reasoning".into(),
-                Value::String(
-                    if request.reasoning.mode.as_deref() == Some("disabled") {
+        match request.reasoning.target_control.as_ref() {
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => {}
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
+                let wire = if stravia_runtime_contract::thinking::effort_is_off(value) {
+                    "none"
+                } else {
+                    value.as_str()
+                };
+                body.insert("reasoning".into(), Value::String(wire.into()));
+            }
+            None => {
+                if let Some(level) = request.reasoning.level {
+                    let wire = if level == stravia_runtime_contract::thinking::ThinkingLevel::Off {
                         "none"
                     } else {
-                        request
-                            .reasoning
-                            .level
-                            .map(|level| {
-                                if level == stravia_runtime_contract::thinking::ThinkingLevel::Off {
-                                    "none"
-                                } else {
-                                    level.as_str()
-                                }
-                            })
-                            .unwrap_or("provider-default")
-                    }
-                    .into(),
-                ),
-            );
+                        level.as_str()
+                    };
+                    body.insert("reasoning".into(), Value::String(wire.into()));
+                }
+            }
         }
 
         let mut headers = HeaderMap::new();

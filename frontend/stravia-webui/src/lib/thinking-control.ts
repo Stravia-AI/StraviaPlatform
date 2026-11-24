@@ -1,4 +1,4 @@
-import { resolveProtocol } from '#lib/protocol.js'
+import { resolveProtocol, type Protocol } from '#lib/protocol.js'
 import type { Provider } from '#lib/types/provider.js'
 import type { TargetThinkingControl, ThinkingLevel, ThinkingLevelMapping } from '#lib/types/route.js'
 
@@ -6,40 +6,47 @@ export type ThinkingControlKind = TargetThinkingControl['type']
 
 export interface ThinkingControlContext {
   protocol?: string | null
-  presetKey?: string | null
-  vendor?: string | null
-  model?: string | null
+  /** `null`/`undefined` means the model declares nothing; a declared list (even empty) is a strict allowlist. */
   reasoningEfforts?: readonly string[] | null
 }
 
-const CONTROL_KINDS: ThinkingControlKind[] = ['effort', 'budget', 'enabled', 'disabled', 'hidden']
+/** Mirrors `Protocol::represents_target_thinking_control` for undeclared models. */
+const PROTOCOL_WRITES_EFFORT: Record<Protocol, boolean> = {
+  'open-responses': true,
+  'openai-compatible': true,
+  'anthropic-messages': true,
+  'google-gemini': true,
+  'bedrock-converse': true,
+  'cohere-chat': true,
+  'gateway-language-model': true,
+  'watsonx-text-chat': false,
+  'command-code': false,
+  'devin-connect': false,
+}
 
 export function thinkingControlContext(
   provider: Provider | undefined,
-  model: string,
   reasoningEfforts: ThinkingControlContext['reasoningEfforts'],
 ): ThinkingControlContext {
-  return {
-    protocol: provider?.protocol,
-    presetKey: provider?.preset_key,
-    vendor: provider?.vendor,
-    model,
-    reasoningEfforts,
-  }
+  return { protocol: provider?.protocol, reasoningEfforts }
 }
 
 export function writableThinkingControlKinds(context: ThinkingControlContext): ThinkingControlKind[] {
-  return CONTROL_KINDS.filter(
-    (kind) => protocolWritesKind(kind, context) || (kind === 'effort' && context.reasoningEfforts?.some(Boolean)),
-  )
+  const effortWritable =
+    context.reasoningEfforts == null
+      ? protocolWritesEffort(context)
+      : context.reasoningEfforts.some((effort) => effort.trim() !== '')
+  return effortWritable ? ['effort', 'hidden'] : ['hidden']
 }
 
 export function thinkingControlWritable(control: TargetThinkingControl, context: ThinkingControlContext): boolean {
-  if (protocolWritesKind(control.type, context)) return true
-  if (control.type !== 'effort' || !control.value || !context.reasoningEfforts?.length) return false
+  if (control.type === 'hidden') return true
+  const value = control.value.trim()
+  if (!value) return false
+  if (context.reasoningEfforts == null) return protocolWritesEffort(context)
   // The host compares native effort identifiers with Rust's eq_ignore_ascii_case.
-  const value = asciiLowercase(control.value)
-  return context.reasoningEfforts.some((candidate) => asciiLowercase(candidate) === value)
+  const needle = asciiLowercase(value)
+  return context.reasoningEfforts.some((candidate) => asciiLowercase(candidate) === needle)
 }
 
 export function unrepresentableThinkingLevels(
@@ -49,68 +56,29 @@ export function unrepresentableThinkingLevels(
   return mappings.filter((row) => !thinkingControlWritable(row.control, context)).map((row) => row.level)
 }
 
+/** Declared efforts an `effort` row can pick from; `null` when the model declares none and any value may be typed. */
+export function effortCandidates(context: ThinkingControlContext): string[] | null {
+  if (context.reasoningEfforts == null) return null
+  const candidates = context.reasoningEfforts.filter((effort) => effort !== '' && effort === effort.trim())
+  return [...new Set(candidates)]
+}
+
+/** The control a row gets when switched to `effort`: its own level name, else the first declared candidate. */
+export function defaultEffortControl(
+  level: ThinkingLevel,
+  context: ThinkingControlContext,
+): Extract<TargetThinkingControl, { type: 'effort' }> {
+  const natural = level === 'off' ? 'none' : level
+  const candidates = effortCandidates(context)
+  const matched = candidates?.find((candidate) => asciiLowercase(candidate) === natural)
+  return { type: 'effort', value: matched ?? (candidates?.length ? candidates[0] : natural) }
+}
+
+function protocolWritesEffort(context: ThinkingControlContext): boolean {
+  const protocol = resolveProtocol(context.protocol)
+  return protocol !== null && PROTOCOL_WRITES_EFFORT[protocol]
+}
+
 function asciiLowercase(value: string): string {
   return value.replace(/[A-Z]/g, (char) => char.toLowerCase())
-}
-
-function protocolWritesKind(kind: ThinkingControlKind, context: ThinkingControlContext): boolean {
-  if (kind === 'hidden') return true
-  const protocol = resolveProtocol(context.protocol)
-  switch (protocol) {
-    case 'open-responses':
-      return kind === 'effort' || kind === 'disabled'
-    case 'anthropic-messages':
-    case 'google-gemini':
-      return true
-    case 'openai-compatible':
-      if (kind === 'effort') return true
-      if (kind === 'enabled' || kind === 'disabled') return openaiCompatibleSupportsToggle(context)
-      return false
-    case 'command-code':
-    case 'devin-connect':
-      return kind === 'effort'
-    default:
-      return false
-  }
-}
-
-/** 与 `openai_compatible_thinking::supports_toggle` 保持同一份厂商/模型规则。 */
-export function openaiCompatibleSupportsToggle(context: ThinkingControlContext): boolean {
-  const model = context.model ?? ''
-  const vendor = context.presetKey || context.vendor || undefined
-  if (containsAsciiCaseInsensitive(model, 'minimax-m3')) return true
-  if (vendorIs(vendor, ['baseten'])) return true
-  if (
-    vendorIs(vendor, ['opencode', 'opencode-go']) &&
-    (containsAsciiCaseInsensitive(model, 'kimi-k2-thinking') || containsAsciiCaseInsensitive(model, 'glm-4.6'))
-  ) {
-    return true
-  }
-  if (
-    vendorIs(vendor, ['deepseek', 'xiaomi', 'xiaomi-token-plan-sgp', 'xiaomi-token-plan-cn', 'xiaomi-token-plan-ams'])
-  ) {
-    return true
-  }
-  if (vendorIs(vendor, ['zai', 'zai-coding-plan', 'zhipuai', 'zhipuai-coding-plan'])) return true
-  return vendorIs(vendor, [
-    'alibaba',
-    'alibaba-cn',
-    'alibaba-coding-plan',
-    'alibaba-coding-plan-cn',
-    'alibaba-token-plan',
-    'alibaba-token-plan-cn',
-  ])
-}
-
-function vendorIs(vendor: string | undefined, candidates: string[]): boolean {
-  return Boolean(
-    vendor &&
-    candidates.some(
-      (candidate) => vendor.length === candidate.length && vendor.toLowerCase() === candidate.toLowerCase(),
-    ),
-  )
-}
-
-function containsAsciiCaseInsensitive(value: string, needle: string): boolean {
-  return value.toLowerCase().includes(needle.toLowerCase())
 }

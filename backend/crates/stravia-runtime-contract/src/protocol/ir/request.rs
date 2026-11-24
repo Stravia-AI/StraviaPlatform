@@ -1366,18 +1366,11 @@ impl ReasoningEffort {
 
 /// Reasoning / extended-thinking configuration.
 ///
-/// Normalized from:
-/// - OpenAI `reasoning.effort` + `reasoning.summary`
-/// - Anthropic `thinking: { type: "enabled", budget_tokens, display }`
+/// Normalized from canonical Thinking Level and summary intent across
+/// OpenAI, Open Responses, Anthropic, and Gemini ingress protocols.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(from = "ReasoningConfigWire")]
 pub struct ReasoningConfig {
-    /// 原生执行模式不是 effort 档位；adaptive 不应被还原为缺少预算的 enabled。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    /// Token budget for thinking (Anthropic `budget_tokens`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<u32>,
     /// 跨协议只保留摘要意图，避免 display 与 summary 形成两个控制来源。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummary>,
@@ -1401,62 +1394,76 @@ pub enum ReasoningSummary {
 impl ReasoningConfig {
     /// Derive client-requested activation without including per-attempt target controls.
     pub fn is_enabled(&self) -> bool {
-        match self.mode.as_deref() {
-            Some("disabled") => false,
-            Some("auto" | "enabled" | "adaptive") => true,
-            _ => self
-                .level
-                .map(|level| level != ThinkingLevel::Off)
-                .unwrap_or_else(|| self.budget_tokens.is_some_and(|budget| budget > 0)),
+        self.level.is_some_and(|level| level != ThinkingLevel::Off)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LegacyTargetThinkingControl {
+    Effort { value: String },
+    Budget { value: u32 },
+    Enabled,
+    Disabled,
+    Hidden,
+}
+
+impl LegacyTargetThinkingControl {
+    fn into_current(self) -> Option<TargetThinkingControl> {
+        match self {
+            Self::Effort { value } => Some(TargetThinkingControl::Effort { value }),
+            Self::Hidden => Some(TargetThinkingControl::Hidden),
+            Self::Disabled | Self::Budget { value: 0 } => Some(TargetThinkingControl::Effort {
+                value: "none".into(),
+            }),
+            Self::Enabled | Self::Budget { .. } => None,
         }
     }
 }
 
-// 格式 1 的旧字段仅在读取 DTO 中出现，不重新成为平台状态。
+// 格式 1 与历史持久化快照的旧字段仅在私有读取 DTO 中容错解析，不重新成为平台状态。
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct ReasoningConfigWire {
     mode: Option<String>,
+    #[allow(dead_code)]
     enabled: bool,
+    #[allow(dead_code)]
     budget_tokens: Option<u32>,
     effort: Option<ReasoningEffort>,
     summary: Option<ReasoningSummary>,
     display: Option<String>,
     level: NullableControl<ThinkingLevel>,
-    target_control: Option<TargetThinkingControl>,
+    target_control: Option<LegacyTargetThinkingControl>,
 }
 
 impl From<ReasoningConfigWire> for ReasoningConfig {
     fn from(wire: ReasoningConfigWire) -> Self {
-        // 兼容投影可同时携带 budget 与 effort，不能把副本重新解释成额外意图。
         let level = match wire.level {
             NullableControl::Value(level) => Some(level),
             NullableControl::Null => None,
-            NullableControl::Missing if wire.budget_tokens.is_some() => None,
-            NullableControl::Missing => wire.effort.as_ref().and_then(|effort| match effort {
-                ReasoningEffort::Budget(value) => Some(ThinkingLevel::from_budget(*value)),
-                value => value
-                    .as_openai_str()
-                    .and_then(|value| ThinkingLevel::from_wire(value).ok()),
-            }),
+            NullableControl::Missing => {
+                if wire.mode.as_deref() == Some("disabled") {
+                    Some(ThinkingLevel::Off)
+                } else {
+                    wire.effort.as_ref().and_then(|effort| {
+                        effort
+                            .as_openai_str()
+                            .and_then(|value| ThinkingLevel::from_wire(value).ok())
+                    })
+                }
+            }
         };
-        let budget_tokens = wire.budget_tokens.or(match wire.effort {
-            Some(ReasoningEffort::Budget(value)) => Some(value),
-            _ => None,
-        });
-        let mode = wire.mode.or_else(|| {
-            (wire.enabled && level.is_none() && budget_tokens.is_none()).then(|| "enabled".into())
-        });
         Self {
-            mode,
-            budget_tokens,
             summary: wire.summary.or(match wire.display.as_deref() {
                 Some("summarized") => Some(ReasoningSummary::Auto),
                 Some("omitted") => Some(ReasoningSummary::None),
                 _ => None,
             }),
             level,
-            target_control: wire.target_control,
+            target_control: wire
+                .target_control
+                .and_then(LegacyTargetThinkingControl::into_current),
         }
     }
 }
@@ -1865,10 +1872,7 @@ mod tests {
         );
         assert!(stored.get("safety_settings").is_none());
         assert_eq!(stored["parallel_tool_calls"], false);
-        assert_eq!(
-            stored["reasoning"],
-            json!({"mode": "enabled", "summary": "auto"})
-        );
+        assert_eq!(stored["reasoning"], json!({"summary": "auto"}));
         assert_eq!(
             stored["response_format"],
             json!({
@@ -2150,34 +2154,94 @@ mod tests {
     }
 
     #[test]
-    fn legacy_reasoning_activation_is_only_a_missing_control_hint() {
-        for (wire, mode, enabled) in [
-            (json!({"enabled": true}), Some("enabled"), true),
-            (json!({"enabled": false}), None, false),
-            (json!({"enabled": true, "level": "off"}), None, false),
-            (json!({"enabled": true, "level": "high"}), None, true),
-            (json!({"enabled": true, "budget_tokens": 0}), None, false),
+    fn legacy_reasoning_snapshot_reads_compatibly_without_budget_or_mode() {
+        use crate::thinking::TargetThinkingControl;
+        for (wire, expected_level, expected_control, enabled) in [
+            (json!({"enabled": true}), None, None, false),
+            (json!({"enabled": false}), None, None, false),
+            (
+                json!({"mode": "disabled"}),
+                Some(crate::thinking::ThinkingLevel::Off),
+                None,
+                false,
+            ),
+            (
+                json!({"enabled": true, "level": "off"}),
+                Some(crate::thinking::ThinkingLevel::Off),
+                None,
+                false,
+            ),
+            (
+                json!({"enabled": true, "level": "high"}),
+                Some(crate::thinking::ThinkingLevel::High),
+                None,
+                true,
+            ),
+            (
+                json!({"enabled": true, "budget_tokens": 0}),
+                None,
+                None,
+                false,
+            ),
+            (
+                json!({"mode": "enabled", "budget_tokens": 8192}),
+                None,
+                None,
+                false,
+            ),
             (
                 json!({"enabled": true, "mode": "disabled", "level": "max", "effort": "low"}),
-                Some("disabled"),
+                Some(crate::thinking::ThinkingLevel::Max),
+                None,
+                true,
+            ),
+            (
+                json!({"target_control": {"type": "disabled"}}),
+                None,
+                Some(TargetThinkingControl::Effort {
+                    value: "none".into(),
+                }),
+                false,
+            ),
+            (
+                json!({"target_control": {"type": "budget", "value": 0}}),
+                None,
+                Some(TargetThinkingControl::Effort {
+                    value: "none".into(),
+                }),
+                false,
+            ),
+            (
+                json!({"target_control": {"type": "budget", "value": 4096}}),
+                None,
+                None,
+                false,
+            ),
+            (
+                json!({"target_control": {"type": "enabled"}}),
+                None,
+                None,
                 false,
             ),
         ] {
-            let reasoning: super::ReasoningConfig = serde_json::from_value(wire).unwrap();
-            assert_eq!(reasoning.mode.as_deref(), mode);
-            assert_eq!(reasoning.is_enabled(), enabled);
+            let reasoning: super::ReasoningConfig = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(reasoning.level, expected_level, "{wire}");
+            assert_eq!(reasoning.target_control, expected_control, "{wire}");
+            assert_eq!(reasoning.is_enabled(), enabled, "{wire}");
             let canonical = serde_json::to_value(&reasoning).unwrap();
+            assert!(canonical.get("mode").is_none());
+            assert!(canonical.get("budget_tokens").is_none());
             assert!(canonical.get("enabled").is_none());
             assert!(canonical.get("effort").is_none());
             let restored: super::ReasoningConfig = serde_json::from_value(canonical).unwrap();
-            assert_eq!(restored.mode, reasoning.mode);
             assert_eq!(restored.level, reasoning.level);
+            assert_eq!(restored.target_control, reasoning.target_control);
             assert_eq!(restored.is_enabled(), enabled);
         }
     }
 
     #[test]
-    fn explicit_reasoning_mode_and_level_survive_legacy_effort_and_normalization() {
+    fn explicit_reasoning_level_survives_legacy_effort_and_normalization() {
         let mut request = super::AiRequest::new("model", Vec::new());
         request.reasoning = serde_json::from_value(json!({
             "mode": "disabled", "level": "max", "effort": "low", "enabled": true
@@ -2189,16 +2253,14 @@ mod tests {
             .ingress
             .insert("reasoning_effort".into(), json!("medium"));
         request.normalize_parameters();
-        assert_eq!(request.reasoning.mode.as_deref(), Some("disabled"));
         assert_eq!(
             request.reasoning.level,
             Some(crate::thinking::ThinkingLevel::Max)
         );
-        assert!(!request.reasoning.is_enabled());
-        request.reasoning.mode = Some("enabled".into());
+        assert!(request.reasoning.is_enabled());
         request.reasoning.level = Some(crate::thinking::ThinkingLevel::Off);
         request.normalize_parameters();
-        assert!(request.reasoning.is_enabled());
+        assert!(!request.reasoning.is_enabled());
         assert_eq!(
             request.reasoning.level,
             Some(crate::thinking::ThinkingLevel::Off)

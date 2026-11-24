@@ -1526,7 +1526,7 @@ struct ClientHistoryState {
 
 /// Namespace generation stamped on stored reusable prefixes. Bumping the
 /// version makes every older index stale at startup rebuild.
-const GENERATION_PREFIX_NAMESPACE: &str = "stravia-generation-history-v5:";
+const GENERATION_PREFIX_NAMESPACE: &str = "stravia-generation-history-v6:";
 
 impl ClientHistoryState {
     fn heap_bytes(&self) -> usize {
@@ -1718,9 +1718,7 @@ impl EffectiveRequestConfig {
         if !request.parameters.resets(ParameterReset::ParallelToolCalls) {
             inherit_option(&mut request.parallel_tool_calls, &self.parallel_tool_calls);
         }
-        if request.reasoning.budget_tokens.is_none()
-            && request.reasoning.level.is_none()
-            && request.reasoning.mode.is_none()
+        if request.reasoning.level.is_none()
             && request.reasoning.summary.is_none()
             && request.reasoning.target_control.is_none()
             && !request.parameters.resets(ParameterReset::Reasoning)

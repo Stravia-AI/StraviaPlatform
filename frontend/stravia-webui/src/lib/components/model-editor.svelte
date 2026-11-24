@@ -30,10 +30,13 @@ import PriceEditor from '#lib/components/price-editor.svelte'
 import { buildModelCostJson, emptyPriceForm, priceFormFromCost, type PriceForm } from '#lib/components/price-form.js'
 
 import {
+  defaultEffortControl,
+  effortCandidates,
   thinkingControlContext,
   thinkingControlWritable,
   unrepresentableThinkingLevels,
   writableThinkingControlKinds,
+  type ThinkingControlContext,
 } from '#lib/thinking-control.js'
 import type {
   CurrencyKind,
@@ -91,6 +94,7 @@ interface Props {
   onSaved?: () => void
 }
 
+const thinkingControlKinds = ['effort', 'hidden'] as const
 const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const UNSPECIFIED_THINKING_LEVEL = 'unspecified'
 
@@ -681,38 +685,32 @@ function thinkingLevelBlockers(level: ThinkingLevel): string[] {
   )
 }
 
-function changeThinkingControlKind(row: ThinkingLevelMapping, type: TargetThinkingControl['type']): void {
-  row.control =
-    type === 'effort'
-      ? { type, value: row.level === 'off' ? 'none' : row.level }
-      : type === 'budget'
-        ? { type, value: 1024 }
-        : { type }
+function changeThinkingControlKind(
+  row: ThinkingLevelMapping,
+  type: TargetThinkingControl['type'],
+  context: ThinkingControlContext,
+): void {
+  row.control = type === 'effort' ? defaultEffortControl(row.level, context) : { type }
   row.source = 'overridden'
   if (targetEditorTarget) targetEditorTarget.validationError = ''
 }
 
-function changeThinkingControlValue(row: ThinkingLevelMapping, value: string | number): void {
-  if (row.control.type === 'effort') row.control.value = String(value)
-  if (row.control.type === 'budget') row.control.value = Math.max(0, Math.trunc(Number(value) || 0))
+function changeThinkingEffort(row: ThinkingLevelMapping, value: string): void {
+  row.control = { type: 'effort', value }
   row.source = 'overridden'
   if (targetEditorTarget) targetEditorTarget.validationError = ''
 }
 
 function thinkingControlLabel(type: TargetThinkingControl['type']): string {
-  return {
-    effort: m.model_editor_thinking_effort(),
-    budget: m.model_editor_thinking_budget(),
-    enabled: m.model_editor_thinking_enabled(),
-    disabled: m.model_editor_thinking_disabled(),
-    hidden: m.model_editor_thinking_hidden(),
-  }[type]
+  return type === 'effort' ? m.model_editor_thinking_effort() : m.model_editor_thinking_hidden()
 }
 
-function targetThinkingContext(target: RouteTargetForm, summary: ProviderModelSummary | undefined) {
+function targetThinkingContext(
+  target: RouteTargetForm,
+  summary: ProviderModelSummary | undefined,
+): ThinkingControlContext {
   return thinkingControlContext(
     providers.find((provider) => provider.id === target.providerId),
-    target.model,
     summary?.specification?.reasoning_efforts,
   )
 }
@@ -1592,6 +1590,7 @@ async function saveModel(): Promise<void> {
               {#if !target.loading && target.providerId && target.model?.trim() && target.thinkingLevelMap.length > 0}
                 {@const context = targetThinkingContext(target, summary)}
                 {@const writableKinds = writableThinkingControlKinds(context)}
+                {@const candidates = effortCandidates(context)}
                 <div class="mt-4 border-t pt-4">
                   <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
                     <div class="min-w-0">
@@ -1634,39 +1633,61 @@ async function saveModel(): Promise<void> {
                             type="single"
                             value={row.control.type}
                             onValueChange={(value: string) =>
-                              value && changeThinkingControlKind(row, value as TargetThinkingControl['type'])}>
+                              value && changeThinkingControlKind(row, value as TargetThinkingControl['type'], context)}>
                             <Select.Trigger
-                              class={['w-28 shrink-0 sm:w-32', !kindWritable && 'border-destructive']}
+                              class="w-36 shrink-0"
                               aria-invalid={!kindWritable}
                               aria-describedby={!kindWritable ? errorId : undefined}
-                              aria-label={`${row.level} ${m.model_editor_thinking_control()}`}>
+                              aria-label={m.model_editor_thinking_control({ level: row.level })}>
                               {thinkingControlLabel(row.control.type)}
                             </Select.Trigger>
                             <Select.Content>
                               <Select.Group>
-                                {#each kindWritable ? writableKinds : [row.control.type, ...writableKinds] as type (type)}
-                                  <Select.Item value={type}>{thinkingControlLabel(type)}</Select.Item>
+                                {#each thinkingControlKinds as type (type)}
+                                  <Select.Item value={type} disabled={!writableKinds.includes(type)}>
+                                    {thinkingControlLabel(type)}
+                                  </Select.Item>
                                 {/each}
                               </Select.Group>
                             </Select.Content>
                           </Select.Root>
                           {#if row.control.type === 'effort'}
-                            <Input
-                              class="min-w-0 flex-1"
-                              value={row.control.value}
-                              aria-label={`${row.level} ${m.model_editor_thinking_effort()}`}
-                              aria-invalid={kindWritable && !rowWritable}
-                              aria-describedby={kindWritable && !rowWritable ? errorId : undefined}
-                              oninput={(event: Event) => changeThinkingControlValue(row, inputValue(event))} />
-                          {:else if row.control.type === 'budget'}
-                            <Input
-                              class="min-w-0 flex-1"
-                              type="number"
-                              min="0"
-                              step="1"
-                              value={row.control.value}
-                              aria-label={`${row.level} ${m.model_editor_thinking_budget()}`}
-                              oninput={(event: Event) => changeThinkingControlValue(row, inputValue(event))} />
+                            {#if candidates?.length}
+                              {@const current = row.control.value}
+                              <Select.Root
+                                type="single"
+                                value={current}
+                                onValueChange={(value: string) => value && changeThinkingEffort(row, value)}>
+                                <Select.Trigger
+                                  title={current}
+                                  class="min-w-0 flex-1 font-technical"
+                                  aria-invalid={!rowWritable}
+                                  aria-describedby={!rowWritable ? errorId : undefined}
+                                  aria-label={m.model_editor_thinking_upstream_level({ level: row.level })}>
+                                  <span class={['truncate', !current.trim() && 'font-sans text-muted-foreground']}>
+                                    {current.trim() ? current : m.model_editor_thinking_choose_level()}
+                                  </span>
+                                </Select.Trigger>
+                                <Select.Content class="max-w-[calc(100vw-2rem)]">
+                                  <Select.Group>
+                                    {#each candidates as effort (effort)}
+                                      <Select.Item value={effort} class="font-technical">
+                                        <span class="min-w-0 whitespace-normal wrap-anywhere">{effort}</span>
+                                      </Select.Item>
+                                    {/each}
+                                  </Select.Group>
+                                </Select.Content>
+                              </Select.Root>
+                            {:else}
+                              <Input
+                                class="min-w-0 flex-1 font-technical"
+                                value={row.control.value}
+                                aria-label={m.model_editor_thinking_upstream_level({ level: row.level })}
+                                readonly={candidates !== null}
+                                aria-invalid={!rowWritable}
+                                aria-describedby={!rowWritable ? errorId : undefined}
+                                oninput={(event: Event) => changeThinkingEffort(row, inputValue(event))} />
+                            {/if}
                           {/if}
                         </div>
                         {#if target.id}
@@ -1682,15 +1703,12 @@ async function saveModel(): Promise<void> {
                           </Button>
                         {/if}
                         {#if !rowWritable}
-                          <p id={errorId} class="col-span-full text-sm text-destructive" role="status">
-                            {kindWritable && row.control.type === 'effort'
-                              ? m.model_editor_thinking_effort_undeclared({
-                                  efforts: formatList(context.reasoningEfforts ?? []),
-                                })
-                              : m.model_editor_thinking_row_unwritable({
-                                  control: thinkingControlLabel(row.control.type),
-                                  supported: formatList(writableKinds.map(thinkingControlLabel)),
-                                })}
+                          <p id={errorId} class="col-span-full text-sm wrap-anywhere text-destructive" role="status">
+                            {!kindWritable
+                              ? m.model_editor_thinking_row_unwritable()
+                              : candidates
+                                ? m.model_editor_thinking_effort_undeclared({ efforts: formatList(candidates) })
+                                : m.model_editor_thinking_effort_required()}
                           </p>
                         {/if}
                       </div>

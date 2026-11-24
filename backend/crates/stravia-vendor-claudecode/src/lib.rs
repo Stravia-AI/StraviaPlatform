@@ -369,7 +369,20 @@ fn infer(
     // 后者不得被思考预算突破型号上限。
     request.normalize_parameters();
     let auto_output_limit = request.generation.max_tokens.is_none();
-    common::apply_anthropic_output_limit(provider, &mut request);
+    let allow_default_effort = !matches!(
+        request.reasoning.target_control,
+        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. })
+    ) && request.reasoning.level.is_none();
+    let explicit_off = match request.reasoning.target_control.as_ref() {
+        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
+            stravia_runtime_contract::thinking::effort_is_off(value)
+        }
+        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => false,
+        None => {
+            request.reasoning.level == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+        }
+    };
+    common::apply_anthropic_egress_metadata(provider, &mut request);
     let protocol = ANTHROPIC_MESSAGES_2023_06_01.to_string();
     let display = request
         .reasoning
@@ -384,7 +397,10 @@ fn infer(
             .body
             .get_mut("thinking")
             .and_then(Value::as_object_mut)
-        && thinking.get("type").and_then(Value::as_str) != Some("disabled")
+        && !matches!(
+            thinking.get("type").and_then(Value::as_str),
+            Some("disabled" | "between_tools")
+        )
     {
         thinking.insert("display".into(), Value::String(display.to_owned()));
     }
@@ -407,8 +423,19 @@ fn infer(
         parent_session_id: parent_session_id.as_deref(),
     };
     let caps = capabilities::ModelCapabilities::from_snapshot(provider);
-    thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display);
-    let body = request::prepare(encoded.body, &caps, auto_output_limit).map_err(invalid)?;
+    if !explicit_off {
+        thinking::preserve_implicit_summary_intent(&mut encoded.body, &caps, display);
+    }
+    let body = request::prepare(
+        encoded.body,
+        &caps,
+        thinking::NormalizeOptions {
+            auto_output_limit,
+            allow_default_effort,
+            explicit_off,
+        },
+    )
+    .map_err(invalid)?;
     let session_id = fallback_session_id(provider);
     let scope = diagnostics_scope(provider, &session_id);
     let cell = stravia_vendor_sdk::state::open(
@@ -431,10 +458,9 @@ fn infer(
     let allow_threads = has_session
         && !continuation_replay
         && identity.account_uuid.is_some_and(|id| !id.is_empty())
-        && provider
-            .model
-            .as_deref()
-            .is_some_and(thinking::supports_message_threads);
+        && provider.model.as_deref().is_some_and(
+            stravia_protocol_codec::codec::thinking::supports_anthropic_message_threads,
+        );
     let mut plan = store
         .plan(&scope, session_id, &body, now_ms()?, allow_threads)
         .map_err(invalid)?;
@@ -934,7 +960,7 @@ mod tests {
                 "metadata":{"user_id":"{\"session_id\":\"spoofed\",\"account_uuid\":\"spoofed\",\"device_id\":\"spoofed\"}"}
             }),
             &capabilities::ModelCapabilities::default(),
-            false,
+            thinking::NormalizeOptions::default(),
         ).unwrap();
         let plan = SessionStore::from_bytes(None)
             .unwrap()

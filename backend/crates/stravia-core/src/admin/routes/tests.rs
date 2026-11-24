@@ -2082,12 +2082,12 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_toggle_route(
+async fn create_effort_route(
     vendor: &str,
     model: &str,
     protocol: &str,
-    capabilities: &[&str],
-    submit_toggle: bool,
+    declared_efforts: Option<Vec<&str>>,
+    submit_efforts: Option<Vec<crate::thinking::ThinkingLevelMapping>>,
 ) -> anyhow::Result<RouteConfig> {
     let data_dir = tempfile::tempdir()?;
     let gateway = Gateway::from_storage(
@@ -2121,17 +2121,21 @@ async fn create_toggle_route(
             use_proxy: false,
         })
         .await?;
+    let mut metadata = json!({
+        "id": model,
+        "capabilities": ["infer"],
+        "modalities": {"input": ["text"], "output": ["text"]},
+    });
+    if let Some(efforts) = declared_efforts {
+        metadata["reasoning_efforts"] = json!(efforts);
+    }
     admin
         .create_manual_provider_model(
             &provider.id,
             model,
             CreateManualProviderModel {
                 template_id: None,
-                metadata: json!({
-                    "id": model,
-                    "capabilities": std::iter::once("infer").chain(capabilities.iter().copied()).collect::<Vec<_>>(),
-                    "modalities": {"input": ["text"], "output": ["text"]},
-                }),
+                metadata,
             },
         )
         .await?;
@@ -2150,24 +2154,7 @@ async fn create_toggle_route(
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
-                thinking_level_map: if submit_toggle {
-                    vec![
-                        crate::thinking::ThinkingLevelMapping {
-                            level: ThinkingLevel::Off,
-                            control:
-                                stravia_runtime_contract::thinking::TargetThinkingControl::Disabled,
-                            source: ThinkingMappingSource::Overridden,
-                        },
-                        crate::thinking::ThinkingLevelMapping {
-                            level: ThinkingLevel::Medium,
-                            control:
-                                stravia_runtime_contract::thinking::TargetThinkingControl::Enabled,
-                            source: ThinkingMappingSource::Overridden,
-                        },
-                    ]
-                } else {
-                    Vec::new()
-                },
+                thinking_level_map: submit_efforts.unwrap_or_default(),
             }],
             default_thinking_level: None,
             billing: None,
@@ -2176,46 +2163,31 @@ async fn create_toggle_route(
 }
 
 #[tokio::test]
-async fn xiaomi_toggle_model_can_be_bound_over_openai_compatible() -> anyhow::Result<()> {
-    let route = create_toggle_route("xiaomi", "mimo-v2.5", "openai-compatible", &[], true).await?;
+async fn toggle_vendor_model_binds_via_canonical_off_and_high_efforts() -> anyhow::Result<()> {
+    let route = create_effort_route(
+        "xiaomi",
+        "mimo-v2.5",
+        "openai-compatible",
+        Some(vec!["none", "high"]),
+        None,
+    )
+    .await?;
 
     assert_eq!(
         route.supported_thinking_levels,
-        vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+        vec![ThinkingLevel::Off, ThinkingLevel::High]
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn unknown_compatible_provider_hides_generated_toggle_controls() -> anyhow::Result<()> {
-    let route = create_toggle_route(
-        "openai-compatible",
-        "custom-toggle-model",
-        "openai-compatible",
-        &[],
-        false,
-    )
-    .await?;
-
-    assert!(route.supported_thinking_levels.is_empty());
-    for row in route.targets[0].thinking_level_map.iter() {
-        assert_eq!(
-            row.control,
-            stravia_runtime_contract::thinking::TargetThinkingControl::Hidden
-        );
-        assert_eq!(row.source, ThinkingMappingSource::Generated);
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn unknown_protocol_does_not_inherit_open_responses_controls() -> anyhow::Result<()> {
-    let route = create_toggle_route(
+    let route = create_effort_route(
         "openai-compatible",
-        "unknown-wire-toggle-model",
+        "unknown-wire-model",
         "vendor-private-wire",
-        &[],
-        false,
+        None,
+        None,
     )
     .await?;
 
@@ -2230,139 +2202,64 @@ async fn unknown_protocol_does_not_inherit_open_responses_controls() -> anyhow::
 }
 
 #[tokio::test]
-async fn model_capability_declaration_authorizes_compatible_toggle_controls() -> anyhow::Result<()>
-{
-    let generated = create_toggle_route(
-        "openai-compatible",
-        "declared-toggle-model",
-        "openai-compatible",
-        &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
-        false,
-    )
-    .await?;
-    assert!(generated.supported_thinking_levels.is_empty());
-    assert!(
-        generated.targets[0]
-            .thinking_level_map
-            .iter()
-            .all(|row| row.control.is_hidden())
-    );
-    let route = create_toggle_route(
-        "openai-compatible",
-        "declared-toggle-model",
-        "openai-compatible",
-        &[stravia_vendor_sdk::MODEL_CAPABILITY_THINKING_TOGGLE],
-        true,
-    )
-    .await?;
+async fn strict_reasoning_efforts_rejects_undeclared_submitted_effort() {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
 
-    assert_eq!(
-        route.supported_thinking_levels,
-        vec![ThinkingLevel::Off, ThinkingLevel::Medium]
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn unknown_compatible_provider_still_rejects_submitted_toggle_controls() {
-    let data_dir = tempfile::tempdir().expect("tempdir");
-    let gateway = Gateway::from_storage(
-        GatewayConfig {
-            data_dir: data_dir.path().to_path_buf(),
-            ..GatewayConfig::default()
-        },
-        std::sync::Arc::new(crate::storage::MemoryStorage::new(
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )),
+    let error = create_effort_route(
+        "openai-compatible",
+        "strict-effort-model",
+        "openai-compatible",
+        Some(vec!["none", "high"]),
+        Some(vec![crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Medium,
+            control: TargetThinkingControl::Effort {
+                value: "medium".into(),
+            },
+            source: ThinkingMappingSource::Overridden,
+        }]),
     )
     .await
-    .expect("gateway");
-    let admin = gateway.admin();
-    let provider = admin
-        .create_provider(CreateProvider {
-            name: Some("Unknown Compatible Route Test Provider".into()),
-            source: ProviderSourceInput::Custom {
-                vendor: "openai-compatible".into(),
-                channel: "default".into(),
-                protocol: Some("openai-compatible".into()),
-                base_url: "http://127.0.0.1:9".into(),
-                models_source: None,
-                static_models: None,
-            },
-            credential: ProviderCredentialInput::ApiKey {
-                value: "route-fixture-key".into(),
-            },
-            vendor_options: Default::default(),
-            use_proxy: false,
-        })
-        .await
-        .expect("provider");
-    admin
-        .create_manual_provider_model(
-            &provider.id,
-            "custom-toggle-model",
-            CreateManualProviderModel {
-                template_id: None,
-                metadata: json!({
-                    "id": "custom-toggle-model",
-                    "modalities": {"input": ["text"], "output": ["text"]}
-                }),
-            },
-        )
-        .await
-        .expect("provider model");
-
-    use stravia_runtime_contract::thinking::TargetThinkingControl;
-    let error = admin
-        .create_model(CreateRoute {
-            purpose: crate::db::models::RoutePurpose::Inference,
-            model_id: "submitted-toggle-route".into(),
-            display_name: None,
-            balance: None,
-
-            targets: vec![CreateTarget {
-                provider_id: provider.id.clone(),
-                model: "custom-toggle-model".into(),
-                enabled: true,
-                priority: None,
-                first_token_timeout_ms: None,
-                target_retry_budget: None,
-                target_cooldown_ms: None,
-                thinking_level_map: vec![
-                    crate::thinking::ThinkingLevelMapping {
-                        level: ThinkingLevel::Off,
-                        control: TargetThinkingControl::Disabled,
-                        source: ThinkingMappingSource::Generated,
-                    },
-                    crate::thinking::ThinkingLevelMapping {
-                        level: ThinkingLevel::Medium,
-                        control: TargetThinkingControl::Enabled,
-                        source: ThinkingMappingSource::Generated,
-                    },
-                ],
-            }],
-            default_thinking_level: None,
-            billing: None,
-        })
-        .await
-        .expect_err("explicitly submitted toggle controls must fail closed");
+    .expect_err("undeclared effort must fail closed when reasoning_efforts is declared");
     let payload: serde_json::Value =
         serde_json::from_str(&error.to_string()).expect("coded thinking-control error");
 
     assert_eq!(payload["code"], "THINKING_CONTROL_UNREPRESENTABLE");
-    assert_eq!(
-        payload["params"]["levels"],
-        serde_json::json!(["off", "medium"])
-    );
-    assert_eq!(
-        payload["params"]["controls"],
-        serde_json::json!(["disabled", "enabled"])
-    );
+    assert_eq!(payload["params"]["levels"], serde_json::json!(["medium"]));
+    assert_eq!(payload["params"]["controls"], serde_json::json!(["effort"]));
     assert_eq!(
         payload["params"]["supported_controls"],
         serde_json::json!(["effort", "hidden"])
+    );
+}
+
+#[tokio::test]
+async fn unknown_protocol_rejects_submitted_effort_when_model_declares_none() {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+
+    let error = create_effort_route(
+        "openai-compatible",
+        "unknown-wire-model",
+        "vendor-private-wire",
+        None,
+        Some(vec![crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::High,
+            control: TargetThinkingControl::Effort {
+                value: "high".into(),
+            },
+            source: ThinkingMappingSource::Overridden,
+        }]),
+    )
+    .await
+    .expect_err("unknown protocol without declared reasoning_efforts must reject Effort");
+    let payload: serde_json::Value =
+        serde_json::from_str(&error.to_string()).expect("coded thinking-control error");
+
+    assert_eq!(payload["code"], "THINKING_CONTROL_UNREPRESENTABLE");
+    assert_eq!(payload["params"]["levels"], serde_json::json!(["high"]));
+    assert_eq!(payload["params"]["controls"], serde_json::json!(["effort"]));
+    assert_eq!(
+        payload["params"]["supported_controls"],
+        serde_json::json!(["hidden"])
     );
 }
 
@@ -2589,8 +2486,9 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
         .iter_mut()
         .find(|row| row.level == ThinkingLevel::High)
         .expect("high row");
+    // 目标仅声明 ["none", "medium"]；手工把 high 映射到已声明候选 medium，随后 regenerate 应还原为 hidden。
     high.control = stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
-        value: "high".into(),
+        value: "medium".into(),
     };
     let updated = admin
         .update_model(

@@ -341,11 +341,13 @@ fn gemini_summary_intent_survives_independent_intensity_mapping() {
         ),
         (
             serde_json::json!({"includeThoughts": true}),
-            Some(TargetThinkingControl::Budget { value: 2048 }),
+            Some(TargetThinkingControl::Effort {
+                value: "low".into(),
+            }),
             true,
         ),
         (
-            serde_json::json!({"thinkingBudget": 0}),
+            serde_json::json!({"thinkingLevel": "NONE"}),
             Some(TargetThinkingControl::Effort {
                 value: "high".into(),
             }),
@@ -353,7 +355,9 @@ fn gemini_summary_intent_survives_independent_intensity_mapping() {
         ),
         (
             serde_json::json!({}),
-            Some(TargetThinkingControl::Disabled),
+            Some(TargetThinkingControl::Effort {
+                value: "none".into(),
+            }),
             false,
         ),
     ] {
@@ -363,19 +367,23 @@ fn gemini_summary_intent_survives_independent_intensity_mapping() {
                 "generationConfig": {"thinkingConfig": config}
             }))
             .unwrap();
+        request.model = "gemini-3-flash".into();
         request.reasoning.target_control = control.clone();
         let reasoning_level = request.reasoning.level;
         let (body, _) = GoogleEncoder.encode_request(request).unwrap();
         let thinking = &body["generationConfig"]["thinkingConfig"];
         assert_eq!(thinking["includeThoughts"], include);
+        assert!(
+            !(thinking.get("thinkingLevel").is_some() && thinking.get("thinkingBudget").is_some()),
+            "Gemini must never emit thinkingLevel and thinkingBudget together: {thinking}"
+        );
         match control {
-            Some(TargetThinkingControl::Effort { .. }) => {
-                assert_eq!(thinking["thinkingLevel"], "HIGH")
+            Some(TargetThinkingControl::Effort { ref value }) if value == "none" => {
+                assert_eq!(thinking["thinkingBudget"], 0);
             }
-            Some(TargetThinkingControl::Budget { .. }) => {
-                assert_eq!(thinking["thinkingBudget"], 2048)
+            Some(TargetThinkingControl::Effort { ref value }) => {
+                assert_eq!(thinking["thinkingLevel"], value.to_ascii_uppercase());
             }
-            Some(TargetThinkingControl::Disabled) => assert_eq!(thinking["thinkingBudget"], 0),
             None => {
                 assert_eq!(reasoning_level, None::<ThinkingLevel>);
                 assert!(thinking.get("thinkingBudget").is_none());
@@ -383,6 +391,60 @@ fn gemini_summary_intent_survives_independent_intensity_mapping() {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+#[test]
+fn gemini_egress_applies_generation_specific_level_and_budget_rules() {
+    use stravia_runtime_contract::thinking::TargetThinkingControl;
+
+    let cases = [
+        ("gemini-3-flash", "high", Some("HIGH"), None, true),
+        ("gemini-3-flash", "none", None, Some(0), false),
+        ("gemini-3-pro", "high", Some("HIGH"), None, true),
+        ("gemini-3-pro", "none", Some("LOW"), None, false),
+        ("gemini-2.5-pro", "high", None, Some(16384), true),
+        ("gemini-2.5-pro", "max", None, Some(32768), true),
+        ("gemini-2.5-pro", "none", None, Some(128), false),
+        ("gemini-2.5-flash", "high", None, Some(16384), true),
+        ("gemini-2.5-flash", "max", None, Some(24576), true),
+        ("gemini-2.5-flash", "none", None, Some(0), false),
+    ];
+
+    for (model, effort, expected_level, expected_budget, expected_thoughts) in cases {
+        let mut request = AiRequest::new(
+            model,
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text("hello".to_owned().into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: effort.into(),
+        });
+        let (body, _) = GoogleEncoder.encode_request(request).unwrap();
+        let thinking = &body["generationConfig"]["thinkingConfig"];
+        assert!(
+            !(thinking.get("thinkingLevel").is_some() && thinking.get("thinkingBudget").is_some()),
+            "{model}/{effort} emitted both thinkingLevel and thinkingBudget: {thinking}"
+        );
+        assert_eq!(
+            thinking.get("thinkingLevel").and_then(Value::as_str),
+            expected_level,
+            "{model}/{effort}"
+        );
+        assert_eq!(
+            thinking.get("thinkingBudget").and_then(Value::as_u64),
+            expected_budget,
+            "{model}/{effort}"
+        );
+        assert_eq!(
+            thinking["includeThoughts"], expected_thoughts,
+            "{model}/{effort}"
+        );
     }
 }
 

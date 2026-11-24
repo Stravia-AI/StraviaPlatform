@@ -94,7 +94,6 @@ fn output_effort_without_thinking_is_preserved() {
         .expect("output effort");
 
     assert!(request.reasoning.is_enabled());
-    assert_eq!(request.reasoning.mode, None);
     assert_eq!(
         request.reasoning.level,
         Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
@@ -102,32 +101,104 @@ fn output_effort_without_thinking_is_preserved() {
 }
 
 #[test]
-fn explicit_effort_keeps_source_mode_and_enabled_budget() {
+fn adaptive_without_effort_defaults_to_high_and_preserves_display() {
+    let request = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "thinking": {"type": "adaptive", "display": "omitted"}
+        })))
+        .expect("adaptive without effort");
+
+    assert_eq!(
+        request.reasoning.level,
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
+    );
+    assert_eq!(request.reasoning.summary, Some(ReasoningSummary::None));
+    assert!(request.reasoning.is_enabled());
+}
+
+#[test]
+fn disabled_thinking_decodes_to_off_and_rejects_non_off_effort() {
+    let disabled = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "thinking": {"type": "disabled"}
+        })))
+        .expect("disabled thinking");
+    assert_eq!(
+        disabled.reasoning.level,
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+    );
+    assert_eq!(disabled.reasoning.summary, Some(ReasoningSummary::None));
+    assert!(!disabled.reasoning.is_enabled());
+
+    let disabled_none = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "thinking": {"type": "disabled"},
+            "output_config": {"effort": "none"}
+        })))
+        .expect("disabled with off effort");
+    assert_eq!(
+        disabled_none.reasoning.level,
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+    );
+
+    let err = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "thinking": {"type": "disabled"},
+            "output_config": {"effort": "high"}
+        })))
+        .expect_err("contradictory disabled + high effort must be rejected");
+    assert!(err.to_string().contains("disabled"));
+}
+
+#[test]
+fn legacy_enabled_thinking_and_budget_tokens_are_rejected_with_migration_hint() {
     for thinking in [
-        serde_json::json!({"type": "enabled", "budget_tokens": 1024, "display": "omitted"}),
-        serde_json::json!({"type": "disabled", "display": "omitted"}),
+        serde_json::json!({"type": "enabled", "budget_tokens": 1024}),
+        serde_json::json!({"type": "enabled"}),
+        serde_json::json!({"type": "adaptive", "budget_tokens": 2048}),
+        serde_json::json!({"type": "disabled", "budget_tokens": 0}),
     ] {
-        let request = AnthropicDecoder
+        let err = AnthropicDecoder
             .decode_request(request_with(serde_json::json!({
-                "thinking": thinking.clone(),
-                "output_config": {"effort": "max"}
+                "thinking": thinking,
             })))
-            .unwrap();
-        assert_eq!(
-            request.reasoning.level,
-            Some(stravia_runtime_contract::thinking::ThinkingLevel::Max)
+            .expect_err("legacy enabled/budget_tokens must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("adaptive") && message.contains("output_config.effort"),
+            "unexpected error message: {message}"
         );
-        assert_eq!(request.reasoning.mode.as_deref(), thinking["type"].as_str());
-        assert_eq!(
-            request.reasoning.is_enabled(),
-            thinking["type"] != "disabled"
-        );
-        assert_eq!(
-            request.reasoning.budget_tokens,
-            thinking["budget_tokens"].as_u64().map(|v| v as u32)
-        );
-        assert_eq!(request.reasoning.summary, Some(ReasoningSummary::None));
     }
+}
+
+#[test]
+fn explicit_null_thinking_and_effort_resets_remain_valid() {
+    use stravia_runtime_contract::protocol::ir::ParameterReset;
+
+    let reset_all = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "thinking": null,
+            "output_config": {"effort": null}
+        })))
+        .expect("null resets");
+    assert!(reset_all.parameters.resets(ParameterReset::Reasoning));
+    assert!(reset_all.parameters.resets(ParameterReset::ReasoningLevel));
+    assert_eq!(reset_all.reasoning.level, None);
+
+    let reset_display = AnthropicDecoder
+        .decode_request(request_with(serde_json::json!({
+            "thinking": {"type": "adaptive", "display": null}
+        })))
+        .expect("null display reset");
+    assert!(
+        reset_display
+            .parameters
+            .resets(ParameterReset::ReasoningSummary)
+    );
+    assert_eq!(
+        reset_display.reasoning.level,
+        Some(stravia_runtime_contract::thinking::ThinkingLevel::High)
+    );
 }
 
 #[test]

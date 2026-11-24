@@ -273,42 +273,20 @@ fn additional_model_request_fields(
     request: &AiRequest,
     metadata: Option<&stravia_vendor_sdk::ModelMetadata>,
 ) -> Result<Option<Value>, PluginError> {
-    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel, effort_is_off};
     let reasoning = &request.reasoning;
-    let mode_thinking = match reasoning.mode.as_deref() {
-        None => None,
-        Some("disabled") => Some("disabled"),
-        Some("adaptive" | "enabled") => Some("adaptive"),
-        Some(_) => {
-            return Err(invalid(
-                "Kiro does not support the requested thinking mode or budget",
-            ));
-        }
-    };
-    let (mut effort, mut thinking_type) = match &reasoning.target_control {
-        Some(TargetThinkingControl::Effort { value }) => (Some(value.as_str()), mode_thinking),
-        Some(TargetThinkingControl::Enabled) => (None, Some("adaptive")),
-        Some(TargetThinkingControl::Disabled) => (None, Some("disabled")),
-        Some(_) => {
-            return Err(invalid(
-                "Kiro does not support the requested thinking control",
-            ));
-        }
-        None if reasoning.budget_tokens.is_some() => {
-            return Err(invalid(
-                "Kiro does not support the requested thinking mode or budget",
-            ));
-        }
+    let requested = match &reasoning.target_control {
+        Some(TargetThinkingControl::Hidden) => return Ok(None),
+        Some(TargetThinkingControl::Effort { value }) => Some(value.as_str()),
         None => match reasoning.level {
-            Some(ThinkingLevel::Off) if mode_thinking.is_some() => (None, mode_thinking),
-            Some(ThinkingLevel::Off) => (Some("none"), None),
-            Some(level) => (Some(level.as_str()), mode_thinking),
-            None => (None, mode_thinking),
+            Some(ThinkingLevel::Off) => Some("none"),
+            Some(level) => Some(level.as_str()),
+            None => None,
         },
     };
-    if effort.is_none() && thinking_type.is_none() {
+    let Some(requested_effort) = requested else {
         return Ok(None);
-    }
+    };
     let extensions = &metadata
         .ok_or_else(|| invalid("Kiro reasoning requires model effort metadata"))?
         .extensions;
@@ -316,55 +294,51 @@ fn additional_model_request_fields(
         .get("kiro_thinking_toggleable")
         .and_then(Value::as_bool)
         == Some(true);
-    if effort == Some("none") && toggleable {
-        effort = None;
-        thinking_type = Some("disabled");
-    }
+    let group = extensions
+        .get("kiro_effort_group")
+        .and_then(Value::as_str)
+        .filter(|group| matches!(*group, "output_config" | "reasoning"));
+
     let mut fields = Map::new();
-    if let Some(requested_effort) = effort.take() {
-        let group = extensions
-            .get("kiro_effort_group")
-            .and_then(Value::as_str)
-            .filter(|group| matches!(*group, "output_config" | "reasoning"))
-            .ok_or_else(|| invalid("Kiro reasoning requires a known model effort field"))?;
+    if effort_is_off(requested_effort) && toggleable {
+        fields.insert("thinking".into(), json!({"type": "disabled"}));
+        return Ok(Some(Value::Object(fields)));
+    }
+    if toggleable && group.is_none() {
+        // Pure-toggle Kiro model: non-off effort maps to thinking: adaptive.
         let supported = extensions
             .get("reasoning_efforts")
             .and_then(Value::as_array)
             .ok_or_else(|| invalid("Kiro reasoning requires declared model effort levels"))?;
-        if !supported
-            .iter()
-            .any(|value| value.as_str() == Some(requested_effort))
-        {
+        if !supported.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|v| v.eq_ignore_ascii_case(requested_effort))
+        }) {
             return Err(invalid(
                 "Kiro model does not declare the requested reasoning effort",
             ));
         }
-        // Match KAS 3.4.0 R4t/cme: when thinking is disabled, cap xhigh/max to the
-        // highest non-capped declared effort level (or omit if none exists).
-        let applied =
-            if thinking_type == Some("disabled") && matches!(requested_effort, "xhigh" | "max") {
-                supported
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .rfind(|v| !matches!(*v, "none" | "xhigh" | "max"))
-            } else {
-                Some(requested_effort)
-            };
-        if let Some(applied) = applied {
-            fields.insert(group.into(), json!({"effort": applied}));
-        }
+        fields.insert("thinking".into(), json!({"type": "adaptive"}));
+        return Ok(Some(Value::Object(fields)));
     }
-    if let Some(thinking_type) = thinking_type {
-        if !toggleable {
-            return Err(invalid("Kiro model does not support thinking toggle"));
-        }
-        fields.insert("thinking".into(), json!({"type": thinking_type}));
+
+    let group =
+        group.ok_or_else(|| invalid("Kiro reasoning requires a known model effort field"))?;
+    let supported = extensions
+        .get("reasoning_efforts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("Kiro reasoning requires declared model effort levels"))?;
+    if !supported
+        .iter()
+        .any(|value| value.as_str() == Some(requested_effort))
+    {
+        return Err(invalid(
+            "Kiro model does not declare the requested reasoning effort",
+        ));
     }
-    if fields.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(Value::Object(fields)))
-    }
+    fields.insert(group.into(), json!({"effort": requested_effort}));
+    Ok(Some(Value::Object(fields)))
 }
 
 fn tool_ids(entries: &[Value]) -> Option<std::collections::HashSet<&str>> {
@@ -996,12 +970,13 @@ mod tests {
             body["additionalModelRequestFields"],
             json!({"reasoning": {"effort": "none"}})
         );
-        req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
-        assert!(super::encode(&req, "model", "id", Some(&meta), true).is_err());
+        req.reasoning.target_control = Some(TargetThinkingControl::Hidden);
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert!(body.get("additionalModelRequestFields").is_none());
     }
 
     #[test]
-    fn maps_thinking_toggle_and_caps_effort_when_disabled() {
+    fn maps_thinking_toggle_and_pure_toggle_models() {
         use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
         let mut req = request(json!([{"role":"user","content":"hello"}]));
         let mut meta = stravia_vendor_sdk::ModelMetadata::default();
@@ -1009,7 +984,7 @@ mod tests {
             .insert("kiro_effort_group".into(), json!("output_config"));
         meta.extensions.insert(
             "reasoning_efforts".into(),
-            json!(["low", "medium", "high", "max"]),
+            json!(["none", "low", "medium", "high", "max"]),
         );
         meta.extensions
             .insert("kiro_thinking_toggleable".into(), json!(true));
@@ -1018,58 +993,30 @@ mod tests {
         req.reasoning.target_control = Some(TargetThinkingControl::Effort {
             value: "none".into(),
         });
-        for mode in [None, Some("adaptive".into())] {
-            req.reasoning.mode = mode;
-            let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
-            assert_eq!(
-                body["additionalModelRequestFields"],
-                json!({"thinking": {"type": "disabled"}})
-            );
-        }
-        req.reasoning.mode = None;
-        req.reasoning.target_control = None;
-        req.reasoning.level = Some(ThinkingLevel::Off);
-        let group = meta.extensions.remove("kiro_effort_group").unwrap();
         let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
         assert_eq!(
             body["additionalModelRequestFields"],
             json!({"thinking": {"type": "disabled"}})
         );
-        meta.extensions.insert("kiro_effort_group".into(), group);
-        req.reasoning.level = None;
 
-        req.reasoning.target_control = Some(TargetThinkingControl::Enabled);
+        // Pure toggle Kiro model without kiro_effort_group: off -> disabled, high -> adaptive.
+        meta.extensions.remove("kiro_effort_group");
+        meta.extensions
+            .insert("reasoning_efforts".into(), json!(["none", "high"]));
+        req.reasoning.target_control = None;
+        req.reasoning.level = Some(ThinkingLevel::Off);
+        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"thinking": {"type": "disabled"}})
+        );
+        req.reasoning.target_control = Some(TargetThinkingControl::Effort {
+            value: "high".into(),
+        });
         let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
         assert_eq!(
             body["additionalModelRequestFields"],
             json!({"thinking": {"type": "adaptive"}})
-        );
-
-        req.reasoning.target_control = Some(TargetThinkingControl::Disabled);
-        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
-        assert_eq!(
-            body["additionalModelRequestFields"],
-            json!({"thinking": {"type": "disabled"}})
-        );
-
-        // When thinking is disabled with max effort, KAS 3.4.0 cme caps to highest non-capped level (high).
-        req.reasoning.target_control = None;
-        req.reasoning.mode = Some("disabled".into());
-        req.reasoning.level = Some(ThinkingLevel::Max);
-        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
-        assert_eq!(
-            body["additionalModelRequestFields"],
-            json!({
-                "output_config": {"effort": "high"},
-                "thinking": {"type": "disabled"}
-            })
-        );
-        meta.extensions
-            .insert("reasoning_efforts".into(), json!(["none", "max"]));
-        let body = super::encode(&req, "model", "id", Some(&meta), true).unwrap();
-        assert_eq!(
-            body["additionalModelRequestFields"],
-            json!({"thinking": {"type": "disabled"}})
         );
     }
 

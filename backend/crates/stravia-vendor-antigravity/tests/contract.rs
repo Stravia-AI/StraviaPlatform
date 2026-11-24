@@ -1793,7 +1793,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
     let request = ProtocolTransform::global().bind(endpoint,endpoint).unwrap().decode_request(json!({
         "contents":[{"role":"user","parts":[{"text":"Run read","future":"strip"}],"foreign":"strip"}],
         "tools":[{"functionDeclarations":[{"name":"read","parameters":{"type":"OBJECT","properties":{"metadata":{"type":"OBJECT","properties":{"seed":{"type":"INTEGER"}}}},"foreign":"strip"},"strict":true},{"name":"list","description":"List entries","parameters":{"type":"OBJECT"}}]},{"googleSearch":{}}],
-        "generationConfig":{"temperature":0.5,"seed":42,"foreign":"strip","thinkingConfig":{"thinkingBudget":2048,"foreign":"strip"}},
+        "generationConfig":{"temperature":0.5,"seed":42,"foreign":"strip","thinkingConfig":{"thinkingLevel":"LOW","foreign":"strip"}},
         "cachedContent":"strip", "foreign":"strip",
         "labels":{"request_id":"client-supplied","model_enum":"client-model","trajectory_id":"client-trajectory"}
     })).unwrap();
@@ -2148,9 +2148,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             ..Default::default()
         });
         let mut selected_request = request.clone();
-        selected_request.reasoning.mode = None;
         selected_request.reasoning.level = None;
-        selected_request.reasoning.budget_tokens = None;
         if !summary {
             selected_request.reasoning.summary =
                 Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None);
@@ -2324,8 +2322,9 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         });
         let mut selected_request = request.clone();
         selected_request.generation.max_tokens = Some(cap);
-        selected_request.reasoning.target_control =
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 2048 });
+        selected_request.reasoning.target_control = None;
+        selected_request.reasoning.level =
+            Some(stravia_runtime_contract::thinking::ThinkingLevel::Low);
         run(
             runtime,
             plugin,
@@ -2349,38 +2348,23 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             cap
         );
         assert_eq!(
-            envelope["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"],
-            2048
+            envelope["request"]["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "LOW"
         );
         assert!(
             envelope
-                .pointer("/request/generationConfig/thinkingConfig/thinkingLevel")
+                .pointer("/request/generationConfig/thinkingConfig/thinkingBudget")
                 .is_none()
         );
     }
-    for (level, budget, control, expected_level, expected_budget, summary) in [
-        (
-            Some("MEDIUM"),
-            None,
-            None,
-            Some(json!("MEDIUM")),
-            None,
-            true,
-        ),
-        (Some("HIGH"), None, None, Some(json!("HIGH")), None, false),
-        (
-            Some("XHIGH"),
-            None,
-            None,
-            Some(json!("EXTRA_HIGH")),
-            None,
-            true,
-        ),
-        (Some("MAX"), None, None, Some(json!("MAX")), None, true),
-        (None, Some(2048), None, None, Some(json!(2048)), true),
+    for (level, control, expected_level, expected_budget, summary) in [
+        (Some("MEDIUM"), None, Some(json!("MEDIUM")), None, true),
+        (Some("HIGH"), None, Some(json!("HIGH")), None, false),
+        (Some("XHIGH"), None, Some(json!("EXTRA_HIGH")), None, true),
+        (Some("MAX"), None, Some(json!("MAX")), None, true),
+        (Some("OFF"), None, None, Some(json!(0)), false),
         (
             Some("HIGH"),
-            None,
             Some(
                 stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
                     value: "medium".into(),
@@ -2389,22 +2373,6 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             Some(json!("MEDIUM")),
             None,
             true,
-        ),
-        (
-            Some("HIGH"),
-            None,
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 7777 }),
-            None,
-            Some(json!(7777)),
-            true,
-        ),
-        (
-            Some("HIGH"),
-            None,
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled),
-            None,
-            Some(json!(0)),
-            false,
         ),
     ] {
         let mut selected_request = request.clone();
@@ -2422,17 +2390,14 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             extensions: BTreeMap::from([("antigravity".into(), table)]),
             ..Default::default()
         });
-        selected_request.reasoning.mode = None;
-        selected_request.reasoning.budget_tokens = budget;
         selected_request.reasoning.level = level.map(|level| {
             stravia_runtime_contract::thinking::ThinkingLevel::from_wire(level).unwrap()
         });
         selected_request.reasoning.target_control = control;
-        selected_request.reasoning.summary = if matches!(
-            selected_request.reasoning.target_control,
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
-        ) {
-            // 客户端即使索取摘要，也不能反转 Target 的显式禁用。
+        selected_request.reasoning.summary = if selected_request.reasoning.level
+            == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
+        {
+            // 客户端即使索取摘要，也不能反转显式关闭思考。
             Some(stravia_runtime_contract::protocol::ir::ReasoningSummary::Auto)
         } else {
             (!summary).then_some(stravia_runtime_contract::protocol::ir::ReasoningSummary::None)

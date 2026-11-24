@@ -245,7 +245,6 @@ impl RouteModule<'_> {
             })
             .ok_or_else(|| provider_model_not_found(provider_id, &model_id))?;
         super::thinking_map::hide_unwritable_generated_controls(
-            self.gw,
             &provider,
             &detail.metadata,
             &mut detail.thinking_level_map,
@@ -575,7 +574,6 @@ impl RouteModule<'_> {
             .then(|| {
                 let mut generated = generate_thinking_level_map(&metadata);
                 super::thinking_map::hide_unwritable_generated_controls(
-                    self.gw,
                     &provider,
                     &metadata,
                     &mut generated,
@@ -589,7 +587,7 @@ impl RouteModule<'_> {
              metadata: &ProviderModelMetadata,
              map: &[crate::thinking::ThinkingLevelMapping]| {
                 super::thinking_map::ensure_thinking_map_representable(
-                    self.gw, &provider, model_id, metadata, map,
+                    &provider, model_id, metadata, map,
                 )
             };
         let before_commit = || permit.ensure_current();
@@ -632,7 +630,6 @@ impl RouteModule<'_> {
             }
         };
         super::thinking_map::hide_unwritable_generated_controls(
-            self.gw,
             &provider,
             &detail.metadata,
             &mut detail.thinking_level_map,
@@ -846,7 +843,6 @@ impl RouteModule<'_> {
                     .then(|| {
                         let mut generated = generate_thinking_level_map(&merged);
                         super::thinking_map::hide_unwritable_generated_controls(
-                            self.gw,
                             provider,
                             &merged,
                             &mut generated,
@@ -970,7 +966,7 @@ impl RouteModule<'_> {
              metadata: &ProviderModelMetadata,
              map: &[crate::thinking::ThinkingLevelMapping]| {
                 super::thinking_map::ensure_thinking_map_representable(
-                    self.gw, provider, model_id, metadata, map,
+                    provider, model_id, metadata, map,
                 )
             };
         self.gw
@@ -1320,6 +1316,11 @@ fn metadata_from_discovered_model(
     if has_canonical && model.display_name.trim() == model_id {
         model.metadata.remove("name");
     }
+    let discovered_efforts_is_fallback = model
+        .metadata
+        .remove("reasoning_efforts_fallback")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let base = match canonical {
         Some(value) => value,
         None => ProviderModelMetadata::bare(model_id).to_value()?,
@@ -1327,6 +1328,13 @@ fn metadata_from_discovered_model(
     let Value::Object(mut object) = base else {
         anyhow::bail!("Canonical Model metadata must be an object");
     };
+    // 开关型厂商在发现期补齐的默认 ["none", "high"] 只是缺省值：若目录或规范模型
+    // 已显式声明更细粒度的 reasoning_efforts，必须保留目录声明。
+    if discovered_efforts_is_fallback
+        && crate::provider_catalog::source_reasoning_efforts(&object)?.is_some()
+    {
+        model.metadata.remove("reasoning_efforts");
+    }
     object.extend(model.metadata);
     object.insert("id".into(), Value::String(model_id.to_owned()));
     let discovered_name = model.display_name.trim();
@@ -1433,7 +1441,6 @@ fn apply_provider_model_mutation(
                 provider_supports_web_search(gw, provider),
             );
             super::thinking_map::hide_unwritable_generated_controls(
-                gw,
                 provider,
                 &detail.metadata,
                 &mut detail.thinking_level_map,

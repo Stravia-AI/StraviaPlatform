@@ -218,6 +218,11 @@ impl GoogleDecoder {
 
         // Reasoning from thinkingConfig
         let reasoning = if let Some(tc) = gc.and_then(|c| c.thinking_config.as_ref()) {
+            if tc.get("thinkingBudget").is_some_and(|v| !v.is_null()) {
+                anyhow::bail!(
+                    "Gemini thinkingConfig.thinkingBudget is no longer supported; use thinkingConfig.thinkingLevel (e.g. \"MINIMAL\", \"LOW\", \"MEDIUM\", \"HIGH\") instead"
+                );
+            }
             let effort_level = match tc.get("thinkingLevel") {
                 None => None,
                 Some(Value::String(value)) => Some(
@@ -228,23 +233,9 @@ impl GoogleDecoder {
                 Some(Value::Null) => None,
                 Some(_) => anyhow::bail!("Gemini thinkingLevel must be a string"),
             };
-            let budget = tc
-                .get("thinkingBudget")
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u32::try_from(v).ok());
             let include_thoughts = tc.get("includeThoughts").and_then(Value::as_bool);
-            let level = effort_level.or_else(|| {
-                budget.map(stravia_runtime_contract::thinking::ThinkingLevel::from_budget)
-            });
             ReasoningConfig {
-                mode: match tc.get("thinkingBudget").and_then(Value::as_i64) {
-                    Some(-1) => Some("auto".into()),
-                    Some(0) => Some("disabled".into()),
-                    Some(value) if value > 0 => Some("enabled".into()),
-                    _ => None,
-                },
-                budget_tokens: budget,
-                level,
+                level: effort_level,
                 summary: include_thoughts.map(|enabled| {
                     if enabled {
                         ReasoningSummary::Auto
@@ -252,7 +243,7 @@ impl GoogleDecoder {
                         ReasoningSummary::None
                     }
                 }),
-                ..Default::default()
+                target_control: None,
             }
         } else {
             ReasoningConfig::default()

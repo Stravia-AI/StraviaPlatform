@@ -350,15 +350,15 @@ fn insert_request_control_fields(obj: &mut serde_json::Map<String, Value>, req: 
         obj.insert("parallel_tool_calls".into(), value.into());
     }
     let mut reasoning = serde_json::Map::new();
+    let target_off = req
+        .reasoning
+        .target_control
+        .as_ref()
+        .is_some_and(stravia_runtime_contract::thinking::TargetThinkingControl::is_off);
     if let Some(control) = req.reasoning.target_control.as_ref() {
-        let effort = match control {
-            stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value } => {
-                value.as_str()
-            }
-            stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => "none",
-            _ => "",
-        };
-        if !effort.is_empty() {
+        if let Some(effort) = control.effort_value()
+            && !effort.is_empty()
+        {
             reasoning.insert("effort".into(), Value::String(effort.into()));
         }
     } else if let Some(level) = req.reasoning.level {
@@ -373,20 +373,14 @@ fn insert_request_control_fields(obj: &mut serde_json::Map<String, Value>, req: 
                 .into(),
             ),
         );
-    } else if req.reasoning.mode.as_deref() == Some("disabled") {
-        reasoning.insert("effort".into(), Value::String("none".into()));
     }
     use stravia_runtime_contract::protocol::ir::ReasoningSummary;
     let summary = match req.reasoning.summary.as_ref() {
         Some(ReasoningSummary::None) => None,
         Some(summary) => Some(summary),
-        None if req.reasoning.mode.as_deref() == Some("disabled")
+        None if target_off
             || req.reasoning.level
                 == Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
-            || matches!(
-                req.reasoning.target_control,
-                Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
-            )
             || req
                 .parameters
                 .resets(stravia_runtime_contract::protocol::ir::ParameterReset::Reasoning)
@@ -484,20 +478,10 @@ fn insert_request_control_fields(obj: &mut serde_json::Map<String, Value>, req: 
         };
         obj.insert(key.into(), Value::String(id.clone()));
     }
-    let reasoning_enabled = req.reasoning.mode.as_deref() != Some("disabled")
-        && req.reasoning.level != Some(stravia_runtime_contract::thinking::ThinkingLevel::Off)
-        && !matches!(
-            req.reasoning.target_control,
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled)
-        )
-        && (req
-            .reasoning
-            .mode
-            .as_deref()
-            .is_some_and(|mode| matches!(mode, "enabled" | "auto"))
-            || req.reasoning.level.is_some()
-            || req.reasoning.target_control.is_some()
-            || req.reasoning.budget_tokens.is_some());
+    let reasoning_enabled = match req.reasoning.target_control.as_ref() {
+        Some(control) => !control.is_hidden() && !control.is_off(),
+        None => req.reasoning.is_enabled(),
+    };
     let mut include = Vec::new();
     if parameters.store != Some(true) && reasoning_enabled {
         include.push(Value::String("reasoning.encrypted_content".into()));
@@ -581,9 +565,10 @@ fn validate_target_thinking_control(req: &AiRequest) -> anyhow::Result<()> {
         return Ok(());
     };
     match control {
-        stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. }
-        | stravia_runtime_contract::thinking::TargetThinkingControl::Disabled => Ok(()),
-        _ => anyhow::bail!("Open Responses cannot represent Target Thinking Control {control:?}"),
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort { .. } => Ok(()),
+        stravia_runtime_contract::thinking::TargetThinkingControl::Hidden => {
+            anyhow::bail!("Open Responses cannot represent Target Thinking Control {control:?}")
+        }
     }
 }
 

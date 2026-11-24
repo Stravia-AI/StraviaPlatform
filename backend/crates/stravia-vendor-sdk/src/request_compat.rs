@@ -425,34 +425,23 @@ impl Serialize for ParametersView<'_> {
     }
 }
 struct ReasoningView<'a>(&'a ir::ReasoningConfig);
-#[derive(Serialize)]
-#[serde(untagged)]
-enum LegacyEffort {
-    Level(&'static str),
-    Budget { budget: u32 },
-}
 impl Serialize for ReasoningView<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use stravia_runtime_contract::thinking::ThinkingLevel;
         let r = self.0;
-        let effort = r
-            .level
-            .map(|level| {
-                LegacyEffort::Level(
-                    if level == stravia_runtime_contract::thinking::ThinkingLevel::Off {
-                        "none"
-                    } else {
-                        level.as_str()
-                    },
-                )
-            })
-            .or_else(|| {
-                r.budget_tokens
-                    .map(|budget| LegacyEffort::Budget { budget })
-            });
+        let effort = r.level.map(|level| {
+            if level == ThinkingLevel::Off {
+                "none"
+            } else {
+                level.as_str()
+            }
+        });
+        let mode = (r.level == Some(ThinkingLevel::Off)).then_some("disabled");
+        let budget_tokens: Option<u32> = None;
         let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("mode", &r.mode)?;
+        map.serialize_entry("mode", &mode)?;
         map.serialize_entry("enabled", &r.is_enabled())?;
-        map.serialize_entry("budget_tokens", &r.budget_tokens)?;
+        map.serialize_entry("budget_tokens", &budget_tokens)?;
         map.serialize_entry("effort", &effort)?;
         if let Some(value) = r.summary {
             map.serialize_entry("display", &summary(value))?;
@@ -964,7 +953,7 @@ mod tests {
         request.parameters.logprobs = Some(3);
         request.parameters.candidate_count = Some(2);
         request.parameters.store = Some(false);
-        request.reasoning.mode = Some("enabled".into());
+        request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
         let responses = value(&request, "open-responses");
         assert_eq!(
             responses["ext"]["OpenResponses"]["include"],
@@ -1005,12 +994,13 @@ mod tests {
     fn all_unified_controls_round_trip_through_format_one() {
         let mut request = AiRequest::new("model", Vec::new());
         request.instructions = Some("instructions".into());
-        request.reasoning.mode = Some("enabled".into());
         request.reasoning.summary = Some(ReasoningSummary::Detailed);
-        request.reasoning.budget_tokens = Some(1024);
         request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
-        request.reasoning.target_control =
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Budget { value: 1024 });
+        request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "high".into(),
+            },
+        );
         request.response_format = Some(ResponseFormat::JsonSchema {
             name: "result".into(),
             description: Some("description".into()),
@@ -1110,20 +1100,37 @@ mod tests {
     }
 
     #[test]
-    fn budget_only_reasoning_and_explicit_resets_round_trip() {
+    fn format_one_reasoning_projection_keeps_legacy_wire_shape_without_internal_budget() {
+        use stravia_runtime_contract::thinking::ThinkingLevel;
         let mut request = AiRequest::new("model", Vec::new());
-        request.reasoning.budget_tokens = Some(1024);
+        request.reasoning.level = Some(ThinkingLevel::Off);
         request.parameters.reset(ParameterReset::Instructions);
         request.parameters.reset(ParameterReset::NativeTools);
         request.parameters.reset(ParameterReset::ReasoningSummary);
-        let mut decoded: AiRequest =
-            serde_json::from_slice(&encode_request_payload(&request, "open-responses").body)
-                .unwrap();
+        let projected = value(&request, "open-responses");
+        assert_eq!(projected["reasoning"]["mode"], "disabled");
+        assert_eq!(projected["reasoning"]["enabled"], false);
+        assert!(projected["reasoning"]["budget_tokens"].is_null());
+        assert_eq!(projected["reasoning"]["effort"], "none");
+        let mut decoded: AiRequest = serde_json::from_value(projected).unwrap();
         decoded.normalize_parameters();
         assert_eq!(
             serde_json::to_value(&decoded.parameters).unwrap(),
             serde_json::to_value(&request.parameters).unwrap()
         );
+        assert_eq!(
+            serde_json::to_value(&decoded.reasoning).unwrap(),
+            serde_json::to_value(&request.reasoning).unwrap()
+        );
+
+        request.reasoning.level = Some(ThinkingLevel::High);
+        let projected = value(&request, "open-responses");
+        assert!(projected["reasoning"]["mode"].is_null());
+        assert_eq!(projected["reasoning"]["enabled"], true);
+        assert!(projected["reasoning"]["budget_tokens"].is_null());
+        assert_eq!(projected["reasoning"]["effort"], "high");
+        let mut decoded: AiRequest = serde_json::from_value(projected).unwrap();
+        decoded.normalize_parameters();
         assert_eq!(
             serde_json::to_value(&decoded.reasoning).unwrap(),
             serde_json::to_value(&request.reasoning).unwrap()

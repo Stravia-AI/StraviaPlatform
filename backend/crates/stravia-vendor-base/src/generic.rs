@@ -121,13 +121,7 @@ pub(crate) fn execute_inference(
         .ok_or_else(|| common::plugin_error(ErrorKind::Invalid, "inference requires a model"))?;
     request.model = model.to_owned();
     if !matches!(protocol, COHERE_PROTOCOL | GATEWAY_PROTOCOL) {
-        thinking::apply(
-            vendor_id,
-            &provider.channel,
-            provider,
-            protocol,
-            &mut request,
-        )?;
+        thinking::apply(vendor_id, provider, protocol, &mut request)?;
     }
     let preserve_upstream_errors = protocol == OPEN_RESPONSES_PROTOCOL
         && stravia_protocol_codec::codec::compaction::native_compaction_requested(&request);

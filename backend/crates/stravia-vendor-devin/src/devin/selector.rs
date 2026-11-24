@@ -201,18 +201,27 @@ pub(crate) fn resolve_selector(
 
     match control {
         Some(TargetThinkingControl::Effort { value }) => {
-            let level = value.to_ascii_lowercase();
-            pick(&|traits| traits.level.as_deref() == Some(level.as_str()))
-        }
-        Some(TargetThinkingControl::Enabled) => pick(&|traits| traits.thinking),
-        Some(TargetThinkingControl::Disabled) => {
-            if default_traits.thinking {
-                pick(&|traits| !traits.thinking)
+            if stravia_runtime_contract::thinking::effort_is_off(value) {
+                pick(&|traits| {
+                    traits
+                        .level
+                        .as_deref()
+                        .is_some_and(stravia_runtime_contract::thinking::effort_is_off)
+                })
+                .or_else(|| {
+                    if default_traits.thinking {
+                        pick(&|traits| !traits.thinking)
+                    } else {
+                        Some(table.default.clone())
+                    }
+                })
             } else {
-                Some(table.default.clone())
+                let level = value.to_ascii_lowercase();
+                pick(&|traits| traits.level.as_deref() == Some(level.as_str()))
+                    .or_else(|| pick(&|traits| traits.thinking))
             }
         }
-        _ => None,
+        Some(TargetThinkingControl::Hidden) | None => None,
     }
     .unwrap_or_else(|| table.default.clone())
 }

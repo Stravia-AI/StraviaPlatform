@@ -8,6 +8,7 @@ pub mod google;
 pub mod open_responses;
 pub mod openai;
 pub mod reasoning;
+pub mod thinking;
 pub mod tool_correlation;
 
 use stravia_runtime_contract::protocol::ir::ContentBlock;

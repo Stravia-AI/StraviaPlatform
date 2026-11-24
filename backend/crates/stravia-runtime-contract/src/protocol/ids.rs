@@ -97,18 +97,16 @@ impl Protocol {
             return true;
         }
         match self {
-            Self::OpenResponses => matches!(
-                control,
-                TargetThinkingControl::Effort { .. } | TargetThinkingControl::Disabled
-            ),
-            Self::AnthropicMessages | Self::GoogleGemini => true,
-            Self::OpenAICompatible => {
+            Self::OpenResponses
+            | Self::OpenAICompatible
+            | Self::AnthropicMessages
+            | Self::GoogleGemini
+            | Self::BedrockConverse
+            | Self::CohereChat
+            | Self::GatewayLanguageModel => {
                 matches!(control, TargetThinkingControl::Effort { .. })
             }
-            Self::BedrockConverse
-            | Self::CohereChat
-            | Self::WatsonxTextChat
-            | Self::GatewayLanguageModel => false,
+            Self::WatsonxTextChat => false,
         }
     }
 }

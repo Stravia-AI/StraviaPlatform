@@ -267,50 +267,47 @@ impl AnthropicDecoder {
 
         // ── Reasoning config ──────────────────────────────────────────────────
         let reasoning = match req.thinking.as_ref() {
-            Some(thinking) if output_effort.is_some() => {
-                if !matches!(thinking.kind.as_str(), "enabled" | "disabled" | "adaptive") {
-                    anyhow::bail!("unsupported Anthropic thinking type: {}", thinking.kind);
-                }
-                let mut reasoning = reasoning_from_effort(
-                    output_effort.as_deref().expect("explicit effort"),
-                    parse_summary(thinking.display.as_deref()),
-                )?;
-                reasoning.mode = Some(if thinking.kind == "adaptive" {
-                    "auto".into()
-                } else {
-                    thinking.kind.clone()
-                });
-                reasoning.budget_tokens = if thinking.kind == "enabled" {
-                    thinking.budget_tokens
-                } else {
-                    None
-                };
-                reasoning
-            }
-            Some(thinking) if thinking.kind == "adaptive" => ReasoningConfig {
-                mode: Some("auto".into()),
-                summary: parse_summary(thinking.display.as_deref()),
-                ..Default::default()
-            },
             Some(thinking) => {
-                let enabled = match thinking.kind.as_str() {
-                    "enabled" => true,
-                    "disabled" => false,
+                if thinking.kind == "enabled"
+                    || thinking
+                        .budget_tokens
+                        .as_ref()
+                        .is_some_and(|value| !value.is_null())
+                {
+                    anyhow::bail!(
+                        "Anthropic thinking.type = \"enabled\" and thinking.budget_tokens are no longer supported; use thinking: {{\"type\": \"adaptive\"}} with output_config.effort (e.g. \"low\", \"medium\", \"high\", \"xhigh\", \"max\"), or thinking: {{\"type\": \"disabled\"}}"
+                    );
+                }
+                match thinking.kind.as_str() {
+                    "adaptive" => {
+                        let summary = parse_summary(thinking.display.as_deref());
+                        if let Some(effort) = output_effort.as_deref() {
+                            reasoning_from_effort(effort, summary)?
+                        } else {
+                            ReasoningConfig {
+                                summary,
+                                level: Some(
+                                    stravia_runtime_contract::thinking::ThinkingLevel::High,
+                                ),
+                                target_control: None,
+                            }
+                        }
+                    }
+                    "disabled" => {
+                        if let Some(effort) = output_effort.as_deref()
+                            && !stravia_runtime_contract::thinking::effort_is_off(effort)
+                        {
+                            anyhow::bail!(
+                                "Anthropic thinking.type = \"disabled\" cannot be combined with non-off output_config.effort ({effort}); omit output_config.effort or set it to \"none\""
+                            );
+                        }
+                        ReasoningConfig {
+                            summary: Some(ReasoningSummary::None),
+                            level: Some(stravia_runtime_contract::thinking::ThinkingLevel::Off),
+                            target_control: None,
+                        }
+                    }
                     value => anyhow::bail!("unsupported Anthropic thinking type: {value}"),
-                };
-                ReasoningConfig {
-                    mode: Some(thinking.kind.clone()),
-                    budget_tokens: thinking.budget_tokens,
-                    summary: parse_summary(thinking.display.as_deref()),
-                    level: Some(if enabled {
-                        thinking
-                            .budget_tokens
-                            .map(stravia_runtime_contract::thinking::ThinkingLevel::from_budget)
-                            .unwrap_or(stravia_runtime_contract::thinking::ThinkingLevel::Medium)
-                    } else {
-                        stravia_runtime_contract::thinking::ThinkingLevel::Off
-                    }),
-                    ..Default::default()
                 }
             }
             None => output_effort

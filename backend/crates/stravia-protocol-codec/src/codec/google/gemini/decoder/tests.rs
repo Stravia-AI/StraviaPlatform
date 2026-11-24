@@ -175,11 +175,9 @@ fn source_effort_roundtrip_does_not_become_dynamic_budget() {
             "generationConfig": {"thinkingConfig": {"thinkingLevel": "HIGH"}}
         }))
         .unwrap();
-    assert_eq!(request.reasoning.mode, None);
     assert!(request.reasoning.is_enabled());
     let restored: stravia_runtime_contract::protocol::ir::AiRequest =
         serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
-    assert_eq!(restored.reasoning.mode, None);
     let (wire, _) = GoogleEncoder.encode_request(restored).unwrap();
     assert_eq!(
         wire["generationConfig"]["thinkingConfig"]["thinkingLevel"],
@@ -190,6 +188,41 @@ fn source_effort_roundtrip_does_not_become_dynamic_budget() {
             .get("thinkingBudget")
             .is_none()
     );
+}
+
+#[test]
+fn gemini_rejects_non_null_thinking_budget_and_keeps_null_resets() {
+    use stravia_runtime_contract::protocol::ir::ParameterReset;
+
+    for budget in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(2048),
+    ] {
+        let err = GoogleDecoder
+            .decode_request(serde_json::json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": budget}}
+            }))
+            .expect_err("thinkingBudget must be rejected");
+        assert!(err.to_string().contains("thinkingLevel"));
+    }
+
+    let reset = GoogleDecoder
+        .decode_request(serde_json::json!({
+            "contents": [],
+            "generationConfig": {
+                "thinkingConfig": {
+                    "thinkingBudget": null,
+                    "thinkingLevel": null,
+                    "includeThoughts": null
+                }
+            }
+        }))
+        .expect("null resets remain valid");
+    assert!(reset.parameters.resets(ParameterReset::ReasoningLevel));
+    assert!(reset.parameters.resets(ParameterReset::ReasoningSummary));
+    assert_eq!(reset.reasoning.level, None);
 }
 
 #[test]
@@ -287,31 +320,36 @@ fn preserves_json_schema_literals_including_explicit_null() {
 }
 
 #[test]
-fn projects_canonical_thinking_mode_budget_and_level_without_target_control() {
+fn projects_canonical_thinking_level_without_target_control() {
     use crate::codec::google::gemini::encoder::GoogleEncoder;
-    for (native, expected) in [
+    for (model, native, expected) in [
         (
-            serde_json::json!({"thinkingBudget": -1, "includeThoughts": false}),
-            serde_json::json!({"thinkingBudget": -1, "includeThoughts": false}),
-        ),
-        (
-            serde_json::json!({"thinkingBudget": 0}),
-            serde_json::json!({"thinkingBudget": 0, "includeThoughts": false}),
-        ),
-        (
-            serde_json::json!({"thinkingBudget": 2048}),
-            serde_json::json!({"thinkingBudget": 2048, "includeThoughts": true}),
-        ),
-        (
+            "gemini-3-flash",
             serde_json::json!({"thinkingLevel": "LOW"}),
             serde_json::json!({"thinkingLevel": "LOW", "includeThoughts": true}),
         ),
+        (
+            "gemini-3-flash",
+            serde_json::json!({"thinkingLevel": "HIGH", "includeThoughts": false}),
+            serde_json::json!({"thinkingLevel": "HIGH", "includeThoughts": false}),
+        ),
+        (
+            "gemini-3-flash",
+            serde_json::json!({"thinkingLevel": "NONE"}),
+            serde_json::json!({"thinkingBudget": 0, "includeThoughts": false}),
+        ),
+        (
+            "gemini-2.5-flash",
+            serde_json::json!({"thinkingLevel": "LOW"}),
+            serde_json::json!({"thinkingBudget": 2048, "includeThoughts": true}),
+        ),
     ] {
-        let request = GoogleDecoder
+        let mut request = GoogleDecoder
             .decode_request(serde_json::json!({
                 "contents": [], "generationConfig": {"thinkingConfig": native}
             }))
             .expect("thinking controls");
+        request.model = model.into();
         assert!(request.reasoning.target_control.is_none());
         let (body, _) = GoogleEncoder
             .encode_request(request)

@@ -1175,7 +1175,7 @@ fn responses_reasoning_effort_maps_to_chat_without_loss() {
 }
 
 #[test]
-fn generic_toggle_without_provider_adapter_is_omitted() {
+fn hidden_target_thinking_control_is_omitted() {
     let mut request = AiRequest::new(
         "custom-model",
         vec![AiItem {
@@ -1187,7 +1187,7 @@ fn generic_toggle_without_provider_adapter_is_omitted() {
         }],
     );
     request.reasoning.target_control =
-        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Enabled);
+        Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden);
     request.meta.source_protocol =
         Some(stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1);
 
@@ -1200,6 +1200,7 @@ fn generic_toggle_without_provider_adapter_is_omitted() {
         .encode_request(request)
         .unwrap();
     assert!(encoded.body.get("reasoning").is_none());
+    assert!(encoded.body.get("reasoning_effort").is_none());
     assert!(encoded.body.get("thinking").is_none());
     assert!(encoded.body.get("enable_thinking").is_none());
     assert_eq!(encoded.body["messages"][0]["content"], "hello");

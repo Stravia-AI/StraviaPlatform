@@ -2,17 +2,29 @@ use super::*;
 
 #[test]
 fn claude_native_thinking_has_model_and_output_cap_gates() {
-    let mut request = BedrockConverseV1.decode_request(json!({
-        "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
-        "messages": [],
-        "inferenceConfig": {"maxTokens": 4096, "temperature": 0, "topP": 0.5},
-        "additionalModelRequestFields": {"thinking": {"type": "enabled", "budget_tokens": 1024}, "top_k": 0, "unconfirmed": true}
-    })).unwrap();
-    assert_eq!(request.reasoning.mode.as_deref(), Some("enabled"));
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    let mut request = BedrockConverseV1
+        .decode_request(json!({
+            "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+            "messages": [],
+            "inferenceConfig": {"maxTokens": 4096, "temperature": 0, "topP": 0.5},
+            "additionalModelRequestFields": {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "low"},
+                "top_k": 0,
+                "unconfirmed": true
+            }
+        }))
+        .unwrap();
+    assert_eq!(request.reasoning.level, Some(ThinkingLevel::Low));
+    request.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "low".into(),
+    });
     let (body, _) = BedrockConverseV1.encode_request(request.clone()).unwrap();
     assert_eq!(
         body["additionalModelRequestFields"]["thinking"],
-        json!({"type": "enabled", "budget_tokens": 1024})
+        json!({"type": "enabled", "budget_tokens": 2048})
     );
     assert!(
         body["additionalModelRequestFields"]
@@ -36,23 +48,53 @@ fn claude_native_thinking_has_model_and_output_cap_gates() {
 }
 
 #[test]
-fn bedrock_native_activation_keeps_explicit_mode_without_budget_inference() {
-    for kind in ["adaptive", "disabled"] {
-        let mut request = BedrockConverseV1
+fn bedrock_native_thinking_decodes_adaptive_and_disabled_without_legacy_budget() {
+    use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
+
+    let adaptive = BedrockConverseV1
+        .decode_request(json!({
+            "modelId": "anthropic.claude-opus-4-6-v1",
+            "messages": [],
+            "additionalModelRequestFields": {"thinking": {"type": "adaptive"}}
+        }))
+        .unwrap();
+    assert_eq!(adaptive.reasoning.level, Some(ThinkingLevel::High));
+    let (body, _) = BedrockConverseV1.encode_request(adaptive).unwrap();
+    assert_eq!(
+        body["additionalModelRequestFields"]["thinking"],
+        json!({"type": "adaptive"})
+    );
+    assert_eq!(
+        body["additionalModelRequestFields"]["output_config"]["effort"],
+        "high"
+    );
+
+    let mut disabled = BedrockConverseV1
+        .decode_request(json!({
+            "modelId": "anthropic.claude-opus-4-6-v1",
+            "messages": [],
+            "additionalModelRequestFields": {"thinking": {"type": "disabled"}}
+        }))
+        .unwrap();
+    assert_eq!(disabled.reasoning.level, Some(ThinkingLevel::Off));
+    disabled.reasoning.target_control = Some(TargetThinkingControl::Effort {
+        value: "none".into(),
+    });
+    let (body, _) = BedrockConverseV1.encode_request(disabled).unwrap();
+    assert_eq!(
+        body["additionalModelRequestFields"]["thinking"],
+        json!({"type": "disabled"})
+    );
+
+    assert!(
+        BedrockConverseV1
             .decode_request(json!({
-                "modelId": "anthropic.claude-sonnet",
+                "modelId": "anthropic.claude-3-7-sonnet-20250219-v1:0",
                 "messages": [],
-                "additionalModelRequestFields": {"thinking": {"type": kind}}
+                "additionalModelRequestFields": {"thinking": {"type": "enabled", "budget_tokens": 1024}}
             }))
-            .unwrap();
-        assert_eq!(request.reasoning.mode.as_deref(), Some(kind));
-        assert_eq!(request.reasoning.budget_tokens, None);
-        request.reasoning.target_control = None;
-        assert_eq!(
-            BedrockConverseV1.encode_request(request).unwrap().0["additionalModelRequestFields"]["thinking"],
-            json!({"type": kind})
-        );
-    }
+            .is_err()
+    );
 }
 
 #[test]
@@ -179,7 +221,7 @@ fn bedrock_null_optional_controls_are_treated_as_absent() {
         assert!(request.response_format.is_none());
         assert!(request.parameters.metadata.is_none());
         assert!(request.parameters.service_tier.is_none());
-        assert!(request.reasoning.mode.is_none());
+        assert!(request.reasoning.level.is_none());
         let (body, _) = BedrockConverseV1.encode_request(request).unwrap();
         for field in [
             "system",
@@ -838,7 +880,7 @@ fn omits_unsupported_controls_roles_and_noninline_images() {
     request.generation.frequency_penalty = Some(0.5);
     request.generation.presence_penalty = Some(0.5);
     request.generation.seed = Some(1);
-    request.reasoning.mode = Some("enabled".into());
+    request.reasoning.level = Some(stravia_runtime_contract::thinking::ThinkingLevel::High);
     request.response_format =
         Some(stravia_runtime_contract::protocol::ir::ResponseFormat::JsonObject);
     request.tools = Some(vec![ToolSpec {
@@ -930,6 +972,76 @@ fn drops_malformed_and_nonobject_calls_with_their_results() {
         assert_eq!(
             BedrockConverseV1.encode_response(&response)["output"]["message"]["content"],
             json!([])
+        );
+    }
+}
+
+#[test]
+fn bedrock_legacy_claude_budget_reserves_output_buffer_below_max_tokens() {
+    let mut request = AiRequest::new(
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        vec![user_item("think")],
+    );
+    request.generation.max_tokens = Some(4096);
+    request.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "high".into(),
+        },
+    );
+
+    let body = stravia_protocol_codec::transform::ProtocolTransform::encode_request_with(
+        &BedrockConverseV1,
+        request,
+    )
+    .expect("encode")
+    .body;
+    assert_eq!(
+        body["additionalModelRequestFields"]["thinking"],
+        json!({"type": "enabled", "budget_tokens": 1024})
+    );
+
+    let mut too_small = AiRequest::new(
+        "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        vec![user_item("think")],
+    );
+    too_small.generation.max_tokens = Some(1024);
+    too_small.reasoning.target_control = Some(
+        stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+            value: "low".into(),
+        },
+    );
+    assert!(
+        stravia_protocol_codec::transform::ProtocolTransform::encode_request_with(
+            &BedrockConverseV1,
+            too_small,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn bedrock_always_on_and_between_tools_off_downgrades_strip_sampling_parameters() {
+    for (model, expected_field) in [
+        ("anthropic.claude-opus-5-5-v1:0", "output_config"),
+        ("anthropic.claude-sonnet-5-5-v1:0", "thinking"),
+    ] {
+        let mut request = AiRequest::new(model, vec![user_item("brief")]);
+        request.generation.temperature = Some(0.7);
+        request.generation.top_p = Some(0.9);
+        request.parameters.top_k = Some(40);
+        request.reasoning.target_control = Some(
+            stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "none".into(),
+            },
+        );
+        let (body, _) = BedrockConverseV1.encode_request(request).expect("encode");
+        assert!(body["inferenceConfig"].get("temperature").is_none());
+        assert!(body["inferenceConfig"].get("topP").is_none());
+        assert!(body["additionalModelRequestFields"].get("top_k").is_none());
+        assert!(
+            body["additionalModelRequestFields"]
+                .get(expected_field)
+                .is_some()
         );
     }
 }

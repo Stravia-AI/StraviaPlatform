@@ -115,13 +115,8 @@ impl OpenAIEncoder {
             Some(stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value }) => {
                 obj.insert("reasoning_effort".into(), Value::String(value));
             }
-            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Disabled) => {
-                obj.insert("reasoning_effort".into(), Value::String("none".into()));
-            }
             None => {
-                if req.reasoning.mode.as_deref() == Some("disabled") {
-                    obj.insert("reasoning_effort".into(), "none".into());
-                } else if let Some(level) = req.reasoning.level {
+                if let Some(level) = req.reasoning.level {
                     let effort = match level {
                         stravia_runtime_contract::thinking::ThinkingLevel::Off => "none",
                         stravia_runtime_contract::thinking::ThinkingLevel::Max => "xhigh",
@@ -130,7 +125,7 @@ impl OpenAIEncoder {
                     obj.insert("reasoning_effort".into(), effort.into());
                 }
             }
-            _ => {}
+            Some(stravia_runtime_contract::thinking::TargetThinkingControl::Hidden) => {}
         }
 
         if let Some(tools) = req.tools {

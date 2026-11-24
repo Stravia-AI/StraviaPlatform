@@ -206,8 +206,18 @@ pub(crate) fn discovered_model(family: &DevinFamily) -> DiscoveredModel {
         selector::SELECTOR_EXTENSION_KEY.to_string(),
         selector::table_extension_value(&table),
     );
+    let has_thinking = family
+        .selectors
+        .iter()
+        .any(|sel| selector::traits(sel).thinking);
+    let has_non_thinking = family
+        .selectors
+        .iter()
+        .any(|sel| !selector::traits(sel).thinking);
     let efforts = if family.levels.len() >= 2 {
         family.levels.clone()
+    } else if has_thinking && has_non_thinking {
+        vec!["none".to_string(), "high".to_string()]
     } else {
         Vec::new()
     };
@@ -316,9 +326,12 @@ mod tests {
     }
 
     #[test]
-    fn discovery_exposes_toggle_without_inventing_efforts() {
+    fn discovery_exposes_canonical_off_and_high_for_toggle_family() {
         let model = discover(&["test-family", "test-family-thinking"], None);
-        assert_eq!(model.metadata.get("reasoning_efforts"), Some(&json!([])));
+        assert_eq!(
+            model.metadata.get("reasoning_efforts"),
+            Some(&json!(["none", "high"]))
+        );
     }
 
     #[test]
