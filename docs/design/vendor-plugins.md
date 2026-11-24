@@ -248,7 +248,7 @@ State 资源的 key、payload 和 journal 正文有明确配额；超限失败�
 [Antigravity 插件](../../backend/crates/stravia-vendor-antigravity)用网站回调后的手动授权码登录，不依赖 loopback；项目接入未完成应报告 pending，保留账号证据，不猜 project 或 tier。参见 [OAuth 捕获](../research/antigravity-oauth.md)。
 
 - 推理目录只选登录账号 Agent 列表，依据真实重定向、家族和档位生成目标 selector；不按显示名或型号 enum 盲合并。显式档位须有真实映射，不构造模型名或降档。见[模型映射](../research/antigravity-model-mapping.md)。
-- `system_prompt_prefix` 默认开启；仅改变本次上游推理副本的身份前缀与顶层指令位置，不改本地历史，也不作用于搜索、生图、发现或额度。
+- `system_prompt_prefix` 默认开启；仅改变本次上游推理副本的身份前缀与系统／developer 指令位置（含顶层指令与独立的 system／developer 消息），不改本地历史，也不作用于搜索、生图、发现或额度。
 - 会话累计计数基于宿主持久 Model Turn 事实与 CAS，分支独立；遇到历史缺口或跨 Provider 不补造步数。任何归属信息都不能当作上游已执行的证明。
 - 完整搜索用已登记的搜索身份，不猜其他工具或降级文本答案，不提供外部续接。协议证据见[搜索捕获](../research/antigravity-cli-web-search.md)；生图映射见[媒体生成](media-generation.md)。
 
