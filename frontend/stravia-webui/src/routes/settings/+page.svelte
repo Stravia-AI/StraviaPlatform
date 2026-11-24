@@ -10,6 +10,7 @@ import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import { DraftGuard } from '#lib/draft-guard.svelte.js'
 import { provideInlineDraftRegistry } from '#lib/inline-draft-registry.svelte.js'
 import { getAuthState } from '#lib/auth.js'
+import AboutSettings from '#lib/components/settings/about-settings.svelte'
 import AdminCredentialsSettings from '#lib/components/settings/admin-credentials-settings.svelte'
 import AppearanceSettings from '#lib/components/settings/appearance-settings.svelte'
 import ArtifactSettings from '#lib/components/settings/artifact-settings.svelte'
@@ -162,6 +163,7 @@ $effect(() => {
         <CurrencySettings />
         {#if isTauri}<DesktopStartupSettings />{/if}
         <ProductUpdateSettings />
+        <AboutSettings />
         {#if extensionSettingsGroups.length > 0}
           {#each extensionSettingsGroups as extGroup (extGroup.id)}
             {@render extensionSettingsGroupSection(extGroup)}
