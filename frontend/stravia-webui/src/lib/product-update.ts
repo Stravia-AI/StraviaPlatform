@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
+export type UpdateChannel = 'release' | 'beta'
 export type UpdateCheckStatus = 'idle' | 'up-to-date' | 'available' | 'error'
 export type ProductUpdatePhase =
   'idle' | 'checking' | 'up-to-date' | 'available' | 'downloading' | 'downloaded' | 'installing' | 'error'
@@ -22,6 +23,7 @@ export interface UpdateFailure {
 
 export interface UpdateStatus {
   current_version: string
+  channel: UpdateChannel
   check_status: UpdateCheckStatus
   last_success_at: string | null
   last_failure: UpdateFailure | null
@@ -48,6 +50,7 @@ export interface DesktopUpdateProgress {
 export interface UpdateApi {
   get(): Promise<UpdateStatus>
   check(mode: 'automatic' | 'manual'): Promise<UpdateStatus>
+  setChannel(channel: UpdateChannel): Promise<UpdateStatus>
   skip(version: string | null): Promise<UpdateStatus>
 }
 
@@ -90,6 +93,11 @@ export function supportsInAppInstallProgress(userAgent: string): boolean {
   return !userAgent.includes('Windows')
 }
 
+export function isPrereleaseVersion(version: string): boolean {
+  const withoutBuild = version.split('+', 1)[0] ?? ''
+  return withoutBuild.includes('-')
+}
+
 export class ProductUpdateController {
   status: UpdateStatus | null = null
   state: ProductUpdateViewState = initialViewState
@@ -101,6 +109,7 @@ export class ProductUpdateController {
   readonly #notifiedVersions = new Set<string>()
   #automaticStarted = false
   #checkInFlight: Promise<UpdateStatus> | null = null
+  #stateEpoch = 0
 
   constructor(
     api: UpdateApi,
@@ -150,6 +159,36 @@ export class ProductUpdateController {
       this.publish()
       return 'error'
     }
+  }
+
+  async silentCheck(): Promise<UpdateCheckStatus | null> {
+    if (this.status?.last_failure?.code === 'UPDATE_CHECK_DISABLED') return null
+    try {
+      return (await this.check('automatic')).check_status
+    } catch {
+      return null
+    }
+  }
+
+  async setChannel(channel: UpdateChannel): Promise<UpdateStatus> {
+    if (['downloading', 'installing'].includes(this.state.phase)) {
+      if (this.status) return this.status
+      throw new Error('Cannot change update channel while an update is in progress')
+    }
+    const status = await this.#api.setChannel(channel)
+    this.#stateEpoch += 1
+    this.#checkInFlight = null
+    this.notification = null
+    if (
+      this.state.phase === 'downloaded' &&
+      this.state.targetVersion &&
+      channel === 'release' &&
+      isPrereleaseVersion(this.state.targetVersion)
+    ) {
+      this.state = { ...initialViewState }
+    }
+    this.applyStatus(status)
+    return status
   }
 
   async skipAvailableVersion(): Promise<void> {
@@ -227,6 +266,7 @@ export class ProductUpdateController {
 
   private async check(mode: 'automatic' | 'manual'): Promise<UpdateStatus> {
     if (this.#checkInFlight) return this.#checkInFlight
+    const epoch = this.#stateEpoch
     if (!['downloading', 'downloaded', 'installing'].includes(this.state.phase)) {
       this.state = { ...this.state, phase: 'checking', error: null }
       this.publish()
@@ -235,10 +275,14 @@ export class ProductUpdateController {
     this.#checkInFlight = request
     try {
       const status = await request
-      this.applyStatus(status)
-      return status
+      if (epoch === this.#stateEpoch) {
+        this.applyStatus(status)
+      }
+      return this.status ?? status
     } finally {
-      this.#checkInFlight = null
+      if (this.#checkInFlight === request) {
+        this.#checkInFlight = null
+      }
     }
   }
 

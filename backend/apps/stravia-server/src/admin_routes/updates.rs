@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use stravia_core::admin::updates::UpdateCheckMode;
+use stravia_core::admin::updates::{UpdateChannel, UpdateCheckMode};
 
 use super::*;
 
@@ -20,6 +20,21 @@ pub(super) async fn check_updates(
     Json(body): Json<CheckUpdatesBody>,
 ) -> impl IntoResponse {
     match gw.admin().check_for_updates(body.mode).await {
+        Ok(status) => Json(serde_json::json!({ "data": status })).into_response(),
+        Err(error) => update_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct UpdateChannelBody {
+    channel: UpdateChannel,
+}
+
+pub(super) async fn set_update_channel(
+    State(gw): State<Gateway>,
+    Json(body): Json<UpdateChannelBody>,
+) -> impl IntoResponse {
+    match gw.admin().set_update_channel(body.channel).await {
         Ok(status) => Json(serde_json::json!({ "data": status })).into_response(),
         Err(error) => update_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     }

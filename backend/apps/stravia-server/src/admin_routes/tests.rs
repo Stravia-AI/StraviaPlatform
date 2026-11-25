@@ -447,7 +447,68 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
     let body = to_bytes(initial.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     assert_eq!(json["data"]["check_status"], "idle");
+    assert_eq!(json["data"]["channel"], "release");
     assert_eq!(json["data"]["download_supported"], false);
+
+    let channel_changed = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/updates/channel")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"channel":"beta"}"#))?,
+        )
+        .await?;
+    assert_eq!(channel_changed.status(), StatusCode::OK);
+    let body = to_bytes(channel_changed.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["data"]["channel"], "beta");
+    assert_eq!(
+        storage.settings().get("product_update_channel").await?,
+        Some("beta".to_string())
+    );
+
+    let invalid_channel = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/updates/channel")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"channel":"nightly"}"#))?,
+        )
+        .await?;
+    assert_eq!(invalid_channel.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let direct_setting = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/settings/product_update_channel")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":"release"}"#))?,
+        )
+        .await?;
+    let body = to_bytes(direct_setting.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("updates API"))
+    );
+    assert_eq!(
+        storage.settings().get("product_update_channel").await?,
+        Some("beta".to_string())
+    );
+
+    let channel_restored = app
+        .clone()
+        .oneshot(
+            Request::put("/api/v1/updates/channel")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"channel":"release"}"#))?,
+        )
+        .await?;
+    assert_eq!(channel_restored.status(), StatusCode::OK);
+    let body = to_bytes(channel_restored.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(json["data"]["channel"], "release");
 
     for mode in ["automatic", "manual"] {
         let checked = app

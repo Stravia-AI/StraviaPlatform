@@ -1,10 +1,18 @@
+import { rejects } from 'node:assert/strict'
 import { describe, expect, test } from 'bun:test'
 
-import { ProductUpdateController, supportsInAppInstallProgress } from '../src/lib/product-update'
-import type { DesktopUpdateBridge, DesktopUpdateSnapshot, UpdateApi, UpdateStatus } from '../src/lib/product-update'
+import { ProductUpdateController, isPrereleaseVersion, supportsInAppInstallProgress } from '../src/lib/product-update'
+import type {
+  DesktopUpdateBridge,
+  DesktopUpdateSnapshot,
+  UpdateApi,
+  UpdateChannel,
+  UpdateStatus,
+} from '../src/lib/product-update'
 
 const available: UpdateStatus = {
   current_version: '1.0.0',
+  channel: 'release',
   check_status: 'available',
   last_success_at: '2026-09-05T00:00:00Z',
   last_failure: null,
@@ -22,6 +30,10 @@ const available: UpdateStatus = {
 
 class FakeApi implements UpdateApi {
   checks = 0
+  channelChanges: UpdateChannel[] = []
+  failChannelChange: Error | null = null
+  nextCheckResolver: ((status: UpdateStatus) => void) | null = null
+  deferNextCheck = false
   status = structuredClone(available)
 
   get(): Promise<UpdateStatus> {
@@ -30,6 +42,31 @@ class FakeApi implements UpdateApi {
 
   check(): Promise<UpdateStatus> {
     this.checks += 1
+    if (this.deferNextCheck) {
+      this.deferNextCheck = false
+      const { promise, resolve } = Promise.withResolvers<UpdateStatus>()
+      this.nextCheckResolver = resolve
+      return promise
+    }
+    return Promise.resolve(structuredClone(this.status))
+  }
+
+  setChannel(channel: UpdateChannel): Promise<UpdateStatus> {
+    this.channelChanges.push(channel)
+    if (this.failChannelChange) {
+      const error = this.failChannelChange
+      this.failChannelChange = null
+      return Promise.reject(error)
+    }
+    this.status = {
+      ...this.status,
+      channel,
+      check_status: 'idle',
+      last_success_at: null,
+      last_failure: null,
+      available_update: null,
+      skipped: false,
+    }
     return Promise.resolve(structuredClone(this.status))
   }
 
@@ -132,5 +169,56 @@ describe('ProductUpdateCoordinator', () => {
     expect(coordinator.state.installPromptOpen).toBeTrue()
     await coordinator.installDownloadedUpdate()
     expect(desktop.installs).toBe(1)
+  })
+
+  test('detects prerelease versions without confusing build metadata', () => {
+    expect(isPrereleaseVersion('0.8.0-beta.1')).toBeTrue()
+    expect(isPrereleaseVersion('0.8.0-beta.1+build.4')).toBeTrue()
+    expect(isPrereleaseVersion('0.8.0')).toBeFalse()
+    expect(isPrereleaseVersion('0.8.0+build-4')).toBeFalse()
+  })
+
+  test('switching from beta to release clears downloaded prerelease state and drops stale in-flight checks', async () => {
+    const api = new FakeApi()
+    api.status = {
+      ...structuredClone(available),
+      current_version: '0.8.0-beta.1',
+      channel: 'beta',
+      download_supported: true,
+      available_update: { ...structuredClone(available.available_update!), version: '0.8.0-beta.2' },
+    }
+    const desktop = new FakeDesktop()
+    const coordinator = new ProductUpdateController(api, desktop)
+    await coordinator.load()
+
+    await coordinator.downloadAvailableUpdate()
+    expect(coordinator.state.phase).toBe('downloaded')
+    expect(coordinator.state.targetVersion).toBe('0.8.0-beta.2')
+
+    const switched = await coordinator.setChannel('release')
+    expect(switched.channel).toBe('release')
+    expect(coordinator.state.phase).toBe('idle')
+    expect(coordinator.state.targetVersion).toBeNull()
+    expect(coordinator.state.installPromptOpen).toBeFalse()
+
+    // 旧检查在切换通道后才返回时，不得覆盖新通道状态。
+    api.deferNextCheck = true
+    const staleCheck = coordinator.silentCheck()
+    const staleSnapshot = structuredClone(api.status)
+    await coordinator.setChannel('beta')
+    api.nextCheckResolver?.({ ...staleSnapshot, channel: 'release', check_status: 'up-to-date' })
+    await staleCheck
+    expect(coordinator.status?.channel).toBe('beta')
+    expect(coordinator.status?.check_status).toBe('idle')
+  })
+
+  test('channel save failure preserves server-confirmed channel', async () => {
+    const api = new FakeApi()
+    const coordinator = new ProductUpdateController(api)
+    await coordinator.load()
+
+    api.failChannelChange = new Error('storage unavailable')
+    await rejects(() => coordinator.setChannel('beta'), /storage unavailable/)
+    expect(coordinator.status?.channel).toBe('release')
   })
 })

@@ -4,7 +4,7 @@ import { apiBase, authenticatedFetch, decodeAdmin, isTauri } from '#lib/auth.js'
 import type { ConnectClientApplyPlan } from '#lib/connect-client-apply.js'
 import type { ConnectClientApplyRequest } from '#lib/connect.js'
 import type { Locale } from '#lib/paraglide/runtime.js'
-import type { UpdateStatus } from '#lib/product-update.js'
+import type { UpdateChannel, UpdateStatus } from '#lib/product-update.js'
 import type {
   ApiKey,
   ApiKeySpend,
@@ -620,6 +620,7 @@ export const admin = {
   updates: {
     get: () => request<UpdateStatus>('GET', '/updates'),
     check: (mode: 'automatic' | 'manual') => request<UpdateStatus>('POST', '/updates/check', { mode }),
+    setChannel: (channel: UpdateChannel) => request<UpdateStatus>('PUT', '/updates/channel', { channel }),
     skip: (version: string | null) => request<UpdateStatus>('PUT', '/updates/skipped-version', { version }),
   },
   platformLlm: {

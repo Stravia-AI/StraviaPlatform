@@ -7,6 +7,7 @@ import type {
   ProductUpdateCoordinatorSnapshot,
   ProductUpdateViewState,
   UpdateApi,
+  UpdateChannel,
   UpdateCheckStatus,
   UpdateStatus,
 } from '#lib/product-update.js'
@@ -19,11 +20,12 @@ export type {
   ProductUpdatePhase,
   ProductUpdateViewState,
   UpdateApi,
+  UpdateChannel,
   UpdateCheckStatus,
   UpdateFailure,
   UpdateStatus,
 } from '#lib/product-update.js'
-export { createDesktopUpdateBridge } from '#lib/product-update.js'
+export { createDesktopUpdateBridge, isPrereleaseVersion } from '#lib/product-update.js'
 
 const initialViewState: ProductUpdateViewState = {
   phase: 'idle',
@@ -58,6 +60,14 @@ export class ProductUpdateCoordinator {
 
   manualCheck(): Promise<UpdateCheckStatus> {
     return this.#controller.manualCheck()
+  }
+
+  silentCheck(): Promise<UpdateCheckStatus | null> {
+    return this.#controller.silentCheck()
+  }
+
+  setChannel(channel: UpdateChannel): Promise<UpdateStatus> {
+    return this.#controller.setChannel(channel)
   }
 
   skipAvailableVersion(): Promise<void> {

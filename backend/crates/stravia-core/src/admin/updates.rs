@@ -18,6 +18,7 @@ use crate::storage::DynStorage;
 
 const UPDATE_STATE_KEY: &str = "product_update_state";
 const SKIPPED_VERSION_KEY: &str = "product_update_skipped_version";
+pub const UPDATE_CHANNEL_KEY: &str = "product_update_channel";
 const UPDATE_SOURCE_ENV: &str = "STRAVIA_UPDATER_URL";
 const DEFAULT_UPDATE_SOURCE_URL: &str = "https://updater.stravia.cn";
 const MANIFEST_ASSET_NAME: &str = "stravia-updater.json";
@@ -38,6 +39,46 @@ const REQUIRED_PLATFORMS: [&str; 6] = [
     "windows-aarch64",
     "windows-x86_64",
 ];
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateChannel {
+    Release,
+    Beta,
+}
+
+impl UpdateChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Beta => "beta",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "release" => Some(Self::Release),
+            "beta" => Some(Self::Beta),
+            _ => None,
+        }
+    }
+
+    pub fn default_for_version(version: &Version) -> Self {
+        if version.pre.is_empty() {
+            Self::Release
+        } else {
+            Self::Beta
+        }
+    }
+
+    pub fn allows_version(self, version: &Version) -> bool {
+        self == Self::Beta || version.pre.is_empty()
+    }
+
+    pub fn allows_version_str(self, version: &str) -> bool {
+        Version::parse(version.trim()).is_ok_and(|parsed| self.allows_version(&parsed))
+    }
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +116,7 @@ pub struct UpdateFailure {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UpdateStatus {
     pub current_version: Version,
+    pub channel: UpdateChannel,
     pub check_status: UpdateCheckStatus,
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_failure: Option<UpdateFailure>,
@@ -85,6 +127,8 @@ pub struct UpdateStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedUpdateState {
+    #[serde(default)]
+    channel: Option<UpdateChannel>,
     last_success_at: Option<DateTime<Utc>>,
     last_failure: Option<UpdateFailure>,
     available_update: Option<AvailableUpdate>,
@@ -502,7 +546,35 @@ impl UpdateService {
 
     pub(crate) async fn status(&self) -> anyhow::Result<UpdateStatus> {
         let state = self.load_state().await?;
-        self.view(state).await
+        let channel = self.current_channel().await?;
+        self.view(state, channel).await
+    }
+
+    pub(crate) async fn set_channel(&self, channel: UpdateChannel) -> anyhow::Result<UpdateStatus> {
+        let _check = self.check_lock.lock().await;
+        let previous = self.current_channel().await?;
+        self.storage
+            .settings()
+            .set(UPDATE_CHANNEL_KEY, channel.as_str())
+            .await?;
+        if channel != previous {
+            self.save_state(&PersistedUpdateState::default()).await?;
+            if channel == UpdateChannel::Release {
+                let skipped_is_prerelease = self
+                    .storage
+                    .settings()
+                    .get(SKIPPED_VERSION_KEY)
+                    .await?
+                    .and_then(|value| Version::parse(value.trim()).ok())
+                    .is_some_and(|version| !version.pre.is_empty());
+                if skipped_is_prerelease {
+                    self.storage.settings().set(SKIPPED_VERSION_KEY, "").await?;
+                }
+            }
+            *self.last_completed_at.lock().await = None;
+        }
+        let state = self.load_state().await?;
+        self.view(state, channel).await
     }
 
     pub(crate) async fn check(&self, mode: UpdateCheckMode) -> anyhow::Result<UpdateStatus> {
@@ -524,7 +596,15 @@ impl UpdateService {
 
     async fn check_exclusive(&self, mode: UpdateCheckMode) -> anyhow::Result<UpdateStatus> {
         let now = self.clock.now();
+        let channel = self.current_channel().await?;
         let mut state = self.load_state().await?;
+        let cached_channel_matches = match state.channel {
+            Some(cached) => cached == channel,
+            None => state
+                .available_update
+                .as_ref()
+                .is_none_or(|update| channel.allows_version(&update.version)),
+        };
         let cached_source_matches = state
             .available_update
             .as_ref()
@@ -534,7 +614,7 @@ impl UpdateService {
                     .validate_manifest_source(&update.manifest_url)
                     .is_ok()
             });
-        if mode == UpdateCheckMode::Automatic && cached_source_matches {
+        if mode == UpdateCheckMode::Automatic && cached_source_matches && cached_channel_matches {
             // 与 view 一致：不高于已安装版本的历史候选不算待安装更新。
             let success_ttl = if state
                 .available_update
@@ -549,15 +629,19 @@ impl UpdateService {
                 .last_success_at
                 .is_some_and(|checked_at| now.signed_duration_since(checked_at) < success_ttl)
             {
-                return self.view(state).await;
+                return self.view(state, channel).await;
             }
             if state.last_failure.as_ref().is_some_and(|failure| {
                 now.signed_duration_since(failure.attempted_at) < FAILURE_RETRY_DELAY
             }) {
-                return self.view(state).await;
+                return self.view(state, channel).await;
             }
         }
+        if !cached_channel_matches {
+            state = PersistedUpdateState::default();
+        }
         if !self.checks_enabled {
+            state.channel = Some(channel);
             state.last_failure = Some(UpdateFailure {
                 code: "UPDATE_CHECK_DISABLED".to_string(),
                 message: "Production update checks are disabled in debug and test builds"
@@ -565,10 +649,11 @@ impl UpdateService {
                 attempted_at: now,
             });
             self.save_state(&state).await?;
-            return self.view(state).await;
+            return self.view(state, channel).await;
         }
 
-        match self.discover().await {
+        state.channel = Some(channel);
+        match self.discover(channel).await {
             Ok(available_update) => {
                 state.last_success_at = Some(now);
                 state.last_failure = None;
@@ -583,12 +668,15 @@ impl UpdateService {
             }
         }
         self.save_state(&state).await?;
-        self.view(state).await
+        self.view(state, channel).await
     }
 
-    async fn discover(&self) -> Result<Option<AvailableUpdate>, SourceError> {
+    async fn discover(
+        &self,
+        channel: UpdateChannel,
+    ) -> Result<Option<AvailableUpdate>, SourceError> {
         let releases = self.source.releases().await?;
-        let Some(release) = select_release(&self.current_version, releases) else {
+        let Some(release) = select_release(&self.current_version, channel, releases) else {
             return Ok(None);
         };
         let Some(manifest_url) = release.manifest_url.clone() else {
@@ -636,6 +724,17 @@ impl UpdateService {
         self.status().await
     }
 
+    async fn current_channel(&self) -> anyhow::Result<UpdateChannel> {
+        let Some(raw) = self.storage.settings().get(UPDATE_CHANNEL_KEY).await? else {
+            return Ok(UpdateChannel::default_for_version(&self.current_version));
+        };
+        if raw.trim().is_empty() {
+            return Ok(UpdateChannel::default_for_version(&self.current_version));
+        }
+        UpdateChannel::parse(&raw)
+            .ok_or_else(|| anyhow::anyhow!("stored product update channel is invalid"))
+    }
+
     async fn load_state(&self) -> anyhow::Result<PersistedUpdateState> {
         let Some(raw) = self.storage.settings().get(UPDATE_STATE_KEY).await? else {
             return Ok(PersistedUpdateState::default());
@@ -651,11 +750,22 @@ impl UpdateService {
         self.storage.settings().set(UPDATE_STATE_KEY, &value).await
     }
 
-    async fn view(&self, state: PersistedUpdateState) -> anyhow::Result<UpdateStatus> {
-        // 更新缓存跨安装版本保留；历史候选不能继续作为已安装版本的可用更新。
+    async fn view(
+        &self,
+        state: PersistedUpdateState,
+        channel: UpdateChannel,
+    ) -> anyhow::Result<UpdateStatus> {
+        let state = if state.channel.is_some_and(|cached| cached != channel) {
+            PersistedUpdateState::default()
+        } else {
+            state
+        };
+        // 更新缓存跨安装版本保留；历史候选不能继续作为已安装版本或当前通道的可用更新。
         let available_update = state
             .available_update
-            .filter(|update| update.version > self.current_version)
+            .filter(|update| {
+                update.version > self.current_version && channel.allows_version(&update.version)
+            })
             .map(|mut update| {
                 if !update.manifest_url.is_empty()
                     && let Err(error) = self.source.validate_manifest_source(&update.manifest_url)
@@ -687,6 +797,7 @@ impl UpdateService {
         };
         Ok(UpdateStatus {
             current_version: self.current_version.clone(),
+            channel,
             check_status,
             last_success_at: state.last_success_at,
             last_failure: state.last_failure,
@@ -706,6 +817,10 @@ impl AdminService {
         self.gw.update_service.check(mode).await
     }
 
+    pub async fn set_update_channel(&self, channel: UpdateChannel) -> anyhow::Result<UpdateStatus> {
+        self.gw.update_service.set_channel(channel).await
+    }
+
     pub async fn set_skipped_update_version(
         &self,
         version: Option<&str>,
@@ -716,12 +831,14 @@ impl AdminService {
 
 fn select_release(
     current: &Version,
+    channel: UpdateChannel,
     releases: impl IntoIterator<Item = RemoteRelease>,
 ) -> Option<RemoteRelease> {
-    let stable_channel = current.pre.is_empty();
     releases
         .into_iter()
-        .filter(|release| release.version > *current && (!stable_channel || !release.prerelease))
+        .filter(|release| {
+            release.version > *current && (channel == UpdateChannel::Beta || !release.prerelease)
+        })
         .max_by(|left, right| left.version.cmp(&right.version))
 }
 
@@ -920,6 +1037,16 @@ mod tests {
 
         async fn manifest(&self, url: &str) -> Result<UpdateManifest, SourceError> {
             self.manifest_calls.lock().await.push(url.to_string());
+            if let Some(tag) = url
+                .strip_prefix("https://updates.example.com/api/v1/releases/")
+                .and_then(|rest| rest.strip_suffix("/manifest.json"))
+                && let Some(version) = tag.strip_prefix('v')
+                && version != "1.2.0"
+            {
+                let release_url =
+                    format!("https://github.com/Stravia-AI/StraviaPlatform/releases/tag/{tag}");
+                return Ok(valid_manifest(version, &release_url));
+            }
             Ok(valid_manifest("1.2.0", RELEASE_URL))
         }
 
@@ -938,6 +1065,23 @@ mod tests {
                 .with_timezone(&Utc),
             release_url: RELEASE_URL.to_string(),
             manifest_url: Some(MANIFEST_URL.to_string()),
+        }
+    }
+
+    fn versioned_release(version: &str, prerelease: bool) -> RemoteRelease {
+        let tag = format!("v{version}");
+        RemoteRelease {
+            version: Version::parse(version).unwrap(),
+            prerelease,
+            published_at: DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            release_url: format!(
+                "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/{tag}"
+            ),
+            manifest_url: Some(format!(
+                "https://updates.example.com/api/v1/releases/{tag}/manifest.json"
+            )),
         }
     }
 
@@ -1306,7 +1450,12 @@ mod tests {
         let releases = source.releases().await.unwrap();
 
         assert_eq!(releases.len(), RELEASE_PAGE_SIZE + 1);
-        let selected = select_release(&Version::parse("0.5.3").unwrap(), releases).unwrap();
+        let selected = select_release(
+            &Version::parse("0.5.3").unwrap(),
+            UpdateChannel::Release,
+            releases,
+        )
+        .unwrap();
         assert_eq!(selected.version, Version::parse("2.0.0").unwrap());
         assert_eq!(
             selected.release_url,
@@ -1536,9 +1685,10 @@ mod tests {
     }
 
     #[test]
-    fn stable_install_selects_highest_newer_stable_release() {
+    fn release_channel_selects_highest_newer_stable_release() {
         let selected = select_release(
             &Version::parse("1.0.0").unwrap(),
+            UpdateChannel::Release,
             [
                 release("1.2.0", false),
                 release("1.3.0-rc.1", true),
@@ -1550,9 +1700,10 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_install_selects_highest_newer_release_across_channels() {
+    fn beta_channel_selects_highest_newer_release_across_prerelease_and_stable() {
         let selected = select_release(
             &Version::parse("1.3.0-beta.1").unwrap(),
+            UpdateChannel::Beta,
             [
                 release("1.3.0-rc.1", true),
                 release("1.3.0", false),
@@ -1561,6 +1712,146 @@ mod tests {
         )
         .expect("a later release should be available");
         assert_eq!(selected.version, Version::parse("1.3.0").unwrap());
+    }
+
+    #[tokio::test]
+    async fn default_channel_follows_installed_version_and_persisted_channel_survives_upgrade() {
+        let source = Arc::new(FakeSource::new([ReleaseReply::Releases(vec![
+            versioned_release("1.4.0-beta.1", true),
+        ])]));
+        let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
+        let stable = service(Arc::clone(&source), Arc::clone(&clock), "1.0.0");
+        assert_eq!(
+            stable.status().await.unwrap().channel,
+            UpdateChannel::Release
+        );
+
+        let prerelease_default = service(Arc::clone(&source), Arc::clone(&clock), "1.3.0-beta.1");
+        assert_eq!(
+            prerelease_default.status().await.unwrap().channel,
+            UpdateChannel::Beta
+        );
+
+        let opted_in = stable.set_channel(UpdateChannel::Beta).await.unwrap();
+        assert_eq!(opted_in.channel, UpdateChannel::Beta);
+
+        // 升级到正式版 1.3.0 后，显式保存的 Beta 通道仍保持生效并继续发现下一期 Beta。
+        let upgraded = UpdateService::new(
+            Arc::clone(&stable.storage),
+            source,
+            clock,
+            Version::parse("1.3.0").unwrap(),
+            true,
+            true,
+        );
+        let status = upgraded.check(UpdateCheckMode::Manual).await.unwrap();
+        assert_eq!(status.channel, UpdateChannel::Beta);
+        assert_eq!(
+            status.available_update.unwrap().version,
+            Version::parse("1.4.0-beta.1").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_channel_to_beta_invalidates_up_to_date_cache_and_discovers_prerelease() {
+        let source = Arc::new(FakeSource::new([
+            ReleaseReply::Releases(vec![versioned_release("1.1.0-beta.1", true)]),
+            ReleaseReply::Releases(vec![versioned_release("1.1.0-beta.1", true)]),
+        ]));
+        let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
+        let svc = service(Arc::clone(&source), Arc::clone(&clock), "1.0.0");
+
+        let stable = svc.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(stable.channel, UpdateChannel::Release);
+        assert_eq!(stable.check_status, UpdateCheckStatus::UpToDate);
+        assert!(stable.available_update.is_none());
+        assert_eq!(source.calls.load(Ordering::SeqCst), 1);
+
+        let switched = svc.set_channel(UpdateChannel::Beta).await.unwrap();
+        assert_eq!(switched.channel, UpdateChannel::Beta);
+        assert_eq!(switched.check_status, UpdateCheckStatus::Idle);
+        assert!(switched.last_success_at.is_none());
+
+        // 切通道后不得继续命中此前 Release 通道的 24 小时 UpToDate 缓存。
+        let beta = svc.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(beta.channel, UpdateChannel::Beta);
+        assert_eq!(beta.check_status, UpdateCheckStatus::Available);
+        let candidate = beta.available_update.expect("beta candidate");
+        assert_eq!(candidate.version, Version::parse("1.1.0-beta.1").unwrap());
+        assert!(candidate.download_available);
+    }
+
+    #[tokio::test]
+    async fn switching_from_beta_to_release_waits_for_next_stable_without_downgrading() {
+        let source = Arc::new(FakeSource::new([
+            ReleaseReply::Releases(vec![
+                versioned_release("1.2.9", false),
+                versioned_release("1.3.0-beta.2", true),
+            ]),
+            ReleaseReply::Releases(vec![
+                versioned_release("1.2.9", false),
+                versioned_release("1.3.0-beta.2", true),
+            ]),
+            ReleaseReply::Releases(vec![
+                versioned_release("1.2.9", false),
+                versioned_release("1.3.0-beta.2", true),
+                versioned_release("1.3.0", false),
+            ]),
+        ]));
+        let clock = Arc::new(FakeClock::new("2026-09-05T00:00:00Z"));
+        let svc = service(Arc::clone(&source), Arc::clone(&clock), "1.3.0-beta.1");
+
+        let beta = svc.check(UpdateCheckMode::Manual).await.unwrap();
+        assert_eq!(beta.channel, UpdateChannel::Beta);
+        assert_eq!(
+            beta.available_update.unwrap().version,
+            Version::parse("1.3.0-beta.2").unwrap()
+        );
+        svc.set_skipped_version(Some("1.3.0-beta.2")).await.unwrap();
+
+        let switched = svc.set_channel(UpdateChannel::Release).await.unwrap();
+        assert_eq!(switched.channel, UpdateChannel::Release);
+        assert_eq!(switched.check_status, UpdateCheckStatus::Idle);
+        assert!(switched.available_update.is_none());
+        assert!(!switched.skipped);
+        assert_eq!(
+            svc.storage
+                .settings()
+                .get(SKIPPED_VERSION_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+
+        let waiting = svc.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(waiting.channel, UpdateChannel::Release);
+        assert_eq!(waiting.check_status, UpdateCheckStatus::UpToDate);
+        assert!(waiting.available_update.is_none());
+
+        let graduated = svc.check(UpdateCheckMode::Manual).await.unwrap();
+        assert_eq!(graduated.channel, UpdateChannel::Release);
+        assert_eq!(graduated.check_status, UpdateCheckStatus::Available);
+        assert_eq!(
+            graduated.available_update.unwrap().version,
+            Version::parse("1.3.0").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_persisted_channel_is_rejected_without_silent_fallback() {
+        let svc = service(
+            Arc::new(FakeSource::new([])),
+            Arc::new(FakeClock::new("2026-09-05T00:00:00Z")),
+            "1.0.0",
+        );
+        svc.storage
+            .settings()
+            .set(UPDATE_CHANNEL_KEY, "nightly")
+            .await
+            .unwrap();
+        assert!(svc.status().await.is_err());
     }
 
     #[tokio::test]

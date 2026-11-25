@@ -21,9 +21,10 @@ import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Progress } from '#lib/components/ui/progress/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
+import * as Select from '#lib/components/ui/select/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { openExternalUrl } from '#lib/open-external.js'
-import { supportsInAppInstallProgress } from '#lib/product-update.js'
+import { isPrereleaseVersion, supportsInAppInstallProgress, type UpdateChannel } from '#lib/product-update.js'
 import { getProductUpdateCoordinator } from '#lib/product-update.svelte.js'
 import { settingsGroupHref } from '#lib/settings-groups.js'
 
@@ -69,6 +70,15 @@ const available = $derived(updates.status?.available_update ?? null)
 const checking = $derived(updates.state.phase === 'checking')
 const checkUnavailable = $derived(updates.status?.last_failure?.code === 'UPDATE_CHECK_DISABLED')
 const busy = $derived(['downloading', 'installing'].includes(updates.state.phase))
+const currentChannel = $derived<UpdateChannel>(updates.status?.channel ?? 'release')
+const showPrereleaseFallbackNote = $derived(
+  Boolean(
+    updates.status && updates.status.channel === 'release' && isPrereleaseVersion(updates.status.current_version),
+  ),
+)
+let savingChannel = $state(false)
+let channelError = $state('')
+let retryChannel = $state<UpdateChannel>()
 const showInstallingProgress = $derived(supportsInAppInstallProgress(browser ? navigator.userAgent : ''))
 const progressPercent = $derived.by(() => {
   const total = updates.state.totalBytes
@@ -86,6 +96,26 @@ const lastChecked = $derived(
     : m.settings_update_never_checked(),
 )
 
+async function selectChannel(nextChannel: UpdateChannel): Promise<void> {
+  if (savingChannel || busy || !updates.status || nextChannel === updates.status.channel) return
+  savingChannel = true
+  channelError = ''
+  retryChannel = nextChannel
+  try {
+    await updates.setChannel(nextChannel)
+    retryChannel = undefined
+    void updates.silentCheck()
+  } catch (error) {
+    channelError = localizeBackendErrorMessage(error)
+  } finally {
+    savingChannel = false
+  }
+}
+
+function handleChannelValueChange(value: string | undefined): void {
+  if (value === 'release' || value === 'beta') void selectChannel(value)
+}
+
 async function checkNow(): Promise<void> {
   const result = await updates.manualCheck()
   if (result === 'up-to-date') toast.success(m.settings_update_up_to_date())
@@ -102,7 +132,12 @@ async function checkNow(): Promise<void> {
 </script>
 
 {#snippet checkButton()}
-  <Button type="button" variant="outline" size="sm" disabled={checking || busy} onclick={() => void checkNow()}>
+  <Button
+    type="button"
+    variant="outline"
+    size="sm"
+    disabled={checking || busy || savingChannel}
+    onclick={() => void checkNow()}>
     {#if checking}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon data-icon="inline-start" />{/if}
     {checking ? m.settings_update_checking() : m.settings_update_check_now()}
   </Button>
@@ -110,62 +145,74 @@ async function checkNow(): Promise<void> {
 
 <SettingsSection id="updates" title={m.settings_update()}>
   <SettingRow title={m.settings_version()}>
-    <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 @min-[32rem]/setting-row:justify-end">
-      <span class="flex items-center gap-2 font-technical text-sm tabular-nums">
-        <span class="break-all">{updates.status?.current_version ?? '–'}</span>
-        {#if available}
-          <ArrowRightIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span class="break-all text-primary">{available.version}</span>
-        {/if}
-      </span>
-      {#if available}
-        <span class="inline-flex items-center gap-1.5 text-sm font-medium text-primary">
-          <CircleArrowUpIcon class="size-4" aria-hidden="true" />{m.settings_update_status_available()}
-        </span>
-      {:else if updates.status?.last_failure && !checkUnavailable}
-        <span class="inline-flex items-center gap-1.5 text-sm font-medium text-destructive">
-          <TriangleAlertIcon class="size-4" aria-hidden="true" />{m.settings_update_status_failed()}
-        </span>
-      {:else if updates.status?.check_status === 'up-to-date'}
-        <span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-          <CircleCheckIcon class="size-4" aria-hidden="true" />{m.settings_update_status_current()}
-        </span>
-      {/if}
-      {#if checkUnavailable}
-        <!-- 开发版没有在线检查：只说明一次，不提供禁用的按钮。 -->
-        <span role="status" class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-          <InfoIcon class="size-4" aria-hidden="true" />{m.settings_update_check_unavailable()}
-        </span>
-      {:else}
-        {@render checkButton()}
-      {/if}
-      {#if !busy}
-        {#if available}
-          {#if updates.status?.skipped}
-            <Button type="button" variant="ghost" size="sm" onclick={() => void updates.clearSkippedVersion()}>
-              {m.settings_update_restore_notifications()}
-            </Button>
-          {:else}
-            <Button type="button" variant="ghost" size="sm" onclick={() => void updates.skipAvailableVersion()}>
-              {m.settings_update_skip()}
-            </Button>
+    <div
+      class={available
+        ? 'flex min-w-0 flex-col items-start gap-y-2 @min-[32rem]/setting-row:items-end'
+        : 'flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 @min-[32rem]/setting-row:justify-end'}>
+      <div class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 @min-[32rem]/setting-row:justify-end">
+        <span class="flex min-w-0 flex-wrap items-center gap-2 font-technical text-sm tabular-nums">
+          <span class="break-all">{updates.status?.current_version ?? '–'}</span>
+          {#if available}
+            <ArrowRightIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <span class="break-all text-primary">{available.version}</span>
           {/if}
-          <Button type="button" variant="outline" size="sm" onclick={() => void openExternalUrl(available.release_url)}>
-            <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
-          </Button>
+        </span>
+        {#if available}
+          <span class="inline-flex items-center gap-1.5 text-sm font-medium text-primary">
+            <CircleArrowUpIcon class="size-4" aria-hidden="true" />{m.settings_update_status_available()}
+          </span>
+        {:else if updates.status?.last_failure && !checkUnavailable}
+          <span class="inline-flex items-center gap-1.5 text-sm font-medium text-destructive">
+            <TriangleAlertIcon class="size-4" aria-hidden="true" />{m.settings_update_status_failed()}
+          </span>
+        {:else if updates.status?.check_status === 'up-to-date'}
+          <span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+            <CircleCheckIcon class="size-4" aria-hidden="true" />{m.settings_update_status_current()}
+          </span>
         {/if}
-        {#if updates.state.phase === 'downloaded'}
-          <Button type="button" size="sm" onclick={() => updates.requestInstallPrompt()}>
-            {m.settings_update_install()}
-          </Button>
+        {#if checkUnavailable}
+          <!-- 开发版没有在线检查：只说明一次，不提供禁用的按钮。 -->
+          <span role="status" class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+            <InfoIcon class="size-4" aria-hidden="true" />{m.settings_update_check_unavailable()}
+          </span>
         {/if}
-        {#if available && updates.status?.download_supported && available.download_available && (updates.state.phase !== 'downloaded' || updates.state.targetVersion !== available.version)}
-          <Button type="button" size="sm" onclick={() => void updates.downloadAvailableUpdate()}>
-            <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
-              ? m.settings_update_retry_download()
-              : m.settings_update_download()}
-          </Button>
-        {/if}
+      </div>
+      {#if !checkUnavailable}
+        <div class="flex min-w-0 flex-wrap items-center gap-2 @min-[32rem]/setting-row:justify-end">
+          {@render checkButton()}
+          {#if !busy}
+            {#if available}
+              {#if updates.status?.skipped}
+                <Button type="button" variant="ghost" size="sm" onclick={() => void updates.clearSkippedVersion()}>
+                  {m.settings_update_restore_notifications()}
+                </Button>
+              {:else}
+                <Button type="button" variant="ghost" size="sm" onclick={() => void updates.skipAvailableVersion()}>
+                  {m.settings_update_skip()}
+                </Button>
+              {/if}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onclick={() => void openExternalUrl(available.release_url)}>
+                <ExternalLinkIcon data-icon="inline-start" />{m.settings_update_view_release()}
+              </Button>
+            {/if}
+            {#if updates.state.phase === 'downloaded'}
+              <Button type="button" size="sm" onclick={() => updates.requestInstallPrompt()}>
+                {m.settings_update_install()}
+              </Button>
+            {/if}
+            {#if available && updates.status?.download_supported && available.download_available && (updates.state.phase !== 'downloaded' || updates.state.targetVersion !== available.version)}
+              <Button type="button" size="sm" onclick={() => void updates.downloadAvailableUpdate()}>
+                <DownloadIcon data-icon="inline-start" />{updates.state.phase === 'error'
+                  ? m.settings_update_retry_download()
+                  : m.settings_update_download()}
+              </Button>
+            {/if}
+          {/if}
+        </div>
       {/if}
     </div>
   </SettingRow>
@@ -226,8 +273,52 @@ async function checkNow(): Promise<void> {
     {/if}
   </div>
 
-  <!-- 开发版不检查也不下载更新，更新代理偏好与之无关；已保存的偏好值保留。 -->
+  <!-- 开发版不检查也不下载更新，更新通道与更新代理偏好与之无关；已保存的偏好值保留。 -->
   {#if !checkUnavailable}
+    <SettingRow
+      title={m.settings_update_channel()}
+      labelFor="update-channel"
+      hint={m.settings_update_channel_hint()}
+      description={showPrereleaseFallbackNote ? m.settings_update_channel_prerelease_note() : undefined}
+      controlSize="setting"
+      class="border-t">
+      {#snippet children({ descriptionId })}
+        {#if savingChannel}<Spinner class="shrink-0" aria-label={m.settings_saving()} />{/if}
+        <Select.Root
+          type="single"
+          bind:value={() => currentChannel, handleChannelValueChange}
+          disabled={savingChannel || busy || !updates.status}>
+          <Select.Trigger
+            id="update-channel"
+            class="w-full min-w-0 flex-1"
+            aria-label={m.settings_update_channel()}
+            aria-describedby={descriptionId}
+            aria-busy={savingChannel || undefined}>
+            {currentChannel === 'beta' ? m.settings_update_channel_beta() : m.settings_update_channel_release()}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              <Select.Item value="release" label={m.settings_update_channel_release()}>
+                {m.settings_update_channel_release()}
+              </Select.Item>
+              <Select.Item value="beta" label={m.settings_update_channel_beta()}>
+                {m.settings_update_channel_beta()}
+              </Select.Item>
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+      {/snippet}
+    </SettingRow>
+    {#if channelError}
+      <RequestFailure
+        class="mb-3"
+        title={m.settings_update_channel_save_failed()}
+        message={channelError}
+        retry={() => {
+          if (retryChannel !== undefined) void selectChannel(retryChannel)
+        }}
+        retrying={savingChannel} />
+    {/if}
     {#if proxyPreferenceQuery.error}
       <RequestFailure
         title={m.settings_update_proxy_load_failed()}
@@ -239,7 +330,11 @@ async function checkNow(): Promise<void> {
         <Spinner />{m.common_loading()}
       </p>
     {:else}
-      <SettingRow layout="inline" title={m.settings_update_use_proxy()} labelFor="update-use-proxy">
+      <SettingRow
+        layout="inline"
+        title={m.settings_update_use_proxy()}
+        labelFor="update-use-proxy"
+        class={channelError ? 'border-t' : undefined}>
         {#if savingProxy}<Spinner aria-label={m.settings_saving()} />{/if}
         <Switch
           id="update-use-proxy"

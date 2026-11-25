@@ -214,6 +214,7 @@ test('real management persists root and destination RPM limits and queue setting
       json: {
         data: {
           current_version: '0.0.0',
+          channel: 'release',
           check_status: 'up-to-date',
           last_success_at: null,
           last_failure: null,
