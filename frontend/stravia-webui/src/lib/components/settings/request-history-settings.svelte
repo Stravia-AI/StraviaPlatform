@@ -44,16 +44,15 @@ async function save(next: string): Promise<string> {
     <SettingRow
       title={m.settings_retention_period_days()}
       labelFor="log-retention"
-      description={m.settings_history_retention_description()}
+      hint={m.settings_history_retention_description()}
       controlSize="number">
-      {#snippet children({ titleId, descriptionId })}
+      {#snippet children({ titleId })}
         <InlineSettingInput
           id="log-retention"
           type="number"
           min={1}
           max={365}
           labelledby={titleId}
-          describedby={descriptionId}
           value={retention}
           {validate}
           onSave={save} />

@@ -23,7 +23,7 @@ const titleId = $derived(explicitTitleId ?? generatedTitleId)
 
 <!-- 设置区段：h2 + 设置行；默认没有描述、顶边线与卡片，节奏由行线建立。 -->
 <section {id} aria-labelledby={titleId} class="min-w-0 scroll-mt-4">
-  <div class="mb-1 flex min-h-8 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+  <div class="mb-2 flex min-h-8 flex-wrap items-center justify-between gap-x-4 gap-y-2">
     <div class="flex min-w-0 items-center gap-2">
       <h2 id={titleId} class="route-section-title">{title}</h2>
       {#if badge}<Badge variant="secondary">{badge}</Badge>{/if}

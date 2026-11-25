@@ -13,15 +13,21 @@ import SettingsSection from '#lib/components/settings/settings-section.svelte'
 import SettingsSheet from '#lib/components/settings/settings-sheet.svelte'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
-import * as Select from '#lib/components/ui/select/index.js'
+import { SegmentedControl, type SegmentedControlOption } from '#lib/components/ui/segmented-control/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
+
+type ArtifactStorageMode = 'internal' | 's3'
 
 const queryClient = useQueryClient()
 const artifactQuery = createQuery(() => ({ queryKey: ['artifact-settings'], queryFn: admin.settings.artifacts }))
 const artifact = $derived(artifactQuery.data)
 const needsAddress = $derived(artifact !== undefined && !artifact.client_base_url)
+const storageOptions = $derived<readonly SegmentedControlOption<ArtifactStorageMode>[]>([
+  { value: 'internal', label: m.artifact_internal_storage() },
+  { value: 's3', label: m.artifact_s3_storage() },
+])
 
 let busyKey = $state<'storage' | 'external' | 'upload'>()
 let rowError = $state('')
@@ -108,9 +114,9 @@ async function saveS3(): Promise<void> {
   }
 }
 
-function selectStorage(value: string): void {
+function selectStorage(value: ArtifactStorageMode): void {
   if (!artifact) return
-  const current = artifact.s3 ? 's3' : 'internal'
+  const current: ArtifactStorageMode = artifact.s3 ? 's3' : 'internal'
   if (value === current) return
   if (value === 's3') openS3Editor()
   else void saveImmediately('storage', { s3: null })
@@ -159,36 +165,31 @@ function toggleExternalDownloads(enabled: boolean): void {
     <SettingRow
       title={m.artifact_client_base_url()}
       labelFor="artifact-client-base-url"
-      description={m.artifact_client_base_help()}
+      hint={m.artifact_client_base_help()}
       layout="stacked">
-      {#snippet children({ titleId, descriptionId })}
+      {#snippet children({ titleId })}
         <InlineSettingInput
           id="artifact-client-base-url"
           type="url"
           technical
           labelledby={titleId}
-          describedby={descriptionId}
           value={artifact.client_base_url}
           onSave={saveClientAddress} />
       {/snippet}
     </SettingRow>
 
-    <SettingRow title={m.artifact_storage()} labelFor="artifact-storage" controlSize="setting">
-      <Select.Root
-        type="single"
-        value={artifact.s3 ? 's3' : 'internal'}
-        onValueChange={selectStorage}
-        disabled={busyKey === 'storage'}>
-        <Select.Trigger id="artifact-storage" class="w-full" aria-busy={busyKey === 'storage' || undefined}>
-          {artifact.s3 ? m.artifact_s3_storage() : m.artifact_internal_storage()}
-        </Select.Trigger>
-        <Select.Content>
-          <Select.Group>
-            <Select.Item value="internal">{m.artifact_internal_storage()}</Select.Item>
-            <Select.Item value="s3">{m.artifact_s3_storage()}</Select.Item>
-          </Select.Group>
-        </Select.Content>
-      </Select.Root>
+    <SettingRow title={m.artifact_storage()}>
+      {#snippet children({ titleId })}
+        {#if busyKey === 'storage'}<Spinner class="shrink-0" aria-label={m.settings_saving()} />{/if}
+        <SegmentedControl
+          id="artifact-storage"
+          options={storageOptions}
+          value={artifact.s3 ? 's3' : 'internal'}
+          onValueChange={selectStorage}
+          ariaLabelledby={titleId}
+          disabled={busyKey === 'storage'}
+          busy={busyKey === 'storage'} />
+      {/snippet}
     </SettingRow>
     {#if artifact.s3}
       <SettingRow nested title={m.artifact_s3_settings()} value={artifact.s3.bucket} onedit={openS3Editor} />

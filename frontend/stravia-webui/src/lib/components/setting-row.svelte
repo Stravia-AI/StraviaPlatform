@@ -81,8 +81,8 @@ const hasControl = $derived(Boolean(children || value !== undefined || onedit))
   data-layout={layout}
   data-nested={nested ? 'true' : undefined}
   class={cn(
-    // 单行设置保持 44px 的可点行高：标题行高 19.25px 加 24px 内边距只有 43.25px，低于触控与可读下限。
-    '@container/setting-row w-full min-w-0 py-3 min-h-11',
+    // 统一单行设置最小高度（52px）并垂直居中，使开关、分段控件与「值 + 编辑」行保持一致的纵向节奏。
+    '@container/setting-row flex w-full min-w-0 flex-col justify-center py-3 min-h-13',
     '[[data-slot=setting-row]+&]:border-t',
     nested && 'ms-2 w-auto border-s ps-4',
     className,

@@ -176,8 +176,8 @@ test('editing the basis in the Sheet appends one subscription record and closes 
   // 与当前记录相同：没有可保存的内容。
   await expect(save).toBeDisabled()
 
-  await sheet.getByRole('tab', { name: 'Subscription-based' }).click()
-  await sheet.getByRole('tab', { name: 'Yearly' }).click()
+  await sheet.getByRole('radio', { name: 'Subscription-based' }).click()
+  await sheet.getByRole('radio', { name: 'Yearly' }).click()
   await sheet.getByLabel('Subscription price').fill('120.50')
   await expect(save).toBeEnabled()
   await save.click()
@@ -201,7 +201,7 @@ test('an invalid subscription price blocks saving and names the problem', async 
 
   await page.getByRole('button', { name: 'Edit Mode' }).click()
   const sheet = page.getByRole('dialog', { name: 'Edit cost basis' })
-  await sheet.getByRole('tab', { name: 'Subscription-based' }).click()
+  await sheet.getByRole('radio', { name: 'Subscription-based' }).click()
   const price = sheet.getByLabel('Subscription price')
   await price.fill('abc')
   await sheet.getByRole('button', { name: 'Save', exact: true }).click()
@@ -219,7 +219,7 @@ test('a failed append keeps the Sheet and the typed price, and the history uncha
 
   await page.getByRole('button', { name: 'Edit Mode' }).click()
   const sheet = page.getByRole('dialog', { name: 'Edit cost basis' })
-  await sheet.getByRole('tab', { name: 'Subscription-based' }).click()
+  await sheet.getByRole('radio', { name: 'Subscription-based' }).click()
   await sheet.getByLabel('Subscription price').fill('9.99')
   await sheet.getByRole('button', { name: 'Save', exact: true }).click()
 
@@ -307,7 +307,7 @@ test('a detected priced subscription is adopted through the Sheet, never written
 
   await banner.getByRole('button', { name: 'Adopt' }).click()
   const sheet = page.getByRole('dialog', { name: 'Edit cost basis' })
-  await expect(sheet.getByRole('tab', { name: 'Subscription-based' })).toHaveAttribute('aria-selected', 'true')
+  await expect(sheet.getByRole('radio', { name: 'Subscription-based' })).toHaveAttribute('aria-checked', 'true')
   await expect(sheet.getByLabel('Subscription price')).toHaveValue('100')
   expect(posts).toEqual([])
   await sheet.getByRole('button', { name: 'Save', exact: true }).click()

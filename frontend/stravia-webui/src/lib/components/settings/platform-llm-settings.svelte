@@ -94,10 +94,7 @@ async function save(): Promise<void> {
       <Skeleton class="h-9" />
     </div>
   {:else if config}
-    <SettingRow
-      title={m.platform_llm_model_title()}
-      description={m.platform_llm_model_description()}
-      onedit={openEditor}>
+    <SettingRow title={m.platform_llm_model_title()} hint={m.platform_llm_model_description()} onedit={openEditor}>
       {#if config.status === 'available'}
         <div
           class="flex min-w-0 flex-1 flex-col gap-0.5 @min-[32rem]/setting-row:max-w-[20rem] @min-[32rem]/setting-row:flex-initial @min-[32rem]/setting-row:items-end">

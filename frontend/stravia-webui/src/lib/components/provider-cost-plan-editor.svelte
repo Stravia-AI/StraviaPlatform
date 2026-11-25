@@ -25,10 +25,10 @@ import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import * as InputGroup from '#lib/components/ui/input-group/index.js'
+import { SegmentedControl, type SegmentedControlOption } from '#lib/components/ui/segmented-control/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
-import * as Tabs from '#lib/components/ui/tabs/index.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import { currencyForKind } from '#lib/money.js'
 import { costDraftFromPlan, costDraftIssue, costDraftMatchesPlan, costPlanInput } from '#lib/provider-cost-draft.js'
@@ -38,6 +38,7 @@ let { open = $bindable(false), plan, prefill = null, customCurrency, onsave }: P
 
 const idPrefix = $props.id()
 const basisLabelId = `${idPrefix}-basis`
+const basisDescriptionId = `${idPrefix}-basis-description`
 const periodLabelId = `${idPrefix}-period`
 
 let saving = $state(false)
@@ -64,6 +65,15 @@ const basisHelp = $derived(
       : m.cost_basis_usage_help(),
 )
 const symbol = $derived(currencyForKind(fields.currency, customCurrency).symbol)
+const basisOptions = $derived<readonly SegmentedControlOption<CostBasis>[]>([
+  { value: 'usage', label: m.cost_basis_usage() },
+  { value: 'subscription', label: m.cost_basis_subscription() },
+  { value: 'none', label: m.cost_basis_none() },
+])
+const periodOptions = $derived<readonly SegmentedControlOption<SubscriptionPeriod>[]>([
+  { value: 'month', label: m.cost_period_month() },
+  { value: 'year', label: m.cost_period_year() },
+])
 
 let wasOpen = false
 $effect.pre(() => {
@@ -81,10 +91,10 @@ function loadDraft(): void {
   focusAmountOnOpen = fields.basis === 'subscription' && fields.amount === ''
 }
 
-function setBasis(value: string): void {
-  if (!value || value === fields.basis) return
+function setBasis(value: CostBasis): void {
+  if (value === fields.basis) return
   const previous = fields.basis
-  fields.basis = value as CostBasis
+  fields.basis = value
   // 新建订阅价格时沿用展示币种；已有价格写法保持不变。
   if (value === 'subscription' && previous !== 'subscription' && !fields.amount) {
     fields.currency = customCurrency ? 'custom' : 'usd'
@@ -93,8 +103,8 @@ function setBasis(value: string): void {
   error = ''
 }
 
-function setPeriod(value: string): void {
-  if (value && value !== fields.period) fields.period = value as SubscriptionPeriod
+function setPeriod(value: SubscriptionPeriod): void {
+  if (value !== fields.period) fields.period = value
 }
 
 function setCurrency(value: string): void {
@@ -134,7 +144,7 @@ async function submit(): Promise<void> {
     onOpenAutoFocus={(event: Event) => {
       // 默认会聚焦第一个可聚焦元素（标题旁的「?」），使说明气泡一打开就弹出。
       event.preventDefault()
-      const selected = content?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      const selected = content?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')
       ;(focusAmountOnOpen ? amountInput : selected)?.focus()
     }}>
     <Sheet.Header class="border-b pr-12">
@@ -150,26 +160,27 @@ async function submit(): Promise<void> {
         <Field.Group>
           <Field.Field>
             <Field.Label id={basisLabelId} hint={m.cost_plan_effective_help()}>{m.cost_plan_basis()}</Field.Label>
-            <Tabs.Root bind:value={() => fields.basis, setBasis}>
-              <Tabs.List class="w-full" aria-labelledby={basisLabelId}>
-                <Tabs.Trigger class="flex-1" value="usage" disabled={saving}>{m.cost_basis_usage()}</Tabs.Trigger>
-                <Tabs.Trigger class="flex-1" value="subscription" disabled={saving}
-                  >{m.cost_basis_subscription()}</Tabs.Trigger>
-                <Tabs.Trigger class="flex-1" value="none" disabled={saving}>{m.cost_basis_none()}</Tabs.Trigger>
-              </Tabs.List>
-            </Tabs.Root>
-            <Field.Description>{basisHelp}</Field.Description>
+            <SegmentedControl
+              class="w-full *:data-[slot=segmented-control-item]:flex-auto"
+              options={basisOptions}
+              value={fields.basis}
+              onValueChange={setBasis}
+              ariaLabelledby={basisLabelId}
+              ariaDescribedby={basisDescriptionId}
+              disabled={saving} />
+            <Field.Description id={basisDescriptionId}>{basisHelp}</Field.Description>
           </Field.Field>
 
           {#if fields.basis === 'subscription'}
             <Field.Field>
               <Field.Label id={periodLabelId}>{m.cost_plan_period()}</Field.Label>
-              <Tabs.Root bind:value={() => fields.period, setPeriod}>
-                <Tabs.List class="w-full" aria-labelledby={periodLabelId}>
-                  <Tabs.Trigger class="flex-1" value="month" disabled={saving}>{m.cost_period_month()}</Tabs.Trigger>
-                  <Tabs.Trigger class="flex-1" value="year" disabled={saving}>{m.cost_period_year()}</Tabs.Trigger>
-                </Tabs.List>
-              </Tabs.Root>
+              <SegmentedControl
+                class="w-full *:data-[slot=segmented-control-item]:flex-auto"
+                options={periodOptions}
+                value={fields.period}
+                onValueChange={setPeriod}
+                ariaLabelledby={periodLabelId}
+                disabled={saving} />
             </Field.Field>
 
             <Field.Field data-invalid={showIssue || undefined}>

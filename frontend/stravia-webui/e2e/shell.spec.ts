@@ -181,15 +181,14 @@ test('system theme follows browser color-scheme changes', async ({ page }) => {
   const body = page.locator('body')
   await expect(root).not.toHaveClass(/\bdark\b/)
   const lightBackground = await body.evaluate((element) => getComputedStyle(element).backgroundColor)
-  await page.locator('#theme-preference').click()
-  await page.getByRole('option', { name: 'System' }).click()
+  const themeGroup = page.locator('#theme-preference')
+  await themeGroup.getByRole('radio', { name: 'System', exact: true }).click()
 
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect(root).toHaveClass(/\bdark\b/)
   await expect(body).not.toHaveCSS('background-color', lightBackground)
 
-  await page.locator('#theme-preference').click()
-  await page.getByRole('option', { name: 'Light' }).click()
+  await themeGroup.getByRole('radio', { name: 'Light', exact: true }).click()
   await expect(root).not.toHaveClass(/\bdark\b/)
   await expect(body).toHaveCSS('background-color', lightBackground)
   await expect.poll(() => page.evaluate(() => localStorage.getItem('stravia-theme'))).toBe('light')

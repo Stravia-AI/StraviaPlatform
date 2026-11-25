@@ -144,8 +144,7 @@ test('external signed downloads and S3 storage take effect only after their shee
   expect(writes).toHaveLength(0)
 
   // Choosing S3 opens its sheet; the storage stays internal until the fields are saved.
-  await page.locator('#artifact-storage').click()
-  await page.getByRole('option', { name: 'External S3', exact: true }).click()
+  await page.locator('#artifact-storage').getByRole('radio', { name: 'External S3', exact: true }).click()
   await sheet.getByLabel('S3 endpoint').fill('https://objects.example/storage')
   await sheet.getByLabel('S3 region').fill('local-region')
   await sheet.getByLabel('S3 bucket').fill('private-files')
@@ -167,7 +166,9 @@ test('external signed downloads and S3 storage take effect only after their shee
   expect(saved.external_signed_downloads).toBe(false)
 
   await page.reload()
-  await expect(page.locator('#artifact-storage')).toHaveText('External S3')
+  await expect(
+    page.locator('#artifact-storage').getByRole('radio', { name: 'External S3', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true')
   await expect(external).not.toBeChecked()
   await external.click()
   await expect(sheet.getByLabel('File public access address')).toHaveValue('https://objects.example/storage')
@@ -241,8 +242,10 @@ test('inline settings commit only on Enter or Save, revert on Escape, and keep t
   const cancel = section.getByRole('button', { name: 'Cancel', exact: true })
   await expect(retention).toHaveValue('7')
   await expect(save).toHaveCount(0)
-  await expect(section).toContainText('kept for at least this many days after its last use')
-  await expect(section).toContainText('Saving starts a cleanup right away')
+  await section.locator('[data-slot="field-hint"]').click()
+  const hint = page.locator('[data-slot="tooltip-content"]')
+  await expect(hint).toContainText('kept for at least this many days after its last use')
+  await expect(hint).toContainText('Saving starts a cleanup right away')
 
   // Blur never commits: the draft stays, the row offers Save and Cancel, nothing is written.
   await retention.fill('30')
@@ -351,16 +354,14 @@ test('settings fields align in wide containers and stack in narrow containers', 
 
   const column = '.settings-column'
   const wideColumn = await boxOf(page, column)
-  const wideLabel = await boxOf(page, 'label[for="theme-preference"]')
+  const wideLabel = await boxOf(page, '#appearance [data-slot="setting-row"] span')
   const wideTheme = await boxOf(page, '#theme-preference')
   const wideLanguage = await boxOf(page, '#interface-language')
   expect(wideLabel.right).toBeLessThan(wideTheme.x)
-  // Short selects keep their 16rem semantic width and sit on the settings column's right edge.
-  expect(Math.abs(wideTheme.width - 256)).toBeLessThan(1)
-  expect(Math.abs(wideLanguage.width - 256)).toBeLessThan(1)
+  // Segmented controls hug their content and sit on the settings column's right edge.
   expect(Math.abs(wideTheme.right - wideColumn.right)).toBeLessThan(1)
   expect(Math.abs(wideLanguage.right - wideColumn.right)).toBeLessThan(1)
-  // The row top-aligns its title with the control (the title is one line, the control 36px).
+  // The row top-aligns its title with the control.
   expect(Math.abs(wideLabel.y - wideTheme.y)).toBeLessThan(12)
 
   await page.goto('/settings?view=data')
@@ -387,23 +388,23 @@ test('settings fields align in wide containers and stack in narrow containers', 
   await page.setViewportSize({ width: 500, height: 900 })
   await page.goto('/settings')
   await expect(page.locator('#theme-preference')).toBeVisible()
-  const narrowLabel = await boxOf(page, 'label[for="theme-preference"]')
+  const narrowLabel = await boxOf(page, '#appearance [data-slot="setting-row"] span')
   const narrowTheme = await boxOf(page, '#theme-preference')
   const narrowLanguage = await boxOf(page, '#interface-language')
   expect(narrowLabel.bottom).toBeLessThanOrEqual(narrowTheme.y)
-  expect(Math.abs(narrowTheme.width - narrowLanguage.width)).toBeLessThan(1)
-  expect(narrowTheme.width).toBeGreaterThan(256)
+  expect(narrowTheme.x).toBeCloseTo(narrowLanguage.x, 0)
   await page.goto('/settings?view=data')
   await expect(page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })).toBeVisible()
+  const narrowDataColumn = await boxOf(page, column)
   const narrowRetention = await boxOf(page, '#log-retention')
-  expect(Math.abs(narrowRetention.width - narrowTheme.width)).toBeLessThan(1)
+  expect(Math.abs(narrowRetention.width - narrowDataColumn.width)).toBeLessThan(1)
 })
 
 test('settings column stays 48rem and centered with its navigation on ultra-wide screens', async ({ page }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
   const rem = 16
   const rows = [
-    ['/settings', 'label[for="theme-preference"]', '#theme-preference', 'inline'],
+    ['/settings', '#appearance [data-slot="setting-row"] span', '#theme-preference', 'inline'],
     ['/settings?view=data', 'label[for="log-retention"]', '#log-retention', 'inline'],
     ['/settings?view=network', 'label[for="proxy-bypass"]', '#proxy-bypass', 'stacked'],
   ] as const

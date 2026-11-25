@@ -90,7 +90,7 @@ async function save(): Promise<void> {
   {:else}
     <SettingRow
       title={m.currency_display_currency()}
-      description={currency ? undefined : m.currency_usd_default_help()}
+      hint={currency ? undefined : m.currency_usd_default_help()}
       value={currency
         ? m.currency_summary({ symbol: currency.symbol, rate: formatAmountNumber(currency.usd_rate) })
         : m.currency_not_configured()}

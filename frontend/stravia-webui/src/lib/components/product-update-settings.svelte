@@ -22,8 +22,8 @@ import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Progress } from '#lib/components/ui/progress/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
+import { SegmentedControl, type SegmentedControlOption } from '#lib/components/ui/segmented-control/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
-import { tabsListVariants, tabsTriggerVariants } from '#lib/components/ui/tabs/variants.js'
 import { openExternalUrl } from '#lib/open-external.js'
 import { isPrereleaseVersion, supportsInAppInstallProgress, type UpdateChannel } from '#lib/product-update.js'
 import { getProductUpdateCoordinator } from '#lib/product-update.svelte.js'
@@ -77,15 +77,15 @@ const showPrereleaseFallbackNote = $derived(
     updates.status && updates.status.channel === 'release' && isPrereleaseVersion(updates.status.current_version),
   ),
 )
-const channelOptions: readonly { value: UpdateChannel; label: () => string }[] = [
-  { value: 'release', label: () => m.settings_update_channel_release() },
-  { value: 'beta', label: () => m.settings_update_channel_beta() },
-]
+const channelOptions = $derived<readonly SegmentedControlOption<UpdateChannel>[]>([
+  { value: 'release', label: m.settings_update_channel_release() },
+  { value: 'beta', label: m.settings_update_channel_beta() },
+])
 
 let savingChannel = $state(false)
 let channelError = $state('')
 let retryChannel = $state<UpdateChannel>()
-let channelGroupEl = $state<HTMLDivElement>()
+let channelGroupEl = $state<HTMLDivElement | null>(null)
 const channelDisabled = $derived(savingChannel || busy || !updates.status)
 const showInstallingProgress = $derived(supportsInAppInstallProgress(browser ? navigator.userAgent : ''))
 const progressPercent = $derived.by(() => {
@@ -103,9 +103,25 @@ const lastChecked = $derived(
       )
     : m.settings_update_never_checked(),
 )
+const hasVersionNotice = $derived(
+  Boolean(
+    (updates.status?.skipped && available) ||
+    (!checkUnavailable && (!updates.status?.last_success_at || updates.status?.last_failure)) ||
+    available?.download_error ||
+    updates.state.phase === 'downloading' ||
+    updates.state.phase === 'downloaded' ||
+    (updates.state.phase === 'installing' && showInstallingProgress) ||
+    (updates.state.phase === 'error' && updates.state.error),
+  ),
+)
+
+function focusChannelOption(channel: UpdateChannel): void {
+  channelGroupEl?.querySelector<HTMLButtonElement>(`button[value="${channel}"]`)?.focus()
+}
 
 async function selectChannel(nextChannel: UpdateChannel): Promise<void> {
   if (savingChannel || busy || !updates.status || nextChannel === updates.status.channel) return
+  const shouldRestoreFocus = Boolean(document.activeElement && channelGroupEl?.contains(document.activeElement))
   savingChannel = true
   channelError = ''
   retryChannel = nextChannel
@@ -117,52 +133,17 @@ async function selectChannel(nextChannel: UpdateChannel): Promise<void> {
     channelError = localizeBackendErrorMessage(error)
   } finally {
     savingChannel = false
-  }
-}
-
-function handleChannelValueChange(value: string | undefined): Promise<void> {
-  if (value === 'release' || value === 'beta') return selectChannel(value)
-  return Promise.resolve()
-}
-
-function focusChannelOption(channel: UpdateChannel): void {
-  channelGroupEl?.querySelector<HTMLButtonElement>(`button[value="${channel}"]`)?.focus()
-}
-
-async function handleChannelKeydown(event: KeyboardEvent, currentIndex: number): Promise<void> {
-  if (channelDisabled) return
-  let nextIndex: number
-  switch (event.key) {
-    case 'ArrowRight':
-    case 'ArrowDown':
-      nextIndex = (currentIndex + 1) % channelOptions.length
-      break
-    case 'ArrowLeft':
-    case 'ArrowUp':
-      nextIndex = (currentIndex - 1 + channelOptions.length) % channelOptions.length
-      break
-    case 'Home':
-      nextIndex = 0
-      break
-    case 'End':
-      nextIndex = channelOptions.length - 1
-      break
-    default:
-      return
-  }
-  event.preventDefault()
-  const nextOption = channelOptions[nextIndex]
-  if (!nextOption) return
-  focusChannelOption(nextOption.value)
-  await handleChannelValueChange(nextOption.value)
-  await tick()
-  if (
-    !channelDisabled &&
-    (!document.activeElement ||
-      document.activeElement === document.body ||
-      channelGroupEl?.contains(document.activeElement))
-  ) {
-    focusChannelOption(currentChannel)
+    if (shouldRestoreFocus) {
+      await tick()
+      if (
+        !channelDisabled &&
+        (!document.activeElement ||
+          document.activeElement === document.body ||
+          channelGroupEl?.contains(document.activeElement))
+      ) {
+        focusChannelOption(currentChannel)
+      }
+    }
   }
 }
 
@@ -267,61 +248,63 @@ async function checkNow(): Promise<void> {
     </div>
   </SettingRow>
 
-  <div class="flex flex-col gap-3 pb-3 empty:hidden">
-    {#if updates.status?.skipped && available}
-      <p role="status" class="text-sm text-muted-foreground">{m.settings_update_skipped()}</p>
-    {/if}
-    {#if !checkUnavailable && (!updates.status?.last_success_at || updates.status?.last_failure)}
-      <p class="text-xs text-muted-foreground">
-        {m.settings_update_last_checked()} <span class="tabular-nums">{lastChecked}</span>
-      </p>
-    {/if}
+  {#if hasVersionNotice}
+    <div class="flex flex-col gap-3 pb-3">
+      {#if updates.status?.skipped && available}
+        <p role="status" class="text-sm text-muted-foreground">{m.settings_update_skipped()}</p>
+      {/if}
+      {#if !checkUnavailable && (!updates.status?.last_success_at || updates.status?.last_failure)}
+        <p class="text-xs text-muted-foreground">
+          {m.settings_update_last_checked()} <span class="tabular-nums">{lastChecked}</span>
+        </p>
+      {/if}
 
-    {#if updates.status?.last_failure && !checkUnavailable}
-      <Alert.Root variant="destructive">
-        <Alert.Description
-          >{m.settings_update_check_failed({ message: updates.status.last_failure.message })}</Alert.Description>
-      </Alert.Root>
-    {/if}
-
-    {#if available?.download_error}
-      <Alert.Root variant="destructive">
-        <Alert.Description>{available.download_error}</Alert.Description>
-      </Alert.Root>
-    {/if}
-
-    {#if updates.state.phase === 'downloading'}
-      <div class="grid gap-2" aria-live="polite">
-        <div class="flex items-center justify-between gap-3 text-sm">
-          <span>{m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })}</span>
-          {#if progressPercent != null}<span class="font-technical tabular-nums">{progressPercent}%</span>{/if}
-        </div>
-        <Progress
-          value={progressPercent}
-          aria-label={m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })} />
-      </div>
-    {:else if updates.state.phase === 'downloaded'}
-      <Alert.Root role="status">
-        <Alert.Description
-          >{m.settings_update_downloaded({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
-      </Alert.Root>
-      {#if updates.state.error}
+      {#if updates.status?.last_failure && !checkUnavailable}
         <Alert.Root variant="destructive">
-          <Alert.Description>{m.settings_update_install_failed({ message: updates.state.error })}</Alert.Description>
+          <Alert.Description
+            >{m.settings_update_check_failed({ message: updates.status.last_failure.message })}</Alert.Description>
         </Alert.Root>
       {/if}
-    {:else if updates.state.phase === 'installing' && showInstallingProgress}
-      <Alert.Root role="status" aria-live="assertive">
-        <Spinner />
-        <Alert.Description
-          >{m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
-      </Alert.Root>
-    {:else if updates.state.phase === 'error' && updates.state.error}
-      <Alert.Root variant="destructive">
-        <Alert.Description>{updates.state.error}</Alert.Description>
-      </Alert.Root>
-    {/if}
-  </div>
+
+      {#if available?.download_error}
+        <Alert.Root variant="destructive">
+          <Alert.Description>{available.download_error}</Alert.Description>
+        </Alert.Root>
+      {/if}
+
+      {#if updates.state.phase === 'downloading'}
+        <div class="grid gap-2" aria-live="polite">
+          <div class="flex items-center justify-between gap-3 text-sm">
+            <span>{m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })}</span>
+            {#if progressPercent != null}<span class="font-technical tabular-nums">{progressPercent}%</span>{/if}
+          </div>
+          <Progress
+            value={progressPercent}
+            aria-label={m.settings_update_downloading({ version: updates.state.targetVersion ?? '' })} />
+        </div>
+      {:else if updates.state.phase === 'downloaded'}
+        <Alert.Root role="status">
+          <Alert.Description
+            >{m.settings_update_downloaded({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
+        </Alert.Root>
+        {#if updates.state.error}
+          <Alert.Root variant="destructive">
+            <Alert.Description>{m.settings_update_install_failed({ message: updates.state.error })}</Alert.Description>
+          </Alert.Root>
+        {/if}
+      {:else if updates.state.phase === 'installing' && showInstallingProgress}
+        <Alert.Root role="status" aria-live="assertive">
+          <Spinner />
+          <Alert.Description
+            >{m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
+        </Alert.Root>
+      {:else if updates.state.phase === 'error' && updates.state.error}
+        <Alert.Root variant="destructive">
+          <Alert.Description>{updates.state.error}</Alert.Description>
+        </Alert.Root>
+      {/if}
+    </div>
+  {/if}
 
   <!-- 开发版不检查也不下载更新，更新通道与更新代理偏好与之无关；已保存的偏好值保留。 -->
   {#if !checkUnavailable}
@@ -329,37 +312,19 @@ async function checkNow(): Promise<void> {
       title={m.settings_update_channel()}
       hint={m.settings_update_channel_hint()}
       description={showPrereleaseFallbackNote ? m.settings_update_channel_prerelease_note() : undefined}
-      class="border-t">
+      class={hasVersionNotice ? 'border-t' : undefined}>
       {#snippet children({ descriptionId })}
         {#if savingChannel}<Spinner class="shrink-0" aria-label={m.settings_saving()} />{/if}
-        <div
-          bind:this={channelGroupEl}
+        <SegmentedControl
+          bind:ref={channelGroupEl}
           id="update-channel"
-          role="radiogroup"
-          data-variant="default"
-          class={tabsListVariants({ variant: 'default' })}
-          aria-label={m.settings_update_channel()}
-          aria-describedby={descriptionId}
-          aria-busy={savingChannel || undefined}
-          aria-disabled={channelDisabled || undefined}>
-          {#each channelOptions as option, index (option.value)}
-            {@const selected = currentChannel === option.value}
-            <button
-              type="button"
-              role="radio"
-              value={option.value}
-              class={tabsTriggerVariants()}
-              tabindex={selected ? 0 : -1}
-              aria-checked={selected}
-              data-state={selected ? 'active' : 'inactive'}
-              data-active={selected ? '' : undefined}
-              disabled={channelDisabled}
-              onclick={() => void handleChannelValueChange(option.value)}
-              onkeydown={(event) => void handleChannelKeydown(event, index)}>
-              {option.label()}
-            </button>
-          {/each}
-        </div>
+          options={channelOptions}
+          value={currentChannel}
+          onValueChange={(value: UpdateChannel) => void selectChannel(value)}
+          ariaLabel={m.settings_update_channel()}
+          ariaDescribedby={descriptionId}
+          disabled={channelDisabled}
+          busy={savingChannel} />
       {/snippet}
     </SettingRow>
     {#if channelError}
