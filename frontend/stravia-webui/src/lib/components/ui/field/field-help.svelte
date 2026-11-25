@@ -15,7 +15,7 @@ let open = $state(false)
   <Tooltip.Trigger
     type="button"
     data-slot="field-hint"
-    class="relative inline-flex size-4 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-[color,transform] duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground"
+    class="relative inline-flex size-4 shrink-0 items-center justify-center rounded-md text-muted-foreground/55 transition-[color,transform] duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground focus-visible:text-foreground"
     aria-label={m.common_field_help()}
     aria-describedby={hintId}
     onclick={() => (open = true)}>

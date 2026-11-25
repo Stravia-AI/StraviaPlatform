@@ -9,6 +9,7 @@ import { Button } from '#lib/components/ui/button/index.js'
 import { Checkbox } from '#lib/components/ui/checkbox/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
+import { SegmentedControl, type SegmentedControlOption } from '#lib/components/ui/segmented-control/index.js'
 import {
   basePriceFields,
   isoWeekdays,
@@ -50,6 +51,10 @@ let {
 
 const priceGrid = 'grid gap-3 grid-cols-[repeat(auto-fill,minmax(max(min(100%,10rem),calc((100%-2.25rem)/4)),1fr))]'
 const errors = $derived(validatePriceForm(value))
+const currencyOptions = $derived<readonly SegmentedControlOption<PriceCurrency>[]>([
+  { value: 'usd', label: m.pricing_currency_usd() },
+  { value: 'custom', label: customCurrency?.symbol ?? '' },
+])
 
 function touch(field: PriceTouchField): void {
   onFieldTouch?.(field)
@@ -124,29 +129,19 @@ function weekdayLabel(day: number): string {
 }
 </script>
 
-{#snippet currencyToggle(current: PriceCurrency, label: string, onSelect: (currency: PriceCurrency) => void)}
-  <div class="flex gap-1" role="group" aria-label={m.pricing_currency_for({ field: label })}>
-    <Button
-      type="button"
-      size="sm"
-      variant={current === 'usd' ? 'secondary' : 'ghost'}
-      class="h-7 min-w-0 flex-1 px-2 text-xs"
-      aria-pressed={current === 'usd'}
-      {disabled}
-      onclick={() => onSelect('usd')}>
-      {m.pricing_currency_usd()}
-    </Button>
-    <Button
-      type="button"
-      size="sm"
-      variant={current === 'custom' ? 'secondary' : 'ghost'}
-      class="h-7 min-w-0 flex-1 truncate px-2 text-xs"
-      aria-pressed={current === 'custom'}
-      {disabled}
-      onclick={() => onSelect('custom')}>
-      {customCurrency?.symbol}
-    </Button>
-  </div>
+{#snippet currencyToggle(
+  current: PriceCurrency,
+  label: string,
+  onSelect: (currency: PriceCurrency) => void,
+  className?: string,
+)}
+  <SegmentedControl
+    options={currencyOptions}
+    value={current}
+    onValueChange={onSelect}
+    ariaLabel={m.pricing_currency_for({ field: label })}
+    {disabled}
+    class={className} />
 {/snippet}
 
 {#snippet pinControl(field: string, label: string)}
@@ -198,7 +193,12 @@ function weekdayLabel(day: number): string {
           placeholder="0.00"
           {disabled} />
         {#if customCurrency}
-          {@render currencyToggle(value.base[field].currency, label, (currency) => setCurrency(field, currency))}
+          {@render currencyToggle(
+            value.base[field].currency,
+            label,
+            (currency) => setCurrency(field, currency),
+            'w-full *:data-[slot=segmented-control-item]:flex-1',
+          )}
         {/if}
       </Field.Field>
     {/each}
@@ -212,7 +212,7 @@ function weekdayLabel(day: number): string {
         {@render pinControl('cost.tiers', m.pricing_tiers_title())}
       </p>
       {#if customCurrency}
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <span class="text-xs text-muted-foreground">{m.pricing_tiers_currency()}</span>
           {@render currencyToggle(value.tiersCurrency, m.pricing_tiers_title(), setTiersCurrency)}
         </div>

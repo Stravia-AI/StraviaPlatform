@@ -279,10 +279,12 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
           title={usesLocal ? m.web_search_model_used() : m.web_search_external_route()}
           value={bindingTarget} />
         {#if usesLocal}
-          <Collapsible.Root bind:open={advancedOpen} class="flex flex-col gap-4 border-t py-2">
-            <Collapsible.Trigger class={buttonVariants({ variant: 'ghost', size: 'sm', class: 'self-start' })}>
-              {m.common_advanced()}
-            </Collapsible.Trigger>
+          <Collapsible.Root bind:open={advancedOpen} class="flex flex-col border-t border-border/60">
+            <div class="px-4 py-2">
+              <Collapsible.Trigger class={buttonVariants({ variant: 'ghost', size: 'sm', class: '-ms-2.5' })}>
+                {m.common_advanced()}
+              </Collapsible.Trigger>
+            </div>
             <Collapsible.Content>
               <SettingsSection id="web-search-advanced-fields" title={m.web_search_limits_title()}>
                 {#if limits}

@@ -81,6 +81,7 @@ import * as Dialog from '#lib/components/ui/dialog/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import * as InputGroup from '#lib/components/ui/input-group/index.js'
+import { SegmentedControl, type SegmentedControlOption } from '#lib/components/ui/segmented-control/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
@@ -256,14 +257,16 @@ function targetStateLabel(state: TargetRuntimeStatus['state'], cooldownMs: numbe
     : label
 }
 
-function strategyLabel(strategy: RouteSelectionStrategy): string {
-  switch (strategy) {
-    case 'traffic_equalization':
-      return m.model_editor_traffic_equalization()
-    case 'latency_preference':
-      return m.model_editor_latency_preference()
-  }
-}
+const balanceOptions = $derived<readonly SegmentedControlOption<RouteSelectionStrategy>[]>([
+  { value: 'traffic_equalization', label: m.model_editor_traffic_equalization() },
+  { value: 'latency_preference', label: m.model_editor_latency_preference() },
+])
+
+const billingModeOptions = $derived<readonly SegmentedControlOption<BillingMode>[]>([
+  { value: 'none', label: m.billing_mode_none() },
+  { value: 'per_call', label: m.billing_mode_per_call() },
+  { value: 'per_token', label: m.billing_mode_per_token() },
+])
 
 function strategyHelp(strategy: RouteSelectionStrategy): string {
   switch (strategy) {
@@ -1037,21 +1040,19 @@ async function saveModel(): Promise<void> {
             </Select.Content>
           </Select.Root>
         </Field.Field>
-        <Field.Field size="setting">
-          <Field.Label for="route-balance" hint={strategyHelp(form.balance)}>
+        <Field.Field>
+          <Field.Label id="route-balance-label" hint={strategyHelp(form.balance)}>
             {m.model_editor_how_requests_sent()}
           </Field.Label>
-          <Select.Root type="single" bind:value={form.balance}>
-            <Select.Trigger id="route-balance" class="w-full" aria-label={m.model_editor_how_requests_sent()}>
-              {strategyLabel(form.balance)}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Group>
-                <Select.Item value="traffic_equalization">{m.model_editor_traffic_equalization()}</Select.Item>
-                <Select.Item value="latency_preference">{m.model_editor_latency_preference()}</Select.Item>
-              </Select.Group>
-            </Select.Content>
-          </Select.Root>
+          <SegmentedControl
+            id="route-balance"
+            options={balanceOptions}
+            value={form.balance}
+            onValueChange={(value: RouteSelectionStrategy) => {
+              form.balance = value
+            }}
+            ariaLabelledby="route-balance-label"
+            disabled={saving} />
         </Field.Field>
       </Field.Group>
       {#if initialModel && !initialModel.purpose}
@@ -1081,30 +1082,21 @@ async function saveModel(): Promise<void> {
         </div>
       </div>
       <Field.Group>
-        <Field.Field size="setting">
-          <Field.FieldLabel for="route-billing-mode">{m.billing_mode()}</Field.FieldLabel>
-          <Select.Root
-            type="single"
+        <Field.Field>
+          <Field.FieldLabel id="route-billing-mode-label">{m.billing_mode()}</Field.FieldLabel>
+          <SegmentedControl
+            id="route-billing-mode"
+            options={billingModeOptions}
             value={billingMode}
-            onValueChange={(value: string) => value && (billingMode = value as BillingMode)}>
-            <Select.Trigger id="route-billing-mode" class="w-full" aria-label={m.billing_mode()}>
-              {billingMode === 'per_call'
-                ? m.billing_mode_per_call()
-                : billingMode === 'per_token'
-                  ? m.billing_mode_per_token()
-                  : m.billing_mode_none()}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Group>
-                <Select.Item value="none">{m.billing_mode_none()}</Select.Item>
-                <Select.Item value="per_call">{m.billing_mode_per_call()}</Select.Item>
-                <Select.Item value="per_token">{m.billing_mode_per_token()}</Select.Item>
-              </Select.Group>
-            </Select.Content>
-          </Select.Root>
+            onValueChange={(value: BillingMode) => {
+              billingMode = value
+            }}
+            ariaLabelledby="route-billing-mode-label"
+            ariaDescribedby="route-billing-mode-help"
+            disabled={saving} />
         </Field.Field>
       </Field.Group>
-      <p class="mt-3 text-sm text-muted-foreground">{m.billing_charged_to_key_help()}</p>
+      <p id="route-billing-mode-help" class="mt-3 text-sm text-muted-foreground">{m.billing_charged_to_key_help()}</p>
       {#if billingMode === 'per_call'}
         <div class="mt-4 grid gap-4 @2xl/model-contract:grid-cols-2 @2xl/model-contract:gap-x-6">
           <Field.Field data-invalid={billingAmountIssue ? true : undefined}>

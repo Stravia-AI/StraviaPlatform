@@ -81,15 +81,16 @@ const hasControl = $derived(Boolean(children || value !== undefined || onedit))
   data-layout={layout}
   data-nested={nested ? 'true' : undefined}
   class={cn(
-    // 单行设置保持 44px 的可点行高：标题行高 19.25px 加 24px 内边距只有 43.25px，低于触控与可读下限。
-    '@container/setting-row w-full min-w-0 py-3 min-h-11',
-    '[[data-slot=setting-row]+&]:border-t',
-    nested && 'ms-2 w-auto border-s ps-4',
+    // 统一单行设置最小高度（52px）并垂直居中；位于分组面板内时统一提供左右内边距与柔和悬停反馈。
+    '@container/setting-row flex min-h-13 w-full min-w-0 flex-col justify-center py-3 transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
+    '[[data-slot=setting-row]+&]:border-t [[data-slot=setting-row]+&]:border-border/60',
+    'in-data-[slot=settings-section-panel]:px-4 in-data-[slot=settings-section-panel]:hover:bg-muted/35 dark:in-data-[slot=settings-section-panel]:hover:bg-muted/20',
     className,
   )}>
   <div
     class={cn(
       'flex min-w-0 gap-2',
+      nested && 'ms-2 border-s border-border ps-3.5 in-data-[slot=settings-section-panel]:ms-0',
       layout === 'inline'
         ? ['justify-between gap-4', description || note ? 'items-start' : 'items-center']
         : layout === 'stacked'

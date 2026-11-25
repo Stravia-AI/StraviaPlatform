@@ -69,16 +69,18 @@ async function save(): Promise<void> {
     {/if}
   {/snippet}
   {#if query.error}
-    <RequestFailure
-      message={localizeBackendErrorMessage(query.error)}
-      retry={() => void query.refetch()}
-      retrying={query.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        message={localizeBackendErrorMessage(query.error)}
+        retry={() => void query.refetch()}
+        retrying={query.isFetching} />
+    </div>
   {:else if config}
     <SettingRow layout="inline" title={m.rpm_preferred_wait()} value={formatNumber(config.preferred_wait_ms)} />
     <SettingRow layout="inline" title={m.rpm_total_wait()} value={formatNumber(config.total_wait_ms)} />
     <SettingRow layout="inline" title={m.rpm_queue_capacity()} value={String(config.queue_capacity)} />
   {:else}
-    <Skeleton class="my-3 h-9" aria-busy="true" />
+    <div class="p-4" aria-busy="true"><Skeleton class="h-9" /></div>
   {/if}
 </SettingsSection>
 

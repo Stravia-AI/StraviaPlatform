@@ -144,7 +144,7 @@ $effect(() => {
 {#snippet extensionSettingsGroupSection(extGroup: RenderableExtensionSettingsGroup)}
   <SettingsSection id={extGroup.id} title={extGroup.label}>
     {#if extGroup.description || extGroup.slots.length > 0}
-      <div class="flex min-w-0 flex-col gap-2" data-extension-settings-group={extGroup.id}>
+      <div class="flex min-w-0 flex-col gap-2 p-4" data-extension-settings-group={extGroup.id}>
         {#if extGroup.description}
           <p class="text-sm break-words text-pretty text-muted-foreground">{extGroup.description}</p>
         {/if}

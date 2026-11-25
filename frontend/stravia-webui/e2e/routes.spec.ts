@@ -1265,9 +1265,8 @@ test('Model Route editor derives thinking levels and identifies blocking destina
   expect(Math.abs(purposeTriggerBox!.x - columnBox!.x)).toBeLessThanOrEqual(1)
   expect(Math.abs(balanceTriggerBox!.x - rightCellX)).toBeLessThanOrEqual(1)
   expect(Math.abs(balanceTriggerBox!.y - purposeTriggerBox!.y)).toBeLessThanOrEqual(1)
-  for (const box of [purposeTriggerBox!, balanceTriggerBox!]) {
-    expect(Math.abs(box.width - 16 * rem)).toBeLessThanOrEqual(2)
-  }
+  expect(Math.abs(purposeTriggerBox!.width - 16 * rem)).toBeLessThanOrEqual(2)
+  expect(balanceTriggerBox!.x + balanceTriggerBox!.width).toBeLessThanOrEqual(columnRight + 1)
 
   // 设置列不足 42rem 时回到单列，字段自上而下堆叠。
   await page.setViewportSize({ width: 600, height: 900 })
@@ -1594,8 +1593,7 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByRole('button', { name: 'Confirm' }).click()
 
-  await page.getByLabel('How requests are sent').click()
-  await page.getByRole('option', { name: 'Latency preference' }).click()
+  await page.locator('#route-balance').getByRole('radio', { name: 'Latency preference', exact: true }).click()
   await expect(page.getByLabel('Destination 1 traffic share')).toHaveCount(0)
   await expect(page.getByLabel('Layer 1')).toBeVisible()
 
