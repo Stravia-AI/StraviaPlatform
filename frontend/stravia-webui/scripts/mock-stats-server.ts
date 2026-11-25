@@ -795,6 +795,7 @@ function handleShell(path: string, method: string): Response | null {
     return json({
       data: {
         current_version: '0.6.1',
+        channel: 'release',
         check_status: 'up-to-date',
         last_success_at: '2026-11-02T00:00:00Z',
         last_failure: null,

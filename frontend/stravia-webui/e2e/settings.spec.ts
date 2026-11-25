@@ -2134,6 +2134,7 @@ test('server update notification skips one version without hiding Settings or ex
       json: {
         data: {
           current_version: '1.0.0',
+          channel: 'release',
           check_status: 'available',
           last_success_at: '2026-09-05T00:00:00Z',
           last_failure: null,
@@ -2200,6 +2201,7 @@ test('cached update remains actionable when the latest automatic check fails', a
   const releaseUrl = 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v1.2.0'
   const status = {
     current_version: '1.0.0',
+    channel: 'release',
     check_status: 'error',
     last_success_at: '2026-09-04T00:00:00Z',
     last_failure: {
@@ -2240,6 +2242,7 @@ for (const locale of ['en-US', 'zh-CN']) {
         json: {
           data: {
             current_version: '0.1.5',
+            channel: 'release',
             check_status: 'error',
             last_success_at: null,
             last_failure: {
@@ -2266,6 +2269,157 @@ for (const locale of ['en-US', 'zh-CN']) {
     await expect(updates).not.toContainText(technicalMessage)
   })
 }
+
+test('switching update channel persists choice, refreshes silently, and retries after save failure', async ({
+  page,
+}) => {
+  await prepareApp(page)
+  let channel: 'release' | 'beta' = 'release'
+  let failNextChannelSave = false
+  const channelPutBodies: Array<{ channel: string }> = []
+  let checkCount = 0
+
+  await page.route('**/api/v1/updates**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    if (path === '/updates/channel' && request.method() === 'PUT') {
+      const payload: unknown = request.postDataJSON()
+      const nextChannel =
+        payload &&
+        typeof payload === 'object' &&
+        'channel' in payload &&
+        (payload.channel === 'release' || payload.channel === 'beta')
+          ? payload.channel
+          : null
+      expect(nextChannel).not.toBeNull()
+      if (!nextChannel) return
+      channelPutBodies.push({ channel: nextChannel })
+      if (failNextChannelSave) {
+        failNextChannelSave = false
+        await route.fulfill({ status: 500, json: { code: 'UPDATE_STATE_UNAVAILABLE', error: 'storage busy' } })
+        return
+      }
+      channel = nextChannel
+      await route.fulfill({
+        json: {
+          data: {
+            current_version: '0.7.6',
+            channel,
+            check_status: 'idle',
+            last_success_at: null,
+            last_failure: null,
+            available_update: null,
+            skipped: false,
+            download_supported: false,
+          },
+        },
+      })
+      return
+    }
+    if (path === '/updates/check') checkCount += 1
+    await route.fulfill({
+      json: {
+        data: {
+          current_version: '0.7.6',
+          channel,
+          check_status: channel === 'beta' ? 'available' : 'up-to-date',
+          last_success_at: '2026-11-25T00:00:00Z',
+          last_failure: null,
+          available_update:
+            channel === 'beta'
+              ? {
+                  version: '0.8.0-beta.1',
+                  published_at: '2026-11-25T00:00:00Z',
+                  release_url: 'https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v0.8.0-beta.1',
+                  manifest_url: 'https://updater.stravia.cn/api/v1/releases/v0.8.0-beta.1/manifest.json',
+                  download_available: true,
+                  download_error: null,
+                }
+              : null,
+          skipped: false,
+          download_supported: false,
+        },
+      },
+    })
+  })
+
+  await page.goto('/settings')
+  const channelSelect = page.locator('#update-channel')
+  await expect(channelSelect).toHaveText('Release')
+  const checksBeforeSwitch = checkCount
+
+  await channelSelect.click()
+  await page.getByRole('option', { name: 'Beta', exact: true }).click()
+  await expect(channelSelect).toHaveText('Beta')
+  await expect(page.locator('#updates').getByText('0.8.0-beta.1', { exact: true })).toBeVisible()
+  expect(channelPutBodies).toEqual([{ channel: 'beta' }])
+  expect(checkCount).toBeGreaterThan(checksBeforeSwitch)
+  await expect(page.locator('[data-sonner-toast]')).toHaveCount(0)
+
+  failNextChannelSave = true
+  await channelSelect.click()
+  await page.getByRole('option', { name: 'Release', exact: true }).click()
+  await expect(channelSelect).toHaveText('Beta')
+  const failure = page.locator('#updates').getByRole('alert')
+  await expect(failure).toContainText('Could not save the update channel.')
+  await failure.getByRole('button', { name: 'Retry' }).click()
+  await expect(channelSelect).toHaveText('Release')
+  await expect(page.locator('#updates').getByRole('alert')).toHaveCount(0)
+  await expect(page.locator('#updates').getByText('0.8.0-beta.1', { exact: true })).toHaveCount(0)
+})
+
+test('switching a prerelease installation to Release explains waiting for next stable without downgrading', async ({
+  page,
+}) => {
+  await prepareApp(page)
+  let channel: 'release' | 'beta' = 'beta'
+
+  await page.route('**/api/v1/updates**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    if (path === '/updates/channel' && request.method() === 'PUT') {
+      const payload: unknown = request.postDataJSON()
+      if (
+        payload &&
+        typeof payload === 'object' &&
+        'channel' in payload &&
+        (payload.channel === 'release' || payload.channel === 'beta')
+      ) {
+        channel = payload.channel
+      }
+    }
+    await route.fulfill({
+      json: {
+        data: {
+          current_version: '0.8.0-beta.1',
+          channel,
+          check_status: 'up-to-date',
+          last_success_at: '2026-11-25T00:00:00Z',
+          last_failure: null,
+          available_update: null,
+          skipped: false,
+          download_supported: false,
+        },
+      },
+    })
+  })
+
+  await page.goto('/settings')
+  const updates = page.locator('#updates')
+  const channelSelect = page.locator('#update-channel')
+  await expect(channelSelect).toHaveText('Beta')
+  await expect(updates).not.toContainText("won't downgrade automatically")
+
+  await channelSelect.click()
+  await page.getByRole('option', { name: 'Release', exact: true }).click()
+  await expect(channelSelect).toHaveText('Release')
+  await expect(updates).toContainText("won't downgrade automatically")
+
+  await channelSelect.click()
+  await page.getByRole('option', { name: 'Beta', exact: true }).click()
+  await expect(channelSelect).toHaveText('Beta')
+  await expect(updates).not.toContainText("won't downgrade automatically")
+})
 
 const credentialCatalog: CredentialRuleCatalog = {
   prefilter: 'contains(text, "test_")',

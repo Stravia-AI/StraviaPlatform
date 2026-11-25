@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use stravia_core::Gateway;
+use stravia_core::admin::updates::UpdateChannel;
 #[cfg(any(test, not(feature = "desktop-e2e")))]
 use stravia_core::outbound_proxy::{OutboundProxySettings, update_uses_proxy};
 #[cfg(any(test, not(feature = "desktop-e2e")))]
@@ -79,6 +80,19 @@ impl DesktopUpdateState {
         self.inner.lock().await.snapshot.clone()
     }
 
+    /// 切换回 Release 通道后，丢弃内存中已下载但未安装的预发布包，避免跨通道误装。
+    async fn reconcile_channel(&self, channel: UpdateChannel) -> DesktopUpdateSnapshot {
+        let mut inner = self.inner.lock().await;
+        if inner.snapshot.phase == DesktopUpdatePhase::Downloaded
+            && let Some(target_version) = inner.snapshot.target_version.as_deref()
+            && !channel.allows_version_str(target_version)
+        {
+            inner.downloaded = None;
+            inner.snapshot = DesktopUpdateSnapshot::default();
+        }
+        inner.snapshot.clone()
+    }
+
     async fn begin_download(
         &self,
         target_version: &str,
@@ -141,9 +155,15 @@ impl DesktopUpdateState {
 
 #[tauri::command]
 pub async fn get_desktop_update_state(
+    gateway: State<'_, Gateway>,
     state: State<'_, DesktopUpdateState>,
 ) -> Result<DesktopUpdateSnapshot, String> {
-    Ok(state.snapshot().await)
+    let status = gateway
+        .admin()
+        .get_update_status()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(state.reconcile_channel(status.channel).await)
 }
 
 #[tauri::command]
@@ -313,15 +333,26 @@ async fn download_verified_update(
 #[tauri::command]
 pub async fn install_product_update(
     app: AppHandle,
+    gateway: State<'_, Gateway>,
     state: State<'_, DesktopUpdateState>,
 ) -> Result<(), String> {
     let _operation = state.operation.lock().await;
+    let status = gateway
+        .admin()
+        .get_update_status()
+        .await
+        .map_err(|error| error.to_string())?;
     let mut inner = state.inner.lock().await;
-    if inner.snapshot.target_version.is_none() {
+    let Some(target_version) = inner.snapshot.target_version.as_deref() else {
         return Err("No downloaded Desktop update is available".to_string());
-    }
+    };
     if inner.snapshot.phase != DesktopUpdatePhase::Downloaded {
         return Err("No downloaded Desktop update is ready to install".to_string());
+    }
+    if !status.channel.allows_version_str(target_version) {
+        inner.downloaded = None;
+        inner.snapshot = DesktopUpdateSnapshot::default();
+        return Err("Downloaded update does not match the active update channel".to_string());
     }
     inner.snapshot.phase = DesktopUpdatePhase::Installing;
     inner.snapshot.error = None;
@@ -536,5 +567,28 @@ mod tests {
         assert_eq!(atomic_optional(&total), None);
         total.store(42, Ordering::Relaxed);
         assert_eq!(atomic_optional(&total), Some(42));
+    }
+
+    #[tokio::test]
+    async fn switching_to_release_channel_clears_downloaded_prerelease_package() {
+        let state = DesktopUpdateState::default();
+        assert!(
+            state
+                .begin_download("1.3.0-beta.2")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        state
+            .complete_download("1.3.0-beta.2", 42, Some(42), DownloadedUpdate::TestBridge)
+            .await;
+
+        assert_eq!(
+            state.reconcile_channel(UpdateChannel::Beta).await.phase,
+            DesktopUpdatePhase::Downloaded
+        );
+        let cleared = state.reconcile_channel(UpdateChannel::Release).await;
+        assert_eq!(cleared, DesktopUpdateSnapshot::default());
+        assert_eq!(state.snapshot().await.phase, DesktopUpdatePhase::Idle);
     }
 }

@@ -199,6 +199,7 @@ Bun.serve({
         return json({
           data: {
             current_version: '0.7.2',
+            channel: 'release',
             check_status: 'up-to-date',
             last_success_at: null,
             last_failure: null,

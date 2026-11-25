@@ -53,6 +53,7 @@ async function isolatedContext(browser: Browser) {
       json: {
         data: {
           current_version: '0.0.0',
+          channel: 'release',
           check_status: 'up-to-date',
           last_success_at: null,
           last_failure: null,

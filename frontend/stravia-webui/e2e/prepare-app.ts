@@ -203,6 +203,7 @@ const settingValues: Record<string, string> = {
 export async function prepareApp(page: Page): Promise<void> {
   let updateStatus: UpdateStatus = {
     current_version: '0.1.5',
+    channel: 'release',
     check_status: 'up-to-date',
     last_success_at: '2026-09-05T00:00:00Z',
     last_failure: null,
@@ -246,6 +247,20 @@ export async function prepareApp(page: Page): Promise<void> {
       return
     }
     if (path === '/updates' || path === '/updates/check') {
+      await route.fulfill({ json: { data: updateStatus } })
+      return
+    }
+    if (path === '/updates/channel') {
+      const channel = request.postDataJSON()?.channel as UpdateStatus['channel']
+      updateStatus = {
+        ...updateStatus,
+        channel,
+        check_status: 'idle',
+        last_success_at: null,
+        last_failure: null,
+        available_update: null,
+        skipped: false,
+      }
       await route.fulfill({ json: { data: updateStatus } })
       return
     }

@@ -69,6 +69,7 @@ const id = $props.id()
 const titleId = `${id}-title`
 const editId = `${id}-edit`
 const descriptionId = $derived(description ? `${id}-description` : undefined)
+const hasControl = $derived(Boolean(children || value !== undefined || onedit))
 </script>
 
 <!--
@@ -98,7 +99,16 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
               description || note ? '@min-[32rem]/setting-row:items-start' : '@min-[32rem]/setting-row:items-center',
             ],
     )}>
-    <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+    <div
+      class={cn(
+        'flex min-w-0 flex-1 flex-col gap-0.5',
+        hasControl &&
+          layout === 'auto' &&
+          !controlSize &&
+          (description || note
+            ? '@min-[32rem]/setting-row:min-w-40'
+            : '@min-[32rem]/setting-row:flex-none @min-[32rem]/setting-row:max-w-[45%]'),
+      )}>
       <div class="flex min-w-0 items-center gap-2">
         {#if labelFor}
           <Label id={titleId} for={labelFor} class="min-w-0 text-sm leading-snug font-medium">{title}</Label>
@@ -112,7 +122,7 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
       {/if}
       {@render note?.()}
     </div>
-    {#if children || value !== undefined || onedit}
+    {#if hasControl}
       <div
         data-slot="setting-row-control"
         style:--setting-control-width={controlSize ? fieldControlWidths[controlSize] : undefined}
@@ -122,7 +132,10 @@ const descriptionId = $derived(description ? `${id}-description` : undefined)
             ? 'shrink-0 justify-end'
             : layout === 'stacked'
               ? 'w-full'
-              : 'w-full @min-[32rem]/setting-row:w-auto @min-[32rem]/setting-row:shrink-0 @min-[32rem]/setting-row:justify-end',
+              : [
+                  'w-full @min-[32rem]/setting-row:w-auto @min-[32rem]/setting-row:justify-end',
+                  controlSize && '@min-[32rem]/setting-row:shrink-0',
+                ],
           controlSize && layout === 'auto' && '@min-[32rem]/setting-row:w-(--setting-control-width)',
         )}>
         {#if value !== undefined}
