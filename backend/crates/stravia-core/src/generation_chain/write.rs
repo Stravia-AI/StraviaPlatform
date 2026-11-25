@@ -168,8 +168,13 @@ impl GenerationChainWrite {
 
     /// 续接指纹必须来自提供方视图，不能包含交付投影新增的思考 Marker。
     pub(crate) fn observe_provider_response(&mut self, request: &AiRequest, response: &AiResponse) {
-        let mut hash =
-            stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&request.items);
+        let mut hash = self
+            .cached_request_items_hash(&request.items)
+            .unwrap_or_else(|| {
+                stravia_runtime_contract::protocol::ir::canonical::history_context_hash(
+                    &request.items,
+                )
+            });
         for item in &response.items {
             hash = stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(
                 &hash, item,
@@ -180,6 +185,23 @@ impl GenerationChainWrite {
             items: request.items.len() + response.items.len(),
             reasoning: request.reasoning.clone(),
         });
+    }
+
+    fn cached_request_items_hash(&self, items: &[AiItem]) -> Option<[u8; 32]> {
+        let cached = self.admission_hash_cache?;
+        if items.len() != self.admission_input.items.len() {
+            return None;
+        }
+        if items.as_ptr() == self.admission_input.items.as_ptr()
+            || stravia_runtime_contract::protocol::ir::canonical::history_items_equal(
+                items,
+                &self.admission_input.items,
+            )
+        {
+            Some(cached.hash)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn stage(
@@ -207,7 +229,13 @@ impl GenerationChainWrite {
         }
         attach_persisted_profile(response, &self.request, self.parent.parent_id.as_deref());
         let context = self.provider_context.as_ref().map(|context| (context.hash, context.items)).unwrap_or_else(|| {
-            let mut hash = stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&self.request.items);
+            let mut hash = self
+                .cached_request_items_hash(&self.request.items)
+                .unwrap_or_else(|| {
+                    stravia_runtime_contract::protocol::ir::canonical::history_context_hash(
+                        &self.request.items,
+                    )
+                });
             for item in &response.items {
                 hash = stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash(&hash, item);
             }
@@ -245,7 +273,13 @@ impl GenerationChainWrite {
                 None,
             ),
         };
-        let projected = match project_client_commit(&self.parent, &self.request_delta, response) {
+        let projected = match project_client_commit_cached(
+            &self.parent,
+            &self.request_delta,
+            response,
+            self.admission_hash_cache
+                .map(|cache| (self.admission_input.as_ref(), cache)),
+        ) {
             Ok(projected) => projected,
             Err(error) => {
                 tracing::warn!(%error, "failed to project client generation history");
@@ -314,17 +348,41 @@ impl GenerationChainWrite {
             });
         staged.effective_state.virtual_window = self.virtual_window;
         staged.effective_state.logical_turn = self.logical_turn;
+        let mut inline_checkpoint = None;
+        let mut pending_turns_backup: Option<Vec<crate::plugin::atomic_lease::PendingModelTurn>> =
+            None;
         if let Some(guard) = &self.atomic_guard {
             let checkpoint = uuid::Uuid::new_v4();
-            guard.checkpoint(checkpoint).await.map_err(|error| {
-                PersistError::Store(match error {
-                    crate::plugin::PluginStorageError::StaleOperation
-                    | crate::plugin::PluginStorageError::MissingLineage => {
-                        TurnCommitError::AtomicStateUnavailable
-                    }
-                    other => TurnCommitError::Storage(other.to_string()),
-                })
-            })?;
+            if guard.store().is_sql_backed() && self.chain.store.has_sql_turn_chain() {
+                if let Some(failure) = guard.failure() {
+                    let error = crate::plugin::PluginStorageError::from(failure);
+                    return Err(PersistError::Store(match error {
+                        crate::plugin::PluginStorageError::StaleOperation
+                        | crate::plugin::PluginStorageError::MissingLineage => {
+                            TurnCommitError::AtomicStateUnavailable
+                        }
+                        other => TurnCommitError::Storage(other.to_string()),
+                    }));
+                }
+                let pending_model_turns = guard.take_pending_model_turns();
+                pending_turns_backup = Some(pending_model_turns.clone());
+                inline_checkpoint = Some(crate::turn_chain::InlineAtomicCheckpoint {
+                    admission_id: guard.admission_id().to_owned(),
+                    lease_id: guard.lease_id().to_string(),
+                    checkpoint_id: checkpoint.to_string(),
+                    pending_model_turns,
+                });
+            } else {
+                guard.checkpoint(checkpoint).await.map_err(|error| {
+                    PersistError::Store(match error {
+                        crate::plugin::PluginStorageError::StaleOperation
+                        | crate::plugin::PluginStorageError::MissingLineage => {
+                            TurnCommitError::AtomicStateUnavailable
+                        }
+                        other => TurnCommitError::Storage(other.to_string()),
+                    })
+                })?;
+            }
             staged.effective_state.atomic_checkpoint_id = Some(checkpoint);
         }
         let redaction_references = if self.chain.records_redaction_references {
@@ -369,10 +427,17 @@ impl GenerationChainWrite {
         }
         let projected = match projection {
             Some(projected) => projected,
-            None => project_client_commit(&self.parent, &self.request_delta, &staged.response)
-                .map_err(PersistError::Store)?,
+            None => project_client_commit_cached(
+                &self.parent,
+                &self.request_delta,
+                &staged.response,
+                self.admission_hash_cache
+                    .map(|cache| (self.admission_input.as_ref(), cache)),
+            )
+            .map_err(PersistError::Store)?,
         };
-        self.chain
+        let result = self
+            .chain
             .store
             .save_projected(
                 GenerationChainCommit {
@@ -388,9 +453,20 @@ impl GenerationChainWrite {
                     redaction_references,
                 },
                 projected,
+                inline_checkpoint,
             )
-            .await
-            .map_err(PersistError::Store)
+            .await;
+        if let Err(error) = &result
+            && let Some(guard) = &self.atomic_guard
+        {
+            if let Some(turns) = pending_turns_backup.take() {
+                guard.restore_pending_model_turns(turns);
+            }
+            if matches!(error, TurnCommitError::AtomicStateUnavailable) {
+                guard.record_external_failure(&crate::plugin::PluginStorageError::StaleOperation);
+            }
+        }
+        result.map_err(PersistError::Store)
     }
 }
 

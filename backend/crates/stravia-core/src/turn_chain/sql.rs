@@ -743,6 +743,273 @@ impl SqlTurnChainStore {
         }
         Ok(())
     }
+
+    #[tracing::instrument(
+        target = "stravia::perf",
+        name = "turn_chain.commit",
+        skip_all,
+        fields(reference_count)
+    )]
+    pub(crate) async fn commit_with_atomic_checkpoint(
+        &self,
+        commit: TurnCommit,
+        inline_checkpoint: Option<InlineAtomicCheckpoint>,
+    ) -> Result<TurnNodeId, TurnCommitError> {
+        let principal = commit.principal.continuation_key();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut encoded = tokio::task::spawn_blocking(move || content::encode(commit.payload))
+            .await
+            .map_err(commit_storage)?
+            .map_err(commit_storage)?;
+        tracing::Span::current().record("reference_count", encoded.contents.len() as u64);
+        if !encoded.contents.is_empty() {
+            macro_rules! hint {
+                ($pool:expr, $lookup:ident) => {{
+                    let mut connection = $pool.acquire().await.map_err(commit_storage)?;
+                    content::$lookup(
+                        &mut connection,
+                        content::LookupScope::Principal(&principal),
+                        &encoded.contents,
+                        false,
+                    )
+                    .await
+                    .map_err(commit_storage)?
+                }};
+            }
+            let ids = match &self.backend {
+                Backend::Sqlite(pool) => hint!(pool, lookup_sqlite),
+                Backend::Postgres(pool) => hint!(pool, lookup_postgres),
+            };
+            content::prepare_missing(&mut encoded.contents, &ids)
+                .await
+                .map_err(commit_storage)?;
+        }
+        // descriptor 不含数据库分配的 ID，编码和大正文压缩都在写协调之前完成。
+        let payload = std::mem::take(&mut encoded.payload);
+        let prefix = commit.reusable_prefix.as_ref();
+        let projection = prefix.and_then(|prefix| prefix.projection.as_ref());
+        let mut marker_references = commit.marker_references;
+        marker_references.sort_unstable();
+        marker_references.dedup();
+        let mut redaction_references = commit.redaction_references;
+        redaction_references.sort_unstable();
+        redaction_references.dedup();
+        let mut compaction_record_ids = commit.compaction_record_ids;
+        compaction_record_ids.sort_unstable();
+        compaction_record_ids.dedup();
+        macro_rules! persist {
+            ($pool:expr, $lock:literal, $checkpoint_lock:literal, $inline_lock:literal, $inline_pg:expr, $lineage_lock:literal, $resolve_scope:path, $deps:ident, $put:ident, $apply_turns:path, $inline_ckpt:path) => {{
+                let mut transaction = $pool.begin_write().await.map_err(commit_storage)?;
+                if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(commit_storage)?; }
+                let duplicate: Option<i64> = sqlx::query_scalar(
+                    "SELECT node_pk FROM turn_nodes WHERE id=$1",
+                ).bind(commit.id.as_str())
+                    .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
+                if duplicate.is_some() { return Err(TurnCommitError::AlreadyExists); }
+                // 共享正文存储的 scope 协议：已有 scope 加 `FOR KEY SHARE`，防止清理方在提交前删除它。
+                let scope = $resolve_scope(&mut transaction, &principal)
+                    .await.map_err(commit_storage)?;
+                // 祖先链只检查存在与 `deleting`；到期但未扫描的链仍可续接。
+                let parent_pk = match commit.parent_id.as_ref() {
+                    Some(parent) => {
+                        let rows: Vec<(i64, i64, Option<i64>, i64)> = sqlx::query_as(
+                            "WITH RECURSIVE seed AS (\
+                             SELECT n.node_pk,n.parent_pk,n.scope_id FROM turn_nodes n \
+                             JOIN content_scopes s ON s.id=n.scope_id \
+                             WHERE n.id=$1 AND s.principal=$2 AND n.kind=$3 \
+                             AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)\
+                             ), ancestors(node_pk,parent_pk,scope_id) AS (\
+                             SELECT node_pk,parent_pk,scope_id FROM seed UNION \
+                             SELECT n.node_pk,n.parent_pk,n.scope_id FROM ancestors a \
+                             CROSS JOIN turn_nodes n \
+                             WHERE n.node_pk=a.parent_pk AND n.scope_id=a.scope_id AND n.kind=$3 \
+                             AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)) \
+                             SELECT a.node_pk,a.scope_id,a.parent_pk,(SELECT node_pk FROM seed) FROM ancestors a",
+                        ).bind(parent.as_str()).bind(&principal).bind(commit.kind.as_str())
+                            .fetch_all(&mut *transaction).await.map_err(commit_storage)?;
+                        let mut roots = 0usize;
+                        for (_, scope_id, parent_pk, _) in &rows {
+                            if *scope_id != scope { return Err(TurnCommitError::ParentUnavailable); }
+                            roots += usize::from(parent_pk.is_none());
+                        }
+                        if roots != 1 || rows.is_empty() {
+                            return Err(TurnCommitError::ParentUnavailable);
+                        }
+                        Some(rows[0].3)
+                    }
+                    None => None,
+                };
+                let node_pk: Option<i64> = sqlx::query_scalar(
+                    "INSERT INTO turn_nodes(id,scope_id,kind,parent_pk,payload_version,created_at,\
+                     prefix_namespace,prefix_fingerprint,prefix_item_count,prefix_completed_at,\
+                     prefix_projection_version,prefix_controls_fingerprint,prefix_context_fingerprint) \
+                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+                     ON CONFLICT(id) DO NOTHING RETURNING node_pk",
+                ).bind(commit.id.as_str()).bind(scope).bind(commit.kind.as_str()).bind(parent_pk)
+                    .bind(i64::from(commit.payload_version)).bind(now)
+                    .bind(prefix.map(|prefix| prefix.namespace.as_str()))
+                    .bind(prefix.map(|prefix| prefix.fingerprint.as_str()))
+                    .bind(prefix.map(|prefix| i64::from(prefix.item_count)))
+                    .bind(prefix.map(|prefix| prefix.completed_at))
+                    .bind(projection.map(|proof| i64::from(proof.version)))
+                    .bind(projection.map(|proof| proof.controls_fingerprint.as_str()))
+                    .bind(projection.map(|proof| proof.context_fingerprint.as_str()))
+                    .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
+                let node_pk = node_pk.ok_or(TurnCommitError::AlreadyExists)?;
+                sqlx::query("INSERT INTO turn_node_payloads(node_pk,payload) VALUES($1,$2)")
+                    .bind(node_pk).bind(payload).execute(&mut *transaction).await.map_err(commit_storage)?;
+                sqlx::query("INSERT INTO turn_node_retention(node_pk,deleting) VALUES($1,FALSE)")
+                    .bind(node_pk).execute(&mut *transaction).await.map_err(commit_storage)?;
+                // 依赖按 Principal 锁定后再写引用行：Marker 缺失只跳过，受信引用缺失即失败。
+                for references in marker_references.chunks(400) {
+                    let found = $deps(
+                        &mut transaction, &principal, "history_markers", "reference", references,
+                    ).await?;
+                    for reference in found {
+                        sqlx::query("INSERT INTO turn_node_markers(node_pk,reference) VALUES($1,$2) ON CONFLICT DO NOTHING")
+                            .bind(node_pk).bind(reference).execute(&mut *transaction).await.map_err(commit_storage)?;
+                    }
+                }
+                for (table, column, references) in [
+                    ("reversible_redaction_mappings", "reference", &redaction_references),
+                    ("native_compactions", "id", &compaction_record_ids),
+                ] {
+                    for chunk in references.chunks(400) {
+                        let found = $deps(
+                            &mut transaction, &principal, table, column, chunk,
+                        ).await?;
+                        if found.len() != chunk.len() {
+                            return Err(TurnCommitError::DependencyUnavailable);
+                        }
+                        for reference in found {
+                            let sql = if table == "native_compactions" {
+                                "INSERT INTO turn_node_compactions(node_pk,record_id) VALUES($1,$2) ON CONFLICT DO NOTHING"
+                            } else {
+                                "INSERT INTO turn_node_redaction_mappings(node_pk,reference) VALUES($1,$2) ON CONFLICT DO NOTHING"
+                            };
+                            sqlx::query(sql)
+                                .bind(node_pk).bind(reference).execute(&mut *transaction).await.map_err(commit_storage)?;
+                        }
+                    }
+                }
+                if let Some(inline) = inline_checkpoint.as_ref() {
+                    if !$inline_lock.is_empty() {
+                        sqlx::query($inline_lock)
+                            .execute(&mut *transaction).await.map_err(commit_storage)?;
+                    }
+                    if $inline_pg {
+                        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('lineage:' || $1),hashtext($2))")
+                            .bind(&principal)
+                            .bind(&inline.admission_id)
+                            .execute(&mut *transaction)
+                            .await
+                            .map_err(commit_storage)?;
+                    }
+                    if !inline.pending_model_turns.is_empty() {
+                        $apply_turns(
+                            &mut transaction,
+                            &principal,
+                            &inline.admission_id,
+                            &inline.lease_id,
+                            &inline.pending_model_turns,
+                        )
+                        .await
+                        .map_err(map_inline_atomic_error)?;
+                    }
+                    $inline_ckpt(
+                        &mut transaction,
+                        &principal,
+                        &inline.admission_id,
+                        &inline.checkpoint_id,
+                        &inline.lease_id,
+                    )
+                    .await
+                    .map_err(map_inline_atomic_error)?;
+                    sqlx::query("INSERT INTO turn_node_atomic_checkpoints(node_pk,principal,checkpoint_id) VALUES($1,$2,$3)")
+                        .bind(node_pk).bind(&principal).bind(&inline.checkpoint_id)
+                        .execute(&mut *transaction).await.map_err(commit_storage)?;
+                } else if let Some(checkpoint_id) = commit.atomic_checkpoint_id.as_ref() {
+                    // SQLite serializes publication and collection with its write transaction.
+                    // PostgreSQL uses the lease and checkpoint row locks below.
+                    if !$checkpoint_lock.is_empty() {
+                        sqlx::query($checkpoint_lock)
+                            .execute(&mut *transaction).await.map_err(commit_storage)?;
+                    }
+                    let lease_sql = concat!(
+                        "SELECT l.expires_at_ms FROM vendor_atomic_leases l ",
+                        "JOIN vendor_atomic_checkpoints c ON c.principal=l.principal AND c.admission_id=l.admission_id AND c.lease_id=l.lease_id ",
+                        "WHERE c.principal=$1 AND c.checkpoint_id=$2", $lineage_lock
+                    );
+                    let expires_at: Option<i64> = sqlx::query_scalar(lease_sql)
+                        .bind(&principal).bind(checkpoint_id)
+                        .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
+                    if !expires_at.is_some_and(|expiry| expiry > chrono::Utc::now().timestamp_millis()) {
+                        return Err(TurnCommitError::AtomicStateUnavailable);
+                    }
+                    let found = $deps(
+                        &mut transaction, &principal, "vendor_atomic_checkpoints", "checkpoint_id",
+                        std::slice::from_ref(checkpoint_id),
+                    ).await?;
+                    if found.is_empty() {
+                        return Err(TurnCommitError::AtomicStateUnavailable);
+                    }
+                    sqlx::query("INSERT INTO turn_node_atomic_checkpoints(node_pk,principal,checkpoint_id) VALUES($1,$2,$3)")
+                        .bind(node_pk).bind(&principal).bind(checkpoint_id)
+                        .execute(&mut *transaction).await.map_err(commit_storage)?;
+                }
+                content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await.map_err(commit_storage)?;
+                transaction.commit().await.map_err(commit_storage)?;
+            }};
+        }
+        match &self.backend {
+            Backend::Sqlite(pool) => {
+                persist!(
+                    pool,
+                    "",
+                    "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                    "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                    false,
+                    "",
+                    crate::content_store::sqlite::resolve_scope,
+                    dependency_references_sqlite,
+                    put_sqlite,
+                    crate::plugin::store::apply_pending_model_turns_in_tx_sqlite,
+                    crate::plugin::store::checkpoint_atomic_state_in_tx_sqlite
+                )
+            }
+            Backend::Postgres(pool) => persist!(
+                pool,
+                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE",
+                "",
+                "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
+                true,
+                " FOR UPDATE OF l",
+                crate::content_store::postgres::resolve_scope,
+                dependency_references_postgres,
+                put_postgres,
+                crate::plugin::store::apply_pending_model_turns_in_tx_postgres,
+                crate::plugin::store::checkpoint_atomic_state_in_tx_postgres
+            ),
+        }
+        Ok(commit.id)
+    }
+}
+
+pub(crate) struct InlineAtomicCheckpoint {
+    pub(crate) admission_id: String,
+    pub(crate) lease_id: String,
+    pub(crate) checkpoint_id: String,
+    pub(crate) pending_model_turns: Vec<crate::plugin::atomic_lease::PendingModelTurn>,
+}
+
+fn map_inline_atomic_error(error: crate::plugin::PluginStorageError) -> TurnCommitError {
+    match error {
+        crate::plugin::PluginStorageError::StaleOperation
+        | crate::plugin::PluginStorageError::MissingLineage => {
+            TurnCommitError::AtomicStateUnavailable
+        }
+        other => TurnCommitError::Storage(other.to_string()),
+    }
 }
 
 #[async_trait]
@@ -907,206 +1174,8 @@ impl TurnChainStore for SqlTurnChainStore {
             .await
     }
 
-    #[tracing::instrument(
-        target = "stravia::perf",
-        name = "turn_chain.commit",
-        skip_all,
-        fields(reference_count)
-    )]
     async fn commit(&self, commit: TurnCommit) -> Result<TurnNodeId, TurnCommitError> {
-        let principal = commit.principal.continuation_key();
-        let now = chrono::Utc::now().timestamp_millis();
-        let mut encoded = tokio::task::spawn_blocking(move || content::encode(commit.payload))
-            .await
-            .map_err(commit_storage)?
-            .map_err(commit_storage)?;
-        tracing::Span::current().record("reference_count", encoded.contents.len() as u64);
-        if !encoded.contents.is_empty() {
-            macro_rules! hint {
-                ($pool:expr, $lookup:ident) => {{
-                    let mut connection = $pool.acquire().await.map_err(commit_storage)?;
-                    content::$lookup(
-                        &mut connection,
-                        content::LookupScope::Principal(&principal),
-                        &encoded.contents,
-                        false,
-                    )
-                    .await
-                    .map_err(commit_storage)?
-                }};
-            }
-            let ids = match &self.backend {
-                Backend::Sqlite(pool) => hint!(pool, lookup_sqlite),
-                Backend::Postgres(pool) => hint!(pool, lookup_postgres),
-            };
-            content::prepare_missing(&mut encoded.contents, &ids)
-                .await
-                .map_err(commit_storage)?;
-        }
-        // descriptor 不含数据库分配的 ID，编码和大正文压缩都在写协调之前完成。
-        let payload = std::mem::take(&mut encoded.payload);
-        let prefix = commit.reusable_prefix.as_ref();
-        let projection = prefix.and_then(|prefix| prefix.projection.as_ref());
-        let mut marker_references = commit.marker_references;
-        marker_references.sort_unstable();
-        marker_references.dedup();
-        let mut redaction_references = commit.redaction_references;
-        redaction_references.sort_unstable();
-        redaction_references.dedup();
-        let mut compaction_record_ids = commit.compaction_record_ids;
-        compaction_record_ids.sort_unstable();
-        compaction_record_ids.dedup();
-        macro_rules! persist {
-            ($pool:expr, $lock:literal, $checkpoint_lock:literal, $lineage_lock:literal, $resolve_scope:path, $deps:ident, $put:ident) => {{
-                let mut transaction = $pool.begin_write().await.map_err(commit_storage)?;
-                if !$lock.is_empty() { sqlx::query($lock).execute(&mut *transaction).await.map_err(commit_storage)?; }
-                let duplicate: Option<i64> = sqlx::query_scalar(
-                    "SELECT node_pk FROM turn_nodes WHERE id=$1",
-                ).bind(commit.id.as_str())
-                    .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
-                if duplicate.is_some() { return Err(TurnCommitError::AlreadyExists); }
-                // 共享正文存储的 scope 协议：已有 scope 加 `FOR KEY SHARE`，防止清理方在提交前删除它。
-                let scope = $resolve_scope(&mut transaction, &principal)
-                    .await.map_err(commit_storage)?;
-                // 祖先链只检查存在与 `deleting`；到期但未扫描的链仍可续接。
-                let parent_pk = match commit.parent_id.as_ref() {
-                    Some(parent) => {
-                        let rows: Vec<(i64, i64, Option<i64>, i64)> = sqlx::query_as(
-                            "WITH RECURSIVE seed AS (\
-                             SELECT n.node_pk,n.parent_pk,n.scope_id FROM turn_nodes n \
-                             JOIN content_scopes s ON s.id=n.scope_id \
-                             WHERE n.id=$1 AND s.principal=$2 AND n.kind=$3 \
-                             AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)\
-                             ), ancestors(node_pk,parent_pk,scope_id) AS (\
-                             SELECT node_pk,parent_pk,scope_id FROM seed UNION \
-                             SELECT n.node_pk,n.parent_pk,n.scope_id FROM ancestors a \
-                             CROSS JOIN turn_nodes n \
-                             WHERE n.node_pk=a.parent_pk AND n.scope_id=a.scope_id AND n.kind=$3 \
-                             AND NOT EXISTS(SELECT 1 FROM turn_node_retention r WHERE r.node_pk=n.node_pk AND r.deleting)) \
-                             SELECT a.node_pk,a.scope_id,a.parent_pk,(SELECT node_pk FROM seed) FROM ancestors a",
-                        ).bind(parent.as_str()).bind(&principal).bind(commit.kind.as_str())
-                            .fetch_all(&mut *transaction).await.map_err(commit_storage)?;
-                        let mut roots = 0usize;
-                        for (_, scope_id, parent_pk, _) in &rows {
-                            if *scope_id != scope { return Err(TurnCommitError::ParentUnavailable); }
-                            roots += usize::from(parent_pk.is_none());
-                        }
-                        if roots != 1 || rows.is_empty() {
-                            return Err(TurnCommitError::ParentUnavailable);
-                        }
-                        Some(rows[0].3)
-                    }
-                    None => None,
-                };
-                let node_pk: Option<i64> = sqlx::query_scalar(
-                    "INSERT INTO turn_nodes(id,scope_id,kind,parent_pk,payload_version,created_at,\
-                     prefix_namespace,prefix_fingerprint,prefix_item_count,prefix_completed_at,\
-                     prefix_projection_version,prefix_controls_fingerprint,prefix_context_fingerprint) \
-                     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
-                     ON CONFLICT(id) DO NOTHING RETURNING node_pk",
-                ).bind(commit.id.as_str()).bind(scope).bind(commit.kind.as_str()).bind(parent_pk)
-                    .bind(i64::from(commit.payload_version)).bind(now)
-                    .bind(prefix.map(|prefix| prefix.namespace.as_str()))
-                    .bind(prefix.map(|prefix| prefix.fingerprint.as_str()))
-                    .bind(prefix.map(|prefix| i64::from(prefix.item_count)))
-                    .bind(prefix.map(|prefix| prefix.completed_at))
-                    .bind(projection.map(|proof| i64::from(proof.version)))
-                    .bind(projection.map(|proof| proof.controls_fingerprint.as_str()))
-                    .bind(projection.map(|proof| proof.context_fingerprint.as_str()))
-                    .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
-                let node_pk = node_pk.ok_or(TurnCommitError::AlreadyExists)?;
-                sqlx::query("INSERT INTO turn_node_payloads(node_pk,payload) VALUES($1,$2)")
-                    .bind(node_pk).bind(payload).execute(&mut *transaction).await.map_err(commit_storage)?;
-                sqlx::query("INSERT INTO turn_node_retention(node_pk,deleting) VALUES($1,FALSE)")
-                    .bind(node_pk).execute(&mut *transaction).await.map_err(commit_storage)?;
-                // 依赖按 Principal 锁定后再写引用行：Marker 缺失只跳过，受信引用缺失即失败。
-                for references in marker_references.chunks(400) {
-                    let found = $deps(
-                        &mut transaction, &principal, "history_markers", "reference", references,
-                    ).await?;
-                    for reference in found {
-                        sqlx::query("INSERT INTO turn_node_markers(node_pk,reference) VALUES($1,$2) ON CONFLICT DO NOTHING")
-                            .bind(node_pk).bind(reference).execute(&mut *transaction).await.map_err(commit_storage)?;
-                    }
-                }
-                for (table, column, references) in [
-                    ("reversible_redaction_mappings", "reference", &redaction_references),
-                    ("native_compactions", "id", &compaction_record_ids),
-                ] {
-                    for chunk in references.chunks(400) {
-                        let found = $deps(
-                            &mut transaction, &principal, table, column, chunk,
-                        ).await?;
-                        if found.len() != chunk.len() {
-                            return Err(TurnCommitError::DependencyUnavailable);
-                        }
-                        for reference in found {
-                            let sql = if table == "native_compactions" {
-                                "INSERT INTO turn_node_compactions(node_pk,record_id) VALUES($1,$2) ON CONFLICT DO NOTHING"
-                            } else {
-                                "INSERT INTO turn_node_redaction_mappings(node_pk,reference) VALUES($1,$2) ON CONFLICT DO NOTHING"
-                            };
-                            sqlx::query(sql)
-                                .bind(node_pk).bind(reference).execute(&mut *transaction).await.map_err(commit_storage)?;
-                        }
-                    }
-                }
-                if let Some(checkpoint_id) = commit.atomic_checkpoint_id.as_ref() {
-                    // SQLite serializes publication and collection with its write transaction.
-                    // PostgreSQL uses the lease and checkpoint row locks below.
-                    if !$checkpoint_lock.is_empty() {
-                        sqlx::query($checkpoint_lock)
-                            .execute(&mut *transaction).await.map_err(commit_storage)?;
-                    }
-                    let lease_sql = concat!(
-                        "SELECT l.expires_at_ms FROM vendor_atomic_leases l ",
-                        "JOIN vendor_atomic_checkpoints c ON c.principal=l.principal AND c.admission_id=l.admission_id AND c.lease_id=l.lease_id ",
-                        "WHERE c.principal=$1 AND c.checkpoint_id=$2", $lineage_lock
-                    );
-                    let expires_at: Option<i64> = sqlx::query_scalar(lease_sql)
-                        .bind(&principal).bind(checkpoint_id)
-                        .fetch_optional(&mut *transaction).await.map_err(commit_storage)?;
-                    if !expires_at.is_some_and(|expiry| expiry > chrono::Utc::now().timestamp_millis()) {
-                        return Err(TurnCommitError::AtomicStateUnavailable);
-                    }
-                    let found = $deps(
-                        &mut transaction, &principal, "vendor_atomic_checkpoints", "checkpoint_id",
-                        std::slice::from_ref(checkpoint_id),
-                    ).await?;
-                    if found.is_empty() {
-                        return Err(TurnCommitError::AtomicStateUnavailable);
-                    }
-                    sqlx::query("INSERT INTO turn_node_atomic_checkpoints(node_pk,principal,checkpoint_id) VALUES($1,$2,$3)")
-                        .bind(node_pk).bind(&principal).bind(checkpoint_id)
-                        .execute(&mut *transaction).await.map_err(commit_storage)?;
-                }
-                content::$put(&mut transaction, node_pk, scope, &mut encoded.contents).await.map_err(commit_storage)?;
-                transaction.commit().await.map_err(commit_storage)?;
-            }};
-        }
-        match &self.backend {
-            Backend::Sqlite(pool) => {
-                persist!(
-                    pool,
-                    "",
-                    "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
-                    "",
-                    crate::content_store::sqlite::resolve_scope,
-                    dependency_references_sqlite,
-                    put_sqlite
-                )
-            }
-            Backend::Postgres(pool) => persist!(
-                pool,
-                "LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE",
-                "",
-                " FOR UPDATE OF l",
-                crate::content_store::postgres::resolve_scope,
-                dependency_references_postgres,
-                put_postgres
-            ),
-        }
-        Ok(commit.id)
+        self.commit_with_atomic_checkpoint(commit, None).await
     }
 
     #[tracing::instrument(

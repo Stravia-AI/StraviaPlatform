@@ -130,6 +130,7 @@ pub(crate) struct AtomicConversationContext {
 pub(crate) struct ModelTurnRegistration {
     model_turn_id: String,
     atomic_state: AtomicConversationContext,
+    atomic_lease: Option<crate::plugin::atomic_lease::AtomicLeaseGuard>,
     state: Mutex<Option<u64>>,
 }
 
@@ -138,8 +139,21 @@ impl ModelTurnRegistration {
         Self {
             model_turn_id,
             atomic_state,
+            atomic_lease: None,
             state: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn with_atomic_lease(
+        mut self,
+        atomic_lease: Option<crate::plugin::atomic_lease::AtomicLeaseGuard>,
+    ) -> Self {
+        self.atomic_lease = atomic_lease;
+        self
+    }
+
+    pub(crate) fn atomic_lease(&self) -> Option<&crate::plugin::atomic_lease::AtomicLeaseGuard> {
+        self.atomic_lease.as_ref()
     }
 
     async fn register(
@@ -148,6 +162,9 @@ impl ModelTurnRegistration {
         provider_id: &str,
     ) -> Result<(u64, bool), PluginStorageError> {
         let mut state = self.state.lock().await;
+        if let Some(lease) = &self.atomic_lease {
+            lease.flush_pending_model_turns().await?;
+        }
         let cursor = store
             .register_model_turn(&self.atomic_state, &self.model_turn_id, provider_id, *state)
             .await?;
@@ -808,37 +825,54 @@ impl Gateway {
         if matches!(prepared.kind, Operation::Infer | Operation::Compact)
             && let Some(registration) = &context.model_turn_registration
         {
-            let (index, mixed_providers) = tokio::select! {
-                biased;
-                _ = context.cancellation.cancelled() => return Err(RuntimeError::Cancelled.into()),
-                () = context.deadline.wait() => return Err(RuntimeError::DeadlineExceeded.into()),
-                result = async {
-                    // The durable commit may complete while the caller is cancelled. Keep
-                    // its result in the turn resource even if the dispatch future is dropped.
-                    let registration = registration.clone();
-                    let store = self.vendor_plugins.store.clone();
-                    let provider_id = prepared.provider_id.clone();
-                    tokio::spawn(async move { registration.register(&store, &provider_id).await })
-                        .await
-                        .map_err(|_| RuntimeError::from_guest(ErrorKind::Trapped, "model turn registration task failed".into(), None))?
-                        .map_err(|error| {
-                            let failure = plugin_storage_failure(error);
-                            RuntimeError::from_guest(failure.kind, failure.message, failure.upstream_status)
-                        })
-                } => result?,
-            };
-            prepared.provider.operation_metadata.insert(
-                "model_turn_id".into(),
-                Value::String(registration.model_turn_id.clone()),
-            );
-            prepared
-                .provider
-                .operation_metadata
-                .insert("model_turn_index".into(), Value::from(index));
-            prepared.provider.operation_metadata.insert(
-                "model_turn_mixed_providers".into(),
-                Value::Bool(mixed_providers),
-            );
+            let is_builtin_base = prepared.plugin.component.descriptor().vendor_id == "base";
+            if is_builtin_base && let Some(lease) = &registration.atomic_lease {
+                if let Some(failure) = lease.failure() {
+                    let failure = plugin_storage_failure(failure.into());
+                    return Err(RuntimeError::from_guest(
+                        failure.kind,
+                        failure.message,
+                        failure.upstream_status,
+                    )
+                    .into());
+                }
+                lease.defer_model_turn(
+                    registration.model_turn_id.clone(),
+                    prepared.provider_id.clone(),
+                );
+            } else {
+                let (index, mixed_providers) = tokio::select! {
+                    biased;
+                    _ = context.cancellation.cancelled() => return Err(RuntimeError::Cancelled.into()),
+                    () = context.deadline.wait() => return Err(RuntimeError::DeadlineExceeded.into()),
+                    result = async {
+                        // The durable commit may complete while the caller is cancelled. Keep
+                        // its result in the turn resource even if the dispatch future is dropped.
+                        let registration = registration.clone();
+                        let store = self.vendor_plugins.store.clone();
+                        let provider_id = prepared.provider_id.clone();
+                        tokio::spawn(async move { registration.register(&store, &provider_id).await })
+                            .await
+                            .map_err(|_| RuntimeError::from_guest(ErrorKind::Trapped, "model turn registration task failed".into(), None))?
+                            .map_err(|error| {
+                                let failure = plugin_storage_failure(error);
+                                RuntimeError::from_guest(failure.kind, failure.message, failure.upstream_status)
+                            })
+                    } => result?,
+                };
+                prepared.provider.operation_metadata.insert(
+                    "model_turn_id".into(),
+                    Value::String(registration.model_turn_id.clone()),
+                );
+                prepared
+                    .provider
+                    .operation_metadata
+                    .insert("model_turn_index".into(), Value::from(index));
+                prepared.provider.operation_metadata.insert(
+                    "model_turn_mixed_providers".into(),
+                    Value::Bool(mixed_providers),
+                );
+            }
         }
         if let Some(affinity) = &context.websocket_affinity {
             prepared

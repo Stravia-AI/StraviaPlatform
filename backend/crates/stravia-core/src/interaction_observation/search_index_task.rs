@@ -1,14 +1,18 @@
 //! 后台维护历史检索索引，并在通知丢失或升级后逐批对账。
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use stravia_runtime_contract::CancellationToken;
 use tokio::sync::{broadcast, mpsc};
 
 use super::{ObservationUpdate, eligible, store::ObservationStore};
-use crate::history_recall::index::{index_postgres, index_sqlite};
+use crate::history_recall::index::{index_postgres, index_sqlite, index_sqlite_batch};
 
 const RECONCILE_BATCH: i64 = 64;
+/// 合并同一请求生命周期内的多次观测事件与并发请求更新，减少 SQLite 写事务与 fsync 次数。
+const COALESCE_DELAY: Duration = Duration::from_millis(50);
+const INDEX_BATCH_LIMIT: usize = 64;
 
 pub(crate) fn index_progress_inconsistent(interaction: &str, progress: &str) -> String {
     format!(
@@ -34,6 +38,7 @@ pub(super) async fn run(
     let mut reconcile_needed = true;
     let mut reconciliation: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
     let mut pending = BTreeSet::<String>::new();
+    let mut flush_at: Option<tokio::time::Instant> = None;
     loop {
         if reconcile_needed && reconciliation.is_none() {
             let db = db.clone();
@@ -43,14 +48,39 @@ pub(super) async fn run(
             ));
             reconcile_needed = false;
         }
-        while let Some(id) = pending.pop_first() {
-            index_until_current(&db, &id, &cancellation).await;
+        let flush_ready = !pending.is_empty()
+            && (pending.len() >= INDEX_BATCH_LIMIT
+                || flush_at.is_some_and(|deadline| tokio::time::Instant::now() >= deadline));
+        if flush_ready {
+            let mut batch = Vec::with_capacity(pending.len().min(INDEX_BATCH_LIMIT));
+            while batch.len() < INDEX_BATCH_LIMIT {
+                let Some(id) = pending.pop_first() else {
+                    break;
+                };
+                batch.push(id);
+            }
+            let remaining = index_batch(&db, &batch, &cancellation).await;
+            pending.extend(remaining);
             if cancellation.is_cancelled() {
                 break;
             }
+            // 仍有积压或大 Interaction 分页续批时立即继续，不再追加合并等待。
+            flush_at = (!pending.is_empty()).then(tokio::time::Instant::now);
+            if !pending.is_empty() {
+                tokio::task::yield_now().await;
+                continue;
+            }
+        } else if !pending.is_empty() && flush_at.is_none() {
+            flush_at = Some(tokio::time::Instant::now() + COALESCE_DELAY);
         }
         tokio::select! {
             _ = cancellation.cancelled() => break,
+            _ = async {
+                match flush_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {}
             result = async {
                 match reconciliation.as_mut() {
                     Some(task) => task.await,
@@ -105,6 +135,47 @@ pub(super) async fn run(
     }
 }
 
+async fn index_batch(
+    db: &ObservationStore,
+    batch: &[String],
+    cancellation: &CancellationToken,
+) -> Vec<String> {
+    if batch.is_empty() {
+        return Vec::new();
+    }
+    match db {
+        ObservationStore::Sqlite(pool, _) => {
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return Vec::new(),
+                result = index_sqlite_batch(pool, batch) => result,
+            };
+            match result {
+                Ok(more) => more,
+                Err(error) => {
+                    // 单个失败不阻断同批其它 Interaction：回退到逐条索引隔离故障。
+                    tracing::debug!(error = ?error, batch_len = batch.len(), "batched history search indexing failed; falling back to per-interaction indexing");
+                    for id in batch {
+                        index_until_current(db, id, cancellation).await;
+                        if cancellation.is_cancelled() {
+                            break;
+                        }
+                    }
+                    Vec::new()
+                }
+            }
+        }
+        ObservationStore::Postgres(_, _) => {
+            for id in batch {
+                index_until_current(db, id, cancellation).await;
+                if cancellation.is_cancelled() {
+                    break;
+                }
+            }
+            Vec::new()
+        }
+    }
+}
+
 async fn index_until_current(db: &ObservationStore, id: &str, cancellation: &CancellationToken) {
     loop {
         let result = tokio::select! {
@@ -139,11 +210,13 @@ pub(super) async fn reconcile(
             return Ok(());
         };
         cursor.clone_from(last);
-        for id in rows {
-            index_until_current(db, &id, cancellation).await;
-            if cancellation.is_cancelled() {
-                return Ok(());
-            }
+        let mut remaining = index_batch(db, &rows, cancellation).await;
+        while !remaining.is_empty() && !cancellation.is_cancelled() {
+            tokio::task::yield_now().await;
+            remaining = index_batch(db, &remaining, cancellation).await;
+        }
+        if cancellation.is_cancelled() {
+            return Ok(());
         }
         tokio::task::yield_now().await;
     }

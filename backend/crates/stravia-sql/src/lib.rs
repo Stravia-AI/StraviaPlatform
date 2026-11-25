@@ -92,6 +92,12 @@ pub mod pool {
 /// A low-cardinality name identifies the role, never the database URL.
 pub struct Pool<DB: Database> {
     inner: sqlx_native::Pool<DB>,
+    /// File-backed SQLite pools with `require_write_lease` isolate writes onto a
+    /// dedicated 1-connection pool so pooled read connections stay permanently
+    /// `PRAGMA query_only = ON` without toggling the flag (which emits SQLite
+    /// `OP_Expire` and invalidates every cached prepared statement on every
+    /// write transaction).
+    writer_pool: Option<sqlx_native::Pool<DB>>,
     name: &'static str,
     write_gate: Option<Arc<tokio::sync::Mutex<()>>>,
     write_mode: Option<WriteMode<DB>>,
@@ -100,6 +106,7 @@ impl<DB: Database> Clone for Pool<DB> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            writer_pool: self.writer_pool.clone(),
             name: self.name,
             write_gate: self.write_gate.clone(),
             write_mode: self.write_mode,
@@ -115,9 +122,14 @@ impl<DB: Database> fmt::Debug for Pool<DB> {
     }
 }
 impl<DB: Database> Pool<DB> {
-    fn wrap(inner: sqlx_native::Pool<DB>, write_mode: Option<WriteMode<DB>>) -> Self {
+    fn wrap(
+        inner: sqlx_native::Pool<DB>,
+        writer_pool: Option<sqlx_native::Pool<DB>>,
+        write_mode: Option<WriteMode<DB>>,
+    ) -> Self {
         Self {
             inner,
+            writer_pool,
             name: "main",
             write_gate: (DB::NAME == <Sqlite as Database>::NAME)
                 .then(|| Arc::new(tokio::sync::Mutex::new(()))),
@@ -193,7 +205,21 @@ impl<DB: Database> Pool<DB> {
             error_kind = tracing::field::Empty,
         ));
         let mut lease = Lease::new(guard, hold, self.name);
-        match self.acquire().await {
+        let acquired = match &self.writer_pool {
+            Some(writer_pool) => {
+                let name = self.name;
+                diagnostics::acquire_named(writer_pool, name)
+                    .await
+                    .map(|connection| PoolConnection {
+                        handle: ConnectionHandle {
+                            inner: ConnectionInner::Pooled(connection),
+                            name,
+                        },
+                    })
+            }
+            None => self.acquire().await,
+        };
+        match acquired {
             Ok(connection) => {
                 let mut connection =
                     WriteConnection::new(connection, Some(lease)).with_write_mode(self.write_mode);
@@ -260,8 +286,11 @@ impl<DB: Database> Pool<DB> {
             result
         }
     }
-    pub fn close(&self) -> impl Future<Output = ()> + '_ {
-        self.inner.close()
+    pub async fn close(&self) {
+        self.inner.close().await;
+        if let Some(writer_pool) = &self.writer_pool {
+            writer_pool.close().await;
+        }
     }
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
@@ -318,10 +347,75 @@ fn sqlite_write_mode(
     })
 }
 
+#[derive(Clone, Default)]
+struct WriterPoolSettings {
+    acquire_timeout: Option<Duration>,
+    idle_timeout: Option<Option<Duration>>,
+    max_lifetime: Option<Option<Duration>>,
+    test_before_acquire: Option<bool>,
+    acquire_time_level: Option<log::LevelFilter>,
+}
+
+impl WriterPoolSettings {
+    fn build<DB: Database>(
+        &self,
+        after_connect: Option<AfterConnect<DB>>,
+    ) -> sqlx_native::pool::PoolOptions<DB> {
+        let mut options = sqlx_native::pool::PoolOptions::<DB>::new()
+            .max_connections(1)
+            .min_connections(0);
+        if let Some(value) = self.acquire_timeout {
+            options = options.acquire_timeout(value);
+        }
+        if let Some(value) = self.idle_timeout {
+            options = options.idle_timeout(value);
+        }
+        if let Some(value) = self.max_lifetime {
+            options = options.max_lifetime(value);
+        }
+        if let Some(value) = self.test_before_acquire {
+            options = options.test_before_acquire(value);
+        }
+        if let Some(value) = self.acquire_time_level {
+            options = options.acquire_time_level(value);
+        }
+        if let Some(callback) = after_connect {
+            options =
+                options.after_connect(move |connection, metadata| callback(connection, metadata));
+        }
+        options
+    }
+}
+
+/// Only writable file-backed SQLite pools can open a dedicated writable
+/// connection; in-memory databases without shared cache would isolate each
+/// connection into its own empty database, and read-only pools must remain
+/// read-only.
+fn supports_dedicated_writer<DB: Database>(
+    options: &<DB::Connection as NativeConnection>::Options,
+) -> bool {
+    let any: &dyn std::any::Any = options;
+    let Some(sqlite) = any.downcast_ref::<sqlx_native::sqlite::SqliteConnectOptions>() else {
+        return false;
+    };
+    let path = sqlite.get_filename();
+    if path == std::path::Path::new(":memory:") || path.as_os_str().is_empty() {
+        return false;
+    }
+    // `sqlx-sqlite`'s `to_url_lossy()` panics on filenames containing `:`
+    // (such as `file:...` URIs or Windows drive letters); inspect the mode
+    // query pair using a sanitized dummy filename instead.
+    let probe = sqlite.clone().filename("stravia-probe.db").to_url_lossy();
+    probe
+        .query_pairs()
+        .any(|(key, value)| key == "mode" && matches!(value.as_ref(), "rw" | "rwc"))
+}
+
 pub struct PoolOptions<DB: Database> {
     native: sqlx_native::pool::PoolOptions<DB>,
     after_connect: Option<AfterConnect<DB>>,
     write_mode: Option<WriteMode<DB>>,
+    writer_settings: WriterPoolSettings,
 }
 impl<DB: Database> Default for PoolOptions<DB> {
     fn default() -> Self {
@@ -334,6 +428,7 @@ impl<DB: Database> PoolOptions<DB> {
             native: sqlx_native::pool::PoolOptions::new(),
             after_connect: None,
             write_mode: None,
+            writer_settings: WriterPoolSettings::default(),
         }
     }
     fn map_native(
@@ -349,19 +444,26 @@ impl<DB: Database> PoolOptions<DB> {
     pub fn min_connections(self, value: u32) -> Self {
         self.map_native(|native| native.min_connections(value))
     }
-    pub fn acquire_timeout(self, value: Duration) -> Self {
+    pub fn acquire_timeout(mut self, value: Duration) -> Self {
+        self.writer_settings.acquire_timeout = Some(value);
         self.map_native(|native| native.acquire_timeout(value))
     }
-    pub fn idle_timeout(self, value: impl Into<Option<Duration>>) -> Self {
+    pub fn idle_timeout(mut self, value: impl Into<Option<Duration>>) -> Self {
+        let value = value.into();
+        self.writer_settings.idle_timeout = Some(value);
         self.map_native(|native| native.idle_timeout(value))
     }
-    pub fn max_lifetime(self, value: impl Into<Option<Duration>>) -> Self {
+    pub fn max_lifetime(mut self, value: impl Into<Option<Duration>>) -> Self {
+        let value = value.into();
+        self.writer_settings.max_lifetime = Some(value);
         self.map_native(|native| native.max_lifetime(value))
     }
-    pub fn test_before_acquire(self, value: bool) -> Self {
+    pub fn test_before_acquire(mut self, value: bool) -> Self {
+        self.writer_settings.test_before_acquire = Some(value);
         self.map_native(|native| native.test_before_acquire(value))
     }
-    pub fn acquire_time_level(self, value: log::LevelFilter) -> Self {
+    pub fn acquire_time_level(mut self, value: log::LevelFilter) -> Self {
+        self.writer_settings.acquire_time_level = Some(value);
         self.map_native(|native| native.acquire_time_level(value))
     }
     /// SQLx connection initialization callbacks use native driver connections.
@@ -379,12 +481,23 @@ impl<DB: Database> PoolOptions<DB> {
         self.after_connect = Some(Arc::new(callback));
         self
     }
-    fn into_native(self) -> (sqlx_native::pool::PoolOptions<DB>, Option<WriteMode<DB>>) {
+    fn split_native(
+        self,
+        options: Option<&<DB::Connection as NativeConnection>::Options>,
+    ) -> (
+        sqlx_native::pool::PoolOptions<DB>,
+        Option<sqlx_native::pool::PoolOptions<DB>>,
+        Option<WriteMode<DB>>,
+    ) {
         let Self {
             native,
             after_connect,
             write_mode,
+            writer_settings,
         } = self;
+        let dedicated_writer = write_mode.is_some()
+            && options.is_some_and(|opts| supports_dedicated_writer::<DB>(opts));
+        let writer_native = dedicated_writer.then(|| writer_settings.build(after_connect.clone()));
         let native = match (after_connect, write_mode) {
             (None, None) => native,
             (Some(callback), None) => {
@@ -401,37 +514,38 @@ impl<DB: Database> PoolOptions<DB> {
                 })
             }),
         };
-        (native, write_mode)
+        let active_write_mode = if dedicated_writer { None } else { write_mode };
+        (native, writer_native, active_write_mode)
     }
     pub async fn connect(self, url: &str) -> Result<Pool<DB>, Error> {
-        let (native, write_mode) = self.into_native();
-        native
-            .connect(url)
-            .await
-            .map(|inner| Pool::wrap(inner, write_mode))
+        let options: <DB::Connection as NativeConnection>::Options = url.parse()?;
+        self.connect_with(options).await
     }
     pub async fn connect_with(
         self,
         options: <DB::Connection as NativeConnection>::Options,
     ) -> Result<Pool<DB>, Error> {
-        let (native, write_mode) = self.into_native();
-        native
-            .connect_with(options)
-            .await
-            .map(|inner| Pool::wrap(inner, write_mode))
+        let (native, writer_native, write_mode) = self.split_native(Some(&options));
+        let writer_options = writer_native.as_ref().map(|_| options.clone());
+        let inner = native.connect_with(options).await?;
+        let writer_pool = writer_native
+            .map(|writer| writer.connect_lazy_with(writer_options.expect("cloned writer options")));
+        Ok(Pool::wrap(inner, writer_pool, write_mode))
     }
     pub fn connect_lazy(self, url: &str) -> Result<Pool<DB>, Error> {
-        let (native, write_mode) = self.into_native();
-        native
-            .connect_lazy(url)
-            .map(|inner| Pool::wrap(inner, write_mode))
+        let options: <DB::Connection as NativeConnection>::Options = url.parse()?;
+        Ok(self.connect_lazy_with(options))
     }
     pub fn connect_lazy_with(
         self,
         options: <DB::Connection as NativeConnection>::Options,
     ) -> Pool<DB> {
-        let (native, write_mode) = self.into_native();
-        Pool::wrap(native.connect_lazy_with(options), write_mode)
+        let (native, writer_native, write_mode) = self.split_native(Some(&options));
+        let writer_options = writer_native.as_ref().map(|_| options.clone());
+        let inner = native.connect_lazy_with(options);
+        let writer_pool = writer_native
+            .map(|writer| writer.connect_lazy_with(writer_options.expect("cloned writer options")));
+        Pool::wrap(inner, writer_pool, write_mode)
     }
 }
 impl PoolOptions<Sqlite> {

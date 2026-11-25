@@ -26,13 +26,19 @@ struct Lease<'r> {
     scratch: Option<Scratch>,
 }
 
+/// Bound idle search workspaces retained per compiled regex so high-concurrency
+/// bursts do not permanently retain unbounded lazy-DFA caches across idle
+/// periods while keeping steady-state concurrent scans (up to 4 threads) warm.
+const MAX_IDLE_SCRATCHES: usize = 4;
+
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        self.regex
-            .0
-            .idle
-            .lock()
-            .push(self.scratch.take().expect("owned search workspace"));
+        if let Some(scratch) = self.scratch.take() {
+            let mut idle = self.regex.0.idle.lock();
+            if idle.len() < MAX_IDLE_SCRATCHES {
+                idle.push(scratch);
+            }
+        }
     }
 }
 
@@ -105,20 +111,7 @@ impl Regex {
             })
     }
 
-    pub(super) fn captures<'h>(&self, haystack: &'h [u8]) -> Option<Captures<'h>> {
-        let mut lease = self.lease();
-        let scratch = lease.scratch.as_mut().unwrap();
-        self.0.engine.search_captures_with(
-            &mut scratch.cache,
-            &Input::new(haystack),
-            &mut scratch.captures,
-        );
-        scratch.captures.is_match().then(|| Captures {
-            haystack,
-            captures: scratch.captures.clone(),
-        })
-    }
-
+    #[cfg(test)]
     pub(super) fn find_iter<'r, 'h>(
         &'r self,
         haystack: &'h [u8],
@@ -142,6 +135,29 @@ impl Regex {
                     end: found.end(),
                 })
         })
+    }
+
+    /// Single-lease match scan that can also extract capture groups on a
+    /// trimmed subslice using the same `Scratch` workspace, avoiding a second
+    /// concurrent `Lease` allocation and `Captures::clone()` on every match.
+    pub(super) fn find_each_with_captures<E>(
+        &self,
+        haystack: &[u8],
+        mut on_match: impl FnMut(usize, usize, &mut CaptureExtractor<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut lease = self.lease();
+        let scratch = lease.scratch.as_mut().expect("owned search workspace");
+        let mut searcher = Searcher::new(Input::new(haystack));
+        while let Some(found) =
+            searcher.advance(|input| Ok(self.0.engine.search_with(&mut scratch.cache, input)))
+        {
+            let mut extractor = CaptureExtractor {
+                engine: &self.0.engine,
+                scratch,
+            };
+            on_match(found.start(), found.end(), &mut extractor)?;
+        }
+        Ok(())
     }
 
     pub(super) fn captures_iter<'r, 'h>(
@@ -168,6 +184,42 @@ impl Regex {
                 captures: scratch.captures.clone(),
             })
         })
+    }
+}
+
+pub(super) struct CaptureExtractor<'a> {
+    engine: &'a meta::Regex,
+    scratch: &'a mut Scratch,
+}
+
+impl CaptureExtractor<'_> {
+    /// Runs capture extraction against `slice` reusing the caller's leased
+    /// scratch workspace and returns the selected group's byte range relative
+    /// to `slice`, if any.
+    pub(super) fn extract_secret_range(
+        &mut self,
+        slice: &[u8],
+        secret_group: usize,
+    ) -> Option<(usize, usize)> {
+        self.engine.search_captures_with(
+            &mut self.scratch.cache,
+            &Input::new(slice),
+            &mut self.scratch.captures,
+        );
+        if !self.scratch.captures.is_match() {
+            return None;
+        }
+        let span = if secret_group > 0 {
+            self.scratch.captures.get_group(secret_group)
+        } else {
+            (1..self.scratch.captures.group_len()).find_map(|index| {
+                self.scratch
+                    .captures
+                    .get_group(index)
+                    .filter(|span| span.start < span.end)
+            })
+        }?;
+        Some((span.start, span.end))
     }
 }
 

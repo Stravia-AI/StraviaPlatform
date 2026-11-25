@@ -573,6 +573,191 @@ async fn mirror_memory_atomic(
     Ok(())
 }
 
+pub(crate) async fn apply_pending_model_turns_in_tx_sqlite(
+    tx: &mut sqlx::SqliteConnection<'_>,
+    principal: &str,
+    admission: &str,
+    lease: &str,
+    turns: &[crate::plugin::atomic_lease::PendingModelTurn],
+) -> Result<(), PluginStorageError> {
+    if turns.is_empty() {
+        return Ok(());
+    }
+    let epoch: i64 = sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id=1")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT g.model_turn_cursor FROM vendor_atomic_lineages g JOIN vendor_atomic_leases l ON l.principal=g.principal AND l.admission_id=g.admission_id WHERE g.principal=$1 AND g.admission_id=$2 AND g.history_epoch=$3 AND l.lease_id=$4 AND l.expires_at_ms>$5")
+        .bind(principal)
+        .bind(admission)
+        .bind(epoch)
+        .bind(lease)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    let encoded = row.ok_or(PluginStorageError::StaleOperation)?.0;
+    let mut cursor: Option<ModelTurnCursor> = encoded
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| PluginStorageError::Storage)?;
+    let mut any_changed = false;
+    for turn in turns {
+        let (next, changed) =
+            ModelTurnCursor::register(cursor, &turn.model_turn_id, &turn.provider_id, None)?;
+        cursor = Some(next);
+        any_changed |= changed;
+    }
+    if any_changed && let Some(cursor) = cursor {
+        let encoded = serde_json::to_string(&cursor).map_err(|_| PluginStorageError::Storage)?;
+        sqlx::query(
+            "UPDATE vendor_atomic_lineages SET model_turn_cursor=$3 WHERE principal=$1 AND admission_id=$2",
+        )
+        .bind(principal)
+        .bind(admission)
+        .bind(encoded)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn apply_pending_model_turns_in_tx_postgres(
+    tx: &mut sqlx::PgConnection<'_>,
+    principal: &str,
+    admission: &str,
+    lease: &str,
+    turns: &[crate::plugin::atomic_lease::PendingModelTurn],
+) -> Result<(), PluginStorageError> {
+    if turns.is_empty() {
+        return Ok(());
+    }
+    let epoch: i64 =
+        sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id=1 FOR SHARE")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT g.model_turn_cursor FROM vendor_atomic_lineages g JOIN vendor_atomic_leases l ON l.principal=g.principal AND l.admission_id=g.admission_id WHERE g.principal=$1 AND g.admission_id=$2 AND g.history_epoch=$3 AND l.lease_id=$4 AND l.expires_at_ms>$5")
+        .bind(principal)
+        .bind(admission)
+        .bind(epoch)
+        .bind(lease)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    let encoded = row.ok_or(PluginStorageError::StaleOperation)?.0;
+    let mut cursor: Option<ModelTurnCursor> = encoded
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| PluginStorageError::Storage)?;
+    let mut any_changed = false;
+    for turn in turns {
+        let (next, changed) =
+            ModelTurnCursor::register(cursor, &turn.model_turn_id, &turn.provider_id, None)?;
+        cursor = Some(next);
+        any_changed |= changed;
+    }
+    if any_changed && let Some(cursor) = cursor {
+        let encoded = serde_json::to_string(&cursor).map_err(|_| PluginStorageError::Storage)?;
+        sqlx::query(
+            "UPDATE vendor_atomic_lineages SET model_turn_cursor=$3 WHERE principal=$1 AND admission_id=$2",
+        )
+        .bind(principal)
+        .bind(admission)
+        .bind(encoded)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn checkpoint_atomic_state_in_tx_sqlite(
+    tx: &mut sqlx::SqliteConnection<'_>,
+    principal: &str,
+    admission: &str,
+    checkpoint: &str,
+    lease: &str,
+) -> Result<(), PluginStorageError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT CAST(1 AS BIGINT) FROM vendor_atomic_leases WHERE principal=$1 AND admission_id=$2 AND lease_id=$3 AND expires_at_ms>$4")
+        .bind(principal)
+        .bind(admission)
+        .bind(lease)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    if exists.is_none() {
+        return Err(PluginStorageError::StaleOperation);
+    }
+    let inserted = sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms,boundary_head,model_turn_cursor) VALUES($1,$2,$3,$4,$5,(SELECT boundary_head FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3),(SELECT model_turn_cursor FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3)) ON CONFLICT(principal,checkpoint_id) DO NOTHING")
+        .bind(principal)
+        .bind(checkpoint)
+        .bind(admission)
+        .bind(lease)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?
+        .rows_affected();
+    if inserted != 1 {
+        return Err(PluginStorageError::Changed);
+    }
+    sqlx::query("INSERT INTO vendor_atomic_checkpoint_cells(principal,checkpoint_id,vendor_id,provider_id,cell_key,revision,payload,journal_head) SELECT principal,$3,vendor_id,provider_id,cell_key,revision,payload,journal_head FROM vendor_atomic_cells WHERE principal=$1 AND admission_id=$2")
+        .bind(principal)
+        .bind(admission)
+        .bind(checkpoint)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+pub(crate) async fn checkpoint_atomic_state_in_tx_postgres(
+    tx: &mut sqlx::PgConnection<'_>,
+    principal: &str,
+    admission: &str,
+    checkpoint: &str,
+    lease: &str,
+) -> Result<(), PluginStorageError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT CAST(1 AS BIGINT) FROM vendor_atomic_leases WHERE principal=$1 AND admission_id=$2 AND lease_id=$3 AND expires_at_ms>$4 FOR UPDATE")
+        .bind(principal)
+        .bind(admission)
+        .bind(lease)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    if exists.is_none() {
+        return Err(PluginStorageError::StaleOperation);
+    }
+    let inserted = sqlx::query("INSERT INTO vendor_atomic_checkpoints(principal,checkpoint_id,admission_id,lease_id,created_at_ms,boundary_head,model_turn_cursor) VALUES($1,$2,$3,$4,$5,(SELECT boundary_head FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3),(SELECT model_turn_cursor FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$3)) ON CONFLICT(principal,checkpoint_id) DO NOTHING")
+        .bind(principal)
+        .bind(checkpoint)
+        .bind(admission)
+        .bind(lease)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?
+        .rows_affected();
+    if inserted != 1 {
+        return Err(PluginStorageError::Changed);
+    }
+    sqlx::query("INSERT INTO vendor_atomic_checkpoint_cells(principal,checkpoint_id,vendor_id,provider_id,cell_key,revision,payload,journal_head) SELECT principal,$3,vendor_id,provider_id,cell_key,revision,payload,journal_head FROM vendor_atomic_cells WHERE principal=$1 AND admission_id=$2")
+        .bind(principal)
+        .bind(admission)
+        .bind(checkpoint)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    Ok(())
+}
+
 impl PluginStore {
     pub(crate) async fn register_model_turn(
         &self,
@@ -671,6 +856,69 @@ impl PluginStore {
                     }
                 }
                 Ok(cursor)
+            }
+        }
+    }
+
+    pub(crate) fn is_sql_backed(&self) -> bool {
+        matches!(
+            self.backend,
+            PluginStoreBackend::Sqlite(_) | PluginStoreBackend::Postgres(_)
+        )
+    }
+
+    pub(crate) async fn register_model_turns_batch(
+        &self,
+        context: &crate::plugin::execution::AtomicConversationContext,
+        turns: &[crate::plugin::atomic_lease::PendingModelTurn],
+    ) -> Result<(), PluginStorageError> {
+        if turns.is_empty() {
+            return Ok(());
+        }
+        let principal = &context.principal;
+        let admission = context.admission_id.to_string();
+        let lease = context.atomic_lease_id.to_string();
+        match &self.backend {
+            PluginStoreBackend::Sqlite(pool) => {
+                let mut tx = pool.begin_write().await.map_err(storage_error)?;
+                sqlx::query("UPDATE vendor_atomic_revision SET revision=revision WHERE id=1")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage_error)?;
+                apply_pending_model_turns_in_tx_sqlite(
+                    &mut tx, principal, &admission, &lease, turns,
+                )
+                .await?;
+                tx.commit().await.map_err(storage_error)?;
+                Ok(())
+            }
+            PluginStoreBackend::Postgres(pool) => {
+                let mut tx = pool.begin_write().await.map_err(storage_error)?;
+                sqlx::query("SELECT pg_advisory_xact_lock_shared(7342179085017261)")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(storage_error)?;
+                sqlx::query(
+                    "SELECT pg_advisory_xact_lock(hashtext('lineage:' || $1),hashtext($2))",
+                )
+                .bind(principal)
+                .bind(&admission)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+                apply_pending_model_turns_in_tx_postgres(
+                    &mut tx, principal, &admission, &lease, turns,
+                )
+                .await?;
+                tx.commit().await.map_err(storage_error)?;
+                Ok(())
+            }
+            PluginStoreBackend::Memory(_) => {
+                for turn in turns {
+                    self.register_model_turn(context, &turn.model_turn_id, &turn.provider_id, None)
+                        .await?;
+                }
+                Ok(())
             }
         }
     }
@@ -1676,6 +1924,129 @@ impl PluginStore {
     ) -> Result<(), PluginStorageError> {
         self.fork_atomic_state_inner(principal, admission, parent_checkpoint, lease, None)
             .await
+    }
+
+    /// Atomically fork an atomic state lineage/lease and insert the corresponding
+    /// `prompt_admissions` row in a single SQLite/PostgreSQL write transaction.
+    /// Returns `Ok(false)` on the in-memory backend so callers can use the
+    /// standalone two-step path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fork_atomic_state_and_insert_prompt_admission(
+        &self,
+        principal: &str,
+        admission_id: &str,
+        parent_checkpoint: Option<&str>,
+        lease: &str,
+        expected_epoch: i64,
+        prompt_admission: &crate::storage::PromptAdmission,
+    ) -> anyhow::Result<bool> {
+        macro_rules! fork_and_insert {
+            ($pool:expr, $lock:literal, $pg:expr, $insert_fn:path) => {{
+                let mut tx = $pool.begin_write().await?;
+                sqlx::query($lock).execute(&mut *tx).await?;
+                let epoch_sql = if $pg {
+                    "SELECT epoch FROM prompt_admission_epoch WHERE id=1 FOR SHARE"
+                } else {
+                    "SELECT epoch FROM prompt_admission_epoch WHERE id=1"
+                };
+                let current_epoch: i64 = sqlx::query_scalar(epoch_sql).fetch_one(&mut *tx).await?;
+                if expected_epoch != current_epoch {
+                    return Err(PluginStorageError::StaleOperation.into());
+                }
+                if $pg {
+                    sqlx::query(
+                        "SELECT pg_advisory_xact_lock(hashtext('lineage:' || $1),hashtext($2))",
+                    )
+                    .bind(principal)
+                    .bind(admission_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                let exists: Option<i64> = sqlx::query_scalar(
+                    "SELECT CAST(1 AS BIGINT) FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$2",
+                )
+                .bind(principal)
+                .bind(admission_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if exists.is_none() {
+                    let mut boundary_head: Option<String> = None;
+                    let mut model_turn_cursor: Option<String> = None;
+                    if let Some(parent) = parent_checkpoint {
+                        let found: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+                            "SELECT boundary_head, model_turn_cursor FROM vendor_atomic_checkpoints WHERE principal=$1 AND checkpoint_id=$2",
+                        )
+                        .bind(principal)
+                        .bind(parent)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        (boundary_head, model_turn_cursor) =
+                            found.ok_or(PluginStorageError::StaleOperation)?;
+                        sqlx::query(
+                            "INSERT INTO vendor_atomic_cells(vendor_id,provider_id,principal,admission_id,cell_key,revision,payload,journal_head) SELECT vendor_id,provider_id,principal,$3,cell_key,revision,payload,journal_head FROM vendor_atomic_checkpoint_cells WHERE principal=$1 AND checkpoint_id=$2",
+                        )
+                        .bind(principal)
+                        .bind(parent)
+                        .bind(admission_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    sqlx::query(
+                        "INSERT INTO vendor_atomic_lineages(principal,admission_id,created_at_ms,history_epoch,boundary_head,model_turn_cursor) VALUES($1,$2,$3,$4,$5,$6)",
+                    )
+                    .bind(principal)
+                    .bind(admission_id)
+                    .bind(chrono::Utc::now().timestamp_millis())
+                    .bind(current_epoch)
+                    .bind(boundary_head)
+                    .bind(model_turn_cursor)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    let lineage_epoch: i64 = sqlx::query_scalar(
+                        "SELECT history_epoch FROM vendor_atomic_lineages WHERE principal=$1 AND admission_id=$2",
+                    )
+                    .bind(principal)
+                    .bind(admission_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if lineage_epoch != current_epoch {
+                        return Err(PluginStorageError::StaleOperation.into());
+                    }
+                }
+                let inserted = sqlx::query(
+                    "INSERT INTO vendor_atomic_leases(principal,admission_id,lease_id,expires_at_ms) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+                )
+                .bind(principal)
+                .bind(admission_id)
+                .bind(lease)
+                .bind(chrono::Utc::now().timestamp_millis() + 120_000)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                if inserted != 1 {
+                    return Err(PluginStorageError::StaleOperation.into());
+                }
+                $insert_fn(&mut tx, prompt_admission, expected_epoch, false).await?;
+                tx.commit().await?;
+                Ok(true)
+            }};
+        }
+        match &self.backend {
+            PluginStoreBackend::Memory(_) => Ok(false),
+            PluginStoreBackend::Sqlite(pool) => fork_and_insert!(
+                pool,
+                "UPDATE vendor_atomic_revision SET revision=revision WHERE id=1",
+                false,
+                crate::storage::sqlite::prompt_admissions::insert_in_tx
+            ),
+            PluginStoreBackend::Postgres(pool) => fork_and_insert!(
+                pool,
+                "SELECT pg_advisory_xact_lock_shared(7342179085017261)",
+                true,
+                crate::storage::postgres::prompt_admissions::insert_in_tx
+            ),
+        }
     }
 
     pub(crate) async fn fork_atomic_state_at_epoch(

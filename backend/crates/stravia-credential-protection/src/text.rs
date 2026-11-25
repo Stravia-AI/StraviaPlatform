@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+use aho_corasick::{AhoCorasick, Input as AcInput, MatchKind as AcMatchKind};
 use serde_json::Value;
 
 use super::{
@@ -124,6 +125,25 @@ pub(super) fn active(mapping: &Mapping) -> bool {
 pub struct KnownSecrets {
     mappings: MappingSnapshot,
     entries: Vec<(usize, bool)>,
+    matcher: Option<AhoCorasick>,
+}
+
+fn build_replace_matcher<'a>(
+    needles: impl Iterator<Item = &'a str>,
+    restore: bool,
+) -> Option<AhoCorasick> {
+    let patterns: Vec<&str> = if restore {
+        needles.collect()
+    } else {
+        needles.chain(std::iter::once(marker::PREFIX)).collect()
+    };
+    if patterns.is_empty() {
+        return None;
+    }
+    AhoCorasick::builder()
+        .match_kind(AcMatchKind::LeftmostLongest)
+        .build(patterns)
+        .ok()
 }
 
 impl KnownSecrets {
@@ -148,7 +168,17 @@ impl KnownSecrets {
             let (a, b) = (&mappings[*a], &mappings[*b]);
             candidate_order((&a.secret, a), (&b.secret, b))
         });
-        Ok(Self { mappings, entries })
+        let matcher = build_replace_matcher(
+            entries
+                .iter()
+                .map(|(index, _)| mappings[*index].secret.as_str()),
+            false,
+        );
+        Ok(Self {
+            mappings,
+            entries,
+            matcher,
+        })
     }
 
     /// 输入是任意历史纯文本，输出把已知秘密换成该映射的凭据标记。
@@ -163,6 +193,7 @@ impl KnownSecrets {
             text,
             false,
             true,
+            self.matcher.as_ref(),
             |text, position| {
                 self.entries
                     .iter()
@@ -194,6 +225,7 @@ struct Candidate<'a> {
 pub(super) struct Candidates<'a> {
     restore: bool,
     entries: Vec<Candidate<'a>>,
+    matcher: Option<AhoCorasick>,
 }
 
 impl<'a> Candidates<'a> {
@@ -224,7 +256,12 @@ impl<'a> Candidates<'a> {
             })
             .collect();
         entries.sort_by(|a, b| candidate_order((a.needle, a.mapping), (b.needle, b.mapping)));
-        Self { restore, entries }
+        let matcher = build_replace_matcher(entries.iter().map(|entry| entry.needle), restore);
+        Self {
+            restore,
+            entries,
+            matcher,
+        }
     }
 
     fn find(&self, text: &str, position: usize) -> Option<&Candidate<'a>> {
@@ -262,6 +299,7 @@ pub(super) fn replace<'a>(
         text,
         candidates.restore,
         false,
+        candidates.matcher.as_ref(),
         |text, position| {
             candidates
                 .find(text, position)
@@ -277,6 +315,7 @@ fn replace_with<'a, 'm>(
     text: &'a str,
     restore: bool,
     preserve_lines: bool,
+    matcher: Option<&AhoCorasick>,
     find: impl Fn(&str, usize) -> Option<&'m Mapping>,
     mut on_match: impl FnMut(&Mapping),
 ) -> Cow<'a, str> {
@@ -287,6 +326,12 @@ fn replace_with<'a, 'm>(
     let mut copied = 0;
     let mut position = 0;
     while position < text.len() {
+        if let Some(matcher) = matcher {
+            let Some(found) = matcher.find(AcInput::new(text).span(position..text.len())) else {
+                break;
+            };
+            position = found.start();
+        }
         // References are protocol atoms. Neither a broad detector nor a known
         // secret matching their identifier may nest another reference inside one.
         if !restore && let Some(reference) = marker::reference_prefix(&text[position..]) {

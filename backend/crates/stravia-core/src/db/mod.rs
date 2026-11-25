@@ -23,10 +23,11 @@ pub async fn init_pool(data_dir: &Path) -> anyhow::Result<SqlitePool> {
         .filename(&db_path)
         .create_if_missing(true)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .busy_timeout(std::time::Duration::from_secs(5));
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .statement_cache_capacity(256);
 
     Ok(SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(4)
         .acquire_time_level(log::LevelFilter::Debug)
         .after_connect(|connection, _| {
             Box::pin(async move {

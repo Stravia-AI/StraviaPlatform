@@ -345,3 +345,64 @@ async fn failed_begin_releases_the_lease_and_restores_readonly() {
     assert_eq!(committed, 11);
     pool.close().await;
 }
+
+#[tokio::test]
+async fn require_write_lease_supports_colon_filenames_and_shared_memory_uris() {
+    let directory = tempfile::tempdir().unwrap();
+    let colon_pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .require_write_lease()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(directory.path().join("coord:colon.db"))
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal),
+        )
+        .await
+        .unwrap();
+    let mut writer = colon_pool.begin_write().await.unwrap();
+    stravia_sql::query("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    stravia_sql::query("INSERT INTO items VALUES (1)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    assert_readonly(
+        stravia_sql::query("INSERT INTO items VALUES (2)")
+            .execute(&colon_pool)
+            .await,
+        "reader pool must stay read-only alongside dedicated writer",
+    );
+    let count: i64 = stravia_sql::query_scalar("SELECT COUNT(*) FROM items")
+        .fetch_one(&colon_pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    colon_pool.close().await;
+
+    let mem_pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .require_write_lease()
+        .connect("sqlite:file:stravia_sql_mem_lease_test?mode=memory&cache=shared")
+        .await
+        .unwrap();
+    let mut writer = mem_pool.begin_write().await.unwrap();
+    stravia_sql::query("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    stravia_sql::query("INSERT INTO items VALUES (7)")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    let value: i64 = stravia_sql::query_scalar("SELECT id FROM items")
+        .fetch_one(&mem_pool)
+        .await
+        .unwrap();
+    assert_eq!(value, 7);
+    mem_pool.close().await;
+}

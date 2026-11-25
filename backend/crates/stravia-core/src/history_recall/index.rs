@@ -100,18 +100,13 @@ async fn insert_postgres(
 // Interaction 再锁进度行，与删除操作的锁顺序一致，并在修改段之前锁住进度。
 // 返回值表示本批之后是否还需再调用一次。进度统一记录 Interaction 的末事件序号，
 // 避免状态重算写入的无事件序号让对账永不收敛。
-macro_rules! index_backend {
-    ($name:ident, $pool:ty, $interaction_lock:literal, $progress_lock:literal, $fetch:ident, $insert:ident) => {
-        pub(crate) async fn $name(
-            pool: &$pool,
-            interaction: &str,
-        ) -> anyhow::Result<bool> {
-            let mut tx = pool.begin_write().await?;
+macro_rules! index_in_tx {
+    ($name:ident, $conn:ty, $interaction_lock:literal, $progress_lock:literal, $fetch:ident, $insert:ident) => {
+        async fn $name(tx: &mut $conn, interaction: &str) -> anyhow::Result<bool> {
             let sql = format!("SELECT i.principal,i.root_id,i.status,i.last_event_sequence,({}) FROM interaction_observations i WHERE i.id=$1{}", eligible("i"), $interaction_lock);
             let row: Option<(String, String, String, i64, bool)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
                 .bind(interaction).fetch_optional(&mut *tx).await?;
             let Some((principal, root, status, last_event_sequence, is_member)) = row else {
-                tx.commit().await?;
                 return Ok(false);
             };
             if !is_member {
@@ -119,7 +114,6 @@ macro_rules! index_backend {
                     .bind(interaction).execute(&mut *tx).await?;
                 sqlx::query("DELETE FROM history_search_progress WHERE interaction_id=$1")
                     .bind(interaction).execute(&mut *tx).await?;
-                tx.commit().await?;
                 return Ok(false);
             }
             sqlx::query("INSERT INTO history_search_progress (interaction_id) VALUES ($1) ON CONFLICT (interaction_id) DO NOTHING")
@@ -134,7 +128,6 @@ macro_rules! index_backend {
             let rebuild = (last > last_event_sequence && latest <= last_event_sequence)
                 || (terminal && (!indexed_terminal || latest > last || last_event_sequence > last));
             if terminal && !rebuild {
-                tx.commit().await?;
                 return Ok(false);
             }
             if rebuild {
@@ -171,28 +164,117 @@ macro_rules! index_backend {
             sqlx::query("UPDATE history_search_progress SET last_event_sequence=$2,indexed_terminal=$3 WHERE interaction_id=$1")
                 .bind(interaction).bind(through).bind(terminal)
                 .execute(&mut *tx).await?;
-            tx.commit().await?;
             Ok(more)
         }
     };
 }
 
-index_backend!(
-    index_sqlite,
-    SqlitePool,
+index_in_tx!(
+    index_sqlite_in_tx,
+    sqlx::SqliteConnection<'_>,
     "",
     "",
     index_events_sqlite,
     insert_sqlite
 );
-index_backend!(
-    index_postgres,
-    PgPool,
+index_in_tx!(
+    index_postgres_in_tx,
+    sqlx::PgConnection<'_>,
     " FOR UPDATE OF i",
     " FOR UPDATE",
     index_events_postgres,
     insert_postgres
 );
+
+pub(crate) async fn index_sqlite(pool: &SqlitePool, interaction: &str) -> anyhow::Result<bool> {
+    if !sqlite_needs_index(pool, interaction).await? {
+        return Ok(false);
+    }
+    let mut tx = pool.begin_write().await?;
+    let more = index_sqlite_in_tx(&mut tx, interaction).await?;
+    tx.commit().await?;
+    Ok(more)
+}
+
+/// 批量在单次 SQLite 写事务内维护多个 Interaction 的历史检索索引；
+/// 事务外先通过只读查询跳过已终结且无待索引变化的 Interaction，避免无谓的写锁与 fsync。
+/// 返回仍需继续分页（单次超过 `EVENT_BATCH`）的 Interaction ID 列表。
+pub(crate) async fn index_sqlite_batch(
+    pool: &SqlitePool,
+    interactions: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut dirty = Vec::with_capacity(interactions.len());
+    for interaction in interactions {
+        if sqlite_needs_index(pool, interaction).await? {
+            dirty.push(interaction.as_str());
+        }
+    }
+    if dirty.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tx = pool.begin_write().await?;
+    let mut more = Vec::new();
+    for interaction in dirty {
+        if index_sqlite_in_tx(&mut tx, interaction).await? {
+            more.push(interaction.to_owned());
+        }
+    }
+    tx.commit().await?;
+    Ok(more)
+}
+
+/// 仅读判断 Interaction 是否需要写事务更新检索索引。
+/// 可能在并发写入窗口内保守返回 `true`（由后续写事务内精确判定），绝不漏掉待索引更新。
+async fn sqlite_needs_index(pool: &SqlitePool, interaction: &str) -> anyhow::Result<bool> {
+    let sql = format!(
+        "SELECT i.status, i.last_event_sequence, ({}), \
+                p.last_event_sequence, p.indexed_terminal, \
+                COALESCE((SELECT MAX(sequence) FROM observation_events WHERE interaction_id=$1), 0), \
+                EXISTS (SELECT 1 FROM history_search_segments s WHERE s.interaction_id=$1) \
+         FROM interaction_observations i \
+         LEFT JOIN history_search_progress p ON p.interaction_id=i.id \
+         WHERE i.id=$1",
+        eligible("i")
+    );
+    type SqliteIndexStateRow = (String, i64, bool, Option<i64>, Option<bool>, i64, bool);
+    let row: Option<SqliteIndexStateRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(interaction)
+        .fetch_optional(pool)
+        .await?;
+    let Some((
+        status,
+        last_event_sequence,
+        is_member,
+        progress_last,
+        indexed_terminal,
+        latest,
+        has_segments,
+    )) = row
+    else {
+        return Ok(false);
+    };
+    if !is_member {
+        return Ok(progress_last.is_some() || has_segments);
+    }
+    let terminal = status != "running" && status != "waiting_client";
+    let Some(last) = progress_last else {
+        return Ok(true);
+    };
+    let indexed_terminal = indexed_terminal.unwrap_or(false);
+    let rebuild = (last > last_event_sequence && latest <= last_event_sequence)
+        || (terminal && (!indexed_terminal || latest > last || last_event_sequence > last));
+    if terminal && !rebuild {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub(crate) async fn index_postgres(pool: &PgPool, interaction: &str) -> anyhow::Result<bool> {
+    let mut tx = pool.begin_write().await?;
+    let more = index_postgres_in_tx(&mut tx, interaction).await?;
+    tx.commit().await?;
+    Ok(more)
+}
 
 #[cfg(test)]
 mod tests {

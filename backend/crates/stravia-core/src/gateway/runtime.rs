@@ -307,10 +307,12 @@ impl Gateway {
     }
 
     pub async fn new(config: GatewayConfig) -> anyhow::Result<Self> {
+        crate::content_store::install_native_sha256();
         Self::prepare(config).await?.start().await
     }
 
     pub async fn from_storage(config: GatewayConfig, storage: DynStorage) -> anyhow::Result<Self> {
+        crate::content_store::install_native_sha256();
         Self::from_storage_with_kind(
             config,
             storage,

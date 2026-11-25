@@ -22,6 +22,131 @@ pub(super) enum ObservationStore {
     Postgres(PgPool, Arc<DebugTraceIndex>),
 }
 
+/// Active SQLite group-commit transaction scoped to the single-threaded observation writer task.
+/// Acquires the write lease lazily on the first write so read-only / text-only batches take no lock.
+pub(super) struct SqliteBatchSlot {
+    pool: SqlitePool,
+    created_at: std::time::Instant,
+    opened_at_ns: std::sync::atomic::AtomicU64,
+    pub(super) tx: tokio::sync::Mutex<Option<sqlx::WriteTransaction<sqlx::Sqlite>>>,
+}
+
+impl SqliteBatchSlot {
+    fn mark_opened(&self) {
+        let elapsed_ns = self
+            .created_at
+            .elapsed()
+            .as_nanos()
+            .clamp(1, u64::MAX as u128) as u64;
+        self.opened_at_ns
+            .store(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+tokio::task_local! {
+    static SQLITE_BATCH_TX: Arc<SqliteBatchSlot>;
+}
+
+pub(super) fn current_sqlite_batch() -> Option<Arc<SqliteBatchSlot>> {
+    SQLITE_BATCH_TX.try_with(Arc::clone).ok()
+}
+
+pub(super) fn sqlite_batch_hold_exceeded(max_hold: std::time::Duration) -> bool {
+    SQLITE_BATCH_TX
+        .try_with(|slot| {
+            let opened = slot.opened_at_ns.load(std::sync::atomic::Ordering::Relaxed);
+            if opened == 0 {
+                return false;
+            }
+            let now_ns = slot.created_at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            now_ns.saturating_sub(opened) >= max_hold.as_nanos().min(u64::MAX as u128) as u64
+        })
+        .unwrap_or(false)
+}
+
+/// Run an observation writer batch under one lazily-opened SQLite write transaction.
+/// Each store write inside `f` executes inside its own savepoint for exact fault isolation.
+pub(super) async fn with_sqlite_batch<F, T>(pool: SqlitePool, f: F) -> (T, anyhow::Result<bool>)
+where
+    F: std::future::Future<Output = T>,
+{
+    let slot = Arc::new(SqliteBatchSlot {
+        pool,
+        created_at: std::time::Instant::now(),
+        opened_at_ns: std::sync::atomic::AtomicU64::new(0),
+        tx: tokio::sync::Mutex::new(None),
+    });
+    let output = SQLITE_BATCH_TX.scope(Arc::clone(&slot), f).await;
+    let tx = slot.tx.lock().await.take();
+    let commit_result = match tx {
+        Some(tx) => tx
+            .commit()
+            .await
+            .map(|()| true)
+            .map_err(anyhow::Error::from),
+        None => Ok(false),
+    };
+    (output, commit_result)
+}
+
+macro_rules! sqlite_write {
+    ($pool:expr, |$tx:ident| $body:block) => {{
+        if let Some(_slot) = current_sqlite_batch() {
+            let mut _guard = _slot.tx.lock().await;
+            if _guard.is_none() {
+                *_guard = Some(_slot.pool.begin_write().await?);
+                _slot.mark_opened();
+            }
+            let _outer = _guard.as_mut().expect("sqlite batch transaction");
+            let mut $tx = _outer.begin().await?;
+            let _res: anyhow::Result<_> = async { $body }.await;
+            match _res {
+                Ok(_val) => {
+                    $tx.commit().await?;
+                    Ok(_val)
+                }
+                Err(_err) => {
+                    if let Err(rollback_err) = $tx.rollback().await {
+                        tracing::debug!(error = %rollback_err, "sqlite batch savepoint rollback failed");
+                    }
+                    Err(_err)
+                }
+            }
+        } else {
+            let mut $tx = $pool.begin_write().await?;
+            let _res: anyhow::Result<_> = async { $body }.await;
+            match _res {
+                Ok(_val) => {
+                    $tx.commit().await?;
+                    Ok(_val)
+                }
+                Err(_err) => Err(_err),
+            }
+        }
+    }};
+}
+
+macro_rules! sqlite_read {
+    ($pool:expr, |$conn:ident| $body:block) => {{
+        if let Some(_slot) = current_sqlite_batch() {
+            let mut _guard = _slot.tx.lock().await;
+            if let Some(_outer) = _guard.as_mut() {
+                let $conn: &mut sqlx::SqliteConnection<'_> = &mut **_outer;
+                $body
+            } else {
+                drop(_guard);
+                let mut _pooled = $pool.acquire().await?;
+                let $conn: &mut sqlx::SqliteConnection<'_> = &mut *_pooled;
+                $body
+            }
+        } else {
+            let mut _pooled = $pool.acquire().await?;
+            let $conn: &mut sqlx::SqliteConnection<'_> = &mut *_pooled;
+            $body
+        }
+    }};
+}
+
 pub(super) struct Admission<'a> {
     pub start: &'a RunStart,
     pub metadata: Option<&'a super::RequestMetadata>,
@@ -257,6 +382,13 @@ impl ObservationStore {
         }
     }
 
+    pub(super) fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        match self {
+            Self::Sqlite(pool, _) => Some(pool),
+            Self::Postgres(_, _) => None,
+        }
+    }
+
     async fn attempt_usage(&self, attempt_id: &str) -> anyhow::Result<Option<ConfirmedUsage>> {
         type UsageRow = (
             Option<i64>,
@@ -266,7 +398,9 @@ impl ObservationStore {
             Option<i64>,
         );
         let row: Option<UsageRow> = match self {
-            Self::Sqlite(pool, _) => sqlx::query_as("SELECT input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens FROM target_attempt_observations WHERE id=? AND usage_recorded=1").bind(attempt_id).fetch_optional(pool).await?,
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
+                sqlx::query_as("SELECT input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens FROM target_attempt_observations WHERE id=? AND usage_recorded=1").bind(attempt_id).fetch_optional(conn).await?
+            }),
             Self::Postgres(pool, _) => sqlx::query_as("SELECT input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens FROM target_attempt_observations WHERE id=$1 AND usage_recorded").bind(attempt_id).fetch_optional(pool).await?,
         };
         Ok(row.map(
@@ -321,44 +455,44 @@ impl ObservationStore {
         };
         match self {
             Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
-                let seq = next_sqlite(&mut tx).await?;
-                let Some((status, recorded_at)) = apply_client_completion_sqlite(
-                    &mut tx,
-                    run_id,
-                    interaction_id,
-                    &completion,
-                    seq,
-                )
-                .await?
-                else {
-                    tx.commit().await?;
-                    return Ok(None);
-                };
-                recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
-                insert_event_sqlite(
-                    &mut tx,
-                    EventInsert {
-                        sequence: seq,
-                        occurred_at: recorded_at,
-                        interaction_id: Some(interaction_id),
-                        run_id: Some(run_id),
-                        rejection_id: None,
-                        kind: "run_state_changed",
-                        payload: &Value::Null,
-                    },
-                )
-                .await?;
-                tx.commit().await?;
-                Ok(Some(event(
-                    seq,
-                    recorded_at,
-                    Some(interaction_id),
-                    Some(run_id),
-                    None,
-                    "run_state_changed",
-                    serde_json::json!({"status": status, "superseded_by": null}),
-                )))
+                sqlite_write!(pool, |tx| {
+                    let seq = next_sqlite(&mut tx).await?;
+                    if let Some((status, recorded_at)) = apply_client_completion_sqlite(
+                        &mut tx,
+                        run_id,
+                        interaction_id,
+                        &completion,
+                        seq,
+                    )
+                    .await?
+                    {
+                        recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
+                        insert_event_sqlite(
+                            &mut tx,
+                            EventInsert {
+                                sequence: seq,
+                                occurred_at: recorded_at,
+                                interaction_id: Some(interaction_id),
+                                run_id: Some(run_id),
+                                rejection_id: None,
+                                kind: "run_state_changed",
+                                payload: &Value::Null,
+                            },
+                        )
+                        .await?;
+                        Ok(Some(event(
+                            seq,
+                            recorded_at,
+                            Some(interaction_id),
+                            Some(run_id),
+                            None,
+                            "run_state_changed",
+                            serde_json::json!({"status": status, "superseded_by": null}),
+                        )))
+                    } else {
+                        Ok(None)
+                    }
+                })
             }
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
@@ -416,7 +550,7 @@ impl ObservationStore {
             return Ok(Vec::new());
         }
         Ok(match self {
-            Self::Sqlite(pool, _) => {
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
                 let mut builder = sqlx::QueryBuilder::new(
                     "SELECT run_id,interaction_id,generation_node_id FROM observation_tail_sources WHERE principal=",
                 );
@@ -431,8 +565,8 @@ impl ObservationStore {
                     separated.push_bind(hash);
                 }
                 separated.push_unseparated(")");
-                builder.build_query_as().fetch_all(pool).await?
-            }
+                builder.build_query_as().fetch_all(conn).await?
+            }),
             Self::Postgres(pool, _) => {
                 let mut builder = sqlx::QueryBuilder::new(
                     "SELECT run_id,interaction_id,generation_node_id FROM observation_tail_sources WHERE principal=",
@@ -463,7 +597,7 @@ impl ObservationStore {
             return Ok(Vec::new());
         }
         Ok(match self {
-            Self::Sqlite(pool, _) => {
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
                 let mut builder = sqlx::QueryBuilder::new(
                     "SELECT tool_id,run_id,interaction_id FROM observation_pending_tools WHERE principal=",
                 );
@@ -476,8 +610,8 @@ impl ObservationStore {
                     separated.push_bind(id);
                 }
                 separated.push_unseparated(")");
-                builder.build_query_as().fetch_all(pool).await?
-            }
+                builder.build_query_as().fetch_all(conn).await?
+            }),
             Self::Postgres(pool, _) => {
                 let mut builder = sqlx::QueryBuilder::new(
                     "SELECT tool_id,run_id,interaction_id FROM observation_pending_tools WHERE principal=",
@@ -512,7 +646,7 @@ impl ObservationStore {
             JOIN observation_tool_results tr ON tr.sequence=e.sequence
             WHERE e.kind='client_tool_result' AND i.principal=";
         Ok(match self {
-            Self::Sqlite(pool, _) => {
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
                 let mut builder = sqlx::QueryBuilder::new(SELECT);
                 builder.push_bind(principal);
                 builder.push(" AND tr.tool_id IN (");
@@ -523,8 +657,8 @@ impl ObservationStore {
                 separated.push_unseparated(")");
                 builder.push(" ORDER BY r.id LIMIT ");
                 builder.push(super::tail::MAX_CANDIDATES + 1);
-                builder.build_query_as().fetch_all(pool).await?
-            }
+                builder.build_query_as().fetch_all(conn).await?
+            }),
             Self::Postgres(pool, _) => {
                 let mut builder = sqlx::QueryBuilder::new(SELECT);
                 builder.push_bind(principal);
@@ -546,13 +680,15 @@ impl ObservationStore {
         run_id: &str,
     ) -> anyhow::Result<Option<String>> {
         Ok(match self {
-            Self::Sqlite(pool, _) => sqlx::query_scalar(
-                "SELECT generation_node_id FROM observation_tail_sources WHERE run_id=?",
-            )
-            .bind(run_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten(),
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
+                sqlx::query_scalar(
+                    "SELECT generation_node_id FROM observation_tail_sources WHERE run_id=?",
+                )
+                .bind(run_id)
+                .fetch_optional(conn)
+                .await?
+                .flatten()
+            }),
             Self::Postgres(pool, _) => sqlx::query_scalar(
                 "SELECT generation_node_id FROM observation_tail_sources WHERE run_id=$1",
             )
@@ -565,13 +701,15 @@ impl ObservationStore {
 
     pub(super) async fn delivery_completed_at(&self, run_id: &str) -> anyhow::Result<Option<i64>> {
         Ok(match self {
-            Self::Sqlite(pool, _) => sqlx::query_scalar(
-                "SELECT delivery_completed_at FROM inference_run_observations WHERE id=?",
-            )
-            .bind(run_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten(),
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
+                sqlx::query_scalar(
+                    "SELECT delivery_completed_at FROM inference_run_observations WHERE id=?",
+                )
+                .bind(run_id)
+                .fetch_optional(conn)
+                .await?
+                .flatten()
+            }),
             Self::Postgres(pool, _) => sqlx::query_scalar(
                 "SELECT delivery_completed_at FROM inference_run_observations WHERE id=$1",
             )
@@ -589,8 +727,7 @@ impl ObservationStore {
     )]
     pub(super) async fn admit(&self, admission: Admission<'_>) -> anyhow::Result<Admitted> {
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 if admission.interrupt_parent
                     && let Some(parent) = admission.parent_interaction_id
                 {
@@ -658,7 +795,6 @@ impl ObservationStore {
                         }
                     }
                 }
-                tx.commit().await?;
                 Ok(Admitted {
                     event: event(
                         sequence,
@@ -672,7 +808,7 @@ impl ObservationStore {
                     follow_ups,
                     follow_up_failure,
                 })
-            }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 if admission.interrupt_parent
@@ -775,17 +911,15 @@ impl ObservationStore {
     )]
     pub async fn mark_observation_gap(&self, interaction_id: &str) -> anyhow::Result<bool> {
         let affected = match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let affected =
                     sqlx::query("UPDATE interaction_observations SET observation_gap=1 WHERE id=?")
                         .bind(interaction_id)
                         .execute(&mut *tx)
                         .await?
                         .rows_affected();
-                tx.commit().await?;
-                affected
-            }
+                Ok(affected)
+            })?,
             Self::Postgres(pool, _) => {
                 sqlx::query("UPDATE interaction_observations SET observation_gap=TRUE WHERE id=$1")
                     .bind(interaction_id)
@@ -799,11 +933,10 @@ impl ObservationStore {
         }
         // 缺口先提交，避免统计写故障抹掉故障本身；投影失败仍向上传播，清理屏障不能放行。
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 crate::storage::sql::recovery::refresh_sqlite(&mut tx, interaction_id).await?;
-                tx.commit().await?;
-            }
+                Ok(())
+            })?,
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 crate::storage::sql::recovery::refresh_postgres(&mut tx, interaction_id).await?;
@@ -830,8 +963,7 @@ impl ObservationStore {
         let prepared = PreparedTurnStart::new(&start)?;
         let count = prepared.durable_count;
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let owner: Option<(String, String)> = sqlx::query_as(
                     "SELECT i.principal,i.root_run_id FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.id=? AND i.id=?",
                 )
@@ -839,26 +971,25 @@ impl ObservationStore {
                 .bind(interaction_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let Some((principal, root_run_id)) = owner else {
-                    tx.rollback().await?;
-                    return Ok(None);
-                };
-                let first = next_sqlite_batch(&mut tx, count).await?;
-                let sequences: Vec<i64> = (first..first + i64::try_from(count)?).collect();
-                let result = write_turn_start_sqlite(
-                    &mut tx,
-                    interaction_id,
-                    run_id,
-                    &principal,
-                    root_run_id == run_id,
-                    &start,
-                    prepared,
-                    &sequences,
-                )
-                .await?;
-                tx.commit().await?;
-                Ok(Some(result))
-            }
+                if let Some((principal, root_run_id)) = owner {
+                    let first = next_sqlite_batch(&mut tx, count).await?;
+                    let sequences: Vec<i64> = (first..first + i64::try_from(count)?).collect();
+                    let result = write_turn_start_sqlite(
+                        &mut tx,
+                        interaction_id,
+                        run_id,
+                        &principal,
+                        root_run_id == run_id,
+                        &start,
+                        prepared,
+                        &sequences,
+                    )
+                    .await?;
+                    Ok(Some(result))
+                } else {
+                    Ok(None)
+                }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let owner: Option<(String, String)> = sqlx::query_as(
@@ -924,7 +1055,8 @@ impl ObservationStore {
         // (tool_id, kind, is_error, content_id, 是否有 handoff)
         type LineageResultRow = (String, String, Option<bool>, Option<i64>, bool);
         let rows: Vec<LineageResultRow> = match self {
-            Self::Sqlite(pool, _) => sqlx::query_as(
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
+                sqlx::query_as(
                 "WITH RECURSIVE lineage(id,parent_run_id,principal) AS (
                     SELECT r.id,r.parent_run_id,i.principal
                     FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id
@@ -946,7 +1078,8 @@ impl ObservationStore {
                 )
                 SELECT tool_id,kind,is_error,content_id,handoff_sequence IS NOT NULL FROM ranked WHERE position=1",
             )
-                .bind(run_id).bind(interaction_id).bind(&ids).fetch_all(pool).await?,
+                .bind(run_id).bind(interaction_id).bind(&ids).fetch_all(conn).await?
+            }),
             Self::Postgres(pool, _) => sqlx::query_as(
                 "WITH RECURSIVE lineage(id,parent_run_id,principal) AS (
                     SELECT r.id,r.parent_run_id,i.principal
@@ -991,19 +1124,23 @@ impl ObservationStore {
             }
         }
         // 祖先链只含同 Principal 的 Run，正文都在该 Principal 的 scope 内。
-        let principals = self
-            .interaction_principals(&[interaction_id.to_owned()])
-            .await?;
-        let bodies = match principals.get(interaction_id) {
-            Some(principal) => {
-                super::content_refs::read_scoped(
-                    self,
-                    principal,
-                    &stored.iter().map(|(_, _, id)| *id).collect::<Vec<_>>(),
-                )
-                .await?
+        let bodies = if stored.is_empty() {
+            crate::content_store::Bodies::from_rows(Vec::new())
+        } else {
+            let principals = self
+                .interaction_principals(&[interaction_id.to_owned()])
+                .await?;
+            match principals.get(interaction_id) {
+                Some(principal) => {
+                    super::content_refs::read_scoped(
+                        self,
+                        principal,
+                        &stored.iter().map(|(_, _, id)| *id).collect::<Vec<_>>(),
+                    )
+                    .await?
+                }
+                None => crate::content_store::Bodies::from_rows(Vec::new()),
             }
-            None => crate::content_store::Bodies::from_rows(Vec::new()),
         };
         for (tool_id, is_error, content_id) in stored {
             let Some(body) = bodies.get(content_id) else {
@@ -1086,8 +1223,7 @@ impl ObservationStore {
         }
         let mut tools = PreparedTools::new(events)?;
         let sequence = match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let mut writes = EventWrites::new(interaction_id, run_id);
                 let principal: String =
                     sqlx::query_scalar("SELECT principal FROM interaction_observations WHERE id=?")
@@ -1104,9 +1240,8 @@ impl ObservationStore {
                 writes.flush_sqlite(&mut tx).await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(tools.latest_at).bind(sequence).bind(run_id).execute(&mut *tx).await?;
                 recompute_status_sqlite(&mut tx, interaction_id, sequence).await?;
-                tx.commit().await?;
-                sequence
-            }
+                Ok(sequence)
+            })?,
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let mut writes = EventWrites::new(interaction_id, run_id);
@@ -1191,8 +1326,7 @@ impl ObservationStore {
         }
         let payload = Value::Object(attrs);
         let seq = match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let seq = next_sqlite(&mut tx).await?;
                 apply_sqlite(&mut tx, interaction_id, run_id, turn, seq, at, None).await?;
                 if let Some((attempt, attempt_at)) = attempt {
@@ -1222,9 +1356,8 @@ impl ObservationStore {
                 .await?;
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
                 recompute_status_sqlite(&mut tx, interaction_id, seq).await?;
-                tx.commit().await?;
-                seq
-            }
+                Ok(seq)
+            })?,
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
@@ -1283,8 +1416,7 @@ impl ObservationStore {
     ) -> anyhow::Result<Option<ObservationEvent>> {
         let mut units = split_user_input(units);
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let mut writes = EventWrites::new(interaction_id, run_id);
                 let (principal, is_root): (String, bool) = sqlx::query_as("SELECT i.principal,i.root_run_id=? FROM interaction_observations i WHERE i.id=?")
                     .bind(run_id)
@@ -1301,7 +1433,6 @@ impl ObservationStore {
                 sqlx::query("UPDATE inference_run_observations SET last_active_at=MAX(last_active_at,?),last_event_sequence=? WHERE id=?").bind(at).bind(seq).bind(run_id).execute(&mut *tx).await?;
                 refresh_interaction_sqlite(&mut tx, interaction_id, seq, is_root.then_some(seq))
                     .await?;
-                tx.commit().await?;
                 Ok(Some(event(
                     seq,
                     at,
@@ -1311,7 +1442,7 @@ impl ObservationStore {
                     "user_input_recorded",
                     Value::Null,
                 )))
-            }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let mut writes = EventWrites::new(interaction_id, run_id);
@@ -1369,8 +1500,7 @@ impl ObservationStore {
         }
         let count = batch.durable_count;
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 // 过滤后才按批预占：被跳过的 Wire/空 credential 不占号。
                 let current_sequence: i64 = sqlx::query_scalar(
                     "SELECT last_event_sequence FROM inference_run_observations WHERE id=?",
@@ -1399,9 +1529,8 @@ impl ObservationStore {
                     current_sequence,
                 )
                 .await?;
-                tx.commit().await?;
                 Ok(result)
-            }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let current_sequence: i64 = sqlx::query_scalar(
@@ -1590,9 +1719,11 @@ impl ObservationStore {
                     self.generation_parent(generation).await?
                 } else if let Some(operation) = source_operation_id {
                     match self {
-                    Self::Sqlite(pool, _) => sqlx::query_as("SELECT e.interaction_id,e.run_id FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE e.kind='compaction_operation' AND e.operation_id=? ORDER BY e.sequence LIMIT 1").bind(operation).fetch_optional(pool).await?,
-                    Self::Postgres(pool, _) => sqlx::query_as("SELECT e.interaction_id,e.run_id FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE e.kind='compaction_operation' AND e.operation_id=$1 ORDER BY e.sequence LIMIT 1").bind(operation).fetch_optional(pool).await?,
-                }
+                        Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
+                            sqlx::query_as("SELECT e.interaction_id,e.run_id FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE e.kind='compaction_operation' AND e.operation_id=? ORDER BY e.sequence LIMIT 1").bind(operation).fetch_optional(conn).await?
+                        }),
+                        Self::Postgres(pool, _) => sqlx::query_as("SELECT e.interaction_id,e.run_id FROM observation_events e JOIN inference_run_observations r ON r.id=e.run_id WHERE e.kind='compaction_operation' AND e.operation_id=$1 ORDER BY e.sequence LIMIT 1").bind(operation).fetch_optional(pool).await?,
+                    }
                 } else {
                     None
                 };
@@ -1674,25 +1805,21 @@ impl ObservationStore {
         now: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let interaction: Option<String> = sqlx::query_scalar("SELECT interaction_id FROM inference_run_observations WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id)")
                     .bind(run_id)
                     .fetch_optional(&mut *tx).await?;
                 let Some(interaction) = interaction else {
-                    tx.rollback().await?;
                     return Ok(None);
                 };
                 let evidence = client_tool_evidence_sqlite(&mut tx, &interaction).await?;
                 if resolved_evidence(&evidence).contains(run_id) {
-                    tx.rollback().await?;
                     return Ok(None);
                 }
                 let row: Option<String> = sqlx::query_scalar(
                     "UPDATE inference_run_observations SET status='disconnected',terminal_reason='client_disconnected' WHERE id=? AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id) RETURNING interaction_id",
                 ).bind(run_id).fetch_optional(&mut *tx).await?;
                 let Some(interaction) = row else {
-                    tx.rollback().await?;
                     return Ok(None);
                 };
                 let seq = next_sqlite(&mut tx).await?;
@@ -1717,7 +1844,6 @@ impl ObservationStore {
                     },
                 )
                 .await?;
-                tx.commit().await?;
                 Ok(Some(event(
                     seq,
                     now,
@@ -1727,7 +1853,7 @@ impl ObservationStore {
                     "run_state_changed",
                     serde_json::json!({"status": "disconnected", "superseded_by": null}),
                 )))
-            }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let interaction: Option<String> = sqlx::query_scalar("SELECT interaction_id FROM inference_run_observations WHERE id=$1 AND status='waiting_client' AND NOT EXISTS(SELECT 1 FROM inference_run_observations c WHERE c.parent_run_id=inference_run_observations.id AND c.interaction_id=inference_run_observations.interaction_id)")
@@ -1925,7 +2051,9 @@ impl ObservationStore {
         now: i64,
     ) -> anyhow::Result<Option<ObservationEvent>> {
         let previous: Option<i64> = match self {
-            Self::Sqlite(pool, _) => sqlx::query_scalar("SELECT last_active_at FROM inference_run_observations r WHERE r.id=? AND (r.background_active>0 OR EXISTS(SELECT 1 FROM model_turn_observations m WHERE m.run_id=r.id AND m.status='running') OR EXISTS(SELECT 1 FROM target_attempt_observations a WHERE a.run_id=r.id AND a.status='running'))").bind(run_id).fetch_optional(pool).await?,
+            Self::Sqlite(pool, _) => sqlite_read!(pool, |conn| {
+                sqlx::query_scalar("SELECT last_active_at FROM inference_run_observations r WHERE r.id=? AND (r.background_active>0 OR EXISTS(SELECT 1 FROM model_turn_observations m WHERE m.run_id=r.id AND m.status='running') OR EXISTS(SELECT 1 FROM target_attempt_observations a WHERE a.run_id=r.id AND a.status='running'))").bind(run_id).fetch_optional(conn).await?
+            }),
             Self::Postgres(pool, _) => sqlx::query_scalar("SELECT last_active_at FROM inference_run_observations r WHERE r.id=$1 AND (r.background_active>0 OR EXISTS(SELECT 1 FROM model_turn_observations m WHERE m.run_id=r.id AND m.status='running') OR EXISTS(SELECT 1 FROM target_attempt_observations a WHERE a.run_id=r.id AND a.status='running'))").bind(run_id).fetch_optional(pool).await?,
         };
         let Some(previous) = previous else {
@@ -1936,8 +2064,7 @@ impl ObservationStore {
             reason: "unfinished_observation_activity".into(),
         })?;
         let seq = match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let attempts = sqlx::query("SELECT id,model_turn_id,started_at,first_token_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,usage_recorded FROM target_attempt_observations WHERE run_id=? AND status='running' ORDER BY id")
                 .bind(run_id)
                 .fetch_all(&mut *tx).await?;
@@ -2009,9 +2136,8 @@ impl ObservationStore {
                     },
                 )
                 .await?;
-                tx.commit().await?;
-                seq
-            }
+                Ok(seq)
+            })?,
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let attempts = sqlx::query("SELECT id,model_turn_id,started_at,first_token_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,usage_recorded FROM target_attempt_observations WHERE run_id=$1 AND status='running' ORDER BY id").bind(run_id).fetch_all(&mut *tx).await?;
@@ -2135,8 +2261,7 @@ impl ObservationStore {
         completion: Option<ClientCompletionWrite<'_>>,
     ) -> anyhow::Result<ObservationEvent> {
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let seq = next_sqlite(&mut tx).await?;
                 if let Some(completion) = &completion {
                     apply_client_completion_sqlite(
@@ -2185,7 +2310,6 @@ impl ObservationStore {
                     },
                 )
                 .await?;
-                tx.commit().await?;
                 Ok(event(
                     seq,
                     recorded_at,
@@ -2195,7 +2319,7 @@ impl ObservationStore {
                     "run_finished",
                     payload,
                 ))
-            }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
@@ -2284,8 +2408,7 @@ impl ObservationStore {
             .map(serde_json::to_string)
             .transpose()?;
         match self {
-            Self::Sqlite(pool, _) => {
-                let mut tx = pool.begin_write().await?;
+            Self::Sqlite(pool, _) => sqlite_write!(pool, |tx| {
                 let seq = next_sqlite(&mut tx).await?;
                 sqlx::query("INSERT INTO rejected_request_observations (id,occurred_at,method,path,ingress_protocol,stage,code,status_code,debug_enabled,last_event_sequence,started_at,duration_ms,failure_json,request_model,api_key_id,api_key_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
                     .bind(&ingress.id)
@@ -2318,7 +2441,6 @@ impl ObservationStore {
                     },
                 )
                 .await?;
-                tx.commit().await?;
                 Ok(event(
                     seq,
                     now,
@@ -2328,7 +2450,7 @@ impl ObservationStore {
                     "request_rejected",
                     payload,
                 ))
-            }
+            }),
             Self::Postgres(pool, _) => {
                 let mut tx = pool.begin().await?;
                 let seq: i64 = sqlx::query_scalar("SELECT nextval('observation_event_sequence')")
@@ -2372,8 +2494,10 @@ impl ObservationStore {
         // Immutable transport evidence survives late observation work and restart recovery.
         // Old rows without this evidence cannot qualify for time-based grouping.
         match self {
-            Self::Sqlite(pool, _) => Ok(sqlx::query_as("SELECT r.interaction_id,r.id AS run_id,r.delivery_completed_at AS delivery_completed_at FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.generation_node_id=? AND i.principal=? LIMIT 1")
-                .bind(generation_node_id).bind(principal).fetch_optional(pool).await?),
+            Self::Sqlite(pool, _) => Ok(sqlite_read!(pool, |conn| {
+                sqlx::query_as("SELECT r.interaction_id,r.id AS run_id,r.delivery_completed_at AS delivery_completed_at FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.generation_node_id=? AND i.principal=? LIMIT 1")
+                    .bind(generation_node_id).bind(principal).fetch_optional(conn).await?
+            })),
             Self::Postgres(pool, _) => Ok(sqlx::query_as("SELECT r.interaction_id,r.id AS run_id,r.delivery_completed_at AS delivery_completed_at FROM inference_run_observations r JOIN interaction_observations i ON i.id=r.interaction_id WHERE r.generation_node_id=$1 AND i.principal=$2 LIMIT 1")
                 .bind(generation_node_id).bind(principal).fetch_optional(pool).await?),
         }
@@ -2384,7 +2508,9 @@ impl ObservationStore {
         generation_node_id: &str,
     ) -> anyhow::Result<Option<(String, String)>> {
         match self {
-            Self::Sqlite(pool, _) => Ok(sqlx::query_as("SELECT interaction_id,id FROM inference_run_observations WHERE generation_node_id=? LIMIT 1").bind(generation_node_id).fetch_optional(pool).await?),
+            Self::Sqlite(pool, _) => Ok(sqlite_read!(pool, |conn| {
+                sqlx::query_as("SELECT interaction_id,id FROM inference_run_observations WHERE generation_node_id=? LIMIT 1").bind(generation_node_id).fetch_optional(conn).await?
+            })),
             Self::Postgres(pool, _) => Ok(sqlx::query_as("SELECT interaction_id,id FROM inference_run_observations WHERE generation_node_id=$1 LIMIT 1").bind(generation_node_id).fetch_optional(pool).await?),
         }
     }

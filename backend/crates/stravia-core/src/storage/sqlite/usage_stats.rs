@@ -8,8 +8,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct SqliteUsageStatsStore {
     pub(super) pool: SqlitePool,
-    pub(super) last_route_snapshot:
-        Arc<parking_lot::RwLock<Vec<crate::router::TargetSchedulingSnapshot>>>,
+    pub(super) route_snapshot: crate::storage::RouteSnapshotCache,
 }
 
 const BASE_BUCKET_MS: i64 = 900_000;
@@ -120,30 +119,21 @@ fn display_bucket_ms(start: i64, end: i64, requested: i64) -> i64 {
 #[async_trait]
 impl UsageStatsStore for SqliteUsageStatsStore {
     async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage {
-        let now = chrono::Utc::now().timestamp_millis();
-        let hour_ago = now.saturating_sub(60 * 60 * 1_000);
-        let result =
-            sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(ROUTE_SCHEDULING_SQL)
-                .bind(hour_ago)
-                .fetch_all(&self.pool)
-                .await;
-        match result {
-            Ok(targets) => {
-                *self.last_route_snapshot.write() = targets.clone();
-                RouteSchedulingUsage {
-                    targets,
-                    stale: false,
+        self.route_snapshot
+            .get_or_refresh(|| {
+                let now = chrono::Utc::now().timestamp_millis();
+                let hour_ago = now.saturating_sub(60 * 60 * 1_000);
+                let pool = self.pool.clone();
+                async move {
+                    sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(
+                        ROUTE_SCHEDULING_SQL,
+                    )
+                    .bind(hour_ago)
+                    .fetch_all(&pool)
+                    .await
                 }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to refresh confirmed route scheduling usage");
-                let targets = self.last_route_snapshot.read().clone();
-                RouteSchedulingUsage {
-                    targets,
-                    stale: true,
-                }
-            }
-        }
+            })
+            .await
     }
 
     async fn stats_overview(
@@ -672,7 +662,7 @@ mod tests {
         }
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         // 已终结请求只含已完成或最终失败、且未在 Target 选择前终止的运行；
         // 取消、断线、进行中与准入前拒绝都不入账。失败的请求是其中失败的部分。
@@ -871,7 +861,7 @@ mod tests {
 
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         let overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(overview.terminal_request_count, 3);
@@ -909,7 +899,7 @@ mod tests {
         let recent = chrono::Utc::now().timestamp_millis() - 10_000;
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
 
         // 进行中的尝试使“无重试”不可判定。
@@ -1105,7 +1095,7 @@ mod tests {
             .await?;
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         let series = store
             .stats_series(
@@ -1524,7 +1514,7 @@ mod tests {
         crate::migrations::migrate_sqlite(&pool, None).await?;
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         assert_eq!(
             store
@@ -1827,7 +1817,7 @@ mod tests {
         };
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         insert_turn(
             pool,
@@ -2016,7 +2006,7 @@ mod tests {
             .execute(pool).await?;
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         let overview = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(overview.total_requests, 2);
@@ -2206,7 +2196,7 @@ mod tests {
         .await?;
         let store = SqliteUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
 
         let provider_a = store

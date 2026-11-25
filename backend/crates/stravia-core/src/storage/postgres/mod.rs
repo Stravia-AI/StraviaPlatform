@@ -21,7 +21,7 @@ use crate::storage::traits::{
     Storage, StorageBackend, StorageBootstrap, StorageHealth, UsageStatsStore, WebProviderStore,
 };
 mod admin_identity;
-mod prompt_admissions;
+pub(crate) mod prompt_admissions;
 mod provider_models;
 mod web_providers;
 
@@ -114,7 +114,7 @@ impl PostgresStorage {
         let oauth_credential_store = Arc::new(PostgresOAuthCredentialStore { pool: pool.clone() });
         let usage_stats_store = Arc::new(PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         });
         let bootstrap = Arc::new(PostgresBootstrap {
             adapter: PostgresAdapter { pool: pool.clone() },

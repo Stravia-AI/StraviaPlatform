@@ -8,8 +8,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct PostgresUsageStatsStore {
     pub(super) pool: Pool<Postgres>,
-    pub(super) last_route_snapshot:
-        Arc<parking_lot::RwLock<Vec<crate::router::TargetSchedulingSnapshot>>>,
+    pub(super) route_snapshot: crate::storage::RouteSnapshotCache,
 }
 
 const BASE_BUCKET_MS: i64 = 900_000;
@@ -116,30 +115,21 @@ fn display_bucket_ms(start: i64, end: i64, requested: i64) -> i64 {
 #[async_trait]
 impl UsageStatsStore for PostgresUsageStatsStore {
     async fn route_scheduling_snapshot(&self) -> RouteSchedulingUsage {
-        let now = chrono::Utc::now().timestamp_millis();
-        let hour_ago = now.saturating_sub(60 * 60 * 1_000);
-        let result =
-            sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(ROUTE_SCHEDULING_SQL)
-                .bind(hour_ago)
-                .fetch_all(&self.pool)
-                .await;
-        match result {
-            Ok(targets) => {
-                *self.last_route_snapshot.write() = targets.clone();
-                RouteSchedulingUsage {
-                    targets,
-                    stale: false,
+        self.route_snapshot
+            .get_or_refresh(|| {
+                let now = chrono::Utc::now().timestamp_millis();
+                let hour_ago = now.saturating_sub(60 * 60 * 1_000);
+                let pool = self.pool.clone();
+                async move {
+                    sqlx::query_as::<_, crate::router::TargetSchedulingSnapshot>(
+                        ROUTE_SCHEDULING_SQL,
+                    )
+                    .bind(hour_ago)
+                    .fetch_all(&pool)
+                    .await
                 }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to refresh confirmed route scheduling usage");
-                let targets = self.last_route_snapshot.read().clone();
-                RouteSchedulingUsage {
-                    targets,
-                    stale: true,
-                }
-            }
-        }
+            })
+            .await
     }
 
     async fn stats_overview(
@@ -540,7 +530,7 @@ mod tests {
     async fn verify_final_failure_counts(pool: &Pool<Postgres>) -> anyhow::Result<()> {
         let baseline_store = PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         let recent_baseline = baseline_store
             .stats_overview(window(1), StatsFilter::All)
@@ -680,7 +670,7 @@ mod tests {
         }
         let store = PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         let recent_overview = store.stats_overview(window(1), StatsFilter::All).await?;
         assert_eq!(
@@ -902,7 +892,7 @@ mod tests {
                 crate::migrations::migrate_postgres(&pool, None).await?;
                 let store = PostgresUsageStatsStore {
                     pool: pool.clone(),
-                    last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                    route_snapshot: crate::storage::RouteSnapshotCache::default(),
                 };
                 assert_eq!(store.stats_overview(window(3), StatsFilter::All).await?.avg_output_tps, None);
                 assert_eq!(store.stats_overview(window(3), StatsFilter::All).await?.avg_first_token_ms, None);
@@ -1125,7 +1115,7 @@ mod tests {
         };
         let store = PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         insert_turn(
             pool,
@@ -1297,7 +1287,7 @@ mod tests {
         };
         let store = PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
 
         // 同一 Model Turn 内多次失败后成功：只计一次恢复。
@@ -1631,7 +1621,7 @@ mod tests {
             .execute(pool).await?;
         let store = PostgresUsageStatsStore {
             pool: pool.clone(),
-            last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            route_snapshot: crate::storage::RouteSnapshotCache::default(),
         };
         let overview = store.stats_overview(selected, StatsFilter::All).await?;
         assert_eq!(overview.total_requests, 2);
@@ -1788,7 +1778,7 @@ mod tests {
                 crate::migrations::migrate_postgres(&pool, None).await?;
                 let store = PostgresUsageStatsStore {
                     pool: pool.clone(),
-                    last_route_snapshot: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                    route_snapshot: crate::storage::RouteSnapshotCache::default(),
                 };
                 let recent = chrono::Utc::now().timestamp_millis() - 10_000;
                 insert_turn(&pool, "a-ok", recent, "model-a", "key-a").await?;

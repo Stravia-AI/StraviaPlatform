@@ -18,7 +18,7 @@ pub(crate) mod manager;
 pub mod marketplace;
 pub(crate) mod network;
 pub(crate) mod permissions;
-mod store;
+pub(crate) mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod types;

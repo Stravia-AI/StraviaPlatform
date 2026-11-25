@@ -1,6 +1,6 @@
 use super::RunEvent;
+use aws_lc_rs::digest::{Context as Sha256Context, SHA256};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use stravia_runtime_contract::protocol::ir::canonical;
 use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent};
@@ -53,7 +53,7 @@ pub(super) fn hash_json(
     max_bytes: usize,
 ) -> serde_json::Result<Option<([u8; 32], usize)>> {
     struct HashWriter {
-        digest: Sha256,
+        digest: Sha256Context,
         bytes: usize,
         remaining: usize,
         overflow: bool,
@@ -75,7 +75,7 @@ pub(super) fn hash_json(
         }
     }
     let mut writer = HashWriter {
-        digest: Sha256::new(),
+        digest: Sha256Context::new(&SHA256),
         bytes: 0,
         remaining: max_bytes,
         overflow: false,
@@ -85,7 +85,13 @@ pub(super) fn hash_json(
         return Ok(None);
     }
     result?;
-    Ok(Some((writer.digest.finalize().into(), writer.bytes)))
+    let digest: [u8; 32] = writer
+        .digest
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 digest is 32 bytes");
+    Ok(Some((digest, writer.bytes)))
 }
 
 /// 用户输入身份忽略图片：客户端超出自身图片数量预算时，会在回放历史前删掉较早的图片、
@@ -852,15 +858,20 @@ fn private_unit(value: &Value) -> Value {
     }
     // 排序使摘要不依赖 JSON Map 的遍历顺序；长度前缀避免字段拼接歧义。
     opaque.sort_unstable();
-    let mut digest = Sha256::new();
+    let mut digest = Sha256Context::new(&SHA256);
     digest.update(b"stravia.retained-tail.private.v1");
     for (key, text) in opaque {
         for part in [key, text] {
-            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(&(part.len() as u64).to_le_bytes());
             digest.update(part.as_bytes());
         }
     }
-    serde_json::json!({PRIVATE_DIGEST: hash_hex(&digest.finalize().into())})
+    let final_digest: [u8; 32] = digest
+        .finish()
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 digest is 32 bytes");
+    serde_json::json!({PRIVATE_DIGEST: hash_hex(&final_digest)})
 }
 
 /// 私有摘要只证明连续，不计入匹配强度、语义单元数或字节数。

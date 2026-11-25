@@ -1,14 +1,12 @@
 //! 重试身份读取整个 canonical 请求，仅排除本次请求的关联 ID。
 //! 每个叶值直接写入摘要；无序对象只保留固定大小的键/值摘要，不复制历史正文。
 
+use super::{AiRequest, sha256_slices, with_serialized_json};
 use serde::Serialize;
 use serde::ser::{
     SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
     SerializeTupleStruct, SerializeTupleVariant,
 };
-use sha2::{Digest, Sha256};
-
-use super::{AiRequest, HashWriter};
 
 type Hash = [u8; 32];
 type Result<T, E = serde_json::Error> = std::result::Result<T, E>;
@@ -28,10 +26,7 @@ struct Keys {
 }
 
 fn scalar(value: &(impl Serialize + ?Sized)) -> Result<Hash> {
-    let mut writer = HashWriter(Sha256::new());
-    writer.0.update(b"scalar:");
-    serde_json::to_writer(&mut writer, value)?;
-    Ok(writer.0.finalize().into())
+    with_serialized_json(value, |bytes| sha256_slices(&[b"scalar:", bytes]))
 }
 
 pub(super) fn request_hash(request: &AiRequest) -> Result<Hash> {
@@ -179,7 +174,7 @@ impl<'a> serde::Serializer for Identity<'a> {
 }
 
 struct Sequence<'a> {
-    hash: Sha256,
+    buf: Vec<u8>,
     count: u64,
     keys: &'a Keys,
     variant: Option<&'static str>,
@@ -187,10 +182,10 @@ struct Sequence<'a> {
 
 impl<'a> Sequence<'a> {
     fn new(keys: &'a Keys, variant: Option<&'static str>) -> Self {
-        let mut hash = Sha256::new();
-        hash.update(b"sequence:");
+        let mut buf = Vec::with_capacity(9 + 64);
+        buf.extend_from_slice(b"sequence:");
         Self {
-            hash,
+            buf,
             count: 0,
             keys,
             variant,
@@ -198,15 +193,15 @@ impl<'a> Sequence<'a> {
     }
 
     fn element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<()> {
-        self.hash
-            .update(value.serialize(Identity::other(self.keys))?);
+        let digest = value.serialize(Identity::other(self.keys))?;
+        self.buf.extend_from_slice(&digest);
         self.count += 1;
         Ok(())
     }
 
     fn finish(mut self) -> Result<Hash> {
-        self.hash.update(self.count.to_le_bytes());
-        let hash = self.hash.finalize().into();
+        self.buf.extend_from_slice(&self.count.to_le_bytes());
+        let hash = sha256_slices(&[&self.buf]);
         match self.variant {
             Some(variant) => variant_hash(variant, hash),
             None => Ok(hash),
@@ -281,17 +276,17 @@ impl<'a> Object<'a> {
         }
         // 只排序摘要，HashMap 顺序及 serde_json preserve_order 特性不影响重试身份。
         self.entries.sort_unstable();
-        let mut hash = Sha256::new();
-        hash.update(b"object:");
         let name = self.name.unwrap_or_default();
-        hash.update((name.len() as u64).to_le_bytes());
-        hash.update(name.as_bytes());
-        hash.update((self.entries.len() as u64).to_le_bytes());
+        let mut buf = Vec::with_capacity(7 + 8 + name.len() + 8 + self.entries.len() * 64);
+        buf.extend_from_slice(b"object:");
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
         for (key, value) in self.entries {
-            hash.update(key);
-            hash.update(value);
+            buf.extend_from_slice(&key);
+            buf.extend_from_slice(&value);
         }
-        let hash = hash.finalize().into();
+        let hash = sha256_slices(&[&buf]);
         match self.variant {
             Some(variant) => variant_hash(variant, hash),
             None => Ok(hash),
@@ -300,11 +295,8 @@ impl<'a> Object<'a> {
 }
 
 fn variant_hash(variant: &str, value: Hash) -> Result<Hash> {
-    let mut hash = Sha256::new();
-    hash.update(b"variant:");
-    hash.update(scalar(variant)?);
-    hash.update(value);
-    Ok(hash.finalize().into())
+    let variant_digest = scalar(variant)?;
+    Ok(sha256_slices(&[b"variant:", &variant_digest, &value]))
 }
 
 impl SerializeMap for Object<'_> {

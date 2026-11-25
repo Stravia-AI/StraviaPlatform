@@ -3,8 +3,49 @@ use crate::storage::traits::{PromptAdmission, PromptAdmissionStore};
 use async_trait::async_trait;
 use sqlx::{QueryBuilder, Row, Sqlite};
 
+pub(crate) async fn insert_in_tx(
+    tx: &mut sqlx::SqliteConnection<'_>,
+    a: &PromptAdmission,
+    expected_epoch: i64,
+    check_epoch: bool,
+) -> anyhow::Result<()> {
+    if check_epoch {
+        let epoch: i64 =
+            sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id = 1")
+                .fetch_one(&mut *tx)
+                .await?;
+        anyhow::ensure!(
+            epoch == expected_epoch,
+            "history was cleared during admission"
+        );
+    }
+    let context_window_index = crate::storage::validate_admission(a)?;
+    let context_window_id = a.context_window_id.map(|id| id.to_string());
+    anyhow::ensure!(
+        a.ordinal >= 0
+            && a.history_count >= 0
+            && a.user_turn_index.is_none_or(|index| index >= 0)
+            && a.dialogue_prompt_index.is_none_or(|index| index >= 0),
+        "invalid admission position or history count"
+    );
+    let result = sqlx::query("INSERT INTO prompt_admissions (id, principal, parent_id, ordinal, history_count, prefix_digest, controls_digest, created_at_ms, conversation_id, conversation_created_at_ms, user_prompt_id, user_prompt_created_at_ms, user_turn_index, dialogue_prompt_index, atomic_lineage_created, context_window_id, context_window_index, logical_turn_id, logical_turn_created_at_ms) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19 WHERE ?3 IS NULL OR EXISTS (SELECT 1 FROM prompt_admissions WHERE id = ?3 AND principal = ?2 AND ordinal <= ?4 AND (user_turn_index IS NULL OR ?13 IS NULL OR user_turn_index <= ?13) AND (dialogue_prompt_index IS NULL OR ?14 IS NULL OR dialogue_prompt_index <= ?14) AND conversation_id = ?9 AND conversation_created_at_ms = ?10 AND (ordinal < ?4 OR (user_prompt_id IS ?11 AND user_prompt_created_at_ms IS ?12 AND logical_turn_id = ?18 AND logical_turn_created_at_ms = ?19)))")
+        .bind(&a.id).bind(&a.principal).bind(&a.parent_id).bind(a.ordinal).bind(a.history_count)
+        .bind(&a.prefix_digest).bind(&a.controls_digest).bind(a.created_at_ms)
+        .bind(&a.conversation_id).bind(a.conversation_created_at_ms).bind(&a.user_prompt_id).bind(a.user_prompt_created_at_ms).bind(a.user_turn_index).bind(a.dialogue_prompt_index).bind(a.atomic_lineage_created).bind(context_window_id).bind(context_window_index).bind(&a.logical_turn_id).bind(a.logical_turn_created_at_ms)
+        .execute(&mut *tx).await?;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "admission parent not found or ordinal precedes parent"
+    );
+    Ok(())
+}
+
 #[async_trait]
 impl PromptAdmissionStore for SqliteStorage {
+    fn shares_sql_database(&self) -> bool {
+        true
+    }
+
     async fn history_epoch(&self) -> anyhow::Result<i64> {
         Ok(
             sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id = 1")
@@ -19,32 +60,7 @@ impl PromptAdmissionStore for SqliteStorage {
         expected_epoch: i64,
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin_write().await?;
-        let epoch: i64 =
-            sqlx::query_scalar("SELECT epoch FROM prompt_admission_epoch WHERE id = 1")
-                .fetch_one(&mut *tx)
-                .await?;
-        anyhow::ensure!(
-            epoch == expected_epoch,
-            "history was cleared during admission"
-        );
-        let context_window_index = crate::storage::validate_admission(a)?;
-        let context_window_id = a.context_window_id.map(|id| id.to_string());
-        anyhow::ensure!(
-            a.ordinal >= 0
-                && a.history_count >= 0
-                && a.user_turn_index.is_none_or(|index| index >= 0)
-                && a.dialogue_prompt_index.is_none_or(|index| index >= 0),
-            "invalid admission position or history count"
-        );
-        let result = sqlx::query("INSERT INTO prompt_admissions (id, principal, parent_id, ordinal, history_count, prefix_digest, controls_digest, created_at_ms, conversation_id, conversation_created_at_ms, user_prompt_id, user_prompt_created_at_ms, user_turn_index, dialogue_prompt_index, atomic_lineage_created, context_window_id, context_window_index, logical_turn_id, logical_turn_created_at_ms) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19 WHERE ?3 IS NULL OR EXISTS (SELECT 1 FROM prompt_admissions WHERE id = ?3 AND principal = ?2 AND ordinal <= ?4 AND (user_turn_index IS NULL OR ?13 IS NULL OR user_turn_index <= ?13) AND (dialogue_prompt_index IS NULL OR ?14 IS NULL OR dialogue_prompt_index <= ?14) AND conversation_id = ?9 AND conversation_created_at_ms = ?10 AND (ordinal < ?4 OR (user_prompt_id IS ?11 AND user_prompt_created_at_ms IS ?12 AND logical_turn_id = ?18 AND logical_turn_created_at_ms = ?19)))")
-            .bind(&a.id).bind(&a.principal).bind(&a.parent_id).bind(a.ordinal).bind(a.history_count)
-            .bind(&a.prefix_digest).bind(&a.controls_digest).bind(a.created_at_ms)
-            .bind(&a.conversation_id).bind(a.conversation_created_at_ms).bind(&a.user_prompt_id).bind(a.user_prompt_created_at_ms).bind(a.user_turn_index).bind(a.dialogue_prompt_index).bind(a.atomic_lineage_created).bind(context_window_id).bind(context_window_index).bind(&a.logical_turn_id).bind(a.logical_turn_created_at_ms)
-            .execute(&mut *tx).await?;
-        anyhow::ensure!(
-            result.rows_affected() == 1,
-            "admission parent not found or ordinal precedes parent"
-        );
+        insert_in_tx(&mut tx, a, expected_epoch, true).await?;
         tx.commit().await?;
         Ok(())
     }

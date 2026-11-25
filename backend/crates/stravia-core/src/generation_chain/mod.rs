@@ -215,6 +215,27 @@ pub(crate) struct GenerationChain {
     atomic_state: Option<crate::plugin::PluginStore>,
 }
 
+/// 发现阶段对不可变 `admission_input` 算出的 canonical 前缀摘要，避免
+/// `admit_user_prompt` 再次从第 0 条重算整段历史与 controls 指纹。
+#[derive(Clone)]
+pub(super) struct DiscoveryHashCache {
+    pub(super) request_ptr: usize,
+    pub(super) controls_hash: [u8; 32],
+    pub(super) hashed_items: usize,
+    pub(super) tail_hash: [u8; 32],
+    pub(super) tail_units: usize,
+    pub(super) prefixes: Vec<(i64, String)>,
+}
+
+/// 准入阶段对不可变 `admission_input` 全量 `items` 算出的 canonical 摘要，供
+/// `observe_provider_response`、`stage` 和 `project_client_commit` 复核后直接续接。
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionHashCache {
+    pub(super) controls_hash: [u8; 32],
+    pub(super) hash: [u8; 32],
+    pub(super) units: usize,
+}
+
 pub(crate) struct GenerationChainWrite {
     chain: GenerationChain,
     principal: Principal,
@@ -223,6 +244,8 @@ pub(crate) struct GenerationChainWrite {
     parent: Arc<ActiveGenerationChain>,
     request_delta: Arc<AiRequest>,
     admission_input: Arc<AiRequest>,
+    discovery_hash_cache: Option<DiscoveryHashCache>,
+    admission_hash_cache: Option<AdmissionHashCache>,
     prompt_admission: Option<crate::storage::PromptAdmission>,
     atomic_context: Option<crate::plugin::execution::AtomicConversationContext>,
     atomic_guard: Option<crate::plugin::atomic_lease::AtomicLeaseGuard>,
@@ -254,6 +277,8 @@ impl Clone for GenerationChainWrite {
             parent: Arc::clone(&self.parent),
             request_delta: Arc::clone(&self.request_delta),
             admission_input: Arc::clone(&self.admission_input),
+            discovery_hash_cache: self.discovery_hash_cache.clone(),
+            admission_hash_cache: self.admission_hash_cache,
             prompt_admission: self.prompt_admission.clone(),
             atomic_context: self.atomic_context.clone(),
             atomic_guard: self.atomic_guard.clone(),
@@ -499,6 +524,7 @@ impl GenerationChain {
         runtime_cache: RuntimeCache,
         retention: crate::history_retention::HistoryRetention,
     ) -> Self {
+        crate::content_store::install_native_sha256();
         Self {
             store: GenerationChainStore::from_turn_chain(turn_chain, runtime_cache, retention),
             pending_commits: PendingGenerationCommits::default(),
@@ -1090,12 +1116,16 @@ impl GenerationChain {
             crate::router::stamp_previous_response_id(Arc::make_mut(&mut request), parent_id);
         }
 
+        let discovery_hash_cache = workspace.take_hash_cache_for(&admission_input);
+
         Ok(GenerationChainWrite {
             chain: self.clone(),
             principal,
             parent: Arc::new(parent),
             request_delta,
             admission_input,
+            discovery_hash_cache,
+            admission_hash_cache: None,
             prompt_admission: None,
             atomic_context: None,
             atomic_guard: None,
@@ -1565,16 +1595,42 @@ impl ClientHistoryState {
             .saturating_add(session_fingerprint.as_ref().map_or(0, String::capacity))
     }
 
+    #[cfg(test)]
     fn from_request_with_count<I: HistoryItem>(request: &AiRequest, items: &[I]) -> (Self, usize) {
-        let (context, units) = history_context_hash_with_count(items);
+        Self::from_request_with_prefix_cache(request, items, None, None)
+    }
+
+    fn from_request_with_prefix_cache<I: HistoryItem>(
+        request: &AiRequest,
+        items: &[I],
+        cached_controls: Option<[u8; 32]>,
+        cached_prefix: Option<(usize, [u8; 32], usize)>,
+    ) -> (Self, usize) {
+        let (context, units) = match cached_prefix {
+            Some((prefix_len, mut digest, mut count)) if prefix_len <= items.len() => {
+                for item in &items[prefix_len..] {
+                    let (next, added) = stravia_runtime_contract::protocol::ir::canonical::append_history_context_hash_with_count(
+                        &digest,
+                        item.history_item(),
+                    );
+                    digest = next;
+                    count += added;
+                }
+                (digest, count)
+            }
+            _ => history_context_hash_with_count(items),
+        };
+        let controls_hash = cached_controls.unwrap_or_else(|| {
+            stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+                request,
+            )
+        });
         (
             Self {
                 projection_version:
                     stravia_runtime_contract::turn_chain::REUSABLE_PREFIX_PROJECTION_VERSION,
                 controls_fingerprint: stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-                    &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
-                        request,
-                    ),
+                    &controls_hash,
                 ),
                 context_fingerprint: stravia_runtime_contract::protocol::ir::canonical::hash_hex(
                     &context,
