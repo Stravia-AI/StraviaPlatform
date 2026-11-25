@@ -82,7 +82,7 @@ def input_text(env: dict[str, Any], summary: dict[str, Any]) -> str:
 
 
 def output_text(env: dict[str, Any], summary: dict[str, Any]) -> str:
-    """摘要的完整最新可见输出；还没有可见块时为空串。"""
+    """摘要的全部可见输出；还没有可见块时为空串。"""
     return resolve_part(env, summary["output"], OUTPUT_SEPARATOR)
 
 

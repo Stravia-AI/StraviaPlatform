@@ -2580,30 +2580,40 @@ fn refs_summary(
     refs: &[(i64, i64)],
     lengths: &std::collections::HashMap<i64, i64>,
 ) -> anyhow::Result<ContentSummary> {
-    let refs = refs
-        .iter()
-        .map(|(_, content_id)| {
-            let raw_len = lengths
-                .get(content_id)
-                .with_context(|| format!("referenced content {content_id} is missing"))?;
-            Ok(ContentRef {
-                content_id: *content_id,
-                raw_len: *raw_len,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(ContentSummary::new(refs))
+    refs_summary_filtered(refs, lengths, false)
+}
+
+fn refs_summary_filtered(
+    refs: &[(i64, i64)],
+    lengths: &std::collections::HashMap<i64, i64>,
+    skip_empty: bool,
+) -> anyhow::Result<ContentSummary> {
+    let mut resolved = Vec::with_capacity(refs.len());
+    for (_, content_id) in refs {
+        let raw_len = *lengths
+            .get(content_id)
+            .with_context(|| format!("referenced content {content_id} is missing"))?;
+        if skip_empty && raw_len == 0 {
+            continue;
+        }
+        resolved.push(ContentRef {
+            content_id: *content_id,
+            raw_len,
+        });
+    }
+    Ok(ContentSummary::new(resolved))
 }
 
 impl ObservationStore {
-    /// 输入取根 Run 最新 `user_input_recorded` 的引用，输出取最新可见块；只读引用与长度。
+    /// 输入取根 Run 最新 `user_input_recorded` 的引用，输出按 sequence 顺序取全部可见块的非空正文引用；只读引用与长度。
     async fn content_summaries(&self, interactions: &[String]) -> anyhow::Result<ContentSummaries> {
         let mut summaries = ContentSummaries::default();
         if interactions.is_empty() {
             return Ok(summaries);
         }
         let mut inputs: Vec<(String, i64)> = Vec::new();
-        let mut outputs: Vec<(String, i64)> = Vec::new();
+        let mut outputs: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
         for chunk in interactions.chunks(IN_LIST_BATCH) {
             match self {
                 Self::Sqlite(pool, _) => {
@@ -2619,15 +2629,19 @@ impl ObservationStore {
                         inputs.push((row.try_get("id")?, row.try_get("input_sequence")?));
                     }
                     let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                        "SELECT interaction_id,MAX(sequence) AS sequence FROM observation_blocks WHERE channel='visible' AND interaction_id IN (",
+                        "SELECT interaction_id,sequence FROM observation_blocks WHERE channel='visible' AND interaction_id IN (",
                     );
                     let mut separated = query.separated(",");
                     for id in chunk {
                         separated.push_bind(id);
                     }
-                    separated.push_unseparated(") GROUP BY interaction_id");
+                    separated.push_unseparated(") ORDER BY interaction_id,sequence");
                     for row in query.build().fetch_all(pool).await? {
-                        outputs.push((row.try_get("interaction_id")?, row.try_get("sequence")?));
+                        let id: String = row.try_get("interaction_id")?;
+                        outputs
+                            .entry(id)
+                            .or_default()
+                            .push(row.try_get("sequence")?);
                     }
                 }
                 Self::Postgres(pool, _) => {
@@ -2643,15 +2657,19 @@ impl ObservationStore {
                         inputs.push((row.try_get("id")?, row.try_get("input_sequence")?));
                     }
                     let mut query = QueryBuilder::<sqlx::Postgres>::new(
-                        "SELECT interaction_id,MAX(sequence) AS sequence FROM observation_blocks WHERE channel='visible' AND interaction_id IN (",
+                        "SELECT interaction_id,sequence FROM observation_blocks WHERE channel='visible' AND interaction_id IN (",
                     );
                     let mut separated = query.separated(",");
                     for id in chunk {
                         separated.push_bind(id);
                     }
-                    separated.push_unseparated(") GROUP BY interaction_id");
+                    separated.push_unseparated(") ORDER BY interaction_id,sequence");
                     for row in query.build().fetch_all(pool).await? {
-                        outputs.push((row.try_get("interaction_id")?, row.try_get("sequence")?));
+                        let id: String = row.try_get("interaction_id")?;
+                        outputs
+                            .entry(id)
+                            .or_default()
+                            .push(row.try_get("sequence")?);
                     }
                 }
             }
@@ -2662,7 +2680,7 @@ impl ObservationStore {
         let sequences: Vec<i64> = inputs
             .iter()
             .map(|(_, sequence)| *sequence)
-            .chain(outputs.iter().map(|(_, sequence)| *sequence))
+            .chain(outputs.values().flatten().copied())
             .collect();
         let refs = self.event_refs(&sequences).await?;
         let content_ids: Vec<i64> = refs
@@ -2679,12 +2697,14 @@ impl ObservationStore {
                 .unwrap_or_default();
             summaries.input.insert(id, summary);
         }
-        for (id, sequence) in outputs {
-            let summary = refs
-                .get(&sequence)
-                .map(|refs| refs_summary(refs, &lengths))
-                .transpose()?
-                .unwrap_or_default();
+        for (id, sequences) in outputs {
+            let block_refs: Vec<(i64, i64)> = sequences
+                .into_iter()
+                .filter_map(|sequence| refs.get(&sequence))
+                .flatten()
+                .copied()
+                .collect();
+            let summary = refs_summary_filtered(&block_refs, &lengths, true)?;
             summaries.output.insert(id, summary);
         }
         Ok(summaries)
@@ -3019,7 +3039,7 @@ impl ObservationStore {
         Ok(owners)
     }
 
-    /// 最新可见块展开后的正文；Bundle 摘要与列表输出摘要共用同一取数规则。
+    /// 最新可见块展开后的正文；供 Bundle 摘要的 `latest_output_text` 使用。
     pub(super) async fn latest_visible_block_text(
         &self,
         interaction_id: &str,
