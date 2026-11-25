@@ -59,11 +59,13 @@ async function saveBypass(next: string): Promise<string> {
 
 <SettingsSection id="proxy" title={m.settings_proxy()}>
   {#if proxyQuery.error}
-    <RequestFailure
-      title={m.settings_some_settings_not_loaded()}
-      message={localizeBackendErrorMessage(proxyQuery.error)}
-      retry={() => void proxyQuery.refetch()}
-      retrying={proxyQuery.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        title={m.settings_some_settings_not_loaded()}
+        message={localizeBackendErrorMessage(proxyQuery.error)}
+        retry={() => void proxyQuery.refetch()}
+        retrying={proxyQuery.isFetching} />
+    </div>
   {:else if proxy}
     <SettingRow title={m.settings_proxy_url()} value={proxy.url || m.common_not_configured()} onedit={openEditor} />
     <SettingRow title={m.settings_bypass_hosts()} labelFor="proxy-bypass" layout="stacked">
@@ -78,7 +80,7 @@ async function saveBypass(next: string): Promise<string> {
       {/snippet}
     </SettingRow>
   {:else if proxyQuery.isPending}
-    <div class="flex flex-col gap-3 py-3" aria-busy="true"><Skeleton class="h-9" /><Skeleton class="h-9" /></div>
+    <div class="flex flex-col gap-3 p-4" aria-busy="true"><Skeleton class="h-9" /><Skeleton class="h-9" /></div>
   {/if}
 </SettingsSection>
 

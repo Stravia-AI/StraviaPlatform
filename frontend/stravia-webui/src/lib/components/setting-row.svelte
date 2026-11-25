@@ -81,15 +81,16 @@ const hasControl = $derived(Boolean(children || value !== undefined || onedit))
   data-layout={layout}
   data-nested={nested ? 'true' : undefined}
   class={cn(
-    // 统一单行设置最小高度（52px）并垂直居中，使开关、分段控件与「值 + 编辑」行保持一致的纵向节奏。
-    '@container/setting-row flex w-full min-w-0 flex-col justify-center py-3 min-h-13',
-    '[[data-slot=setting-row]+&]:border-t',
-    nested && 'ms-2 w-auto border-s ps-4',
+    // 统一单行设置最小高度（52px）并垂直居中；位于分组面板内时统一提供左右内边距与柔和悬停反馈。
+    '@container/setting-row flex min-h-13 w-full min-w-0 flex-col justify-center py-3 transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
+    '[[data-slot=setting-row]+&]:border-t [[data-slot=setting-row]+&]:border-border/60',
+    'in-data-[slot=settings-section-panel]:px-4 in-data-[slot=settings-section-panel]:hover:bg-muted/35 dark:in-data-[slot=settings-section-panel]:hover:bg-muted/20',
     className,
   )}>
   <div
     class={cn(
       'flex min-w-0 gap-2',
+      nested && 'ms-2 border-s border-border ps-3.5 in-data-[slot=settings-section-panel]:ms-0',
       layout === 'inline'
         ? ['justify-between gap-4', description || note ? 'items-start' : 'items-center']
         : layout === 'stacked'

@@ -352,38 +352,39 @@ test('settings fields align in wide containers and stack in narrow containers', 
   await expect(page.locator('#theme-preference')).toBeVisible()
   await page.evaluate(() => document.fonts.ready.then(() => undefined))
 
-  const column = '.settings-column'
-  const wideColumn = await boxOf(page, column)
+  const panel = '[data-slot="settings-section-panel"]'
+  const panelInset = 17 // 1px border + 16px px-4
+  const widePanel = await boxOf(page, panel)
   const wideLabel = await boxOf(page, '#appearance [data-slot="setting-row"] span')
   const wideTheme = await boxOf(page, '#theme-preference')
   const wideLanguage = await boxOf(page, '#interface-language')
   expect(wideLabel.right).toBeLessThan(wideTheme.x)
-  // Segmented controls hug their content and sit on the settings column's right edge.
-  expect(Math.abs(wideTheme.right - wideColumn.right)).toBeLessThan(1)
-  expect(Math.abs(wideLanguage.right - wideColumn.right)).toBeLessThan(1)
+  // Segmented controls hug their content and sit on the panel's inner right edge.
+  expect(Math.abs(widePanel.right - panelInset - wideTheme.right)).toBeLessThan(1.5)
+  expect(Math.abs(widePanel.right - panelInset - wideLanguage.right)).toBeLessThan(1.5)
   // The row top-aligns its title with the control.
   expect(Math.abs(wideLabel.y - wideTheme.y)).toBeLessThan(12)
 
   await page.goto('/settings?view=data')
   await expect(page.locator('#log-retention')).toBeVisible()
   await page.evaluate(() => document.fonts.ready.then(() => undefined))
-  const dataColumn = await boxOf(page, column)
+  const dataPanel = await boxOf(page, panel)
   const retention = await boxOf(page, '#log-retention')
   const clientAddress = await boxOf(page, '#artifact-client-base-url')
   expect(Math.abs(retention.width - 112)).toBeLessThan(1)
-  expect(Math.abs(retention.right - dataColumn.right)).toBeLessThan(1)
-  // Free-text rows stack: the title sits above a control that fills the settings column.
+  expect(Math.abs(dataPanel.right - panelInset - retention.right)).toBeLessThan(1.5)
+  // Free-text rows stack: the title sits above a control that fills the panel's inner width.
   const clientAddressLabel = await boxOf(page, 'label[for="artifact-client-base-url"]')
   expect(clientAddressLabel.bottom).toBeLessThanOrEqual(clientAddress.y)
-  expect(Math.abs(clientAddress.x - dataColumn.x)).toBeLessThan(1)
-  expect(Math.abs(clientAddress.right - dataColumn.right)).toBeLessThan(1)
+  expect(Math.abs(clientAddress.x - (dataPanel.x + panelInset))).toBeLessThan(1.5)
+  expect(Math.abs(dataPanel.right - panelInset - clientAddress.right)).toBeLessThan(1.5)
 
   await page.goto('/settings?view=network')
   await expect(page.locator('#proxy-bypass')).toBeVisible()
   const bypass = await boxOf(page, '#proxy-bypass')
-  const networkColumn = await boxOf(page, column)
-  expect(Math.abs(bypass.x - networkColumn.x)).toBeLessThan(1)
-  expect(Math.abs(bypass.right - networkColumn.right)).toBeLessThan(1)
+  const networkPanel = await boxOf(page, panel)
+  expect(Math.abs(bypass.x - (networkPanel.x + panelInset))).toBeLessThan(1.5)
+  expect(Math.abs(networkPanel.right - panelInset - bypass.right)).toBeLessThan(1.5)
 
   await page.setViewportSize({ width: 500, height: 900 })
   await page.goto('/settings')
@@ -395,9 +396,9 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(narrowTheme.x).toBeCloseTo(narrowLanguage.x, 0)
   await page.goto('/settings?view=data')
   await expect(page.getByRole('spinbutton', { name: 'Retention period (days)', exact: true })).toBeVisible()
-  const narrowDataColumn = await boxOf(page, column)
+  const narrowDataPanel = await boxOf(page, panel)
   const narrowRetention = await boxOf(page, '#log-retention')
-  expect(Math.abs(narrowRetention.width - narrowDataColumn.width)).toBeLessThan(1)
+  expect(Math.abs(narrowRetention.width - (narrowDataPanel.width - panelInset * 2))).toBeLessThan(2)
 })
 
 test('settings column stays 48rem and centered with its navigation on ultra-wide screens', async ({ page }) => {

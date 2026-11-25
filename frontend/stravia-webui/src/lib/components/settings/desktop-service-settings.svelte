@@ -211,11 +211,11 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
 
 <SettingsSection id="client" title={m.desktop_client_title()}>
   {#if portQuery.isPending || clientQuery.isPending}
-    <p role="status" class="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+    <p role="status" class="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
       <Spinner />{m.desktop_client_loading()}
     </p>
   {:else if portQuery.isError}
-    <div class="py-3" role="alert">
+    <div class="p-4" role="alert">
       <p class="text-sm font-medium text-destructive">{m.desktop_client_unavailable()}</p>
       <p class="mt-1 text-sm text-muted-foreground">{String(portQuery.error)}</p>
       <Button class="mt-3" variant="outline" onclick={() => void portQuery.refetch()}>
@@ -223,7 +223,7 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
       </Button>
     </div>
   {:else if clientQuery.isError}
-    <div class="py-3" role="alert">
+    <div class="p-4" role="alert">
       <p class="text-sm font-medium text-destructive">{m.desktop_client_settings_unavailable()}</p>
       <p class="mt-1 text-sm text-muted-foreground">{String(clientQuery.error)}</p>
       <Button class="mt-3" variant="outline" onclick={() => void clientQuery.refetch()}>
@@ -281,7 +281,7 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
       </div>
     </SettingRow>
     {#if portState.mode === 'fallback' && (portState.bindingFailure || portState.ownerLookup !== 'notApplicable')}
-      <div class="mb-2 border-s-2 border-warning ps-4 text-sm" role="status">
+      <div class="mx-4 mb-3 border-s-2 border-warning ps-4 text-sm" role="status">
         <p>{m.desktop_client_using_temporary_port()}</p>
         {#if portState.bindingFailure}
           <p class="mt-1 text-muted-foreground">{portState.bindingFailure.message}</p>
@@ -295,14 +295,14 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
         {/if}
       </div>
     {:else if portState.mode === 'configError'}
-      <div class="mb-2 border-s-2 border-destructive ps-4 text-sm" role="alert">
+      <div class="mx-4 mb-3 border-s-2 border-destructive ps-4 text-sm" role="alert">
         <p>{m.desktop_client_port_settings_unreadable()}</p>
         <p class="mt-1 text-muted-foreground">{portState.configError}</p>
       </div>
     {/if}
-    {#if validationError}<Field.FieldError>{validationError}</Field.FieldError>{/if}
+    {#if validationError}<Field.FieldError class="px-4 pb-3">{validationError}</Field.FieldError>{/if}
     {#if displayedOperationError}
-      <Field.FieldError>
+      <Field.FieldError class="px-4 pb-3">
         {displayedOperationError.code === 'bindFailed'
           ? m.desktop_client_port_not_bound()
           : displayedOperationError.code === 'storeWriteFailed'
@@ -325,7 +325,8 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
       layout="inline"
       title={m.desktop_client_external_access()}
       labelFor="desktop-external-access"
-      description={m.desktop_client_external_access_hint()}>
+      description={m.desktop_client_external_access_hint()}
+      class="border-t border-border/60">
       {#if externalToggling}<Spinner aria-label={m.settings_saving()} />{/if}
       <Switch
         id="desktop-external-access"
@@ -370,7 +371,7 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
       </SettingRow>
     {/if}
     {#if externalError}
-      <Field.FieldError>
+      <Field.FieldError class="px-4 pb-3">
         {externalError.code === 'bindFailed'
           ? m.desktop_client_external_not_switched()
           : m.desktop_client_settings_not_saved()}

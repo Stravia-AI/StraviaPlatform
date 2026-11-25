@@ -249,7 +249,7 @@ async function checkNow(): Promise<void> {
   </SettingRow>
 
   {#if hasVersionNotice}
-    <div class="flex flex-col gap-3 pb-3">
+    <div class="flex flex-col gap-3 px-4 pb-3">
       {#if updates.status?.skipped && available}
         <p role="status" class="text-sm text-muted-foreground">{m.settings_update_skipped()}</p>
       {/if}
@@ -312,7 +312,7 @@ async function checkNow(): Promise<void> {
       title={m.settings_update_channel()}
       hint={m.settings_update_channel_hint()}
       description={showPrereleaseFallbackNote ? m.settings_update_channel_prerelease_note() : undefined}
-      class={hasVersionNotice ? 'border-t' : undefined}>
+      class={hasVersionNotice ? 'border-t border-border/60' : undefined}>
       {#snippet children({ descriptionId })}
         {#if savingChannel}<Spinner class="shrink-0" aria-label={m.settings_saving()} />{/if}
         <SegmentedControl
@@ -328,23 +328,28 @@ async function checkNow(): Promise<void> {
       {/snippet}
     </SettingRow>
     {#if channelError}
-      <RequestFailure
-        class="mb-3"
-        title={m.settings_update_channel_save_failed()}
-        message={channelError}
-        retry={() => {
-          if (retryChannel !== undefined) void selectChannel(retryChannel)
-        }}
-        retrying={savingChannel} />
+      <div class="px-4 pb-3">
+        <RequestFailure
+          title={m.settings_update_channel_save_failed()}
+          message={channelError}
+          retry={() => {
+            if (retryChannel !== undefined) void selectChannel(retryChannel)
+          }}
+          retrying={savingChannel} />
+      </div>
     {/if}
     {#if proxyPreferenceQuery.error}
-      <RequestFailure
-        title={m.settings_update_proxy_load_failed()}
-        message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
-        retry={() => void proxyPreferenceQuery.refetch()}
-        retrying={proxyPreferenceQuery.isFetching} />
+      <div class="border-t border-border/60 p-4">
+        <RequestFailure
+          title={m.settings_update_proxy_load_failed()}
+          message={localizeBackendErrorMessage(proxyPreferenceQuery.error)}
+          retry={() => void proxyPreferenceQuery.refetch()}
+          retrying={proxyPreferenceQuery.isFetching} />
+      </div>
     {:else if proxyPreferenceQuery.isPending}
-      <p role="status" class="flex items-center gap-2 border-t py-3 text-sm text-muted-foreground">
+      <p
+        role="status"
+        class="flex items-center gap-2 border-t border-border/60 px-4 py-3 text-sm text-muted-foreground">
         <Spinner />{m.common_loading()}
       </p>
     {:else}
@@ -352,7 +357,7 @@ async function checkNow(): Promise<void> {
         layout="inline"
         title={m.settings_update_use_proxy()}
         labelFor="update-use-proxy"
-        class={channelError ? 'border-t' : undefined}>
+        class={channelError ? 'border-t border-border/60' : undefined}>
         {#if savingProxy}<Spinner aria-label={m.settings_saving()} />{/if}
         <Switch
           id="update-use-proxy"
@@ -361,19 +366,21 @@ async function checkNow(): Promise<void> {
       </SettingRow>
     {/if}
     {#if proxyNeedsConfiguration}
-      <p role="alert" class="pb-3 text-sm">
+      <p role="alert" class="px-4 pb-3 text-sm">
         <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4"
           >{m.settings_update_proxy_configure_first()}</a>
       </p>
     {/if}
     {#if proxyError}
-      <RequestFailure
-        title={m.settings_update_proxy_save_failed()}
-        message={proxyError}
-        retry={() => {
-          if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
-        }}
-        retrying={savingProxy} />
+      <div class="px-4 pb-3">
+        <RequestFailure
+          title={m.settings_update_proxy_save_failed()}
+          message={proxyError}
+          retry={() => {
+            if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
+          }}
+          retrying={savingProxy} />
+      </div>
     {/if}
   {/if}
 </SettingsSection>

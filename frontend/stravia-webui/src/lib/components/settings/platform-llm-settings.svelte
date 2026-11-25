@@ -84,13 +84,15 @@ async function save(): Promise<void> {
 
 <SettingsSection id="platform-llm" title={m.platform_llm_section_title()}>
   {#if configQuery.isError}
-    <RequestFailure
-      title={m.platform_llm_not_loaded()}
-      message={localizeBackendErrorMessage(configQuery.error)}
-      retry={() => void configQuery.refetch()}
-      retrying={configQuery.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        title={m.platform_llm_not_loaded()}
+        message={localizeBackendErrorMessage(configQuery.error)}
+        retry={() => void configQuery.refetch()}
+        retrying={configQuery.isFetching} />
+    </div>
   {:else if configQuery.isPending}
-    <div class="flex flex-col gap-3 py-3" aria-busy="true" aria-label={m.common_settings_loading()}>
+    <div class="flex flex-col gap-3 p-4" aria-busy="true" aria-label={m.common_settings_loading()}>
       <Skeleton class="h-9" />
     </div>
   {:else if config}
@@ -130,9 +132,11 @@ async function save(): Promise<void> {
       {/if}
     </SettingRow>
     {#if config.status === 'unavailable'}
-      <Alert.Root variant="warning" role="status" class="mt-3">
-        <Alert.Description>{m.platform_llm_saved_unavailable()}</Alert.Description>
-      </Alert.Root>
+      <div class="px-4 pb-3">
+        <Alert.Root variant="warning" role="status">
+          <Alert.Description>{m.platform_llm_saved_unavailable()}</Alert.Description>
+        </Alert.Root>
+      </div>
     {/if}
   {/if}
 </SettingsSection>

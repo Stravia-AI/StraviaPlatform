@@ -80,13 +80,15 @@ async function save(): Promise<void> {
 
 <SettingsSection id="currency" title={m.currency_custom_currency()}>
   {#if currencyQuery.error}
-    <RequestFailure
-      title={m.currency_not_loaded()}
-      message={localizeBackendErrorMessage(currencyQuery.error)}
-      retry={() => void currencyQuery.refetch()}
-      retrying={currencyQuery.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        title={m.currency_not_loaded()}
+        message={localizeBackendErrorMessage(currencyQuery.error)}
+        retry={() => void currencyQuery.refetch()}
+        retrying={currencyQuery.isFetching} />
+    </div>
   {:else if currencyQuery.isPending}
-    <div class="flex flex-col gap-3 py-3" aria-busy="true"><Skeleton class="h-9" /></div>
+    <div class="flex flex-col gap-3 p-4" aria-busy="true"><Skeleton class="h-9" /></div>
   {:else}
     <SettingRow
       title={m.currency_display_currency()}

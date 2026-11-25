@@ -185,7 +185,7 @@ function selectThinkingLevel(value?: string): void {
       onedit={openEditor} />
   {/if}
   {#if toggleError || config.state === 'unavailable'}
-    <div class="mt-3 flex flex-col gap-3">
+    <div class="flex flex-col gap-3 px-4 pb-3">
       {#if toggleError}
         <Alert.Root variant="destructive"><Alert.Description>{toggleError}</Alert.Description></Alert.Root>
       {/if}

@@ -35,11 +35,13 @@ async function save(next: string): Promise<string> {
 
 <SettingsSection id="logs" title={m.settings_history_retention()}>
   {#if retentionQuery.error}
-    <RequestFailure
-      title={m.settings_some_settings_not_loaded()}
-      message={localizeBackendErrorMessage(retentionQuery.error)}
-      retry={() => void retentionQuery.refetch()}
-      retrying={retentionQuery.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        title={m.settings_some_settings_not_loaded()}
+        message={localizeBackendErrorMessage(retentionQuery.error)}
+        retry={() => void retentionQuery.refetch()}
+        retrying={retentionQuery.isFetching} />
+    </div>
   {:else if retention !== undefined}
     <SettingRow
       title={m.settings_retention_period_days()}
@@ -59,6 +61,6 @@ async function save(next: string): Promise<string> {
       {/snippet}
     </SettingRow>
   {:else}
-    <Skeleton class="my-3 h-9" aria-busy="true" />
+    <div class="p-4" aria-busy="true"><Skeleton class="h-9" /></div>
   {/if}
 </SettingsSection>

@@ -142,11 +142,13 @@ async function downloadPerformance(): Promise<void> {
 
 <SettingsSection id="diagnostics" title={m.settings_diagnostics()}>
   {#if debugQuery.error}
-    <RequestFailure
-      title={m.settings_diagnostics_load_failed()}
-      message={localizeBackendErrorMessage(debugQuery.error)}
-      retry={() => void debugQuery.refetch()}
-      retrying={debugQuery.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        title={m.settings_diagnostics_load_failed()}
+        message={localizeBackendErrorMessage(debugQuery.error)}
+        retry={() => void debugQuery.refetch()}
+        retrying={debugQuery.isFetching} />
+    </div>
   {:else if debugQuery.data}
     <SettingRow
       layout="inline"
@@ -186,7 +188,7 @@ async function downloadPerformance(): Promise<void> {
       </SettingRow>
     {/if}
   {:else}
-    <Skeleton class="my-3 h-9" aria-busy="true" />
+    <div class="p-4" aria-busy="true"><Skeleton class="h-9" /></div>
   {/if}
 </SettingsSection>
 

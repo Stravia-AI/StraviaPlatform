@@ -140,9 +140,9 @@ const handleCopyWechatName: MouseEventHandler<HTMLElement> = ({ currentTarget })
 {/snippet}
 
 <SettingsSection id="about" title={m.settings_about()}>
-  <div class="min-w-0 divide-y divide-border">
+  <div class="min-w-0 divide-y divide-border/60">
     <!-- 第 1 行：品牌标识与发行版 -->
-    <div class="flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3">
+    <div class="flex min-h-11 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
       <div class="flex min-w-0 items-center gap-2.5">
         <BrandMark class="size-6" />
         <BrandWordmark class="text-base text-foreground" />
@@ -170,7 +170,7 @@ const handleCopyWechatName: MouseEventHandler<HTMLElement> = ({ currentTarget })
     </div>
 
     <!-- 第 2 行：官方链接与社区入口 -->
-    <div class="flex min-h-11 flex-wrap items-center justify-center gap-2 py-3">
+    <div class="flex min-h-11 flex-wrap items-center justify-center gap-2 px-4 py-3">
       <Button
         type="button"
         variant="ghost"

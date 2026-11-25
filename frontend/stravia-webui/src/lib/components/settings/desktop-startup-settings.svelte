@@ -64,18 +64,18 @@ async function applyStartupToggle(
       </SettingRow>
     {/if}
     {#if startupError}
-      <Field.FieldError role="alert">
+      <Field.FieldError role="alert" class="px-4 pb-3">
         {m.desktop_client_settings_not_saved()}
         <span class="mt-1 block font-normal text-muted-foreground">{startupError}</span>
       </Field.FieldError>
     {/if}
   {:else if clientQuery.isError}
-    <div class="flex flex-wrap items-center gap-3 py-3 text-sm text-muted-foreground">
+    <div class="flex flex-wrap items-center gap-3 px-4 py-3 text-sm text-muted-foreground">
       <p>{m.desktop_client_settings_unavailable()}</p>
       <Button variant="outline" size="sm" onclick={() => void clientQuery.refetch()}>{m.common_retry()}</Button>
     </div>
   {:else}
-    <p role="status" class="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+    <p role="status" class="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
       <Spinner />{m.desktop_client_loading()}
     </p>
   {/if}

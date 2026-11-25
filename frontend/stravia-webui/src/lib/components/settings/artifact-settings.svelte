@@ -156,11 +156,13 @@ function toggleExternalDownloads(enabled: boolean): void {
 
 <SettingsSection id="artifacts" title={m.artifact_settings_title()} badge={m.common_beta()}>
   {#if artifactQuery.error}
-    <RequestFailure
-      title={m.artifact_load_failed()}
-      message={localizeBackendErrorMessage(artifactQuery.error)}
-      retry={() => void artifactQuery.refetch()}
-      retrying={artifactQuery.isFetching} />
+    <div class="p-4">
+      <RequestFailure
+        title={m.artifact_load_failed()}
+        message={localizeBackendErrorMessage(artifactQuery.error)}
+        retry={() => void artifactQuery.refetch()}
+        retrying={artifactQuery.isFetching} />
+    </div>
   {:else if artifact}
     <SettingRow
       title={m.artifact_client_base_url()}
@@ -228,9 +230,9 @@ function toggleExternalDownloads(enabled: boolean): void {
         }
         disabled={busyKey === 'upload' || needsAddress} />
     </SettingRow>
-    {#if rowError}<Field.FieldError role="alert">{rowError}</Field.FieldError>{/if}
+    {#if rowError}<Field.FieldError role="alert" class="px-4 pb-3">{rowError}</Field.FieldError>{/if}
   {:else}
-    <div class="flex flex-col gap-3 py-3" aria-busy="true"><Skeleton class="h-9" /><Skeleton class="h-9" /></div>
+    <div class="flex flex-col gap-3 p-4" aria-busy="true"><Skeleton class="h-9" /><Skeleton class="h-9" /></div>
   {/if}
 </SettingsSection>
 

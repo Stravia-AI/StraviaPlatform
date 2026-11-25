@@ -103,7 +103,11 @@ function handleKeydown(event: KeyboardEvent, currentIndex: number): void {
   data-slot="segmented-control"
   data-variant="default"
   role="radiogroup"
-  class={cn(tabsListVariants({ variant: 'default' }), 'min-h-8 p-0.5', className)}
+  class={cn(
+    tabsListVariants({ variant: 'default' }),
+    'min-h-8 border border-border/60 bg-muted/75 p-0.5 dark:bg-background/70',
+    className,
+  )}
   aria-label={ariaLabel}
   aria-labelledby={ariaLabelledby}
   aria-describedby={ariaDescribedby}
@@ -117,7 +121,10 @@ function handleKeydown(event: KeyboardEvent, currentIndex: number): void {
       role="radio"
       data-slot="segmented-control-item"
       value={option.value}
-      class={cn(tabsTriggerVariants(), 'min-h-7 px-2.5 py-0')}
+      class={cn(
+        tabsTriggerVariants(),
+        'min-h-6.5 px-2.5 py-0 data-active:border-border/70 data-active:bg-card data-active:text-foreground data-active:shadow-xs group-data-[variant=default]/tabs-list:data-active:shadow-xs dark:data-active:border-border/90 dark:data-active:bg-card dark:data-active:shadow-xs',
+      )}
       tabindex={index === tabStopIndex ? 0 : -1}
       aria-checked={selected}
       data-state={selected ? 'active' : 'inactive'}
