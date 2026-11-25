@@ -155,6 +155,7 @@ fn session_context() -> SessionContext {
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,
         principal: Principal::new("test-key"),
+        transparent_injections: None,
         cancellation: stravia_runtime_contract::CancellationToken::new(),
         inherited_media_turns: Vec::new(),
         response_id: None,
@@ -185,10 +186,12 @@ impl PlatformTool for ControlledDeliveryTool {
         &self,
         _arguments: Value,
         _context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
         self.entered.notify_one();
         self.release.notified().await;
-        Ok(serde_json::json!({"unprocessed_success":true}))
+        Ok(PlatformToolOutput::ok(
+            serde_json::json!({"unprocessed_success":true}),
+        ))
     }
 }
 
@@ -406,7 +409,7 @@ async fn marker_reference_delivery_is_fixed_after_background_completion_and_hook
                 entered: entered.clone(),
                 release: release.clone(),
             }),
-            Arc::new(crate::mcp::read::ReadTool::new(&gateway, &mut Vec::new()).unwrap()),
+            Arc::new(crate::mcp::read::ReadTool::new(&gateway)),
         ])
         .unwrap(),
     );
@@ -1406,7 +1409,10 @@ impl stravia_runtime_contract::hook::PlatformTool for RuntimeEchoTool {
         &self,
         arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
         let Some(object) = arguments.as_object() else {
             return Err(stravia_runtime_contract::hook::PlatformToolError::new(
                 "arguments must be an object",
@@ -1417,7 +1423,9 @@ impl stravia_runtime_contract::hook::PlatformTool for RuntimeEchoTool {
                 "tool failed",
             ))
         } else {
-            Ok(arguments)
+            Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+                arguments,
+            ))
         }
     }
 }

@@ -1075,6 +1075,11 @@ pub(super) async fn orchestrate(
         phase.finish();
         return response;
     }
+    let transparent_injections = crate::proxy::security::Security::new(gw.storage.auth())
+        .authorize_transparent_injections(&principal)
+        .await
+        .ok()
+        .map(Into::into);
     let session_context = stravia_runtime_contract::hook::SessionContext {
         tools_fixed: false,
         request_id: ctx.request_id.clone(),
@@ -1084,6 +1089,7 @@ pub(super) async fn orchestrate(
         transport: stravia_runtime_contract::hook::TransportKind::Http,
         inherited_media_turns,
         principal,
+        transparent_injections,
         cancellation: ctx.cancellation.clone(),
         response_id: generation.write.as_ref().map(|write| write.id().to_owned()),
         previous_response_id,

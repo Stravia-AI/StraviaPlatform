@@ -1,9 +1,9 @@
 use super::*;
-use crate::mcp::read::ReadTool;
+use crate::mcp::read::{ReadTool, SearchReadHandler};
 use std::{future::Future, pin::Pin};
 use stravia_runtime_contract::{
     CancellationToken,
-    hook::{PlatformTool, PlatformToolError, StraviaReadDomain, ToolExecutionContext, ToolId},
+    hook::{PlatformToolError, PlatformToolOutput, ToolExecutionContext},
 };
 
 struct ControlledSearch {
@@ -14,28 +14,13 @@ struct ControlledSearch {
 }
 
 #[async_trait]
-impl PlatformTool for ControlledSearch {
-    fn id(&self) -> ToolId {
-        ToolId::new("controlled-search")
-    }
-    fn external_name(&self) -> &str {
-        "controlled_search"
-    }
-    fn description(&self) -> Option<&str> {
-        Some("Controlled sourced search report")
-    }
-    fn parameters(&self) -> Value {
-        json!({"type":"object"})
-    }
-    fn read_domain(&self) -> Option<StraviaReadDomain> {
-        Some(StraviaReadDomain::Query)
-    }
-    async fn execute(
+impl SearchReadHandler for ControlledSearch {
+    async fn search(
         &self,
-        arguments: Value,
+        request: stravia_web_search::PublicSearchRequest,
         _context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        assert_eq!(arguments["query"], "controlled evidence");
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        assert_eq!(request.query, "controlled evidence");
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
         self.release.notified().await;
@@ -44,7 +29,7 @@ impl PlatformTool for ControlledSearch {
                 "controlled search failed after acceptance",
             ));
         }
-        Ok(json!({
+        Ok(PlatformToolOutput::ok(json!({
             "path":"stravia://turns/abcdefghijklmnopqrstuvwxyzab",
             "completion":"complete",
             "report":{
@@ -52,7 +37,7 @@ impl PlatformTool for ControlledSearch {
                 "sources":[{"path":"stravia://turns/abcdefghijklmnopqrstuvwxyzab/sources/1","url":"https://example.org/evidence","title":"Controlled evidence"}],
                 "limitations":["Only the controlled source was inspected."]
             }
-        }))
+        })))
     }
 }
 
@@ -77,8 +62,7 @@ async fn fixture(fail: bool) -> (TestApp, ReadTool, Arc<ControlledSearch>) {
         release: Arc::new(tokio::sync::Notify::new()),
         fail,
     });
-    let mut contributions: Vec<Arc<dyn PlatformTool>> = vec![upstream.clone()];
-    let reader = ReadTool::new(&app.gateway, &mut contributions).unwrap();
+    let reader = ReadTool::with_search_handler(&app.gateway, upstream.clone());
     (app, reader, upstream)
 }
 

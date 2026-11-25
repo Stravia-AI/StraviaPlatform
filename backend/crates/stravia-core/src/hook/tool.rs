@@ -288,8 +288,8 @@ mod tests {
             &self,
             arguments: Value,
             _context: ToolExecutionContext,
-        ) -> Result<Value, PlatformToolError> {
-            Ok(arguments)
+        ) -> Result<PlatformToolOutput, PlatformToolError> {
+            Ok(PlatformToolOutput::ok(arguments))
         }
 
         fn parallel_safe(&self) -> bool {
@@ -321,7 +321,7 @@ mod tests {
             &self,
             _arguments: Value,
             _context: ToolExecutionContext,
-        ) -> Result<Value, PlatformToolError> {
+        ) -> Result<PlatformToolOutput, PlatformToolError> {
             panic!("boom")
         }
     }

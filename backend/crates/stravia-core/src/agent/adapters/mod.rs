@@ -104,7 +104,7 @@ impl AgentTool for PlatformToolAgentAdapter {
     ) -> Result<AgentToolOutput, AgentToolError> {
         let output = self
             .tool
-            .execute_result(
+            .execute(
                 input,
                 ToolExecutionContext {
                     request_id: context.turn_id.to_string(),

@@ -21,7 +21,6 @@ pub(super) async fn configure_gateway_extensions(
     let web_platform_tools = web_access::internal_platform_tools(gateway);
     let mut runner_tools: Vec<Arc<dyn agent::AgentTool>> = tools
         .iter()
-        .filter(|tool| tool.read_domain().is_none())
         .map(|tool| {
             Arc::new(agent::PlatformToolAgentAdapter::new(Arc::clone(tool), 1))
                 as Arc<dyn agent::AgentTool>
@@ -188,24 +187,8 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
         principal: &stravia_runtime_contract::Principal,
         binding: &stravia_web_search::ResolvedWebSearchBackend,
     ) -> Result<(), stravia_web_search::WebSearchError> {
-        if let Err(denial) = self
-            .gateway
-            .policy_allows_capability(
-                principal.api_key_id(),
-                crate::policy::PolicyCapability::WebSearch,
-            )
-            .await
-        {
-            tracing::warn!(
-                api_key_id = ?principal.api_key_id(),
-                code = denial.code.as_str(),
-                reason = denial.message.as_str(),
-                "policy denied web search capability"
-            );
-            return Err(web_search_authorization_error());
-        }
-        proxy::security::Security::new(self.gateway.storage.auth())
-            .authorize_principal_capability(principal)
+        self.gateway
+            .authorize_capability(principal, crate::policy::PolicyCapability::WebSearch)
             .await
             .map_err(|_| web_search_authorization_error())?;
         // Local 绑定内部记录键，External 仍绑定公开模型名。
@@ -228,10 +211,6 @@ impl stravia_web_search::SearchRunAuthorizer for GatewayWebSearchAuthorizer {
             .map_err(|_| web_search_authorization_error())?
             .filter(|route| route.is_enabled)
             .ok_or_else(web_search_authorization_error)?;
-        proxy::security::Security::new(self.gateway.storage.auth())
-            .authorize_principal_capability(principal)
-            .await
-            .map_err(|_| web_search_authorization_error())?;
         Ok(())
     }
 }
@@ -325,14 +304,17 @@ fn hook_runtime_with_web_search(
     mut tools: Vec<Arc<dyn PlatformTool>>,
     dynamic_tool_loaders: Vec<Arc<dyn crate::hook::DynamicPlatformToolLoader>>,
 ) -> anyhow::Result<(HookRuntime, crate::mcp::read::ReadTool)> {
-    let (builtin_hooks, builtin_tools) = stravia_web_search::builtin_extensions(Arc::new(
+    if tools
+        .iter()
+        .any(|tool| tool.external_name() == crate::mcp::read::TOOL_NAME)
+    {
+        anyhow::bail!("StraviaRead is reserved for the built-in read tool");
+    }
+    hooks.push(stravia_web_search::web_search_hook(Arc::new(
         web_search::host::SearchHost(gateway.clone()),
-    ));
-    hooks.extend(builtin_hooks);
-    tools.extend(builtin_tools);
-    tools.extend(media::platform_tools(gateway));
+    )));
     hooks.push(media::planning_hook(gateway));
-    let read_tool = crate::mcp::read::ReadTool::new(gateway, &mut tools)?;
+    let read_tool = crate::mcp::read::ReadTool::new(gateway);
     tools.push(Arc::new(read_tool.clone()));
     hooks.push(Arc::new(crate::mcp::read::ReadPlanningHook {
         tool: read_tool.clone(),

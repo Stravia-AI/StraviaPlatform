@@ -1087,6 +1087,7 @@ mod tests {
                     ingress: INGRESS,
                     transport: stravia_runtime_contract::hook::TransportKind::Http,
                     principal: principal.clone(),
+                    transparent_injections: None,
                     cancellation: stravia_runtime_contract::CancellationToken::new(),
                     inherited_media_turns: Vec::new(),
                     response_id: None,

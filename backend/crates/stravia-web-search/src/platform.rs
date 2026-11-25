@@ -3,76 +3,40 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde::Deserialize;
 use serde_json::Value;
 
 use stravia_runtime_contract::Principal;
 use stravia_runtime_contract::hook::{
     ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
-    HookSession, PlatformTool, PlatformToolError, PlatformToolOutput, ResponsePatch,
-    SessionContext, ToolExecutionContext, ToolId, ToolProgress, ToolProgressSink,
+    HookSession, PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT, ReadExposureScope, ResponsePatch,
+    SessionContext, ToolProgress, ToolProgressSink,
 };
 use stravia_runtime_contract::protocol::ir::{
-    ContentBlock, NativeTool, NativeToolKind, ToolChoice, WebSearchTool,
+    NativeTool, NativeToolKind, ToolChoice, WebSearchTool,
 };
 
 use stravia_web_access_contract::read_path::{
     ReadBody, ReadInput, ReadTarget, decode_read_input, parse_read_input,
 };
 
-use super::{SearchTurnId, WebSearchEvent, WebSearchInput, WebSearchRunPolicy, WebSearchRunner};
+use super::{
+    SearchTurnId, WebSearchError, WebSearchEvent, WebSearchInput, WebSearchResult,
+    WebSearchRunPolicy, WebSearchRunner,
+};
 
 pub const PUBLIC_WEB_SEARCH_TOOL_ID: &str = "stravia-read";
 pub const PUBLIC_WEB_SEARCH_TOOL_NAME: &str = "StraviaRead";
-const MAX_PUBLIC_DEADLINE: Duration = Duration::from_secs(15 * 60);
+const MAX_PUBLIC_DEADLINE: Duration = PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT;
 
-pub type BuiltinExtensions = (Vec<Arc<dyn Hook>>, Vec<Arc<dyn PlatformTool>>);
-
-pub fn builtin_extensions(gateway: Arc<dyn crate::host::PublicSearchHost>) -> BuiltinExtensions {
-    (
-        vec![Arc::new(WebSearchHook {
-            gateway: gateway.clone(),
-        })],
-        vec![Arc::new(WebSearchPlatformTool {
-            gateway: gateway.clone(),
-        })],
-    )
+pub fn hook(gateway: Arc<dyn crate::host::PublicSearchHost>) -> Arc<dyn Hook> {
+    Arc::new(WebSearchHook { gateway })
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PublicSearchInput {
-    query: String,
-    #[serde(default)]
-    previous_path: Option<String>,
-    #[serde(default)]
-    allowed_domains: Option<Vec<String>>,
-}
-
-pub fn input_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The question or topic to search. UTF-8 encoding must not exceed 64 KiB."
-            },
-            "previous_path": {
-                "type": ["string", "null"],
-                "pattern": "^stravia://turns/[a-z]{28}$",
-                "maxLength": 128,
-                "description": "An exact prior stravia://turns/<turn-id> path to continue or branch from."
-            },
-            "allowed_domains": {
-                "type": ["array", "null"],
-                "maxItems": 20,
-                "items": { "type": "string" }
-            }
-        },
-        "required": ["query", "previous_path", "allowed_domains"],
-        "additionalProperties": false
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicSearchRequest {
+    pub query: String,
+    pub previous_turn_id: Option<SearchTurnId>,
+    pub allowed_domains: Option<Vec<String>>,
 }
 
 pub async fn is_available(
@@ -93,42 +57,24 @@ async fn authorized_search_access(
     Some(access)
 }
 
-pub async fn execute(
+pub async fn execute_request(
     gateway: &dyn crate::host::PublicSearchHost,
-    arguments: Value,
+    request: PublicSearchRequest,
     principal: Principal,
     cancellation: stravia_runtime_contract::CancellationToken,
     progress: Option<Arc<dyn ToolProgressSink>>,
-) -> Result<Value, Value> {
+) -> Result<WebSearchResult, WebSearchError> {
     if !is_available(gateway, &principal).await {
         return Err(unavailable_error());
     }
-    let request: PublicSearchInput = serde_json::from_value(arguments).map_err(|error| {
-        serde_json::json!({
-            "error": {
-                "code": "invalid_input",
-                "message": format!("invalid web_search arguments: {error}")
-            }
-        })
-    })?;
     let runner: WebSearchRunner = gateway.runner().await.map_err(|_| unavailable_error())?;
-    let previous_turn_id = request
-        .previous_path
-        .as_deref()
-        .map(SearchTurnId::from_reference)
-        .transpose()
-        .map_err(|error| {
-            serde_json::json!({
-                "error": { "code": "invalid_input", "message": error.to_string() }
-            })
-        })?;
     let policy = request
         .allowed_domains
         .map(|allowed_domains| WebSearchRunPolicy { allowed_domains });
     let mut stream = runner.run(WebSearchInput {
         principal,
         query: request.query,
-        previous_turn_id,
+        previous_turn_id: request.previous_turn_id,
         policy,
         cancellation,
         deadline: Instant::now() + MAX_PUBLIC_DEADLINE,
@@ -136,17 +82,10 @@ pub async fn execute(
     while let Some(event) = stream.next().await {
         match event {
             WebSearchEvent::Completed(result) | WebSearchEvent::Partial(result) => {
-                return serde_json::to_value(result).map_err(|_| {
-                    serde_json::json!({
-                        "error": {
-                            "code": "result_encoding_failed",
-                            "message": "Web Search result could not be encoded"
-                        }
-                    })
-                });
+                return Ok(result);
             }
             WebSearchEvent::Failed(error) => {
-                return Err(serde_json::json!({ "error": error }));
+                return Err(error);
             }
             WebSearchEvent::Progress {
                 call_id,
@@ -165,12 +104,10 @@ pub async fn execute(
             WebSearchEvent::RunStarted { .. } => {}
         }
     }
-    Err(serde_json::json!({
-        "error": {
-            "code": "search_incomplete",
-            "message": "Web Search ended without a terminal result"
-        }
-    }))
+    Err(WebSearchError::new(
+        "search_incomplete",
+        "Web Search ended without a terminal result",
+    ))
 }
 
 fn search_phase_name(phase: super::WebSearchPhase) -> &'static str {
@@ -183,86 +120,8 @@ fn search_phase_name(phase: super::WebSearchPhase) -> &'static str {
     }
 }
 
-fn unavailable_error() -> Value {
-    serde_json::json!({
-        "error": {
-            "code": "web_search_unavailable",
-            "message": "Web Search is unavailable"
-        }
-    })
-}
-
-struct WebSearchPlatformTool {
-    gateway: Arc<dyn crate::host::PublicSearchHost>,
-}
-
-#[async_trait]
-impl PlatformTool for WebSearchPlatformTool {
-    fn read_domain(&self) -> Option<stravia_runtime_contract::hook::StraviaReadDomain> {
-        Some(stravia_runtime_contract::hook::StraviaReadDomain::Query)
-    }
-
-    fn id(&self) -> ToolId {
-        ToolId::new(PUBLIC_WEB_SEARCH_TOOL_ID)
-    }
-
-    fn external_name(&self) -> &str {
-        PUBLIC_WEB_SEARCH_TOOL_NAME
-    }
-
-    fn description(&self) -> Option<&str> {
-        Some("Search the public web and return a complete sourced report.")
-    }
-
-    fn parameters(&self) -> Value {
-        input_schema()
-    }
-    fn parallel_safe(&self) -> bool {
-        true
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        execute(
-            self.gateway.as_ref(),
-            arguments,
-            context.principal,
-            context.cancellation,
-            context.progress,
-        )
-        .await
-        .map_err(|error| PlatformToolError::new(error.to_string()))
-    }
-
-    async fn execute_result(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<PlatformToolOutput, PlatformToolError> {
-        match execute(
-            self.gateway.as_ref(),
-            arguments,
-            context.principal,
-            context.cancellation,
-            context.progress,
-        )
-        .await
-        {
-            Ok(result) => Ok(PlatformToolOutput {
-                content: vec![ContentBlock::Unknown { raw: result }],
-                is_error: false,
-                metadata: serde_json::Map::new(),
-            }),
-            Err(error) => Ok(PlatformToolOutput {
-                content: vec![ContentBlock::Unknown { raw: error }],
-                is_error: true,
-                metadata: serde_json::Map::new(),
-            }),
-        }
-    }
+fn unavailable_error() -> WebSearchError {
+    WebSearchError::new("web_search_unavailable", "Web Search is unavailable")
 }
 
 struct WebSearchHook {
@@ -311,42 +170,34 @@ impl HookSession for WebSearchHookSession {
                 if let Some(batch) = client_web_search_precedence(current) {
                     return Ok(batch);
                 }
-                let Some(_access) =
-                    authorized_search_access(self.gateway.as_ref(), &self.principal).await
-                else {
-                    return if native.is_some() {
-                        Ok(reject(
-                            403,
-                            "web_search_unavailable",
-                            "Web Search is unavailable",
-                        ))
-                    } else {
-                        Ok(ActionBatch::default())
-                    };
-                };
                 if native.is_none() {
                     return Ok(ActionBatch::default());
                 }
-                let mut actions = Vec::with_capacity(2);
-                if native.is_some() {
-                    self.native_filters = filters;
-                    if matches!(
-                        &current.tool_choice,
-                        Some(ToolChoice::Native(NativeToolKind::WebSearch))
-                    ) {
-                        actions.push(HookAction::PatchRequest(Box::new(
-                            stravia_runtime_contract::hook::RequestPatch::SetToolChoice(Some(
-                                ToolChoice::Named {
-                                    name: PUBLIC_WEB_SEARCH_TOOL_NAME.into(),
-                                },
-                            )),
-                        )));
-                    }
+                if authorized_search_access(self.gateway.as_ref(), &self.principal)
+                    .await
+                    .is_none()
+                {
+                    return Ok(reject(
+                        403,
+                        "web_search_unavailable",
+                        "Web Search is unavailable",
+                    ));
                 }
-                actions.push(HookAction::ExposeRead {
-                    scope: stravia_runtime_contract::hook::ReadExposureScope::new(true, false),
-                    description: "Use StraviaRead with path stravia://search and the query in question for complete sourced research, or a public HTTP(S) URL for webpage Markdown and file import.".into(),
-                });
+                let mut actions = Vec::with_capacity(2);
+                self.native_filters = filters;
+                if matches!(
+                    &current.tool_choice,
+                    Some(ToolChoice::Native(NativeToolKind::WebSearch))
+                ) {
+                    actions.push(HookAction::PatchRequest(Box::new(
+                        stravia_runtime_contract::hook::RequestPatch::SetToolChoice(Some(
+                            ToolChoice::Named {
+                                name: PUBLIC_WEB_SEARCH_TOOL_NAME.into(),
+                            },
+                        )),
+                    )));
+                }
+                actions.push(HookAction::expose_read(ReadExposureScope::new(true, false)));
                 Ok(ActionBatch { actions })
             }
             HookEvent::Request { current, .. } if self.native_filters.is_some() => {
@@ -557,41 +408,6 @@ pub fn output_schema() -> Value {
 mod tests {
     use super::*;
     use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, ToolSpec};
-
-    #[test]
-    fn input_schema_is_strict_function_compatible() {
-        let schema = input_schema();
-        let properties = schema["properties"]
-            .as_object()
-            .expect("input schema properties must be an object");
-
-        assert_eq!(
-            schema["required"],
-            serde_json::json!(["query", "previous_path", "allowed_domains"])
-        );
-        assert_eq!(
-            properties["previous_path"]["type"],
-            serde_json::json!(["string", "null"])
-        );
-        assert_eq!(
-            properties["allowed_domains"]["type"],
-            serde_json::json!(["array", "null"])
-        );
-        assert!(properties.get("blocked_domains").is_none());
-    }
-
-    #[test]
-    fn public_search_input_rejects_blocked_domains_as_an_unknown_field() {
-        assert!(
-            serde_json::from_value::<PublicSearchInput>(serde_json::json!({
-                "query": "Search the claim",
-                "previous_path": None::<String>,
-                "allowed_domains": None::<Vec<String>>,
-                "blocked_domains": []
-            }))
-            .is_err()
-        );
-    }
 
     #[test]
     fn native_blocked_domain_filters_are_rejected_as_unsupported() {

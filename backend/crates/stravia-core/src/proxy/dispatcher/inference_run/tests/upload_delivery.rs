@@ -27,11 +27,16 @@ impl stravia_runtime_contract::hook::PlatformTool for UploadArgumentTool {
         &self,
         arguments: Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<Value, stravia_runtime_contract::hook::PlatformToolError> {
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
         self.received.send(arguments).await.map_err(|_| {
             stravia_runtime_contract::hook::PlatformToolError::new("test receiver closed")
         })?;
-        Ok(json!({"accepted":true}))
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            json!({"accepted":true}),
+        ))
     }
 }
 

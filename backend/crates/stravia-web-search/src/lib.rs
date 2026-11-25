@@ -10,7 +10,8 @@ pub use config::*;
 pub use external::*;
 pub use local::*;
 pub use platform::{
-    builtin_extensions, execute as execute_public_search, input_schema, native_web_search_requested,
+    PublicSearchRequest, execute_request as execute_public_search, hook as web_search_hook,
+    native_web_search_requested,
 };
 pub use runner::*;
 pub use types::*;

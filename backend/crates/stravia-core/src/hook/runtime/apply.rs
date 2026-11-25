@@ -265,6 +265,7 @@ pub(super) struct ToolExposure<'a> {
     pub tools: &'a mut HashMap<String, ToolId>,
     pub specs: &'a mut HashMap<String, ToolSpec>,
     pub read_scope: &'a mut ReadExposureScope,
+    pub advertised_read_scope: &'a mut ReadExposureScope,
 }
 
 pub(super) fn apply_request_actions(
@@ -343,6 +344,7 @@ fn apply_request_actions_staged(
     let mut staged_tools = exposure.tools.clone();
     let mut staged_tool_specs = exposure.specs.clone();
     let mut staged_read_scope = *exposure.read_scope;
+    let mut staged_advertised_read_scope = *exposure.advertised_read_scope;
     let mut protected_specs: HashMap<String, ToolSpec> = staged_request
         .tools
         .iter()
@@ -374,35 +376,28 @@ fn apply_request_actions_staged(
                 history_edits.extend(edit);
                 refresh_context |= refresh;
             }
-            HookAction::ExposeRead { scope, description } => {
+            HookAction::ExposeRead { scope, advertised } => {
                 let tool_id = ToolId::new("stravia-read");
                 let provider_name = "StraviaRead".to_string();
                 let mut spec = match staged_tool_specs.get(&provider_name) {
                     Some(spec) => spec.clone(),
                     None => {
-                        let mut exposed =
-                            registry
-                                .expose(&tool_id, &HashSet::new())
-                                .map_err(|error| {
-                                    invalid_action(hook_id, EventKind::Request, error.to_string())
-                                })?;
-                        exposed.spec.description = None;
-                        exposed.spec
+                        registry
+                            .expose(&tool_id, &HashSet::new())
+                            .map_err(|error| {
+                                invalid_action(hook_id, EventKind::Request, error.to_string())
+                            })?
+                            .spec
                     }
                 };
-                // 合并执行范围；body 参数由描述说明并在执行时校验，schema 只保留 path/body。
+                // 合并执行范围与展示范围，由单一事实源统一渲染 StraviaRead 描述。
                 staged_read_scope = staged_read_scope.union(scope);
+                staged_advertised_read_scope =
+                    staged_advertised_read_scope.union(advertised.unwrap_or(scope));
                 spec.parameters = stravia_web_access_contract::read_path::model_input_schema();
-                if !description.is_empty() {
-                    match spec.description.as_mut() {
-                        Some(current) if !current.lines().any(|line| line == description) => {
-                            current.push('\n');
-                            current.push_str(&description);
-                        }
-                        None => spec.description = Some(description),
-                        _ => {}
-                    }
-                }
+                spec.description = Some(crate::mcp::read::render_description(
+                    staged_advertised_read_scope,
+                ));
                 let tools = staged_request.to_mut().tools.get_or_insert_with(Vec::new);
                 tools.retain(|tool| tool.name != provider_name);
                 tools.push(spec.clone());
@@ -482,6 +477,7 @@ fn apply_request_actions_staged(
     *exposure.tools = staged_tools;
     *exposure.specs = staged_tool_specs;
     *exposure.read_scope = staged_read_scope;
+    *exposure.advertised_read_scope = staged_advertised_read_scope;
     Ok(RequestHookOutcome {
         control: control.unwrap_or(HookControl::Continue),
         history_edits,

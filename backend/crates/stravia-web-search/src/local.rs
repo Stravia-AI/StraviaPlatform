@@ -17,6 +17,7 @@ use stravia_runtime_contract::agent::{
     AgentInput, AgentOutputValidationContext, AgentOutputValidator, AgentRunError, AgentRunLimits,
     AgentSlug, ArtifactPolicy, VersionedToolId,
 };
+use stravia_runtime_contract::hook::PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT;
 use stravia_runtime_contract::protocol::ir::{AiItem, ContentBlock, MessageContent, Role};
 use stravia_web_access_contract::STRAVIA_READ_TOOL_ID;
 
@@ -47,7 +48,7 @@ pub fn local_search_definition() -> AgentDefinitionSpec {
             version: 1,
         }],
         budgets: AgentBudgets {
-            total_wall_time: Duration::from_secs(900),
+            total_wall_time: PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT,
             working_wall_time: Duration::from_secs(720),
             model_turns: 20,
             tool_calls: None,

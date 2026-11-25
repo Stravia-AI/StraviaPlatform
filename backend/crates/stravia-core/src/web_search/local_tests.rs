@@ -147,14 +147,16 @@ impl PlatformTool for SearchLeaf {
         &self,
         _arguments: Value,
         _context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        Ok(serde_json::json!({
-            "results": [{
-                "url": "https://8.8.8.8/source",
-                "status": "success",
-                "title": "Verified"
-            }]
-        }))
+    ) -> Result<stravia_runtime_contract::hook::PlatformToolOutput, PlatformToolError> {
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            serde_json::json!({
+                "results": [{
+                    "url": "https://8.8.8.8/source",
+                    "status": "success",
+                    "title": "Verified"
+                }]
+            }),
+        ))
     }
 }
 

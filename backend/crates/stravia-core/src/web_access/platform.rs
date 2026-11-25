@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use stravia_runtime_contract::hook::{
-    PlatformTool, PlatformToolError, PlatformToolOutput, ToolExecutionContext, ToolId,
+    PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, ToolExecutionContext,
+    ToolId,
 };
-use stravia_runtime_contract::protocol::ir::ContentBlock;
 use stravia_web_access_contract::{
     DEFAULT_SEARCH_RESULTS, STRAVIA_READ_TOOL_ID, STRAVIA_READ_TOOL_NAME,
-    read_path::{ReadTarget, decode_read_input, model_input_schema, parse_read_input},
+    read_path::{
+        ReadTarget, decode_read_input, is_history_path, model_input_schema, parse_read_input,
+    },
 };
 
 use super::{SearchRequest, WebAccessError};
@@ -17,11 +19,13 @@ use super::{SearchRequest, WebAccessError};
 pub(crate) fn internal_platform_tools(gateway: &crate::Gateway) -> Vec<Arc<dyn PlatformTool>> {
     vec![Arc::new(InternalReadTool {
         gateway: gateway.clone(),
+        reader: crate::mcp::read::ReadTool::internal(gateway),
     })]
 }
 
 struct InternalReadTool {
     gateway: crate::Gateway,
+    reader: crate::mcp::read::ReadTool,
 }
 
 #[async_trait]
@@ -55,17 +59,7 @@ impl PlatformTool for InternalReadTool {
     async fn execute(
         &self,
         arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        self.execute_result(arguments, context)
-            .await
-            .and_then(output_value)
-    }
-
-    async fn execute_result(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
+        mut context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
         let request = match decode_read_input(arguments) {
             Ok(request) => request,
@@ -75,11 +69,16 @@ impl PlatformTool for InternalReadTool {
                 ))));
             }
         };
+        if is_history_path(&request.path) {
+            context.read_scope = ReadExposureScope::FULL;
+            return self.reader.read_input(request, context).await;
+        }
         let target = parse_read_input(&request)
             .map_err(|error| PlatformToolError::new(error.to_string()))?;
         // 搜索续接由内部路由器统一拒绝（需要 Turn 类型），媒体续接与资源读取一并交给它。
         let ReadTarget::Search(search) = target else {
-            return crate::mcp::read::execute_internal_read(&self.gateway, request, context).await;
+            context.read_scope = ReadExposureScope::FULL;
+            return self.reader.read_target(target, context).await;
         };
         if !crate::mcp::read::networking_available(&self.gateway, &context.principal).await {
             return Err(PlatformToolError::new(
@@ -106,38 +105,15 @@ impl PlatformTool for InternalReadTool {
         let value = serde_json::to_value(response).map_err(|error| {
             PlatformToolError::new(format!("StraviaRead result encoding failed: {error}"))
         })?;
-        Ok(PlatformToolOutput {
-            content: vec![ContentBlock::Unknown { raw: value }],
-            is_error: false,
-            metadata: serde_json::Map::new(),
-        })
+        Ok(PlatformToolOutput::ok(value))
     }
 }
 
 fn web_access_error_output(error: WebAccessError) -> PlatformToolOutput {
-    PlatformToolOutput {
-        content: vec![ContentBlock::Unknown {
-            raw: serde_json::json!({
-                "error": {
-                    "code": error.code,
-                    "message": error.message,
-                }
-            }),
-        }],
-        is_error: true,
-        metadata: serde_json::Map::new(),
-    }
-}
-
-fn output_value(output: PlatformToolOutput) -> Result<Value, PlatformToolError> {
-    let Some(ContentBlock::Unknown { raw }) = output.content.into_iter().next() else {
-        return Err(PlatformToolError::new(
-            "StraviaRead returned no structured output",
-        ));
-    };
-    if output.is_error {
-        Err(PlatformToolError::new(raw.to_string()))
-    } else {
-        Ok(raw)
-    }
+    PlatformToolOutput::error(serde_json::json!({
+        "error": {
+            "code": error.code,
+            "message": error.message,
+        }
+    }))
 }

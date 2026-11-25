@@ -400,8 +400,13 @@ impl stravia_runtime_contract::hook::PlatformTool for BoundaryTool {
         &self,
         arguments: Value,
         _: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<Value, stravia_runtime_contract::hook::PlatformToolError> {
-        Ok(arguments)
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            arguments,
+        ))
     }
 }
 

@@ -34,7 +34,7 @@ async fn merged_full_read_scope_does_not_count_as_client_declaration() {
         .await
         .expect("API key");
     let hook = crate::mcp::read::ReadPlanningHook {
-        tool: crate::mcp::read::ReadTool::new(&gateway, &mut Vec::new()).expect("read tool"),
+        tool: crate::mcp::read::ReadTool::new(&gateway),
     };
     let session = SessionContext {
         tools_fixed: false,
@@ -44,6 +44,7 @@ async fn merged_full_read_scope_does_not_count_as_client_declaration() {
         ingress: stravia_runtime_contract::protocol::ids::OPENAI_COMPATIBLE_CHAT_COMPLETIONS_V1,
         transport: TransportKind::Http,
         principal: stravia_runtime_contract::Principal::new(key.id),
+        transparent_injections: None,
         cancellation: stravia_runtime_contract::CancellationToken::new(),
         inherited_media_turns: Vec::new(),
         response_id: None,
@@ -66,15 +67,16 @@ async fn merged_full_read_scope_does_not_count_as_client_declaration() {
         })
         .await
         .expect("read planning");
-    let (scope, description) = actions
+    let (scope, advertised) = actions
         .actions
         .iter()
         .find_map(|action| match action {
-            HookAction::ExposeRead { scope, description } => Some((scope, description)),
+            HookAction::ExposeRead { scope, advertised } => Some((*scope, *advertised)),
             _ => None,
         })
         .expect("injected reader");
     assert!(scope.history(), "merged scope must retain history");
+    let description = crate::mcp::read::render_description(advertised.unwrap_or(scope));
     assert!(description.contains("History Recall"), "{description}");
     drop(hook);
     close_test_gateway(gateway, data_dir).await;
@@ -167,7 +169,7 @@ async fn internal_agent_reader_cannot_access_history_for_history_key() {
         })
         .await
         .expect("API key");
-    let read = crate::mcp::read::ReadTool::new(&gateway, &mut Vec::new()).expect("read tool");
+    let read = crate::mcp::read::ReadTool::new(&gateway);
     let adapter = PlatformToolAgentAdapter::new(std::sync::Arc::new(read), 1);
     let error = adapter
         .execute(

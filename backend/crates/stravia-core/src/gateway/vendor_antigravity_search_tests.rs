@@ -110,11 +110,8 @@ async fn antigravity_discovered_search_route_through_stravia_read() -> anyhow::R
             spend_limit: None,
         })
         .await?;
-    let (_, mut tools) = stravia_web_search::builtin_extensions(Arc::new(
-        crate::web_search::host::SearchHost(gateway.clone()),
-    ));
-    let reader = crate::mcp::read::ReadTool::new(&gateway, &mut tools)?;
-    let output = reader.execute_result(
+    let reader = crate::mcp::read::ReadTool::new(&gateway);
+    let output = reader.execute(
         json!({"path": "stravia://search", "body": {"question": "What is the grounded answer?"}}),
         ToolExecutionContext {
             request_id: "search-acceptance".into(), run_id: "search-acceptance".into(),

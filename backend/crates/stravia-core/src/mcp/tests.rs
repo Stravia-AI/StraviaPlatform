@@ -236,7 +236,7 @@ async fn read_tool_responses_schema_accepts_path_and_body() {
     )
     .await
     .expect("gateway");
-    let tool = read::ReadTool::new(&gateway, &mut Vec::new()).expect("read tool");
+    let tool = read::ReadTool::new(&gateway);
     let mcp_schema = McpTool::input_schema(&tool);
     let registry = PlatformToolRegistry::new(vec![Arc::new(tool)]).expect("registry");
     let exposed = registry

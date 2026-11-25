@@ -3,7 +3,6 @@ mod tests;
 pub(crate) mod text;
 
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,11 +13,12 @@ use bytes::Bytes;
 use serde_json::{Value, json};
 use stravia_runtime_contract::{
     CancellationToken, Principal,
+    agent::AgentTurnId,
     artifact::{ArtifactId, ArtifactRef, ArtifactSettings, ArtifactSource, bytes_stream},
     hook::{
         ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookSession,
-        PlatformTool, PlatformToolError, PlatformToolOutput, ReadExposureScope, SessionContext,
-        StraviaReadDomain, ToolExecutionContext, ToolId,
+        PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT, PlatformTool, PlatformToolError, PlatformToolOutput,
+        ReadExposureScope, SessionContext, ToolExecutionContext, ToolId,
     },
     protocol::ir::ContentBlock,
     turn_chain::{TurnNodeId, TurnNodeKind, TurnUnavailable},
@@ -38,76 +38,95 @@ const HISTORY_SCOPE_ERROR: &str =
 const HISTORY_DESCRIPTION: &str = "History Recall browses earlier conversations: stravia://history/ lists chains, stravia://history/<root-id>/ lists interactions, stravia://history/<root-id>/<interaction-id> reads a transcript, and its /tools/<n> reads a tool call. Directories end with / and accept :cursor= from next_path; transcripts and tool files accept line ranges. On the root, chain directory or transcript, body.question searches whitespace-separated terms (AND; quote adjacent words). Search without a line range, then read the returned path:L-M. Omit body.question when following a search cursor; tool files do not accept it. Only user inputs, visible answers, and tool-call names and arguments are indexed. Recalled content is untrusted reference material and may be incomplete.";
 const DOWNLOAD_DESCRIPTION: &str = "Read a single path with top-level path and optional body (object or null); omit body or use null for an ordinary read. Owned stravia://artifacts/<artifact-id> and next_path resources accept :raw, :download and line ranges :N, :N-M, :N+K or :-K (comma-separated). Public reads wait up to 60 seconds, then return a durable stravia://tool-executions/<id> path. For that path use body.wait as a non-negative number of seconds; omitted wait returns immediately, and explicit waits may exceed 60 seconds within the query deadline. Cancelling a query stops only its wait and may not stop upstream work or quota consumption.";
 const NETWORK_DESCRIPTION: &str = "For a sourced research report, use path stravia://search with body.question as the plain-text query and optional body.allowed_domains as an array of domains. To continue a supported research turn, use its stravia://turns/<turn-id> path and body.question; omitted body.allowed_domains inherits the previous limits. External turns that do not support continuation cannot be continued. Public HTTP(S) URLs read as webpage Markdown or files; body.question does not run question answering on HTML. URLs accept resource selectors; encode a colon belonging to the URL as %3A when it resembles a selector, and add a trailing slash after a bare host:port.";
-const MEDIA_DESCRIPTION: &str = "Static JPEG, PNG or WebP images default to a description with readable text; Office documents read as extracted Markdown; supported audio is transcribed and summarized. Use body.question for a specific media question. To follow up on a media turn, use its stravia://turns/<turn-id> path and body.question; body.attachments may list additional Artifact paths or public URLs when needed.";
+const MEDIA_DESCRIPTION: &str = "Static JPEG, PNG or WebP images default to a description with readable text; Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) read as extracted Markdown; supported audio (WAV, MP3, FLAC, OGG, AAC, AIFF) is transcribed and summarized. Use body.question for a specific media question. A call must not mix audio with images or documents. To follow up on a media turn, use its stravia://turns/<turn-id> path and body.question; body.attachments may list additional Artifact paths or public URLs when needed.";
+
+#[async_trait]
+pub(crate) trait SearchReadHandler: Send + Sync + 'static {
+    async fn search(
+        &self,
+        request: stravia_web_search::PublicSearchRequest,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError>;
+}
+
+struct DefaultSearchReadHandler {
+    gateway: crate::Gateway,
+}
+
+#[async_trait]
+impl SearchReadHandler for DefaultSearchReadHandler {
+    async fn search(
+        &self,
+        request: stravia_web_search::PublicSearchRequest,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        let host = crate::web_search::host::SearchHost(self.gateway.clone());
+        match stravia_web_search::execute_public_search(
+            &host,
+            request,
+            context.principal,
+            context.cancellation,
+            context.progress,
+        )
+        .await
+        {
+            Ok(result) => {
+                let value = serde_json::to_value(result).map_err(|_| {
+                    PlatformToolError::new("Web Search result could not be encoded")
+                })?;
+                Ok(PlatformToolOutput::ok(value))
+            }
+            Err(error) => Ok(PlatformToolOutput::error(json!({ "error": error }))),
+        }
+    }
+}
+
+struct WebAccessRunGuard {
+    service: crate::web_access::WebAccessService,
+    run_id: String,
+}
+
+impl Drop for WebAccessRunGuard {
+    fn drop(&mut self) {
+        self.service.release_run_snapshot(&self.run_id);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ReadTool {
     gateway: crate::Gateway,
-    handlers: Arc<HashMap<StraviaReadDomain, Arc<dyn PlatformTool>>>,
+    search: Arc<dyn SearchReadHandler>,
     internal: bool,
 }
 
 impl ReadTool {
-    pub(crate) fn new(
-        gateway: &crate::Gateway,
-        tools: &mut Vec<Arc<dyn PlatformTool>>,
-    ) -> anyhow::Result<Self> {
-        if tools
-            .iter()
-            .any(|tool| tool.read_domain().is_none() && tool.external_name() == TOOL_NAME)
-        {
-            anyhow::bail!("StraviaRead is reserved for domain contributions");
-        }
-        let mut handlers = HashMap::new();
-        let mut identities = std::collections::HashSet::new();
-        tools.push(Arc::new(WebPageTool {
+    pub(crate) fn new(gateway: &crate::Gateway) -> Self {
+        Self {
             gateway: gateway.clone(),
-        }));
-        for tool in tools.iter().filter(|tool| tool.read_domain().is_some()) {
-            let domain = tool.read_domain().expect("filtered read contribution");
-            tool.description()
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "StraviaRead contribution requires a description: {}",
-                        tool.id()
-                    )
-                })?;
-            if !identities.insert(tool.id()) || handlers.insert(domain, Arc::clone(tool)).is_some()
-            {
-                anyhow::bail!("ambiguous StraviaRead contribution for {domain:?}");
-            }
-        }
-        tools.retain(|tool| tool.read_domain().is_none());
-        Ok(Self {
-            gateway: gateway.clone(),
-            handlers: Arc::new(handlers),
+            search: Arc::new(DefaultSearchReadHandler {
+                gateway: gateway.clone(),
+            }),
             internal: false,
-        })
+        }
     }
 
-    fn read_description(&self, scope: ReadExposureScope) -> String {
-        let mut text = description(scope);
-        for domain in [
-            StraviaReadDomain::Query,
-            StraviaReadDomain::WebPage,
-            StraviaReadDomain::Media,
-        ] {
-            let visible = match domain {
-                StraviaReadDomain::Query | StraviaReadDomain::WebPage => scope.networking(),
-                StraviaReadDomain::Media => scope.media(),
-            };
-            if visible
-                && let Some(description) = self
-                    .handlers
-                    .get(&domain)
-                    .and_then(|tool| tool.description())
-            {
-                text.push('\n');
-                text.push_str(description);
-            }
+    pub(crate) fn internal(gateway: &crate::Gateway) -> Self {
+        Self {
+            internal: true,
+            ..Self::new(gateway)
         }
-        text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_search_handler(
+        gateway: &crate::Gateway,
+        search: Arc<dyn SearchReadHandler>,
+    ) -> Self {
+        Self {
+            gateway: gateway.clone(),
+            search,
+            internal: false,
+        }
     }
 
     async fn capabilities(&self, principal: &Principal) -> ReadExposureScope {
@@ -126,95 +145,120 @@ impl ReadTool {
         arguments: Value,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        use crate::interaction_observation::{AdmissionFacts, IngressStart, RunOutcome, RunStart};
         use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 
-        let inherited = crate::interaction_observation::scope::current();
-        let standalone = inherited.is_none();
-        let observer = inherited.unwrap_or_else(|| {
-            let request = AiRequest::new(
-                TOOL_NAME,
-                vec![AiItem {
-                    role: Role::User,
-                    content: MessageContent::Text(Arc::new(arguments.to_string())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    meta: None,
-                }],
-            );
-            self.gateway
-                .observation
-                .observe_ingress(IngressStart {
-                    id: context.run_id.clone(),
-                    method: "MCP".into(),
-                    path: format!("tools/call/{TOOL_NAME}"),
-                    protocol: "mcp".into(),
-                })
-                .admit(
-                    RunStart {
-                        id: context.run_id.clone(),
-                        principal: context.principal.api_key_id().into(),
-                        api_key_id: Some(context.principal.api_key_id().into()),
-                        api_key_name: None,
-                        route_id: TOOL_NAME.into(),
-                        model_display_name: Some(TOOL_NAME.into()),
-                        ingress_protocol: "mcp".into(),
-                    },
-                    AdmissionFacts {
-                        client_request: Arc::new(request),
-                        has_new_user: true,
-                        has_matching_pending_tool_result: false,
-                        generation_root_id: None,
-                        generation_parent_id: None,
-                    },
-                )
-        });
         let cancellation = context.cancellation.clone();
-        let result = crate::interaction_observation::scope::scope(
-            Some(observer.clone()),
-            self.read(arguments, context),
-        )
-        .await;
-        if standalone {
-            let failed = result.as_ref().map_or(true, |output| output.is_error);
-            observer.finish(RunOutcome {
-                client_output_committed: false,
-                delivery: None,
-                delivery_completed_at: None,
-                status: if cancellation.is_cancelled() {
-                    "cancelled"
+        let scope = crate::mcp::bridge::StandaloneMcpObservationScope::enter(&self.gateway, || {
+            crate::mcp::bridge::StandaloneMcpObservation {
+                run_id: context.run_id.clone(),
+                principal_id: context.principal.api_key_id().to_owned(),
+                tool_name: TOOL_NAME.to_owned(),
+                route_id: TOOL_NAME.to_owned(),
+                model_display_name: Some(TOOL_NAME.to_owned()),
+                client_request: AiRequest::new(
+                    TOOL_NAME,
+                    vec![AiItem {
+                        role: Role::User,
+                        content: MessageContent::Text(Arc::new(arguments.to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        meta: None,
+                    }],
+                ),
+            }
+        });
+        scope
+            .run(self.read(arguments, context), |result| {
+                let failed = result.as_ref().map_or(true, |output| output.is_error);
+                if cancellation.is_cancelled() {
+                    ("cancelled", Some("cancelled".into()))
                 } else if failed {
-                    "failed"
+                    ("failed", Some("tool_execution_failed".into()))
                 } else {
-                    "completed"
+                    ("completed", None)
                 }
-                .into(),
-                terminal_reason: if cancellation.is_cancelled() {
-                    Some("cancelled".into())
-                } else if failed {
-                    Some("tool_execution_failed".into())
-                } else {
-                    None
-                },
-                generation_node_id: None,
-                generation_root_id: None,
-            });
-        }
-        result
+            })
+            .await
     }
 
-    async fn dispatch(
+    async fn execute_search(
         &self,
-        domain: StraviaReadDomain,
-        arguments: Value,
+        request: stravia_web_search::PublicSearchRequest,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        let handler = self
-            .handlers
-            .get(&domain)
-            .ok_or_else(|| PlatformToolError::new("StraviaRead handler unavailable"))?;
-        let output = handler.execute_result(arguments, context.clone()).await?;
+        let output = self.search.search(request, context.clone()).await?;
         self.paginate_report(output, &context).await
+    }
+
+    async fn execute_media(
+        &self,
+        input: stravia_media::MediaUnderstandingInput,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        let media_deadline = Instant::now() + stravia_media::MEDIA_TOTAL_WALL_TIME;
+        let deadline = crate::tool_execution::current_deadline()
+            .map_or(media_deadline, |current| current.min(media_deadline));
+        let output = match stravia_media::platform::execute_input(
+            &crate::media::runtime(&self.gateway),
+            input,
+            context.principal.clone(),
+            context.cancellation.clone(),
+            deadline,
+        )
+        .await
+        {
+            Ok(result) => {
+                let value = serde_json::to_value(result).map_err(|_| {
+                    PlatformToolError::new("Media Understanding result could not be encoded")
+                })?;
+                PlatformToolOutput::ok(value.clone()).with_metadata("stravia_media", value)
+            }
+            Err(error) => PlatformToolOutput::error(json!({ "error": error })),
+        };
+        self.paginate_report(output, &context).await
+    }
+
+    async fn fetch_webpage(
+        &self,
+        url: String,
+        context: &ToolExecutionContext,
+    ) -> Result<Result<crate::web_access::FetchResponse, PlatformToolOutput>, PlatformToolError>
+    {
+        let service = self.gateway.web_access();
+        let _guard = if self.internal {
+            None
+        } else {
+            let run_id = stravia_runtime_contract::identifier::new_id();
+            before_execution(
+                &context.cancellation,
+                service.capture_run_snapshot(&run_id, context.principal.api_key_id()),
+            )
+            .await?
+            .map_err(|error| PlatformToolError::new(error.to_string()))?;
+            Some(WebAccessRunGuard {
+                service: service.clone(),
+                run_id,
+            })
+        };
+        let run_id = _guard
+            .as_ref()
+            .map_or(context.run_id.as_str(), |guard| guard.run_id.as_str());
+        let request = crate::web_access::FetchRequest {
+            urls: vec![url],
+            max_characters: 500_000,
+        };
+        let result = before_execution(
+            &context.cancellation,
+            service.fetch_in_run(run_id, context.principal.api_key_id(), request),
+        )
+        .await?
+        .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        if result.is_execution_error() {
+            let value = serde_json::to_value(result)
+                .map_err(|error| PlatformToolError::new(error.to_string()))?;
+            return Ok(Err(PlatformToolOutput::error(value)));
+        }
+        Ok(Ok(result))
     }
 
     async fn paginate_report(
@@ -284,6 +328,40 @@ impl ReadTool {
     ) -> Result<PlatformToolOutput, PlatformToolError> {
         let input = decode_read_input(arguments)
             .map_err(|error| PlatformToolError::new(error.to_string()))?;
+        self.read_input(input, context).await
+    }
+
+    pub(crate) async fn read_input(
+        &self,
+        input: ReadInput,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        self.authorize_principal(&context).await?;
+        // 执行范围不含历史时，任何历史路径（含写错的）都返回同一个暴露错误，不先暴露语法细节。
+        if is_history_path(&input.path) && !context.read_scope.history() {
+            return Err(PlatformToolError::new(HISTORY_SCOPE_ERROR));
+        }
+        let target =
+            parse_read_input(&input).map_err(|error| PlatformToolError::new(error.to_string()))?;
+        self.read_target_authorized(target, context).await
+    }
+
+    pub(crate) async fn read_target(
+        &self,
+        target: ReadTarget,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
+        self.authorize_principal(&context).await?;
+        if matches!(target, ReadTarget::History(_)) && !context.read_scope.history() {
+            return Err(PlatformToolError::new(HISTORY_SCOPE_ERROR));
+        }
+        self.read_target_authorized(target, context).await
+    }
+
+    async fn authorize_principal(
+        &self,
+        context: &ToolExecutionContext,
+    ) -> Result<(), PlatformToolError> {
         before_execution(&context.cancellation, async {
             crate::proxy::security::Security::new(self.gateway.storage.auth())
                 .authorize_principal_capability(&context.principal)
@@ -291,12 +369,14 @@ impl ReadTool {
                 .map_err(|_| PlatformToolError::new("Principal authorization failed"))
         })
         .await??;
-        // 执行范围不含历史时，任何历史路径（含写错的）都返回同一个暴露错误，不先暴露语法细节。
-        if is_history_path(&input.path) && !context.read_scope.history() {
-            return Err(PlatformToolError::new(HISTORY_SCOPE_ERROR));
-        }
-        let target =
-            parse_read_input(&input).map_err(|error| PlatformToolError::new(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn read_target_authorized(
+        &self,
+        target: ReadTarget,
+        context: ToolExecutionContext,
+    ) -> Result<PlatformToolOutput, PlatformToolError> {
         let resource_path = match target {
             ReadTarget::History(history) => {
                 return before_execution(&context.cancellation, async {
@@ -353,13 +433,12 @@ impl ReadTool {
                     "Networking is unavailable",
                 )?;
                 return self
-                    .dispatch(
-                        StraviaReadDomain::Query,
-                        json!({
-                            "query": search.query,
-                            "previous_path": null,
-                            "allowed_domains": search.allowed_domains,
-                        }),
+                    .execute_search(
+                        stravia_web_search::PublicSearchRequest {
+                            query: search.query,
+                            previous_turn_id: None,
+                            allowed_domains: search.allowed_domains,
+                        },
                         context,
                     )
                     .await;
@@ -393,22 +472,10 @@ impl ReadTool {
                     context.read_scope.networking() && enabled.networking(),
                     "Networking is unavailable in this run",
                 )?;
-                let result = if self.internal {
-                    fetch_page(&self.gateway, resource_path.url, &context).await?
-                } else {
-                    self.dispatch(
-                        StraviaReadDomain::WebPage,
-                        json!({"url":resource_path.url}),
-                        context.clone(),
-                    )
-                    .await?
+                let fetched = match self.fetch_webpage(resource_path.url, &context).await? {
+                    Ok(fetched) => fetched,
+                    Err(error_output) => return Ok(error_output),
                 };
-                if result.is_error {
-                    return Ok(result);
-                }
-                let (value, _) = crate::hook::tool::blocks_to_value(result.content)?;
-                let fetched: crate::web_access::FetchResponse = serde_json::from_value(value)
-                    .map_err(|_| PlatformToolError::new("Invalid webpage result"))?;
                 let page = fetched
                     .results
                     .into_iter()
@@ -816,13 +883,12 @@ impl ReadTool {
     ) -> Result<PlatformToolOutput, PlatformToolError> {
         self.require_media(&context).await?;
         self.prepare_media_source(&id, &context).await?;
-        self.dispatch(
-            StraviaReadDomain::Media,
-            json!({
-                "prompt": question,
-                "artifacts": [{"path": id.reference()}],
-                "previous_path": null,
-            }),
+        self.execute_media(
+            stravia_media::MediaUnderstandingInput {
+                prompt: question,
+                artifacts: vec![stravia_media::types::MediaArtifactInput { artifact_id: id }],
+                previous_turn_id: None,
+            },
             context,
         )
         .await
@@ -876,13 +942,14 @@ impl ReadTool {
                     .await?,
                     "Networking is unavailable",
                 )?;
-                self.dispatch(
-                    StraviaReadDomain::Query,
-                    json!({
-                        "query": question,
-                        "previous_path": turn_path,
-                        "allowed_domains": allowed_domains,
-                    }),
+                let previous_turn_id = stravia_web_search::SearchTurnId::from_reference(&turn_path)
+                    .map_err(|error| PlatformToolError::new(error.to_string()))?;
+                self.execute_search(
+                    stravia_web_search::PublicSearchRequest {
+                        query: question,
+                        previous_turn_id: Some(previous_turn_id),
+                        allowed_domains,
+                    },
                     context,
                 )
                 .await
@@ -893,18 +960,19 @@ impl ReadTool {
                     "body.allowed_domains is only supported for search continuation; remove body.allowed_domains for a media continuation",
                 )?;
                 self.require_media(&context).await?;
+                let previous_turn_id = AgentTurnId::from_reference(&turn_path)
+                    .map_err(|_| PlatformToolError::new("Invalid Turn Reference"))?;
                 let mut artifacts = Vec::with_capacity(attachments.len());
                 for attachment in &attachments {
-                    let artifact = self.attachment_artifact(attachment, &context).await?;
-                    artifacts.push(json!({"path": artifact.reference()}));
+                    let artifact_id = self.attachment_artifact(attachment, &context).await?;
+                    artifacts.push(stravia_media::types::MediaArtifactInput { artifact_id });
                 }
-                self.dispatch(
-                    StraviaReadDomain::Media,
-                    json!({
-                        "prompt": question,
-                        "artifacts": artifacts,
-                        "previous_path": turn_path,
-                    }),
+                self.execute_media(
+                    stravia_media::MediaUnderstandingInput {
+                        prompt: question,
+                        artifacts,
+                        previous_turn_id: Some(previous_turn_id),
+                    },
                     context,
                 )
                 .await
@@ -1178,7 +1246,7 @@ impl PlatformTool for ReadTool {
         true
     }
     fn execution_limit(&self) -> Option<Duration> {
-        Some(Duration::from_secs(15 * 60))
+        Some(PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT)
     }
     fn execution_policy(
         &self,
@@ -1196,15 +1264,6 @@ impl PlatformTool for ReadTool {
         }
     }
     async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        let result = PlatformTool::execute_result(self, arguments, context).await?;
-        let (value, _) = crate::hook::tool::blocks_to_value(result.content)?;
-        Ok(value)
-    }
-    async fn execute_result(
         &self,
         arguments: Value,
         context: ToolExecutionContext,
@@ -1226,31 +1285,22 @@ impl McpTool for ReadTool {
         Some(DOWNLOAD_DESCRIPTION)
     }
     async fn description_for(&self, context: &McpContext) -> Option<String> {
-        Some(
-            self.read_description(
-                self.capabilities(&Principal::new(context.api_key_id.clone()))
-                    .await,
-            ),
-        )
+        Some(render_description(
+            self.capabilities(&Principal::new(context.api_key_id.clone()))
+                .await,
+        ))
     }
     fn input_schema(&self) -> Value {
         input_schema()
     }
     fn deadline(&self) -> Duration {
-        Duration::from_secs(15 * 60)
+        PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT
     }
     fn await_cancellation_cleanup(&self) -> bool {
         true
     }
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError> {
-        let Some(keys) = self.gateway.storage.api_keys() else {
-            return Ok(false);
-        };
-        let key = keys
-            .get(&context.api_key_id)
-            .await
-            .map_err(|error| McpToolError::new("mcp_access_check_failed", error.to_string()))?;
-        if !key.is_some_and(|key| key.is_enabled && key.mcp_access_enabled) {
+        if !crate::mcp::bridge::api_key_allows_mcp(&self.gateway, &context.api_key_id).await? {
             return Ok(false);
         }
         Ok(
@@ -1265,49 +1315,15 @@ impl McpTool for ReadTool {
         arguments: Value,
         context: &McpContext,
     ) -> Result<McpToolOutput, McpToolError> {
-        let (cancellation, deadline) = context.execution().unwrap_or_else(|| {
-            (
-                CancellationToken::new(),
-                Instant::now() + Duration::from_secs(900),
-            )
-        });
-        let run_id = stravia_runtime_contract::identifier::new_id();
-        let context = ToolExecutionContext {
-            request_id: run_id.clone(),
-            run_id,
-            interaction_id: None,
-            principal: Principal::new(context.api_key_id.clone()),
-            read_scope: ReadExposureScope::FULL,
-            cancellation,
-            progress: None,
-        };
-        let result = crate::tool_execution::scope_request(
-            deadline,
-            self.gateway.dispatch_platform_tool(
-                Arc::new(self.clone()),
-                arguments,
-                context,
-                crate::tool_execution::ExecutionSource::Mcp,
-            ),
+        crate::mcp::bridge::call_platform_tool(
+            &self.gateway,
+            self,
+            arguments,
+            context,
+            PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT,
+            "read_failed",
         )
-        .await;
-        match result {
-            Ok(delivery) => {
-                let result = delivery.output;
-                let (value, _) =
-                    crate::hook::tool::blocks_to_value(result.content).map_err(|error| {
-                        McpToolError::new("result_encoding_failed", error.to_string())
-                    })?;
-                Ok(if result.is_error {
-                    McpToolOutput::execution_error(value)
-                } else {
-                    McpToolOutput::success(value)
-                })
-            }
-            Err(error) => Ok(McpToolOutput::execution_error(
-                json!({"error":{"code":"read_failed","message":error.to_string()}}),
-            )),
-        }
+        .await
     }
 }
 
@@ -1319,95 +1335,7 @@ fn is_execution_query(arguments: &Value) -> Result<bool, PlatformToolError> {
     Ok(matches!(target, ReadTarget::ToolExecution(_)))
 }
 
-struct WebPageTool {
-    gateway: crate::Gateway,
-}
-#[async_trait]
-impl PlatformTool for WebPageTool {
-    fn id(&self) -> ToolId {
-        ToolId::new("stravia-read-page")
-    }
-    fn external_name(&self) -> &str {
-        TOOL_NAME
-    }
-    fn read_domain(&self) -> Option<StraviaReadDomain> {
-        Some(StraviaReadDomain::WebPage)
-    }
-    fn description(&self) -> Option<&str> {
-        Some("Read public webpages as Markdown with sources and extraction limitations.")
-    }
-    fn parameters(&self) -> Value {
-        model_input_schema()
-    }
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        let result = self.execute_result(arguments, context).await?;
-        crate::hook::tool::blocks_to_value(result.content).map(|(value, _)| value)
-    }
-    async fn execute_result(
-        &self,
-        arguments: Value,
-        mut context: ToolExecutionContext,
-    ) -> Result<PlatformToolOutput, PlatformToolError> {
-        context.run_id = stravia_runtime_contract::identifier::new_id();
-        let url = arguments
-            .get("url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| PlatformToolError::new("Missing webpage URL"))?;
-        let service = self.gateway.web_access();
-        before_execution(
-            &context.cancellation,
-            service.capture_run_snapshot(&context.run_id, context.principal.api_key_id()),
-        )
-        .await?
-        .map_err(|error| PlatformToolError::new(error.to_string()))?;
-        let result = fetch_page(&self.gateway, url.to_owned(), &context).await;
-        service.release_run_snapshot(&context.run_id);
-        result
-    }
-}
-async fn fetch_page(
-    gateway: &crate::Gateway,
-    url: String,
-    context: &ToolExecutionContext,
-) -> Result<PlatformToolOutput, PlatformToolError> {
-    let request = serde_json::from_value(json!({"urls":[url],"max_characters":500000}))
-        .map_err(|error| PlatformToolError::new(error.to_string()))?;
-    let result = before_execution(&context.cancellation, async {
-        gateway
-            .web_access()
-            .fetch_in_run(&context.run_id, context.principal.api_key_id(), request)
-            .await
-    })
-    .await?
-    .map_err(|error| PlatformToolError::new(error.to_string()))?;
-    let is_error = result.is_execution_error();
-    let mut output = output(
-        serde_json::to_value(result).map_err(|error| PlatformToolError::new(error.to_string()))?,
-    );
-    output.is_error = is_error;
-    Ok(output)
-}
-
-pub(crate) async fn execute_internal_read(
-    gateway: &crate::Gateway,
-    input: ReadInput,
-    mut context: ToolExecutionContext,
-) -> Result<PlatformToolOutput, PlatformToolError> {
-    context.read_scope = ReadExposureScope::FULL;
-    let mut tools = crate::media::platform_tools(gateway);
-    let mut router = ReadTool::new(gateway, &mut tools)
-        .map_err(|error| PlatformToolError::new(error.to_string()))?;
-    router.internal = true;
-    let arguments =
-        serde_json::to_value(input).map_err(|error| PlatformToolError::new(error.to_string()))?;
-    router.read(arguments, context).await
-}
-
-fn description(scope: ReadExposureScope) -> String {
+pub(crate) fn render_description(scope: ReadExposureScope) -> String {
     let mut text = DOWNLOAD_DESCRIPTION.to_owned();
     if scope.networking() {
         text.push('\n');
@@ -1453,6 +1381,7 @@ struct ReadPlanningSession {
 impl HookSession for ReadPlanningSession {
     async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
         let HookEvent::Request {
+            session,
             read_declared: explicit,
             ..
         } = event
@@ -1464,26 +1393,22 @@ impl HookSession for ReadPlanningSession {
         }
         self.resolved = true;
         let enabled = self.tool.capabilities(&self.principal).await;
-        let security = crate::proxy::security::Security::new(self.tool.gateway.storage.auth());
-        let injections = security
-            .authorize_transparent_injections(&self.principal)
-            .await
-            .ok();
-        let basic = injections
-            .as_ref()
-            .is_some_and(|injections| injections.enabled);
+        let injections = match session.transparent_injections {
+            Some(snapshot) => Some(snapshot),
+            None => crate::proxy::security::Security::new(self.tool.gateway.storage.auth())
+                .authorize_transparent_injections(&self.principal)
+                .await
+                .ok()
+                .map(Into::into),
+        };
+        let basic = injections.is_some_and(|injections| injections.enabled);
         let networking = enabled.networking()
-            && injections.as_ref().is_some_and(|injections| {
-                injections.contains(crate::db::models::TransparentInjection::WebSearch)
-            });
+            && injections.is_some_and(|injections| injections.effective_web_search());
         let media = enabled.media()
-            && injections.as_ref().is_some_and(|injections| {
-                injections.contains(crate::db::models::TransparentInjection::MediaUnderstanding)
-            });
+            && injections.is_some_and(|injections| injections.effective_media_understanding());
         // 历史回看不依赖平台能力，只看 Key 的选择；显式声明不含历史范围。
-        let history = injections.as_ref().is_some_and(|injections| {
-            injections.contains(crate::db::models::TransparentInjection::HistoryRecall)
-        });
+        let history =
+            injections.is_some_and(|injections| injections.effective_history_recall());
         let scope = if explicit {
             ReadExposureScope::FULL
         } else if history {
@@ -1494,10 +1419,9 @@ impl HookSession for ReadPlanningSession {
         if !explicit && !basic && !networking && !media {
             return Ok(ActionBatch::default());
         }
-        let visible = if explicit { enabled } else { scope };
         Ok(ActionBatch::one(HookAction::ExposeRead {
             scope,
-            description: self.tool.read_description(visible),
+            advertised: explicit.then_some(enabled),
         }))
     }
 }

@@ -53,7 +53,7 @@ impl PlatformTool for AgentCallPlatformTool {
         &self,
         arguments: Value,
         context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
+    ) -> Result<stravia_runtime_contract::hook::PlatformToolOutput, PlatformToolError> {
         run_agent_call(
             &self.runner,
             self.definition_id.clone(),
@@ -62,6 +62,7 @@ impl PlatformTool for AgentCallPlatformTool {
             arguments,
         )
         .await
+        .map(stravia_runtime_contract::hook::PlatformToolOutput::ok)
         .map_err(|error| PlatformToolError::new(error.message))
     }
 }
@@ -119,17 +120,7 @@ impl McpTool for AgentCallMcpTool {
     }
 
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError> {
-        let Some(api_keys) = self.gateway.storage.api_keys() else {
-            return Ok(false);
-        };
-        let key = api_keys
-            .get(&context.api_key_id)
-            .await
-            .map_err(|error| McpToolError::new("mcp_access_check_failed", error.to_string()))?;
-        let Some(key) = key else {
-            return Ok(false);
-        };
-        if !key.is_enabled || !key.mcp_access_enabled {
+        if !crate::mcp::bridge::api_key_allows_mcp(&self.gateway, &context.api_key_id).await? {
             return Ok(false);
         }
 
@@ -159,77 +150,54 @@ impl McpTool for AgentCallMcpTool {
         arguments: Value,
         context: &McpContext,
     ) -> Result<McpToolOutput, McpToolError> {
-        use crate::interaction_observation::{AdmissionFacts, IngressStart, RunOutcome, RunStart};
         use stravia_runtime_contract::protocol::ir::{AiItem, AiRequest, MessageContent, Role};
 
         let principal = Principal::new(context.api_key_id.clone());
+        let cancellation = context
+            .execution()
+            .map(|(cancellation, _)| cancellation)
+            .or_else(|| context.request_cancellation())
+            .unwrap_or_default();
         // MCP tool calls have no inference ingress of their own. Admit a
         // standalone Run so the Agent's model turns carry cost and billing
         // attribution; an inherited scope (Hook/Platform tool) is reused.
-        let inherited = crate::interaction_observation::scope::current();
-        let standalone = inherited.is_none();
-        let observer = inherited.unwrap_or_else(|| {
-            let id = stravia_runtime_contract::identifier::new_id();
-            let request = AiRequest::new(
-                self.definition_id.as_str(),
-                vec![AiItem {
-                    role: Role::User,
-                    content: MessageContent::Text(Arc::new(arguments.to_string())),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    meta: None,
-                }],
-            );
-            self.gateway
-                .observation
-                .observe_ingress(IngressStart {
-                    id: id.clone(),
-                    method: "MCP".into(),
-                    path: format!("tools/call/{}", self.name),
-                    protocol: "mcp".into(),
-                })
-                .admit(
-                    RunStart {
-                        id,
-                        principal: principal.api_key_id().into(),
-                        api_key_id: Some(principal.api_key_id().into()),
-                        api_key_name: None,
-                        route_id: self.name.clone(),
-                        model_display_name: Some(self.definition_id.as_str().to_owned()),
-                        ingress_protocol: "mcp".into(),
-                    },
-                    AdmissionFacts {
-                        client_request: Arc::new(request),
-                        has_new_user: true,
-                        has_matching_pending_tool_result: false,
-                        generation_root_id: None,
-                        generation_parent_id: None,
-                    },
-                )
+        let scope = crate::mcp::bridge::StandaloneMcpObservationScope::enter(&self.gateway, || {
+            crate::mcp::bridge::StandaloneMcpObservation {
+                run_id: stravia_runtime_contract::identifier::new_id(),
+                principal_id: principal.api_key_id().to_owned(),
+                tool_name: self.name.clone(),
+                route_id: self.name.clone(),
+                model_display_name: Some(self.definition_id.as_str().to_owned()),
+                client_request: AiRequest::new(
+                    self.definition_id.as_str(),
+                    vec![AiItem {
+                        role: Role::User,
+                        content: MessageContent::Text(Arc::new(arguments.to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        meta: None,
+                    }],
+                ),
+            }
         });
-        let result = crate::interaction_observation::scope::scope(
-            Some(observer.clone()),
-            run_agent_call(
-                &self.runner,
-                self.definition_id.clone(),
-                principal,
-                CancellationToken::new(),
-                arguments,
-            ),
-        )
-        .await;
-        if standalone {
-            let failed = result.is_err();
-            observer.finish(RunOutcome {
-                client_output_committed: false,
-                delivery: None,
-                delivery_completed_at: None,
-                status: if failed { "failed" } else { "completed" }.into(),
-                terminal_reason: failed.then(|| "tool_execution_failed".into()),
-                generation_node_id: None,
-                generation_root_id: None,
-            });
-        }
+        let result = scope
+            .run(
+                run_agent_call(
+                    &self.runner,
+                    self.definition_id.clone(),
+                    principal,
+                    cancellation,
+                    arguments,
+                ),
+                |result| {
+                    if result.is_err() {
+                        ("failed", Some("tool_execution_failed".into()))
+                    } else {
+                        ("completed", None)
+                    }
+                },
+            )
+            .await;
         let output =
             result.map_err(|error| McpToolError::new("agent_call_failed", error.message))?;
         Ok(McpToolOutput::success(output))

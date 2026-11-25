@@ -85,6 +85,8 @@ pub struct SessionContext {
     pub ingress: ProtocolId,
     pub transport: TransportKind,
     pub principal: Principal,
+    /// 请求规划阶段预加载的透明注入偏好快照；未预加载时（如独立 Hook 测试）为 `None`。
+    pub transparent_injections: Option<super::tool::TransparentInjectionSnapshot>,
     pub cancellation: crate::CancellationToken,
     pub inherited_media_turns: Vec<(usize, Vec<String>)>,
     pub response_id: Option<String>,
@@ -195,13 +197,24 @@ pub enum HookAction {
     ExposeTool(ToolId),
     ExposeRead {
         scope: super::tool::ReadExposureScope,
-        description: String,
+        /// 仅用于工具描述展示的能力范围；为 `None` 时与 `scope` 相同。
+        /// 显式声明场景下执行范围保持 `FULL`，但描述只展示当前已启用的能力。
+        advertised: Option<super::tool::ReadExposureScope>,
     },
     Respond(Box<AiResponse>),
     Reject(HookRejection),
     StreamAbort {
         message: String,
     },
+}
+
+impl HookAction {
+    pub const fn expose_read(scope: super::tool::ReadExposureScope) -> Self {
+        Self::ExposeRead {
+            scope,
+            advertised: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

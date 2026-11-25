@@ -1,20 +1,12 @@
-use std::sync::Arc;
+use stravia_runtime_contract::CancellationToken;
 use stravia_runtime_contract::Principal;
 
-use async_trait::async_trait;
 use serde_json::Value;
 
-use stravia_runtime_contract::CancellationToken;
-use stravia_runtime_contract::hook::{
-    PlatformTool, PlatformToolError, PlatformToolOutput, ToolExecutionContext, ToolId,
+use super::{
+    MediaKind, MediaUnderstandingError, MediaUnderstandingInput, MediaUnderstandingResult,
+    MediaUnderstandingService,
 };
-use stravia_runtime_contract::protocol::ir::ContentBlock;
-
-use super::{MediaKind, MediaUnderstandingInput, MediaUnderstandingService};
-
-pub const MEDIA_TOOL_ID: &str = "media-understanding";
-pub const MEDIA_TOOL_DESCRIPTION: &str = "Understand static JPEG, PNG, or WebP Artifacts and Office documents (DOCX, XLSX, PPTX, DOC, XLS, PPT) using OCR, description, comparison, or visual reasoning, or WAV, MP3, FLAC, OGG, AAC, or AIFF audio Artifacts by transcription, summary, or answering questions about the audio. A call must not mix audio with images or documents.";
-pub const MEDIA_TOOL_NAME: &str = "StraviaRead";
 
 /// 目标是否能原生接收图片输入；只描述输入，不代表适合承担理解。
 pub fn model_is_image_capable(model: &crate::host::MediaRoute) -> bool {
@@ -49,60 +41,6 @@ pub fn model_is_eligible(model: &crate::host::MediaRoute, kind: MediaKind) -> bo
             MediaKind::Image => supports_image(&target.input_modalities),
             MediaKind::Audio => supports_audio(&target.input_modalities),
         })
-}
-
-pub fn tools(gateway: &crate::host::MediaRuntime) -> Vec<Arc<dyn PlatformTool>> {
-    vec![Arc::new(MediaUnderstandingPlatformTool {
-        gateway: gateway.clone(),
-    })]
-}
-
-pub fn input_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "minLength": 1,
-                "description": "The OCR, description, comparison, visual reasoning, transcription, or audio question task. UTF-8 encoding must not exceed 64 KiB."
-            },
-            "artifacts": {
-                "type": "array",
-                "maxItems": 8,
-                "default": [],
-                "description": "Static JPEG, PNG, or WebP images and Office document (DOCX, XLSX, PPTX, DOC, XLS, PPT) source Artifacts, or WAV, MP3, FLAC, OGG, AAC, or AIFF audio source Artifacts, in stable order; one call must not mix audio with images or documents. Retained ancestor sources are reused when continuing previous_path; duplicate paths within one call are rejected.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "pattern": "^stravia://artifacts/[a-z]{55}$" }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                }
-            },
-            "previous_path": {
-                "type": "string",
-                "pattern": "^stravia://turns/[a-z]{28}$",
-                "maxLength": 128,
-                "description": "An exact prior stravia://turns/<turn-id> path to continue or branch from."
-            }
-        },
-        "required": ["prompt"],
-        "anyOf": [
-            {
-                "required": ["previous_path"]
-            },
-            {
-                "properties": {
-                    "artifacts": {
-                        "minItems": 1
-                    }
-                },
-                "required": ["artifacts"]
-            }
-        ],
-        "additionalProperties": false
-    })
 }
 
 pub fn output_schema() -> Value {
@@ -160,132 +98,32 @@ pub async fn is_any_available(gateway: &crate::host::MediaRuntime, principal: &P
     false
 }
 
-pub async fn execute_until(
+pub async fn execute_input(
     gateway: &crate::host::MediaRuntime,
-    arguments: Value,
+    input: MediaUnderstandingInput,
     principal: Principal,
     cancellation: CancellationToken,
     deadline: std::time::Instant,
-) -> Result<Value, Value> {
+) -> Result<MediaUnderstandingResult, MediaUnderstandingError> {
     if !is_any_available(gateway, &principal).await {
         return Err(unavailable_error());
     }
-    let input: MediaUnderstandingInput = serde_json::from_value(arguments).map_err(|_| {
-        serde_json::json!({
-            "error": {
-                "code": "invalid_input",
-                "message": "Invalid Media Understanding arguments"
-            }
-        })
-    })?;
     let service: MediaUnderstandingService =
         gateway.host.service().await.ok_or_else(unavailable_error)?;
-    let kind = service
-        .resolve_kind(&principal, &input)
-        .await
-        .map_err(|error| serde_json::json!({ "error": error }))?;
+    let kind = service.resolve_kind(&principal, &input).await?;
     if !is_available(gateway, &principal, kind).await {
         return Err(unavailable_error());
     }
-    let result = service
+    service
         .execute_until(principal, kind, input, cancellation, deadline)
         .await
-        .map_err(|error| serde_json::json!({ "error": error }))?;
-    serde_json::to_value(result).map_err(|_| {
-        serde_json::json!({
-            "error": {
-                "code": "result_encoding_failed",
-                "message": "Media Understanding result could not be encoded"
-            }
-        })
-    })
 }
 
-async fn execute_platform(
-    gateway: &crate::host::MediaRuntime,
-    arguments: Value,
-    context: &ToolExecutionContext,
-) -> Result<Value, Value> {
-    execute_until(
-        gateway,
-        arguments,
-        context.principal.clone(),
-        context.cancellation.clone(),
-        std::time::Instant::now() + crate::MEDIA_TOTAL_WALL_TIME,
+fn unavailable_error() -> MediaUnderstandingError {
+    MediaUnderstandingError::new(
+        "media_understanding_unavailable",
+        "Media Understanding is unavailable",
     )
-    .await
-}
-
-fn unavailable_error() -> Value {
-    serde_json::json!({
-        "error": {
-            "code": "media_understanding_unavailable",
-            "message": "Media Understanding is unavailable"
-        }
-    })
-}
-
-struct MediaUnderstandingPlatformTool {
-    gateway: crate::host::MediaRuntime,
-}
-
-#[async_trait]
-impl PlatformTool for MediaUnderstandingPlatformTool {
-    fn read_domain(&self) -> Option<stravia_runtime_contract::hook::StraviaReadDomain> {
-        Some(stravia_runtime_contract::hook::StraviaReadDomain::Media)
-    }
-    fn id(&self) -> ToolId {
-        ToolId::new(MEDIA_TOOL_ID)
-    }
-
-    fn external_name(&self) -> &str {
-        MEDIA_TOOL_NAME
-    }
-
-    fn description(&self) -> Option<&str> {
-        Some(MEDIA_TOOL_DESCRIPTION)
-    }
-
-    fn parameters(&self) -> Value {
-        input_schema()
-    }
-
-    fn parallel_safe(&self) -> bool {
-        true
-    }
-
-    async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        execute_platform(&self.gateway, arguments, &context)
-            .await
-            .map_err(|error| PlatformToolError::new(error.to_string()))
-    }
-
-    async fn execute_result(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<PlatformToolOutput, PlatformToolError> {
-        match execute_platform(&self.gateway, arguments, &context).await {
-            Ok(result) => {
-                let mut metadata = serde_json::Map::new();
-                metadata.insert("stravia_media".into(), result.clone());
-                Ok(PlatformToolOutput {
-                    content: vec![ContentBlock::Unknown { raw: result }],
-                    is_error: false,
-                    metadata,
-                })
-            }
-            Err(error) => Ok(PlatformToolOutput {
-                content: vec![ContentBlock::Unknown { raw: error }],
-                is_error: true,
-                metadata: serde_json::Map::new(),
-            }),
-        }
-    }
 }
 #[cfg(test)]
 mod tests {

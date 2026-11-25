@@ -1,4 +1,4 @@
-use std::{io::Cursor, sync::Arc, time::Instant};
+use std::{io::Cursor, time::Instant};
 
 use bytes::Bytes;
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
@@ -129,94 +129,69 @@ pub(crate) async fn generate(
         input.input.prompt.clone(),
         references,
     );
-    let inherited = crate::interaction_observation::scope::current();
-    let standalone = inherited.is_none();
-    let observer = inherited.unwrap_or_else(|| {
-        use crate::interaction_observation::{AdmissionFacts, IngressStart, RunStart};
-        let id = stravia_runtime_contract::identifier::new_id();
-        gateway
-            .observation
-            .observe_ingress(IngressStart {
-                id: id.clone(),
-                method: "MCP".into(),
-                path: "tools/call/generate".into(),
-                protocol: "mcp".into(),
-            })
-            .admit(
-                RunStart {
-                    id,
-                    principal: principal.api_key_id().into(),
-                    api_key_id: Some(principal.api_key_id().into()),
-                    api_key_name: None,
-                    route_id: route.model_id.clone().into(),
-                    model_display_name: route.display_name.clone(),
-                    ingress_protocol: "mcp".into(),
-                },
-                AdmissionFacts {
-                    client_request: Arc::new(observation_request.clone()),
-                    has_new_user: true,
-                    has_matching_pending_tool_result: false,
-                    generation_root_id: None,
-                    generation_parent_id: None,
-                },
-            )
+    let scope = crate::mcp::bridge::StandaloneMcpObservationScope::enter(gateway, || {
+        crate::mcp::bridge::StandaloneMcpObservation {
+            run_id: stravia_runtime_contract::identifier::new_id(),
+            principal_id: principal.api_key_id().to_owned(),
+            tool_name: "generate".to_owned(),
+            route_id: route.model_id.to_string(),
+            model_display_name: route.display_name.clone(),
+            client_request: observation_request.clone(),
+        }
     });
-    let result = crate::interaction_observation::scope::scope(Some(observer.clone()), async {
-        normalize_references(
-            gateway,
-            &principal,
-            &mut observation_request,
-            &cancellation,
-            deadline,
+    let observer = scope.observer();
+    let result = scope
+        .run(
+            async {
+                normalize_references(
+                    gateway,
+                    &principal,
+                    &mut observation_request,
+                    &cancellation,
+                    deadline,
+                )
+                .await?;
+                let references = materialize_references(
+                    gateway,
+                    &principal,
+                    &observation_request,
+                    &cancellation,
+                    deadline,
+                )
+                .await?;
+                let request = MediaImageRequest {
+                    prompt: input.input.prompt,
+                    references,
+                    aspect_ratio: input.input.aspect_ratio,
+                    resolution: input.input.resolution,
+                };
+                let mut context = VendorCallContext::new(
+                    cancellation,
+                    stravia_runtime_contract::Deadline::fixed(deadline),
+                );
+                context.observer = Some(observer);
+                generate_image(
+                    gateway,
+                    &route,
+                    request,
+                    principal,
+                    deadline,
+                    context,
+                    &download_settings,
+                )
+                .await
+            },
+            |result| {
+                let status = match result {
+                    Ok(_) => "completed",
+                    Err(error) if error.code == "cancelled" => "cancelled",
+                    Err(_) => "failed",
+                };
+                let reason = result.as_ref().err().map(|error| error.code.to_owned());
+                (status, reason)
+            },
         )
-        .await?;
-        let references = materialize_references(
-            gateway,
-            &principal,
-            &observation_request,
-            &cancellation,
-            deadline,
-        )
-        .await?;
-        let request = MediaImageRequest {
-            prompt: input.input.prompt,
-            references,
-            aspect_ratio: input.input.aspect_ratio,
-            resolution: input.input.resolution,
-        };
-        let mut context = VendorCallContext::new(
-            cancellation,
-            stravia_runtime_contract::Deadline::fixed(deadline),
-        );
-        context.observer = Some(observer.clone());
-        generate_image(
-            gateway,
-            &route,
-            request,
-            principal,
-            deadline,
-            context,
-            &download_settings,
-        )
-        .await
-    })
-    .await;
-    if standalone {
-        observer.finish(crate::interaction_observation::RunOutcome {
-            client_output_committed: false,
-            delivery: None,
-            delivery_completed_at: None,
-            status: match &result {
-                Ok(_) => "completed",
-                Err(error) if error.code == "cancelled" => "cancelled",
-                Err(_) => "failed",
-            }
-            .into(),
-            terminal_reason: result.as_ref().err().map(|error| error.code.to_owned()),
-            generation_node_id: None,
-            generation_root_id: None,
-        });
-    }
+        .await;
     result.map(|(value, _publication)| value)
 }
 

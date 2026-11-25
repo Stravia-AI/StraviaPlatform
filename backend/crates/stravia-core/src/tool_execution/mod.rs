@@ -10,7 +10,10 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use stravia_runtime_contract::{
     CancellationToken, Principal,
-    hook::{PlatformTool, PlatformToolError, PlatformToolOutput, ToolExecutionContext},
+    hook::{
+        DEFAULT_PLATFORM_TOOL_SYNC_WAIT, PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT, PlatformTool,
+        PlatformToolError, PlatformToolOutput, ToolExecutionContext,
+    },
     protocol::ir::{ContentBlock, ToolCall},
 };
 use tokio::sync::{Notify, oneshot};
@@ -29,7 +32,7 @@ use crate::{
     },
 };
 
-const DEFAULT_WAIT: Duration = Duration::from_secs(60);
+const DEFAULT_WAIT: Duration = DEFAULT_PLATFORM_TOOL_SYNC_WAIT;
 
 #[cfg(feature = "test-support")]
 async fn enter_handoff_test_barrier(
@@ -267,7 +270,7 @@ impl Gateway {
         use stravia_runtime_contract::hook::PlatformExecutionPolicy;
         match tool.execution_policy(&arguments) {
             PlatformExecutionPolicy::Query => tool
-                .execute_result(arguments, context)
+                .execute(arguments, context)
                 .await
                 .map(ToolExecutionOutput::ordinary),
             PlatformExecutionPolicy::Synchronous => {
@@ -281,12 +284,12 @@ impl Gateway {
                 }
                 if tool.parallel_safe() {
                     let _permit = self.history_marker_execution_gate.read().await;
-                    tool.execute_result(arguments, context)
+                    tool.execute(arguments, context)
                         .await
                         .map(ToolExecutionOutput::ordinary)
                 } else {
                     let _permit = self.history_marker_execution_gate.write().await;
-                    tool.execute_result(arguments, context)
+                    tool.execute(arguments, context)
                         .await
                         .map(ToolExecutionOutput::ordinary)
                 }
@@ -309,7 +312,10 @@ impl Gateway {
             .try_with(|instant| *instant)
             .unwrap_or_else(|_| tokio::time::Instant::now());
         let deadline = current_deadline().unwrap_or_else(|| {
-            Instant::now() + tool.execution_limit().unwrap_or(Duration::from_secs(900))
+            Instant::now()
+                + tool
+                    .execution_limit()
+                    .unwrap_or(PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT)
         });
         let remaining = deadline.saturating_duration_since(Instant::now());
         let deadline_unix_ms = chrono::Utc::now()
@@ -411,7 +417,7 @@ impl Gateway {
                         return Err(failure("Tool execution could not be claimed"));
                     }
                     claimed = true;
-                    tool.execute_result(arguments, context).await.map(ToolExecutionOutput::ordinary)
+                    tool.execute(arguments, context).await.map(ToolExecutionOutput::ordinary)
                 };
                 if parallel_safe {
                     let _permit = gateway.history_marker_execution_gate.read().await;

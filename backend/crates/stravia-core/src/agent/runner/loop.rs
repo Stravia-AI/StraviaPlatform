@@ -495,6 +495,7 @@ impl AgentRunner {
                         ingress: stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
                         transport: TransportKind::Http,
                         principal: input.principal.clone(),
+                        transparent_injections: None,
                         cancellation: cancellation.clone(),
                         inherited_media_turns: Vec::new(),
                         response_id: None,

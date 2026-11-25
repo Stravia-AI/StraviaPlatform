@@ -9,10 +9,11 @@ use stravia_runtime_contract::{
     CancellationToken, Principal,
     hook::{
         ActionBatch, EventKind, Hook, HookAction, HookDescriptor, HookEvent, HookId, HookRejection,
-        HookSession, PlatformTool, PlatformToolError, PlatformToolOutput, RequestPatch,
-        SessionContext, ToolExecutionContext, ToolId,
+        HookSession, PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT, PlatformExecutionPolicy, PlatformTool,
+        PlatformToolError, PlatformToolOutput, RequestPatch, SessionContext, ToolExecutionContext,
+        ToolId,
     },
-    protocol::ir::{ContentBlock, ToolChoice},
+    protocol::ir::ToolChoice,
 };
 
 use super::{GenerationError, config, execution};
@@ -24,7 +25,7 @@ use crate::{
 
 const TOOL_ID: &str = "media-generation";
 const TOOL_NAME: &str = "generate";
-const LIMIT: Duration = Duration::from_secs(15 * 60);
+const LIMIT: Duration = PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT;
 const DESCRIPTION: &str = "Generate one image from a prompt, optionally using up to five ordered JPEG/PNG/WebP reference images (owned plain stravia://artifacts/<artifact-id> paths without selectors, or public HTTP(S) image URLs; at most 32 MiB and 25 megapixels each). aspect_ratio and resolution are preferences mapped by the selected image Provider and are not exact guarantees. Returns a stable Artifact path, actual image dimensions, and a 15-minute bearer download_url. Display the image using Markdown ![description](download_url \"stravia://artifacts/<artifact-id>\"), substituting the returned download_url and path; keep the stable path in the title for download recovery and reuse it as a reference image. No extra Read is needed to display a fresh result; use StraviaRead with the path plus the :download selector when a new download link is needed. If link issuance fails after storage, the structured error includes the retained artifact; do not regenerate it. Waits up to 60 seconds, then returns an execution path and status; read that path with StraviaRead and optionally set wait to a number of seconds for status and the original result or error. Cancelling a query stops only its wait. Local cancellation does not guarantee upstream generation or quota consumption stops; retries may repeat generation and consume quota.";
 
 pub(crate) fn input_schema() -> Value {
@@ -62,27 +63,8 @@ impl GenerateTool {
     }
 
     async fn enabled(&self, principal: &Principal) -> Result<bool, GenerationError> {
-        if let Err(denial) = self
-            .gateway
-            .policy_allows_capability(
-                principal.api_key_id(),
-                crate::policy::PolicyCapability::MediaGeneration,
-            )
-            .await
-        {
-            tracing::warn!(
-                api_key_id = ?principal.api_key_id(),
-                code = denial.code.as_str(),
-                reason = denial.message.as_str(),
-                "policy denied media generation capability"
-            );
-            return Err(GenerationError::new(
-                "authorization_failed",
-                "Principal authorization failed",
-            ));
-        }
-        Security::new(self.gateway.storage.auth())
-            .authorize_principal_capability(principal)
+        self.gateway
+            .authorize_capability(principal, crate::policy::PolicyCapability::MediaGeneration)
             .await
             .map_err(|_| {
                 GenerationError::new("authorization_failed", "Principal authorization failed")
@@ -116,13 +98,9 @@ impl GenerateTool {
         // 地址，避免 debug 构建逐层内联搬移大型 future 耗尽工作线程栈。
         let result =
             Box::pin(self.run(arguments, context.principal, context.cancellation, deadline)).await;
-        let is_error = result.is_err();
-        Ok(PlatformToolOutput {
-            content: vec![ContentBlock::Unknown {
-                raw: result.unwrap_or_else(error_value),
-            }],
-            is_error,
-            metadata: Default::default(),
+        Ok(match result {
+            Ok(value) => PlatformToolOutput::ok(value),
+            Err(error) => error_output(error),
         })
     }
 }
@@ -136,13 +114,7 @@ fn error_value(error: GenerationError) -> Value {
 }
 
 fn error_output(error: GenerationError) -> PlatformToolOutput {
-    PlatformToolOutput {
-        content: vec![ContentBlock::Unknown {
-            raw: error_value(error),
-        }],
-        is_error: true,
-        metadata: Default::default(),
-    }
+    PlatformToolOutput::error(error_value(error))
 }
 
 #[async_trait]
@@ -162,11 +134,12 @@ impl PlatformTool for GenerateTool {
     fn execution_limit(&self) -> Option<Duration> {
         Some(LIMIT)
     }
-    fn execution_policy(
-        &self,
-        _arguments: &Value,
-    ) -> stravia_runtime_contract::hook::PlatformExecutionPolicy {
-        stravia_runtime_contract::hook::PlatformExecutionPolicy::Bounded
+    fn execution_policy(&self, arguments: &Value) -> PlatformExecutionPolicy {
+        if execution::validate_input(arguments).is_err() {
+            PlatformExecutionPolicy::Synchronous
+        } else {
+            PlatformExecutionPolicy::Bounded
+        }
     }
     fn parameters(&self) -> Value {
         input_schema()
@@ -177,19 +150,6 @@ impl PlatformTool for GenerateTool {
         false
     }
     async fn execute(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError> {
-        let result = PlatformTool::execute_result(self, arguments, context).await?;
-        let (value, _) = crate::hook::tool::blocks_to_value(result.content)?;
-        if result.is_error {
-            Err(PlatformToolError::new(value.to_string()))
-        } else {
-            Ok(value)
-        }
-    }
-    async fn execute_result(
         &self,
         arguments: Value,
         context: ToolExecutionContext,
@@ -227,13 +187,7 @@ impl McpTool for GenerateTool {
             .unwrap_or(false)
     }
     async fn available(&self, context: &McpContext) -> Result<bool, McpToolError> {
-        let Some(keys) = self.gateway.storage.api_keys() else {
-            return Ok(false);
-        };
-        let key = keys.get(&context.api_key_id).await.map_err(|_| {
-            McpToolError::new("mcp_access_check_failed", "MCP access could not be checked")
-        })?;
-        if !key.is_some_and(|key| key.is_enabled && key.mcp_access_enabled) {
+        if !crate::mcp::bridge::api_key_allows_mcp(&self.gateway, &context.api_key_id).await? {
             return Ok(false);
         }
         self.enabled(&Principal::new(context.api_key_id.clone()))
@@ -245,51 +199,15 @@ impl McpTool for GenerateTool {
         arguments: Value,
         context: &McpContext,
     ) -> Result<McpToolOutput, McpToolError> {
-        if let Err(error) = execution::validate_input(&arguments) {
-            return Ok(McpToolOutput::execution_error(error_value(error)));
-        }
-        let (cancellation, deadline) = context
-            .execution()
-            .unwrap_or_else(|| (CancellationToken::new(), Instant::now() + LIMIT));
-        let caller_cancellation = cancellation.clone();
-        let run_id = stravia_runtime_contract::identifier::new_id();
-        let execution_context = ToolExecutionContext {
-            request_id: run_id.clone(),
-            run_id,
-            interaction_id: None,
-            principal: Principal::new(context.api_key_id.clone()),
-            read_scope: stravia_runtime_contract::hook::ReadExposureScope::FULL,
-            cancellation,
-            progress: None,
-        };
-        let result = crate::tool_execution::scope_request(
-            deadline,
-            self.gateway.dispatch_platform_tool(
-                Arc::new(self.clone()),
-                arguments,
-                execution_context,
-                crate::tool_execution::ExecutionSource::Mcp,
-            ),
+        crate::mcp::bridge::call_platform_tool(
+            &self.gateway,
+            self,
+            arguments,
+            context,
+            LIMIT,
+            "generation_failed",
         )
-        .await;
-        match result {
-            Ok(delivery) => {
-                let result = delivery.output;
-                let (value, _) =
-                    crate::hook::tool::blocks_to_value(result.content).map_err(|error| {
-                        McpToolError::new("result_encoding_failed", error.to_string())
-                    })?;
-                Ok(if result.is_error {
-                    McpToolOutput::execution_error(value)
-                } else {
-                    McpToolOutput::success(value)
-                })
-            }
-            Err(error) => Ok(McpToolOutput::execution_error(json!({"error":{
-                "code": if caller_cancellation.is_cancelled() { "cancelled" } else { "generation_failed" },
-                "message":error.to_string()
-            }}))),
-        }
+        .await
     }
 }
 
@@ -326,7 +244,10 @@ struct GenerateSession {
 #[async_trait]
 impl HookSession for GenerateSession {
     async fn handle(&mut self, event: HookEvent<'_>) -> Result<ActionBatch, String> {
-        let HookEvent::Request { current, .. } = event else {
+        let HookEvent::Request {
+            session, current, ..
+        } = event
+        else {
             return Ok(ActionBatch::default());
         };
         if self.resolved {
@@ -347,11 +268,14 @@ impl HookSession for GenerateSession {
             .any(|tool| tool.name == TOOL_NAME);
         self.forced_generate = explicit
             && matches!(&current.tool_choice, Some(ToolChoice::Named { name }) if name == TOOL_NAME);
-        let inject = Security::new(self.tool.gateway.storage.auth())
-            .authorize_transparent_injections(&self.principal)
-            .await
-            .map_err(|error| error.to_string())?
-            .contains(crate::db::models::TransparentInjection::MediaGeneration);
+        let inject = match session.transparent_injections {
+            Some(snapshot) => snapshot.effective_media_generation(),
+            None => Security::new(self.tool.gateway.storage.auth())
+                .authorize_transparent_injections(&self.principal)
+                .await
+                .map_err(|error| error.to_string())?
+                .contains(crate::db::models::TransparentInjection::MediaGeneration),
+        };
         if !explicit && !inject {
             return Ok(ActionBatch::default());
         }

@@ -819,8 +819,7 @@ async fn execution_storage_failure_never_claims_handoff_or_success_or_retries_ge
         } else {
             assert!(!initial.is_error, "{initial:?}");
             let path = initial.structured_content["path"].as_str().unwrap();
-            let reader =
-                crate::mcp::read::ReadTool::new(&fixture.app.gateway, &mut Vec::new()).unwrap();
+            let reader = crate::mcp::read::ReadTool::new(&fixture.app.gateway);
             let result = McpTool::call(
                 &reader,
                 json!({"path":path,"body":{"wait":120}}),

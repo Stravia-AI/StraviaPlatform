@@ -1,7 +1,7 @@
 use crate::{
     admin, admission, agent, config, db, generation_chain, history_marker, interaction_observation,
-    media, migrations, model_turn, provider_catalog, proxy, router, storage, turn_chain,
-    web_access, web_search,
+    media, migrations, model_turn, provider_catalog, router, storage, turn_chain, web_access,
+    web_search,
 };
 
 mod builder;
@@ -234,20 +234,23 @@ impl Gateway {
         context: &crate::mcp::McpContext,
         timeout: Duration,
     ) -> Result<stravia_runtime_contract::hook::PlatformToolOutput, crate::mcp::McpToolError> {
-        let accepted = tokio::time::Instant::now();
-        let deadline = std::time::Instant::now() + timeout;
-        let cancellation = context.request_cancellation().unwrap_or_default();
+        let (cancellation, deadline) = context.execution().unwrap_or_else(|| {
+            (
+                context.request_cancellation().unwrap_or_default(),
+                std::time::Instant::now() + timeout,
+            )
+        });
+        let run_id = stravia_runtime_contract::identifier::new_id();
         let exec_ctx = stravia_runtime_contract::hook::ToolExecutionContext {
-            request_id: stravia_runtime_contract::identifier::new_id(),
-            run_id: stravia_runtime_contract::identifier::new_id(),
+            request_id: run_id.clone(),
+            run_id,
             interaction_id: None,
             principal: stravia_runtime_contract::Principal::new(context.api_key_id.clone()),
             read_scope: stravia_runtime_contract::hook::ReadExposureScope::FULL,
             cancellation,
             progress: None,
         };
-        let delivery = crate::tool_execution::scope_execution(
-            accepted,
+        let delivery = crate::tool_execution::scope_request(
             deadline,
             self.dispatch_platform_tool(
                 platform_tool,
@@ -277,6 +280,55 @@ impl Gateway {
             ));
         }
         Ok(())
+    }
+
+    async fn enforce_capability_policy(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        capability: crate::policy::PolicyCapability,
+    ) -> Result<(), crate::error::GatewayError> {
+        if let Err(denial) = self
+            .policy_allows_capability(principal.api_key_id(), capability)
+            .await
+        {
+            tracing::warn!(
+                api_key_id = ?principal.api_key_id(),
+                capability = ?capability,
+                code = denial.code.as_str(),
+                reason = denial.message.as_str(),
+                "policy denied platform capability"
+            );
+            return Err(crate::error::GatewayError::Forbidden {
+                reason: crate::error::AccessDenial::Custom(denial.message),
+            });
+        }
+        Ok(())
+    }
+
+    /// 统一校验平台能力策略（fail-closed）与 Principal 有效状态。
+    pub(crate) async fn authorize_capability(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        capability: crate::policy::PolicyCapability,
+    ) -> Result<crate::proxy::security::ModelAccessGrant, crate::error::GatewayError> {
+        self.enforce_capability_policy(principal, capability)
+            .await?;
+        crate::proxy::security::Security::new(self.storage.auth())
+            .authorize_principal_capability(principal)
+            .await
+    }
+
+    /// 统一校验平台能力策略（fail-closed）并返回 Principal 的有效透明注入集合。
+    pub(crate) async fn authorize_capability_injections(
+        &self,
+        principal: &stravia_runtime_contract::Principal,
+        capability: crate::policy::PolicyCapability,
+    ) -> Result<crate::proxy::security::EffectiveInjections, crate::error::GatewayError> {
+        self.enforce_capability_policy(principal, capability)
+            .await?;
+        crate::proxy::security::Security::new(self.storage.auth())
+            .authorize_transparent_injections(principal)
+            .await
     }
 
     fn clone_for_live(&self) -> Self {

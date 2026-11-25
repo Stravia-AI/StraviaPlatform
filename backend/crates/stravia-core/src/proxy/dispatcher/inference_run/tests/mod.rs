@@ -1697,12 +1697,17 @@ impl stravia_runtime_contract::hook::PlatformTool for OrderedTool {
         &self,
         arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
         let index = arguments["index"].as_u64().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing index")
         })?;
         self.calls.lock().push(index);
-        Ok(serde_json::json!({ "index": index }))
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            serde_json::json!({ "index": index }),
+        ))
     }
 }
 
@@ -1728,7 +1733,10 @@ impl stravia_runtime_contract::hook::PlatformTool for RetryingOrderedTool {
         &self,
         arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
         let index = arguments["index"].as_u64().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing index")
         })?;
@@ -1738,7 +1746,9 @@ impl stravia_runtime_contract::hook::PlatformTool for RetryingOrderedTool {
                 "first attempt failed",
             ));
         }
-        Ok(serde_json::json!({ "index": index }))
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            serde_json::json!({ "index": index }),
+        ))
     }
 }
 
@@ -1827,7 +1837,10 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
         &self,
         _arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
         let access = self.access.upgrade().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing test fixture")
         })?;
@@ -1869,7 +1882,9 @@ impl stravia_runtime_contract::hook::PlatformTool for AccessMutationTool {
             .map_err(|error| {
                 stravia_runtime_contract::hook::PlatformToolError::new(error.to_string())
             })?;
-        Ok(serde_json::json!({ "mutated": true }))
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            serde_json::json!({ "mutated": true }),
+        ))
     }
 }
 

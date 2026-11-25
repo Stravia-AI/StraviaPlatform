@@ -89,7 +89,7 @@ async fn document_fixture() -> (
         )
         .await
         .expect("configure Artifact downloads");
-    let reader = ReadTool::new(&gateway, &mut Vec::new()).unwrap();
+    let reader = ReadTool::new(&gateway);
     let key = gateway
         .admin()
         .create_api_key(crate::db::models::CreateApiKey {
@@ -277,7 +277,7 @@ async fn search_report_delivery_keeps_sources_and_continues_only_the_answer() {
     })
     .await
     .unwrap();
-    let reader = ReadTool::new(&gateway, &mut Vec::new()).unwrap();
+    let reader = ReadTool::new(&gateway);
     let context = ToolExecutionContext {
         request_id: "delivery".into(),
         run_id: "delivery".into(),

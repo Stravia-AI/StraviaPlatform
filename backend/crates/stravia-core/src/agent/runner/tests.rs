@@ -61,18 +61,13 @@ impl stravia_runtime_contract::hook::PlatformTool for BlockOutputTool {
         &self,
         _arguments: Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<Value, stravia_runtime_contract::hook::PlatformToolError> {
-        Err(stravia_runtime_contract::hook::PlatformToolError::new(
-            "use typed output",
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::blocks(
+            self.0.clone(),
         ))
-    }
-
-    async fn execute_blocks(
-        &self,
-        _arguments: Value,
-        _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<Vec<ContentBlock>, stravia_runtime_contract::hook::PlatformToolError> {
-        Ok(self.0.clone())
     }
 }
 
@@ -455,7 +450,7 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
             &self,
             arguments: Value,
             _context: ToolExecutionContext,
-        ) -> Result<Value, PlatformToolError> {
+        ) -> Result<stravia_runtime_contract::hook::PlatformToolOutput, PlatformToolError> {
             let request = self
                 .0
                 .post(arguments["url"].as_str().unwrap())
@@ -470,7 +465,9 @@ async fn deferred_concurrent_agents_export_tool_wire_in_their_parent_debug_bundl
             let body = stravia_web_access::wire::body(response, exchange)
                 .await
                 .map_err(|error| PlatformToolError::new(error.to_string()))?;
-            Ok(Value::String(String::from_utf8(body).unwrap()))
+            Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+                Value::String(String::from_utf8(body).unwrap()),
+            ))
         }
     }
 

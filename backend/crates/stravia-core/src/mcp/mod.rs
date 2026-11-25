@@ -9,6 +9,7 @@ use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
+pub(crate) mod bridge;
 pub(crate) mod read;
 mod server;
 

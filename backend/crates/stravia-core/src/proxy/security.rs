@@ -73,6 +73,24 @@ impl EffectiveInjections {
     }
 }
 
+impl From<EffectiveInjections> for stravia_runtime_contract::hook::TransparentInjectionSnapshot {
+    fn from(value: EffectiveInjections) -> Self {
+        Self {
+            enabled: value.enabled,
+            web_search: value.selections.contains(TransparentInjection::WebSearch),
+            media_understanding: value
+                .selections
+                .contains(TransparentInjection::MediaUnderstanding),
+            media_generation: value
+                .selections
+                .contains(TransparentInjection::MediaGeneration),
+            history_recall: value
+                .selections
+                .contains(TransparentInjection::HistoryRecall),
+        }
+    }
+}
+
 /// 一个 Key 的客户端模型目录视图：可见 Route 范围与透明注入授权。
 pub(crate) struct ModelCatalogAccess {
     bound_route_ids: HashSet<String>,

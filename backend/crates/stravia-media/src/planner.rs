@@ -140,7 +140,14 @@ impl HookSession for MediaPlanningSession {
                     "No eligible Target can continue Media Understanding",
                 ));
             }
-            if !transparent_bridge_available(&self.gateway, &self.principal, read_scope, None).await
+            if !transparent_bridge_available(
+                &self.gateway,
+                &self.principal,
+                read_scope,
+                session.transparent_injections,
+                None,
+            )
+            .await
             {
                 return Ok(reject(
                     503,
@@ -163,10 +170,7 @@ impl HookSession for MediaPlanningSession {
                 actions: vec![
                     HookAction::PatchRequest(Box::new(RequestPatch::SetSystem(controls.instructions))),
                     HookAction::PatchRequest(Box::new(RequestPatch::SetMediaRouting(Some(plan)))),
-                    HookAction::ExposeRead {
-                        scope: ReadExposureScope::new(false, true),
-                        description: "Read an image Artifact path; put a specific media question in body.question, or use body: null for default understanding.".into(),
-                    },
+                    HookAction::expose_read(ReadExposureScope::new(false, true)),
                 ],
             });
         }
@@ -203,6 +207,7 @@ impl HookSession for MediaPlanningSession {
                 &self.gateway,
                 &self.principal,
                 read_scope,
+                session.transparent_injections,
                 Some(MediaKind::Image),
             )
             .await
@@ -301,12 +306,7 @@ impl HookSession for MediaPlanningSession {
         actions.extend([
             HookAction::PatchRequest(Box::new(RequestPatch::SetSystem(rewritten.instructions))),
             HookAction::PatchRequest(Box::new(RequestPatch::SetMediaRouting(Some(plan)))),
-            HookAction::ExposeRead {
-                    scope: ReadExposureScope::new(false, true),
-                    description:
-                        "Read an image Artifact path; put a specific media question in body.question, or use body: null for default understanding."
-                            .into(),
-            },
+            HookAction::expose_read(ReadExposureScope::new(false, true)),
         ]);
         Ok(ActionBatch { actions })
     }
@@ -321,13 +321,23 @@ async fn transparent_bridge_available(
     gateway: &crate::host::MediaRuntime,
     principal: &Principal,
     read_scope: ReadExposureScope,
+    injections: Option<stravia_runtime_contract::hook::TransparentInjectionSnapshot>,
     kind: Option<MediaKind>,
 ) -> bool {
     let available = match kind {
         Some(kind) => super::platform::is_available(gateway, principal, kind).await,
         None => super::platform::is_any_available(gateway, principal).await,
     };
-    available && (read_scope.media() || gateway.host.transparent_injection_enabled(principal).await)
+    if !available {
+        return false;
+    }
+    if read_scope.media() {
+        return true;
+    }
+    match injections {
+        Some(snapshot) => snapshot.effective_media_understanding(),
+        None => gateway.host.transparent_injection_enabled(principal).await,
+    }
 }
 
 fn materialize_media_turns(

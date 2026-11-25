@@ -7,6 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const DEFAULT_PLATFORM_TOOL_EXECUTION_LIMIT: Duration = Duration::from_secs(120);
+/// 公开有界平台工具（StraviaRead、generate、Web Search）的统一最大执行时长（15 分钟）。
+pub const PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// 公开平台工具的默认同步等待窗口（60 秒）；耗尽后转后台执行并返回执行引用。
+pub const DEFAULT_PLATFORM_TOOL_SYNC_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformExecutionPolicy {
@@ -86,11 +90,32 @@ impl ReadExposureScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StraviaReadDomain {
-    Query,
-    WebPage,
-    Media,
+/// 请求规划阶段预加载的透明注入偏好快照；不可由工具参数构造。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransparentInjectionSnapshot {
+    pub enabled: bool,
+    pub web_search: bool,
+    pub media_understanding: bool,
+    pub media_generation: bool,
+    pub history_recall: bool,
+}
+
+impl TransparentInjectionSnapshot {
+    pub const fn effective_web_search(self) -> bool {
+        self.enabled && self.web_search
+    }
+
+    pub const fn effective_media_understanding(self) -> bool {
+        self.enabled && self.media_understanding
+    }
+
+    pub const fn effective_media_generation(self) -> bool {
+        self.enabled && self.media_generation
+    }
+
+    pub const fn effective_history_recall(self) -> bool {
+        self.enabled && self.history_recall
+    }
 }
 
 #[derive(Clone)]
@@ -122,6 +147,37 @@ pub struct PlatformToolOutput {
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
     pub metadata: serde_json::Map<String, Value>,
+}
+
+impl PlatformToolOutput {
+    pub fn ok(raw: Value) -> Self {
+        Self {
+            content: vec![ContentBlock::Unknown { raw }],
+            is_error: false,
+            metadata: serde_json::Map::new(),
+        }
+    }
+
+    pub fn error(raw: Value) -> Self {
+        Self {
+            content: vec![ContentBlock::Unknown { raw }],
+            is_error: true,
+            metadata: serde_json::Map::new(),
+        }
+    }
+
+    pub fn blocks(content: Vec<ContentBlock>) -> Self {
+        Self {
+            content,
+            is_error: false,
+            metadata: serde_json::Map::new(),
+        }
+    }
+
+    pub fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.metadata.insert(key.into(), value);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -168,9 +224,6 @@ pub trait PlatformTool: Send + Sync + 'static {
     fn preserve_external_name(&self) -> bool {
         false
     }
-    fn read_domain(&self) -> Option<StraviaReadDomain> {
-        None
-    }
     fn description(&self) -> Option<&str> {
         None
     }
@@ -201,27 +254,7 @@ pub trait PlatformTool: Send + Sync + 'static {
         &self,
         arguments: Value,
         context: ToolExecutionContext,
-    ) -> Result<Value, PlatformToolError>;
-
-    async fn execute_blocks(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<Vec<ContentBlock>, PlatformToolError> {
-        let content = self.execute(arguments, context).await?;
-        Ok(vec![ContentBlock::Unknown { raw: content }])
-    }
-    async fn execute_result(
-        &self,
-        arguments: Value,
-        context: ToolExecutionContext,
-    ) -> Result<PlatformToolOutput, PlatformToolError> {
-        Ok(PlatformToolOutput {
-            content: self.execute_blocks(arguments, context).await?,
-            is_error: false,
-            metadata: serde_json::Map::new(),
-        })
-    }
+    ) -> Result<PlatformToolOutput, PlatformToolError>;
 }
 
 #[derive(Debug, Clone)]

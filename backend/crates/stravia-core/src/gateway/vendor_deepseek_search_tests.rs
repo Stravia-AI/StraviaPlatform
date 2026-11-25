@@ -161,13 +161,10 @@ async fn deepseek_search_follows_bound_flash_thinking_level_through_stravia_read
         })
         .await?;
 
-    let (_, mut tools) = stravia_web_search::builtin_extensions(Arc::new(
-        crate::web_search::host::SearchHost(gateway.clone()),
-    ));
-    let reader = crate::mcp::read::ReadTool::new(&gateway, &mut tools)?;
+    let reader = crate::mcp::read::ReadTool::new(&gateway);
 
     let run_search = |request_id: &str| {
-        reader.execute_result(
+        reader.execute(
             json!({"path": "stravia://search", "body": {"question": "What is DeepSeek Flash?"}}),
             ToolExecutionContext {
                 request_id: request_id.into(),
@@ -362,13 +359,10 @@ async fn deepseek_search_live_upstream_smoke() -> anyhow::Result<()> {
         })
         .await?;
 
-    let (_, mut tools) = stravia_web_search::builtin_extensions(Arc::new(
-        crate::web_search::host::SearchHost(gateway.clone()),
-    ));
-    let reader = crate::mcp::read::ReadTool::new(&gateway, &mut tools)?;
+    let reader = crate::mcp::read::ReadTool::new(&gateway);
 
     let run = |id: &str, question: &str| {
-        reader.execute_result(
+        reader.execute(
             json!({"path": "stravia://search", "body": {"question": question}}),
             ToolExecutionContext {
                 request_id: id.into(),

@@ -91,6 +91,7 @@ impl HookRuntime {
             } else {
                 ReadExposureScope::NONE
             },
+            advertised_read_scope: ReadExposureScope::NONE,
             read_declared,
             skips: Vec::new(),
             stream_leg_open: false,
@@ -120,6 +121,7 @@ pub(crate) struct InferenceRun {
     exposed_tools: HashMap<String, ToolId>,
     exposed_tool_specs: HashMap<String, ToolSpec>,
     read_scope: ReadExposureScope,
+    advertised_read_scope: ReadExposureScope,
     read_declared: bool,
     skips: Vec<HookSkip>,
     stream_leg_open: bool,
@@ -270,6 +272,7 @@ impl InferenceRun {
                     tools: &mut self.exposed_tools,
                     specs: &mut self.exposed_tool_specs,
                     read_scope: &mut self.read_scope,
+                    advertised_read_scope: &mut self.advertised_read_scope,
                 },
                 &self.tools,
                 batch,

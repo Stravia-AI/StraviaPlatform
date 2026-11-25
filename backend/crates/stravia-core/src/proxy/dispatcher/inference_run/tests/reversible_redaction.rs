@@ -31,18 +31,23 @@ impl stravia_runtime_contract::hook::PlatformTool for CredentialFileTool {
         &self,
         arguments: serde_json::Value,
         _context: stravia_runtime_contract::hook::ToolExecutionContext,
-    ) -> Result<serde_json::Value, stravia_runtime_contract::hook::PlatformToolError> {
+    ) -> Result<
+        stravia_runtime_contract::hook::PlatformToolOutput,
+        stravia_runtime_contract::hook::PlatformToolError,
+    > {
         let value = arguments["value"].as_str().ok_or_else(|| {
             stravia_runtime_contract::hook::PlatformToolError::new("missing credential")
         })?;
         tokio::fs::write(&self.path, value).await.map_err(|_| {
             stravia_runtime_contract::hook::PlatformToolError::new("credential file unavailable")
         })?;
-        Ok(if self.array_output {
-            serde_json::json!([{"type": "text", "value": format!("{value} {TOOL_SECRET}")}])
-        } else {
-            serde_json::json!({"api_key": TOOL_SECRET, "configured": true})
-        })
+        Ok(stravia_runtime_contract::hook::PlatformToolOutput::ok(
+            if self.array_output {
+                serde_json::json!([{"type": "text", "value": format!("{value} {TOOL_SECRET}")}])
+            } else {
+                serde_json::json!({"api_key": TOOL_SECRET, "configured": true})
+            },
+        ))
     }
 }
 

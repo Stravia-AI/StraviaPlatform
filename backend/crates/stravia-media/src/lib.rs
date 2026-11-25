@@ -18,11 +18,14 @@ pub use definition::{
 };
 pub use ingest::{MediaRunSnapshotStore, contains_images, snapshot_and_rewrite};
 pub use planner::hook as planning_hook;
-pub use platform::{model_is_image_capable, supports_image, tools as platform_tools};
+pub use platform::{model_is_image_capable, supports_image};
 pub use preprocessor::{
     MAX_DERIVATIVE_BYTES, MAX_MEDIA_ARTIFACTS, MediaInputPreprocessor, MediaPreprocessError,
 };
-pub use service::{DERIVATIVE_STAGING_RETENTION, MediaUnderstandingService, safe_preprocess_error};
+pub use service::{
+    DERIVATIVE_STAGING_RETENTION, MediaUnderstandingError, MediaUnderstandingService,
+    safe_preprocess_error,
+};
 pub use store::MediaDerivativeStore;
 pub use types::{MediaKind, MediaReport, MediaUnderstandingInput, MediaUnderstandingResult};
 pub use validator::MediaReportValidator;
