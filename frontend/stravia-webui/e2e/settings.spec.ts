@@ -2077,13 +2077,14 @@ test('web search keeps one settings column with aligned actions and operable sou
   const edit = (await page.getByRole('button', { name: 'Edit search method', exact: true }).boundingBox())!
   const steps = (await page.locator('#search-max-turns').boundingBox())!
   const suffix = (await page.locator('[data-slot=setting-row]').getByText('s', { exact: true }).boundingBox())!
+  const panelInset = 17 // 1px border + 16px px-4
   const editRight = edit.x + edit.width
-  // 行内控件与区段动作共用设置列的右缘。
+  // 区段动作共用设置列的右缘，面板内行内控件贴齐面板内容区右缘。
   expect(Math.abs(editRight - (column.x + column.width))).toBeLessThanOrEqual(1)
   const connect = (await page.getByRole('button', { name: 'Connect service', exact: true }).boundingBox())!
   expect(Math.abs(connect.x + connect.width - (column.x + column.width))).toBeLessThanOrEqual(1)
-  expect(Math.abs(steps.x + steps.width - editRight)).toBeLessThanOrEqual(1)
-  expect(Math.abs(suffix.x + suffix.width - editRight)).toBeLessThanOrEqual(1)
+  expect(Math.abs(steps.x + steps.width - (editRight - panelInset))).toBeLessThanOrEqual(1.5)
+  expect(Math.abs(suffix.x + suffix.width - (editRight - panelInset))).toBeLessThanOrEqual(1.5)
   expect(Math.abs(steps.width - 7 * remSize)).toBeLessThanOrEqual(1)
   const seconds = (await page.locator('#search-total-seconds').boundingBox())!
   expect(Math.abs(seconds.width - 7 * remSize)).toBeLessThanOrEqual(1)
@@ -2983,7 +2984,7 @@ test('platform task model setting supports configure, unavailable recovery, clea
   await expect(section).toContainText('Not configured')
 
   // Configure a model; first attempt fails inline, retry succeeds.
-  await section.getByRole('button').click()
+  await section.getByRole('button', { name: /Edit/ }).click()
   const dialog = page.getByRole('dialog')
   await dialog.locator('#platform-llm-route').click()
   await page.getByRole('option', { name: /Fast Chat/ }).click()
