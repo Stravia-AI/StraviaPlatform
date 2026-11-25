@@ -76,6 +76,7 @@ pub struct DesktopUpdateState {
 }
 
 impl DesktopUpdateState {
+    #[cfg(test)]
     async fn snapshot(&self) -> DesktopUpdateSnapshot {
         self.inner.lock().await.snapshot.clone()
     }
