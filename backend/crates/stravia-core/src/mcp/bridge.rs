@@ -25,10 +25,9 @@ pub(crate) async fn api_key_allows_mcp(
     let Some(keys) = gateway.storage.api_keys() else {
         return Ok(false);
     };
-    let key = keys
-        .get(api_key_id)
-        .await
-        .map_err(|_| McpToolError::new("mcp_access_check_failed", "MCP access could not be checked"))?;
+    let key = keys.get(api_key_id).await.map_err(|_| {
+        McpToolError::new("mcp_access_check_failed", "MCP access could not be checked")
+    })?;
     Ok(key.is_some_and(|key| key.is_enabled && key.mcp_access_enabled))
 }
 

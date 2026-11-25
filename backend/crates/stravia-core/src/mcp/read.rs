@@ -1407,8 +1407,7 @@ impl HookSession for ReadPlanningSession {
         let media = enabled.media()
             && injections.is_some_and(|injections| injections.effective_media_understanding());
         // 历史回看不依赖平台能力，只看 Key 的选择；显式声明不含历史范围。
-        let history =
-            injections.is_some_and(|injections| injections.effective_history_recall());
+        let history = injections.is_some_and(|injections| injections.effective_history_recall());
         let scope = if explicit {
             ReadExposureScope::FULL
         } else if history {

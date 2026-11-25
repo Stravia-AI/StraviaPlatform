@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## [0.7.7] - 2026-11-26
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
+### Added
+
+- Added selectable **Release** (`release`) and **Beta** (`beta`) product update channels across Core, Server (`PUT /api/v1/updates/channel`), Desktop, and Settings UI. The channel defaults from the installed version, persists across upgrades, and immediately invalidates cross-channel caches and pending pre-release downloads when switching back to `release`.
+- Persisted active page tabs and workspace view state in URL query parameters across Logs, Provider details, Connect, Allowances, Reversible Redaction, and Vendor Plugins pages.
+- Added community links and a WeChat Official Account QR code to the Settings **About** section and project READMEs.
+- Added a reusable segmented control component (`SegmentedControl`) for multi-option controls across Settings and model/price editors.
+
+### Changed
+
+- Improved database write throughput and history digest computation across SQLite and PostgreSQL by batching observation writes, turn/generation chain persistence, prompt admissions, usage stats, and atomic plugin leases, alongside faster credential-protection pattern matching and history indexing.
+- Unified internal platform tool output contracts and consolidated built-in MCP reading and bridging across core, media generation, web access, web search, and agent execution paths.
+- Refined Settings section panels and control styling for consistent visual hierarchy.
+- Updated Rust, WebUI, and Nix (`nix/bun.nix`) dependencies, migrated WebUI components to Svelte 5 event attribute syntax, and gated Desktop state snapshot helpers to test builds.
+
+### Fixed
+
+- Interaction observation now aggregates all visible output blocks in a turn rather than truncating to a single output block.
+
 ## [0.7.6] - 2026-11-24
 
 ### Verification

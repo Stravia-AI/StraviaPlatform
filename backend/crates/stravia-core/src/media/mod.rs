@@ -140,7 +140,10 @@ impl MediaHost for GatewayHost {
     }
     async fn authorize_capability(&self, principal: &Principal) -> bool {
         self.0
-            .authorize_capability(principal, crate::policy::PolicyCapability::MediaUnderstanding)
+            .authorize_capability(
+                principal,
+                crate::policy::PolicyCapability::MediaUnderstanding,
+            )
             .await
             .is_ok()
     }

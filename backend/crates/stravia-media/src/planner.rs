@@ -168,7 +168,9 @@ impl HookSession for MediaPlanningSession {
             };
             return Ok(ActionBatch {
                 actions: vec![
-                    HookAction::PatchRequest(Box::new(RequestPatch::SetSystem(controls.instructions))),
+                    HookAction::PatchRequest(Box::new(RequestPatch::SetSystem(
+                        controls.instructions,
+                    ))),
                     HookAction::PatchRequest(Box::new(RequestPatch::SetMediaRouting(Some(plan)))),
                     HookAction::expose_read(ReadExposureScope::new(false, true)),
                 ],
