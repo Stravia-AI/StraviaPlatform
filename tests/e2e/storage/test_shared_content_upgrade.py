@@ -296,12 +296,16 @@ def assert_observation_converted(env: dict[str, Any], fixture: dict[str, Any]) -
             assert detail["input_text"] == masked(expected["input_preview"]), interaction_id
             assert input_text(env, detail["interaction"]) == masked(expected["input_preview"])
             # 详情的 output_text 是整条 Interaction 的可见输出，与旧 visible_tail 同口径；
-            # 摘要只引用最新一个可见块，所以它是详情输出的结尾。
+            # 摘要按顺序引用全部可见块，因此展开后与详情可见输出内容一致（块间统一以空行分隔）。
             tail = masked(expected["visible_tail"]).strip()
-            latest_block = output_text(env, detail["interaction"]).strip()
+            summary_output = output_text(env, detail["interaction"]).strip()
             assert detail["output_text"].strip() == tail, (interaction_id, detail["output_text"], tail)
-            assert bool(latest_block) == bool(tail), interaction_id
-            assert tail.endswith(latest_block), (interaction_id, latest_block, tail)
+            assert bool(summary_output) == bool(tail), interaction_id
+            assert re.sub(r"\s+", "", summary_output) == re.sub(r"\s+", "", tail), (
+                interaction_id,
+                summary_output,
+                tail,
+            )
         except AssertionError as error:
             problems.append(f"{interaction_id}: {error!r}"[:900])
 

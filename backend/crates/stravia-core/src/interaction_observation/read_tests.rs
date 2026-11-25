@@ -941,6 +941,67 @@ impl Fixture {
     }
 }
 
+async fn output_summary_includes_all_visible_blocks_in_order(
+    observation: &InteractionObservation,
+) -> anyhow::Result<()> {
+    let first = "committed .envrc update";
+    let second = "NO_PREDICTION";
+
+    let run1 = admit_with(
+        observation,
+        "multi-visible-run-1",
+        "reader-multi",
+        "route-multi",
+        vec![user_item("commit please")],
+        None,
+        true,
+    );
+    run1.capture_user_input(&[user_item("commit please")]);
+    run1.publish_user_input();
+    record_turn(&run1, "turn-1", "attempt-1", first);
+    record_turn(&run1, "turn-empty", "attempt-empty", "");
+    finish(&run1, "waiting_client", Some("gen-multi-1"));
+
+    let run2 = admit_with(
+        observation,
+        "multi-visible-run-2",
+        "reader-multi",
+        "route-multi",
+        vec![user_item("commit please"), AiItem::output_text(first)],
+        Some("gen-multi-1"),
+        false,
+    );
+    record_turn(&run2, "turn-2", "attempt-2", second);
+    finish(&run2, "completed", Some("gen-multi-2"));
+    observation.flush().await?;
+
+    let forest = observation.query_forest(ForestQuery::default()).await?;
+    let summary = summary_by_route(&forest, "route-multi");
+    assert_eq!(summary.output.refs.len(), 2);
+    assert_eq!(summary.output.raw_len, (first.len() + second.len()) as i64);
+
+    let detail = observation
+        .get_interaction(&summary.id, ForestQuery::default())
+        .await?
+        .expect("interaction detail");
+    assert_eq!(detail.interaction.output, summary.output);
+
+    let ids: Vec<i64> = summary
+        .output
+        .refs
+        .iter()
+        .map(|reference| reference.content_id)
+        .collect();
+    let contents = observation.observation_contents(&ids).await?;
+    let by_id: std::collections::HashMap<i64, Value> = contents
+        .into_iter()
+        .map(|item| (item.content.content_id, item.content.body))
+        .collect();
+    let texts: Vec<Value> = ids.iter().map(|id| by_id[id].clone()).collect();
+    assert_eq!(texts, vec![json!(first), json!(second)]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_read_contract() -> anyhow::Result<()> {
     let fixture = Fixture::sqlite().await?;
@@ -961,6 +1022,14 @@ async fn sqlite_merged_turn_finish_usage_uses_management_net_input() -> anyhow::
 async fn sqlite_branch_child_detail_carries_its_own_input_text() -> anyhow::Result<()> {
     let fixture = Fixture::sqlite().await?;
     let result = branch_child_detail_carries_its_own_input_text(&fixture.observation).await;
+    fixture.close().await?;
+    result
+}
+
+#[tokio::test]
+async fn sqlite_output_summary_includes_all_visible_blocks_in_order() -> anyhow::Result<()> {
+    let fixture = Fixture::sqlite().await?;
+    let result = output_summary_includes_all_visible_blocks_in_order(&fixture.observation).await;
     fixture.close().await?;
     result
 }
@@ -988,6 +1057,15 @@ async fn postgres_merged_turn_finish_usage_uses_management_net_input() -> anyhow
 async fn postgres_branch_child_detail_carries_its_own_input_text() -> anyhow::Result<()> {
     let fixture = Fixture::postgres().await?;
     let result = branch_child_detail_carries_its_own_input_text(&fixture.observation).await;
+    fixture.close().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires STRAVIA_TEST_POSTGRES_URL pointing to an isolated test PostgreSQL"]
+async fn postgres_output_summary_includes_all_visible_blocks_in_order() -> anyhow::Result<()> {
+    let fixture = Fixture::postgres().await?;
+    let result = output_summary_includes_all_visible_blocks_in_order(&fixture.observation).await;
     fixture.close().await?;
     result
 }

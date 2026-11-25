@@ -69,7 +69,7 @@ Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、�
 | Chromium WebUI E2E | `task test:e2e:web` |
 | Windows 桌面冒烟测试 | `task test:e2e:desktop` |
 
-`DB_URL` 与 `STRAVIA_TEST_REDIS_URL` 必须指向隔离的测试数据库与 Redis，不得使用生产服务。
+`DB_URL`、`STRAVIA_TEST_POSTGRES_URL` 与 `STRAVIA_TEST_REDIS_URL` 必须指向隔离的测试数据库与 Redis，不得使用生产服务。未显式提供测试 PostgreSQL 且处于 `devenv` 环境（存在 `$PGHOST` / `start-postgres`）时，直接使用 `devenv` 提供的 PostgreSQL（如 `postgresql://$USER@localhost/postgres?host=$PGHOST`；未就绪时用 `start-postgres` 启动）运行 PostgreSQL 单元测试、存储 E2E 与 `dump-schema`。
 
 `task test:all` 覆盖全部本地测试面，前置条件为锁定依赖、浏览器、Docker 与本地 `postgres:16`、`redis:8-alpine` 镜像；自动创建并清理仅监听 loopback 的独立容器，不使用调用者的数据库或 Redis。五分钟从启动计到测试与清理完成（含检查与增量构建，冷构建不承诺），超时或任一失败返回非零；不得以跳过测试、缩短产品 TTL、丢弃大输入边界或重试掩盖失败来满足时限。需要生产凭据的 live-upstream、S3 等 opt-in 测试不在其内，须单独满足前置条件。日志与计时在 `target/test-results/all/`。
 
