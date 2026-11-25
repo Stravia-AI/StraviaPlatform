@@ -43,23 +43,62 @@ pub fn retry_request_hash(request: &AiRequest) -> Result<[u8; 32], serde_json::E
     retry::request_hash(request)
 }
 
-struct HashWriter(Sha256);
+type NativeSha256Fn = fn(&[&[u8]]) -> [u8; 32];
 
-impl std::io::Write for HashWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
+static NATIVE_SHA256: std::sync::OnceLock<NativeSha256Fn> = std::sync::OnceLock::new();
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+/// Registers a host-accelerated FIPS 180-4 SHA-256 implementation (for example
+/// `aws-lc-rs`) for canonical hashing without adding host-only crates to the
+/// Wasm-compatible contract crate.
+pub fn register_native_sha256(f: NativeSha256Fn) {
+    let _ = NATIVE_SHA256.set(f);
+}
+
+#[inline]
+pub(super) fn sha256_slices(chunks: &[&[u8]]) -> [u8; 32] {
+    if let Some(f) = NATIVE_SHA256.get() {
+        return f(chunks);
     }
+    let mut hasher = Sha256::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    hasher.finalize().into()
+}
+
+const SCRATCH_MAX_RETAIN: usize = 256 * 1024;
+
+std::thread_local! {
+    static CANONICAL_JSON_SCRATCH: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(super) fn with_serialized_json<R>(
+    value: &(impl serde::Serialize + ?Sized),
+    f: impl FnOnce(&[u8]) -> R,
+) -> Result<R, serde_json::Error> {
+    CANONICAL_JSON_SCRATCH.with(|cell| {
+        if let Ok(mut buf) = cell.try_borrow_mut() {
+            buf.clear();
+            let result = match serde_json::to_writer(&mut *buf, value) {
+                Ok(()) => Ok(f(&buf)),
+                Err(error) => Err(error),
+            };
+            if buf.capacity() > SCRATCH_MAX_RETAIN {
+                *buf = Vec::new();
+            }
+            result
+        } else {
+            let mut buf = Vec::new();
+            serde_json::to_writer(&mut buf, value)?;
+            Ok(f(&buf))
+        }
+    })
 }
 
 fn json_hash(value: &(impl serde::Serialize + ?Sized)) -> [u8; 32] {
-    let mut writer = HashWriter(Sha256::new());
-    serde_json::to_writer(&mut writer, value).expect("canonical JSON value must serialize");
-    writer.0.finalize().into()
+    with_serialized_json(value, |bytes| sha256_slices(&[bytes]))
+        .expect("canonical JSON value must serialize")
 }
 
 /// Produces the stable Provider prompt material used by cache routing.
@@ -649,17 +688,17 @@ fn append_history_serialized_hash(
     previous: [u8; 32],
     value: &(impl serde::Serialize + ?Sized),
 ) -> [u8; 32] {
-    // 长度前缀属于既有持久化指纹契约；先计数，再直接散列相同 JSON 字节。
-    let length = crate::json::serialized_len(&value)
-        .expect("model-visible provider-context unit must serialize as JSON");
-    let mut hasher = Sha256::new();
-    hasher.update(b"stravia-generation-chain-history-v1\0");
-    hasher.update(previous);
-    hasher.update((length as u64).to_be_bytes());
-    let mut writer = HashWriter(hasher);
-    serde_json::to_writer(&mut writer, &value)
-        .expect("model-visible provider-context unit must serialize as JSON");
-    writer.0.finalize().into()
+    // 长度前缀属于既有持久化指纹契约；单次序列化到复用缓冲后直接给出长度并整块散列。
+    with_serialized_json(value, |bytes| {
+        let len = (bytes.len() as u64).to_be_bytes();
+        sha256_slices(&[
+            b"stravia-generation-chain-history-v1\0",
+            &previous,
+            &len,
+            bytes,
+        ])
+    })
+    .expect("model-visible provider-context unit must serialize as JSON")
 }
 
 /// Fingerprints material and controls that can change Provider prompt-cache
@@ -674,10 +713,10 @@ pub fn history_request_controls_hash(request: &AiRequest) -> [u8; 32] {
 }
 
 fn request_controls_hash(request: &AiRequest, cache: bool) -> [u8; 32] {
-    let mut writer = HashWriter(Sha256::new());
-    serde_json::to_writer(&mut writer, &RequestControls { request, cache })
-        .expect("request controls must serialize as JSON");
-    writer.0.finalize().into()
+    with_serialized_json(&RequestControls { request, cache }, |bytes| {
+        sha256_slices(&[bytes])
+    })
+    .expect("request controls must serialize as JSON")
 }
 
 struct RequestControls<'a> {
@@ -779,16 +818,17 @@ impl serde::Serialize for ControlTools<'_> {
 }
 
 pub fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
+    sha256_slices(&[bytes])
 }
 
 pub fn hash_hex(hash: &[u8; 32]) -> String {
-    let mut output = String::with_capacity(hash.len() * 2);
-    for byte in hash {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 64];
+    for (i, &byte) in hash.iter().enumerate() {
+        out[i * 2] = HEX[(byte >> 4) as usize];
+        out[i * 2 + 1] = HEX[(byte & 0x0f) as usize];
     }
-    output
+    String::from_utf8(out.to_vec()).expect("hex encoding is valid ASCII")
 }
 
 fn history_content_block_value(block: &ContentBlock) -> serde_json::Value {

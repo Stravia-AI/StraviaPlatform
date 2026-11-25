@@ -105,7 +105,11 @@ impl<DB: Database> WriteConnection<DB> {
     /// SQLite 的查询 future 被取消后，worker 仍可能执行语句；仅丢弃 MutexGuard
     /// 不能说明数据库写锁已释放。ping 是同一 worker 队列中的完成屏障。
     /// 屏障失败或事务仍活跃时返回错误，后台关闭任务继续持有协调权直至关闭完成。
-    pub async fn finish(mut self) -> Result<(), Error> {
+    pub async fn finish(self) -> Result<(), Error> {
+        self.finish_inner(true).await
+    }
+
+    async fn finish_inner(mut self, require_barrier: bool) -> Result<(), Error> {
         if self.lease.is_none() {
             drop(self.connection.take());
             return Ok(());
@@ -125,7 +129,15 @@ impl<DB: Database> WriteConnection<DB> {
         let mut phase = Phase::new(span);
         let result = {
             let connection = self.connection.as_mut().expect("live write connection");
-            settle(connection, self.write_mode).await
+            if require_barrier || self.write_mode.is_some() {
+                settle(connection, self.write_mode).await
+            } else if connection.handle.raw().is_in_transaction() {
+                Err(Error::Protocol(
+                    "SQLite write lease ended with an active transaction".into(),
+                ))
+            } else {
+                Ok(())
+            }
         };
         match result {
             Ok(()) => {
@@ -218,7 +230,8 @@ impl<DB: Database> WriteTransaction<DB> {
             return Err(error);
         }
         self.connection.transaction_open = false;
-        self.connection.finish().await
+        // commit/rollback 已在驱动 worker 上同步完成；使用独立写连接时无需额外 ping。
+        self.connection.finish_inner(false).await
     }
 }
 

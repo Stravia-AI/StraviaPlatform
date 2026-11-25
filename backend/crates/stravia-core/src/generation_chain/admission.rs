@@ -1,5 +1,4 @@
 use super::*;
-use sha2::{Digest, Sha256};
 use stravia_runtime_contract::protocol::ir::Role;
 use stravia_runtime_contract::protocol::ir::canonical;
 
@@ -10,11 +9,11 @@ fn same_item_positions(left: &[AiItem], right: &[AiItem]) -> bool {
         })
 }
 
-fn controls_digest(request: &AiRequest) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"stravia-prompt-admission-controls-v1\0");
-    hash.update(canonical::history_request_controls_hash(request));
-    canonical::hash_hex(&hash.finalize().into())
+fn controls_digest_from_hash(controls_hash: &[u8; 32]) -> String {
+    canonical::hash_hex(&crate::content_store::sha256_slices(&[
+        b"stravia-prompt-admission-controls-v1\0",
+        controls_hash,
+    ]))
 }
 
 fn is_user_prompt(item: &AiItem) -> bool {
@@ -86,17 +85,47 @@ fn count_user_turns(items: &[AiItem]) -> anyhow::Result<i64> {
 
 type HistoryProof = (i64, String, Vec<(i64, String)>);
 
+struct SeededHistoryProof {
+    count: i64,
+    hash: [u8; 32],
+    units_total: usize,
+    digest: String,
+    prefixes: Vec<(i64, String)>,
+}
+
 // One fold per item, with only temporary prefix digests, never retained text or
 // a cumulative per-admission vector. Prefixes end at client item boundaries.
 fn history_proof<'a>(
     items: impl IntoIterator<Item = &'a AiItem>,
     collect_prefixes: bool,
 ) -> anyhow::Result<HistoryProof> {
-    let mut hash = canonical::history_context_hash(&[]);
-    let mut count = 0i64;
-    let mut prefixes = Vec::new();
+    let proof = history_proof_from_seed(
+        canonical::history_context_hash(&[]),
+        0,
+        Vec::new(),
+        items,
+        collect_prefixes,
+    )?;
+    Ok((proof.count, proof.digest, proof.prefixes))
+}
+
+fn history_proof_from_seed<'a>(
+    mut hash: [u8; 32],
+    mut units_total: usize,
+    mut prefixes: Vec<(i64, String)>,
+    items: impl IntoIterator<Item = &'a AiItem>,
+    collect_prefixes: bool,
+) -> anyhow::Result<SeededHistoryProof> {
+    let mut count =
+        i64::try_from(units_total).map_err(|_| anyhow::anyhow!("history unit count overflow"))?;
+    if !collect_prefixes {
+        prefixes.clear();
+    }
     for item in items {
         let (next, units) = canonical::append_history_context_hash_with_count(&hash, item);
+        units_total = units_total
+            .checked_add(units)
+            .ok_or_else(|| anyhow::anyhow!("history unit count overflow"))?;
         count = count
             .checked_add(i64::try_from(units)?)
             .ok_or_else(|| anyhow::anyhow!("history unit count overflow"))?;
@@ -105,7 +134,13 @@ fn history_proof<'a>(
             prefixes.push((count, canonical::hash_hex(&hash)));
         }
     }
-    Ok((count, canonical::hash_hex(&hash), prefixes))
+    Ok(SeededHistoryProof {
+        count,
+        hash,
+        units_total,
+        digest: canonical::hash_hex(&hash),
+        prefixes,
+    })
 }
 
 fn metadata_from_admission(entry: &crate::storage::PromptAdmission) -> Option<UserPromptMetadata> {
@@ -196,7 +231,12 @@ impl GenerationChainWrite {
         };
         let history_epoch = store.history_epoch().await?;
         let principal = self.principal.continuation_key();
-        let controls = controls_digest(&self.admission_input);
+        let discovery_cache = self.discovery_hash_cache.take();
+        let controls_hash = discovery_cache
+            .as_ref()
+            .map(|cache| cache.controls_hash)
+            .unwrap_or_else(|| canonical::history_request_controls_hash(&self.admission_input));
+        let controls = controls_digest_from_hash(&controls_hash);
         let explicit = self
             .admission_input
             .parameters
@@ -214,10 +254,35 @@ impl GenerationChainWrite {
                 false,
             )?
         } else {
-            history_proof(
-                self.admission_input.items.iter(),
-                self.parent.parent_id.is_none(),
-            )?
+            let collect_prefixes = self.parent.parent_id.is_none();
+            let proof = match discovery_cache {
+                Some(cache) if cache.hashed_items <= self.admission_input.items.len() => {
+                    history_proof_from_seed(
+                        cache.tail_hash,
+                        cache.tail_units,
+                        if collect_prefixes {
+                            cache.prefixes
+                        } else {
+                            Vec::new()
+                        },
+                        self.admission_input.items[cache.hashed_items..].iter(),
+                        collect_prefixes,
+                    )?
+                }
+                _ => history_proof_from_seed(
+                    canonical::history_context_hash(&[]),
+                    0,
+                    Vec::new(),
+                    self.admission_input.items.iter(),
+                    collect_prefixes,
+                )?,
+            };
+            self.admission_hash_cache = Some(AdmissionHashCache {
+                controls_hash,
+                hash: proof.hash,
+                units: proof.units_total,
+            });
+            (proof.count, proof.digest, proof.prefixes)
         };
         let has_proven_parent = self.parent.parent_id.is_some()
             || self.parent.parent_prompt_metadata.is_some()
@@ -474,50 +539,32 @@ impl GenerationChainWrite {
         } else {
             (Some(id.clone()), Some(created_at_ms))
         };
-        let (atomic_context, atomic_guard) = if let Some(state) = &self.chain.atomic_state {
-            let mut checkpoint = self.parent.parent_atomic_checkpoint_id;
-            let mut parent_guard = None;
-            if checkpoint.is_none()
-                && self.parent.parent_id.is_none()
-                && !isolated
-                && let Some(parent_admission) = parent.as_ref()
-            {
-                // Capture failed admitted state under a separate fenced lease.
-                let parent_id = uuid::Uuid::parse_str(&parent_admission.id)?;
-                let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::acquire_at_epoch(
-                    state.clone(),
-                    principal.clone(),
-                    parent_id,
-                    history_epoch,
-                )
-                .await?;
-                let snapshot = uuid::Uuid::new_v4();
-                guard.checkpoint(snapshot).await?;
-                checkpoint = Some(snapshot);
-                parent_guard = Some(guard);
-            }
-            let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::fork_at_epoch(
+        let mut parent_guard = None;
+        let mut parent_checkpoint = self.parent.parent_atomic_checkpoint_id;
+        if let Some(state) = &self.chain.atomic_state
+            && parent_checkpoint.is_none()
+            && self.parent.parent_id.is_none()
+            && !isolated
+            && let Some(parent_admission) = parent.as_ref()
+        {
+            // Capture failed admitted state under a separate fenced lease.
+            let parent_id = uuid::Uuid::parse_str(&parent_admission.id)?;
+            let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::acquire_at_epoch(
                 state.clone(),
                 principal.clone(),
-                admission_id,
-                checkpoint,
+                parent_id,
                 history_epoch,
             )
             .await?;
-            drop(parent_guard);
-            let context = crate::plugin::execution::AtomicConversationContext {
-                principal: principal.clone(),
-                admission_id,
-                atomic_lease_id: guard.lease_id(),
-            };
-            (Some(context), Some(guard))
-        } else {
-            (None, None)
-        };
+            let snapshot = uuid::Uuid::new_v4();
+            guard.checkpoint(snapshot).await?;
+            parent_checkpoint = Some(snapshot);
+            parent_guard = Some(guard);
+        }
         let admission = crate::storage::PromptAdmission {
             context_window_id: Some(window.id),
             context_window_index: Some(window.index),
-            atomic_lineage_created: atomic_guard.is_some(),
+            atomic_lineage_created: self.chain.atomic_state.is_some(),
             logical_turn_id: logical_turn.id.to_string(),
             logical_turn_created_at_ms: logical_turn.created_at_ms,
             id,
@@ -561,7 +608,7 @@ impl GenerationChainWrite {
                 })
                 .transpose()?
             },
-            principal,
+            principal: principal.clone(),
             // Equal zero ordinals normally require equal logical turns; unknown
             // ordinals do not prove that two distinct turns have equal positions.
             parent_id: if ordinal_unknown {
@@ -574,7 +621,73 @@ impl GenerationChainWrite {
             prefix_digest,
             controls_digest: controls,
         };
-        store.insert_at_epoch(&admission, history_epoch).await?;
+        let (atomic_context, atomic_guard) = if let Some(state) = &self.chain.atomic_state {
+            if store.shares_sql_database() && state.is_sql_backed() {
+                let lease_id = uuid::Uuid::new_v4();
+                let parent_str = parent_checkpoint.map(|id| id.to_string());
+                let committed = state
+                    .fork_atomic_state_and_insert_prompt_admission(
+                        &principal,
+                        &admission.id,
+                        parent_str.as_deref(),
+                        &lease_id.to_string(),
+                        history_epoch,
+                        &admission,
+                    )
+                    .await?;
+                drop(parent_guard);
+                if committed {
+                    let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::from_established(
+                        state.clone(),
+                        principal.clone(),
+                        admission_id,
+                        lease_id,
+                    );
+                    let context = crate::plugin::execution::AtomicConversationContext {
+                        principal,
+                        admission_id,
+                        atomic_lease_id: lease_id,
+                    };
+                    (Some(context), Some(guard))
+                } else {
+                    let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::fork_at_epoch(
+                        state.clone(),
+                        principal.clone(),
+                        admission_id,
+                        parent_checkpoint,
+                        history_epoch,
+                    )
+                    .await?;
+                    store.insert_at_epoch(&admission, history_epoch).await?;
+                    let context = crate::plugin::execution::AtomicConversationContext {
+                        principal,
+                        admission_id,
+                        atomic_lease_id: guard.lease_id(),
+                    };
+                    (Some(context), Some(guard))
+                }
+            } else {
+                let guard = crate::plugin::atomic_lease::AtomicLeaseGuard::fork_at_epoch(
+                    state.clone(),
+                    principal.clone(),
+                    admission_id,
+                    parent_checkpoint,
+                    history_epoch,
+                )
+                .await?;
+                drop(parent_guard);
+                store.insert_at_epoch(&admission, history_epoch).await?;
+                let context = crate::plugin::execution::AtomicConversationContext {
+                    principal,
+                    admission_id,
+                    atomic_lease_id: guard.lease_id(),
+                };
+                (Some(context), Some(guard))
+            }
+        } else {
+            store.insert_at_epoch(&admission, history_epoch).await?;
+            (None, None)
+        };
         self.history_delta_start = if let Some(start) = failed_prefix_start.filter(|_| {
             self.parent.parent_id.is_none()
                 && self.parent.compaction_input_range.is_none()

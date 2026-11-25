@@ -22,6 +22,7 @@ mod gc;
 mod sql;
 pub(crate) mod upgrade;
 
+pub(crate) use sql::InlineAtomicCheckpoint;
 pub use sql::SqlTurnChainStore;
 
 #[cfg(test)]

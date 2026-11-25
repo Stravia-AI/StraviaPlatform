@@ -77,12 +77,33 @@ pub(super) async fn read_scoped(
     let scope_key = scope_key(principal);
     let rows = match store {
         ObservationStore::Sqlite(pool, _) => {
-            let mut connection = pool.acquire().await?;
-            let Some(scope) = content_store::sqlite::scope_id(&mut connection, &scope_key).await?
-            else {
-                return Ok(Bodies::from_rows(Vec::new()));
-            };
-            content_store::sqlite::read(&mut connection, scope, content_ids).await?
+            if let Some(slot) = super::store::current_sqlite_batch() {
+                let mut guard = slot.tx.lock().await;
+                if let Some(outer) = guard.as_mut() {
+                    let Some(scope) = content_store::sqlite::scope_id(outer, &scope_key).await?
+                    else {
+                        return Ok(Bodies::from_rows(Vec::new()));
+                    };
+                    content_store::sqlite::read(outer, scope, content_ids).await?
+                } else {
+                    drop(guard);
+                    let mut connection = pool.acquire().await?;
+                    let Some(scope) =
+                        content_store::sqlite::scope_id(&mut connection, &scope_key).await?
+                    else {
+                        return Ok(Bodies::from_rows(Vec::new()));
+                    };
+                    content_store::sqlite::read(&mut connection, scope, content_ids).await?
+                }
+            } else {
+                let mut connection = pool.acquire().await?;
+                let Some(scope) =
+                    content_store::sqlite::scope_id(&mut connection, &scope_key).await?
+                else {
+                    return Ok(Bodies::from_rows(Vec::new()));
+                };
+                content_store::sqlite::read(&mut connection, scope, content_ids).await?
+            }
         }
         ObservationStore::Postgres(pool, _) => {
             let mut connection = pool.acquire().await?;

@@ -13,6 +13,7 @@ pub(super) struct DecodedDiscoveryNode {
 pub(super) struct DiscoveryWorkspace {
     context: Option<stravia_runtime_contract::turn_chain::TurnReadContext>,
     budget: usize,
+    last_hash_cache: Option<DiscoveryHashCache>,
 }
 
 /// Request-local reuse for preparation and attribution; consumers cannot inspect nodes.
@@ -39,6 +40,23 @@ impl DiscoveryWorkspace {
                 .with_decoder(Self::decode_shared_node)
             }),
             budget: DISCOVERY_WORKSPACE_BYTES,
+            last_hash_cache: None,
+        }
+    }
+
+    pub(super) fn take_hash_cache_for(
+        &mut self,
+        request: &Arc<AiRequest>,
+    ) -> Option<DiscoveryHashCache> {
+        let ptr = Arc::as_ptr(request) as usize;
+        if self
+            .last_hash_cache
+            .as_ref()
+            .is_some_and(|cache| cache.request_ptr == ptr)
+        {
+            self.last_hash_cache.take()
+        } else {
+            None
         }
     }
 
@@ -82,6 +100,7 @@ impl DiscoveryWorkspace {
                 .with_decoder(Self::decode_shared_node),
             ),
             budget,
+            last_hash_cache: None,
         }
     }
 
@@ -688,17 +707,25 @@ impl GenerationChainStore {
         if limit == 0 {
             return Ok(None);
         }
-        let controls_fingerprint = stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-            &stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
+        let controls_hash =
+            stravia_runtime_contract::protocol::ir::canonical::history_request_controls_hash(
                 &client_request,
-            ),
-        );
+            );
+        let controls_fingerprint =
+            stravia_runtime_contract::protocol::ir::canonical::hash_hex(&controls_hash);
         let session_fingerprint = generation_session_fingerprint(&client_request);
+        let can_cache_for_admission = matches!(client_request, Cow::Borrowed(_));
         let mut context_fingerprints = Vec::with_capacity(limit);
         let mut prefix_units = Vec::with_capacity(limit);
+        let mut admission_prefixes = if can_cache_for_admission {
+            Vec::with_capacity(limit)
+        } else {
+            Vec::new()
+        };
         let mut context =
             stravia_runtime_contract::protocol::ir::canonical::history_context_hash(&[]);
         let mut semantic_units = 0usize;
+        let mut admission_units_ok = can_cache_for_admission;
         for item in &client_request.items[..limit] {
             // 计数与摘要共用借用投影，不为大文本生成临时 Value 副本。
             let (next, units) =
@@ -707,12 +734,26 @@ impl GenerationChainStore {
                 );
             context = next;
             semantic_units += units;
+            let hex = stravia_runtime_contract::protocol::ir::canonical::hash_hex(&context);
+            if admission_units_ok {
+                match i64::try_from(semantic_units) {
+                    Ok(count) => admission_prefixes.push((count, hex.clone())),
+                    Err(_) => admission_units_ok = false,
+                }
+            }
             let units = u32::try_from(semantic_units).unwrap_or(u32::MAX);
             prefix_units.push(units);
-            context_fingerprints.push((
-                stravia_runtime_contract::protocol::ir::canonical::hash_hex(&context),
-                units,
-            ));
+            context_fingerprints.push((hex, units));
+        }
+        if admission_units_ok {
+            workspace.last_hash_cache = Some(DiscoveryHashCache {
+                request_ptr: Arc::as_ptr(&snapshot) as usize,
+                controls_hash,
+                hashed_items: limit,
+                tail_hash: context,
+                tail_units: semantic_units,
+                prefixes: admission_prefixes,
+            });
         }
 
         let mut candidate_count = 0_u64;
@@ -1405,6 +1446,10 @@ impl GenerationChainStore {
         items_equal(&original.items, &candidate.items)
     }
 
+    pub(super) fn has_sql_turn_chain(&self) -> bool {
+        self.sql_turn_chain.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) async fn save(
         &self,
@@ -1416,7 +1461,7 @@ impl GenerationChainStore {
         commit.effective_state.context_fingerprint = history_context_fingerprint(&request.items);
         commit.effective_state.context_messages = request.items.len();
         commit.effective_state.append_output(&commit.response);
-        self.save_projected(commit, projected).await
+        self.save_projected(commit, projected, None).await
     }
 
     /// Persist a staged generation with the client projection captured at
@@ -1426,6 +1471,7 @@ impl GenerationChainStore {
         &self,
         commit: GenerationChainCommit<'_>,
         projected_client: ProjectedClientCommit,
+        inline_atomic_checkpoint: Option<crate::turn_chain::InlineAtomicCheckpoint>,
     ) -> Result<(), TurnCommitError> {
         let GenerationChainCommit {
             principal,
@@ -1561,21 +1607,28 @@ impl GenerationChainStore {
         drop(client_items);
         drop(client_delta_items);
         drop(effective_request);
-        self.turn_chain
-            .commit(TurnCommit {
-                id: TurnNodeId::new(id),
-                kind: TurnNodeKind::Response,
-                parent_id: parent.parent_id.as_deref().map(TurnNodeId::new),
-                principal: principal.clone(),
-                payload_version: RESPONSE_PAYLOAD_VERSION,
-                payload,
-                marker_references,
-                redaction_references,
-                compaction_record_ids: parent.compaction_record_ids.clone(),
-                atomic_checkpoint_id,
-                reusable_prefix,
-            })
-            .await?;
+        let turn_commit = TurnCommit {
+            id: TurnNodeId::new(id),
+            kind: TurnNodeKind::Response,
+            parent_id: parent.parent_id.as_deref().map(TurnNodeId::new),
+            principal: principal.clone(),
+            payload_version: RESPONSE_PAYLOAD_VERSION,
+            payload,
+            marker_references,
+            redaction_references,
+            compaction_record_ids: parent.compaction_record_ids.clone(),
+            atomic_checkpoint_id,
+            reusable_prefix,
+        };
+        if let (Some(sql_turn_chain), Some(inline)) =
+            (self.sql_turn_chain.as_ref(), inline_atomic_checkpoint)
+        {
+            sql_turn_chain
+                .commit_with_atomic_checkpoint(turn_commit, Some(inline))
+                .await?;
+        } else {
+            self.turn_chain.commit(turn_commit).await?;
+        }
         Ok(())
     }
 }

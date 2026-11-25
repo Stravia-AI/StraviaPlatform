@@ -19,10 +19,20 @@ pub(super) struct ProjectedClientCommit {
     pub(super) client_item_units: usize,
 }
 
+#[cfg(test)]
 pub(super) fn project_client_commit(
     parent: &ActiveGenerationChain,
     request_delta: &AiRequest,
     response: &AiResponse,
+) -> Result<ProjectedClientCommit, TurnCommitError> {
+    project_client_commit_cached(parent, request_delta, response, None)
+}
+
+pub(super) fn project_client_commit_cached(
+    parent: &ActiveGenerationChain,
+    request_delta: &AiRequest,
+    response: &AiResponse,
+    cached_admission: Option<(&AiRequest, AdmissionHashCache)>,
 ) -> Result<ProjectedClientCommit, TurnCommitError> {
     let fresh_states = &parent.fresh_inline_states;
     let mut client_request_delta = canonical_client_history_request(request_delta);
@@ -65,8 +75,24 @@ pub(super) fn project_client_commit(
     let client_history_end = client_items.len();
     client_items.extend(client_output.iter().cloned());
     // 输出改写与压缩替换完成后才投影；计数只随这个不可变快照传递，不缓存可变请求。
-    let (client_history, client_item_units) =
-        ClientHistoryState::from_request_with_count(&client_request_delta, &client_items);
+    let (cached_controls, cached_prefix) = match cached_admission {
+        Some((admission_input, cache)) => {
+            let controls = (std::ptr::eq(request_delta, admission_input)
+                && matches!(client_request_delta, Cow::Borrowed(_)))
+            .then_some(cache.controls_hash);
+            let prefix = (client_history_end == admission_input.items.len()
+                && items_equal(&client_items[..client_history_end], &admission_input.items))
+            .then_some((client_history_end, cache.hash, cache.units));
+            (controls, prefix)
+        }
+        None => (None, None),
+    };
+    let (client_history, client_item_units) = ClientHistoryState::from_request_with_prefix_cache(
+        &client_request_delta,
+        &client_items,
+        cached_controls,
+        cached_prefix,
+    );
     let client_instructions = match client_request_delta {
         Cow::Borrowed(request) => request.instructions.clone(),
         Cow::Owned(request) => request.instructions,
@@ -778,10 +804,11 @@ pub(crate) fn generation_session_fingerprint(request: &AiRequest) -> Option<Stri
 }
 
 pub(crate) fn generation_session_id_fingerprint(session_id: &str) -> String {
-    let mut bytes = b"stravia-generation-session-v1\0".to_vec();
-    bytes.extend_from_slice(session_id.as_bytes());
     stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-        &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&bytes),
+        &crate::content_store::sha256_slices(&[
+            b"stravia-generation-session-v1\0",
+            session_id.as_bytes(),
+        ]),
     )
 }
 

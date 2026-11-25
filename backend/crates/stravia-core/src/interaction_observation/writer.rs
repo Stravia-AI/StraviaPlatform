@@ -809,6 +809,200 @@ async fn persist_turn_finish_phase(
         .await
 }
 
+const SQLITE_BATCH_MAX_COMMANDS: usize = 16;
+const SQLITE_BATCH_COALESCE_WINDOW: Duration = Duration::from_millis(2);
+const SQLITE_BATCH_MAX_HOLD: Duration = Duration::from_millis(4);
+
+fn is_batchable_command(command: &WriterCommand) -> bool {
+    !matches!(
+        command,
+        WriterCommand::ClearDebug { .. }
+            | WriterCommand::Purge { .. }
+            | WriterCommand::FlushInteraction { .. }
+            | WriterCommand::Barrier(_)
+            | WriterCommand::Shutdown(_)
+    )
+}
+
+#[derive(Default)]
+struct BatchPostCommit {
+    events: Vec<ObservationEvent>,
+    live_updates: Vec<ObservationUpdate>,
+    admitted_runs: Vec<String>,
+    touched_interactions: HashMap<String, i64>,
+    had_usage: bool,
+    actions: Vec<DeferredTraceAction>,
+}
+
+enum DeferredTraceAction {
+    AdmitManifest {
+        run_id: String,
+        trace: super::trace::TraceHandle,
+        now: i64,
+        expires: i64,
+    },
+    FinishManifest {
+        run_id: String,
+        trace: super::trace::TraceHandle,
+        at: i64,
+        expires: i64,
+    },
+    FinalizeTrace {
+        run_id: Option<String>,
+        rejection_id: Option<String>,
+        trace: super::trace::TraceHandle,
+        at: i64,
+        expires: i64,
+    },
+    DiscardTrace(super::trace::TraceHandle),
+}
+
+tokio::task_local! {
+    static BATCH_POST_COMMIT: std::cell::RefCell<BatchPostCommit>;
+}
+
+fn emit_live(live: &super::live::LiveState, update: ObservationUpdate) {
+    let mut update = Some(update);
+    if BATCH_POST_COMMIT
+        .try_with(|cell| {
+            cell.borrow_mut()
+                .live_updates
+                .push(update.take().expect("live update"));
+        })
+        .is_ok()
+    {
+        return;
+    }
+    live.emit(update.expect("live update"));
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_deferred_trace_actions(
+    actions: Vec<DeferredTraceAction>,
+    debug_trace_index: &super::manifest_index::DebugTraceIndex,
+    traces: &super::trace::TraceManager,
+    persisted_manifests: &mut HashMap<String, TraceManifest>,
+    partial_trace_count: &std::sync::atomic::AtomicU64,
+) {
+    if actions.is_empty() {
+        return;
+    }
+    let mut terminal_runs = HashSet::new();
+    let mut finalized_runs = HashSet::new();
+    for action in &actions {
+        match action {
+            DeferredTraceAction::FinishManifest { run_id, .. } => {
+                terminal_runs.insert(run_id.clone());
+            }
+            DeferredTraceAction::FinalizeTrace {
+                run_id: Some(run_id),
+                ..
+            } => {
+                terminal_runs.insert(run_id.clone());
+                finalized_runs.insert(run_id.clone());
+            }
+            _ => {}
+        }
+    }
+    for action in actions {
+        match action {
+            DeferredTraceAction::AdmitManifest {
+                run_id,
+                trace,
+                now,
+                expires,
+            } => {
+                if terminal_runs.contains(&run_id) {
+                    continue;
+                }
+                let manifest = trace.manifest();
+                match debug_trace_index
+                    .save_manifest(Some(&run_id), None, &manifest, now, expires, false)
+                    .await
+                {
+                    Ok(()) => {
+                        persisted_manifests.insert(run_id, manifest);
+                    }
+                    Err(error) => {
+                        trace.mark_observation_gap();
+                        tracing::warn!(%run_id, %error, "trace manifest persistence failed");
+                    }
+                }
+            }
+            DeferredTraceAction::FinishManifest {
+                run_id,
+                trace,
+                at,
+                expires,
+            } => {
+                if finalized_runs.contains(&run_id) {
+                    continue;
+                }
+                if let Err(error) = trace.flush().await {
+                    trace.mark_observation_gap();
+                    tracing::warn!(%run_id, %error, "run trace flush failed");
+                }
+                let manifest = trace.manifest();
+                match debug_trace_index
+                    .save_manifest(Some(&run_id), None, &manifest, at, expires, true)
+                    .await
+                {
+                    Ok(()) => {
+                        persisted_manifests.insert(run_id, manifest);
+                    }
+                    Err(error) => {
+                        trace.mark_observation_gap();
+                        tracing::warn!(%run_id, %error, "terminal trace manifest persistence failed");
+                    }
+                }
+            }
+            DeferredTraceAction::FinalizeTrace {
+                run_id,
+                rejection_id,
+                trace,
+                at,
+                expires,
+            } => {
+                let manifest = trace.finish().await;
+                let persisted_partial = manifest.status == "partial"
+                    && !manifest
+                        .reasons
+                        .iter()
+                        .any(|reason| reason == "debug_data_cleared");
+                if !run_id.as_ref().is_some_and(|run_id| {
+                    persisted_manifests
+                        .get(run_id)
+                        .is_some_and(|previous| manifests_match(previous, &manifest))
+                }) && let Err(error) = debug_trace_index
+                    .save_manifest(
+                        run_id.as_deref(),
+                        rejection_id.as_deref(),
+                        &manifest,
+                        at,
+                        expires,
+                        true,
+                    )
+                    .await
+                {
+                    tracing::warn!(trace_id=%manifest.trace_id,%error,"trace manifest persistence failed");
+                }
+                if persisted_partial {
+                    partial_trace_count.fetch_add(1, Ordering::AcqRel);
+                }
+                if let Some(run_id) = run_id {
+                    persisted_manifests.remove(&run_id);
+                }
+            }
+            DeferredTraceAction::DiscardTrace(trace) => {
+                let manifest = trace.finish().await;
+                if let Err(error) = traces.delete(&manifest.trace_id).await {
+                    tracing::warn!(trace_id=%manifest.trace_id,%error,"unadmitted trace cleanup failed");
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<()>) {
     let WriterDeps {
         store,
@@ -850,6 +1044,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut deferred = None;
+        let mut pending_batch: std::collections::VecDeque<(WriterCommand, PerfContext)> =
+            std::collections::VecDeque::new();
         let mut maintenance = tokio::time::Instant::now();
         let mut next_live_publish = tokio::time::Instant::now() + Duration::from_millis(100);
         // A discarded stats-bearing transaction cannot be declared summarized by a later barrier.
@@ -893,7 +1089,9 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     failures.gaps.insert(interaction_id, occurred_at);
                 }
             }
-            let command = if deferred.is_some() {
+            let command = if let Some(next) = pending_batch.pop_front() {
+                Some(next)
+            } else if deferred.is_some() {
                 deferred.take()
             } else {
                 tokio::select! {
@@ -924,17 +1122,144 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     } => command.map(CommandEnvelope::dequeue),
                 }
             };
-            let (command, perf_context) = command
-                .map_or((None, PerfContext::default()), |(command, context)| {
-                    (Some(command), context)
-                });
-            let processing = tracing::info_span!(
-                target: "stravia::perf", "observation.command.process",
-                causal_parent_id = perf_context.span_id(),
-                causal_epoch = perf_context.epoch(),
-                command_kind = command_kind(command.as_ref())
-            );
-            let stop = async {
+            let sqlite_batch_pool = match (&command, store.sqlite_pool()) {
+                (Some((cmd, _)), Some(pool)) if is_batchable_command(cmd) => Some(pool.clone()),
+                _ => None,
+            };
+            let in_sqlite_batch = sqlite_batch_pool.is_some();
+            let mut batch_queue = std::collections::VecDeque::with_capacity(if in_sqlite_batch {
+                SQLITE_BATCH_MAX_COMMANDS
+            } else {
+                1
+            });
+            if in_sqlite_batch {
+                let first = command.expect("batchable sqlite command");
+                let should_coalesce = {
+                    let non_text = !matches!(first.0, WriterCommand::Text { .. });
+                    #[cfg(feature = "test-support")]
+                    {
+                        non_text && queue_hold.listener.is_none()
+                    }
+                    #[cfg(not(feature = "test-support"))]
+                    {
+                        non_text
+                    }
+                };
+                let mut saw_flush_trigger = matches!(
+                    first.0,
+                    WriterCommand::Finish { .. } | WriterCommand::Reject { .. }
+                );
+                batch_queue.push_back(Some(first));
+                while batch_queue.len() < SQLITE_BATCH_MAX_COMMANDS {
+                    let Some((cmd, ctx)) = pending_batch.pop_front() else {
+                        break;
+                    };
+                    saw_flush_trigger |= matches!(
+                        cmd,
+                        WriterCommand::Finish { .. } | WriterCommand::Reject { .. }
+                    );
+                    batch_queue.push_back(Some((cmd, ctx)));
+                }
+                let queue_held = {
+                    #[cfg(feature = "test-support")]
+                    {
+                        queue_hold.held.is_some()
+                    }
+                    #[cfg(not(feature = "test-support"))]
+                    {
+                        false
+                    }
+                };
+                if !queue_held && pending_batch.is_empty() && deferred.is_none() {
+                    while batch_queue.len() < SQLITE_BATCH_MAX_COMMANDS {
+                        match rx.try_recv().map(CommandEnvelope::dequeue) {
+                            Ok((cmd, ctx)) if is_batchable_command(&cmd) => {
+                                saw_flush_trigger |= matches!(
+                                    cmd,
+                                    WriterCommand::Finish { .. } | WriterCommand::Reject { .. }
+                                );
+                                batch_queue.push_back(Some((cmd, ctx)));
+                            }
+                            Ok(other) => {
+                                deferred = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                if should_coalesce
+                    && !saw_flush_trigger
+                    && deferred.is_none()
+                    && pending_batch.is_empty()
+                    && batch_queue.len() < SQLITE_BATCH_MAX_COMMANDS
+                {
+                    let deadline = tokio::time::Instant::now() + SQLITE_BATCH_COALESCE_WINDOW;
+                    while batch_queue.len() < SQLITE_BATCH_MAX_COMMANDS {
+                        tokio::select! {
+                            biased;
+                            next = rx.recv() => {
+                                let Some(env) = next else {
+                                    break;
+                                };
+                                let (cmd, ctx) = env.dequeue();
+                                if !is_batchable_command(&cmd) {
+                                    deferred = Some((cmd, ctx));
+                                    break;
+                                }
+                                let is_trigger = matches!(
+                                    cmd,
+                                    WriterCommand::Finish { .. } | WriterCommand::Reject { .. }
+                                );
+                                batch_queue.push_back(Some((cmd, ctx)));
+                                if is_trigger {
+                                    while batch_queue.len() < SQLITE_BATCH_MAX_COMMANDS {
+                                        match rx.try_recv().map(CommandEnvelope::dequeue) {
+                                            Ok((cmd, ctx)) if is_batchable_command(&cmd) => {
+                                                batch_queue.push_back(Some((cmd, ctx)));
+                                            }
+                                            Ok(other) => {
+                                                deferred = Some(other);
+                                                break;
+                                            }
+                                            Err(_) => break,
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            _ = tokio::time::sleep_until(deadline) => break,
+                        }
+                    }
+                }
+            } else {
+                batch_queue.push_back(command);
+            }
+            let run_batch = async {
+                let mut should_stop = false;
+                let mut processed = 0_usize;
+                while !batch_queue.is_empty() {
+                    if in_sqlite_batch
+                        && processed > 0
+                        && super::store::sqlite_batch_hold_exceeded(SQLITE_BATCH_MAX_HOLD)
+                    {
+                        break;
+                    }
+                    let Some(command) = batch_queue.pop_front() else {
+                        break;
+                    };
+                    processed += 1;
+                    let (command, perf_context) = command
+                        .map_or((None, PerfContext::default()), |(command, context)| {
+                            (Some(command), context)
+                        });
+                    let processing = tracing::info_span!(
+                        target: "stravia::perf", "observation.command.process",
+                        causal_parent_id = perf_context.span_id(),
+                        causal_epoch = perf_context.epoch(),
+                        command_kind = command_kind(command.as_ref())
+                    );
+                    let stop = async {
             let command = match command {
                 Some(WriterCommand::Text { run_id, event, .. }) => {
                     let mut text = event.lock();
@@ -1518,28 +1843,46 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         .await
                     {
                         Ok(admitted) => {
+                            if in_sqlite_batch {
+                                let _ = BATCH_POST_COMMIT.try_with(|cell| {
+                                    cell.borrow_mut().admitted_runs.push(start.id.clone());
+                                });
+                            }
                             if let Some(input) = decision.received_input.take() {
                                 attribution.cache_received_input(start.id.clone(), input, expires);
                             }
                             if let Some(trace) = trace {
-                                let manifest = trace.manifest();
-                                match debug_trace_index
-                                    .save_manifest(
-                                        Some(&start.id),
-                                        None,
-                                        &manifest,
-                                        now,
-                                        expires,
-                                        false,
-                                    )
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        persisted_manifests.insert(start.id.clone(), manifest);
-                                    }
-                                    Err(error) => {
-                                        trace.mark_observation_gap();
-                                        tracing::warn!(run_id=%start.id,%error,"trace manifest persistence failed");
+                                if in_sqlite_batch {
+                                    let _ = BATCH_POST_COMMIT.try_with(|cell| {
+                                        cell.borrow_mut().actions.push(
+                                            DeferredTraceAction::AdmitManifest {
+                                                run_id: start.id.clone(),
+                                                trace,
+                                                now,
+                                                expires,
+                                            },
+                                        );
+                                    });
+                                } else {
+                                    let manifest = trace.manifest();
+                                    match debug_trace_index
+                                        .save_manifest(
+                                            Some(&start.id),
+                                            None,
+                                            &manifest,
+                                            now,
+                                            expires,
+                                            false,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            persisted_manifests.insert(start.id.clone(), manifest);
+                                        }
+                                        Err(error) => {
+                                            trace.mark_observation_gap();
+                                            tracing::warn!(run_id=%start.id,%error,"trace manifest persistence failed");
+                                        }
                                     }
                                 }
                             }
@@ -1563,9 +1906,17 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         }
                     }
                     if let Some(trace) = discarded_trace {
-                        let manifest = trace.finish().await;
-                        if let Err(error) = traces.delete(&manifest.trace_id).await {
-                            tracing::warn!(trace_id=%manifest.trace_id,%error,"unadmitted trace cleanup failed");
+                        if in_sqlite_batch {
+                            let _ = BATCH_POST_COMMIT.try_with(|cell| {
+                                cell.borrow_mut()
+                                    .actions
+                                    .push(DeferredTraceAction::DiscardTrace(trace));
+                            });
+                        } else {
+                            let manifest = trace.finish().await;
+                            if let Err(error) = traces.delete(&manifest.trace_id).await {
+                                tracing::warn!(trace_id=%manifest.trace_id,%error,"unadmitted trace cleanup failed");
+                            }
                         }
                     }
                 }
@@ -1664,8 +2015,20 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     let mut received = vec![(occurred_at, receive_order)];
                     let mut batch_spans = Vec::new();
                     while batch.len() < 64 {
-                        match rx.try_recv().map(CommandEnvelope::dequeue) {
-                            Ok((WriterCommand::Event {
+                        let next_item = if in_sqlite_batch {
+                            match batch_queue.pop_front() {
+                                Some(Some(item)) => Some(item),
+                                Some(None) => {
+                                    batch_queue.push_front(None);
+                                    None
+                                }
+                                None => None,
+                            }
+                        } else {
+                            rx.try_recv().map(CommandEnvelope::dequeue).ok()
+                        };
+                        match next_item {
+                            Some((WriterCommand::Event {
                                 run_id: next_run,
                                 event,
                                 occurred_at: next_occurred_at,
@@ -1698,11 +2061,15 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 batch.push((event, block_id, next_occurred_at));
                                 latest_at = latest_at.max(next_occurred_at);
                             }
-                            Ok(command) => {
-                                deferred = Some(command);
+                            Some(command) => {
+                                if in_sqlite_batch {
+                                    batch_queue.push_front(Some(command));
+                                } else {
+                                    deferred = Some(command);
+                                }
                                 break;
                             }
-                            Err(_) => break,
+                            None => break,
                         }
                     }
                     for (index, (event, block_id, occurred_at)) in batch.iter().enumerate() {
@@ -1795,30 +2162,45 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     let trace = active_traces.lock().get(&run_id).cloned();
                     if let Some(trace) = trace {
-                        // 客户端终态不代表后台执行结束；最后一个 Observer 的 Finalize 才关闭抓包。
-                        if let Err(error) = trace.flush().await {
-                            trace.mark_observation_gap();
-                            tracing::warn!(%run_id, %error, "run trace flush failed");
-                        }
-                        let manifest = trace.manifest();
-                        let at = finished_at;
-                        match debug_trace_index
-                            .save_manifest(
-                                Some(&run_id),
-                                None,
-                                &manifest,
-                                at,
-                                retention.deadline(at),
-                                true,
-                            )
-                            .await
-                        {
-                            Ok(()) => {
-                                persisted_manifests.insert(run_id.clone(), manifest);
-                            }
-                            Err(error) => {
+                        if in_sqlite_batch {
+                            let at = finished_at;
+                            let expires = retention.deadline(at);
+                            let _ = BATCH_POST_COMMIT.try_with(|cell| {
+                                cell.borrow_mut().actions.push(
+                                    DeferredTraceAction::FinishManifest {
+                                        run_id: run_id.clone(),
+                                        trace,
+                                        at,
+                                        expires,
+                                    },
+                                );
+                            });
+                        } else {
+                            // 客户端终态不代表后台执行结束；最后一个 Observer 的 Finalize 才关闭抓包。
+                            if let Err(error) = trace.flush().await {
                                 trace.mark_observation_gap();
-                                tracing::warn!(%run_id, %error, "terminal trace manifest persistence failed");
+                                tracing::warn!(%run_id, %error, "run trace flush failed");
+                            }
+                            let manifest = trace.manifest();
+                            let at = finished_at;
+                            match debug_trace_index
+                                .save_manifest(
+                                    Some(&run_id),
+                                    None,
+                                    &manifest,
+                                    at,
+                                    retention.deadline(at),
+                                    true,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    persisted_manifests.insert(run_id.clone(), manifest);
+                                }
+                                Err(error) => {
+                                    trace.mark_observation_gap();
+                                    tracing::warn!(%run_id, %error, "terminal trace manifest persistence failed");
+                                }
                             }
                         }
                     }
@@ -1926,7 +2308,8 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                                 }
                             }
                         }
-                        if pending_finish.is_some()
+                        if !in_sqlite_batch
+                            && pending_finish.is_some()
                             && let Some(trace) = &trace
                         {
                             let manifest = trace.finish().await;
@@ -1993,36 +2376,54 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         }
                     }
                     let mut persisted_partial = false;
+                    let mut deferred_finalize_trace = false;
                     if let Some(trace) = trace {
-                        // Producer capture already entered Trace's own queue; finish drains it
-                        // before publishing the terminal durable manifest boundary.
-                        let manifest = trace.finish().await;
-                        let at = occurred_at;
-                        let expiry = retention.deadline(at);
-                        // The index retains terminal manifests in memory even when
-                        // the durable write fails, so the finalized partial count
-                        // covers indexed failures as well as persisted manifests.
-                        persisted_partial = manifest.status == "partial"
-                            && !manifest
-                                .reasons
-                                .iter()
-                                .any(|reason| reason == "debug_data_cleared");
-                        if !run_id.as_ref().is_some_and(|run_id| {
-                            persisted_manifests
-                                .get(run_id)
-                                .is_some_and(|previous| manifests_match(previous, &manifest))
-                        }) && let Err(error) = debug_trace_index
-                            .save_manifest(
-                                run_id.as_deref(),
-                                rejection_id.as_deref(),
-                                &manifest,
-                                at,
-                                expiry,
-                                true,
-                            )
-                            .await
-                        {
-                            tracing::warn!(trace_id=%manifest.trace_id,%error,"trace manifest persistence failed");
+                        if in_sqlite_batch {
+                            deferred_finalize_trace = true;
+                            let at = occurred_at;
+                            let expires = retention.deadline(at);
+                            let _ = BATCH_POST_COMMIT.try_with(|cell| {
+                                cell.borrow_mut().actions.push(
+                                    DeferredTraceAction::FinalizeTrace {
+                                        run_id: run_id.clone(),
+                                        rejection_id,
+                                        trace,
+                                        at,
+                                        expires,
+                                    },
+                                );
+                            });
+                        } else {
+                            // Producer capture already entered Trace's own queue; finish drains it
+                            // before publishing the terminal durable manifest boundary.
+                            let manifest = trace.finish().await;
+                            let at = occurred_at;
+                            let expiry = retention.deadline(at);
+                            // The index retains terminal manifests in memory even when
+                            // the durable write fails, so the finalized partial count
+                            // covers indexed failures as well as persisted manifests.
+                            persisted_partial = manifest.status == "partial"
+                                && !manifest
+                                    .reasons
+                                    .iter()
+                                    .any(|reason| reason == "debug_data_cleared");
+                            if !run_id.as_ref().is_some_and(|run_id| {
+                                persisted_manifests
+                                    .get(run_id)
+                                    .is_some_and(|previous| manifests_match(previous, &manifest))
+                            }) && let Err(error) = debug_trace_index
+                                .save_manifest(
+                                    run_id.as_deref(),
+                                    rejection_id.as_deref(),
+                                    &manifest,
+                                    at,
+                                    expiry,
+                                    true,
+                                )
+                                .await
+                            {
+                                tracing::warn!(trace_id=%manifest.trace_id,%error,"trace manifest persistence failed");
+                            }
                         }
                     }
                     if let Some(run_id) = run_id {
@@ -2033,7 +2434,9 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             partial_trace_count.fetch_add(1, Ordering::AcqRel);
                         }
                         drop(active);
-                        persisted_manifests.remove(&run_id);
+                        if !deferred_finalize_trace {
+                            persisted_manifests.remove(&run_id);
+                        }
                     } else if persisted_partial {
                         partial_trace_count.fetch_add(1, Ordering::AcqRel);
                     }
@@ -2139,6 +2542,75 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
             }
             false
             }.instrument(processing).await;
+                    if stop {
+                        should_stop = true;
+                        break;
+                    }
+                }
+                should_stop
+            };
+            let stop = if let Some(pool) = sqlite_batch_pool {
+                let ((should_stop, post), commit_result) = super::store::with_sqlite_batch(
+                    pool,
+                    BATCH_POST_COMMIT.scope(
+                        std::cell::RefCell::new(BatchPostCommit::default()),
+                        async {
+                            let should_stop = run_batch.await;
+                            let post = BATCH_POST_COMMIT
+                                .with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+                            (should_stop, post)
+                        },
+                    ),
+                )
+                .await;
+                match commit_result {
+                    Ok(_) => {
+                        for event in post.events {
+                            publish(&updates, &trace_sequence, event);
+                        }
+                        for update in post.live_updates {
+                            live.emit(update);
+                        }
+                        run_deferred_trace_actions(
+                            post.actions,
+                            &debug_trace_index,
+                            &traces,
+                            &mut persisted_manifests,
+                            &partial_trace_count,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        if post.had_usage {
+                            failures.incomplete_usage = true;
+                        }
+                        for run_id in post.admitted_runs {
+                            attribution.abandon_admission(&run_id);
+                            replayed_tool_results.remove(&run_id);
+                        }
+                        for (interaction_id, at) in post.touched_interactions {
+                            failures.gaps.insert(interaction_id.clone(), at);
+                            live.emit(ObservationUpdate::LiveGap {
+                                interaction_id,
+                                run_id: String::new(),
+                                reason: "persistence_failed".into(),
+                            });
+                        }
+                        tracing::warn!(
+                            cause = %redacted_persist_cause(&error),
+                            "sqlite observation batch commit failed"
+                        );
+                    }
+                }
+                should_stop
+            } else {
+                run_batch.await
+            };
+            while let Some(leftover) = batch_queue.pop_back() {
+                if let Some(leftover) = leftover {
+                    pending_batch.push_front(leftover);
+                }
+            }
             if stop {
                 break;
             }
@@ -2408,6 +2880,39 @@ fn publish(
     trace_sequence: &AtomicI64,
     event: ObservationEvent,
 ) {
+    let mut event = Some(event);
+    if BATCH_POST_COMMIT
+        .try_with(|cell| {
+            let event = event.take().expect("observation event");
+            let mut post = cell.borrow_mut();
+            if let Some(interaction_id) = &event.interaction_id {
+                post.touched_interactions
+                    .entry(interaction_id.clone())
+                    .and_modify(|ts| *ts = (*ts).max(event.occurred_at))
+                    .or_insert(event.occurred_at);
+            }
+            if matches!(
+                event.kind.as_str(),
+                "run_admitted"
+                    | "run_finished"
+                    | "request_rejected"
+                    | "model_turn_started"
+                    | "model_turn_finished"
+                    | "target_attempt_started"
+                    | "target_attempt_finished"
+                    | "usage_confirmed"
+                    | "delivery_finished"
+                    | "client_output_committed"
+            ) {
+                post.had_usage = true;
+            }
+            post.events.push(event);
+        })
+        .is_ok()
+    {
+        return;
+    }
+    let event = event.expect("observation event");
     trace_sequence.fetch_max(event.sequence, Ordering::AcqRel);
     let _ = updates.send(ObservationUpdate::Event(event));
 }
@@ -2500,10 +3005,13 @@ async fn persist_finish(
         }
     }
     if let Some(interaction) = attribution.interaction_for_run(run_id) {
-        context.live.emit(ObservationUpdate::LiveFinished {
-            interaction_id: interaction.to_owned(),
-            run_id: run_id.to_owned(),
-        });
+        emit_live(
+            context.live,
+            ObservationUpdate::LiveFinished {
+                interaction_id: interaction.to_owned(),
+                run_id: run_id.to_owned(),
+            },
+        );
     }
     attribution.finish(run_id, &outcome.status, at);
 }

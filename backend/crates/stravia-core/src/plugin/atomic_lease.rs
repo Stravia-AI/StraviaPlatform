@@ -72,6 +72,12 @@ fn record_failure(
     cancellation.cancel();
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingModelTurn {
+    pub(crate) model_turn_id: String,
+    pub(crate) provider_id: String,
+}
+
 #[derive(Clone)]
 pub(crate) struct AtomicLeaseGuard {
     inner: Arc<AtomicLeaseInner>,
@@ -83,6 +89,7 @@ struct AtomicLeaseInner {
     admission: String,
     lease_id: Uuid,
     failure: Arc<Mutex<Option<AtomicLeaseFailure>>>,
+    pending_model_turns: Mutex<Vec<PendingModelTurn>>,
     cancellation: CancellationToken,
     heartbeat: tokio::task::JoinHandle<()>,
 }
@@ -147,6 +154,17 @@ impl AtomicLeaseGuard {
         Ok(Self::start(store, principal, admission, lease_id))
     }
 
+    /// Wrap an atomic lease whose lineage and lease row were already committed
+    /// inside an atomic multi-table transaction.
+    pub(crate) fn from_established(
+        store: PluginStore,
+        principal: String,
+        admission_id: Uuid,
+        lease_id: Uuid,
+    ) -> Self {
+        Self::start(store, principal, admission_id.to_string(), lease_id)
+    }
+
     fn start(store: PluginStore, principal: String, admission: String, lease_id: Uuid) -> Self {
         let failure = Arc::new(Mutex::new(None));
         let cancellation = CancellationToken::new();
@@ -179,6 +197,7 @@ impl AtomicLeaseGuard {
                 admission,
                 lease_id,
                 failure,
+                pending_model_turns: Mutex::new(Vec::new()),
                 cancellation,
                 heartbeat,
             }),
@@ -187,6 +206,71 @@ impl AtomicLeaseGuard {
 
     pub(crate) fn lease_id(&self) -> Uuid {
         self.inner.lease_id
+    }
+
+    pub(crate) fn store(&self) -> &PluginStore {
+        &self.inner.store
+    }
+
+    pub(crate) fn admission_id(&self) -> &str {
+        &self.inner.admission
+    }
+
+    pub(crate) fn defer_model_turn(&self, model_turn_id: String, provider_id: String) {
+        let mut pending = self.inner.pending_model_turns.lock();
+        if pending.last().is_some_and(|entry| {
+            entry.model_turn_id == model_turn_id && entry.provider_id == provider_id
+        }) {
+            return;
+        }
+        pending.push(PendingModelTurn {
+            model_turn_id,
+            provider_id,
+        });
+    }
+
+    pub(crate) fn take_pending_model_turns(&self) -> Vec<PendingModelTurn> {
+        std::mem::take(&mut *self.inner.pending_model_turns.lock())
+    }
+
+    pub(crate) fn restore_pending_model_turns(&self, mut turns: Vec<PendingModelTurn>) {
+        if turns.is_empty() {
+            return;
+        }
+        let mut pending = self.inner.pending_model_turns.lock();
+        turns.append(&mut *pending);
+        *pending = turns;
+    }
+
+    pub(crate) async fn flush_pending_model_turns(&self) -> Result<(), PluginStorageError> {
+        if let Some(failure) = self.failure() {
+            return Err(failure.into());
+        }
+        let turns = self.take_pending_model_turns();
+        if turns.is_empty() {
+            return Ok(());
+        }
+        let context = crate::plugin::execution::AtomicConversationContext {
+            principal: self.inner.principal.clone(),
+            admission_id: Uuid::parse_str(&self.inner.admission)
+                .map_err(|_| PluginStorageError::Storage)?,
+            atomic_lease_id: self.inner.lease_id,
+        };
+        if let Err(error) = self
+            .inner
+            .store
+            .register_model_turns_batch(&context, &turns)
+            .await
+        {
+            self.restore_pending_model_turns(turns);
+            record_failure(&self.inner.failure, &self.inner.cancellation, &error);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_external_failure(&self, error: &PluginStorageError) {
+        record_failure(&self.inner.failure, &self.inner.cancellation, error);
     }
 
     /// Signals when renewal or checkpointing fails. Link the operation's own
@@ -207,6 +291,7 @@ impl AtomicLeaseGuard {
     /// The backend checks the durable lease in the same transaction as the
     /// snapshot, even if the last heartbeat succeeded locally.
     pub(crate) async fn checkpoint(&self, checkpoint_id: Uuid) -> Result<(), PluginStorageError> {
+        self.flush_pending_model_turns().await?;
         if let Some(failure) = self.failure() {
             return Err(failure.into());
         }

@@ -758,10 +758,10 @@ fn execute_inner(
     // 在构造边界装箱，避免把准备、重试和派发状态逐层嵌入外层 select 的栈帧。
     Box::pin(async move {
         let registration = input.atomic_conversation.clone().map(|atomic_state| {
-            Arc::new(ModelTurnRegistration::new(
-                model_turn_id.clone(),
-                atomic_state,
-            ))
+            Arc::new(
+                ModelTurnRegistration::new(model_turn_id.clone(), atomic_state)
+                    .with_atomic_lease(input.atomic_lease.clone()),
+            )
         });
         let gateway = &executor.gateway;
         let route = {
@@ -2534,8 +2534,25 @@ async fn drive_vendor_attempt(
                 stripped,
             );
         }
-        if parent_cancellation.is_cancelled() || operation_cancellation.is_cancelled() {
+        let committed_upstream_failure = !parent_cancellation.is_cancelled()
+            && lifecycle.committed()
+            && matches!(&outcome, Err(failure) if failure.is_upstream());
+        if (parent_cancellation.is_cancelled() || operation_cancellation.is_cancelled())
+            && !committed_upstream_failure
+        {
             operation_cancellation.cancel();
+            drop(attempt);
+            if let Some(lease) = prepared
+                .model_turn_registration
+                .as_deref()
+                .and_then(ModelTurnRegistration::atomic_lease)
+                && let Err(flush_error) = lease.flush_pending_model_turns().await
+            {
+                tracing::debug!(
+                    error = %flush_error,
+                    "deferred base model turn cursor flush failed after cancellation"
+                );
+            }
             return;
         }
 
@@ -2558,6 +2575,10 @@ async fn drive_vendor_attempt(
                             terminal_output,
                             failure_observer.as_ref(),
                             prepared.attempt_credential_version,
+                            prepared
+                                .model_turn_registration
+                                .as_deref()
+                                .and_then(ModelTurnRegistration::atomic_lease),
                         )
                         .await;
                         return;
@@ -2582,6 +2603,10 @@ async fn drive_vendor_attempt(
                         terminal_output,
                         failure_observer.as_ref(),
                         prepared.attempt_credential_version,
+                        prepared
+                            .model_turn_registration
+                            .as_deref()
+                            .and_then(ModelTurnRegistration::atomic_lease),
                     )
                     .await;
                     return;
@@ -2669,6 +2694,10 @@ async fn drive_vendor_attempt(
                     terminal_output,
                     failure_observer.as_ref(),
                     prepared.attempt_credential_version,
+                    prepared
+                        .model_turn_registration
+                        .as_deref()
+                        .and_then(ModelTurnRegistration::atomic_lease),
                 )
                 .await;
                 return;
@@ -2730,6 +2759,10 @@ async fn drive_vendor_attempt(
                     terminal_output,
                     failure_observer.as_ref(),
                     prepared.attempt_credential_version,
+                    prepared
+                        .model_turn_registration
+                        .as_deref()
+                        .and_then(ModelTurnRegistration::atomic_lease),
                 )
                 .await;
                 return;
@@ -2771,6 +2804,10 @@ async fn drive_vendor_attempt(
                     terminal_output,
                     failure_observer.as_ref(),
                     prepared.attempt_credential_version,
+                    prepared
+                        .model_turn_registration
+                        .as_deref()
+                        .and_then(ModelTurnRegistration::atomic_lease),
                 )
                 .await;
                 return;
@@ -2845,6 +2882,7 @@ async fn finish_vendor_failure(
     terminal_output: tokio::sync::mpsc::OwnedPermit<VendorPublishedResult>,
     observer: Option<&crate::interaction_observation::RunObserver>,
     credential_version: Option<crate::db::models::ProviderCredentialVersion>,
+    atomic_lease: Option<&crate::plugin::atomic_lease::AtomicLeaseGuard>,
 ) {
     // ADR-0073：上游确认的凭据拒绝 → 持久化 Provider 失效。OAuth 恢复路径
     // 在此之前已尝试刷新；走到这里的拒绝即恢复耗尽后的终态。条件写失败只
@@ -2877,6 +2915,14 @@ async fn finish_vendor_failure(
         None,
         Some(&failure.diagnostic),
     );
+    if let Some(lease) = atomic_lease
+        && let Err(flush_error) = lease.flush_pending_model_turns().await
+    {
+        tracing::debug!(
+            error = %flush_error,
+            "deferred base model turn cursor flush failed after vendor failure"
+        );
+    }
     lifecycle
         .publish_failure(failure, terminal_output, observer)
         .await;

@@ -58,6 +58,102 @@ pub async fn bump_config_epoch(store: &dyn SettingsStore) -> anyhow::Result<()> 
 pub use memory::MemoryStorage;
 pub use postgres::PostgresStorage;
 pub use sqlite::SqliteStorage;
+
+const ROUTE_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct CachedRouteSnapshot {
+    fetched_at: Option<std::time::Instant>,
+    targets: Vec<crate::router::TargetSchedulingSnapshot>,
+}
+
+/// 路由 1 小时统计快照的单飞短 TTL 缓存：避免高并发下每个请求全表扫描并排序最近一小时的
+/// `target_attempt_observations`，刷新失败时仍回退到最近一次确认快照并标记 `stale: true`。
+#[derive(Clone)]
+pub(crate) struct RouteSnapshotCache {
+    state: std::sync::Arc<parking_lot::RwLock<CachedRouteSnapshot>>,
+    refresh_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Default for RouteSnapshotCache {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Arc::new(parking_lot::RwLock::new(CachedRouteSnapshot {
+                fetched_at: None,
+                targets: Vec::new(),
+            })),
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+}
+
+impl RouteSnapshotCache {
+    pub(crate) async fn get_or_refresh<F, Fut>(&self, fetch: F) -> RouteSchedulingUsage
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<crate::router::TargetSchedulingSnapshot>, sqlx::Error>>,
+    {
+        self.get_or_refresh_with_ttl(ROUTE_SNAPSHOT_TTL, fetch)
+            .await
+    }
+
+    async fn get_or_refresh_with_ttl<F, Fut>(
+        &self,
+        ttl: std::time::Duration,
+        fetch: F,
+    ) -> RouteSchedulingUsage
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<crate::router::TargetSchedulingSnapshot>, sqlx::Error>>,
+    {
+        let now = std::time::Instant::now();
+        {
+            let guard = self.state.read();
+            if guard
+                .fetched_at
+                .is_some_and(|at| now.saturating_duration_since(at) < ttl)
+            {
+                return RouteSchedulingUsage {
+                    targets: guard.targets.clone(),
+                    stale: false,
+                };
+            }
+        }
+        let _refresh = self.refresh_lock.lock().await;
+        let now = std::time::Instant::now();
+        {
+            let guard = self.state.read();
+            if guard
+                .fetched_at
+                .is_some_and(|at| now.saturating_duration_since(at) < ttl)
+            {
+                return RouteSchedulingUsage {
+                    targets: guard.targets.clone(),
+                    stale: false,
+                };
+            }
+        }
+        match fetch().await {
+            Ok(targets) => {
+                let mut guard = self.state.write();
+                guard.fetched_at = Some(std::time::Instant::now());
+                guard.targets = targets.clone();
+                RouteSchedulingUsage {
+                    targets,
+                    stale: false,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to refresh confirmed route scheduling usage");
+                let targets = self.state.read().targets.clone();
+                RouteSchedulingUsage {
+                    targets,
+                    stale: true,
+                }
+            }
+        }
+    }
+}
+
 pub use traits::{
     AdminIdentityRecord, AdminIdentityStore, AdminSessionRecord, ApiKeyAccessRecord, ApiKeySpend,
     ApiKeyStore, AuthAccessStore, DynStorage, MoneyStore, NewAdminIdentity, NewAdminSession,
@@ -65,3 +161,57 @@ pub use traits::{
     ProviderModelStore, ProviderStore, RouteSchedulingUsage, RouteStore, SettingsStore, Storage,
     StorageBootstrap, UsageStatsStore,
 };
+
+#[cfg(test)]
+mod route_snapshot_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn single_flight_reuses_fresh_snapshot_and_falls_back_stale_on_error() {
+        let cache = RouteSnapshotCache::default();
+        let fetches = std::sync::Arc::new(AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let cache = cache.clone();
+            let fetches = std::sync::Arc::clone(&fetches);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                cache
+                    .get_or_refresh_with_ttl(std::time::Duration::from_secs(60), || {
+                        let fetches = std::sync::Arc::clone(&fetches);
+                        async move {
+                            fetches.fetch_add(1, Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                            Ok(vec![
+                                crate::router::TargetSchedulingSnapshot::default(),
+                                crate::router::TargetSchedulingSnapshot::default(),
+                            ])
+                        }
+                    })
+                    .await
+            }));
+        }
+        for handle in handles {
+            let usage = handle.await.unwrap();
+            assert!(!usage.stale);
+            assert_eq!(usage.targets.len(), 2);
+        }
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            1,
+            "concurrent misses must coalesce into one single-flight refresh"
+        );
+
+        let fallback = cache
+            .get_or_refresh_with_ttl(std::time::Duration::ZERO, || async {
+                Err(sqlx::Error::PoolTimedOut)
+            })
+            .await;
+        assert!(fallback.stale);
+        assert_eq!(fallback.targets.len(), 2);
+    }
+}

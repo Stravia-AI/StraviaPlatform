@@ -18,9 +18,10 @@ pub use user_rules::CompiledCustomRules;
 
 use super::RedactionError;
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
-use expression::{Context, Program};
+use expression::{Context, Program, WordList};
 use pattern::Regex;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -104,19 +105,83 @@ fn detector() -> Result<&'static Detector> {
         .map_err(|error| *error)
 }
 
+fn load_snapshot() -> Result<Snapshot> {
+    let mut snapshot: Snapshot = toml::from_str(include_str!("detection/betterleaks.toml"))
+        .map_err(|_| RedactionError::Detection)?;
+    if snapshot.title.is_empty()
+        || snapshot.min_version.is_empty()
+        || snapshot.betterleaks_min_version.is_empty()
+    {
+        return Err(RedactionError::Detection);
+    }
+    canonicalize_betterleaks(&mut snapshot);
+    Ok(snapshot)
+}
+
+fn catalog_static() -> Result<&'static CredentialRuleCatalog> {
+    static CATALOG: std::sync::LazyLock<Result<CredentialRuleCatalog>> =
+        std::sync::LazyLock::new(|| {
+            let snapshot = load_snapshot()?;
+            let mut seen = HashSet::with_capacity(snapshot.rules.len());
+            for rule in &snapshot.rules {
+                if rule.id.is_empty()
+                    || !seen.insert(rule.id.as_str())
+                    || rule.description.is_empty()
+                    || !matches!(rule.confidence.as_str(), "low" | "medium" | "high")
+                {
+                    return Err(RedactionError::Detection);
+                }
+            }
+            Ok(CredentialRuleCatalog {
+                prefilter: snapshot.prefilter,
+                filter: snapshot.filter,
+                rules: snapshot
+                    .rules
+                    .into_iter()
+                    .map(|source| {
+                        // 名称与检测对象直接来自规则身份，不维护第二份手工目录。
+                        let name = source
+                            .id
+                            .split('-')
+                            .map(|word| {
+                                let mut chars = word.chars();
+                                match chars.next() {
+                                    Some(first) => {
+                                        first.to_uppercase().collect::<String>() + chars.as_str()
+                                    }
+                                    None => String::new(),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        CredentialRule {
+                            id: source.id,
+                            target: name.clone(),
+                            name,
+                            description: source.description,
+                            regex: source.regex,
+                            path: source.path,
+                            secret_group: source.secret_group,
+                            keywords: source.keywords,
+                            filter: source.filter,
+                            components: source.components,
+                            skip_report: source.skip_report,
+                            specificity: source.specificity,
+                            confidence: source.confidence,
+                            enabled: true,
+                        }
+                    })
+                    .collect(),
+            })
+        });
+    CATALOG.as_ref().map_err(|error| *error)
+}
+
 /// 仅解析并规范化内置规则目录的 ID 集合，不编译正则、Aho-Corasick 或分词器；
 /// 供启动迁移快速校验规则归因使用。
 pub fn builtin_rule_ids() -> Result<Vec<String>> {
     static IDS: std::sync::LazyLock<Result<Vec<String>>> = std::sync::LazyLock::new(|| {
-        let mut snapshot: Snapshot = toml::from_str(include_str!("detection/betterleaks.toml"))
-            .map_err(|_| RedactionError::Detection)?;
-        if snapshot.title.is_empty()
-            || snapshot.min_version.is_empty()
-            || snapshot.betterleaks_min_version.is_empty()
-        {
-            return Err(RedactionError::Detection);
-        }
-        canonicalize_betterleaks(&mut snapshot);
+        let snapshot = load_snapshot()?;
         let mut seen = HashSet::with_capacity(snapshot.rules.len());
         let mut out = Vec::with_capacity(snapshot.rules.len());
         for rule in snapshot.rules {
@@ -130,8 +195,9 @@ pub fn builtin_rule_ids() -> Result<Vec<String>> {
     IDS.as_ref().cloned().map_err(|error| *error)
 }
 
+/// 规则目录展示不触发正则引擎、Aho-Corasick 或分词器的编译。
 pub async fn rule_catalog() -> Result<CredentialRuleCatalog> {
-    tokio::task::spawn_blocking(|| Ok(detector()?.catalog.clone()))
+    tokio::task::spawn_blocking(|| Ok(catalog_static()?.clone()))
         .await
         .map_err(|_| RedactionError::Detection)?
 }
@@ -358,29 +424,62 @@ struct Component {
     columns: Option<usize>,
     optional: bool,
 }
-struct Rule {
-    regex: Option<Regex>,
-    path: Option<Regex>,
-    secret_group: usize,
-    /// 小写关键词在 `Detector::keywords` 中的模式编号；任一出现于小写文本即需运行规则。
-    keywords: Vec<usize>,
+struct ActiveRule {
+    regex: Regex,
     filter: Program,
+}
+
+struct Rule {
+    id: String,
+    regex_source: Option<String>,
+    path_source: Option<String>,
+    filter_source: String,
+    /// 按需编译单条规则的正则与过滤器：关键词从未命中的数百条规则不占用内存与冷启动 CPU。
+    compiled: OnceLock<Result<Option<ActiveRule>>>,
+    secret_group: usize,
+    /// 小写关键词在 `Detector::keywords` 中的模式编号；任一出现于文本即需运行规则。
+    keywords: Vec<usize>,
     components: Vec<Component>,
     skip_report: bool,
     specificity: i64,
 }
 
+impl Rule {
+    fn compile_active(&self) -> Result<Option<&ActiveRule>> {
+        self.compiled
+            .get_or_init(|| {
+                if let Some(path_source) = self.path_source.as_deref() {
+                    let path = expression::regex(path_source)?;
+                    if !path.is_match(b"") {
+                        return Ok(None);
+                    }
+                }
+                let Some(regex_source) = self.regex_source.as_deref() else {
+                    return Ok(None);
+                };
+                let regex = expression::regex(regex_source)?;
+                if self.secret_group >= regex.captures_len() {
+                    return Err(RedactionError::Detection);
+                }
+                let filter = Program::compile(&self.filter_source)?;
+                Ok(Some(ActiveRule { regex, filter }))
+            })
+            .as_ref()
+            .map(Option::as_ref)
+            .map_err(|error| *error)
+    }
+}
+
 pub(super) struct Detector {
-    catalog: CredentialRuleCatalog,
     rules: Vec<Rule>,
     order: Vec<usize>,
-    /// 全部规则去重后的小写关键词；每段文本一次扫描，替代数百次逐关键词子串搜索。
+    /// 全部规则去重后的关键词；使用 ASCII 大小写不敏感匹配直接扫描原文，避免整段文本转小写分配。
     keywords: AhoCorasick,
-    prefilter: Program,
+    all_ascii_keywords: bool,
+    prefilter_skips_all: bool,
     filter: Program,
-    tokenizer: tiktoken_rs::CoreBPE,
-    words: HashSet<&'static str>,
-    word_lengths: Vec<usize>,
+    tokenizer: OnceLock<Result<tiktoken_rs::CoreBPE>>,
+    words: OnceLock<WordList>,
 }
 #[derive(Clone)]
 struct Finding<'a> {
@@ -400,15 +499,7 @@ struct Composite<'a> {
 
 impl Detector {
     pub(super) fn new() -> Result<Self> {
-        let mut snapshot: Snapshot = toml::from_str(include_str!("detection/betterleaks.toml"))
-            .map_err(|_| RedactionError::Detection)?;
-        if snapshot.title.is_empty()
-            || snapshot.min_version.is_empty()
-            || snapshot.betterleaks_min_version.is_empty()
-        {
-            return Err(RedactionError::Detection);
-        }
-        canonicalize_betterleaks(&mut snapshot);
+        let snapshot = load_snapshot()?;
         let mut ids = HashMap::with_capacity(snapshot.rules.len());
         for (index, rule) in snapshot.rules.iter().enumerate() {
             if rule.id.is_empty() || ids.insert(rule.id.as_str(), index).is_some() {
@@ -421,13 +512,7 @@ impl Detector {
         for source in &snapshot.rules {
             if source.description.is_empty()
                 || !matches!(source.confidence.as_str(), "low" | "medium" | "high")
-            {
-                return Err(RedactionError::Detection);
-            }
-            let regex = source.regex.as_deref().map(expression::regex).transpose()?;
-            let path = source.path.as_deref().map(expression::regex).transpose()?;
-            if regex.is_none() && path.is_none()
-                || source.secret_group >= regex.as_ref().map_or(1, Regex::captures_len)
+                || (source.regex.is_none() && source.path.is_none())
             {
                 return Err(RedactionError::Detection);
             }
@@ -461,8 +546,11 @@ impl Detector {
             // compiled: its network requests must not participate in local scanning.
             let _ = &source.validate;
             rules.push(Rule {
-                regex,
-                path,
+                id: source.id.clone(),
+                regex_source: source.regex.clone(),
+                path_source: source.path.clone(),
+                filter_source: source.filter.clone(),
+                compiled: OnceLock::new(),
                 secret_group: source.secret_group,
                 keywords: source
                     .keywords
@@ -477,7 +565,6 @@ impl Detector {
                             })
                     })
                     .collect(),
-                filter: Program::compile(&source.filter)?,
                 components,
                 skip_report: source.skip_report,
                 specificity: source.specificity,
@@ -485,72 +572,43 @@ impl Detector {
         }
         let mut order: Vec<usize> = (0..rules.len()).collect();
         order.sort_by_key(|index| std::cmp::Reverse(rules[*index].specificity));
-        let words: HashSet<_> = include_str!("detection/words.txt")
-            .lines()
-            .filter(|word| !word.is_empty())
-            .collect();
-        let word_lengths = words
-            .iter()
-            .map(|word| word.len())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        // 重叠匹配才能报告互为前缀或子串的全部关键词，与逐个子串搜索的语义一致。
+        let all_ascii_keywords = keyword_patterns.iter().all(|keyword| keyword.is_ascii());
+        // 重叠匹配才能报告互为前缀或子串的全部关键词，与逐个子串搜索的语义一致；
+        // 启用 ASCII 大小写不敏感后可直接扫描原文。
         let keywords = AhoCorasick::builder()
+            .ascii_case_insensitive(all_ascii_keywords)
             .match_kind(MatchKind::Standard)
             .kind(Some(AhoCorasickKind::DFA))
             .build(&keyword_patterns)
             .map_err(|_| RedactionError::Detection)?;
+        let tokenizer = OnceLock::new();
+        let words = OnceLock::new();
+        // 模型文本字段的虚拟路径恒为空串，启动时评估一次全局路径预过滤后即可释放其正则。
+        let prefilter_skips_all = {
+            let prefilter = Program::compile(&snapshot.prefilter)?;
+            let empty = Context {
+                raw: "",
+                secret: "",
+                matched: "",
+                start: 0,
+                end: 0,
+                line_start: 0,
+                line_end: 0,
+                line: "",
+                tokenizer: &tokenizer,
+                words: &words,
+            };
+            prefilter.evaluate(&empty)?
+        };
         Ok(Self {
             rules,
             order,
             keywords,
-            prefilter: Program::compile(&snapshot.prefilter)?,
+            all_ascii_keywords,
+            prefilter_skips_all,
             filter: Program::compile(&snapshot.filter)?,
-            tokenizer: tiktoken_rs::cl100k_base().map_err(|_| RedactionError::Detection)?,
+            tokenizer,
             words,
-            word_lengths,
-            catalog: CredentialRuleCatalog {
-                prefilter: snapshot.prefilter,
-                filter: snapshot.filter,
-                rules: snapshot
-                    .rules
-                    .into_iter()
-                    .map(|source| {
-                        // 名称与检测对象直接来自规则身份，不维护第二份手工目录。
-                        let name = source
-                            .id
-                            .split('-')
-                            .map(|word| {
-                                let mut chars = word.chars();
-                                match chars.next() {
-                                    Some(first) => {
-                                        first.to_uppercase().collect::<String>() + chars.as_str()
-                                    }
-                                    None => String::new(),
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        CredentialRule {
-                            id: source.id,
-                            target: name.clone(),
-                            name,
-                            description: source.description,
-                            regex: source.regex,
-                            path: source.path,
-                            secret_group: source.secret_group,
-                            keywords: source.keywords,
-                            filter: source.filter,
-                            components: source.components,
-                            skip_report: source.skip_report,
-                            specificity: source.specificity,
-                            confidence: source.confidence,
-                            enabled: true,
-                        }
-                    })
-                    .collect(),
-            },
         })
     }
 
@@ -561,8 +619,10 @@ impl Detector {
         texts: &[&str],
         disabled: &BTreeSet<String>,
     ) -> Result<Vec<DetectedCredential>> {
+        if self.prefilter_skips_all {
+            return Ok(Vec::new());
+        }
         let off: Vec<bool> = self
-            .catalog
             .rules
             .iter()
             .map(|rule| disabled.contains(&rule.id))
@@ -570,14 +630,19 @@ impl Detector {
         let mut unique = HashMap::new();
         let mut reported_positions = HashSet::new();
         let mut secrets: Vec<DetectedCredential> = Vec::new();
+        let mut present = vec![false; self.keywords.patterns_len()];
         for (source_index, raw) in texts.iter().enumerate() {
-            let empty = self.context(raw, "", "", 0, 0);
-            if self.prefilter.evaluate(&empty)? {
-                continue;
-            }
-            let lower = raw.to_lowercase();
-            let mut present = vec![false; self.keywords.patterns_len()];
-            for found in self.keywords.find_overlapping_iter(&lower) {
+            present.fill(false);
+            // Unicode 中只有 U+0130 ('İ') 和 U+212A ('K') 转小写会产生 ASCII 字符；
+            // 其余文本直接原位做 ASCII 大小写不敏感多模式匹配，零分配且语义完全一致。
+            let needs_unicode_lower = !self.all_ascii_keywords
+                || (!raw.is_ascii() && raw.contains(['\u{0130}', '\u{212A}']));
+            let haystack: Cow<'_, str> = if needs_unicode_lower {
+                Cow::Owned(raw.to_lowercase())
+            } else {
+                Cow::Borrowed(raw)
+            };
+            for found in self.keywords.find_overlapping_iter(haystack.as_bytes()) {
                 present[found.pattern().as_usize()] = true;
             }
             let references = reference_ranges(raw);
@@ -657,7 +722,7 @@ impl Detector {
                         secrets.len() - 1
                     });
                     let findings = &mut secrets[credential_index].findings;
-                    let rule_id = &self.catalog.rules[finding.rule].id;
+                    let rule_id = &self.rules[finding.rule].id;
                     if reported_positions.insert((
                         source_index,
                         finding.start,
@@ -715,7 +780,6 @@ impl Detector {
             line: &raw[line_start..location_line_end],
             tokenizer: &self.tokenizer,
             words: &self.words,
-            word_lengths: &self.word_lengths,
         }
     }
 
@@ -736,77 +800,82 @@ impl Detector {
 
     fn find_betterleaks<'a>(&self, raw: &'a str, index: usize) -> Result<Vec<Finding<'a>>> {
         let rule = &self.rules[index];
-        if rule.path.as_ref().is_some_and(|path| !path.is_match(b"")) {
-            return Ok(Vec::new());
-        }
-        let Some(pattern) = &rule.regex else {
+        let Some(active) = rule.compile_active()? else {
             return Ok(Vec::new());
         };
+        let bytes = raw.as_bytes();
         let mut findings = Vec::new();
-        for full in pattern.find_iter(raw.as_bytes()) {
-            let start = full.start();
-            let end = full.end();
-            let matched = raw
-                .get(start..end)
-                .ok_or(RedactionError::Detection)?
-                .trim_matches('\n');
-            // Betterleaks re-matches after trimming newlines, then selects the
-            // configured group, otherwise its first nonempty capture.
-            let captures = pattern.captures(matched.as_bytes());
-            let secret = if let Some(captures) = &captures {
-                let group = if rule.secret_group > 0 {
-                    captures.get(rule.secret_group)
-                } else {
-                    (1..captures.len()).find_map(|i| captures.get(i).filter(|m| !m.is_empty()))
-                };
-                if let Some(group) = group {
-                    std::str::from_utf8(group.as_bytes()).map_err(|_| RedactionError::Detection)?
+        // 单调推进换行游标，避免大量命中时对 `raw[..start]` 做 O(N^2) 重复扫描。
+        let mut cursor_pos = 0usize;
+        let mut cursor_line = 0usize;
+        let mut cursor_line_start = 0usize;
+        active
+            .regex
+            .find_each_with_captures(bytes, |start, end, extractor| {
+                let matched = raw
+                    .get(start..end)
+                    .ok_or(RedactionError::Detection)?
+                    .trim_matches('\n');
+                // Betterleaks re-matches after trimming newlines, then selects the
+                // configured group, otherwise its first nonempty capture.
+                let secret = if let Some((group_start, group_end)) =
+                    extractor.extract_secret_range(matched.as_bytes(), rule.secret_group)
+                {
+                    matched
+                        .get(group_start..group_end)
+                        .ok_or(RedactionError::Detection)?
                 } else {
                     matched
+                };
+                if secret.is_empty() {
+                    return Ok(());
                 }
-            } else {
-                matched
-            };
-            if secret.is_empty() {
-                continue;
-            }
-            let context = self.context(raw, secret, matched, start, end);
-            if self.filter.evaluate(&context)? || rule.filter.evaluate(&context)? {
-                continue;
-            }
-            let start_line = raw.as_bytes()[..start]
-                .iter()
-                .filter(|b| **b == b'\n')
-                .count();
-            let location_end = start + matched.len();
-            let end_line = start_line
-                + raw.as_bytes()[start..location_end]
-                    .iter()
-                    .filter(|b| **b == b'\n')
-                    .count();
-            let column = start
-                - raw.as_bytes()[..start]
-                    .iter()
-                    .rposition(|b| *b == b'\n')
-                    .map_or(0, |i| i + 1);
-            let end_column = location_end
-                - raw.as_bytes()[..location_end]
-                    .iter()
-                    .rposition(|b| *b == b'\n')
-                    .map_or(0, |i| i + 1);
-            // 捕获片段仍借用原输入；保留秘密自身的位置，而非外围正则上下文。
-            let secret_start = secret.as_ptr() as usize - raw.as_ptr() as usize;
-            findings.push(Finding {
-                rule: index,
-                secret,
-                start: secret_start,
-                end: secret_start + secret.len(),
-                start_line,
-                end_line,
-                column,
-                end_column,
-            });
-        }
+                let context = self.context(raw, secret, matched, start, end);
+                if self.filter.evaluate(&context)? || active.filter.evaluate(&context)? {
+                    return Ok(());
+                }
+                if start >= cursor_pos {
+                    for (offset, &byte) in bytes[cursor_pos..start].iter().enumerate() {
+                        if byte == b'\n' {
+                            cursor_line += 1;
+                            cursor_line_start = cursor_pos + offset + 1;
+                        }
+                    }
+                    cursor_pos = start;
+                } else {
+                    cursor_line = bytes[..start].iter().filter(|&&b| b == b'\n').count();
+                    cursor_line_start = bytes[..start]
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map_or(0, |i| i + 1);
+                    cursor_pos = start;
+                }
+                let start_line = cursor_line;
+                let column = start - cursor_line_start;
+                let location_end = start + matched.len();
+                let mut end_line = start_line;
+                let mut end_line_start = cursor_line_start;
+                for (offset, &byte) in bytes[start..location_end].iter().enumerate() {
+                    if byte == b'\n' {
+                        end_line += 1;
+                        end_line_start = start + offset + 1;
+                    }
+                }
+                let end_column = location_end - end_line_start;
+                // 捕获片段仍借用原输入；保留秘密自身的位置，而非外围正则上下文。
+                let secret_start = secret.as_ptr() as usize - raw.as_ptr() as usize;
+                findings.push(Finding {
+                    rule: index,
+                    secret,
+                    start: secret_start,
+                    end: secret_start + secret.len(),
+                    start_line,
+                    end_line,
+                    column,
+                    end_column,
+                });
+                Ok(())
+            })?;
         Ok(findings)
     }
 
@@ -1032,5 +1101,14 @@ mod tests {
             .map(|rule| rule.id)
             .collect();
         assert_eq!(fast, compiled);
+    }
+
+    #[test]
+    fn all_bundled_rules_compile_and_validate() {
+        let det = detector().expect("detector");
+        for rule in &det.rules {
+            rule.compile_active()
+                .unwrap_or_else(|_| panic!("bundled rule {} failed to compile", rule.id));
+        }
     }
 }

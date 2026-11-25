@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, ensure};
-use sha2::{Digest, Sha256};
+use aws_lc_rs::digest::{Context as Sha256Context, SHA256};
 use sqlx::{PgPool, SqlitePool};
 
 use stravia_runtime_contract::protocol::ir::content::{ContentFormat, ContentUnitBody};
@@ -55,14 +55,29 @@ const CONTENT_DIGEST_DOMAIN: &[u8] = b"stravia.content.v1\0";
 
 pub(crate) type ContentDigest = [u8; 32];
 
+/// 使用 `aws-lc-rs` 硬件加速实现计算多切片 SHA-256（无 SHA-NI 的 x86_64 CPU 上仍走 AVX2 汇编）。
+#[inline]
+pub(crate) fn sha256_slices(chunks: &[&[u8]]) -> ContentDigest {
+    let mut ctx = Sha256Context::new(&SHA256);
+    for chunk in chunks {
+        ctx.update(chunk);
+    }
+    ctx.finish()
+        .as_ref()
+        .try_into()
+        .expect("SHA-256 digest is 32 bytes")
+}
+
+/// 向 `stravia-runtime-contract` 注册宿主侧 `aws-lc-rs` SHA-256 实现。
+pub(crate) fn install_native_sha256() {
+    stravia_runtime_contract::protocol::ir::canonical::register_native_sha256(sha256_slices);
+}
+
 /// 内容身份：`SHA-256(域前缀 || format_byte || raw_bytes)`。
+/// 使用 `aws-lc-rs` 硬件加速实现（无 SHA-NI 的 x86_64 CPU 上仍走 AVX2 汇编）。
 pub(crate) fn content_digest(format: ContentFormat, raw: &[u8]) -> ContentDigest {
-    Sha256::new()
-        .chain_update(CONTENT_DIGEST_DOMAIN)
-        .chain_update([format_code(format)])
-        .chain_update(raw)
-        .finalize()
-        .into()
+    let format_byte = [format_code(format)];
+    sha256_slices(&[CONTENT_DIGEST_DOMAIN, &format_byte, raw])
 }
 
 /// 正文格式的持久化编码：同时是摘要前缀字节与 `contents.format` 列的取值，

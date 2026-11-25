@@ -876,6 +876,11 @@ pub trait PromptAdmissionStore: Send + Sync {
     fn memory_history_lock(&self) -> Option<Arc<tokio::sync::RwLock<()>>> {
         None
     }
+    /// True when backed by the same SQLite/PostgreSQL database as `PluginStore`,
+    /// allowing admission insertion to share the atomic-lineage fork transaction.
+    fn shares_sql_database(&self) -> bool {
+        false
+    }
     async fn history_epoch(&self) -> anyhow::Result<i64>;
     async fn insert_at_epoch(
         &self,

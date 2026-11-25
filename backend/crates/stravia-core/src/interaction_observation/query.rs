@@ -1781,7 +1781,17 @@ impl ObservationStore {
                         separated.push_bind(id);
                     }
                     query.push(")");
-                    query.build_query_as().fetch_all(pool).await?
+                    if let Some(slot) = super::store::current_sqlite_batch() {
+                        let mut guard = slot.tx.lock().await;
+                        if let Some(outer) = guard.as_mut() {
+                            query.build_query_as().fetch_all(&mut **outer).await?
+                        } else {
+                            drop(guard);
+                            query.build_query_as().fetch_all(pool).await?
+                        }
+                    } else {
+                        query.build_query_as().fetch_all(pool).await?
+                    }
                 }
                 Self::Postgres(pool, _) => {
                     let mut query = QueryBuilder::<sqlx::Postgres>::new(

@@ -16,6 +16,7 @@ pub struct GatewayBuilder {
 
 impl GatewayBuilder {
     pub fn new(config: GatewayConfig) -> Self {
+        crate::content_store::install_native_sha256();
         Self {
             config,
             storage: None,

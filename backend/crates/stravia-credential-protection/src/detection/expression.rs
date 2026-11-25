@@ -2,10 +2,7 @@
 //! No validation expressions, dynamic functions, I/O, or runtime regex compilation.
 use super::super::RedactionError;
 use super::pattern::Regex;
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-};
+use std::{borrow::Cow, collections::HashMap, sync::OnceLock};
 
 type Result<T, E = RedactionError> = std::result::Result<T, E>;
 fn invalid() -> RedactionError {
@@ -375,6 +372,39 @@ impl Parser {
     }
 }
 
+pub(super) struct WordList {
+    words: Vec<&'static str>,
+    lengths: Vec<usize>,
+}
+
+impl WordList {
+    pub(super) fn load() -> Self {
+        let mut words: Vec<&'static str> = include_str!("words.txt")
+            .lines()
+            .filter(|word| !word.is_empty())
+            .collect();
+        words.sort_unstable();
+        words.dedup();
+        let lengths = words
+            .iter()
+            .map(|word| word.len())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self { words, lengths }
+    }
+
+    #[inline]
+    pub(super) fn contains(&self, word: &str) -> bool {
+        self.words.binary_search(&word).is_ok()
+    }
+
+    #[inline]
+    pub(super) fn lengths(&self) -> &[usize] {
+        &self.lengths
+    }
+}
+
 pub(super) struct Context<'a> {
     pub secret: &'a str,
     pub matched: &'a str,
@@ -384,9 +414,8 @@ pub(super) struct Context<'a> {
     pub end: usize,
     pub line_start: usize,
     pub line_end: usize,
-    pub tokenizer: &'a tiktoken_rs::CoreBPE,
-    pub words: &'a HashSet<&'static str>,
-    pub word_lengths: &'a [usize],
+    pub tokenizer: &'a OnceLock<Result<tiktoken_rs::CoreBPE>>,
+    pub words: &'a OnceLock<WordList>,
 }
 #[derive(Clone)]
 enum Value<'a> {
@@ -729,7 +758,14 @@ impl Expr {
                         } else {
                             Cow::Borrowed(input)
                         };
-                        let count = context.tokenizer.encode_ordinary(&analyzed).len();
+                        let tokenizer = context
+                            .tokenizer
+                            .get_or_init(|| {
+                                tiktoken_rs::cl100k_base().map_err(|_| RedactionError::Detection)
+                            })
+                            .as_ref()
+                            .map_err(|error| *error)?;
+                        let count = tokenizer.encode_ordinary(&analyzed).len();
                         let ratio = if count == 0 {
                             0.0
                         } else {
@@ -738,11 +774,12 @@ impl Expr {
                         if matches!(function, Function::TokenRatio) {
                             Value::Number(ratio)
                         } else {
+                            let words = context.words.get_or_init(WordList::load);
                             let lowered = analyzed.to_lowercase();
                             let has_word = |minimum: usize| {
                                 (0..lowered.len()).any(|start| {
-                                    context
-                                        .word_lengths
+                                    words
+                                        .lengths()
                                         .iter()
                                         .copied()
                                         .skip_while(|length| *length < minimum)
@@ -750,7 +787,7 @@ impl Expr {
                                         .any(|length| {
                                             lowered
                                                 .get(start..start + length)
-                                                .is_some_and(|s| context.words.contains(s))
+                                                .is_some_and(|s| words.contains(s))
                                         })
                                 })
                             };

@@ -44,6 +44,7 @@ impl Default for CacheAffinity {
 
 impl CacheAffinity {
     pub(crate) fn new(runtime_cache: RuntimeCache) -> Self {
+        crate::content_store::install_native_sha256();
         Self {
             runtime_cache,
             mutation: Arc::new(Mutex::new(())),
