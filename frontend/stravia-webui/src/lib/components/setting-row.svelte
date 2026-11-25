@@ -149,7 +149,9 @@ const hasControl = $derived(Boolean(children || value !== undefined || onedit))
             variant="outline"
             size="sm"
             aria-labelledby="{editId} {titleId}"
-            onclick={onedit}>{m.common_edit()}</Button>
+            onclick={onedit}>
+            {m.common_edit()}
+          </Button>
         {/if}
       </div>
     {/if}

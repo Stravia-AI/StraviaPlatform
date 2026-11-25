@@ -1375,19 +1375,19 @@ test.describe('hit records time range', () => {
     // 实时窗口只带起点；终点是“现在”，新命中不会被终点挡住。
     expect(near(state.discoveryRequests[0].startAt, frozenMs - 168 * HOUR)).toBe(true)
     expect(state.discoveryRequests[0].endAt).toBeNull()
-    await expect(page.getByRole('button', { name: 'Hit records time range' })).toContainText('Last 7d')
+    await expect(page.getByRole('combobox', { name: 'Hit records time range' })).toContainText('Last 7d')
     await expect(page.getByRole('button', { name: 'Reload hit records' })).toBeVisible()
     await expect(page.locator('#credential-rule-search')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Add custom rule' })).toHaveCount(0)
 
     await openRules(page)
-    await expect(page.getByRole('button', { name: 'Hit records time range' })).toHaveCount(0)
+    await expect(page.getByRole('combobox', { name: 'Hit records time range' })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Reload hit records' })).toHaveCount(0)
     await expect(page.locator('#credential-rule-search')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Add custom rule' })).toBeVisible()
 
     await page.getByRole('tab', { name: 'Matching test', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Hit records time range' })).toHaveCount(0)
+    await expect(page.getByRole('combobox', { name: 'Hit records time range' })).toHaveCount(0)
     await expect(page.locator('#credential-rule-search')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Add custom rule' })).toHaveCount(0)
   })
@@ -1401,7 +1401,7 @@ test.describe('hit records time range', () => {
     await page.goto('/reversible-redaction')
     await expect(rowOf(page, 'omp-key')).toBeVisible()
 
-    await page.getByRole('button', { name: 'Hit records time range' }).click()
+    await page.getByRole('combobox', { name: 'Hit records time range' }).click()
     await page.getByRole('option', { name: 'Last 6h' }).click()
     await expect.poll(() => state.discoveryRequests.length).toBe(2)
     expect(near(state.discoveryRequests[1].startAt, frozenMs - 6 * HOUR)).toBe(true)
@@ -1446,7 +1446,7 @@ test.describe('hit records time range', () => {
     await expect.poll(() => state.discoveryRequests.length).toBe(2)
     const [start, end] = [new Date('2026-10-01T08:00'), new Date('2026-10-11T08:00')]
     expect(state.discoveryRequests[1]).toMatchObject({ cursor: null, startAt: start.getTime(), endAt: end.getTime() })
-    await expect(page.getByRole('button', { name: 'Hit records time range' })).toContainText('Custom')
+    await expect(page.getByRole('combobox', { name: 'Hit records time range' })).toContainText('Custom')
   })
 
   test('explains an empty range and reloads on request', async ({ page }) => {

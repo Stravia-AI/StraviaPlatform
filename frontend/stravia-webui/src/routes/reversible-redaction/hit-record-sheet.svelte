@@ -191,8 +191,9 @@ function focusClose(event: Event): void {
             <dd>
               <span class="flex flex-wrap gap-1.5">
                 {#each record.rule_ids as ruleId (ruleId)}
-                  <Badge variant="outline" class="h-auto max-w-full whitespace-normal" title={ruleId}
-                    >{ruleNames.get(ruleId) ?? ruleId}</Badge>
+                  <Badge variant="outline" class="h-auto max-w-full whitespace-normal" title={ruleId}>
+                    {ruleNames.get(ruleId) ?? ruleId}
+                  </Badge>
                 {/each}
               </span>
             </dd>
@@ -228,17 +229,19 @@ function focusClose(event: Event): void {
             {#if selectedHit}
               {#key `${record.id}:${hitIndex}`}
                 {#if maskedDetailQuery.isPending}
-                  <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
-                    ><Spinner />{m.credential_protection_hit_records_detail_loading()}</span>
+                  <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status">
+                    <Spinner />{m.credential_protection_hit_records_detail_loading()}
+                  </span>
                 {:else if maskedDetailQuery.isError}
                   {#if hitQueryFailure(maskedDetailQuery.error) === 'gone'}
                     <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_detail_gone()}</p>
                   {:else}
-                    <Alert.Root variant="destructive"
-                      ><Alert.Description>{m.credential_protection_hit_records_detail_failed()}</Alert.Description
-                      ></Alert.Root>
-                    <Button class="self-start" variant="outline" onclick={() => void maskedDetailQuery.refetch()}
-                      >{m.common_retry()}</Button>
+                    <Alert.Root variant="destructive">
+                      <Alert.Description>{m.credential_protection_hit_records_detail_failed()}</Alert.Description>
+                    </Alert.Root>
+                    <Button class="self-start" variant="outline" onclick={() => void maskedDetailQuery.refetch()}>
+                      {m.common_retry()}
+                    </Button>
                   {/if}
                 {:else if displayedDetail}
                   <CredentialHitDetail
@@ -277,17 +280,19 @@ function focusClose(event: Event): void {
               <Collapsible.Content class="min-w-0">
                 {#if reuseExpanded}
                   {#if reusesQuery.isPending}
-                    <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
-                      ><Spinner />{m.credential_protection_hit_records_reuse_loading()}</span>
+                    <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status">
+                      <Spinner />{m.credential_protection_hit_records_reuse_loading()}
+                    </span>
                   {:else if reusesQuery.isError && !reusePages.length}
                     {#if hitQueryFailure(reusesQuery.error) === 'gone'}
                       <p class="text-sm text-muted-foreground">{m.credential_protection_hit_records_detail_gone()}</p>
                     {:else}
-                      <Alert.Root variant="destructive"
-                        ><Alert.Description>{m.credential_protection_hit_records_reuse_failed()}</Alert.Description
-                        ></Alert.Root>
-                      <Button class="self-start" variant="outline" onclick={() => void reusesQuery.refetch()}
-                        >{m.common_retry()}</Button>
+                      <Alert.Root variant="destructive">
+                        <Alert.Description>{m.credential_protection_hit_records_reuse_failed()}</Alert.Description>
+                      </Alert.Root>
+                      <Button class="self-start" variant="outline" onclick={() => void reusesQuery.refetch()}>
+                        {m.common_retry()}
+                      </Button>
                     {/if}
                   {:else if !reuseLinkable}
                     <p class="text-sm text-muted-foreground">
@@ -304,12 +309,14 @@ function focusClose(event: Event): void {
                               <a class="reuse-link" href={resolve(requestLogPath(item.interaction_id))}>
                                 <span class="reuse-main">
                                   <span class="font-medium">{credentialSourceLabel(hitSourceKind(item))}</span>
-                                  <span class="reuse-key"
-                                    >{item.api_key_name ?? m.credential_protection_discoveries_unknown_key()}</span>
-                                  <span class="reuse-time"
-                                    >{m.credential_protection_hit_records_reuse_last({
+                                  <span class="reuse-key">
+                                    {item.api_key_name ?? m.credential_protection_discoveries_unknown_key()}
+                                  </span>
+                                  <span class="reuse-time">
+                                    {m.credential_protection_hit_records_reuse_last({
                                       time: formatLogTime(item.last_reused_at),
-                                    })}</span>
+                                    })}
+                                  </span>
                                 </span>
                                 <span class="sr-only">{m.credential_protection_hit_records_open_request()}</span>
                                 <ArrowRightIcon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -320,12 +327,13 @@ function focusClose(event: Event): void {
                       </div>
                       <div class="reuse-pager">
                         {#if reuseBounds}
-                          <span class="font-technical text-xs text-muted-foreground"
-                            >{m.credential_protection_hit_records_reuse_range({
+                          <span class="font-technical text-xs text-muted-foreground">
+                            {m.credential_protection_hit_records_reuse_range({
                               start: formatNumber(reuseBounds.start),
                               end: formatNumber(reuseBounds.end),
                               total: formatNumber(reuseTotal),
-                            })}</span>
+                            })}
+                          </span>
                         {/if}
                         <span class="flex items-center gap-1">
                           <Button
@@ -358,11 +366,12 @@ function focusClose(event: Event): void {
                           {m.credential_protection_hit_records_detail_gone()}
                         </p>
                       {:else}
-                        <Alert.Root variant="destructive"
-                          ><Alert.Description>{m.credential_protection_hit_records_reuse_failed()}</Alert.Description
-                          ></Alert.Root>
-                        <Button class="self-start" variant="outline" onclick={() => void reusesQuery.refetch()}
-                          >{m.common_retry()}</Button>
+                        <Alert.Root variant="destructive">
+                          <Alert.Description>{m.credential_protection_hit_records_reuse_failed()}</Alert.Description>
+                        </Alert.Root>
+                        <Button class="self-start" variant="outline" onclick={() => void reusesQuery.refetch()}>
+                          {m.common_retry()}
+                        </Button>
                       {/if}
                     {/if}
                   {/if}

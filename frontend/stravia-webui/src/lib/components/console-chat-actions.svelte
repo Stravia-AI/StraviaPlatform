@@ -60,38 +60,50 @@ async function remove() {
       <DropdownMenu.Root>
         <DropdownMenu.Trigger
           aria-label={m.common_more_actions()}
-          class={buttonVariants({ variant: 'outline', size: 'icon' })}><EllipsisIcon /></DropdownMenu.Trigger>
-        <DropdownMenu.Content align="end"
-          ><DropdownMenu.Group>
+          class={buttonVariants({ variant: 'outline', size: 'icon' })}>
+          <EllipsisIcon />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end">
+          <DropdownMenu.Group>
             <DropdownMenu.Item
               variant="destructive"
               onSelect={() => {
                 error = ''
                 deleteOpen = true
-              }}>{m.console_chat_clear()}</DropdownMenu.Item>
-          </DropdownMenu.Group></DropdownMenu.Content>
+              }}>
+              {m.console_chat_clear()}
+            </DropdownMenu.Item>
+          </DropdownMenu.Group>
+        </DropdownMenu.Content>
       </DropdownMenu.Root>
     {/if}
   {:else if conversation}
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
         aria-label={m.console_chat_actions()}
-        class={buttonVariants({ variant: 'ghost', size: 'icon' })}><EllipsisIcon /></DropdownMenu.Trigger>
-      <DropdownMenu.Content align="end"
-        ><DropdownMenu.Group>
+        class={buttonVariants({ variant: 'ghost', size: 'icon' })}>
+        <EllipsisIcon />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content align="end">
+        <DropdownMenu.Group>
           <DropdownMenu.Item
             onSelect={() => {
               title = conversation?.title ?? ''
               error = ''
               renameOpen = true
-            }}>{m.console_chat_rename()}</DropdownMenu.Item>
+            }}>
+            {m.console_chat_rename()}
+          </DropdownMenu.Item>
           <DropdownMenu.Item
             variant="destructive"
             onSelect={() => {
               error = ''
               deleteOpen = true
-            }}>{m.console_chat_delete()}</DropdownMenu.Item>
-        </DropdownMenu.Group></DropdownMenu.Content>
+            }}>
+            {m.console_chat_delete()}
+          </DropdownMenu.Item>
+        </DropdownMenu.Group>
+      </DropdownMenu.Content>
     </DropdownMenu.Root>
   {/if}
 </div>
@@ -104,17 +116,20 @@ async function remove() {
         event.preventDefault()
         void rename()
       }}>
-      <Field.FieldGroup
-        ><Field.Field orientation="vertical">
+      <Field.FieldGroup>
+        <Field.Field orientation="vertical">
           <Field.FieldLabel for={`conversation-title-${conversation?.id}`}>{m.console_chat_title()}</Field.FieldLabel>
           <Input id={`conversation-title-${conversation?.id}`} bind:value={title} disabled={busy} required />
-        </Field.Field></Field.FieldGroup>
+        </Field.Field>
+      </Field.FieldGroup>
       {#if error}<p role="alert" class="text-destructive">{error}</p>{/if}
-      <Dialog.Footer
-        ><Button type="button" variant="outline" disabled={busy} onclick={() => (renameOpen = false)}
-          >{m.common_cancel()}</Button
-        ><Button type="submit" disabled={busy || !title.trim()} aria-busy={busy}>{m.console_chat_rename()}</Button
-        ></Dialog.Footer>
+      <Dialog.Footer>
+        <Button type="button" variant="outline" disabled={busy} onclick={() => (renameOpen = false)}>
+          {m.common_cancel()}
+        </Button><Button type="submit" disabled={busy || !title.trim()} aria-busy={busy}>
+          {m.console_chat_rename()}
+        </Button>
+      </Dialog.Footer>
     </form>
   </Dialog.Content>
 </Dialog.Root>
@@ -122,18 +137,21 @@ async function remove() {
   <AlertDialog.Content>
     <AlertDialog.Header>
       <AlertDialog.Title>{clearAll ? m.console_chat_clear_title() : m.console_chat_delete_title()}</AlertDialog.Title>
-      <AlertDialog.Description
-        >{clearAll
+      <AlertDialog.Description>
+        {clearAll
           ? m.console_chat_clear_description({ count: chat.snapshot.conversations.length })
-          : m.console_chat_delete_description({ title: conversation?.title ?? '' })}</AlertDialog.Description>
+          : m.console_chat_delete_description({ title: conversation?.title ?? '' })}
+      </AlertDialog.Description>
     </AlertDialog.Header>
     {#if error}<p role="alert" class="text-destructive">{error}</p>{/if}
-    <AlertDialog.Footer
-      ><AlertDialog.Cancel disabled={busy}>{m.common_cancel()}</AlertDialog.Cancel><Button
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel disabled={busy}>{m.common_cancel()}</AlertDialog.Cancel><Button
         variant="destructive"
         disabled={busy}
         aria-busy={busy}
-        onclick={() => void remove()}>{clearAll ? m.console_chat_clear() : m.console_chat_delete()}</Button
-      ></AlertDialog.Footer>
+        onclick={() => void remove()}>
+        {clearAll ? m.console_chat_clear() : m.console_chat_delete()}
+      </Button>
+    </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

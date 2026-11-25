@@ -441,8 +441,9 @@ onMount(() => {
                     {#if chat.snapshot.generations[conversation.id]}<span
                         role="status"
                         class="text-xs"
-                        aria-label={m.console_chat_generating()}>●</span
-                      >{/if}
+                        aria-label={m.console_chat_generating()}>
+                        ●
+                      </span>{/if}
                   </a>
                 </li>
               {/each}
@@ -455,7 +456,9 @@ onMount(() => {
                       allConversationsActive ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
                     ]}
                     aria-current={allConversationsActive ? 'page' : undefined}
-                    onclick={() => (navigationOpen = false)}>{m.console_chat_view_more()}</a>
+                    onclick={() => (navigationOpen = false)}>
+                    {m.console_chat_view_more()}
+                  </a>
                 </li>
               {/if}
             </ul>
@@ -498,8 +501,9 @@ onMount(() => {
                   {:else if item.badge}
                     <Sidebar.MenuBadge><Badge variant="secondary">{item.badge()}</Badge></Sidebar.MenuBadge>
                   {:else if item.href === '/vendor-plugins' && marketplaceUpdateCount > 0}
-                    <Sidebar.MenuBadge aria-hidden="true"
-                      ><Badge variant="secondary">{marketplaceUpdateCount}</Badge></Sidebar.MenuBadge>
+                    <Sidebar.MenuBadge aria-hidden="true">
+                      <Badge variant="secondary">{marketplaceUpdateCount}</Badge>
+                    </Sidebar.MenuBadge>
                   {/if}
                 </Sidebar.MenuItem>
               {/each}
@@ -564,8 +568,9 @@ onMount(() => {
               {#if index > 0}<Breadcrumb.Separator>/</Breadcrumb.Separator>{/if}
               <Breadcrumb.Item class="min-w-0">
                 {#if item.href}
-                  <Breadcrumb.Link class="inline-flex min-w-0 items-center truncate" href={resolve(item.href)}
-                    >{item.label}</Breadcrumb.Link>
+                  <Breadcrumb.Link class="inline-flex min-w-0 items-center truncate" href={resolve(item.href)}>
+                    {item.label}
+                  </Breadcrumb.Link>
                 {:else}
                   <Breadcrumb.Page class="truncate">{item.label}</Breadcrumb.Page>
                 {/if}
@@ -662,7 +667,9 @@ onMount(() => {
                         {#if contribution.title && contribution.href}
                           <a
                             class="w-fit font-medium break-words text-pretty text-primary underline-offset-4 hover:underline"
-                            href={resolve(contribution.href)}>{contribution.title}</a>
+                            href={resolve(contribution.href)}>
+                            {contribution.title}
+                          </a>
                         {:else if contribution.title}
                           <p class="font-medium break-words text-pretty">{contribution.title}</p>
                         {/if}
@@ -670,7 +677,9 @@ onMount(() => {
                           {#if !contribution.title && contribution.href}
                             <a
                               class="w-fit text-xs break-words text-pretty text-primary underline-offset-4 hover:underline"
-                              href={resolve(contribution.href)}>{contribution.description}</a>
+                              href={resolve(contribution.href)}>
+                              {contribution.description}
+                            </a>
                           {:else}
                             <p class="text-xs break-words text-pretty text-muted-foreground">
                               {contribution.description}

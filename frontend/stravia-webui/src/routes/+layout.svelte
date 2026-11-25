@@ -284,7 +284,9 @@ onMount(() => {
                 onclick={() => {
                   void queryClient.invalidateQueries({ queryKey: ['models'] })
                   void queryClient.invalidateQueries({ queryKey: ['api-keys'] })
-                }}>{m.connect_continue_setup()}</Button>
+                }}>
+                {m.connect_continue_setup()}
+              </Button>
             </div>
           {/if}
           {@render children()}

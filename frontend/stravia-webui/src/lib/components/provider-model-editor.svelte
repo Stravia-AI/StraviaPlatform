@@ -216,7 +216,9 @@ export function submit(): void {
         disabled={disabled || !restorableFields.has(field)}
         title={restorableFields.has(field) ? undefined : m.provider_model_editor_restore_unavailable()}
         aria-label={`${m.provider_model_editor_restore_sync()} ${label}`}
-        onclick={() => onRestore?.([field])}>{m.provider_model_editor_restore_sync()}</Button>
+        onclick={() => onRestore?.([field])}>
+        {m.provider_model_editor_restore_sync()}
+      </Button>
     </span>
   {/if}
 {/snippet}
@@ -257,8 +259,9 @@ export function submit(): void {
       {/each}
       {#if !draft}
         <Field.Field>
-          <Field.Label for="provider-model-selection" hint={m.provider_model_editor_visibility_help()}
-            >{m.common_availability_adding_models()}</Field.Label>
+          <Field.Label for="provider-model-selection" hint={m.provider_model_editor_visibility_help()}>
+            {m.common_availability_adding_models()}
+          </Field.Label>
           <Select.Root
             type="single"
             {disabled}
@@ -312,8 +315,9 @@ export function submit(): void {
       </Field.Field>
       <Field.Field>
         <div class="flex min-h-6 flex-wrap items-center justify-between gap-1">
-          <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}
-            >{m.provider_model_editor_reasoning_efforts()}</Field.Label>
+          <Field.Label for="provider-model-reasoning-efforts" hint={m.provider_model_editor_effort_help()}>
+            {m.provider_model_editor_reasoning_efforts()}
+          </Field.Label>
           {@render pinnedControl('reasoning_efforts', m.provider_model_editor_reasoning_efforts())}
         </div>
         <ReasoningEffortSelect
@@ -347,8 +351,9 @@ export function submit(): void {
     </Field.Group>
     <div class={alignedActions}>
       {#if !hasField('modalities')}
-        <Button type="button" variant="outline" size="sm" onclick={addModalities}
-          ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_modalities()}</Button>
+        <Button type="button" variant="outline" size="sm" onclick={addModalities}>
+          <PlusIcon data-icon="inline-start" />{m.provider_model_editor_modalities()}
+        </Button>
       {/if}
     </div>
   </FormSection>
@@ -370,8 +375,9 @@ export function submit(): void {
           onFieldTouch={(field) => touch(`cost.${field}`)}
           onRemove={removeCost} />
       {:else}
-        <Button type="button" variant="outline" size="sm" class="self-start" onclick={addCost}
-          ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}</Button>
+        <Button type="button" variant="outline" size="sm" class="self-start" onclick={addCost}>
+          <PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing()}
+        </Button>
       {/if}
     </div>
   </FormSection>
@@ -380,10 +386,11 @@ export function submit(): void {
     <Collapsible.Root class="border-t pt-2" bind:open={extensionsOpen}>
       <Collapsible.Trigger
         type="button"
-        class="group/extensions flex w-full items-center gap-2 rounded-md py-2 text-left text-sm font-medium text-muted-foreground transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground"
-        ><ChevronRightIcon
+        class="group/extensions flex w-full items-center gap-2 rounded-md py-2 text-left text-sm font-medium text-muted-foreground transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] hover:text-foreground">
+        <ChevronRightIcon
           class="size-4 shrink-0 transition-transform duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)] group-data-[state=open]/extensions:rotate-90"
-          aria-hidden="true" />{m.provider_model_editor_extension_fields_read_only()} · {extensionEntries.length}</Collapsible.Trigger>
+          aria-hidden="true" />{m.provider_model_editor_extension_fields_read_only()} · {extensionEntries.length}
+      </Collapsible.Trigger>
       <Collapsible.Content>
         <pre
           class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/40 p-3 font-technical text-xs">{JSON.stringify(
@@ -398,11 +405,12 @@ export function submit(): void {
   {#if saveError || structuralErrors.length > 0}
     <Alert.Root bind:ref={errorAlert} tabindex={-1} variant="destructive" role="alert">
       <Alert.Title>{m.provider_model_editor_cannot_save()}</Alert.Title>
-      <Alert.Description
-        ><ul class="list-disc pl-5">
+      <Alert.Description>
+        <ul class="list-disc pl-5">
           {#if saveError}<li>{saveError}</li>{/if}
           {#each structuralErrors as error (error)}<li>{error}</li>{/each}
-        </ul></Alert.Description>
+        </ul>
+      </Alert.Description>
     </Alert.Root>
   {/if}
 </fieldset>

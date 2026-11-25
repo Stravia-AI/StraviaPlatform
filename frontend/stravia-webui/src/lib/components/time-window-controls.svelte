@@ -78,16 +78,18 @@ let {
       </Select.Group>
     </Select.Content>
   </Select.Root>
-  <Button variant="ghost" size="sm" disabled={olderDisabled} aria-label={olderLabel} onclick={() => onolder()}
-    >{m.observation_older_window()}</Button>
+  <Button variant="ghost" size="sm" disabled={olderDisabled} aria-label={olderLabel} onclick={() => onolder()}>
+    {m.observation_older_window()}
+  </Button>
   <Button variant="ghost" size="sm" class="range-picker" aria-label={rangeLabel} onclick={() => onrange()}>
     <CalendarRangeIcon data-icon="inline-start" />
     <span class="range-label">
       {formatLogTime(startMs)} — {live ? m.observation_live() : formatLogTime(endMs)}
     </span>
   </Button>
-  <Button variant="ghost" size="sm" disabled={newerDisabled} aria-label={newerLabel} onclick={() => onnewer()}
-    >{m.observation_newer_window()}</Button>
+  <Button variant="ghost" size="sm" disabled={newerDisabled} aria-label={newerLabel} onclick={() => onnewer()}>
+    {m.observation_newer_window()}
+  </Button>
   {#if trailing}{@render trailing()}{/if}
 </div>
 

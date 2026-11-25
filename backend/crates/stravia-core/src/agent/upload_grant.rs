@@ -78,8 +78,10 @@ impl UploadGrantIssuer {
 
     pub(crate) fn with_clock(secret: &[u8], clock: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
         Self {
-            encoding: EncodingKey::from_secret(secret),
-            decoding: DecodingKey::from_secret(secret),
+            encoding: EncodingKey::from_secret(secret)
+                .expect("upload grant signing key must be non-empty"),
+            decoding: DecodingKey::from_secret(secret)
+                .expect("upload grant signing key must be non-empty"),
             clock,
         }
     }

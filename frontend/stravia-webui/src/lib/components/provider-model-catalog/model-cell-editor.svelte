@@ -195,8 +195,9 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
     {/if}
     {#if error}
       <div class="flex flex-col items-start gap-3 px-4 pt-4" class:pb-4={!detail && !loading}>
-        <Alert.Root variant="destructive" role="alert"
-          ><Alert.Description class="whitespace-pre-line">{error}</Alert.Description></Alert.Root>
+        <Alert.Root variant="destructive" role="alert">
+          <Alert.Description class="whitespace-pre-line">{error}</Alert.Description>
+        </Alert.Root>
         {#if !detail && !loading}<Button variant="outline" onclick={() => load()}>{m.common_retry()}</Button>{/if}
       </div>
     {/if}
@@ -227,10 +228,11 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
           {:else if field === 'modalities'}
             {#each targets as target (target)}
               <Field.Field>
-                <Field.Label for={`${uid}-${target}`}
-                  >{target === 'input'
+                <Field.Label for={`${uid}-${target}`}>
+                  {target === 'input'
                     ? m.provider_model_editor_accepted_input_types()
-                    : m.provider_model_editor_generated_output_types()}</Field.Label>
+                    : m.provider_model_editor_generated_output_types()}
+                </Field.Label>
                 {#if target === 'input'}
                   <ModalitySelect
                     id={`${uid}-${target}`}
@@ -259,8 +261,9 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
             </Field.Field>
           {:else}
             <Field.Field>
-              <Field.Label for={`${uid}-availability`} hint={m.provider_model_editor_visibility_help()}
-                >{label}</Field.Label>
+              <Field.Label for={`${uid}-availability`} hint={m.provider_model_editor_visibility_help()}>
+                {label}
+              </Field.Label>
               <Select.Root
                 type="single"
                 value={policy}
@@ -271,14 +274,16 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
                     void save(policy)
                   }
                 }}>
-                <Select.Trigger id={`${uid}-availability`} class="w-full"
-                  >{providerModelSelectionPolicyLabel(policy, localeState.current)}</Select.Trigger>
-                <Select.Content
-                  ><Select.Group>
+                <Select.Trigger id={`${uid}-availability`} class="w-full">
+                  {providerModelSelectionPolicyLabel(policy, localeState.current)}
+                </Select.Trigger>
+                <Select.Content>
+                  <Select.Group>
                     <Select.Item value="auto">{m.common_use_synced_status()}</Select.Item>
                     <Select.Item value="force_enabled">{m.common_always_allow()}</Select.Item>
                     <Select.Item value="force_disabled">{m.common_don_t_allow()}</Select.Item>
-                  </Select.Group></Select.Content>
+                  </Select.Group>
+                </Select.Content>
               </Select.Root>
             </Field.Field>
           {/if}
@@ -290,10 +295,13 @@ async function save(selection?: ProviderModelSelectionPolicy): Promise<void> {
             disabled={saving}
             onclick={() => {
               open = false
-            }}>{m.common_cancel()}</Button>
+            }}>
+            {m.common_cancel()}
+          </Button>
           {#if field !== 'availability' || error}
-            <Button type="submit" disabled={saving}
-              >{#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save()}</Button>
+            <Button type="submit" disabled={saving}>
+              {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save()}
+            </Button>
           {:else if saving}<Spinner />{/if}
         </div>
       </form>

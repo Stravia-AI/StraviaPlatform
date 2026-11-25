@@ -77,8 +77,9 @@ function handleInstallPrompt(open: boolean): void {
       </Alert.Root>
     {/if}
     {#snippet footer()}
-      <Button type="button" onclick={() => void updates.installDownloadedUpdate()}
-        >{m.settings_update_install()}</Button>
+      <Button type="button" onclick={() => void updates.installDownloadedUpdate()}>
+        {m.settings_update_install()}
+      </Button>
     {/snippet}
   </Dialog.Layout>
 </Dialog.Root>

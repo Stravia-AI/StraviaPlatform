@@ -4816,7 +4816,7 @@ test.describe('Interaction Observation canvas', () => {
         return Number(params?.get('end_at')) - Number(params?.get('start_at'))
       })
       .toBe(600_000)
-    await expect(page.getByRole('button', { name: 'Time range', exact: true })).toHaveText('10 minutes')
+    await expect(page.getByRole('combobox', { name: 'Time range', exact: true })).toHaveText('10 minutes')
     const presets = [
       ['5 minutes', 300_000],
       ['10 minutes', 600_000],
@@ -4827,7 +4827,7 @@ test.describe('Interaction Observation canvas', () => {
       ['24 hours', DAY],
     ] as const
     for (const [label, duration] of presets) {
-      await page.getByRole('button', { name: 'Time range', exact: true }).click()
+      await page.getByRole('combobox', { name: 'Time range', exact: true }).click()
       await page.getByRole('option', { name: label, exact: true }).click()
       await expect
         .poll(() => {
@@ -4867,7 +4867,7 @@ test.describe('Interaction Observation canvas', () => {
   test('live presets expire old roots while an applied custom range stays fixed', async ({ page }) => {
     const fixture = await installObservationFixture(page)
     await page.goto('/logs')
-    await page.getByRole('button', { name: 'Time range', exact: true }).click()
+    await page.getByRole('combobox', { name: 'Time range', exact: true }).click()
     await page.getByRole('option', { name: '5 minutes', exact: true }).click()
     await expect(node(page, 'Atlas', 'completed')).toBeVisible()
     await page.clock.setSystemTime(startedAt + 900_000)

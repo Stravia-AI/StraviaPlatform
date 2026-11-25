@@ -8,6 +8,7 @@ import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 
 let { summary }: { summary: AvailabilitySummaryData } = $props()
 const hintId = $props.id()
+let open = $state(false)
 </script>
 
 <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -23,12 +24,13 @@ const hintId = $props.id()
     </dt>
     <dd class="text-right whitespace-nowrap">{summary.firstPass == null ? '—' : formatPercent(summary.firstPass)}</dd>
   </dl>
-  <Tooltip.Root delayDuration={0} disableCloseOnTriggerClick>
+  <Tooltip.Root bind:open delayDuration={0} disableCloseOnTriggerClick>
     <Tooltip.Trigger
       type="button"
       class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
       aria-label={m.stats_availability_help()}
-      aria-describedby={hintId}>
+      aria-describedby={hintId}
+      onclick={() => (open = true)}>
       <CircleHelpIcon class="size-4" />
     </Tooltip.Trigger>
     <Tooltip.Content id={hintId} role="tooltip" class="max-w-[min(24rem,calc(100vw-2rem))] text-pretty">

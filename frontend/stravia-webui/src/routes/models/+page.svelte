@@ -288,10 +288,11 @@ async function deleteModel(): Promise<void> {
         </DropdownMenu.Item>
       </DropdownMenu.Group>
       <DropdownMenu.Separator />
-      <DropdownMenu.Group
-        ><DropdownMenu.Item variant="destructive" onSelect={() => askDelete(model)}
-          >{m.models_delete_model()}</DropdownMenu.Item
-        ></DropdownMenu.Group>
+      <DropdownMenu.Group>
+        <DropdownMenu.Item variant="destructive" onSelect={() => askDelete(model)}>
+          {m.models_delete_model()}
+        </DropdownMenu.Item>
+      </DropdownMenu.Group>
     </DropdownMenu.Content>
   </DropdownMenu.Root>
 {/snippet}
@@ -325,13 +326,16 @@ async function deleteModel(): Promise<void> {
   {@const text = formatRouteDestinations(summary)}
   <div class="min-w-0">
     <span
-      class={cn('block truncate', !summary.preferred && 'text-warning', !model.is_enabled && 'text-muted-foreground')}
-      >{text.primary}</span>
+      class={cn('block truncate', !summary.preferred && 'text-warning', !model.is_enabled && 'text-muted-foreground')}>
+      {text.primary}
+    </span>
     {#if text.details.length > 0}
       <span class="block truncate text-xs text-muted-foreground">
         {#each text.details as detail, index (detail.text)}
           {#if index > 0}<span aria-hidden="true"> · </span>{/if}<span
-            class={cn(detail.tone === 'warning' && 'text-warning')}>{detail.text}</span>
+            class={cn(detail.tone === 'warning' && 'text-warning')}>
+            {detail.text}
+          </span>
         {/each}
       </span>
     {/if}
@@ -425,8 +429,9 @@ async function deleteModel(): Promise<void> {
         {#each visibleModels as model (model.id)}
           <div class="route-mobile-row">
             <div class="min-w-0">
-              <a class="block truncate font-medium" href={resolve(`models/${encodeURIComponent(model.model_id)}`)}
-                >{effectiveModelDisplayName(model)}</a>
+              <a class="block truncate font-medium" href={resolve(`models/${encodeURIComponent(model.model_id)}`)}>
+                {effectiveModelDisplayName(model)}
+              </a>
 
               <TechnicalValue value={model.model_id} copyable />
               <dl class="mt-1 flex min-w-0 items-start gap-1.5">
@@ -507,7 +512,9 @@ async function deleteModel(): Promise<void> {
       <AlertDialog.Action
         variant="destructive"
         disabled={routeDependenciesUnavailable}
-        onclick={() => void deleteModel()}>{m.models_delete_model_label()}</AlertDialog.Action>
+        onclick={() => void deleteModel()}>
+        {m.models_delete_model_label()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

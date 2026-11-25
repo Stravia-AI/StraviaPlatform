@@ -235,8 +235,9 @@ async function saveKey(): Promise<void> {
 </script>
 
 {#snippet unavailableLink(href: string)}
-  <a href={resolve(href)} class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
-    >{m.api_key_editor_platform_capability_disabled()}</a>
+  <a href={resolve(href)} class="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground">
+    {m.api_key_editor_platform_capability_disabled()}
+  </a>
 {/snippet}
 
 {#snippet capabilityNote(status: CapabilityStatus, href: string)}
@@ -268,8 +269,9 @@ async function saveKey(): Promise<void> {
     {/if}
     {#if apiKey || form.customKey}
       <Field.Field>
-        <Field.Label for="api-key-secret" hint={m.api_key_editor_api_key_help()}
-          >{m.api_key_editor_api_key()}</Field.Label>
+        <Field.Label for="api-key-secret" hint={m.api_key_editor_api_key_help()}>
+          {m.api_key_editor_api_key()}
+        </Field.Label>
         <div class="w-full min-w-0">
           <SecretInput
             id="api-key-secret"
@@ -555,12 +557,13 @@ async function saveKey(): Promise<void> {
         </fieldset>
         {@render mcpPolicySlot()}
       </div>
-      <Sheet.Footer class="route-overlay-footer"
-        ><Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => setOpen(false))}
-          >{m.common_cancel()}</Button
-        ><Button type="submit" disabled={saving}
-          >{#if saving}<Spinner data-icon="inline-start" />{/if}{m.api_key_editor_save_api_key()}</Button
-        ></Sheet.Footer>
+      <Sheet.Footer class="route-overlay-footer">
+        <Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => setOpen(false))}>
+          {m.common_cancel()}
+        </Button><Button type="submit" disabled={saving}>
+          {#if saving}<Spinner data-icon="inline-start" />{/if}{m.api_key_editor_save_api_key()}
+        </Button>
+      </Sheet.Footer>
     {/if}
   </form>
 {/snippet}
@@ -604,9 +607,9 @@ async function saveKey(): Promise<void> {
             </Field.Field>
           </Field.Group>
         </div>
-        <Sheet.Footer class="route-overlay-footer"
-          ><Sheet.Close class={buttonVariants({ variant: 'default' })}>{m.api_key_editor_done()}</Sheet.Close
-          ></Sheet.Footer>
+        <Sheet.Footer class="route-overlay-footer">
+          <Sheet.Close class={buttonVariants({ variant: 'default' })}>{m.api_key_editor_done()}</Sheet.Close>
+        </Sheet.Footer>
       {:else}
         {@render editorForm(false)}
       {/if}

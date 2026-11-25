@@ -266,14 +266,17 @@ function openRuleFromChip(event: MouseEvent, ruleId: string): void {
                 variant: 'outline',
                 class: 'h-auto max-w-full cursor-pointer py-1 text-left whitespace-normal hover:bg-accent',
               })}
-              onclick={(event) => openRuleFromChip(event, ruleId)}>{ruleNames.get(ruleId)}</button>
+              onclick={(event) => openRuleFromChip(event, ruleId)}>
+              {ruleNames.get(ruleId)}
+            </button>
           {:else if rulesPending}
             <Skeleton class="h-5 w-32" />
           {:else}
             <span
               title={ruleId}
-              class={badgeVariants({ variant: 'outline', class: 'h-auto max-w-full py-1 font-technical' })}
-              >{ruleId}</span>
+              class={badgeVariants({ variant: 'outline', class: 'h-auto max-w-full py-1 font-technical' })}>
+              {ruleId}
+            </span>
           {/if}
         </li>
       {/each}
@@ -319,8 +322,9 @@ function openRuleFromChip(event: MouseEvent, ruleId: string): void {
     {/each}
     {#if preview.hidden > 0}
       <li>
-        <span class={badgeVariants({ variant: 'outline', class: 'py-1 tabular-nums' })}
-          >{m.credential_protection_hit_records_more({ count: formatNumber(preview.hidden) })}</span>
+        <span class={badgeVariants({ variant: 'outline', class: 'py-1 tabular-nums' })}>
+          {m.credential_protection_hit_records_more({ count: formatNumber(preview.hidden) })}
+        </span>
       </li>
     {/if}
   </ul>
@@ -333,20 +337,23 @@ function openRuleFromChip(event: MouseEvent, ruleId: string): void {
     </div>
   {:else if !headLoaded}
     <div class="hit-state">
-      <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status"
-        ><Spinner />{m.credential_protection_discoveries_loading()}</span>
+      <span class="inline-flex items-center gap-2 text-sm text-muted-foreground" role="status">
+        <Spinner />{m.credential_protection_discoveries_loading()}
+      </span>
     </div>
   {:else if !items.length}
     <div class="hit-state">
-      <Empty.Root
-        ><Empty.Header
-          ><Empty.Media variant="icon"><HistoryIcon /></Empty.Media>
+      <Empty.Root>
+        <Empty.Header>
+          <Empty.Media variant="icon"><HistoryIcon /></Empty.Media>
           <Empty.Title>{m.credential_protection_no_records_in_range()}</Empty.Title>
-          <Empty.Description>{m.credential_protection_discoveries_empty_in_range()}</Empty.Description></Empty.Header>
-        <Empty.Content
-          ><Button variant="outline" onclick={onTest}
-            >{m.credential_protection_test_tab()}<ArrowRightIcon data-icon="inline-end" /></Button
-          ></Empty.Content>
+          <Empty.Description>{m.credential_protection_discoveries_empty_in_range()}</Empty.Description>
+        </Empty.Header>
+        <Empty.Content>
+          <Button variant="outline" onclick={onTest}>
+            {m.credential_protection_test_tab()}<ArrowRightIcon data-icon="inline-end" />
+          </Button>
+        </Empty.Content>
       </Empty.Root>
     </div>
   {/if}

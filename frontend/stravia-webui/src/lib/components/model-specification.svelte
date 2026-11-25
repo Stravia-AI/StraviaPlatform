@@ -46,21 +46,25 @@ const efforts = $derived(specification.reasoning_efforts ?? [])
     role="group"
     aria-label={m.model_specification_title()}
     class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-    <span class="font-technical"
-      >{m.model_specification_context_short()}
-      {context == null ? m.model_specification_not_registered() : formatSpecificationTokens(context)}</span>
-    <span class="inline-flex items-center gap-1"
-      ><span class="text-muted-foreground">{m.model_specification_input()}</span>
-      <ModalityIcons values={specification.modalities?.input} /></span>
-    <span class="inline-flex items-center gap-1"
-      ><span class="text-muted-foreground">{m.model_specification_output()}</span>
-      <ModalityIcons values={specification.modalities?.output} /></span>
+    <span class="font-technical">
+      {m.model_specification_context_short()}
+      {context == null ? m.model_specification_not_registered() : formatSpecificationTokens(context)}
+    </span>
+    <span class="inline-flex items-center gap-1">
+      <span class="text-muted-foreground">{m.model_specification_input()}</span>
+      <ModalityIcons values={specification.modalities?.input} />
+    </span>
+    <span class="inline-flex items-center gap-1">
+      <span class="text-muted-foreground">{m.model_specification_output()}</span>
+      <ModalityIcons values={specification.modalities?.output} />
+    </span>
     {#if density !== 'target'}
-      <span class="break-words"
-        ><span class="text-muted-foreground">{m.model_specification_reasoning_efforts()}</span>
-        <span class="font-technical"
-          >{efforts.length ? efforts.join(', ') : m.model_specification_not_registered()}</span
-        ></span>
+      <span class="break-words">
+        <span class="text-muted-foreground">{m.model_specification_reasoning_efforts()}</span>
+        <span class="font-technical">
+          {efforts.length ? efforts.join(', ') : m.model_specification_not_registered()}
+        </span>
+      </span>
     {/if}
   </div>
 {/if}

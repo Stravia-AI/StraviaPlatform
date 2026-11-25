@@ -290,8 +290,9 @@ function saveProvider(): void {
       <Tabs.Root value={step} onValueChange={changeStep} class="mt-3">
         <Tabs.List aria-label={m.provider_editor_connection_setup_steps()}>
           <Tabs.Trigger value="select" disabled={draft.submitting}>{m.provider_editor_choose_service()}</Tabs.Trigger>
-          <Tabs.Trigger value="configure" disabled={!selectedOption || draft.submitting}
-            >{m.provider_editor_connection_details()}</Tabs.Trigger>
+          <Tabs.Trigger value="configure" disabled={!selectedOption || draft.submitting}>
+            {m.provider_editor_connection_details()}
+          </Tabs.Trigger>
         </Tabs.List>
       </Tabs.Root>
     </Sheet.Header>
@@ -349,8 +350,9 @@ function saveProvider(): void {
             </Empty.Header>
             <Empty.Content>
               {#if search.trim()}
-                <Button type="button" variant="outline" size="sm" onclick={() => (search = '')}
-                  >{m.provider_editor_clear_search()}</Button>
+                <Button type="button" variant="outline" size="sm" onclick={() => (search = '')}>
+                  {m.provider_editor_clear_search()}
+                </Button>
               {:else}
                 <Button href="/vendor-plugins" variant="outline" size="sm">
                   {m.provider_config_manage_plugins()}
@@ -419,8 +421,9 @@ function saveProvider(): void {
                   <Select.Content>
                     <Select.Group>
                       {#each selectedOption.channel.protocols as option (option.value)}
-                        <Select.Item value={option.value}
-                          >{resolvePluginText(option.label, localeState.current)}</Select.Item>
+                        <Select.Item value={option.value}>
+                          {resolvePluginText(option.label, localeState.current)}
+                        </Select.Item>
                       {/each}
                     </Select.Group>
                   </Select.Content>
@@ -479,8 +482,9 @@ function saveProvider(): void {
         </div>
 
         <Sheet.Footer class="route-overlay-footer flex-row justify-between sm:justify-between">
-          <Button type="button" variant="outline" disabled={draft.submitting} onclick={() => guard.request(goBack)}
-            >{m.provider_editor_back()}</Button>
+          <Button type="button" variant="outline" disabled={draft.submitting} onclick={() => guard.request(goBack)}>
+            {m.provider_editor_back()}
+          </Button>
           <div class="flex items-center gap-2">
             <Sheet.Close type="button" class={buttonVariants({ variant: 'outline' })} disabled={draft.submitting}>
               {m.common_cancel()}

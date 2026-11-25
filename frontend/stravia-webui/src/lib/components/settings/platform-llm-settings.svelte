@@ -175,8 +175,9 @@ async function save(): Promise<void> {
     {#if eligibleRoutes.length === 0}
       <div class="flex flex-wrap items-center gap-x-2" role="status">
         <span class="text-sm text-muted-foreground">{m.platform_llm_no_eligible_models()}</span>
-        <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}
-          >{m.platform_llm_manage_models()}</a>
+        <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}>
+          {m.platform_llm_manage_models()}
+        </a>
       </div>
     {/if}
   </Field.Group>

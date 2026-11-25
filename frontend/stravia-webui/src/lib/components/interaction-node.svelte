@@ -76,8 +76,9 @@ const usage = $derived([
     {#each usage as item (item[0])}
       <span class="usage-item" title={item[0]}>
         <span>{item[0]}</span>
-        <strong title={item[1] == null ? m.observation_usage_unknown() : undefined}
-          >{formatCompactCount(item[1])}</strong>
+        <strong title={item[1] == null ? m.observation_usage_unknown() : undefined}>
+          {formatCompactCount(item[1])}
+        </strong>
       </span>
     {/each}
   </div>

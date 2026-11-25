@@ -465,7 +465,9 @@ export async function focusLatest(): Promise<void> {
         onclick={() => {
           onmanualmove()
           void zoomIn({ duration: cameraDuration(120) })
-        }}><PlusIcon /></Button>
+        }}>
+        <PlusIcon />
+      </Button>
       <Button
         variant="secondary"
         size="icon"
@@ -473,7 +475,9 @@ export async function focusLatest(): Promise<void> {
         onclick={() => {
           onmanualmove()
           void zoomOut({ duration: cameraDuration(120) })
-        }}><MinusIcon /></Button>
+        }}>
+        <MinusIcon />
+      </Button>
       <Button
         variant="secondary"
         size="icon"
@@ -481,25 +485,31 @@ export async function focusLatest(): Promise<void> {
         onclick={() => {
           onmanualmove()
           onfitall()
-        }}><CrosshairIcon /></Button>
+        }}>
+        <CrosshairIcon />
+      </Button>
       <Button
         variant="secondary"
         size="icon"
         aria-label={m.observation_return_running()}
         disabled={!latestId}
-        onclick={resumeFollow}><LocateFixedIcon /></Button>
+        onclick={resumeFollow}>
+        <LocateFixedIcon />
+      </Button>
       <Button
         variant="secondary"
         size="icon"
         aria-label={minimapOpen ? m.observation_hide_minimap() : m.observation_show_minimap()}
-        onclick={() => (minimapOpen = !minimapOpen)}
-        >{#if minimapOpen}<ChevronDownIcon />{:else}<MapIcon />{/if}</Button>
+        onclick={() => (minimapOpen = !minimapOpen)}>
+        {#if minimapOpen}<ChevronDownIcon />{:else}<MapIcon />{/if}
+      </Button>
     </Panel>
     {#if followPaused && newActivityAvailable}
-      <Panel position="top-center"
-        ><Button onclick={resumeFollow}
-          ><span class="activity-mark" aria-hidden="true"></span>{m.observation_new_activity_follow()}</Button
-        ></Panel>
+      <Panel position="top-center">
+        <Button onclick={resumeFollow}>
+          <span class="activity-mark" aria-hidden="true"></span>{m.observation_new_activity_follow()}
+        </Button>
+      </Panel>
     {/if}
   </SvelteFlow>
 </div>

@@ -238,8 +238,9 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
           <Alert.Root variant="warning" role="status">
             <Alert.Description>
               {m.web_search_enable_prerequisite()}
-              <Button variant="link" size="sm" disabled={writing} onclick={() => (editorOpen = true)}
-                >{m.web_search_edit_method()}</Button>
+              <Button variant="link" size="sm" disabled={writing} onclick={() => (editorOpen = true)}>
+                {m.web_search_edit_method()}
+              </Button>
             </Alert.Description>
           </Alert.Root>
         {/if}
@@ -254,8 +255,9 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
               <Button
                 variant="link"
                 size="sm"
-                onclick={() => document.getElementById('web-search-sources')?.scrollIntoView({ block: 'start' })}
-                >{m.web_search_configure_sources()}</Button>
+                onclick={() => document.getElementById('web-search-sources')?.scrollIntoView({ block: 'start' })}>
+                {m.web_search_configure_sources()}
+              </Button>
             </Alert.Description>
           </Alert.Root>
         {/if}
@@ -268,7 +270,9 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
             size="sm"
             disabled={writing}
             aria-label={m.web_search_edit_method()}
-            onclick={() => (editorOpen = true)}>{m.common_edit()}</Button>
+            onclick={() => (editorOpen = true)}>
+            {m.common_edit()}
+          </Button>
         {/snippet}
         <SettingRow title={m.web_search_method()} value={methodLabel} />
         <SettingRow
@@ -276,8 +280,9 @@ function rangeValidator(min: number, max: number): (draft: string) => string | n
           value={bindingTarget} />
         {#if usesLocal}
           <Collapsible.Root bind:open={advancedOpen} class="flex flex-col gap-4 border-t py-2">
-            <Collapsible.Trigger class={buttonVariants({ variant: 'ghost', size: 'sm', class: 'self-start' })}
-              >{m.common_advanced()}</Collapsible.Trigger>
+            <Collapsible.Trigger class={buttonVariants({ variant: 'ghost', size: 'sm', class: 'self-start' })}>
+              {m.common_advanced()}
+            </Collapsible.Trigger>
             <Collapsible.Content>
               <SettingsSection id="web-search-advanced-fields" title={m.web_search_limits_title()}>
                 {#if limits}

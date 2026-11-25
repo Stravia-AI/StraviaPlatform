@@ -391,8 +391,9 @@ function selectMatch(match: CredentialMatch): void {
         aria-label={m.credential_protection_rule_toggle({ name: row.name })} />
     </div>
   {:else}
-    <span class="text-xs text-muted-foreground"
-      >{row.rule.enabled ? m.common_enabled_status() : m.common_disabled_status()}</span>
+    <span class="text-xs text-muted-foreground">
+      {row.rule.enabled ? m.common_enabled_status() : m.common_disabled_status()}
+    </span>
   {/if}
 {/snippet}
 
@@ -404,8 +405,9 @@ function selectMatch(match: CredentialMatch): void {
     {:else}
       {@const keywords = patternKeywords(rule)}
       {#each keywords.slice(0, 3) as keyword (keyword)}
-        <Badge variant="secondary" class="h-auto max-w-full"
-          ><code class="whitespace-normal break-all">{keyword}</code></Badge>
+        <Badge variant="secondary" class="h-auto max-w-full">
+          <code class="whitespace-normal break-all">{keyword}</code>
+        </Badge>
       {/each}
       {#if keywords.length > 3}
         <span class="text-xs text-muted-foreground">+{formatNumber(keywords.length - 3)}</span>
@@ -418,8 +420,9 @@ function selectMatch(match: CredentialMatch): void {
 {#snippet builtinConditions(rule: CredentialRule)}
   <div class="flex flex-wrap items-center gap-1.5">
     {#each rule.keywords.slice(0, 3) as keyword (keyword)}
-      <Badge variant="secondary" class="h-auto max-w-full"
-        ><code class="whitespace-normal break-all">{keyword}</code></Badge>
+      <Badge variant="secondary" class="h-auto max-w-full">
+        <code class="whitespace-normal break-all">{keyword}</code>
+      </Badge>
     {/each}
     {#if rule.keywords.length > 3}
       <span class="text-xs text-muted-foreground">+{formatNumber(rule.keywords.length - 3)}</span>
@@ -460,8 +463,9 @@ function selectMatch(match: CredentialMatch): void {
           disabled={!settingQuery.isSuccess || saving}
           aria-busy={saving}
           aria-label={m.reversible_redaction_enable()} />
-        <span class="text-sm font-medium text-muted-foreground" aria-hidden="true"
-          >{storedEnabled ? m.common_enabled_status() : m.common_disabled_status()}</span>
+        <span class="text-sm font-medium text-muted-foreground" aria-hidden="true">
+          {storedEnabled ? m.common_enabled_status() : m.common_disabled_status()}
+        </span>
       </div>
     {/snippet}
   </PageHeader>
@@ -469,13 +473,16 @@ function selectMatch(match: CredentialMatch): void {
   {#if settingQuery.isError || saveError}
     <section class="route-section flex flex-col gap-3" aria-label={m.reversible_redaction_enable()}>
       {#if settingQuery.isError}
-        <Alert.Root variant="destructive"
-          ><Alert.Description>{m.reversible_redaction_load_failed()}</Alert.Description></Alert.Root>
-        <Button class="self-start" variant="outline" onclick={() => void settingQuery.refetch()}
-          >{m.common_retry()}</Button>
+        <Alert.Root variant="destructive">
+          <Alert.Description>{m.reversible_redaction_load_failed()}</Alert.Description>
+        </Alert.Root>
+        <Button class="self-start" variant="outline" onclick={() => void settingQuery.refetch()}>
+          {m.common_retry()}
+        </Button>
       {/if}
-      {#if saveError}<Alert.Root variant="destructive"><Alert.Description>{saveError}</Alert.Description></Alert.Root
-        >{/if}
+      {#if saveError}<Alert.Root variant="destructive">
+          <Alert.Description>{saveError}</Alert.Description>
+        </Alert.Root>{/if}
     </section>
   {/if}
 
@@ -485,8 +492,8 @@ function selectMatch(match: CredentialMatch): void {
     <div class="workspace-toolbar">
       <Tabs.List aria-label={m.reversible_redaction_title()}>
         <Tabs.Trigger value="records"><HistoryIcon />{m.credential_protection_records_tab()}</Tabs.Trigger>
-        <Tabs.Trigger value="rules"
-          ><ListFilterIcon />{m.credential_protection_catalog_title()}
+        <Tabs.Trigger value="rules">
+          <ListFilterIcon />{m.credential_protection_catalog_title()}
           {#if rulesQuery.isSuccess}<Badge variant="secondary">{formatNumber(ruleRows.length)}</Badge>{/if}
         </Tabs.Trigger>
         <Tabs.Trigger value="test"><ScanTextIcon />{m.credential_protection_test_tab()}</Tabs.Trigger>
@@ -513,7 +520,9 @@ function selectMatch(match: CredentialMatch): void {
               variant="ghost"
               size="icon-sm"
               aria-label={m.credential_protection_records_refresh()}
-              onclick={() => hitRecords?.reload()}><RefreshCwIcon /></Button>
+              onclick={() => hitRecords?.reload()}>
+              <RefreshCwIcon />
+            </Button>
           {/snippet}
         </TimeWindowControls>
       {:else if tab === 'rules'}
@@ -532,8 +541,9 @@ function selectMatch(match: CredentialMatch): void {
               type="single"
               bind:value={originFilter}
               onValueChange={() => (pagination = { ...pagination, pageIndex: 0 })}>
-              <Select.Trigger class="w-36" aria-label={m.credential_custom_filter_label()}
-                >{originFilterLabel}</Select.Trigger>
+              <Select.Trigger class="w-36" aria-label={m.credential_custom_filter_label()}>
+                {originFilterLabel}
+              </Select.Trigger>
               <Select.Content>
                 <Select.Group>
                   <Select.Item value="all">{m.credential_custom_filter_all()}</Select.Item>
@@ -617,16 +627,17 @@ function selectMatch(match: CredentialMatch): void {
             pageSizeOptions={[10, 25, 50]}
             onRowClick={handleRuleRowClick}>
             {#snippet empty()}
-              <Empty.Root
-                ><Empty.Header
-                  ><Empty.Media variant="icon"><ListFilterIcon /></Empty.Media>
+              <Empty.Root>
+                <Empty.Header>
+                  <Empty.Media variant="icon"><ListFilterIcon /></Empty.Media>
                   <Empty.Title>{m.credential_protection_catalog_title()}</Empty.Title>
-                  <Empty.Description
-                    >{originFilter === 'custom' && !customRules.length
+                  <Empty.Description>
+                    {originFilter === 'custom' && !customRules.length
                       ? m.credential_custom_empty()
                       : ruleRows.length
                         ? m.credential_protection_catalog_no_results()
-                        : m.credential_protection_catalog_empty()}</Empty.Description>
+                        : m.credential_protection_catalog_empty()}
+                  </Empty.Description>
                 </Empty.Header>
               </Empty.Root>
             {/snippet}
@@ -665,12 +676,14 @@ function selectMatch(match: CredentialMatch): void {
                     }} />
                 </Field.Field>
                 <Field.Field orientation="horizontal" class="flex-wrap">
-                  <Button type="submit" disabled={testing || !testInput.length} aria-busy={testing}
-                    >{#if testing}<Spinner data-icon="inline-start" />{/if}{testing
+                  <Button type="submit" disabled={testing || !testInput.length} aria-busy={testing}>
+                    {#if testing}<Spinner data-icon="inline-start" />{/if}{testing
                       ? m.credential_protection_tester_running()
-                      : m.credential_protection_tester_submit()}</Button>
-                  <Button type="button" variant="outline" disabled={testing} onclick={clearTest}
-                    >{m.credential_protection_tester_clear()}</Button>
+                      : m.credential_protection_tester_submit()}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={testing} onclick={clearTest}>
+                    {m.credential_protection_tester_clear()}
+                  </Button>
                 </Field.Field>
               </Field.Group>
             </form>
@@ -686,23 +699,25 @@ function selectMatch(match: CredentialMatch): void {
             aria-busy={testing}>
             <h3 id="test-results-title" class="mb-4 text-sm font-medium">{m.credential_protection_results_title()}</h3>
             {#if testing}
-              <Empty.Root
-                ><Empty.Header
-                  ><Empty.Media><Spinner /></Empty.Media><Empty.Description role="status"
-                    >{m.credential_protection_tester_running()}</Empty.Description
-                  ></Empty.Header
-                ></Empty.Root>
+              <Empty.Root>
+                <Empty.Header>
+                  <Empty.Media><Spinner /></Empty.Media><Empty.Description role="status">
+                    {m.credential_protection_tester_running()}
+                  </Empty.Description>
+                </Empty.Header>
+              </Empty.Root>
             {:else if matches === undefined && !testError}
-              <Empty.Root class="min-h-64"
-                ><Empty.Header
-                  ><Empty.Media variant="icon"><ScanTextIcon /></Empty.Media>
+              <Empty.Root class="min-h-64">
+                <Empty.Header>
+                  <Empty.Media variant="icon"><ScanTextIcon /></Empty.Media>
                   <Empty.Title>{m.credential_protection_test_ready()}</Empty.Title>
                   <Empty.Description>{m.credential_protection_test_ready_hint()}</Empty.Description>
-                </Empty.Header></Empty.Root>
+                </Empty.Header>
+              </Empty.Root>
             {/if}
-            {#if testError}<Alert.Root variant="destructive"
-                ><Alert.Description>{m.credential_protection_tester_failed()}</Alert.Description></Alert.Root
-              >{/if}
+            {#if testError}<Alert.Root variant="destructive">
+                <Alert.Description>{m.credential_protection_tester_failed()}</Alert.Description>
+              </Alert.Root>{/if}
             {#if matches}
               <div role="status" class="text-sm">
                 {matches.length
@@ -802,8 +817,9 @@ function selectMatch(match: CredentialMatch): void {
           {#if selectedRule.keywords.length}
             <div class="flex flex-wrap gap-1.5">
               {#each selectedRule.keywords as keyword (keyword)}
-                <Badge variant="secondary" class="h-auto max-w-full"
-                  ><code class="whitespace-normal break-all">{keyword}</code></Badge>
+                <Badge variant="secondary" class="h-auto max-w-full">
+                  <code class="whitespace-normal break-all">{keyword}</code>
+                </Badge>
               {/each}
             </div>
           {:else}
@@ -839,8 +855,9 @@ function selectMatch(match: CredentialMatch): void {
               {#each selectedRule.components as component (component.id)}
                 <li class="flex flex-col gap-1 py-3">
                   <div class="flex flex-wrap items-center justify-between gap-2">
-                    <span class="text-sm font-medium"
-                      >{ruleNames.get(component.id) ?? m.credential_protection_component_unknown()}</span>
+                    <span class="text-sm font-medium">
+                      {ruleNames.get(component.id) ?? m.credential_protection_component_unknown()}
+                    </span>
                     <Badge variant={component.optional ? 'secondary' : 'outline'}>
                       {component.optional
                         ? m.credential_protection_component_optional()
@@ -898,8 +915,8 @@ function selectMatch(match: CredentialMatch): void {
   <Sheet.Content
     closeLabel={m.common_close()}
     class="data-[side=right]:w-full data-[side=right]:sm:max-w-xl overflow-y-auto">
-    <Sheet.Header
-      ><Sheet.Title>{m.credential_protection_details()}</Sheet.Title>
+    <Sheet.Header>
+      <Sheet.Title>{m.credential_protection_details()}</Sheet.Title>
       <Sheet.Description>{m.reversible_redaction_summary()}</Sheet.Description>
     </Sheet.Header>
     <div class="flex flex-col gap-5 px-4 pb-6">
@@ -914,10 +931,10 @@ function selectMatch(match: CredentialMatch): void {
         <p>{m.credential_protection_hits_limits()}</p>
       </div>
       <Accordion.Root type="single">
-        <Accordion.Item value="shared-conditions"
-          ><Accordion.Trigger>{m.credential_protection_catalog_conditions()}</Accordion.Trigger>
-          <Accordion.Content
-            ><div class="flex flex-col gap-3">
+        <Accordion.Item value="shared-conditions">
+          <Accordion.Trigger>{m.credential_protection_catalog_conditions()}</Accordion.Trigger>
+          <Accordion.Content>
+            <div class="flex flex-col gap-3">
               <p class="text-sm text-muted-foreground">{m.credential_protection_catalog_intro()}</p>
               <p class="text-sm text-muted-foreground">{m.credential_protection_catalog_path_note()}</p>
               <p class="text-sm text-muted-foreground">{m.credential_protection_rule_conditions_help()}</p>
@@ -932,7 +949,8 @@ function selectMatch(match: CredentialMatch): void {
                     ? m.credential_protection_catalog_failed()
                     : m.credential_protection_catalog_loading()}
                 </p>{/if}
-            </div></Accordion.Content>
+            </div>
+          </Accordion.Content>
         </Accordion.Item>
       </Accordion.Root>
     </div>

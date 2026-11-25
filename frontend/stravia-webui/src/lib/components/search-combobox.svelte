@@ -171,8 +171,9 @@ function handleKeydown(event: KeyboardEvent): void {
         onkeydown={handleKeydown} />
       {#if clearLabel && value && !disabled}
         <InputGroup.Addon align="inline-end">
-          <InputGroup.Button type="button" variant="ghost" size="icon-sm" aria-label={clearLabel} onclick={clear}
-            ><XIcon /></InputGroup.Button>
+          <InputGroup.Button type="button" variant="ghost" size="icon-sm" aria-label={clearLabel} onclick={clear}>
+            <XIcon />
+          </InputGroup.Button>
         </InputGroup.Addon>
       {/if}
     </InputGroup.Root>

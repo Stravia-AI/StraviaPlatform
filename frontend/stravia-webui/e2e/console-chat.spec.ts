@@ -1175,7 +1175,7 @@ test('invalidated key makes persisted conversation read-only and offers a fresh 
   )
   await page.goto(address)
   await page.getByRole('button', { name: 'New conversation with another Key' }).click()
-  await expect(page.getByRole('button', { name: 'API Key', exact: true })).toContainText('Replacement key')
+  await expect(page.getByRole('combobox', { name: 'API Key', exact: true })).toContainText('Replacement key')
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
 })
 
@@ -1233,7 +1233,7 @@ test('missing addresses recover and Chinese mobile users can send and stop from 
   await expect(page.getByRole('heading', { name: 'Conversation not found' })).toBeVisible()
   await page.getByRole('button', { name: 'Start new conversation' }).click()
   await page.getByRole('link', { name: 'Settings', exact: true }).first().click()
-  await page.getByRole('button', { name: 'Language', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Language', exact: true }).click()
   await page.getByRole('option', { name: '简体中文' }).click()
   await page.getByRole('link', { name: '对话', exact: true }).first().click()
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1266,7 +1266,7 @@ test('keyboard selection determines the identity, model and reasoning used for a
     { ...model, id: 'search-model', model_id: 'search-model', display_name: 'Search model', purpose: 'web_search' },
   ]
   await page.goto('/')
-  const keySelector = page.getByRole('button', { name: 'API Key', exact: true })
+  const keySelector = page.getByRole('combobox', { name: 'API Key', exact: true })
   await expect(keySelector).toContainText('Choose an API Key')
   await keySelector.focus()
   await page.keyboard.press('Enter')

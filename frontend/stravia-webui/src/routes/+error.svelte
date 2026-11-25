@@ -24,8 +24,9 @@ function retry(): void {
   <section class="flex w-full max-w-2xl min-w-0 flex-col gap-4" aria-labelledby="error-title">
     <div class="flex items-baseline gap-3">
       <span
-        class="shrink-0 rounded-md border border-destructive/40 px-2 py-0.5 font-mono text-sm font-semibold text-destructive tabular-nums"
-        >{status}</span>
+        class="shrink-0 rounded-md border border-destructive/40 px-2 py-0.5 font-mono text-sm font-semibold text-destructive tabular-nums">
+        {status}
+      </span>
       <h1 id="error-title" class="font-structural text-2xl font-semibold text-balance">
         {m.error_page_temporarily_unavailable()}
       </h1>

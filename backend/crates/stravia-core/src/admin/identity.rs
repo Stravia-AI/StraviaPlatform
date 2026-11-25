@@ -427,13 +427,11 @@ impl AdminAuth {
         validation.validate_exp = false;
         validation.leeway = 0;
         validation.set_required_spec_claims(&["exp"]);
-        let claims = decode::<AccessClaims>(
-            access_token,
-            &DecodingKey::from_secret(identity.jwt_secret.as_bytes()),
-            &validation,
-        )
-        .map_err(|_| AuthError::Unauthorized)?
-        .claims;
+        let decoding_key = DecodingKey::from_secret(identity.jwt_secret.as_bytes())
+            .map_err(|_| AuthError::Unauthorized)?;
+        let claims = decode::<AccessClaims>(access_token, &decoding_key, &validation)
+            .map_err(|_| AuthError::Unauthorized)?
+            .claims;
         let now = (self.clock)();
         if claims.typ != TokenType::Access || claims.exp <= now || claims.iat > now {
             return Err(AuthError::Unauthorized);
@@ -589,16 +587,18 @@ impl AdminAuth {
             iat: now,
             exp: access_expires_at,
         };
-        let access_token = encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(identity.jwt_secret.as_bytes()),
-        )
-        .map_err(|error| {
-            AuthError::Storage(
-                anyhow::Error::new(error).context("failed to sign administrator access token"),
-            )
-        })?;
+        let encoding_key =
+            EncodingKey::from_secret(identity.jwt_secret.as_bytes()).map_err(|error| {
+                AuthError::Storage(
+                    anyhow::Error::new(error).context("failed to sign administrator access token"),
+                )
+            })?;
+        let access_token =
+            encode(&Header::new(Algorithm::HS256), &claims, &encoding_key).map_err(|error| {
+                AuthError::Storage(
+                    anyhow::Error::new(error).context("failed to sign administrator access token"),
+                )
+            })?;
         Ok(SessionTokens {
             access_token,
             refresh_token,

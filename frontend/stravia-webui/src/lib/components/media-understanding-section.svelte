@@ -231,12 +231,13 @@ function selectThinkingLevel(value?: string): void {
         <Select.Trigger id="media-thinking-level-{kind}" class="w-full">
           {thinkingLevel || m.media_understanding_select_thinking_level()}
         </Select.Trigger>
-        <Select.Content
-          ><Select.Group>
+        <Select.Content>
+          <Select.Group>
             {#each selectedModel?.supported_thinking_levels ?? [] as level (level)}
               <Select.Item value={level} label={level}>{level}</Select.Item>
             {/each}
-          </Select.Group></Select.Content>
+          </Select.Group>
+        </Select.Content>
       </Select.Root>
     </Field.Field>
   </Field.Group>

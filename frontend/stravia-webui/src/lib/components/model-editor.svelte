@@ -935,8 +935,9 @@ async function saveModel(): Promise<void> {
     <GripVerticalIcon class="size-4" />
   </span>
   <span class="min-w-0">
-    <span class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}
-      >{modelIdentity.label}</span>
+    <span class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}>
+      {modelIdentity.label}
+    </span>
     <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
       {targetProviderLabel(target)}
     </span>
@@ -1060,8 +1061,9 @@ async function saveModel(): Promise<void> {
         <p class="mt-3 text-sm text-warning" role="status">
           {#if bindingBlocker === 'image_generation'}
             {m.backend_error_route_image_generation_bound()}
-            <a class="underline underline-offset-2" href={resolve('media-generation')}
-              >{m.route_purpose_open_media()}</a>
+            <a class="underline underline-offset-2" href={resolve('media-generation')}>
+              {m.route_purpose_open_media()}
+            </a>
           {:else}
             {m.backend_error_route_web_search_bound()}
             <a class="underline underline-offset-2" href={resolve('web-search')}>{m.route_purpose_open_search()}</a>
@@ -1109,8 +1111,9 @@ async function saveModel(): Promise<void> {
             <Field.FieldLabel for="route-billing-amount">{m.billing_amount()}</Field.FieldLabel>
             <InputGroup.Root>
               <InputGroup.Addon align="inline-start">
-                <InputGroup.Text class="font-technical"
-                  >{currencyForKind(billingCurrency, customCurrency).symbol}</InputGroup.Text>
+                <InputGroup.Text class="font-technical">
+                  {currencyForKind(billingCurrency, customCurrency).symbol}
+                </InputGroup.Text>
               </InputGroup.Addon>
               <InputGroup.Input
                 id="route-billing-amount"
@@ -1163,8 +1166,9 @@ async function saveModel(): Promise<void> {
           <h2 id="route-targets-title" class="route-section-title">{m.model_editor_request_destinations()}</h2>
           {#if savedRouteId}<Field.Help hint={m.model_editor_target_status_refresh_note()} />{/if}
         </div>
-        <Button type="button" variant="outline" onclick={addTarget}
-          ><CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}</Button>
+        <Button type="button" variant="outline" onclick={addTarget}>
+          <CirclePlusIcon data-icon="inline-start" />{m.model_editor_add_destination()}
+        </Button>
       </div>
 
       {#if savedRouteId && targetStatusesFailed}
@@ -1442,9 +1446,9 @@ async function saveModel(): Promise<void> {
                   <Badge variant={target.enabled ? 'default' : 'secondary'}>
                     {target.enabled ? m.model_editor_enabled() : m.model_editor_disabled()}
                   </Badge>
-                  {#if target.persisted && summary && !summary.available}<Badge variant="destructive"
-                      >{m.model_editor_model_no_longer_available()}</Badge
-                    >{/if}
+                  {#if target.persisted && summary && !summary.available}<Badge variant="destructive">
+                      {m.model_editor_model_no_longer_available()}
+                    </Badge>{/if}
                 </div>
                 <div class="flex items-center gap-1">
                   {#if !target.enabled}
@@ -1453,7 +1457,9 @@ async function saveModel(): Promise<void> {
                       variant="ghost"
                       size="icon"
                       aria-label={m.model_editor_remove_destination_value({ index: index + 1 })}
-                      onclick={deleteEditedTarget}><Trash2Icon /></Button>
+                      onclick={deleteEditedTarget}>
+                      <Trash2Icon />
+                    </Button>
                   {/if}
                 </div>
               </div>
@@ -1480,10 +1486,12 @@ async function saveModel(): Promise<void> {
                       bind:value={target.model}
                       aria-label={m.model_editor_destination_value_custom_model_id({ index: index + 1 })}
                       placeholder="private-model" />
-                    <Field.Description class="text-warning"
-                      >{m.model_editor_model_not_synced_list_requests_fail_if_id()}</Field.Description>
-                    <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}
-                      >{m.model_editor_choose_synced_model()}</Button>
+                    <Field.Description class="text-warning">
+                      {m.model_editor_model_not_synced_list_requests_fail_if_id()}
+                    </Field.Description>
+                    <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}>
+                      {m.model_editor_choose_synced_model()}
+                    </Button>
                   {:else}
                     {@const candidates = modelCandidates(target)}
                     <SearchCombobox
@@ -1512,8 +1520,9 @@ async function saveModel(): Promise<void> {
                 <Field.Field orientation="vertical" data-invalid={firstTokenInvalid ? 'true' : undefined}>
                   <Field.Label
                     for={`target-first-token-timeout-${target.key}`}
-                    hint={m.model_editor_first_token_timeout_help()}
-                    >{m.model_editor_first_token_timeout()}</Field.Label>
+                    hint={m.model_editor_first_token_timeout_help()}>
+                    {m.model_editor_first_token_timeout()}
+                  </Field.Label>
                   <InputGroup.Root class="w-28">
                     <InputGroup.Input
                       id={`target-first-token-timeout-${target.key}`}
@@ -1525,18 +1534,20 @@ async function saveModel(): Promise<void> {
                         ? `target-first-token-timeout-constraint-${target.key}`
                         : undefined}
                       bind:value={target.firstTokenTimeoutSeconds} />
-                    <InputGroup.Addon align="inline-end"
-                      ><InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text></InputGroup.Addon>
+                    <InputGroup.Addon align="inline-end">
+                      <InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text>
+                    </InputGroup.Addon>
                   </InputGroup.Root>
-                  {#if firstTokenInvalid}<Field.Error id={`target-first-token-timeout-constraint-${target.key}`}
-                      >{m.model_editor_seconds_constraint()}</Field.Error
-                    >{/if}
+                  {#if firstTokenInvalid}<Field.Error id={`target-first-token-timeout-constraint-${target.key}`}>
+                      {m.model_editor_seconds_constraint()}
+                    </Field.Error>{/if}
                 </Field.Field>
                 <Field.Field orientation="vertical" data-invalid={retryBudgetInvalid ? 'true' : undefined}>
                   <Field.Label
                     for={`target-retry-budget-${target.key}`}
-                    hint={m.model_editor_target_retry_budget_help()}
-                    >{m.model_editor_target_retry_budget()}</Field.Label>
+                    hint={m.model_editor_target_retry_budget_help()}>
+                    {m.model_editor_target_retry_budget()}
+                  </Field.Label>
                   <InputGroup.Root class="w-28">
                     <InputGroup.Input
                       id={`target-retry-budget-${target.key}`}
@@ -1546,16 +1557,18 @@ async function saveModel(): Promise<void> {
                       aria-invalid={retryBudgetInvalid}
                       aria-describedby={retryBudgetInvalid ? `target-retry-budget-constraint-${target.key}` : undefined}
                       bind:value={target.targetRetryBudget} />
-                    <InputGroup.Addon align="inline-end"
-                      ><InputGroup.Text>{m.model_editor_unit_times()}</InputGroup.Text></InputGroup.Addon>
+                    <InputGroup.Addon align="inline-end">
+                      <InputGroup.Text>{m.model_editor_unit_times()}</InputGroup.Text>
+                    </InputGroup.Addon>
                   </InputGroup.Root>
-                  {#if retryBudgetInvalid}<Field.Error id={`target-retry-budget-constraint-${target.key}`}
-                      >{m.model_editor_retry_budget_constraint()}</Field.Error
-                    >{/if}
+                  {#if retryBudgetInvalid}<Field.Error id={`target-retry-budget-constraint-${target.key}`}>
+                      {m.model_editor_retry_budget_constraint()}
+                    </Field.Error>{/if}
                 </Field.Field>
                 <Field.Field orientation="vertical" data-invalid={cooldownInvalid ? 'true' : undefined}>
-                  <Field.Label for={`target-cooldown-${target.key}`} hint={m.model_editor_target_cooldown_help()}
-                    >{m.model_editor_target_cooldown()}</Field.Label>
+                  <Field.Label for={`target-cooldown-${target.key}`} hint={m.model_editor_target_cooldown_help()}>
+                    {m.model_editor_target_cooldown()}
+                  </Field.Label>
                   <InputGroup.Root class="w-28">
                     <InputGroup.Input
                       id={`target-cooldown-${target.key}`}
@@ -1565,12 +1578,13 @@ async function saveModel(): Promise<void> {
                       aria-invalid={cooldownInvalid}
                       aria-describedby={cooldownInvalid ? `target-cooldown-constraint-${target.key}` : undefined}
                       bind:value={target.targetCooldownSeconds} />
-                    <InputGroup.Addon align="inline-end"
-                      ><InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text></InputGroup.Addon>
+                    <InputGroup.Addon align="inline-end">
+                      <InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text>
+                    </InputGroup.Addon>
                   </InputGroup.Root>
-                  {#if cooldownInvalid}<Field.Error id={`target-cooldown-constraint-${target.key}`}
-                      >{m.model_editor_seconds_constraint()}</Field.Error
-                    >{/if}
+                  {#if cooldownInvalid}<Field.Error id={`target-cooldown-constraint-${target.key}`}>
+                      {m.model_editor_seconds_constraint()}
+                    </Field.Error>{/if}
                 </Field.Field>
               </Field.Group>
 
@@ -1721,13 +1735,16 @@ async function saveModel(): Promise<void> {
                 </p>{/if}
             </div>
             {#snippet footer()}
-              <Button type="button" variant="outline" onclick={() => closeTargetEditor(false)}
-                >{m.common_cancel()}</Button>
+              <Button type="button" variant="outline" onclick={() => closeTargetEditor(false)}>
+                {m.common_cancel()}
+              </Button>
 
               <Button
                 type="button"
                 disabled={target.loading || (target.enabled && !targetConfigured(target))}
-                onclick={() => closeTargetEditor(true)}>{m.common_confirm()}</Button>
+                onclick={() => closeTargetEditor(true)}>
+                {m.common_confirm()}
+              </Button>
               <p class="text-sm text-muted-foreground sm:order-first sm:mr-auto sm:self-center">
                 {m.model_editor_target_draft_note()}
               </p>
@@ -1820,8 +1837,9 @@ async function saveModel(): Promise<void> {
       class="sticky bottom-0 z-20 mt-auto translate-y-2 border-t bg-background py-2 after:absolute after:inset-x-0 after:top-full after:h-2 after:bg-background after:content-['']">
       <div class="flex flex-wrap items-center justify-end gap-2">
         <Button href="/models" variant="outline">{m.common_cancel()}</Button>
-        <Button type="submit" disabled={saving}
-          >{#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}</Button>
+        <Button type="submit" disabled={saving}>
+          {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save_model()}
+        </Button>
       </div>
     </div>
   </form>

@@ -13,8 +13,9 @@ const requestedPath = $derived(page.url.pathname)
   <section class="flex w-full max-w-2xl min-w-0 flex-col gap-4" aria-labelledby="not-found-title">
     <div class="flex items-baseline gap-3">
       <span
-        class="shrink-0 rounded-md border px-2 py-0.5 font-mono text-sm font-semibold text-muted-foreground tabular-nums"
-        >404</span>
+        class="shrink-0 rounded-md border px-2 py-0.5 font-mono text-sm font-semibold text-muted-foreground tabular-nums">
+        404
+      </span>
       <h1 id="not-found-title" class="font-structural text-2xl font-semibold text-balance">
         {m.not_found_page_not_found()}
       </h1>

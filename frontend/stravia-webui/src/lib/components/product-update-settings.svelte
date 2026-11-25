@@ -229,8 +229,9 @@ async function checkNow(): Promise<void> {
 
     {#if updates.status?.last_failure && !checkUnavailable}
       <Alert.Root variant="destructive">
-        <Alert.Description
-          >{m.settings_update_check_failed({ message: updates.status.last_failure.message })}</Alert.Description>
+        <Alert.Description>
+          {m.settings_update_check_failed({ message: updates.status.last_failure.message })}
+        </Alert.Description>
       </Alert.Root>
     {/if}
 
@@ -252,8 +253,9 @@ async function checkNow(): Promise<void> {
       </div>
     {:else if updates.state.phase === 'downloaded'}
       <Alert.Root role="status">
-        <Alert.Description
-          >{m.settings_update_downloaded({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
+        <Alert.Description>
+          {m.settings_update_downloaded({ version: updates.state.targetVersion ?? '' })}
+        </Alert.Description>
       </Alert.Root>
       {#if updates.state.error}
         <Alert.Root variant="destructive">
@@ -263,8 +265,9 @@ async function checkNow(): Promise<void> {
     {:else if updates.state.phase === 'installing' && showInstallingProgress}
       <Alert.Root role="status" aria-live="assertive">
         <Spinner />
-        <Alert.Description
-          >{m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}</Alert.Description>
+        <Alert.Description>
+          {m.settings_update_installing({ version: updates.state.targetVersion ?? '' })}
+        </Alert.Description>
       </Alert.Root>
     {:else if updates.state.phase === 'error' && updates.state.error}
       <Alert.Root variant="destructive">
@@ -344,8 +347,9 @@ async function checkNow(): Promise<void> {
     {/if}
     {#if proxyNeedsConfiguration}
       <p role="alert" class="pb-3 text-sm">
-        <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4"
-          >{m.settings_update_proxy_configure_first()}</a>
+        <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4">
+          {m.settings_update_proxy_configure_first()}
+        </a>
       </p>
     {/if}
     {#if proxyError}

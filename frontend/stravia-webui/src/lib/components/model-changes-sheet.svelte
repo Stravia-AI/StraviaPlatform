@@ -146,16 +146,17 @@ $effect(() => {
       <span class="flex min-w-0 flex-1 flex-col gap-1.5">
         <span class="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
           <span class="max-w-full min-w-0 truncate font-medium">{record.provider_name}</span>
-          <time class="shrink-0 font-technical text-xs text-muted-foreground" datetime={record.checked_at}
-            >{formatLogTime(record.checked_at)}</time>
+          <time class="shrink-0 font-technical text-xs text-muted-foreground" datetime={record.checked_at}>
+            {formatLogTime(record.checked_at)}
+          </time>
         </span>
         <span
           class={cn(
             'flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[0.8125rem] leading-[1.45]',
             record.outcome === 'success' ? 'text-foreground' : 'text-destructive',
           )}>
-          <span
-            >{record.outcome === 'failure'
+          <span>
+            {record.outcome === 'failure'
               ? m.model_changes_failed()
               : record.outcome === 'partial_success'
                 ? m.model_changes_partial()
@@ -164,7 +165,8 @@ $effect(() => {
                       (kind) =>
                         `${changeLabel(kind)} ${record.changes.filter((item) => item.types.includes(kind)).length}`,
                     )
-                    .join(' · ')}</span>
+                    .join(' · ')}
+          </span>
           <span class="text-muted-foreground">· {sourceLabel(record.source)}</span>
           {#if record.initial_sync}<Badge variant="outline">{m.model_changes_initial()}</Badge>{/if}
           {#if record.provider_deleted}<Badge variant="outline">{m.model_changes_deleted()}</Badge>{/if}
@@ -217,11 +219,13 @@ $effect(() => {
                 aria-labelledby={`model-change-${record.id}-${item.model_id}`}>
                 <Table.Header>
                   <Table.Row>
-                    <Table.Head scope="col" class="w-[36%] ps-0 whitespace-normal"
-                      >{m.model_changes_field()}</Table.Head>
+                    <Table.Head scope="col" class="w-[36%] ps-0 whitespace-normal">
+                      {m.model_changes_field()}
+                    </Table.Head>
                     <Table.Head scope="col" class="w-[32%] whitespace-normal">{m.model_changes_before()}</Table.Head>
-                    <Table.Head scope="col" class="w-[32%] pe-0 whitespace-normal"
-                      >{m.model_changes_after()}</Table.Head>
+                    <Table.Head scope="col" class="w-[32%] pe-0 whitespace-normal">
+                      {m.model_changes_after()}
+                    </Table.Head>
                   </Table.Row>
                 </Table.Header>
                 <Table.Body>
@@ -297,26 +301,33 @@ $effect(() => {
             clearLabel={m.common_table_clear_filter()}
             onValueChange={(value: string) => (providerId = value)} />
           <Select.Root type="single" bind:value={type}>
-            <Select.Trigger id="history-type" class="w-full min-w-0" aria-label={m.model_changes_type()}
-              ><span class="truncate">{type ? changeLabel(type) : m.model_changes_all_types()}</span></Select.Trigger>
-            <Select.Content
-              ><Select.Group
-                ><Select.Item value="">{m.model_changes_all_types()}</Select.Item
-                >{#each changeTypes as kind (kind)}<Select.Item value={kind}>{changeLabel(kind)}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content>
+            <Select.Trigger id="history-type" class="w-full min-w-0" aria-label={m.model_changes_type()}>
+              <span class="truncate">{type ? changeLabel(type) : m.model_changes_all_types()}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                <Select.Item value="">
+                  {m.model_changes_all_types()}
+                </Select.Item>{#each changeTypes as kind (kind)}<Select.Item value={kind}>
+                    {changeLabel(kind)}
+                  </Select.Item>{/each}
+              </Select.Group>
+            </Select.Content>
           </Select.Root>
           <Select.Root type="single" bind:value={source}>
-            <Select.Trigger id="history-source" class="w-full min-w-0" aria-label={m.model_changes_source()}
-              ><span class="truncate">{source ? sourceLabel(source) : m.model_changes_all_sources()}</span
-              ></Select.Trigger>
-            <Select.Content
-              ><Select.Group
-                ><Select.Item value="">{m.model_changes_all_sources()}</Select.Item
-                >{#each ['automatic_sync', 'manual_sync', 'manual_change'] as origin (origin)}<Select.Item
-                    value={origin}>{sourceLabel(origin as ModelChangeSource)}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content>
+            <Select.Trigger id="history-source" class="w-full min-w-0" aria-label={m.model_changes_source()}>
+              <span class="truncate">{source ? sourceLabel(source) : m.model_changes_all_sources()}</span>
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                <Select.Item value="">
+                  {m.model_changes_all_sources()}
+                </Select.Item>{#each ['automatic_sync', 'manual_sync', 'manual_change'] as origin (origin)}<Select.Item
+                    value={origin}>
+                    {sourceLabel(origin as ModelChangeSource)}
+                  </Select.Item>{/each}
+              </Select.Group>
+            </Select.Content>
           </Select.Root>
         </div>
       </div>
@@ -337,11 +348,11 @@ $effect(() => {
           retry={() => history.refetch()} />{/if}
       {#if history.isPending}<p role="status" class="flex items-center gap-2 py-6 text-sm text-muted-foreground">
           <Spinner />{m.model_changes_loading()}
-        </p>{:else if records.length === 0 && !history.isError}<Empty.Root
-          ><Empty.Header
-            ><Empty.Title>{filtered ? m.model_changes_no_match() : m.model_changes_empty()}</Empty.Title></Empty.Header
-          ></Empty.Root
-        >{:else}
+        </p>{:else if records.length === 0 && !history.isError}<Empty.Root>
+          <Empty.Header>
+            <Empty.Title>{filtered ? m.model_changes_no_match() : m.model_changes_empty()}</Empty.Title>
+          </Empty.Header>
+        </Empty.Root>{:else}
         <div class="flex flex-col">
           {#each records.filter((record) => record.id !== selectedId) as record (record.id)}{@render batch(
               record,
@@ -351,9 +362,9 @@ $effect(() => {
       {#if history.hasNextPage}<Button
           variant="outline"
           disabled={history.isFetchingNextPage}
-          onclick={() => history.fetchNextPage()}
-          >{#if history.isFetchingNextPage}<Spinner data-icon="inline-start" />{/if}{m.model_changes_older()}</Button
-        >{/if}
+          onclick={() => history.fetchNextPage()}>
+          {#if history.isFetchingNextPage}<Spinner data-icon="inline-start" />{/if}{m.model_changes_older()}
+        </Button>{/if}
     </div>
   </Sheet.Content>
 </Sheet.Root>

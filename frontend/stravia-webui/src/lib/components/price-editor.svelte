@@ -133,7 +133,9 @@ function weekdayLabel(day: number): string {
       class="h-7 min-w-0 flex-1 px-2 text-xs"
       aria-pressed={current === 'usd'}
       {disabled}
-      onclick={() => onSelect('usd')}>{m.pricing_currency_usd()}</Button>
+      onclick={() => onSelect('usd')}>
+      {m.pricing_currency_usd()}
+    </Button>
     <Button
       type="button"
       size="sm"
@@ -141,7 +143,9 @@ function weekdayLabel(day: number): string {
       class="h-7 min-w-0 flex-1 truncate px-2 text-xs"
       aria-pressed={current === 'custom'}
       {disabled}
-      onclick={() => onSelect('custom')}>{customCurrency?.symbol}</Button>
+      onclick={() => onSelect('custom')}>
+      {customCurrency?.symbol}
+    </Button>
   </div>
 {/snippet}
 
@@ -157,7 +161,9 @@ function weekdayLabel(day: number): string {
         disabled={disabled || !restorableFields?.has(field)}
         title={restorableFields?.has(field) ? undefined : m.provider_model_editor_restore_unavailable()}
         aria-label={`${m.provider_model_editor_restore_sync()} ${label}`}
-        onclick={() => onRestore?.(field)}>{m.provider_model_editor_restore_sync()}</Button>
+        onclick={() => onRestore?.(field)}>
+        {m.provider_model_editor_restore_sync()}
+      </Button>
     </span>
   {/if}
 {/snippet}
@@ -169,8 +175,9 @@ function weekdayLabel(day: number): string {
       <Field.Help hint={m.pricing_unit_help()} />
     </p>
     {#if onRemove}
-      <Button type="button" variant="ghost" size="sm" {disabled} onclick={onRemove}
-        ><Trash2Icon data-icon="inline-start" />{m.common_remove()}</Button>
+      <Button type="button" variant="ghost" size="sm" {disabled} onclick={onRemove}>
+        <Trash2Icon data-icon="inline-start" />{m.common_remove()}
+      </Button>
     {/if}
   </div>
 
@@ -216,8 +223,9 @@ function weekdayLabel(day: number): string {
       <div class="flex flex-col gap-3 border-t border-dashed pt-4 first:border-t-0 first:pt-0">
         <div class="flex items-end justify-between gap-3">
           <Field.Field orientation="vertical" class="max-w-64">
-            <Field.Label for={`${idPrefix}-tier-${index}`}
-              >{m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}</Field.Label>
+            <Field.Label for={`${idPrefix}-tier-${index}`}>
+              {m.provider_model_editor_tier_value_context_threshold({ index: index + 1 })}
+            </Field.Label>
             <Input
               id={`${idPrefix}-tier-${index}`}
               inputmode="numeric"
@@ -233,7 +241,9 @@ function weekdayLabel(day: number): string {
             class="shrink-0"
             aria-label={m.provider_model_editor_remove_tier()}
             {disabled}
-            onclick={() => removeTier(index)}><Trash2Icon /></Button>
+            onclick={() => removeTier(index)}>
+            <Trash2Icon />
+          </Button>
         </div>
         <div class={priceGrid}>
           {#each basePriceFields as field (field)}
@@ -253,8 +263,9 @@ function weekdayLabel(day: number): string {
       </div>
     {/each}
 
-    <Button type="button" variant="outline" size="sm" class="self-start" {disabled} onclick={addTier}
-      ><PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}</Button>
+    <Button type="button" variant="outline" size="sm" class="self-start" {disabled} onclick={addTier}>
+      <PlusIcon data-icon="inline-start" />{m.provider_model_editor_pricing_tier()}
+    </Button>
   </div>
 
   <div class="flex flex-col gap-3 border-t border-dashed pt-4">
@@ -264,8 +275,9 @@ function weekdayLabel(day: number): string {
         <Field.Help hint={m.pricing_peak_help()} />
       </p>
       {#if value.peak}
-        <Button type="button" variant="ghost" size="sm" {disabled} onclick={removePeak}
-          ><Trash2Icon data-icon="inline-start" />{m.pricing_peak_remove()}</Button>
+        <Button type="button" variant="ghost" size="sm" {disabled} onclick={removePeak}>
+          <Trash2Icon data-icon="inline-start" />{m.pricing_peak_remove()}
+        </Button>
       {/if}
     </div>
 
@@ -310,8 +322,9 @@ function weekdayLabel(day: number): string {
       <div class="flex flex-col gap-3">
         <div class="flex items-center justify-between gap-2">
           <span class="text-sm font-medium">{m.pricing_peak_ranges()}</span>
-          <Button type="button" variant="outline" size="sm" {disabled} onclick={() => addRange(peak)}
-            ><PlusIcon data-icon="inline-start" />{m.pricing_peak_add_range()}</Button>
+          <Button type="button" variant="outline" size="sm" {disabled} onclick={() => addRange(peak)}>
+            <PlusIcon data-icon="inline-start" />{m.pricing_peak_add_range()}
+          </Button>
         </div>
         {#each peak.ranges as range, index (index)}
           <div class="flex flex-wrap items-end gap-3">
@@ -344,13 +357,16 @@ function weekdayLabel(day: number): string {
               class="mb-0.5"
               aria-label={m.pricing_peak_remove_range({ range: index + 1 })}
               {disabled}
-              onclick={() => removeRange(peak, index)}><Trash2Icon /></Button>
+              onclick={() => removeRange(peak, index)}>
+              <Trash2Icon />
+            </Button>
           </div>
         {/each}
       </div>
     {:else}
-      <Button type="button" variant="outline" size="sm" class="self-start" {disabled} onclick={addPeak}
-        ><PlusIcon data-icon="inline-start" />{m.pricing_peak_add()}</Button>
+      <Button type="button" variant="outline" size="sm" class="self-start" {disabled} onclick={addPeak}>
+        <PlusIcon data-icon="inline-start" />{m.pricing_peak_add()}
+      </Button>
     {/if}
   </div>
 

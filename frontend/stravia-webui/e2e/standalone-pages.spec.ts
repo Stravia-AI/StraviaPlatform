@@ -54,7 +54,7 @@ async function expectNoApplicationNavigation(page: Page): Promise<void> {
 }
 
 async function chooseLanguage(page: Page, name: string): Promise<void> {
-  await page.getByRole('button', { name: /^(Language|语言)$/ }).click()
+  await page.getByRole('combobox', { name: /^(Language|语言)$/ }).click()
   await page.getByRole('option', { name }).click()
 }
 
@@ -128,7 +128,7 @@ test.describe('Setup', () => {
       await expectNoApplicationNavigation(page)
 
       const title = await box(page, 'h1')
-      const language = await page.getByRole('button', { name: 'Language', exact: true }).boundingBox()
+      const language = await page.getByRole('combobox', { name: 'Language', exact: true }).boundingBox()
       expect(language).not.toBeNull()
       expect(language!.width).toBeLessThanOrEqual(rem(12))
       const separate =

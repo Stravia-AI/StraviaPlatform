@@ -19,16 +19,18 @@ let { match, ruleNames, onselect }: Props = $props()
     class="h-auto w-full justify-start whitespace-normal py-3 text-left"
     onclick={() => onselect(match)}>
     <span class="flex min-w-0 flex-col gap-1">
-      <span class="break-all"
-        >{ruleNames.get(match.rule_id) ?? match.rule_id}
-        <span class="text-xs text-muted-foreground">({match.rule_id})</span></span>
-      <span
-        >{m.credential_protection_tester_position({
+      <span class="break-all">
+        {ruleNames.get(match.rule_id) ?? match.rule_id}
+        <span class="text-xs text-muted-foreground">({match.rule_id})</span>
+      </span>
+      <span>
+        {m.credential_protection_tester_position({
           startLine: match.start_line,
           startColumn: match.start_column,
           endLine: match.end_line,
           endColumn: match.end_column,
-        })}</span>
+        })}
+      </span>
     </span>
   </Button>
 </li>

@@ -293,7 +293,7 @@ test('real gateway accepts original images and persisted reasoning replay under 
       await api('/api-keys', 'POST', { name: 'Unselected ownership', model_ids: [modelId] }),
     )
     await page.reload()
-    await page.getByRole('button', { name: 'API Key', exact: true }).click()
+    await page.getByRole('combobox', { name: 'API Key', exact: true }).click()
     await page.getByRole('option', { name: 'Selected console ownership', exact: true }).click()
     await page
       .locator('input[type=file]')

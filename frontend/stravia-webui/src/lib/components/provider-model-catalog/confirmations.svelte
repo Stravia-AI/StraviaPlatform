@@ -41,8 +41,9 @@ let {
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel onclick={onKeepEditing}>{m.provider_model_catalog_keep_editing()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={onDiscard}
-        >{m.provider_model_catalog_discard_changes()}</AlertDialog.Action>
+      <AlertDialog.Action variant="destructive" onclick={onDiscard}>
+        {m.provider_model_catalog_discard_changes()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

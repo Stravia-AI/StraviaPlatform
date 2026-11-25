@@ -685,8 +685,9 @@ function retryAll(): void {
       {#if hint}<Field.Help {hint} />{/if}
     </div>
     {#if note}
-      <span class="min-w-0 truncate font-technical text-xs text-muted-foreground tabular-nums" title={note}
-        >{note}</span>
+      <span class="min-w-0 truncate font-technical text-xs text-muted-foreground tabular-nums" title={note}>
+        {note}
+      </span>
     {/if}
   </div>
 {/snippet}
@@ -695,11 +696,13 @@ function retryAll(): void {
   {#if total > STATS_TOP_N}
     <div class="flex items-center gap-3">
       {#if !showAll}
-        <span class="font-technical text-xs text-muted-foreground tabular-nums"
-          >{m.stats_top_range({ count: STATS_TOP_N, total })}</span>
+        <span class="font-technical text-xs text-muted-foreground tabular-nums">
+          {m.stats_top_range({ count: STATS_TOP_N, total })}
+        </span>
       {/if}
-      <Button type="button" variant="ghost" size="sm" onclick={toggle}
-        >{showAll ? m.stats_show_top({ count: STATS_TOP_N }) : m.stats_view_all({ total })}</Button>
+      <Button type="button" variant="ghost" size="sm" onclick={toggle}>
+        {showAll ? m.stats_show_top({ count: STATS_TOP_N }) : m.stats_view_all({ total })}
+      </Button>
     </div>
   {/if}
 {/snippet}
@@ -717,8 +720,9 @@ function retryAll(): void {
       <RequestFailure title={m.stats_some_usage_data_not_refreshed()} message={localizeBackendErrorMessage(anyError)}>
         <p>{m.stats_refresh_failed({ labels: formatList(failedAnalyticsLabels) })}</p>
         <p>{m.stats_refresh_error_help()}</p>
-        <Button type="button" variant="outline" disabled={analyticsFetching} onclick={retryAll}
-          >{m.stats_retry_all()}</Button>
+        <Button type="button" variant="outline" disabled={analyticsFetching} onclick={retryAll}>
+          {m.stats_retry_all()}
+        </Button>
       </RequestFailure>
     {/if}
 
@@ -830,8 +834,9 @@ function retryAll(): void {
           {:else if tokenPie && tokenPie.total > 0}
             <StatsDonut slices={tokenPie.slices} palette={TOKEN_PALETTE} ariaLabel={m.stats_token_breakdown()}>
               {#snippet center(active: DonutSlice | null)}
-                <span class="font-technical text-xl font-medium tabular-nums"
-                  >{formatCompactCount(active ? active.value : tokenPie.total)}</span>
+                <span class="font-technical text-xl font-medium tabular-nums">
+                  {formatCompactCount(active ? active.value : tokenPie.total)}
+                </span>
               {/snippet}
             </StatsDonut>
           {:else}{@render stateLine(
@@ -868,8 +873,9 @@ function retryAll(): void {
               ariaLabel={m.stats_share_all_requests()}
               labelClass="font-technical">
               {#snippet center(active: DonutSlice | null)}
-                <span class="font-technical text-xl font-medium tabular-nums"
-                  >{formatCompactCount(active ? active.value : modelTotal)}</span>
+                <span class="font-technical text-xl font-medium tabular-nums">
+                  {formatCompactCount(active ? active.value : modelTotal)}
+                </span>
               {/snippet}
             </StatsDonut>
           {:else}{@render stateLine(m.stats_no_model_traffic())}{/if}
@@ -930,8 +936,10 @@ function retryAll(): void {
                   <p class="truncate font-medium">{providerLabel(provider)}</p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">
                     {formatTps(provider.avg_output_tps)} ·
-                    <span class={provider.upstream_error_count > 0 ? 'text-destructive' : undefined}
-                      >{provider.upstream_error_count} {m.stats_errors()}</span>
+                    <span class={provider.upstream_error_count > 0 ? 'text-destructive' : undefined}>
+                      {provider.upstream_error_count}
+                      {m.stats_errors()}
+                    </span>
                     · {formatProviderErrorRate(provider)}
                   </p>
                   <p class="font-technical mt-1 text-xs text-muted-foreground">

@@ -33,7 +33,9 @@ let {
     size="icon-sm"
     variant="ghost"
     aria-label={m.common_close()}
-    onclick={onDismiss}><XIcon /></Button>
+    onclick={onDismiss}>
+    <XIcon />
+  </Button>
   <Alert.Description>
     <p>{m.settings_update_notification_body({ version: update.version })}</p>
     <div class="flex flex-wrap gap-2">

@@ -1145,7 +1145,7 @@ async fn official_client_reads_html_and_raw_text_without_media_execution() {
         result.structured_content
     );
     let result = result.structured_content.unwrap();
-    assert_eq!(result["content"], "café & thé");
+    assert_eq!(result["content"], "café \\& thé");
     assert_eq!(result["representation"], "markdown");
     assert_eq!(result["question_applied"], false);
     assert!(result.get("download_url").is_none());

@@ -2,7 +2,7 @@ version: "3"
 
 vars:
   DESKTOP_DIR: backend/apps/stravia-desktop
-  TAURI_CLI_VERSION: 2.12.3
+  TAURI_CLI_VERSION: 2.12.6
 
 tasks:
   install:patch-crate:

@@ -132,22 +132,24 @@ async function submit(): Promise<void> {
               <Select.Trigger id="search-backend" class="w-full">
                 {backendKind === 'local' ? m.web_search_use_stravia_model() : m.web_search_use_external_route()}
               </Select.Trigger>
-              <Select.Content
-                ><Select.Group>
+              <Select.Content>
+                <Select.Group>
                   <Select.Item value="external" label={m.web_search_use_external_route()}>
                     {m.web_search_use_external_route()}
                   </Select.Item>
                   <Select.Item value="local" label={m.web_search_use_stravia_model()}>
                     {m.web_search_use_stravia_model()}
                   </Select.Item>
-                </Select.Group></Select.Content>
+                </Select.Group>
+              </Select.Content>
             </Select.Root>
           </Field.Field>
 
           {#if backendKind === 'local'}
             <Field.Field>
-              <Field.Label for="search-local-model" hint={m.web_search_eligible_model_help()}
-                >{m.web_search_model_used()}</Field.Label>
+              <Field.Label for="search-local-model" hint={m.web_search_eligible_model_help()}>
+                {m.web_search_model_used()}
+              </Field.Label>
               <SearchCombobox
                 id="search-local-model"
                 value={localModelId}
@@ -170,8 +172,9 @@ async function submit(): Promise<void> {
             {:else if eligibleModels.length === 0}
               <div class="flex flex-wrap items-center gap-x-2" role="status">
                 <span class="text-sm text-muted-foreground">{m.web_search_no_eligible_models()}</span>
-                <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}
-                  >{m.web_search_manage_models()}</a>
+                <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}>
+                  {m.web_search_manage_models()}
+                </a>
               </div>
             {/if}
           {:else}
@@ -212,8 +215,9 @@ async function submit(): Promise<void> {
             {:else if !externalRoutes.some((route) => route.available)}
               <div class="flex flex-wrap items-center gap-x-2" role="status">
                 <span class="text-sm text-muted-foreground">{m.web_search_no_eligible_routes()}</span>
-                <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}
-                  >{m.web_search_manage_models()}</a>
+                <a href={resolve('/models')} class={buttonVariants({ variant: 'link', size: 'sm' })}>
+                  {m.web_search_manage_models()}
+                </a>
               </div>
             {/if}
           {/if}
@@ -225,8 +229,9 @@ async function submit(): Promise<void> {
         {/if}
       </div>
       <Sheet.Footer class="route-overlay-footer pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        <Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => (open = false))}
-          >{m.common_cancel()}</Button>
+        <Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => (open = false))}>
+          {m.common_cancel()}
+        </Button>
         <Button type="submit" disabled={saving || !bindingReady || !baseline.dirty} aria-busy={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{m.web_search_save_method()}
         </Button>

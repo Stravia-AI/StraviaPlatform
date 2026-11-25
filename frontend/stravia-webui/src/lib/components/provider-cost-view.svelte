@@ -82,10 +82,7 @@ let windowDays = $state<WindowDays>('1')
 
 snapshot<ProviderCostViewSnapshot>({
   id: 'provider-cost-view',
-  capture: () => ({
-    providerId: provider.id,
-    windowDays,
-  }),
+  capture: () => ({ providerId: provider.id, windowDays }),
   restore: (value) => {
     if (!value || value.providerId !== provider.id) return
     if (windows.some((item) => item.days === value.windowDays)) {
@@ -219,8 +216,9 @@ function suggestionPrice(item: CostSuggestion): string {
             {/if}
           </div>
           <div class="ms-auto flex gap-2">
-            <Button variant="ghost" size="sm" onclick={() => (dismissed = JSON.stringify(visibleSuggestion))}
-              >{m.cost_suggestion_dismiss()}</Button>
+            <Button variant="ghost" size="sm" onclick={() => (dismissed = JSON.stringify(visibleSuggestion))}>
+              {m.cost_suggestion_dismiss()}
+            </Button>
             <Button size="sm" onclick={() => adopt(visibleSuggestion)}>
               {visibleSuggestion.kind === 'subscription' && visibleSuggestion.price === null
                 ? m.cost_suggestion_set_subscription()
@@ -297,8 +295,9 @@ function suggestionPrice(item: CostSuggestion): string {
               {historyLabel(item)}
               {#if index === 0}<Badge variant="secondary">{m.cost_plan_current()}</Badge>{/if}
             </span>
-            <time class="font-technical text-xs text-muted-foreground tabular-nums"
-              >{formatLogTime(item.effective_from)}</time>
+            <time class="font-technical text-xs text-muted-foreground tabular-nums">
+              {formatLogTime(item.effective_from)}
+            </time>
           </li>
         {/each}
       </ol>

@@ -153,8 +153,9 @@ async function submit(): Promise<void> {
             <Tabs.Root bind:value={() => fields.basis, setBasis}>
               <Tabs.List class="w-full" aria-labelledby={basisLabelId}>
                 <Tabs.Trigger class="flex-1" value="usage" disabled={saving}>{m.cost_basis_usage()}</Tabs.Trigger>
-                <Tabs.Trigger class="flex-1" value="subscription" disabled={saving}
-                  >{m.cost_basis_subscription()}</Tabs.Trigger>
+                <Tabs.Trigger class="flex-1" value="subscription" disabled={saving}>
+                  {m.cost_basis_subscription()}
+                </Tabs.Trigger>
                 <Tabs.Trigger class="flex-1" value="none" disabled={saving}>{m.cost_basis_none()}</Tabs.Trigger>
               </Tabs.List>
             </Tabs.Root>
@@ -190,13 +191,14 @@ async function submit(): Promise<void> {
                   aria-invalid={showIssue || undefined}
                   oninput={() => (attempted = false)} />
                 <InputGroup.Addon align="inline-end">
-                  <InputGroup.Text
-                    >{fields.period === 'year' ? m.cost_plan_per_year() : m.cost_plan_per_month()}</InputGroup.Text>
+                  <InputGroup.Text>
+                    {fields.period === 'year' ? m.cost_plan_per_year() : m.cost_plan_per_month()}
+                  </InputGroup.Text>
                 </InputGroup.Addon>
               </InputGroup.Root>
-              {#if showIssue}<Field.Error>{issue}</Field.Error>{:else}<Field.Description
-                  >{m.cost_plan_price_help()}</Field.Description
-                >{/if}
+              {#if showIssue}<Field.Error>{issue}</Field.Error>{:else}<Field.Description>
+                  {m.cost_plan_price_help()}
+                </Field.Description>{/if}
             </Field.Field>
 
             {#if customCurrency}
@@ -224,8 +226,9 @@ async function submit(): Promise<void> {
         {/if}
       </div>
       <Sheet.Footer class="route-overlay-footer pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        <Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => (open = false))}
-          >{m.common_cancel()}</Button>
+        <Button type="button" variant="outline" disabled={saving} onclick={() => guard.request(() => (open = false))}>
+          {m.common_cancel()}
+        </Button>
         <Button type="submit" disabled={saving || unchanged} aria-busy={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{m.common_save()}
         </Button>

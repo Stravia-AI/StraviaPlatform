@@ -51,7 +51,9 @@ async function copyValue(trigger: HTMLElement): Promise<void> {
         'font-technical flex min-w-0 items-center truncate text-left text-xs tabular-nums transition-colors duration-[140ms] ease-[cubic-bezier(0.2,0,0,1)]',
         copied && 'text-signal',
         className,
-      )}>{display}</Tooltip.Trigger>
+      )}>
+      {display}
+    </Tooltip.Trigger>
     <Tooltip.Content class="max-w-[min(32rem,calc(100vw-2rem))] break-all font-mono text-xs">{value}</Tooltip.Content>
   </Tooltip.Root>
   {#if copyable}

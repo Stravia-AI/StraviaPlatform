@@ -29,7 +29,7 @@ stravia-web-access = { path = "backend/crates/stravia-web-access" }
 stravia-web-access-contract = { path = "backend/crates/stravia-web-access-contract" }
 tokio = { version = "1", default-features = false }
 axum = { version = "0.8", default-features = false }
-rmcp = { version = "=3.5.1", default-features = false }
+rmcp = { version = "=3.11.0", default-features = false }
 sse-stream = "=0.2.6"
 # 与桌面更新器统一 TLS/代理编译特性；运行时代理由客户端显式选择。
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy", "socks"] }
@@ -38,20 +38,20 @@ cookie_store = { version = "=0.22.1", default-features = false }
 # 固定 Codex 使用的 RFC 7692 实现；不全局替换其他客户端的 WebSocket 依赖。
 tungstenite-deflate = { package = "tungstenite", git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f", default-features = false, features = ["deflate", "handshake"] }
 tokio-tungstenite-deflate = { package = "tokio-tungstenite", git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186", default-features = false }
-async-compression = { version = "=0.4.48", default-features = false, features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
+async-compression = { version = "=0.4.54", default-features = false, features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
 tower-http = { version = "0.7.1", features = ["cors", "trace"] }
 sqlx = { package = "stravia-sql", path = "backend/crates/stravia-sql" }
-sqlx-native = { package = "sqlx", version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
-sqlx-core = { version = "=0.9.0", default-features = false }
+sqlx-native = { package = "sqlx", version = "0.9.1", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls", "migrate", "macros", "rust_decimal", "json"] }
+sqlx-core = { version = "=0.9.1", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-wasmtime = { version = "=49.0.3", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation", "pooling-allocator"] }
+wasmtime = { version = "=51.0.0", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "component-model-async", "async", "parallel-compilation", "pooling-allocator"] }
 # 复用 wasmtime parallel-compilation 已引入的 rayon，在临时线程池编译并在结束后退出线程归还内存。
 rayon = "1.12.0"
-wasmtime-wasi = { version = "=49.0.3", default-features = false, features = ["p2"] }
-wasmprinter = "=0.258.3"
-wat = "=1.258.3"
+wasmtime-wasi = { version = "=51.0.0", default-features = false, features = ["p2"] }
+wasmprinter = "=0.263.0"
+wat = "=1.263.0"
 serde-saphyr = "2"
 json5 = "1"
 async-trait = "0.1"
@@ -60,7 +60,7 @@ tracing-appender = "0.2"
 tracing-subscriber = "0.3"
 metrics = "0.24.2"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false }
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.4", default-features = false, features = ["system"] }
 log = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false }
@@ -71,13 +71,13 @@ thiserror = "2"
 tokio-stream = "0.1"
 futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 http-body-util = "0.1"
-htmd = "0.5"
+htmd = "0.6"
 bytes = "1"
-flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
-zstd = { version = "=0.14.3", default-features = false }
+flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
+zstd = { version = "=0.14.5", default-features = false }
 # 与 shellexpand 复用 dirs 6；相同的 home_dir 实现无需在服务端额外编译 dirs 7。
 dirs = "6"
-dom_smoothie = "0.18"
+dom_smoothie = "0.20"
 base64 = "0.23"
 base64-022 = { package = "base64", version = "0.22.1" }
 rand = "0.10"
@@ -87,22 +87,22 @@ md-5 = "0.11"
 hex = "0.4"
 hpack = "0.3"
 argon2 = { version = "0.6", features = ["getrandom"] }
-jsonwebtoken = { version = "11", default-features = false }
+jsonwebtoken = { version = "12", default-features = false }
 rpassword = "7.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
-office_oxide = "0.1.11"
-cfb = "0.15"
-zip = { version = "=9.0.5", default-features = false }
+office_oxide = "0.1.17"
+cfb = "0.16"
+zip = { version = "=9.8.2", default-features = false }
 dashmap = "6"
 inventory = "0.3"
-aws-credential-types = "1.3.0"
-aws-sigv4 = "1.5.1"
+aws-credential-types = "1.3.1"
+aws-sigv4 = "1.6.6"
 http = "1"
 tokio-rustls = "0.26.4"
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
-aws-lc-rs = "1.18.1"
+aws-lc-rs = "1.19.0"
 rustls-platform-verifier = "0.7"
-brotli-decompressor = "5.0.3"
+brotli-decompressor = "6.4.0"
 rama-core = { version = "=0.4.0", features = ["std"] }
 rama-http = "=0.4.0"
 rama-http-core = "=0.4.0"
@@ -111,38 +111,38 @@ rama-net = "=0.4.0"
 percent-encoding = "2"
 hyper = { version = "1", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["client-proxy", "tokio"] }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 # 避免碎片化主机上的透明大页缺页触发同步内存整理，不改系统 THP 配置。
 mimalloc = { version = "0.1.52", features = ["no_thp"] }
 tinyufo = { package = "TinyUFO", version = "=0.9.0" }
-redis = { version = "=1.7.1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "script"] }
+redis = { version = "=1.8.3", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "script"] }
 tempfile = "3"
-regex = "1.13.1"
+regex = "1.13.2"
 # 凭据检测关键词预筛选的多模式匹配；与 regex 已依赖的版本相同，不引入新的构建产物。
 aho-corasick = "1.1.5"
 tiktoken-rs = "=0.12.1"
-scraper = { version = "0.27.0", default-features = false, features = ["errors"] }
+scraper = { version = "0.29.0", default-features = false, features = ["errors"] }
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 walkdir = "2"
 url = { version = "2", features = ["serde"] }
 urlencoding = "2.1.3"
-unicode-normalization = "=0.1.25"
-toml = { version = "1.1.4", features = ["std", "parse", "display", "serde"] }
+unicode-normalization = "=0.1.26"
+toml = { version = "1.2.3", features = ["std", "parse", "display", "serde"] }
 shellexpand = "3"
 rust-embed = { version = "8", features = ["compression"] }
 listeners = "0.6.1"
 local-ip-address = "0.6"
-tauri = { version = "=2.12.4", features = ["tray-icon"] }
+tauri = { version = "=2.12.7", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.7.0"
-tauri-plugin-dialog = "2.8.3"
-tauri-plugin-single-instance = "2.5.4"
-tauri-plugin-opener = "2.7.2"
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-opener = "2.7.3"
 tauri-plugin-process = "2.4.0"
-tauri-plugin-store = "2.5.0"
-tauri-plugin-updater = "2.14.0"
-tauri-build = { version = "2.7.3", features = [] }
+tauri-plugin-store = "2.5.1"
+tauri-plugin-updater = "2.14.1"
+tauri-build = { version = "2.7.6", features = [] }
 tauri-plugin-wdio = "1.5.0"
 tauri-plugin-wdio-webdriver = "1.5.0"
 
@@ -153,20 +153,20 @@ foldhash = "0.2.0"
 serde_core = "1.0.229"
 proc-macro2 = "1.0.107"
 libc = "0.2.189"
-crc32fast = "1.5.2"
-regex-automata = "0.4.18"
+crc32fast = "1.5.6"
+regex-automata = "0.4.19"
 time = "0.3.55"
 windows-sys = "0.61"
 windows = "0.61"
 winapi = "0.3.9"
 windows-core = "0.61.2"
-rustix = "1.1.5"
-toml_datetime = "1.1.1"
-toml_parser = "1.1.3"
-winnow = "1.0.4"
+rustix = "1.1.6"
+toml_datetime = "1.1.3"
+toml_parser = "1.1.7"
+winnow = "1.0.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2 = "0.6.4"
-jsonschema = { version = "0.59.0", default-features = false }
+jsonschema = { version = "0.63.1", default-features = false }
 rcgen = "0.14.5"
 wit-bindgen = "0.63.0"
 stable_deref_trait = "1.2.1"

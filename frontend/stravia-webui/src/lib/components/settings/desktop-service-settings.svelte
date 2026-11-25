@@ -351,8 +351,9 @@ async function copyLanUrl(trigger: HTMLElement): Promise<void> {
                 </Select.Content>
               </Select.Root>
             {:else}
-              <InputGroup.Text id="desktop-external-address" class="font-technical px-1.5 text-foreground tabular-nums"
-                >{lanAddress}</InputGroup.Text>
+              <InputGroup.Text id="desktop-external-address" class="font-technical px-1.5 text-foreground tabular-nums">
+                {lanAddress}
+              </InputGroup.Text>
             {/if}
             <InputGroup.Addon align="inline-end">
               <span class="font-technical tabular-nums">:{portState.currentPort}</span>

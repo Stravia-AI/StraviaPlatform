@@ -123,8 +123,9 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
 }
 </script>
 
-<svelte:head
-  ><title>{provider ? provider.name.trim() || provider.id : m.common_model_service()} · Stravia</title></svelte:head>
+<svelte:head>
+  <title>{provider ? provider.name.trim() || provider.id : m.common_model_service()} · Stravia</title>
+</svelte:head>
 
 {#if providersQuery.isPending}
   <div class="grid min-h-72 place-items-center"><Spinner /></div>
@@ -136,14 +137,16 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
       message={localizeBackendErrorMessage(providersQuery.error)}
       retry={() => providersQuery.refetch()}
       retrying={providersQuery.isFetching} />
-    <Button href="/providers" variant="outline"
-      ><ArrowLeftIcon data-icon="inline-start" />{m.providers_back_model_services()}</Button>
+    <Button href="/providers" variant="outline">
+      <ArrowLeftIcon data-icon="inline-start" />{m.providers_back_model_services()}
+    </Button>
   </div>
 {:else if !provider}
   <div class="route-page">
     <PageHeader title={m.providers_model_service_not_found()} />
-    <Button href="/providers" variant="outline"
-      ><ArrowLeftIcon data-icon="inline-start" />{m.providers_back_model_services()}</Button>
+    <Button href="/providers" variant="outline">
+      <ArrowLeftIcon data-icon="inline-start" />{m.providers_back_model_services()}
+    </Button>
   </div>
 {:else}
   <div class="route-page">
@@ -174,8 +177,9 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
       {/snippet}
       {#snippet actions()}
         {#if usesProviderModels}
-          <Button variant="outline" href={`/models/new?provider=${encodeURIComponent(provider.id)}`}
-            ><PlusIcon data-icon="inline-start" />{m.providers_use_model()}</Button>
+          <Button variant="outline" href={`/models/new?provider=${encodeURIComponent(provider.id)}`}>
+            <PlusIcon data-icon="inline-start" />{m.providers_use_model()}
+          </Button>
         {/if}
       {/snippet}
     </PageHeader>
@@ -185,9 +189,10 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
           class={tabsTriggerVariants()}
           data-state={effectiveView === item.id ? 'active' : 'inactive'}
           aria-current={effectiveView === item.id ? 'page' : undefined}
-          href={resolve(`providers/${encodeURIComponent(providerId)}?view=${encodeURIComponent(item.id)}`)}
-          >{item.label()}
-          {#if item.count}<Badge variant="secondary">{item.count}</Badge>{/if}</a>
+          href={resolve(`providers/${encodeURIComponent(providerId)}?view=${encodeURIComponent(item.id)}`)}>
+          {item.label()}
+          {#if item.count}<Badge variant="secondary">{item.count}</Badge>{/if}
+        </a>
       {/each}
     </nav>
 
@@ -249,8 +254,9 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
             <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed px-4 py-10 text-center">
               <p class="text-sm text-muted-foreground">{m.providers_no_models_use_model_service_yet()}</p>
               {#if usesProviderModels}
-                <Button variant="outline" href={resolve(`providers/${encodeURIComponent(providerId)}?view=models`)}
-                  >{m.providers_browse_service_models()}</Button>
+                <Button variant="outline" href={resolve(`providers/${encodeURIComponent(providerId)}?view=models`)}>
+                  {m.providers_browse_service_models()}
+                </Button>
               {/if}
             </div>
           {:else}
@@ -276,21 +282,24 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
                     columns,
                   ]}>
                   <div role="cell" class="min-w-0">
-                    <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden"
-                      >{m.providers_route_client_model()}</span>
+                    <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden">
+                      {m.providers_route_client_model()}
+                    </span>
                     <a
                       class="block font-medium hover:underline"
                       href={resolve('/models/[id]', { id: reference.route.model_id })}>
                       <span class="block break-words">{effectiveModelDisplayName(reference.route)}</span>
                       {#if logicalModelSecondaryId(reference.route)}
-                        <span class="block break-all font-technical text-xs font-normal text-muted-foreground"
-                          >{reference.route.model_id}</span>
+                        <span class="block break-all font-technical text-xs font-normal text-muted-foreground">
+                          {reference.route.model_id}
+                        </span>
                       {/if}
                     </a>
                   </div>
                   <div role="cell" class="min-w-0">
-                    <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden"
-                      >{m.providers_route_upstream_model()}</span>
+                    <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden">
+                      {m.providers_route_upstream_model()}
+                    </span>
                     {#if sameId}
                       <span class="text-sm text-muted-foreground">{m.providers_route_same_id()}</span>
                     {:else}
@@ -298,8 +307,9 @@ async function syncModels(id = providerId): Promise<ProviderModelSyncSummary | u
                     {/if}
                   </div>
                   <div role="cell" class="min-w-0">
-                    <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden"
-                      >{m.providers_route_priority()}</span>
+                    <span class="block text-xs text-muted-foreground @min-[40rem]/route-references:hidden">
+                      {m.providers_route_priority()}
+                    </span>
                     <Badge variant="outline" class="font-technical">{reference.target.priority}</Badge>
                   </div>
                 </div>

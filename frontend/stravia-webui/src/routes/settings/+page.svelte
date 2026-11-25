@@ -118,7 +118,9 @@ $effect(() => {
           {#if contribution.title && contribution.href}
             <a
               class="w-fit font-medium break-words text-pretty text-primary underline-offset-4 hover:underline"
-              href={resolve(contribution.href)}>{contribution.title}</a>
+              href={resolve(contribution.href)}>
+              {contribution.title}
+            </a>
           {:else if contribution.title}
             <p class="font-medium break-words text-pretty">{contribution.title}</p>
           {/if}
@@ -126,7 +128,9 @@ $effect(() => {
             {#if !contribution.title && contribution.href}
               <a
                 class="w-fit text-xs break-words text-pretty text-primary underline-offset-4 hover:underline"
-                href={resolve(contribution.href)}>{contribution.description}</a>
+                href={resolve(contribution.href)}>
+                {contribution.description}
+              </a>
             {:else}
               <p class="text-xs break-words text-pretty text-muted-foreground">{contribution.description}</p>
             {/if}

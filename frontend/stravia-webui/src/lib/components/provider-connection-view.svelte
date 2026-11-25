@@ -270,8 +270,9 @@ async function testConnection(): Promise<void> {
   {:else if descriptor && !channel}
     <Alert.Root variant="destructive" class="mb-4">
       <Alert.Title>{m.provider_config_channel_missing()}</Alert.Title>
-      <Alert.Description
-        >{m.provider_config_channel_missing_help({ channel: provider.channel ?? '—' })}</Alert.Description>
+      <Alert.Description>
+        {m.provider_config_channel_missing_help({ channel: provider.channel ?? '—' })}
+      </Alert.Description>
     </Alert.Root>
   {/if}
 
@@ -396,7 +397,9 @@ async function testConnection(): Promise<void> {
           type="button"
           variant="outline"
           onclick={() => guard.request(revert)}
-          disabled={busy || (!dirty && !draft.oauthSessionId)}>{m.common_cancel()}</Button>
+          disabled={busy || (!dirty && !draft.oauthSessionId)}>
+          {m.common_cancel()}
+        </Button>
         <Button type="submit" disabled={busy || !draft.submittable}>
           {#if busy}<Spinner data-icon="inline-start" />{/if}
           {m.provider_connection_view_save_connection()}

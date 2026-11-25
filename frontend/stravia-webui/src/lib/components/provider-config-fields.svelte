@@ -118,8 +118,9 @@ function setText(field: VendorConfigField, value: string): void {
             class="col-span-full justify-between rounded-lg border px-3 py-2"
             data-invalid={invalid || undefined}>
             <div>
-              <Field.Label for={controlId} hint={fieldHint(field)}
-                >{resolvePluginText(field.label, localeState.current)}</Field.Label>
+              <Field.Label for={controlId} hint={fieldHint(field)}>
+                {resolvePluginText(field.label, localeState.current)}
+              </Field.Label>
               {#if field.required}<Field.Description>{m.provider_config_required()}</Field.Description>{/if}
             </div>
             <Switch
@@ -136,8 +137,9 @@ function setText(field: VendorConfigField, value: string): void {
           <Field.Field
             class={field.secret || (field.kind.type === 'string' && field.kind.multiline) ? 'col-span-full' : undefined}
             data-invalid={invalid || undefined}>
-            <Field.Label for={controlId} hint={fieldHint(field)}
-              >{resolvePluginText(field.label, localeState.current)}</Field.Label>
+            <Field.Label for={controlId} hint={fieldHint(field)}>
+              {resolvePluginText(field.label, localeState.current)}
+            </Field.Label>
             {#if field.kind.type === 'bool'}
               <Select.Root
                 type="single"
@@ -177,8 +179,9 @@ function setText(field: VendorConfigField, value: string): void {
                 <Select.Content>
                   <Select.Group>
                     {#each field.kind.options as option (option.value)}
-                      <Select.Item value={option.value}
-                        >{resolvePluginText(option.label, localeState.current)}</Select.Item>
+                      <Select.Item value={option.value}>
+                        {resolvePluginText(option.label, localeState.current)}
+                      </Select.Item>
                     {/each}
                   </Select.Group>
                 </Select.Content>

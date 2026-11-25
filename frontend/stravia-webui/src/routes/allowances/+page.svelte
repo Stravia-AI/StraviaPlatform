@@ -614,8 +614,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
         {m.allowances_load_failed()}
       </span>
       {#if provider.canRetry}
-        <Button variant="outline" size="sm" onclick={() => reading.retryProvider(providerId)}
-          >{m.common_retry()}</Button>
+        <Button variant="outline" size="sm" onclick={() => reading.retryProvider(providerId)}>
+          {m.common_retry()}
+        </Button>
       {/if}
     </div>
   {:else if provider.allowances.length > 0}
@@ -638,8 +639,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               ? 'grid min-w-0 gap-1'
               : 'flex min-w-0 items-start justify-between gap-3'}>
             <span class="flex min-w-0 items-center gap-1 text-xs leading-4 text-muted-foreground">
-              <span class="line-clamp-2 break-words" title={allowanceLabel(allowance)}
-                >{allowanceLabel(allowance)}</span>
+              <span class="line-clamp-2 break-words" title={allowanceLabel(allowance)}>
+                {allowanceLabel(allowance)}
+              </span>
               {#if provider.snapshot?.guard_supported && allowance.guarded}
                 <ShieldCheckIcon class="size-3 shrink-0 text-primary" aria-hidden="true" />
                 <span class="sr-only">{m.allowances_guard_enabled()}</span>
@@ -674,12 +676,13 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       </Alert.Description>
     </Alert.Root>
   {:else if snapshot?.error}
-    <Alert.Root variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status"
-      ><Alert.Description
-        >{snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
+    <Alert.Root variant={snapshot.status === 'stale' ? 'warning' : 'destructive'} role="status">
+      <Alert.Description>
+        {snapshot.status === 'stale' ? `${m.allowances_stale_message()} ` : ''}{allowanceErrorMessage(
           snapshot.error.category,
-        )}</Alert.Description
-      ></Alert.Root>
+        )}
+      </Alert.Description>
+    </Alert.Root>
   {/if}
   {#if snapshot?.missing_guarded_keys?.length}
     <Alert.Root variant="warning">
@@ -693,26 +696,27 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               size="sm"
               disabled={!provider.canSaveGuards}
               aria-busy={provider.savingGuards}
-              onclick={() => reading.setGuard(snapshot.provider_id, key, false)}
-              >{#if provider.savingGuards}<Spinner
-                  aria-hidden="true" />{m.allowances_guard_saving()}{:else}{m.allowances_remove_guard({
-                  key,
-                })}{/if}</Button>
+              onclick={() => reading.setGuard(snapshot.provider_id, key, false)}>
+              {#if provider.savingGuards}<Spinner
+                  aria-hidden="true" />{m.allowances_guard_saving()}{:else}{m.allowances_remove_guard({ key })}{/if}
+            </Button>
           </div>
         {/each}
       </Alert.Description>
     </Alert.Root>
   {/if}
   {#if provider.refreshError != null}
-    <Alert.Root variant="warning" role="status"
-      ><Alert.Description>
+    <Alert.Root variant="warning" role="status">
+      <Alert.Description>
         {m.allowances_guard_refresh_failed()}
         {localizeBackendErrorMessage(provider.refreshError)}
-      </Alert.Description></Alert.Root>
+      </Alert.Description>
+    </Alert.Root>
   {/if}
   {#if provider.guardError != null}
-    <Alert.Root variant="destructive"
-      ><Alert.Description>{localizeBackendErrorMessage(provider.guardError)}</Alert.Description></Alert.Root>
+    <Alert.Root variant="destructive">
+      <Alert.Description>{localizeBackendErrorMessage(provider.guardError)}</Alert.Description>
+    </Alert.Root>
   {/if}
 {/snippet}
 
@@ -893,7 +897,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                   {#if snapshot.plan_label}
                     <span
                       data-testid={`allowance-plan-${providerId}`}
-                      aria-label={m.allowances_plan({ plan: snapshot.plan_label })}>{snapshot.plan_label}</span>
+                      aria-label={m.allowances_plan({ plan: snapshot.plan_label })}>
+                      {snapshot.plan_label}
+                    </span>
                   {/if}
                 </div>
                 {#if snapshot?.resets && snapshot.resets.grants.length > 0}
@@ -914,25 +920,27 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                 <AlertDialog.Root>
                   <AlertDialog.Trigger
                     disabled={!provider.canReset || provider.resetting}
-                    class={buttonVariants({ variant: 'outline', size: 'sm' })}
-                    >{m.allowances_grant_retry()}</AlertDialog.Trigger>
+                    class={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                    {m.allowances_grant_retry()}
+                  </AlertDialog.Trigger>
                   <AlertDialog.Content
                     onOpenAutoFocus={(event: Event) => {
                       event.preventDefault()
                       document.getElementById(`allowance-retry-cancel-${providerId}`)?.focus()
                     }}>
                     <AlertDialog.Header>
-                      <AlertDialog.Title
-                        >{m.allowances_grant_retry_title({
-                          provider: provider.target.provider_name,
-                        })}</AlertDialog.Title>
+                      <AlertDialog.Title>
+                        {m.allowances_grant_retry_title({ provider: provider.target.provider_name })}
+                      </AlertDialog.Title>
                       <AlertDialog.Description>{m.allowances_grant_retry_description()}</AlertDialog.Description>
                     </AlertDialog.Header>
                     <AlertDialog.Footer>
-                      <AlertDialog.Cancel id={`allowance-retry-cancel-${providerId}`}
-                        >{m.allowances_grant_cancel()}</AlertDialog.Cancel>
-                      <AlertDialog.Action variant="destructive" onclick={() => resetGrant(provider, pendingGrantId)}
-                        >{m.allowances_grant_retry()}</AlertDialog.Action>
+                      <AlertDialog.Cancel id={`allowance-retry-cancel-${providerId}`}>
+                        {m.allowances_grant_cancel()}
+                      </AlertDialog.Cancel>
+                      <AlertDialog.Action variant="destructive" onclick={() => resetGrant(provider, pendingGrantId)}>
+                        {m.allowances_grant_retry()}
+                      </AlertDialog.Action>
                     </AlertDialog.Footer>
                   </AlertDialog.Content>
                 </AlertDialog.Root>
@@ -1003,19 +1011,25 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
                                 document.getElementById(`allowance-reset-cancel-${providerId}-${grant.id}`)?.focus()
                               }}>
                               <AlertDialog.Header>
-                                <AlertDialog.Title
-                                  >{m.allowances_grant_confirm_title({
+                                <AlertDialog.Title>
+                                  {m.allowances_grant_confirm_title({
                                     provider: provider.target.provider_name,
                                     grant: grant.label,
-                                  })}</AlertDialog.Title>
-                                <AlertDialog.Description
-                                  >{m.allowances_grant_confirm_description()}</AlertDialog.Description>
+                                  })}
+                                </AlertDialog.Title>
+                                <AlertDialog.Description>
+                                  {m.allowances_grant_confirm_description()}
+                                </AlertDialog.Description>
                               </AlertDialog.Header>
                               <AlertDialog.Footer>
-                                <AlertDialog.Cancel id={`allowance-reset-cancel-${providerId}-${grant.id}`}
-                                  >{m.allowances_grant_cancel()}</AlertDialog.Cancel>
-                                <AlertDialog.Action variant="destructive" onclick={() => resetGrant(provider, grant.id)}
-                                  >{m.allowances_grant_confirm()}</AlertDialog.Action>
+                                <AlertDialog.Cancel id={`allowance-reset-cancel-${providerId}-${grant.id}`}>
+                                  {m.allowances_grant_cancel()}
+                                </AlertDialog.Cancel>
+                                <AlertDialog.Action
+                                  variant="destructive"
+                                  onclick={() => resetGrant(provider, grant.id)}>
+                                  {m.allowances_grant_confirm()}
+                                </AlertDialog.Action>
                               </AlertDialog.Footer>
                             </AlertDialog.Content>
                           </AlertDialog.Root>
@@ -1112,14 +1126,15 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
       retrying={readState.fetching} />
   {:else if !hasEntries}
     <section class="route-section">
-      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10"
-        ><Empty.Header
-          ><Empty.Media variant="icon"><GaugeIcon /></Empty.Media><Empty.Title role="heading" aria-level={2}
-            >{m.allowances_empty_title()}</Empty.Title
-          ><Empty.Description>{m.allowances_empty_description()}</Empty.Description></Empty.Header
-        ><Empty.Content
-          ><Button variant="outline" href="/providers">{m.allowances_manage_providers()}</Button></Empty.Content
-        ></Empty.Root>
+      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10">
+        <Empty.Header>
+          <Empty.Media variant="icon"><GaugeIcon /></Empty.Media><Empty.Title role="heading" aria-level={2}>
+            {m.allowances_empty_title()}
+          </Empty.Title><Empty.Description>{m.allowances_empty_description()}</Empty.Description>
+        </Empty.Header><Empty.Content>
+          <Button variant="outline" href="/providers">{m.allowances_manage_providers()}</Button>
+        </Empty.Content>
+      </Empty.Root>
     </section>
   {:else}
     {#if readState.loadError}<RequestFailure
@@ -1141,7 +1156,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
             </InputGroup.Root>
             <Select.Root type="single" bind:value={catalogFilter}>
-              <Select.Trigger class="allowances-select w-full justify-between">{catalogFilterLabel}</Select.Trigger>
+              <Select.Trigger class="allowances-select w-full justify-between" aria-label={catalogFilterLabel}>
+                {catalogFilterLabel}
+              </Select.Trigger>
               <Select.Content>
                 <Select.Group>
                   <Select.Item value="all">{m.allowances_filter_catalog_all()}</Select.Item>
@@ -1152,7 +1169,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               </Select.Content>
             </Select.Root>
             <Select.Root type="single" bind:value={conditionFilter}>
-              <Select.Trigger class="allowances-select w-full justify-between">{conditionFilterLabel}</Select.Trigger>
+              <Select.Trigger class="allowances-select w-full justify-between" aria-label={conditionFilterLabel}>
+                {conditionFilterLabel}
+              </Select.Trigger>
               <Select.Content>
                 <Select.Group>
                   <Select.Item value="all">{m.allowances_filter_condition_all()}</Select.Item>
@@ -1163,7 +1182,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
               </Select.Content>
             </Select.Root>
             <Select.Root type="single" bind:value={freshnessFilter}>
-              <Select.Trigger class="allowances-select w-full justify-between">{freshnessFilterLabel}</Select.Trigger>
+              <Select.Trigger class="allowances-select w-full justify-between" aria-label={freshnessFilterLabel}>
+                {freshnessFilterLabel}
+              </Select.Trigger>
               <Select.Content>
                 <Select.Group>
                   <Select.Item value="all">{m.allowances_filter_freshness_all()}</Select.Item>
@@ -1246,9 +1267,9 @@ function allowanceErrorMessage(category: ProviderAllowanceErrorCategory): string
         <section class="allowance-matrix-section route-section min-w-0" aria-labelledby="allowance-matrix-title">
           <h2 id="allowance-matrix-title" class="sr-only">{m.allowances_matrix_title()}</h2>
           {#if visibleProviders.length === 0}
-            <Empty.Root class="p-8"
-              ><Empty.Header><Empty.Description>{m.allowances_filter_empty()}</Empty.Description></Empty.Header
-              ></Empty.Root>
+            <Empty.Root class="p-8">
+              <Empty.Header><Empty.Description>{m.allowances_filter_empty()}</Empty.Description></Empty.Header>
+            </Empty.Root>
           {:else}
             <ul class="border-t border-border/60" aria-label={m.allowances_matrix_title()}>
               {#each visibleProviders as provider (provider.target.provider_id)}

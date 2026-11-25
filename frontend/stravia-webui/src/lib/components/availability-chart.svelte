@@ -253,23 +253,25 @@ function onkeydown(event: KeyboardEvent) {
               <dt>{m.stats_final_success_rate()}</dt>
               <dd class="text-right">
                 <span class="block">{rateText(point.final)}</span>
-                <span class="block text-muted-foreground"
-                  >{m.stats_availability_final_reading({
+                <span class="block text-muted-foreground">
+                  {m.stats_availability_final_reading({
                     failed: formatCompactCount(point.failedRequests),
                     total: formatCompactCount(point.terminalRequests),
-                  })}</span>
+                  })}
+                </span>
               </dd>
               <dt>{m.stats_first_pass_success_rate()}</dt>
               <dd class="text-right">
                 <span class="block">{rateText(point.firstPass)}</span>
                 {#if point.firstPass != null}
-                  <span class="block text-muted-foreground"
-                    >{m.stats_availability_first_pass_reading({
+                  <span class="block text-muted-foreground">
+                    {m.stats_availability_first_pass_reading({
                       passed: formatCompactCount(
                         point.terminalRequests - point.failedRequests - point.recoveredRequests,
                       ),
                       total: formatCompactCount(point.terminalRequests),
-                    })}</span>
+                    })}
+                  </span>
                 {/if}
               </dd>
               <dt>{m.stats_recovered_request_count()}</dt>
@@ -277,22 +279,24 @@ function onkeydown(event: KeyboardEvent) {
                 {#if point.firstPass == null}
                   <span class="block">—</span>
                 {:else}
-                  <span class="block"
-                    >{m.stats_recovery_gain({
+                  <span class="block">
+                    {m.stats_recovery_gain({
                       count: formatCompactCount(point.recoveredRequests),
                       points: gainText(point.recoveryGainPoints),
-                    })}</span>
+                    })}
+                  </span>
                 {/if}
               </dd>
               <dt>{m.stats_upstream_attempts()}</dt>
               <dd class="text-right">
                 <span class="block">{formatCompactCount(point.upstreamRequests)}</span>
-                <span class="block text-muted-foreground"
-                  >{m.stats_upstream_attempt_success_rate()}: {rateText(point.upstreamAttemptSuccess)} ·
+                <span class="block text-muted-foreground">
+                  {m.stats_upstream_attempt_success_rate()}: {rateText(point.upstreamAttemptSuccess)} ·
                   {m.stats_availability_upstream_reading({
                     errors: formatCompactCount(point.upstreamErrors),
                     total: formatCompactCount(point.upstreamRequests),
-                  })}</span>
+                  })}
+                </span>
               </dd>
             </dl>
             {#if point.firstPass == null && point.final != null}

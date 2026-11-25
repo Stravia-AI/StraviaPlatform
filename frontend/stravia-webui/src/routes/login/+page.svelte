@@ -90,9 +90,9 @@ async function submit(): Promise<void> {
               aria-invalid={error ? true : undefined} />
             {#if error}<Field.FieldError id="login-password-error">{error}</Field.FieldError>{/if}
           </Field.Field>
-          <Button class="w-full" type="submit" disabled={submitting || !username.trim() || !password}
-            >{#if submitting}<Spinner
-                data-icon="inline-start" />{m.login_signing_in()}{:else}{m.login_sign()}{/if}</Button>
+          <Button class="w-full" type="submit" disabled={submitting || !username.trim() || !password}>
+            {#if submitting}<Spinner data-icon="inline-start" />{m.login_signing_in()}{:else}{m.login_sign()}{/if}
+          </Button>
         </Field.FieldGroup>
       </form>
     </section>

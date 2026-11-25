@@ -725,20 +725,21 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
     <span class="flex min-w-0 items-center gap-2">
       {#if row.source}<span class="truncate">{row.source.repository}</span>
         {#if row.source.official}<Badge variant="outline" class="shrink-0">{m.plugin_sources_official()}</Badge>{/if}
-      {:else if row.installed?.origin}<span class="truncate text-muted-foreground"
-          >{row.installed.origin.repository}</span>
+      {:else if row.installed?.origin}<span class="truncate text-muted-foreground">
+          {row.installed.origin.repository}
+        </span>
       {:else if row.installed}<span class="text-muted-foreground">{sourceLabel(row.installed.source)}</span>{/if}
     </span>
-    {#if isBundledOfficial(row)}<span class="shrink-0 text-xs text-muted-foreground"
-        >{sourceLabel(row.installed.source)}</span
-      >{/if}
+    {#if isBundledOfficial(row)}<span class="shrink-0 text-xs text-muted-foreground">
+        {sourceLabel(row.installed.source)}
+      </span>{/if}
   </span>
 {/snippet}
 {#snippet marketInstalled(context: DataTableCellContext<MarketRow>)}
   {@const version = attachedVersion(context.row.original)}
-  {#if version}<span class="font-technical tabular-nums">{version}</span>{:else}<span class="text-muted-foreground"
-      >—</span
-    >{/if}
+  {#if version}<span class="font-technical tabular-nums">{version}</span>{:else}<span class="text-muted-foreground">
+      —
+    </span>{/if}
 {/snippet}
 {#snippet marketAvailable(context: DataTableCellContext<MarketRow>)}
   {@const release = rowRelease(context.row.original)}
@@ -770,7 +771,9 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
         size="sm"
         variant={rowStatus(row).primary ? 'default' : 'outline'}
         disabled={preparing || !row.source?.enabled || release.conflict || !release.compatible || !!row.source?.error}
-        onclick={() => prepare(row, release)}>{actionLabel(row)}</Button>
+        onclick={() => prepare(row, release)}>
+        {actionLabel(row)}
+      </Button>
     {/if}
     <Button
       size="sm"
@@ -778,24 +781,29 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       onclick={() => {
         detailKey = row.key
         detailOpen = true
-      }}>{m.vendor_plugins_details()}</Button>
+      }}>
+      {m.vendor_plugins_details()}
+    </Button>
   </div>
 {/snippet}
 {#snippet pageActions()}
-  <Button variant="outline" disabled={refreshing} onclick={refreshMarket}
-    >{#if refreshing}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
-        data-icon="inline-start" />{/if}{m.market_check_updates()}</Button>
+  <Button variant="outline" disabled={refreshing} onclick={refreshMarket}>
+    {#if refreshing}<Spinner data-icon="inline-start" />{:else}<RefreshCwIcon
+        data-icon="inline-start" />{/if}{m.market_check_updates()}
+  </Button>
   <Button variant="outline" onclick={() => (sourceOpen = true)}>{m.plugin_sources_title()}</Button>
   <DropdownMenu.Root>
     <DropdownMenu.Trigger>
       {#snippet child({ props })}
-        <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}
-          ><MoreHorizontalIcon /></Button>
+        <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}>
+          <MoreHorizontalIcon />
+        </Button>
       {/snippet}
     </DropdownMenu.Trigger>
     <DropdownMenu.Content class="w-48" align="end">
-      <DropdownMenu.Item disabled={importBusy} onSelect={pickPluginFile}
-        ><UploadIcon />{m.vendor_plugins_import_title()}</DropdownMenu.Item>
+      <DropdownMenu.Item disabled={importBusy} onSelect={pickPluginFile}>
+        <UploadIcon />{m.vendor_plugins_import_title()}
+      </DropdownMenu.Item>
     </DropdownMenu.Content>
   </DropdownMenu.Root>
 {/snippet}
@@ -826,17 +834,18 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
   {#if marketQuery.error}<RequestFailure
       message={localizeBackendErrorMessage(marketQuery.error)}
       retry={() => marketQuery.refetch()} />{/if}
-  {#if refreshError || importError || prepareError}<Alert.Root variant="destructive"
-      ><CircleAlertIcon /><Alert.Description>{refreshError ?? importError ?? prepareError}</Alert.Description
-      ></Alert.Root
-    >{/if}
+  {#if refreshError || importError || prepareError}<Alert.Root variant="destructive">
+      <CircleAlertIcon /><Alert.Description>{refreshError ?? importError ?? prepareError}</Alert.Description>
+    </Alert.Root>{/if}
   <section class="route-section vendor-plugins-workspace">
     <Tabs.Root bind:value={() => tab, selectTab}>
       <Tabs.List aria-label={m.vendor_plugins_title()}>
         <Tabs.Trigger value="all">{m.market_all()}</Tabs.Trigger>
         <Tabs.Trigger value="installed">{m.market_installed()}</Tabs.Trigger>
-        <Tabs.Trigger value="updates"
-          >{m.market_updates()} <Badge variant="outline">{marketQuery.data?.update_count ?? 0}</Badge></Tabs.Trigger>
+        <Tabs.Trigger value="updates">
+          {m.market_updates()}
+          <Badge variant="outline">{marketQuery.data?.update_count ?? 0}</Badge>
+        </Tabs.Trigger>
       </Tabs.List>
     </Tabs.Root>
     <div class="flex flex-wrap gap-2">
@@ -923,8 +932,8 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
 <PluginSources
   bind:open={sourceOpen}
   onchanged={() => queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] })} />
-<Sheet.Root bind:open={detailOpen}
-  ><Sheet.Content
+<Sheet.Root bind:open={detailOpen}>
+  <Sheet.Content
     bind:ref={detailContent}
     side="right"
     class="w-full! gap-0 sm:max-w-2xl!"
@@ -947,7 +956,9 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                 <button
                   type="button"
                   class="min-w-0 truncate text-primary underline-offset-4 hover:underline"
-                  onclick={() => void openExternalUrl(row.source!.url)}>{row.source.repository}</button>
+                  onclick={() => void openExternalUrl(row.source!.url)}>
+                  {row.source.repository}
+                </button>
                 {#if row.source.official}<Badge variant="outline">{m.plugin_sources_official()}</Badge>{/if}
               </dd>
               <dt>{m.plugin_sources_fingerprint()}</dt>
@@ -969,9 +980,9 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                   <button
                     type="button"
                     class="font-technical text-primary underline-offset-4 hover:underline"
-                    onclick={() => void openExternalUrl(row.installed!.origin!.release_url)}
-                    >{row.installed.origin.release_tag}</button
-                  >{:else}{sourceLabel(row.installed.source)}{/if}
+                    onclick={() => void openExternalUrl(row.installed!.origin!.release_url)}>
+                    {row.installed.origin.release_tag}
+                  </button>{:else}{sourceLabel(row.installed.source)}{/if}
                 {#if row.installed.source === 'local'}<p class="text-xs text-muted-foreground">
                     {m.market_local_unverified()}
                   </p>{/if}
@@ -1005,7 +1016,9 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                     <button
                       type="button"
                       class="font-technical text-primary tabular-nums underline-offset-4 hover:underline"
-                      onclick={() => void openExternalUrl(version.release_url)}>{version.version}</button>
+                      onclick={() => void openExternalUrl(version.release_url)}>
+                      {version.version}
+                    </button>
                     <span class="text-xs text-muted-foreground tabular-nums">
                       · {new Date(version.published_at).toLocaleDateString()} · {formatSize(version.artifact.size)}
                     </span>
@@ -1022,27 +1035,32 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                         !!row.source?.error ||
                         version.conflict ||
                         !version.compatible}
-                      onclick={() => prepare(row, version)}>{m.market_install_version()}</Button
-                    >{/if}
+                      onclick={() => prepare(row, version)}>
+                      {m.market_install_version()}
+                    </Button>{/if}
                 </li>{/each}
             </ul>
           </section>{/if}
         {#if row.installed?.error}<RequestFailure message={row.installed.error} />{/if}
         {#if restoreError?.vendorId === row.vendorId}<RequestFailure message={restoreError.message} />{/if}
       </div>
-      <Sheet.Footer class="border-t"
-        >{#if row.installed?.pending_update}<Button onclick={() => showPreview(row.installed!.pending_update!)}
-            >{m.vendor_plugins_review_update()}</Button
-          >{/if}{#if row.installed && canRestoreBuiltin(row.installed)}<Button
+      <Sheet.Footer class="border-t">
+        {#if row.installed?.pending_update}<Button onclick={() => showPreview(row.installed!.pending_update!)}>
+            {m.vendor_plugins_review_update()}
+          </Button>{/if}{#if row.installed && canRestoreBuiltin(row.installed)}<Button
             variant="outline"
             disabled={restoringVendorId === row.vendorId}
-            onclick={() => restoreBuiltin(row.vendorId)}>{m.vendor_plugins_restore_builtin()}</Button
-          >{/if}{#if row.installed && canUninstall(row.installed)}<Button
+            onclick={() => restoreBuiltin(row.vendorId)}>
+            {m.vendor_plugins_restore_builtin()}
+          </Button>{/if}{#if row.installed && canUninstall(row.installed)}<Button
             variant="outline"
-            onclick={() => openUninstall(row.installed!)}>{m.vendor_plugins_uninstall_action()}</Button
-          >{/if}</Sheet.Footer>
+            onclick={() => openUninstall(row.installed!)}>
+            {m.vendor_plugins_uninstall_action()}
+          </Button>{/if}
+      </Sheet.Footer>
     {/if}
-  </Sheet.Content></Sheet.Root>
+  </Sheet.Content>
+</Sheet.Root>
 
 <AlertDialog.Root bind:open={() => uninstallOpen, setUninstallOpen}>
   {#if uninstallTarget}
@@ -1123,9 +1141,9 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
                 <button
                   type="button"
                   class="font-technical text-primary underline-offset-4 hover:underline"
-                  onclick={() => void openExternalUrl(preview!.origin!.release_url)}
-                  >{preview.origin.release_tag}</button
-                >{:else}{sourceLabel(preview.target_source)}{/if}
+                  onclick={() => void openExternalUrl(preview!.origin!.release_url)}>
+                  {preview.origin.release_tag}
+                </button>{:else}{sourceLabel(preview.target_source)}{/if}
             </dd>
             {#if preview.origin}
               <dt>{m.plugin_sources_fingerprint()}</dt>
@@ -1317,8 +1335,9 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       </div>
 
       {#snippet footer()}
-        <Button bind:ref={previewCancel} variant="outline" disabled={confirming} onclick={() => setPreviewOpen(false)}
-          >{m.common_cancel()}</Button>
+        <Button bind:ref={previewCancel} variant="outline" disabled={confirming} onclick={() => setPreviewOpen(false)}>
+          {m.common_cancel()}
+        </Button>
         <Button
           disabled={confirming || (dataDiscardRequired && !allowDataDiscard)}
           aria-busy={confirming}

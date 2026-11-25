@@ -241,19 +241,23 @@ async function deleteKey(): Promise<void> {
           {...props}
           size="icon-sm"
           variant="ghost"
-          aria-label={m.api_keys_more_actions_value({ name: apiKey.name })}><MoreHorizontalIcon /></Button>
+          aria-label={m.api_keys_more_actions_value({ name: apiKey.name })}>
+          <MoreHorizontalIcon />
+        </Button>
       {/snippet}
     </DropdownMenu.Trigger>
     <DropdownMenu.Content class="w-48" align="end">
-      <DropdownMenu.Group
-        ><DropdownMenu.Item onSelect={() => void toggleKey(apiKey)} disabled={actingKeyId === apiKey.id}
-          >{apiKey.is_enabled ? m.api_keys_disable_api_key() : m.api_keys_enable_api_key()}</DropdownMenu.Item
-        ></DropdownMenu.Group>
+      <DropdownMenu.Group>
+        <DropdownMenu.Item onSelect={() => void toggleKey(apiKey)} disabled={actingKeyId === apiKey.id}>
+          {apiKey.is_enabled ? m.api_keys_disable_api_key() : m.api_keys_enable_api_key()}
+        </DropdownMenu.Item>
+      </DropdownMenu.Group>
       <DropdownMenu.Separator />
-      <DropdownMenu.Group
-        ><DropdownMenu.Item variant="destructive" onSelect={() => askDelete(apiKey)}
-          >{m.api_keys_delete_api_key()}</DropdownMenu.Item
-        ></DropdownMenu.Group>
+      <DropdownMenu.Group>
+        <DropdownMenu.Item variant="destructive" onSelect={() => askDelete(apiKey)}>
+          {m.api_keys_delete_api_key()}
+        </DropdownMenu.Item>
+      </DropdownMenu.Group>
     </DropdownMenu.Content>
   </DropdownMenu.Root>
 {/snippet}
@@ -298,10 +302,11 @@ async function deleteKey(): Promise<void> {
           </div>{/each}
       </div>
     {:else if resourcesEmpty}
-      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10"
-        ><Empty.Header><Empty.Title>{m.api_keys_no_api_keys_created()}</Empty.Title></Empty.Header><Empty.Content
-          ><Button onclick={openCreate}>{m.api_keys_create_first_api_key()}</Button></Empty.Content
-        ></Empty.Root>
+      <Empty.Root class="mx-auto my-auto w-full max-w-xl py-10">
+        <Empty.Header><Empty.Title>{m.api_keys_no_api_keys_created()}</Empty.Title></Empty.Header><Empty.Content>
+          <Button onclick={openCreate}>{m.api_keys_create_first_api_key()}</Button>
+        </Empty.Content>
+      </Empty.Root>
     {:else if apiKeysQuery.data !== undefined && modelsQuery.data !== undefined}
       <div class="route-desktop-table min-h-0 flex-1">
         <DataTable
@@ -323,16 +328,20 @@ async function deleteKey(): Promise<void> {
             <button type="button" class="min-w-0 cursor-pointer text-start" onclick={() => openEditor(apiKey)}>
               <span class="block truncate font-medium">{apiKey.name}</span>
               <span class="block font-technical mt-1 text-xs text-muted-foreground">{maskedKey(apiKey.key)}</span>
-              <span class="block font-technical mt-2 text-xs text-muted-foreground tabular-nums"
-                >{limitsLabel(apiKey)}</span>
-              <span class="block font-technical mt-1 text-xs text-muted-foreground tabular-nums"
-                >{m.api_keys_available_balance()}: {balanceLabel(apiKey)}</span>
+              <span class="block font-technical mt-2 text-xs text-muted-foreground tabular-nums">
+                {limitsLabel(apiKey)}
+              </span>
+              <span class="block font-technical mt-1 text-xs text-muted-foreground tabular-nums">
+                {m.api_keys_available_balance()}: {balanceLabel(apiKey)}
+              </span>
               <span class="mt-1 flex flex-wrap items-center gap-x-3">
                 <StatusIndicator
                   compact
                   label={apiKey.is_enabled ? m.common_enabled_status() : m.common_disabled_status()}
                   tone={apiKey.is_enabled ? 'healthy' : 'neutral'} /><span
-                  class="font-technical text-xs text-muted-foreground">{expirationLabel(apiKey.expires_at)}</span>
+                  class="font-technical text-xs text-muted-foreground">
+                  {expirationLabel(apiKey.expires_at)}
+                </span>
               </span>
             </button>
             <div class="flex items-start gap-1">{@render keyActions(apiKey)}</div>
@@ -365,8 +374,9 @@ async function deleteKey(): Promise<void> {
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={() => void deleteKey()}
-        >{m.api_keys_delete_api_key_label()}</AlertDialog.Action>
+      <AlertDialog.Action variant="destructive" onclick={() => void deleteKey()}>
+        {m.api_keys_delete_api_key_label()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

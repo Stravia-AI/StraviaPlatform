@@ -182,7 +182,9 @@ async function downloadPerformance(): Promise<void> {
           variant="destructive"
           size="sm"
           disabled={clearingDebug || changingDebug || debugQuery.isFetching}
-          onclick={() => (debugClearOpen = true)}>{m.observation_clear_debug()}</Button>
+          onclick={() => (debugClearOpen = true)}>
+          {m.observation_clear_debug()}
+        </Button>
       </SettingRow>
     {/if}
   {:else}

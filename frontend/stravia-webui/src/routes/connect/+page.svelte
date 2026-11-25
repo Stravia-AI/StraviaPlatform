@@ -346,14 +346,17 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
   <div class="flex flex-wrap gap-2">
     {#if selected}
       {#if apiKeys.length > 0}
-        <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys')}
-          >{m.connect_manage_api_keys()}</Button>
+        <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys')}>
+          {m.connect_manage_api_keys()}
+        </Button>
       {/if}
-      <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys', true)}
-        >{m.connect_create_an_api_key()}</Button>
+      <Button variant="ghost" size="sm" onclick={() => manageResource('/api-keys', true)}>
+        {m.connect_create_an_api_key()}
+      </Button>
     {:else}
-      <Button variant="outline" onclick={() => manageResource('/api-keys', true)}
-        >{m.connect_create_an_api_key()}</Button>
+      <Button variant="outline" onclick={() => manageResource('/api-keys', true)}>
+        {m.connect_create_an_api_key()}
+      </Button>
       {#if apiKeys.length > 0}
         <Button variant="ghost" onclick={() => manageResource('/api-keys')}>{m.connect_manage_api_keys()}</Button>
       {/if}
@@ -389,8 +392,9 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
 
       <Tabs.Root bind:value={() => tab, selectTab} class="min-h-0 flex-1">
         <Tabs.List class="shrink-0" aria-label={m.connect_setup_format()}>
-          <Tabs.Trigger value="cli"
-            ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>
+          <Tabs.Trigger value="cli">
+            <TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}
+          </Tabs.Trigger>
           <Tabs.Trigger value="code"><Code2Icon data-icon="inline-start" />{m.connect_code()}</Tabs.Trigger>
           <Tabs.Trigger value="mcp"><BlocksIcon data-icon="inline-start" />{m.connect_mcp_tab()}</Tabs.Trigger>
         </Tabs.List>
@@ -405,14 +409,16 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
               <Field.FieldGroup>
                 <ConnectControlRow label={m.connect_client()} labelFor="cli-tool" hint={selectedTool.description()}>
                   <Select.Root type="single" bind:value={cliToolId}>
-                    <Select.Trigger id="cli-tool" class="w-full min-w-0"
-                      ><span class="truncate">{selectedTool.name}</span></Select.Trigger>
-                    <Select.Content
-                      ><Select.Group
-                        >{#each CLI_TOOLS as tool (tool.id)}<Select.Item value={tool.id} label={tool.name}
-                            >{tool.name}</Select.Item
-                          >{/each}</Select.Group
-                      ></Select.Content>
+                    <Select.Trigger id="cli-tool" class="w-full min-w-0">
+                      <span class="truncate">{selectedTool.name}</span>
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        {#each CLI_TOOLS as tool (tool.id)}<Select.Item value={tool.id} label={tool.name}>
+                            {tool.name}
+                          </Select.Item>{/each}
+                      </Select.Group>
+                    </Select.Content>
                   </Select.Root>
                 </ConnectControlRow>
                 <ConnectControlRow
@@ -430,18 +436,20 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                       }
                     }
                     disabled={cliKeys.length === 0}>
-                    <Select.Trigger id="cli-key" class="w-full min-w-0"
-                      ><span class="truncate"
-                        >{selectedCliKey
+                    <Select.Trigger id="cli-key" class="w-full min-w-0">
+                      <span class="truncate">
+                        {selectedCliKey
                           ? `${selectedCliKey.name} · ${maskApiKey(selectedCliKey.key)}`
-                          : m.connect_select_api_key()}</span
-                      ></Select.Trigger>
-                    <Select.Content
-                      ><Select.Group
-                        >{#each cliKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
-                            >{key.name} · {maskApiKey(key.key)}</Select.Item
-                          >{/each}</Select.Group
-                      ></Select.Content>
+                          : m.connect_select_api_key()}
+                      </span>
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        {#each cliKeys as key (key.id)}<Select.Item value={key.id} label={key.name}>
+                            {key.name} · {maskApiKey(key.key)}
+                          </Select.Item>{/each}
+                      </Select.Group>
+                    </Select.Content>
                   </Select.Root>
                   {#snippet below()}
                     {@render keyActions(selectedCliKey !== undefined)}
@@ -473,21 +481,23 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                     {#if isTauri}
                       <Button
                         onclick={() => void applySelectedClient()}
-                        disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}
-                        >{#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
+                        disabled={!connectClientInput || !connectPlanQuery.data || applyingClient}>
+                        {#if applyingClient}<Spinner data-icon="inline-start" />{:else}<CheckIcon
                             data-icon="inline-start" />{/if}{applyingClient
                           ? m.connect_applying()
                           : cliToolId === 'chatgpt'
                             ? m.connect_apply_both()
-                            : m.connect_apply()}</Button>
+                            : m.connect_apply()}
+                      </Button>
                     {/if}
                     <Button
                       variant={isTauri ? 'outline' : 'default'}
                       onclick={copyGeneratedCliConfig}
-                      disabled={!generatedCliConfig}
-                      ><ClipboardCopyIcon data-icon="inline-start" />{cliToolId === 'chatgpt'
+                      disabled={!generatedCliConfig}>
+                      <ClipboardCopyIcon data-icon="inline-start" />{cliToolId === 'chatgpt'
                         ? m.connect_copy_both()
-                        : m.connect_copy_configuration()}</Button>
+                        : m.connect_copy_configuration()}
+                    </Button>
                   </div>
                   {#if cliToolId === 'chatgpt'}
                     <p class="text-sm">{m.connect_chatgpt_shared_config()}</p>
@@ -508,18 +518,18 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
               {#if generatedCliConfig}
                 <pre class="route-code-plane min-h-96 flex-1">{generatedCliConfig}</pre>
               {:else if !connectPlanQuery.isError}
-                <Empty.Root class="min-h-72 border-y"
-                  ><Empty.Header
-                    >{#if models.length === 0}
+                <Empty.Root class="min-h-72 border-y">
+                  <Empty.Header>
+                    {#if models.length === 0}
                       <Empty.Title>{m.connect_add_model_first()}</Empty.Title>
-                      <Empty.Description
-                        >{m.connect_connect_model_service_add_model_generating_code()}</Empty.Description>
+                      <Empty.Description>
+                        {m.connect_connect_model_service_add_model_generating_code()}
+                      </Empty.Description>
                     {:else if cliKeys.length === 0}
                       <Empty.Title>{m.connect_no_eligible_key()}</Empty.Title>
-                      <Empty.Description
-                        >{apiKeys.length
-                          ? m.connect_no_eligible_key_description()
-                          : m.connect_create_key_description()}</Empty.Description>
+                      <Empty.Description>
+                        {apiKeys.length ? m.connect_no_eligible_key_description() : m.connect_create_key_description()}
+                      </Empty.Description>
                     {:else if !selectedCliKey}
                       <Empty.Title>{m.connect_select_api_key()}</Empty.Title>
                       <Empty.Description>{m.connect_select_api_key_client_description()}</Empty.Description>
@@ -531,10 +541,11 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                       <Empty.Description>{m.connect_complete_model_mappings_description()}</Empty.Description>
                     {:else}
                       <Empty.Title>{m.connect_loading_global_config()}</Empty.Title>
-                    {/if}</Empty.Header
-                  >{#if models.length === 0}<Empty.Content
-                      ><Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button></Empty.Content
-                    >{/if}</Empty.Root>
+                    {/if}
+                  </Empty.Header>{#if models.length === 0}<Empty.Content>
+                      <Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button>
+                    </Empty.Content>{/if}
+                </Empty.Root>
               {/if}
             </section>
           </div>
@@ -553,17 +564,20 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                   labelFor="code-protocol"
                   hint={codeProtocols.find((protocol) => protocol.id === codeProtocol)?.path}>
                   <Select.Root type="single" bind:value={codeProtocol}>
-                    <Select.Trigger id="code-protocol" class="w-full min-w-0"
-                      ><span class="truncate"
-                        >{codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}</span
-                      ></Select.Trigger>
-                    <Select.Content
-                      ><Select.Group
-                        >{#each codeProtocols as protocol (protocol.id)}<Select.Item
+                    <Select.Trigger id="code-protocol" class="w-full min-w-0">
+                      <span class="truncate">
+                        {codeProtocols.find((protocol) => protocol.id === codeProtocol)?.name}
+                      </span>
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        {#each codeProtocols as protocol (protocol.id)}<Select.Item
                             value={protocol.id}
-                            label={protocol.name}>{protocol.name}</Select.Item
-                          >{/each}</Select.Group
-                      ></Select.Content>
+                            label={protocol.name}>
+                            {protocol.name}
+                          </Select.Item>{/each}
+                      </Select.Group>
+                    </Select.Content>
                   </Select.Root>
                 </ConnectControlRow>
                 <ConnectControlRow label={m.common_model()} labelFor="code-model">
@@ -586,18 +600,20 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                       }
                     }
                     disabled={codeKeys.length === 0}>
-                    <Select.Trigger id="code-key" class="w-full min-w-0"
-                      ><span class="truncate"
-                        >{selectedCodeKey
+                    <Select.Trigger id="code-key" class="w-full min-w-0">
+                      <span class="truncate">
+                        {selectedCodeKey
                           ? `${selectedCodeKey.name} · ${maskApiKey(selectedCodeKey.key)}`
-                          : m.connect_select_api_key()}</span
-                      ></Select.Trigger>
-                    <Select.Content
-                      ><Select.Group
-                        >{#each codeKeys as key (key.id)}<Select.Item value={key.id} label={key.name}
-                            >{key.name} · {maskApiKey(key.key)}</Select.Item
-                          >{/each}</Select.Group
-                      ></Select.Content>
+                          : m.connect_select_api_key()}
+                      </span>
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Group>
+                        {#each codeKeys as key (key.id)}<Select.Item value={key.id} label={key.name}>
+                            {key.name} · {maskApiKey(key.key)}
+                          </Select.Item>{/each}
+                      </Select.Group>
+                    </Select.Content>
                   </Select.Root>
                   {#snippet below()}
                     {#if !codeModel && models.length > 0}
@@ -616,18 +632,15 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                 <h2 id="code-output-title" class="route-section-title">
                   {m.connect_generated_request()}
                 </h2>
-                <Button onclick={copyGeneratedCode} disabled={!codeModel || !selectedCodeKey}
-                  ><ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}</Button>
+                <Button onclick={copyGeneratedCode} disabled={!codeModel || !selectedCodeKey}>
+                  <ClipboardCopyIcon data-icon="inline-start" />{m.common_copy()}
+                </Button>
               </div>
               <Tabs.Root bind:value={codeLanguage} class="min-h-0 flex-1">
                 <Tabs.List class="shrink-0" aria-label={m.connect_code_language()}>
-                  {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}
-                      >{language === 'typescript'
-                        ? 'TypeScript'
-                        : language === 'python'
-                          ? 'Python'
-                          : 'cURL'}</Tabs.Trigger
-                    >{/each}
+                  {#each ['python', 'typescript', 'curl'] as language (language)}<Tabs.Trigger value={language}>
+                      {language === 'typescript' ? 'TypeScript' : language === 'python' ? 'Python' : 'cURL'}
+                    </Tabs.Trigger>{/each}
                 </Tabs.List>
                 <Tabs.Content value={codeLanguage} class="mt-3 min-h-0 data-active:flex data-active:flex-col">
                   {#if codeModel}
@@ -636,30 +649,33 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
                       <Alert.Root class="mt-3 shrink-0" variant="warning" role="status">
                         {#if codeKeys.length === 0}
                           <Alert.Title>{m.connect_no_eligible_key()}</Alert.Title>
-                          <Alert.Description
-                            >{apiKeys.length
+                          <Alert.Description>
+                            {apiKeys.length
                               ? m.connect_no_eligible_key_description()
-                              : m.connect_create_key_description()}</Alert.Description>
+                              : m.connect_create_key_description()}
+                          </Alert.Description>
                         {:else}
-                          <Alert.Description
-                            >{m.connect_select_api_key_using_sample_current_output_contains()}</Alert.Description>
+                          <Alert.Description>
+                            {m.connect_select_api_key_using_sample_current_output_contains()}
+                          </Alert.Description>
                         {/if}
                       </Alert.Root>
                     {/if}
                   {:else}
-                    <Empty.Root class="min-h-72 border-y"
-                      ><Empty.Header
-                        >{#if models.length}
+                    <Empty.Root class="min-h-72 border-y">
+                      <Empty.Header>
+                        {#if models.length}
                           <Empty.Title>{m.common_select_model()}</Empty.Title>
                         {:else}
                           <Empty.Title>{m.connect_add_model_first()}</Empty.Title>
-                          <Empty.Description
-                            >{m.connect_connect_model_service_add_model_generating_code()}</Empty.Description>
-                        {/if}</Empty.Header
-                      >{#if models.length === 0}<Empty.Content
-                          ><Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button
-                          ></Empty.Content
-                        >{/if}</Empty.Root>
+                          <Empty.Description>
+                            {m.connect_connect_model_service_add_model_generating_code()}
+                          </Empty.Description>
+                        {/if}
+                      </Empty.Header>{#if models.length === 0}<Empty.Content>
+                          <Button onclick={() => manageResource('/models')}>{m.connect_go_models()}</Button>
+                        </Empty.Content>{/if}
+                    </Empty.Root>
                   {/if}
                 </Tabs.Content>
               </Tabs.Root>

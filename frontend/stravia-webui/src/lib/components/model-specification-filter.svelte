@@ -84,10 +84,11 @@ function toggle<T extends string>(selected: T[], key: T, checked: boolean): T[] 
   {#each ['inputModalities', 'outputModalities'] as direction (direction)}
     {@const key = direction as 'inputModalities' | 'outputModalities'}
     <Field.FieldSet>
-      <Field.FieldLegend
-        >{key === 'inputModalities'
+      <Field.FieldLegend>
+        {key === 'inputModalities'
           ? m.model_specification_input_modalities()
-          : m.model_specification_output_modalities()}</Field.FieldLegend>
+          : m.model_specification_output_modalities()}
+      </Field.FieldLegend>
       <Field.FieldGroup class="grid grid-cols-2 gap-2">
         {#each specificationModalities as modality (modality.key)}
           <Field.Field orientation="horizontal">
@@ -96,10 +97,9 @@ function toggle<T extends string>(selected: T[], key: T, checked: boolean): T[] 
               checked={value[key].includes(modality.key)}
               onCheckedChange={(checked) =>
                 onChange({ ...value, [key]: toggle(value[key], modality.key, checked === true) })} />
-            <Field.FieldLabel for={`${id}-${key}-${modality.key}`} class="gap-1.5"
-              ><modality.icon
-                class="size-3.5 shrink-0 text-muted-foreground"
-                aria-hidden="true" />{modality.label()}</Field.FieldLabel>
+            <Field.FieldLabel for={`${id}-${key}-${modality.key}`} class="gap-1.5">
+              <modality.icon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />{modality.label()}
+            </Field.FieldLabel>
           </Field.Field>
         {/each}
       </Field.FieldGroup>

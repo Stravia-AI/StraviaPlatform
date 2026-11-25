@@ -25,9 +25,5 @@ export async function syncQueryParams(
   if (sameRelativeUrl(current, next)) return
   const shallow = options.shallow ?? false
   const href = `${next.pathname.slice(resolve('').length)}${next.search}${next.hash}` as Path
-  await goto(resolve(href), {
-    replace: options.replace ?? true,
-    shallow,
-    reset: false,
-  })
+  await goto(resolve(href), { replace: options.replace ?? true, shallow, reset: false })
 }

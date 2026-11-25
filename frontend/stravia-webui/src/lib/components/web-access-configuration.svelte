@@ -384,7 +384,9 @@ async function deleteProvider(): Promise<void> {
                     onclick={() => {
                       deleteTarget = provider
                       deleteOpen = true
-                    }}>{m.web_access_configuration_delete()}</Button>
+                    }}>
+                    {m.web_access_configuration_delete()}
+                  </Button>
                 {/if}
               </div>
             </div>
@@ -424,13 +426,17 @@ async function deleteProvider(): Promise<void> {
           variant="ghost"
           disabled={settingsUnavailable || savingSettings || !provider.registered || orderIndex === 0}
           aria-label={m.web_access_configuration_move_value_up({ name: provider.name, capability: label })}
-          onclick={() => moveProvider(provider.id, capability, -1)}><ArrowUpIcon /></Button>
+          onclick={() => moveProvider(provider.id, capability, -1)}>
+          <ArrowUpIcon />
+        </Button>
         <Button
           size="icon-sm"
           variant="ghost"
           disabled={settingsUnavailable || savingSettings || !provider.registered || orderIndex === ids.length - 1}
           aria-label={m.web_access_configuration_move_value_down({ name: provider.name, capability: label })}
-          onclick={() => moveProvider(provider.id, capability, 1)}><ArrowDownIcon /></Button>
+          onclick={() => moveProvider(provider.id, capability, 1)}>
+          <ArrowDownIcon />
+        </Button>
       {/if}
     {:else}
       <span class="min-w-0 flex-1 text-sm text-muted-foreground" aria-hidden="true">{label}</span>
@@ -447,10 +453,11 @@ async function deleteProvider(): Promise<void> {
     closeLabel={m.common_close()}
     locked={editorGuard.busy}>
     <Sheet.Header class="border-b pr-12">
-      <Sheet.Title
-        >{editingProvider
+      <Sheet.Title>
+        {editingProvider
           ? m.web_access_configuration_edit_search_service()
-          : m.web_access_configuration_connect_search_service()}</Sheet.Title>
+          : m.web_access_configuration_connect_search_service()}
+      </Sheet.Title>
     </Sheet.Header>
     <form
       class="route-overlay-form"
@@ -465,8 +472,9 @@ async function deleteProvider(): Promise<void> {
             <Input id="web-provider-name" bind:value={editorName} disabled={savingEditor} required />
           </Field.Field>
           <Field.Field>
-            <Field.Label for="web-provider-kind" hint={m.web_access_configuration_account_help()}
-              >{m.web_access_configuration_service()}</Field.Label>
+            <Field.Label for="web-provider-kind" hint={m.web_access_configuration_account_help()}>
+              {m.web_access_configuration_service()}
+            </Field.Label>
             <Select.Root
               type="single"
               value={editorKind}
@@ -476,15 +484,17 @@ async function deleteProvider(): Promise<void> {
                 editorSecret = ''
                 editorError = ''
               }}>
-              <Select.Trigger id="web-provider-kind" class="w-full"
-                >{editorKind ? formatKindLabel(editorKind) : ''}</Select.Trigger>
-              <Select.Content
-                ><Select.Group>
+              <Select.Trigger id="web-provider-kind" class="w-full">
+                {editorKind ? formatKindLabel(editorKind) : ''}
+              </Select.Trigger>
+              <Select.Content>
+                <Select.Group>
                   {#each editingProvider ? kinds : creatableKinds as descriptor (descriptor.kind)}
                     {@const label = formatKindLabel(descriptor.kind)}
                     <Select.Item value={descriptor.kind} {label}>{label}</Select.Item>
                   {/each}
-                </Select.Group></Select.Content>
+                </Select.Group>
+              </Select.Content>
             </Select.Root>
           </Field.Field>
           <Field.Field orientation="horizontal">
@@ -516,16 +526,18 @@ async function deleteProvider(): Promise<void> {
             </Field.Field>
           {/if}
         </Field.Group>
-        {#if editorError}<Alert.Root variant="destructive"
-            ><Alert.Description>{editorError}</Alert.Description></Alert.Root
-          >{/if}
+        {#if editorError}<Alert.Root variant="destructive">
+            <Alert.Description>{editorError}</Alert.Description>
+          </Alert.Root>{/if}
       </div>
       <Sheet.Footer class="route-overlay-footer pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <Button
           type="button"
           variant="outline"
           disabled={savingEditor}
-          onclick={() => editorGuard.request(() => (editorOpen = false))}>{m.common_cancel()}</Button>
+          onclick={() => editorGuard.request(() => (editorOpen = false))}>
+          {m.common_cancel()}
+        </Button>
         <Button type="submit" aria-busy={savingEditor} disabled={savingEditor}>
           {#if savingEditor}<Spinner data-icon="inline-start" />{/if}{m.web_access_configuration_save_service()}
         </Button>

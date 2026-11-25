@@ -105,11 +105,7 @@ let columnFilters = $state<ColumnFiltersState>([
 
 snapshot<ProviderModelCatalogSnapshot>({
   id: 'provider-model-catalog',
-  capture: () => ({
-    providerId,
-    search,
-    columnFilters: cloneColumnFilters(columnFilters),
-  }),
+  capture: () => ({ providerId, search, columnFilters: cloneColumnFilters(columnFilters) }),
   restore: (value) => {
     if (!value || value.providerId !== providerId) return
     search = typeof value.search === 'string' ? value.search : ''
@@ -642,8 +638,9 @@ function clearManualTemplate(): void {
   {#if references.length > 0}
     <a
       class="inline-flex w-fit items-center rounded-md px-2 py-1 text-sm font-medium hover:bg-muted"
-      href={resolve(`providers/${encodeURIComponent(providerId)}?view=routes`)}
-      >{m.provider_model_catalog_used_by_models({ count: references.length })}</a>
+      href={resolve(`providers/${encodeURIComponent(providerId)}?view=routes`)}>
+      {m.provider_model_catalog_used_by_models({ count: references.length })}
+    </a>
   {:else if routeReferencesReady}
     <button
       type="button"
@@ -672,17 +669,20 @@ function clearManualTemplate(): void {
   {:else}
     <Empty.Root>
       <Empty.Header>
-        <Empty.Description
-          >{models.length === 0
+        <Empty.Description>
+          {models.length === 0
             ? m.provider_model_catalog_no_models_available()
-            : m.provider_model_catalog_no_models_match_filters()}</Empty.Description>
+            : m.provider_model_catalog_no_models_match_filters()}
+        </Empty.Description>
       </Empty.Header>
       <Empty.Content>
         {#if models.length === 0}
-          <Button variant="outline" onclick={() => (manualOpen = true)}
-            >{m.provider_model_catalog_add_model_manually()}</Button>
-          <Button variant="outline" onclick={requestSync} disabled={syncing}
-            >{m.provider_model_catalog_sync_models()}</Button>
+          <Button variant="outline" onclick={() => (manualOpen = true)}>
+            {m.provider_model_catalog_add_model_manually()}
+          </Button>
+          <Button variant="outline" onclick={requestSync} disabled={syncing}>
+            {m.provider_model_catalog_sync_models()}
+          </Button>
         {:else if hasActiveFilters}
           <Button size="sm" variant="outline" onclick={clearFilters}>{m.provider_model_catalog_clear_filters()}</Button>
         {/if}
@@ -711,8 +711,9 @@ function clearManualTemplate(): void {
           : m.backend_error_catalog_model_not_found()}
         retry={modelEditing.readError ? () => editing.retry() : undefined}
         retrying={modelEditing.loading}>
-        <Button variant="outline" onclick={() => editing.close()} disabled={modelEditing.busy}
-          >{m.common_cancel()}</Button>
+        <Button variant="outline" onclick={() => editing.close()} disabled={modelEditing.busy}>
+          {m.common_cancel()}
+        </Button>
       </RequestFailure>
     {:else}
       <div class="route-section-header">
@@ -741,7 +742,9 @@ function clearManualTemplate(): void {
                 variant="ghost"
                 size="icon"
                 disabled={modelEditing.busy}
-                aria-label={m.provider_model_catalog_model_actions()}><MoreHorizontalIcon /></Button>
+                aria-label={m.provider_model_catalog_model_actions()}>
+                <MoreHorizontalIcon />
+              </Button>
             {/snippet}
           </DropdownMenu.Trigger>
           <DropdownMenu.Content align="end" class="w-max min-w-48 max-w-[calc(100vw-2rem)]">
@@ -752,12 +755,15 @@ function clearManualTemplate(): void {
                     resolve(
                       `models/new?provider=${encodeURIComponent(providerId)}&model=${encodeURIComponent(modelEditing.detail!.id)}`,
                     ),
-                  )}>{m.provider_model_catalog_use_new_model()}</DropdownMenu.Item>
+                  )}>
+                {m.provider_model_catalog_use_new_model()}
+              </DropdownMenu.Item>
 
               {#if modelEditing.detail.source_kind === 'manual'}
                 <DropdownMenu.Separator />
-                <DropdownMenu.Item variant="destructive" onSelect={() => editing.requestDelete()}
-                  >{m.provider_model_catalog_remove_manually_added_model()}</DropdownMenu.Item>
+                <DropdownMenu.Item variant="destructive" onSelect={() => editing.requestDelete()}>
+                  {m.provider_model_catalog_remove_manually_added_model()}
+                </DropdownMenu.Item>
               {/if}
             </DropdownMenu.Group>
           </DropdownMenu.Content>
@@ -797,8 +803,9 @@ function clearManualTemplate(): void {
           <StatusIndicator tone="warning" label={m.provider_model_editor_unsaved()} class="me-auto" />
         {/if}
         <div class="flex gap-2">
-          <Button variant="outline" onclick={() => editing.close()} disabled={modelEditing.busy || rpmSaving}
-            >{m.common_cancel()}</Button>
+          <Button variant="outline" onclick={() => editing.close()} disabled={modelEditing.busy || rpmSaving}>
+            {m.common_cancel()}
+          </Button>
           <Button
             onclick={saveModelDetail}
             disabled={modelEditing.busy || rpmSaving}
@@ -827,8 +834,9 @@ function clearManualTemplate(): void {
           </div>
         {/if}
         <div class="ms-auto flex flex-wrap gap-2">
-          <Button data-model-changes-trigger variant="outline" onclick={() => changesSheet.show(providerId)}
-            >{m.model_changes_title()}</Button>
+          <Button data-model-changes-trigger variant="outline" onclick={() => changesSheet.show(providerId)}>
+            {m.model_changes_title()}
+          </Button>
 
           <Button variant="outline" onclick={() => (manualOpen = true)}>
             <PlusIcon data-icon="inline-start" />
@@ -851,8 +859,9 @@ function clearManualTemplate(): void {
           {#if displayedSyncSummary}
             <p class="min-w-0 text-muted-foreground">
               {m.provider_model_catalog_last_checked()}
-              <time class="font-technical text-xs" datetime={displayedSyncSummary.checked_at}
-                >{formatLogTime(displayedSyncSummary.checked_at)}</time>
+              <time class="font-technical text-xs" datetime={displayedSyncSummary.checked_at}>
+                {formatLogTime(displayedSyncSummary.checked_at)}
+              </time>
               · {sourceLabel(displayedSyncSummary.source)}
               {#if summaryDescription(displayedSyncSummary)}
                 · <span class="text-foreground">{summaryDescription(displayedSyncSummary)}</span>{/if}
@@ -951,8 +960,9 @@ function clearManualTemplate(): void {
                 {#if references.length > 0}
                   <a
                     class="inline-flex items-center rounded-md px-2 py-1 text-sm font-medium hover:bg-muted"
-                    href={resolve(`providers/${encodeURIComponent(providerId)}?view=routes`)}
-                    >{m.provider_model_catalog_used_by_models({ count: references.length })}</a>
+                    href={resolve(`providers/${encodeURIComponent(providerId)}?view=routes`)}>
+                    {m.provider_model_catalog_used_by_models({ count: references.length })}
+                  </a>
                 {:else if routeReferencesReady}
                   <Button
                     type="button"
@@ -1000,8 +1010,9 @@ function clearManualTemplate(): void {
                 <div class="min-w-0">
                   <dt class="sr-only">{m.provider_model_catalog_how_models_were_added()}</dt>
                   <dd>
-                    <Badge variant="outline"
-                      >{model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}</Badge>
+                    <Badge variant="outline">
+                      {model.source_kind === 'manual' ? m.common_added_manually() : m.common_synced()}
+                    </Badge>
                   </dd>
                 </div>
               </div>

@@ -269,7 +269,9 @@ async function submitEdit(id: string) {
         class: compact
           ? 'size-7 rounded-md text-muted-foreground hover:text-foreground'
           : 'text-muted-foreground hover:text-foreground',
-      })}><Icon class={compact ? 'size-3.5' : undefined} /></Tooltip.Trigger>
+      })}>
+      <Icon class={compact ? 'size-3.5' : undefined} />
+    </Tooltip.Trigger>
     <Tooltip.Content>{label}</Tooltip.Content>
   </Tooltip.Root>
 {/snippet}
@@ -319,7 +321,9 @@ async function submitEdit(id: string) {
                   Boolean(generation) ||
                   !snapshot.selectedModelId ||
                   Boolean(guide) ||
-                  Boolean(snapshot.catalogError)}>{m.console_chat_resend()}</Button>
+                  Boolean(snapshot.catalogError)}>
+                {m.console_chat_resend()}
+              </Button>
             </div>
           </form>
         {:else}<p class="whitespace-pre-wrap">{consoleVisibleText(message.text)}</p>{/if}
@@ -408,7 +412,9 @@ async function submitEdit(id: string) {
               {#if message.status === 'failed'}<Button
                   variant="outline"
                   disabled={!snapshot.retryModelAvailable || Boolean(guide) || Boolean(snapshot.catalogError)}
-                  onclick={() => void command(() => chat.retry())}>{m.console_chat_retry()}</Button>
+                  onclick={() => void command(() => chat.retry())}>
+                  {m.console_chat_retry()}
+                </Button>
               {/if}
 
               {@render iconAction(
@@ -425,27 +431,29 @@ async function submitEdit(id: string) {
 
             <div
               class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-xs text-muted-foreground tabular-nums">
-              <span class="font-technical break-all">{message.routeId}</span><span
-                >{m.console_chat_effort()}: {message.thinkingLevel === 'default'
+              <span class="font-technical break-all">{message.routeId}</span><span>
+                {m.console_chat_effort()}: {message.thinkingLevel === 'default'
                   ? m.console_chat_default()
-                  : message.thinkingLevel}</span
-              ><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
-              {#if usage?.inputTokens !== undefined}<span
-                  >{m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}</span
-                >{/if}
-              {#if usage?.outputTokens !== undefined}<span
-                  >{m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}</span
-                >{/if}
-              {#if usage?.cacheReadTokens !== undefined}<span
-                  >{m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}</span
-                >{/if}
-              {#if usage?.cacheWriteTokens !== undefined}<span
-                  >{m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}</span
-                >{/if}
+                  : message.thinkingLevel}
+              </span><time datetime={message.createdAt} class="font-technical">{formatLogTime(message.createdAt)}</time>
+              {#if usage?.inputTokens !== undefined}<span>
+                  {m.console_chat_input_tokens({ count: formatNumber(usage.inputTokens) })}
+                </span>{/if}
+              {#if usage?.outputTokens !== undefined}<span>
+                  {m.console_chat_output_tokens({ count: formatNumber(usage.outputTokens) })}
+                </span>{/if}
+              {#if usage?.cacheReadTokens !== undefined}<span>
+                  {m.console_chat_cache_read_tokens({ count: formatNumber(usage.cacheReadTokens) })}
+                </span>{/if}
+              {#if usage?.cacheWriteTokens !== undefined}<span>
+                  {m.console_chat_cache_write_tokens({ count: formatNumber(usage.cacheWriteTokens) })}
+                </span>{/if}
               {#if message.elapsedMs === undefined}
-                {#if message.status === 'stopped'}<span role="status">{m.console_chat_stopped()}</span
-                  >{:else if message.status === 'incomplete'}<span role="status">{m.console_chat_incomplete()}</span
-                  >{/if}
+                {#if message.status === 'stopped'}<span role="status">
+                    {m.console_chat_stopped()}
+                  </span>{:else if message.status === 'incomplete'}<span role="status">
+                    {m.console_chat_incomplete()}
+                  </span>{/if}
               {/if}
             </div>
           </div>{/if}
@@ -473,19 +481,22 @@ async function submitEdit(id: string) {
       <p class="text-destructive">{localizeBackendErrorMessage(snapshot.loadError ?? snapshot.catalogError)}</p>
       <Button
         variant="outline"
-        onclick={() => void command(() => (snapshot.loadError ? chat.start() : chat.refreshCatalog()))}
-        >{m.console_chat_retry()}</Button>
+        onclick={() => void command(() => (snapshot.loadError ? chat.start() : chat.refreshCatalog()))}>
+        {m.console_chat_retry()}
+      </Button>
     </div>
   {/if}
   {#if snapshot.loading}<div role="status" aria-label={m.console_chat_loading()} class="flex flex-col gap-4">
       <Skeleton class="h-8 w-48" /><Skeleton class="h-32 w-full" />
     </div>
   {:else if snapshot.missingConversation}
-    <Empty.Root
-      ><Empty.Header><Empty.Description>{m.console_chat_missing_description()}</Empty.Description></Empty.Header
-      ><Empty.Content
-        ><Button onclick={() => void newConversation()}>{m.console_chat_start_new()}</Button></Empty.Content
-      ></Empty.Root>
+    <Empty.Root>
+      <Empty.Header>
+        <Empty.Description>{m.console_chat_missing_description()}</Empty.Description>
+      </Empty.Header><Empty.Content>
+        <Button onclick={() => void newConversation()}>{m.console_chat_start_new()}</Button>
+      </Empty.Content>
+    </Empty.Root>
   {:else}
     {#if conversation?.messages.length}
       <VirtualList
@@ -497,32 +508,36 @@ async function submitEdit(id: string) {
         row={messageRow}
         endThreshold={follow ? 80 : -1} />
     {:else if !guide && !snapshot.loadError && !snapshot.catalogError}
-      <Empty.Root class="flex-1"
-        ><Empty.Header
-          ><Empty.Media><BrandMark class="size-10 text-muted-foreground" /></Empty.Media><Empty.Title
-            class="text-2xl font-medium text-balance">{m.console_chat_start_prompt()}</Empty.Title
-          ></Empty.Header
-        ></Empty.Root>
+      <Empty.Root class="flex-1">
+        <Empty.Header>
+          <Empty.Media><BrandMark class="size-10 text-muted-foreground" /></Empty.Media><Empty.Title
+            class="text-2xl font-medium text-balance">
+            {m.console_chat_start_prompt()}
+          </Empty.Title>
+        </Empty.Header>
+      </Empty.Root>
     {/if}
     {#if snapshot.readOnlyReason}
-      <Alert.Root role="status" class="mt-auto"
-        ><Alert.Title>{m.console_chat_read_only()}</Alert.Title><Alert.Description
-          ><p>{readOnlyText}</p>
-          <Button variant="outline" onclick={() => void newConversation()}>{m.console_chat_other_key()}</Button
-          ></Alert.Description
-        ></Alert.Root>
+      <Alert.Root role="status" class="mt-auto">
+        <Alert.Title>{m.console_chat_read_only()}</Alert.Title><Alert.Description>
+          <p>{readOnlyText}</p>
+          <Button variant="outline" onclick={() => void newConversation()}>{m.console_chat_other_key()}</Button>
+        </Alert.Description>
+      </Alert.Root>
     {:else if guide}
-      <Empty.Root class="mx-auto my-auto w-full max-w-xl" aria-labelledby="chat-setup-title"
-        ><Empty.Header
-          ><Empty.Title><h2 id="chat-setup-title">{guide.title}</h2></Empty.Title><Empty.Description
-            >{guide.description}</Empty.Description
-          ></Empty.Header
-        ><Empty.Content
-          ><Button href={resolve(guide.href)}>{guide.label}</Button><Button
+      <Empty.Root class="mx-auto my-auto w-full max-w-xl" aria-labelledby="chat-setup-title">
+        <Empty.Header>
+          <Empty.Title><h2 id="chat-setup-title">{guide.title}</h2></Empty.Title><Empty.Description>
+            {guide.description}
+          </Empty.Description>
+        </Empty.Header><Empty.Content>
+          <Button href={resolve(guide.href)}>{guide.label}</Button><Button
             variant="ghost"
-            onclick={() => void command(() => chat.refreshCatalog())}>{m.console_chat_refresh()}</Button
-          ></Empty.Content
-        ></Empty.Root>
+            onclick={() => void command(() => chat.refreshCatalog())}>
+            {m.console_chat_refresh()}
+          </Button>
+        </Empty.Content>
+      </Empty.Root>
     {:else if !snapshot.loadError && !snapshot.catalogError}
       <div class="composer-dock">
         {#if !follow && conversation}<Tooltip.Root>
@@ -536,7 +551,9 @@ async function submitEdit(id: string) {
                 variant: 'outline',
                 size: 'icon',
                 class: 'jump-latest rounded-full bg-card shadow-md dark:bg-card',
-              })}><ArrowDownIcon /></Tooltip.Trigger>
+              })}>
+              <ArrowDownIcon />
+            </Tooltip.Trigger>
             <Tooltip.Content>{m.console_chat_latest()}</Tooltip.Content>
           </Tooltip.Root>{/if}
         <ConsoleChatComposer
@@ -549,8 +566,9 @@ async function submitEdit(id: string) {
     {/if}
     {#if generation && (guide || snapshot.catalogError || snapshot.readOnlyReason)}<Button
         variant="outline"
-        onclick={() => void command(() => chat.stop())}>{m.console_chat_stop()}</Button
-      >{/if}
+        onclick={() => void command(() => chat.stop())}>
+        {m.console_chat_stop()}
+      </Button>{/if}
   {/if}
 </section>
 

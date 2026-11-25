@@ -8,6 +8,7 @@ import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 
 let { overview }: { overview?: Pick<StatsOverview, 'avg_first_token_ms' | 'avg_output_tps'> } = $props()
 const hintId = $props.id()
+let open = $state(false)
 const firstToken = $derived(overview?.avg_first_token_ms)
 const outputTps = $derived(overview?.avg_output_tps)
 </script>
@@ -25,12 +26,13 @@ const outputTps = $derived(overview?.avg_output_tps)
     </dt>
     <dd class="text-right whitespace-nowrap">{outputTps == null ? '—' : `${formatNumber(outputTps)} tok/s`}</dd>
   </dl>
-  <Tooltip.Root delayDuration={0} disableCloseOnTriggerClick>
+  <Tooltip.Root bind:open delayDuration={0} disableCloseOnTriggerClick>
     <Tooltip.Trigger
       type="button"
       class="inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
       aria-label={m.stats_latency_speed_help()}
-      aria-describedby={hintId}>
+      aria-describedby={hintId}
+      onclick={() => (open = true)}>
       <CircleHelpIcon class="size-4" />
     </Tooltip.Trigger>
     <Tooltip.Content id={hintId} role="tooltip" class="max-w-[min(20rem,calc(100vw-2rem))] text-pretty">

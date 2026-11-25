@@ -35,7 +35,9 @@ function ownersLabel(owners: PortOwner[]): string {
 
       <a
         class={buttonVariants({ variant: 'outline', size: 'sm', class: 'mt-3' })}
-        href={resolve(settingsGroupHref('network', 'client'))}>{m.desktop_port_notice_open_desktop_settings()}</a>
+        href={resolve(settingsGroupHref('network', 'client'))}>
+        {m.desktop_port_notice_open_desktop_settings()}
+      </a>
     </Alert.Description>
   </Alert.Root>
 {:else if state?.mode === 'fallback'}
@@ -66,7 +68,9 @@ function ownersLabel(owners: PortOwner[]): string {
 
       <a
         class={buttonVariants({ variant: 'outline', size: 'sm', class: 'mt-3' })}
-        href={resolve(settingsGroupHref('network', 'client'))}>{m.desktop_port_notice_resolve_desktop_settings()}</a>
+        href={resolve(settingsGroupHref('network', 'client'))}>
+        {m.desktop_port_notice_resolve_desktop_settings()}
+      </a>
     </Alert.Description>
   </Alert.Root>
 {/if}

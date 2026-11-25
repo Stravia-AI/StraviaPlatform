@@ -25,7 +25,7 @@ test('configured Chat offers a composer before the first request', async ({ page
 
   const main = page.getByRole('main')
   await expect(main.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
-  await expect(main.getByRole('button', { name: 'API Key', exact: true })).toContainText('Client key')
+  await expect(main.getByRole('combobox', { name: 'API Key', exact: true })).toContainText('Client key')
 })
 
 test('Chat does not treat a failed configuration fetch as an empty instance', async ({ page }) => {

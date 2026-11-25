@@ -44,9 +44,9 @@ let open = $state(false)
         ]}
         aria-label={m.rpm_edit_label({ model: modelId, value: summary })}
         disabled={query.isPending}>
-        {#if query.isPending}<Spinner />{:else if query.error}{m.common_unavailable()}{:else}<span class="truncate"
-            >{summary}</span
-          >{/if}
+        {#if query.isPending}<Spinner />{:else if query.error}{m.common_unavailable()}{:else}<span class="truncate">
+            {summary}
+          </span>{/if}
         {#if compact && !query.isPending && !query.error}<PencilIcon
             class="size-3 shrink-0 text-muted-foreground"
             aria-hidden="true" />{/if}

@@ -150,8 +150,9 @@ function dateLabel(timestamp: number): string {
         <div role="alert" class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
           {errorMessage(error)}
           {#if errorCode(error) === 'not_cataloged' && releaseUrl(url)}
-            <button type="button" onclick={() => void openExternalUrl(releaseUrl(url)!)} class="ml-1 underline"
-              >{m.plugin_sources_releases()}</button>
+            <button type="button" onclick={() => void openExternalUrl(releaseUrl(url)!)} class="ml-1 underline">
+              {m.plugin_sources_releases()}
+            </button>
           {/if}
         </div>
       {/if}
@@ -162,7 +163,9 @@ function dateLabel(timestamp: number): string {
             <button
               type="button"
               onclick={() => void openExternalUrl(preview!.url)}
-              class="break-all font-medium underline">{preview.repository}</button>
+              class="break-all font-medium underline">
+              {preview.repository}
+            </button>
           </div>
           {#if trustSource}
             <div>
@@ -201,11 +204,12 @@ function dateLabel(timestamp: number): string {
                 preview = undefined
                 trustSource = undefined
                 error = undefined
-              }}>{m.plugin_sources_back()}</Button>
-            <Button disabled={busy} onclick={confirmTrust}
-              >{#if busy}<Spinner />{/if}{trustSource
-                ? m.plugin_sources_confirm_retrust()
-                : m.plugin_sources_trust()}</Button>
+              }}>
+              {m.plugin_sources_back()}
+            </Button>
+            <Button disabled={busy} onclick={confirmTrust}>
+              {#if busy}<Spinner />{/if}{trustSource ? m.plugin_sources_confirm_retrust() : m.plugin_sources_trust()}
+            </Button>
           </div>
         </div>
       {:else if adding}
@@ -230,10 +234,11 @@ function dateLabel(timestamp: number): string {
               autocomplete="off" />
           </div>
           <div class="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" disabled={busy} onclick={resetFlow}
-              >{m.plugin_sources_cancel()}</Button
-            ><Button type="submit" disabled={busy}
-              >{#if busy}<Spinner />{/if}{m.plugin_sources_preview()}</Button>
+            <Button type="button" variant="outline" disabled={busy} onclick={resetFlow}>
+              {m.plugin_sources_cancel()}
+            </Button><Button type="submit" disabled={busy}>
+              {#if busy}<Spinner />{/if}{m.plugin_sources_preview()}
+            </Button>
           </div>
         </form>
       {:else}
@@ -241,7 +246,9 @@ function dateLabel(timestamp: number): string {
           onclick={() => {
             adding = true
             error = undefined
-          }}>{m.plugin_sources_add()}</Button>
+          }}>
+          {m.plugin_sources_add()}
+        </Button>
         {#if sourcesQuery.isPending}
           <p class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />{m.plugin_sources_loading()}</p>
         {:else if sourcesQuery.error}
@@ -259,8 +266,9 @@ function dateLabel(timestamp: number): string {
                   <button
                     type="button"
                     onclick={() => void openExternalUrl(source.url)}
-                    class="min-w-0 break-all font-medium underline">{source.repository}</button
-                  >{#if source.official}<Badge variant="outline">{m.plugin_sources_official()}</Badge>{/if}
+                    class="min-w-0 break-all font-medium underline">
+                    {source.repository}
+                  </button>{#if source.official}<Badge variant="outline">{m.plugin_sources_official()}</Badge>{/if}
                 </div>
                 <p class="text-xs text-muted-foreground">
                   {source.mirrored === true
@@ -275,28 +283,36 @@ function dateLabel(timestamp: number): string {
                     : m.plugin_sources_never_checked()}
                 </p>
                 <div class="flex flex-wrap gap-x-6 gap-y-3 text-sm">
-                  <label class="flex items-center gap-2"
-                    ><Switch
+                  <label class="flex items-center gap-2">
+                    <Switch
                       bind:checked={() => source.enabled, (checked: boolean) => update(source, { enabled: checked })}
-                      disabled={busy} />{m.plugin_sources_enabled()}</label>
-                  <label class="flex items-center gap-2"
-                    ><Switch
+                      disabled={busy} />{m.plugin_sources_enabled()}
+                  </label>
+                  <label class="flex items-center gap-2">
+                    <Switch
                       bind:checked={
                         () => source.include_prerelease,
                         (checked: boolean) => update(source, { include_prerelease: checked })
                       }
-                      disabled={busy} />{m.plugin_sources_prerelease()}</label>
+                      disabled={busy} />{m.plugin_sources_prerelease()}
+                  </label>
                 </div>
                 {#if source.error}<p role="alert" class="text-sm text-destructive">{sourceError(source.error)}</p>{/if}
                 <div class="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" disabled={busy || !source.enabled} onclick={() => refresh(source)}
-                    >{m.plugin_sources_refresh()}</Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busy || !source.enabled}
+                    onclick={() => refresh(source)}>
+                    {m.plugin_sources_refresh()}
+                  </Button>
                   {#if source.error?.code === 'key_changed' && !source.official}<Button
                       variant="outline"
                       size="sm"
                       disabled={busy}
-                      onclick={() => reviewKey(source)}>{m.plugin_sources_retrust()}</Button
-                    >{/if}
+                      onclick={() => reviewKey(source)}>
+                      {m.plugin_sources_retrust()}
+                    </Button>{/if}
                   {#if !source.official}<Button
                       variant="outline"
                       size="sm"
@@ -304,8 +320,9 @@ function dateLabel(timestamp: number): string {
                       onclick={() => {
                         deleteSource = source
                         error = undefined
-                      }}>{m.plugin_sources_delete()}</Button
-                    >{/if}
+                      }}>
+                      {m.plugin_sources_delete()}
+                    </Button>{/if}
                 </div>
               </section>
             {/each}
@@ -330,8 +347,9 @@ function dateLabel(timestamp: number): string {
     <AlertDialog.Content class="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-lg">
       <AlertDialog.Header>
         <AlertDialog.Title>{m.plugin_sources_delete()}</AlertDialog.Title>
-        <AlertDialog.Description
-          >{m.plugin_sources_delete_prompt({ repository: deleteSource.repository })}</AlertDialog.Description>
+        <AlertDialog.Description>
+          {m.plugin_sources_delete_prompt({ repository: deleteSource.repository })}
+        </AlertDialog.Description>
       </AlertDialog.Header>
       {#if error}<p role="alert" class="text-sm text-destructive">{errorMessage(error)}</p>{/if}
       <AlertDialog.Footer>

@@ -106,10 +106,11 @@ function selectMatch(index: number): void {
       <Empty.Header>
         <Empty.Media variant="icon"><FileWarningIcon /></Empty.Media>
         <Empty.Title>{m.credential_protection_hit_records_unavailable()}</Empty.Title>
-        <Empty.Description
-          >{detail.reason === 'not_retained'
+        <Empty.Description>
+          {detail.reason === 'not_retained'
             ? m.credential_protection_hit_records_unavailable_not_retained()
-            : m.credential_protection_hit_records_unavailable_missing()}</Empty.Description>
+            : m.credential_protection_hit_records_unavailable_missing()}
+        </Empty.Description>
       </Empty.Header>
     </Empty.Root>
   </div>
@@ -172,7 +173,9 @@ function selectMatch(index: number): void {
           <span
             class={segment.kind === 'hit' ? 'entry-hit' : 'entry-match'}
             data-match-index={segment.matchIndex}
-            data-active={segment.matchIndex === activeSegment ? 'true' : undefined}>{segment.text}</span>
+            data-active={segment.matchIndex === activeSegment ? 'true' : undefined}>
+            {segment.text}
+          </span>
         {/if}
       {/each}
     </div>
@@ -200,8 +203,9 @@ function selectMatch(index: number): void {
               onclick={() => selectMatch(index)}>
               <span class="match-name">{name} <span class="match-rule">({match.rule_id})</span></span>
               <!-- 行列简写只给眼睛看；完整的位置说明留给读屏与悬停提示。 -->
-              <span class="match-position" aria-hidden="true"
-                >{match.start_line}:{match.start_column}–{match.end_line}:{match.end_column}</span>
+              <span class="match-position" aria-hidden="true">
+                {match.start_line}:{match.start_column}–{match.end_line}:{match.end_column}
+              </span>
               <span class="sr-only">{position}</span>
             </button>
           </li>

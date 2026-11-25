@@ -144,8 +144,9 @@ async function save(): Promise<void> {
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel onclick={() => (confirmOpen = false)}>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action disabled={saving} onclick={() => void save()}
-        >{m.currency_first_save_confirm()}</AlertDialog.Action>
+      <AlertDialog.Action disabled={saving} onclick={() => void save()}>
+        {m.currency_first_save_confirm()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

@@ -129,9 +129,9 @@ export async function save(): Promise<void> {
   {/if}
   {#if !embedded}
     <div class="flex justify-end gap-2 border-t border-border/60 px-4 py-3">
-      {#if onCancel}<Button type="button" variant="outline" disabled={saving} onclick={onCancel}
-          >{m.common_cancel()}</Button
-        >{/if}
+      {#if onCancel}<Button type="button" variant="outline" disabled={saving} onclick={onCancel}>
+          {m.common_cancel()}
+        </Button>{/if}
       <Button type="submit" disabled={saving || !ready || !!query.error} aria-busy={saving}>
         {#if saving}<Spinner data-icon="inline-start" />{/if}{m.rpm_save_limit()}
       </Button>

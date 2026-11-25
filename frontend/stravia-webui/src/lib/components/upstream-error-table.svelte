@@ -132,8 +132,9 @@ const columns = helper.columns([
   <!-- 结果标签较长时在窄列内换行，避免挤占错误列导致技术错误码从中间断开。 -->
   <Badge
     variant={upstreamErrorOutcomeTone(error.outcome)}
-    class="h-auto max-w-full whitespace-normal text-center leading-tight"
-    >{upstreamErrorOutcomeLabel(error.outcome)}</Badge>
+    class="h-auto max-w-full whitespace-normal text-center leading-tight">
+    {upstreamErrorOutcomeLabel(error.outcome)}
+  </Badge>
 {/snippet}
 
 <div class="upstream-error-table">

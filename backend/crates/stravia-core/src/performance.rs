@@ -568,13 +568,20 @@ fn sample_events(sample: ResourceSample) -> Vec<Value> {
 }
 
 struct ProcessSampler {
-    system: System,
+    system: Option<System>,
     warmed_epoch: Option<u64>,
 }
 
 static PROCESS: LazyLock<Mutex<ProcessSampler>> = LazyLock::new(|| {
+    let system = match System::new() {
+        Ok(system) => Some(system),
+        Err(error) => {
+            tracing::warn!(%error, "performance process sampler initialization failed");
+            None
+        }
+    };
     Mutex::new(ProcessSampler {
-        system: System::new(),
+        system,
         warmed_epoch: None,
     })
 });
@@ -1106,16 +1113,22 @@ fn sample_process() {
         }
     };
     let mut sampler = PROCESS.lock();
-    sampler.system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        false,
-        ProcessRefreshKind::nothing().with_memory().with_cpu(),
-    );
+    if let Some(system) = sampler.system.as_mut() {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            false,
+            ProcessRefreshKind::nothing().with_memory().with_cpu(),
+        );
+    }
     let guard = sources().read();
     if any_enabled(&guard) && epoch == EPOCH.load(Ordering::Acquire) {
         let mut rss_bytes = None;
         let mut cpu_percent = None;
-        if let Some(process) = sampler.system.process(pid) {
+        if let Some(process) = sampler
+            .system
+            .as_ref()
+            .and_then(|system| system.process(pid))
+        {
             rss_bytes = Some(process.memory());
             gauge!("stravia_process_rss_bytes").set(process.memory() as f64);
             // 首个样本没有可比较的上次 CPU 读数，不能输出伪造的 0。

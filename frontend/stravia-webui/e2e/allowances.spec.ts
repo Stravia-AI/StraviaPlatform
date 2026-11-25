@@ -147,7 +147,7 @@ async function mockAllowances(page: Page, snapshots: AllowanceFixture[]) {
 }
 
 async function selectFilter(page: Page, label: string, option: string): Promise<void> {
-  await page.getByRole('button', { name: label, exact: true }).click()
+  await page.getByRole('combobox', { name: label, exact: true }).click()
   await page.getByRole('option', { name: option, exact: true }).click()
 }
 
@@ -1133,12 +1133,12 @@ test('filters always name their dimension and stay reachable on narrow viewports
   await mockAllowances(page, [freshSnapshot, staleSnapshot, errorSnapshot])
   await page.goto('/allowances')
   for (const name of ['All provider types', 'All allowance states', 'All data states']) {
-    await expect(page.getByRole('button', { name, exact: true })).toBeVisible()
+    await expect(page.getByRole('combobox', { name, exact: true })).toBeVisible()
   }
   await selectFilter(page, 'All data states', 'Stale')
-  await expect(page.getByRole('button', { name: 'Data state: Stale', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'All provider types', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'All allowance states', exact: true })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Data state: Stale', exact: true })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'All provider types', exact: true })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'All allowance states', exact: true })).toBeVisible()
 })
 
 for (const width of [390, 320]) {
@@ -1162,7 +1162,7 @@ for (const width of [390, 320]) {
     await page.goto('/allowances')
 
     for (const name of ['全部供应商类型', '全部额度状态', '全部数据状态']) {
-      const filter = page.getByRole('button', { name, exact: true })
+      const filter = page.getByRole('combobox', { name, exact: true })
       await expect(filter).toBeVisible()
       const box = (await filter.boundingBox())!
       expect(box.x).toBeGreaterThanOrEqual(0)

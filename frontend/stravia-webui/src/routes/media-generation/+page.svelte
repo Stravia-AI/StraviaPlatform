@@ -248,15 +248,17 @@ async function unlinkRoute(): Promise<void> {
             disabled={routeSaving || clearSaving || eligibleRoutes.length === 0}
             onValueChange={chooseRoute} />
           {#if eligibleRoutesQuery.isSuccess && eligibleRoutes.length === 0 && !savedRouteId}
-            <Button type="button" variant="outline" size="sm" href={resolve('models')}
-              >{m.connect_add_a_model()}</Button>
+            <Button type="button" variant="outline" size="sm" href={resolve('models')}>
+              {m.connect_add_a_model()}
+            </Button>
           {/if}
           {#if routeSaving}
             <Spinner aria-label={m.media_generation_saving_route()} />
           {/if}
           {#if savedRouteId}
-            <Button type="button" variant="outline" size="sm" disabled={routeSaving} onclick={openClear}
-              >{m.media_generation_clear_route()}</Button>
+            <Button type="button" variant="outline" size="sm" disabled={routeSaving} onclick={openClear}>
+              {m.media_generation_clear_route()}
+            </Button>
           {/if}
         {/if}
       </SettingRow>

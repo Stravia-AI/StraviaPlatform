@@ -112,17 +112,19 @@ function drop(event: DragEvent) {
         onValueChange={(value: string) => chat.selectKey(value || null)}>
         <Select.Trigger
           id="chat-key"
-          class="h-9! max-w-72 min-w-0 gap-1.5 border-0 bg-transparent px-2.5 shadow-none hover:bg-muted dark:bg-transparent dark:hover:bg-input/50"
-          ><KeyRoundIcon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /><span class="truncate"
-            >{snapshot.keyCandidates.find((key) => key.id === snapshot.selectedKeyId)?.name ??
-              m.console_chat_choose_key()}</span
-          ></Select.Trigger>
-        <Select.Content
-          ><Select.Group
-            >{#each snapshot.keyCandidates as key (key.id)}<Select.Item value={key.id} label={key.name}
-                >{key.name}</Select.Item
-              >{/each}</Select.Group
-          ></Select.Content>
+          class="h-9! max-w-72 min-w-0 gap-1.5 border-0 bg-transparent px-2.5 shadow-none hover:bg-muted dark:bg-transparent dark:hover:bg-input/50">
+          <KeyRoundIcon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /><span class="truncate">
+            {snapshot.keyCandidates.find((key) => key.id === snapshot.selectedKeyId)?.name ??
+              m.console_chat_choose_key()}
+          </span>
+        </Select.Trigger>
+        <Select.Content>
+          <Select.Group>
+            {#each snapshot.keyCandidates as key (key.id)}<Select.Item value={key.id} label={key.name}>
+                {key.name}
+              </Select.Item>{/each}
+          </Select.Group>
+        </Select.Content>
       </Select.Root>
     </div>
   {/if}
@@ -181,7 +183,9 @@ function drop(event: DragEvent) {
               size="icon"
               class="absolute top-0 right-0"
               aria-label={m.console_chat_remove_image({ name: image.name })}
-              onclick={() => (images = images.filter((item) => item.id !== image.id))}><XIcon /></Button>
+              onclick={() => (images = images.filter((item) => item.id !== image.id))}>
+              <XIcon />
+            </Button>
           </li>
         {/each}
       </ul>
@@ -215,7 +219,9 @@ function drop(event: DragEvent) {
         disabled={reading}
         aria-busy={reading}
         aria-label={m.console_chat_add_images()}
-        onclick={() => fileInput?.click()}><PlusIcon /></Button>
+        onclick={() => fileInput?.click()}>
+        <PlusIcon />
+      </Button>
       <div class="hidden min-w-0 flex-1 sm:block"></div>
       <ConsoleModelPicker />
       {#if generating}
@@ -225,15 +231,18 @@ function drop(event: DragEvent) {
           size="icon"
           class="rounded-full"
           aria-label={m.console_chat_stop()}
-          onclick={onstop}><StopIcon /></Button>
+          onclick={onstop}>
+          <StopIcon />
+        </Button>
       {:else}
         <Button
           type="submit"
           size="icon"
           class="rounded-full"
           aria-label={m.console_chat_send()}
-          disabled={!text.trim() || !snapshot.selectedKeyId || !snapshot.selectedModelId || incompatible || reading}
-          ><SendIcon /></Button>
+          disabled={!text.trim() || !snapshot.selectedKeyId || !snapshot.selectedModelId || incompatible || reading}>
+          <SendIcon />
+        </Button>
       {/if}
     </div>
   </form>

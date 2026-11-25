@@ -144,16 +144,19 @@ async function remove(): Promise<void> {
             </div>
             <Tabs.Root bind:value={draft.mode} class="gap-4">
               <Tabs.List aria-labelledby="custom-rule-mode-label">
-                <Tabs.Trigger value="simple" disabled={busy}
-                  ><TypeIcon />{m.credential_custom_mode_simple()}</Tabs.Trigger>
-                <Tabs.Trigger value="pattern" disabled={busy}
-                  ><RegexIcon />{m.credential_custom_mode_pattern()}</Tabs.Trigger>
+                <Tabs.Trigger value="simple" disabled={busy}>
+                  <TypeIcon />{m.credential_custom_mode_simple()}
+                </Tabs.Trigger>
+                <Tabs.Trigger value="pattern" disabled={busy}>
+                  <RegexIcon />{m.credential_custom_mode_pattern()}
+                </Tabs.Trigger>
               </Tabs.List>
 
               <Tabs.Content value="simple" class="flex flex-col gap-4">
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('text')}>
-                  <Field.Label for="custom-rule-text" hint={m.credential_custom_text_help()}
-                    >{m.credential_custom_text()}</Field.Label>
+                  <Field.Label for="custom-rule-text" hint={m.credential_custom_text_help()}>
+                    {m.credential_custom_text()}
+                  </Field.Label>
                   <SecretTextarea
                     id="custom-rule-text"
                     bind:value={draft.text}
@@ -170,8 +173,9 @@ async function remove(): Promise<void> {
 
               <Tabs.Content value="pattern" class="flex flex-col gap-4">
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('regex')}>
-                  <Field.Label for="custom-rule-regex" hint={m.credential_custom_regex_help()}
-                    >{m.credential_protection_rule_expression()}</Field.Label>
+                  <Field.Label for="custom-rule-regex" hint={m.credential_custom_regex_help()}>
+                    {m.credential_protection_rule_expression()}
+                  </Field.Label>
                   <Input
                     id="custom-rule-regex"
                     class="font-technical"
@@ -184,8 +188,9 @@ async function remove(): Promise<void> {
                   <Field.Error id="custom-rule-regex-error">{errorFor('regex')}</Field.Error>
                 </Field.Field>
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('secret_group')}>
-                  <Field.Label for="custom-rule-group" hint={m.credential_custom_group_help()}
-                    >{m.credential_custom_group()}</Field.Label>
+                  <Field.Label for="custom-rule-group" hint={m.credential_custom_group_help()}>
+                    {m.credential_custom_group()}
+                  </Field.Label>
                   <Input
                     id="custom-rule-group"
                     class="font-technical w-28"
@@ -197,8 +202,9 @@ async function remove(): Promise<void> {
                   <Field.Error id="custom-rule-group-error">{errorFor('secret_group')}</Field.Error>
                 </Field.Field>
                 <Field.Field orientation="vertical" data-invalid={!!errorFor('keywords')}>
-                  <Field.Label for="custom-rule-keywords" hint={m.credential_custom_keywords_help()}
-                    >{m.credential_protection_keywords()}</Field.Label>
+                  <Field.Label for="custom-rule-keywords" hint={m.credential_custom_keywords_help()}>
+                    {m.credential_protection_keywords()}
+                  </Field.Label>
                   <Input
                     id="custom-rule-keywords"
                     class="font-technical"
@@ -216,8 +222,9 @@ async function remove(): Promise<void> {
                     <Accordion.Trigger>{m.common_advanced()}</Accordion.Trigger>
                     <Accordion.Content>
                       <Field.Field orientation="vertical" data-invalid={!!errorFor('min_entropy')}>
-                        <Field.Label for="custom-rule-entropy" hint={m.credential_custom_min_entropy_help()}
-                          >{m.credential_custom_min_entropy()}</Field.Label>
+                        <Field.Label for="custom-rule-entropy" hint={m.credential_custom_min_entropy_help()}>
+                          {m.credential_custom_min_entropy()}
+                        </Field.Label>
                         <Input
                           id="custom-rule-entropy"
                           class="font-technical w-28"
@@ -236,8 +243,9 @@ async function remove(): Promise<void> {
           </Field.Field>
 
           <Field.Field orientation="vertical" data-invalid={!!errorFor('description')}>
-            <Field.Label for="custom-rule-description" hint={m.credential_custom_description_help()}
-              >{m.credential_custom_description()}</Field.Label>
+            <Field.Label for="custom-rule-description" hint={m.credential_custom_description_help()}>
+              {m.credential_custom_description()}
+            </Field.Label>
             <Input
               id="custom-rule-description"
               bind:value={draft.description}
@@ -273,10 +281,13 @@ async function remove(): Promise<void> {
             disabled={busy}
             onclick={() => {
               deleteOpen = true
-            }}><TrashIcon data-icon="inline-start" />{m.credential_custom_delete()}</Button>
+            }}>
+            <TrashIcon data-icon="inline-start" />{m.credential_custom_delete()}
+          </Button>
         {/if}
-        <Button type="button" variant="outline" disabled={busy} onclick={() => guard.request(() => (open = false))}
-          >{m.common_cancel()}</Button>
+        <Button type="button" variant="outline" disabled={busy} onclick={() => guard.request(() => (open = false))}>
+          {m.common_cancel()}
+        </Button>
         <Button type="submit" disabled={busy} aria-busy={saving}>
           {#if saving}<Spinner data-icon="inline-start" />{/if}{rule
             ? m.credential_custom_save()
@@ -295,8 +306,9 @@ async function remove(): Promise<void> {
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel disabled={deleting}>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" disabled={deleting} onclick={() => void remove()}
-        >{m.credential_custom_delete()}</AlertDialog.Action>
+      <AlertDialog.Action variant="destructive" disabled={deleting} onclick={() => void remove()}>
+        {m.credential_custom_delete()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

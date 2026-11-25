@@ -157,12 +157,14 @@ async function showRunInDiagnostics(runId: string) {
         <span class="stream-text">
           <strong>{summary.title}</strong>
           {#each summary.facts as fact (fact.label)}
-            <span class="fact"
-              ><span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span></span>
+            <span class="fact">
+              <span class="fact-label">{fact.label}</span><span class="fact-value">{fact.value}</span>
+            </span>
           {/each}
         </span>
-        <time class="stream-time" title={formatLogTime(event.occurred_at)}
-          >{timeline.offsetLabel(event.occurred_at)}</time>
+        <time class="stream-time" title={formatLogTime(event.occurred_at)}>
+          {timeline.offsetLabel(event.occurred_at)}
+        </time>
         <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
       </Collapsible.Trigger>
       {#if summary.note}<p class="event-note">{summary.note}</p>{/if}
@@ -207,16 +209,18 @@ async function showRunInDiagnostics(runId: string) {
       <Collapsible.Root {...rowDisclosure('group', itemKey(item))}>
         <Collapsible.Trigger class="stream-row" data-tone="neutral" data-group={item.type}>
           <span class="stream-text">
-            <strong
-              >{item.type === 'tools'
+            <strong>
+              {item.type === 'tools'
                 ? m.observation_tool_handoffs({ tool: item.name ?? m.observation_event_tool(), count: events.length })
-                : group?.label}</strong>
+                : group?.label}
+            </strong>
             {#if group?.titles}<span class="group-titles">{group.titles}</span>{/if}
           </span>
           <time
             class="stream-time"
-            title="{formatLogTime(events[0].occurred_at)} – {formatLogTime(events[events.length - 1].occurred_at)}"
-            >{timeline.offsetLabel(events[0].occurred_at)}</time>
+            title="{formatLogTime(events[0].occurred_at)} – {formatLogTime(events[events.length - 1].occurred_at)}">
+            {timeline.offsetLabel(events[0].occurred_at)}
+          </time>
           <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
         </Collapsible.Trigger>
         <Collapsible.Content>
@@ -259,8 +263,9 @@ async function showRunInDiagnostics(runId: string) {
                 <!-- 标题行不放标签：状态由主干圆点形状与颜色表达，文字只留给读屏；中断与记录不完整在事件流和告警中呈现。 -->
                 <span class="sr-only">{observationStatusLabel(run.status)}</span>
               </span>
-              <time class="stream-time" title={formatLogTime(run.started_at)}
-                >{timeline.offsetLabel(run.started_at)}</time>
+              <time class="stream-time" title={formatLogTime(run.started_at)}>
+                {timeline.offsetLabel(run.started_at)}
+              </time>
               <ChevronRightIcon size={14} class="stream-chev" aria-hidden="true" />
             </span>
             <!-- 首行回答「谁在服务、多快」，次行回答「用了多少」；未报告的值显示中性破折号。 -->
@@ -275,9 +280,9 @@ async function showRunInDiagnostics(runId: string) {
                 {@render runMetric(m.logs_duration_short(), formatDuration(metrics?.durationMs))}
                 {@render runMetric(m.logs_first_token_short(), formatDuration(metrics?.firstTokenMs))}
                 <!-- 单位 tok/s 已说明含义，省去标签让首行在窄检查器中少换行。 -->
-                <span class="run-metric" title={m.logs_token_speed()}
-                  ><span class="run-metric-value">{metrics?.tps == null ? '– tok/s' : formatTps(metrics.tps)}</span
-                  ></span>
+                <span class="run-metric" title={m.logs_token_speed()}>
+                  <span class="run-metric-value">{metrics?.tps == null ? '– tok/s' : formatTps(metrics.tps)}</span>
+                </span>
               </span>
               <span class="run-metric-line">
                 {@render tokenMetric(m.observation_usage_input(), run.usage.input_tokens)}
@@ -294,8 +299,9 @@ async function showRunInDiagnostics(runId: string) {
               type="button"
               class="run-parent"
               title={m.observation_run_jump_to({ index: `R${parentIndex}` })}
-              onclick={() => jumpToRun(run.parent_run_id)}
-              >{m.observation_run_continued_from({ index: `R${parentIndex}` })}</button>
+              onclick={() => jumpToRun(run.parent_run_id)}>
+              {m.observation_run_continued_from({ index: `R${parentIndex}` })}
+            </button>
           {:else if parentIndex !== null}
             <span class="run-parent" data-muted>{m.observation_run_continued_from({ index: `R${parentIndex}` })}</span>
           {:else}
@@ -305,10 +311,11 @@ async function showRunInDiagnostics(runId: string) {
       </div>
       <!-- 记录不完整是判断依据，不随事件流一起折叠。 -->
       {#if run.trace?.status === 'partial' || (run.debug_enabled && !run.trace)}
-        <Alert.Root variant="warning" role="status" class="stream-alert"
-          ><Alert.Description>
+        <Alert.Root variant="warning" role="status" class="stream-alert">
+          <Alert.Description>
             {m.observation_partial_trace({ reasons: run.trace?.reasons.join(', ') || m.observation_trace_missing() })}
-          </Alert.Description></Alert.Root>
+          </Alert.Description>
+        </Alert.Root>
       {/if}
       <Collapsible.Content>
         {#snippet child({ props, open })}
@@ -358,14 +365,16 @@ async function showRunInDiagnostics(runId: string) {
 {/snippet}
 
 {#snippet runMetric(label: string, value: string)}
-  <span class="run-metric"
-    ><span class="run-metric-label">{label}</span> <span class="run-metric-value">{value}</span></span>
+  <span class="run-metric">
+    <span class="run-metric-label">{label}</span> <span class="run-metric-value">{value}</span>
+  </span>
 {/snippet}
 
 {#snippet tokenMetric(label: string, value: number | null)}
-  <span class="run-metric" title={value == null ? m.observation_usage_unknown() : undefined}
-    ><span class="run-metric-label">{label}</span>
-    <span class="run-metric-value">{value == null ? '–' : formatNumber(value)}</span></span>
+  <span class="run-metric" title={value == null ? m.observation_usage_unknown() : undefined}>
+    <span class="run-metric-label">{label}</span>
+    <span class="run-metric-value">{value == null ? '–' : formatNumber(value)}</span>
+  </span>
 {/snippet}
 
 <header class="flex items-start justify-between gap-3 border-b p-4">
@@ -377,8 +386,9 @@ async function showRunInDiagnostics(runId: string) {
 
 {#if onlatest}
   <div class="border-b px-4 py-3">
-    <Button variant="outline" class="h-auto w-full justify-start whitespace-normal text-start" onclick={onlatest}
-      >{m.observation_moved_to_latest()}</Button>
+    <Button variant="outline" class="h-auto w-full justify-start whitespace-normal text-start" onclick={onlatest}>
+      {m.observation_moved_to_latest()}
+    </Button>
   </div>
 {/if}
 
@@ -493,10 +503,12 @@ async function showRunInDiagnostics(runId: string) {
       <p class="max-w-(--reading-max-width) whitespace-pre-wrap break-words">{reason}</p>
     {/each}
     <div class="flex flex-wrap gap-3">
-      {#if oninteraction}<Button variant="outline" onclick={oninteraction}>{m.observation_open_interaction()}</Button
-        >{/if}
-      <Button variant="outline" onclick={onbundle}
-        ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
+      {#if oninteraction}<Button variant="outline" onclick={oninteraction}>
+          {m.observation_open_interaction()}
+        </Button>{/if}
+      <Button variant="outline" onclick={onbundle}>
+        <DownloadIcon data-icon="inline-start" />{m.observation_bundle()}
+      </Button>
     </div>
     <h3 class="font-structural font-semibold">{m.observation_upstream_attempts()}</h3>
     {#if upstreamError.attempts.length === 0}
@@ -507,10 +519,11 @@ async function showRunInDiagnostics(runId: string) {
           <li class="attempt" data-current={attempt.id === upstreamError.error.id || undefined}>
             <div class="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
               <span class="font-medium">{m.observation_upstream_attempt({ index: index + 1 })}</span>
-              <span class="font-technical text-xs tabular-nums text-muted-foreground"
-                >{formatLogTime(attempt.started_at)} · {attempt.duration_ms === null
+              <span class="font-technical text-xs tabular-nums text-muted-foreground">
+                {formatLogTime(attempt.started_at)} · {attempt.duration_ms === null
                   ? '—'
-                  : formatDuration(attempt.duration_ms)}</span>
+                  : formatDuration(attempt.duration_ms)}
+              </span>
             </div>
             <div class="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
               <span class="min-w-0 break-words">{attempt.upstream_model ?? '—'}</span>
@@ -584,10 +597,12 @@ async function showRunInDiagnostics(runId: string) {
       <p class="max-w-(--reading-max-width) whitespace-pre-wrap break-words">{reason}</p>
     {/each}
     <div class="flex flex-wrap gap-3">
-      {#if oninteraction}<Button variant="outline" onclick={oninteraction}>{m.observation_open_interaction()}</Button
-        >{/if}
-      <Button variant="outline" onclick={onbundle}
-        ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
+      {#if oninteraction}<Button variant="outline" onclick={oninteraction}>
+          {m.observation_open_interaction()}
+        </Button>{/if}
+      <Button variant="outline" onclick={onbundle}>
+        <DownloadIcon data-icon="inline-start" />{m.observation_bundle()}
+      </Button>
     </div>
     <h3 class="font-structural font-semibold">{m.observation_diagnostics()}</h3>
     <ol class="stream">
@@ -597,8 +612,9 @@ async function showRunInDiagnostics(runId: string) {
     </ol>
   </div>
 {:else if !interaction}
-  <Empty.Root class="flex-1"
-    ><Empty.Header><Empty.Title>{m.observation_details_unavailable()}</Empty.Title></Empty.Header></Empty.Root>
+  <Empty.Root class="flex-1">
+    <Empty.Header><Empty.Title>{m.observation_details_unavailable()}</Empty.Title></Empty.Header>
+  </Empty.Root>
 {:else}
   <Tabs.Root class="flex min-h-0 flex-1 flex-col" bind:value={activeTab}>
     <div class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2">
@@ -606,8 +622,9 @@ async function showRunInDiagnostics(runId: string) {
         <Tabs.Trigger value="timeline">{m.observation_conversation()}</Tabs.Trigger>
         <Tabs.Trigger value="diagnostics">{m.observation_diagnostics()}</Tabs.Trigger>
       </Tabs.List>
-      <Button variant="outline" size="sm" onclick={onbundle}
-        ><DownloadIcon data-icon="inline-start" />{m.observation_bundle()}</Button>
+      <Button variant="outline" size="sm" onclick={onbundle}>
+        <DownloadIcon data-icon="inline-start" />{m.observation_bundle()}
+      </Button>
     </div>
     <Tabs.Content value="timeline" class="min-h-0 flex-1 overflow-hidden">
       {#if interaction}

@@ -104,11 +104,15 @@ function lastModel(item: ConsoleConversation) {
     {#if snapshot.loading}<p role="status">{m.console_chat_loading()}</p>
     {:else if empty}
       <section class="route-section" aria-labelledby="conversations-empty-title">
-        <Empty.Root class="flex-1"
-          ><Empty.Header
-            ><Empty.Title><h2 id="conversations-empty-title">{m.console_chat_empty()}</h2></Empty.Title
-            ><Empty.Description>{m.console_chat_empty_description()}</Empty.Description></Empty.Header
-          ><Empty.Content><Button href={resolve('/')}>{m.console_chat_start_new()}</Button></Empty.Content></Empty.Root>
+        <Empty.Root class="flex-1">
+          <Empty.Header>
+            <Empty.Title>
+              <h2 id="conversations-empty-title">{m.console_chat_empty()}</h2>
+            </Empty.Title><Empty.Description>{m.console_chat_empty_description()}</Empty.Description>
+          </Empty.Header><Empty.Content>
+            <Button href={resolve('/')}>{m.console_chat_start_new()}</Button>
+          </Empty.Content>
+        </Empty.Root>
       </section>
     {:else if snapshot.conversations.length}
       <section class="conversations-workspace" aria-labelledby="conversations-list-title">
@@ -146,7 +150,9 @@ function lastModel(item: ConsoleConversation) {
                 <div class="conversations-row-body">
                   <a
                     class="block font-medium break-words hover:underline"
-                    href={resolve(`?conversation=${encodeURIComponent(item.id)}`)}>{item.title}</a>
+                    href={resolve(`?conversation=${encodeURIComponent(item.id)}`)}>
+                    {item.title}
+                  </a>
                   {#if chat.readOnlyReasonFor(item.id)}
                     <p class="text-xs text-muted-foreground">{m.console_chat_read_only()}</p>
                   {/if}

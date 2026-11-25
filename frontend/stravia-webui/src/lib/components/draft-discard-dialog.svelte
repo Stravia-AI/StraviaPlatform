@@ -25,8 +25,11 @@ let { guard, title = m.draft_guard_title(), description = m.draft_guard_descript
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>{m.draft_guard_keep_editing()}</AlertDialog.Cancel>
-      <AlertDialog.Action class={buttonVariants({ variant: 'destructive' })} onclick={() => void guard.confirmDiscard()}
-        >{m.draft_guard_discard()}</AlertDialog.Action>
+      <AlertDialog.Action
+        class={buttonVariants({ variant: 'destructive' })}
+        onclick={() => void guard.confirmDiscard()}>
+        {m.draft_guard_discard()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

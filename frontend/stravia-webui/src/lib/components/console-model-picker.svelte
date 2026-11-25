@@ -90,9 +90,9 @@ async function pickModel(id: string) {
     })}>
     <span class="flex min-w-0 items-baseline gap-2">
       <span class="truncate">{modelName}</span>
-      {#if selectedModel && snapshot.thinkingSelection !== 'default'}<span class="shrink-0 text-muted-foreground"
-          >{effortLabel}</span
-        >{/if}
+      {#if selectedModel && snapshot.thinkingSelection !== 'default'}<span class="shrink-0 text-muted-foreground">
+          {effortLabel}
+        </span>{/if}
     </span><ChevronDownIcon data-icon="inline-end" class="text-muted-foreground" />
   </Popover.Trigger>
   <Popover.Content
@@ -121,8 +121,9 @@ async function pickModel(id: string) {
           type="button"
           class="inline-flex min-h-7 max-w-full items-center gap-0.5 rounded-md px-2 text-xs text-muted-foreground transition-colors duration-[140ms] outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
           onclick={() => void showModels()}>
-          <span class="sr-only">{m.console_chat_model()}: </span><span class="truncate">{modelName}</span
-          ><ChevronRightIcon class="size-3.5 shrink-0" aria-hidden="true" />
+          <span class="sr-only">{m.console_chat_model()}: </span><span class="truncate">
+            {modelName}
+          </span><ChevronRightIcon class="size-3.5 shrink-0" aria-hidden="true" />
         </button>
       </div>
       {#if ordered}
@@ -138,15 +139,18 @@ async function pickModel(id: string) {
           bind:value={() => index, (value: number) => chooseEffort(stops[value])} />
       {:else}
         <Select.Root type="single" value={snapshot.thinkingSelection} onValueChange={chooseEffort}>
-          <Select.Trigger id="chat-thinking" aria-label={m.console_chat_effort()} class="w-full"
-            >{effortLabel}</Select.Trigger>
-          <Select.Content
-            ><Select.Group>
+          <Select.Trigger id="chat-thinking" aria-label={m.console_chat_effort()} class="w-full">
+            {effortLabel}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
               {#each ['default', ...snapshot.thinkingLevels] as level (level)}<Select.Item
                   value={level}
-                  label={thinkingLabel(level)}>{thinkingLabel(level)}</Select.Item
-                >{/each}
-            </Select.Group></Select.Content>
+                  label={thinkingLabel(level)}>
+                  {thinkingLabel(level)}
+                </Select.Item>{/each}
+            </Select.Group>
+          </Select.Content>
         </Select.Root>
       {/if}
     {:else}
@@ -165,11 +169,11 @@ async function pickModel(id: string) {
               data-checked={model.id === snapshot.selectedModelId}
               class="rounded-md px-3"
               onSelect={() => void pickModel(model.id)}>
-              <span class="flex min-w-0 flex-col"
-                ><span class="truncate">{name}</span>
-                {#if name !== model.model_id}<span class="truncate font-technical text-xs text-muted-foreground"
-                    >{model.model_id}</span
-                  >{/if}
+              <span class="flex min-w-0 flex-col">
+                <span class="truncate">{name}</span>
+                {#if name !== model.model_id}<span class="truncate font-technical text-xs text-muted-foreground">
+                    {model.model_id}
+                  </span>{/if}
               </span>
             </Command.Item>
           {/each}

@@ -432,8 +432,9 @@ async function copyProvider(): Promise<void> {
 </script>
 
 {#snippet modelChangesAction()}
-  <Button data-model-changes-trigger variant="outline" size="sm" onclick={() => changesSheet.show()}
-    >{m.model_changes_title()}</Button>
+  <Button data-model-changes-trigger variant="outline" size="sm" onclick={() => changesSheet.show()}>
+    {m.model_changes_title()}
+  </Button>
 {/snippet}
 
 <svelte:head><title>{m.common_model_services()} · Stravia</title></svelte:head>
@@ -474,15 +475,18 @@ async function copyProvider(): Promise<void> {
         <DropdownMenu.Item onSelect={() => void toggleProvider(provider)} disabled={actingProviderId === provider.id}>
           {provider.is_enabled ? m.providers_disable_service() : m.providers_enable_service()}
         </DropdownMenu.Item>
-        <DropdownMenu.Item onSelect={() => askCopy(provider)}
-          >{m.providers_duplicate_service_action()}</DropdownMenu.Item>
+        <DropdownMenu.Item onSelect={() => askCopy(provider)}>
+          {m.providers_duplicate_service_action()}
+        </DropdownMenu.Item>
       </DropdownMenu.Group>
       <DropdownMenu.Separator />
       <DropdownMenu.Group>
         <DropdownMenu.Item
           variant="destructive"
           disabled={deleting || actingProviderId === provider.id}
-          onSelect={() => askDelete(provider)}>{m.providers_delete_service()}</DropdownMenu.Item>
+          onSelect={() => askDelete(provider)}>
+          {m.providers_delete_service()}
+        </DropdownMenu.Item>
       </DropdownMenu.Group>
     </DropdownMenu.Content>
   </DropdownMenu.Root>
@@ -527,8 +531,9 @@ async function copyProvider(): Promise<void> {
       {#if inventory.total > 0 || inventory.status === 'ok'}
         <span
           class="font-technical tabular-nums"
-          aria-label={m.providers_inventory_counts_aria({ available: inventory.available, total: inventory.total })}
-          >{inventory.available} / {inventory.total}</span>
+          aria-label={m.providers_inventory_counts_aria({ available: inventory.available, total: inventory.total })}>
+          {inventory.available} / {inventory.total}
+        </span>
       {/if}
       {#if inventory.status === 'syncing'}
         <StatusIndicator compact label={m.providers_inventory_syncing()} />
@@ -547,8 +552,9 @@ async function copyProvider(): Promise<void> {
   {:else if row.linkedModelCount === 0}
     <span class="text-muted-foreground">{m.providers_linked_models_none()}</span>
   {:else}
-    <a class="font-technical tabular-nums hover:underline" href={resolve(providerViewPath(row.provider, 'routes'))}
-      >{row.linkedModelCount}</a>
+    <a class="font-technical tabular-nums hover:underline" href={resolve(providerViewPath(row.provider, 'routes'))}>
+      {row.linkedModelCount}
+    </a>
   {/if}
 {/snippet}
 
@@ -570,10 +576,9 @@ async function copyProvider(): Promise<void> {
         <span class="font-technical tabular-nums">{cost.amount ?? '—'}</span>
       {:else}
         <span class="font-technical tabular-nums">{cost.price}</span>
-        <span class="text-xs text-muted-foreground"
-          >{cost.multiple
-            ? m.providers_cost_value_multiple({ multiple: cost.multiple })
-            : m.cost_basis_subscription()}</span>
+        <span class="text-xs text-muted-foreground">
+          {cost.multiple ? m.providers_cost_value_multiple({ multiple: cost.multiple }) : m.cost_basis_subscription()}
+        </span>
       {/if}
     </a>
   {/if}
@@ -632,7 +637,9 @@ async function copyProvider(): Promise<void> {
         class="h-auto p-0 text-xs"
         variant="link"
         disabled={actingProviderId === provider.id || reauthorizationBinding}
-        onclick={() => void reauthorizeProvider(provider)}>{m.providers_reauthorize()}</Button>
+        onclick={() => void reauthorizeProvider(provider)}>
+        {m.providers_reauthorize()}
+      </Button>
     </div>
   {/if}
 {/snippet}
@@ -771,8 +778,9 @@ async function copyProvider(): Promise<void> {
               {/if}
             </div>
             <div class="flex items-start gap-1">
-              <Button variant="ghost" size="sm" href={`/providers/${encodeURIComponent(provider.id)}?view=connection`}
-                >{m.providers_open()}</Button>
+              <Button variant="ghost" size="sm" href={`/providers/${encodeURIComponent(provider.id)}?view=connection`}>
+                {m.providers_open()}
+              </Button>
               {@render providerActions(provider)}
             </div>
           </div>
@@ -932,8 +940,9 @@ async function copyProvider(): Promise<void> {
     </Field.Field>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action onclick={() => void copyProvider()}
-        >{m.providers_duplicate_service_short_action()}</AlertDialog.Action>
+      <AlertDialog.Action onclick={() => void copyProvider()}>
+        {m.providers_duplicate_service_short_action()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

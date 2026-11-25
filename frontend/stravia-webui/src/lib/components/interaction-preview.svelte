@@ -160,10 +160,11 @@ async function handleKeydown(event: KeyboardEvent) {
   <div class="preview-markdown" style:--markdown-first-margin={contextLabel ? '0.35rem' : '0'}>
     {#if contextLabel}<strong>{contextLabel}</strong>{/if}
     {#if status === 'failed'}
-      <span class="preview-error"
-        ><span class="preview-error-mark" aria-hidden="true"></span>{m.observation_content_load_failed({
+      <span class="preview-error">
+        <span class="preview-error-mark" aria-hidden="true"></span>{m.observation_content_load_failed({
           reason: reason ?? '',
-        })}</span>
+        })}
+      </span>
     {:else if text !== null && /\S/.test(text)}
       {#if streamed}
         <StreamingMarkdown {text} active={animate} streaming={active} {textStart} {snapshotKey} />
@@ -250,8 +251,9 @@ async function handleKeydown(event: KeyboardEvent) {
       <p class="preview-label">{label}</p>
       {@render markdown(tooltipText, tooltipStatus, active && open, liveTooltip && tail, fullError)}
       {#if failure !== null}
-        <Button class="preview-retry" variant="outline" size="sm" onclick={() => (attempt += 1)}
-          >{m.common_retry()}</Button>
+        <Button class="preview-retry" variant="outline" size="sm" onclick={() => (attempt += 1)}>
+          {m.common_retry()}
+        </Button>
       {/if}
     </div>
   </Tooltip.Content>

@@ -30,8 +30,9 @@ function setValue(selected: string[]): void {
       <span role="list" class="flex min-w-0 items-center gap-3 overflow-hidden">
         {#each value as item (item)}
           {@const modality = specificationModality(item)}
-          <span role="listitem" class="inline-flex shrink-0 items-center gap-1.5"
-            ><modality.icon class="size-3.5 text-muted-foreground" aria-hidden="true" />{modality.label()}</span>
+          <span role="listitem" class="inline-flex shrink-0 items-center gap-1.5">
+            <modality.icon class="size-3.5 text-muted-foreground" aria-hidden="true" />{modality.label()}
+          </span>
         {/each}
       </span>
     {:else}
@@ -42,8 +43,9 @@ function setValue(selected: string[]): void {
     <Select.Group>
       {#each options as option (option)}
         {@const modality = specificationModality(option)}
-        <Select.Item value={option} label={modality.label()}
-          ><modality.icon class="size-3.5 text-muted-foreground" aria-hidden="true" />{modality.label()}</Select.Item>
+        <Select.Item value={option} label={modality.label()}>
+          <modality.icon class="size-3.5 text-muted-foreground" aria-hidden="true" />{modality.label()}
+        </Select.Item>
       {/each}
     </Select.Group>
   </Select.Content>

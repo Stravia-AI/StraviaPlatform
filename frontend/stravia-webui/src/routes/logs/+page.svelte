@@ -169,10 +169,7 @@ function scheduleSyncTabQuery(tab: ObservationTab): void {
 
 snapshot<LogsPageSnapshot>({
   id: 'logs-page',
-  capture: () => ({
-    workspace: ws.captureState(),
-    inspectorWidth,
-  }),
+  capture: () => ({ workspace: ws.captureState(), inspectorWidth }),
   restore: (value) => {
     if (!value || typeof value !== 'object') return
     const key = JSON.stringify(value)
@@ -403,7 +400,9 @@ async function downloadBundle(): Promise<void> {
     variant="ghost"
     size="icon-sm"
     aria-label={m.observation_refresh_anchor()}
-    onclick={() => void ws.refreshAnchor()}><RefreshCwIcon /></Button>
+    onclick={() => void ws.refreshAnchor()}>
+    <RefreshCwIcon />
+  </Button>
   <Button
     bind:ref={fullscreenButton}
     variant="ghost"
@@ -417,20 +416,23 @@ async function downloadBundle(): Promise<void> {
 
 {#snippet headerActions()}
   <div class="flex flex-wrap items-center gap-2">
-    <Button variant="outline" onclick={() => (filterOpen = true)}
-      ><SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if ws.activeFilterCount}<span
-          >· {ws.activeFilterCount}</span
-        >{/if}</Button>
+    <Button variant="outline" onclick={() => (filterOpen = true)}>
+      <SlidersHorizontalIcon data-icon="inline-start" />{m.observation_filters()}{#if ws.activeFilterCount}<span>
+          · {ws.activeFilterCount}
+        </span>{/if}
+    </Button>
     <DropdownMenu.Root>
       <DropdownMenu.Trigger>
         {#snippet child({ props })}
-          <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}
-            ><MoreHorizontalIcon /></Button>
+          <Button {...props} variant="outline" size="icon" aria-label={m.common_more_actions()}>
+            <MoreHorizontalIcon />
+          </Button>
         {/snippet}
       </DropdownMenu.Trigger>
       <DropdownMenu.Content class="w-48" align="end">
-        <DropdownMenu.Item variant="destructive" onSelect={() => (clearOpen = true)}
-          >{m.observation_clear_history()}</DropdownMenu.Item>
+        <DropdownMenu.Item variant="destructive" onSelect={() => (clearOpen = true)}>
+          {m.observation_clear_history()}
+        </DropdownMenu.Item>
       </DropdownMenu.Content>
     </DropdownMenu.Root>
   </div>
@@ -454,17 +456,21 @@ async function downloadBundle(): Promise<void> {
     <div class="workspace-toolbar">
       <div class="toolbar-tabs">
         <Tabs.Root value={ws.activeTab} onValueChange={handleTabChange}>
-          <Tabs.List
-            ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
-              value="client-errors">{m.observation_client_errors()}</Tabs.Trigger
-            ><Tabs.Trigger value="upstream-errors">{m.observation_upstream_errors()}</Tabs.Trigger></Tabs.List>
+          <Tabs.List>
+            <Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
+              value="client-errors">
+              {m.observation_client_errors()}
+            </Tabs.Trigger><Tabs.Trigger value="upstream-errors">{m.observation_upstream_errors()}</Tabs.Trigger>
+          </Tabs.List>
         </Tabs.Root>
         {#if ws.activeTab === 'client-errors'}
-          <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status"
-            >{ws.clientErrors.length} / {ws.clientErrorTotal}</span>
+          <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status">
+            {ws.clientErrors.length} / {ws.clientErrorTotal}
+          </span>
         {:else if ws.activeTab === 'upstream-errors'}
-          <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status"
-            >{ws.upstreamErrors.length} / {ws.upstreamErrorTotal}</span>
+          <span class="font-technical text-xs tabular-nums whitespace-nowrap text-muted-foreground" role="status">
+            {ws.upstreamErrors.length} / {ws.upstreamErrorTotal}
+          </span>
         {/if}
       </div>
       <TimeWindowControls
@@ -529,26 +535,24 @@ async function downloadBundle(): Promise<void> {
             {:else if ws.loadError}
               <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
             {:else}
-              <Empty.Root
-                ><Empty.Header
-                  ><Empty.Title
-                    >{ws.activeFilterCount
-                      ? m.observation_no_matching_chains()
-                      : m.observation_no_chains()}</Empty.Title
-                  ><Empty.Description
-                    >{ws.activeFilterCount
-                      ? m.observation_clear_filters_help()
-                      : m.observation_new_requests_appear()}</Empty.Description
-                  ></Empty.Header
-                >{#if ws.activeFilterCount}<Empty.Content
-                    ><Button
+              <Empty.Root>
+                <Empty.Header>
+                  <Empty.Title>
+                    {ws.activeFilterCount ? m.observation_no_matching_chains() : m.observation_no_chains()}
+                  </Empty.Title><Empty.Description>
+                    {ws.activeFilterCount ? m.observation_clear_filters_help() : m.observation_new_requests_appear()}
+                  </Empty.Description>
+                </Empty.Header>{#if ws.activeFilterCount}<Empty.Content>
+                    <Button
                       variant="outline"
                       onclick={() => {
                         ws.clearFilters()
                         void ws.applyFilters()
-                      }}>{m.observation_clear_filters()}</Button
-                    ></Empty.Content
-                  >{/if}</Empty.Root>
+                      }}>
+                      {m.observation_clear_filters()}
+                    </Button>
+                  </Empty.Content>{/if}
+              </Empty.Root>
             {/if}
           </div>
         {/if}
@@ -593,12 +597,13 @@ async function downloadBundle(): Promise<void> {
         {/if}
         {#if ws.clientErrorLoading && ws.clientErrors.length === 0}
           <div class="stage-state" role="status">{m.observation_loading_client_errors()}</div>
-        {:else if ws.clientErrors.length === 0 && !ws.clientErrorError}<Empty.Root class="flex-1"
-            ><Empty.Header
-              ><Empty.Title>{m.observation_no_client_errors()}</Empty.Title><Empty.Description
-                >{m.observation_no_client_errors_description()}</Empty.Description
-              ></Empty.Header
-            ></Empty.Root>
+        {:else if ws.clientErrors.length === 0 && !ws.clientErrorError}<Empty.Root class="flex-1">
+            <Empty.Header>
+              <Empty.Title>{m.observation_no_client_errors()}</Empty.Title><Empty.Description>
+                {m.observation_no_client_errors_description()}
+              </Empty.Description>
+            </Empty.Header>
+          </Empty.Root>
         {:else if ws.clientErrors.length > 0}
           <ClientErrorTable
             items={ws.clientErrors}
@@ -606,8 +611,9 @@ async function downloadBundle(): Promise<void> {
             onselect={(clientError: ClientErrorSummary) => void ws.selectClientError(clientError)} />
         {/if}
         {#if ws.clientErrorCursor}<div class="border-t p-3 text-center">
-            <Button variant="outline" disabled={ws.clientErrorLoading} onclick={() => void ws.loadClientErrors(false)}
-              >{ws.clientErrorLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
+            <Button variant="outline" disabled={ws.clientErrorLoading} onclick={() => void ws.loadClientErrors(false)}>
+              {ws.clientErrorLoading ? m.observation_loading_more() : m.observation_load_more()}
+            </Button>
           </div>{/if}
         {#if ws.selectedClientError}<ObservationInspector
             portalTarget={fullscreen ? workspaceEl : undefined}
@@ -637,12 +643,13 @@ async function downloadBundle(): Promise<void> {
         {/if}
         {#if ws.upstreamErrorLoading && ws.upstreamErrors.length === 0}
           <div class="stage-state" role="status">{m.observation_loading_upstream_errors()}</div>
-        {:else if ws.upstreamErrors.length === 0 && !ws.upstreamErrorError}<Empty.Root class="flex-1"
-            ><Empty.Header
-              ><Empty.Title>{m.observation_no_upstream_errors()}</Empty.Title><Empty.Description
-                >{m.observation_no_upstream_errors_description()}</Empty.Description
-              ></Empty.Header
-            ></Empty.Root>
+        {:else if ws.upstreamErrors.length === 0 && !ws.upstreamErrorError}<Empty.Root class="flex-1">
+            <Empty.Header>
+              <Empty.Title>{m.observation_no_upstream_errors()}</Empty.Title><Empty.Description>
+                {m.observation_no_upstream_errors_description()}
+              </Empty.Description>
+            </Empty.Header>
+          </Empty.Root>
         {:else if ws.upstreamErrors.length > 0}
           <UpstreamErrorTable
             items={ws.upstreamErrors}
@@ -653,8 +660,9 @@ async function downloadBundle(): Promise<void> {
             <Button
               variant="outline"
               disabled={ws.upstreamErrorLoading}
-              onclick={() => void ws.loadUpstreamErrors(false)}
-              >{ws.upstreamErrorLoading ? m.observation_loading_more() : m.observation_load_more()}</Button>
+              onclick={() => void ws.loadUpstreamErrors(false)}>
+              {ws.upstreamErrorLoading ? m.observation_loading_more() : m.observation_load_more()}
+            </Button>
           </div>{/if}
         {#if ws.selectedUpstreamError}<ObservationInspector
             portalTarget={fullscreen ? workspaceEl : undefined}
@@ -727,115 +735,123 @@ async function downloadBundle(): Promise<void> {
   </Dialog.Content>
 </Dialog.Root>
 
-<Sheet.Root bind:open={filterOpen}
-  ><Sheet.Content
+<Sheet.Root bind:open={filterOpen}>
+  <Sheet.Content
     side="right"
     class="w-full! max-w-none! sm:max-w-sm!"
     closeLabel={m.observation_close_filters()}
-    aria-describedby={undefined}
-    ><Sheet.Header
-      ><div class="flex items-center gap-1.5">
+    aria-describedby={undefined}>
+    <Sheet.Header>
+      <div class="flex items-center gap-1.5">
         <Sheet.Title>{m.observation_filters()}</Sheet.Title>
         <Field.Help hint={m.observation_filters_description()} />
-      </div></Sheet.Header>
+      </div>
+    </Sheet.Header>
     <div class="route-overlay-body">
       <Field.FieldGroup>
-        <Field.Field
-          ><Field.FieldLabel for="observation-provider">{m.common_model_service()}</Field.FieldLabel><SearchCombobox
+        <Field.Field>
+          <Field.FieldLabel for="observation-provider">{m.common_model_service()}</Field.FieldLabel><SearchCombobox
             id="observation-provider"
             value={ws.providerFilter === 'all' ? '' : ws.providerFilter}
             options={(providersQuery.data ?? []).map((provider) => ({ value: provider.id, label: provider.name }))}
             placeholder={m.logs_all_model_services()}
             emptyText={m.common_no_matching_providers()}
             clearLabel={m.common_table_clear_filter()}
-            onValueChange={(value: string) => ws.setProviderFilter(value || 'all')} /></Field.Field>
-        <Field.Field
-          ><Field.FieldLabel for="observation-model">{m.common_model()}</Field.FieldLabel><SearchCombobox
+            onValueChange={(value: string) => ws.setProviderFilter(value || 'all')} />
+        </Field.Field>
+        <Field.Field>
+          <Field.FieldLabel for="observation-model">{m.common_model()}</Field.FieldLabel><SearchCombobox
             id="observation-model"
             value={ws.modelFilter === 'all' ? '' : ws.modelFilter}
             options={(modelsQuery.data ?? []).map(logicalModelOption)}
             placeholder={m.common_all_models()}
             emptyText={m.common_no_matching_models()}
             clearLabel={m.common_table_clear_filter()}
-            onValueChange={(value: string) => ws.setModelFilter(value || 'all')} /></Field.Field>
-        <Field.Field
-          ><Field.FieldLabel for="observation-key">{m.common_api_key()}</Field.FieldLabel><Select.Root
+            onValueChange={(value: string) => ws.setModelFilter(value || 'all')} />
+        </Field.Field>
+        <Field.Field>
+          <Field.FieldLabel for="observation-key">{m.common_api_key()}</Field.FieldLabel><Select.Root
             type="single"
-            bind:value={() => ws.apiKeyFilter, (value: string) => ws.setApiKeyFilter(value)}
-            ><Select.Trigger id="observation-key" class="w-full"
-              >{keysQuery.data?.find((item) => item.id === ws.apiKeyFilter)?.name ??
-                m.observation_all()}</Select.Trigger
-            ><Select.Content
-              ><Select.Group
-                ><Select.Item value="all">{m.observation_all()}</Select.Item
-                >{#each keysQuery.data ?? [] as key (key.id)}<Select.Item value={key.id} label={key.name}
-                    >{key.name}</Select.Item
-                  >{/each}</Select.Group
-              ></Select.Content
-            ></Select.Root
-          ></Field.Field>
-        {#if ws.activeTab === 'client-errors'}<Field.Field
-            ><Field.FieldLabel for="observation-client-error-type">{m.observation_client_error_type()}</Field.FieldLabel
-            ><Select.Root
+            bind:value={() => ws.apiKeyFilter, (value: string) => ws.setApiKeyFilter(value)}>
+            <Select.Trigger id="observation-key" class="w-full">
+              {keysQuery.data?.find((item) => item.id === ws.apiKeyFilter)?.name ?? m.observation_all()}
+            </Select.Trigger><Select.Content>
+              <Select.Group>
+                <Select.Item value="all">
+                  {m.observation_all()}
+                </Select.Item>{#each keysQuery.data ?? [] as key (key.id)}<Select.Item value={key.id} label={key.name}>
+                    {key.name}
+                  </Select.Item>{/each}
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        </Field.Field>
+        {#if ws.activeTab === 'client-errors'}<Field.Field>
+            <Field.FieldLabel for="observation-client-error-type">
+              {m.observation_client_error_type()}
+            </Field.FieldLabel><Select.Root
               type="single"
               bind:value={
                 () => ws.clientErrorTypeFilter,
                 (value: string) => ws.setClientErrorTypeFilter(value as ClientErrorType | 'all')
-              }
-              ><Select.Trigger id="observation-client-error-type" class="w-full"
-                >{ws.clientErrorTypeFilter === 'all'
+              }>
+              <Select.Trigger id="observation-client-error-type" class="w-full">
+                {ws.clientErrorTypeFilter === 'all'
                   ? m.observation_all()
-                  : clientErrorTypeLabel(ws.clientErrorTypeFilter)}</Select.Trigger
-              ><Select.Content
-                ><Select.Group
-                  >{#each ['all', 'failed', 'rejected'] as type (type)}<Select.Item value={type}
-                      >{type === 'all' ? m.observation_all() : clientErrorTypeLabel(type)}</Select.Item
-                    >{/each}</Select.Group
-                ></Select.Content
-              ></Select.Root
-            ></Field.Field>
-        {:else if ws.activeTab === 'upstream-errors'}<Field.Field
-            ><Field.FieldLabel for="observation-upstream-outcome">{m.observation_upstream_result()}</Field.FieldLabel
-            ><Select.Root
+                  : clientErrorTypeLabel(ws.clientErrorTypeFilter)}
+              </Select.Trigger><Select.Content>
+                <Select.Group>
+                  {#each ['all', 'failed', 'rejected'] as type (type)}<Select.Item value={type}>
+                      {type === 'all' ? m.observation_all() : clientErrorTypeLabel(type)}
+                    </Select.Item>{/each}
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+          </Field.Field>
+        {:else if ws.activeTab === 'upstream-errors'}<Field.Field>
+            <Field.FieldLabel for="observation-upstream-outcome">
+              {m.observation_upstream_result()}
+            </Field.FieldLabel><Select.Root
               type="single"
               bind:value={
                 () => ws.upstreamErrorOutcomeFilter,
                 (value: string) => ws.setUpstreamErrorOutcomeFilter(value as UpstreamErrorOutcome | 'all')
-              }
-              ><Select.Trigger id="observation-upstream-outcome" class="w-full"
-                >{ws.upstreamErrorOutcomeFilter === 'all'
+              }>
+              <Select.Trigger id="observation-upstream-outcome" class="w-full">
+                {ws.upstreamErrorOutcomeFilter === 'all'
                   ? m.observation_all()
-                  : upstreamErrorOutcomeLabel(ws.upstreamErrorOutcomeFilter)}</Select.Trigger
-              ><Select.Content
-                ><Select.Group
-                  >{#each ['all', 'recovered', 'caused_failure', 'in_progress', 'interrupted'] as outcome (outcome)}<Select.Item
-                      value={outcome}
-                      >{outcome === 'all' ? m.observation_all() : upstreamErrorOutcomeLabel(outcome)}</Select.Item
-                    >{/each}</Select.Group
-                ></Select.Content
-              ></Select.Root
-            ></Field.Field>
+                  : upstreamErrorOutcomeLabel(ws.upstreamErrorOutcomeFilter)}
+              </Select.Trigger><Select.Content>
+                <Select.Group>
+                  {#each ['all', 'recovered', 'caused_failure', 'in_progress', 'interrupted'] as outcome (outcome)}<Select.Item
+                      value={outcome}>
+                      {outcome === 'all' ? m.observation_all() : upstreamErrorOutcomeLabel(outcome)}
+                    </Select.Item>{/each}
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+          </Field.Field>
         {/if}
-        {#if ws.activeTab === 'interactions'}<Field.Field
-            ><Field.FieldLabel for="observation-status">{m.common_status()}</Field.FieldLabel><Select.Root
+        {#if ws.activeTab === 'interactions'}<Field.Field>
+            <Field.FieldLabel for="observation-status">{m.common_status()}</Field.FieldLabel><Select.Root
               type="single"
-              bind:value={() => ws.statusFilter, (value: string) => ws.setStatusFilter(value)}
-              ><Select.Trigger id="observation-status" class="w-full"
-                >{ws.statusFilter === 'all'
-                  ? m.observation_all()
-                  : observationStatusLabel(ws.statusFilter)}</Select.Trigger
-              ><Select.Content
-                ><Select.Group
-                  >{#each ['all', 'running', 'waiting_client', 'completed', 'interrupted'] as status (status)}<Select.Item
-                      value={status}
-                      >{status === 'all' ? m.observation_all() : observationStatusLabel(status)}</Select.Item
-                    >{/each}</Select.Group
-                ></Select.Content
-              ></Select.Root
-            ></Field.Field>
+              bind:value={() => ws.statusFilter, (value: string) => ws.setStatusFilter(value)}>
+              <Select.Trigger id="observation-status" class="w-full">
+                {ws.statusFilter === 'all' ? m.observation_all() : observationStatusLabel(ws.statusFilter)}
+              </Select.Trigger><Select.Content>
+                <Select.Group>
+                  {#each ['all', 'running', 'waiting_client', 'completed', 'interrupted'] as status (status)}<Select.Item
+                      value={status}>
+                      {status === 'all' ? m.observation_all() : observationStatusLabel(status)}
+                    </Select.Item>{/each}
+                </Select.Group>
+              </Select.Content>
+            </Select.Root>
+          </Field.Field>
           <Field.Field>
-            <Field.FieldLabel for="observation-min-tokens" hint={m.observation_min_tokens_hint()}
-              >{m.observation_min_tokens()}</Field.FieldLabel>
+            <Field.FieldLabel for="observation-min-tokens" hint={m.observation_min_tokens_hint()}>
+              {m.observation_min_tokens()}
+            </Field.FieldLabel>
             <div class="flex items-center gap-3">
               <Slider
                 id="observation-min-tokens"
@@ -845,22 +861,25 @@ async function downloadBundle(): Promise<void> {
                 step={1}
                 class="flex-1"
                 aria-label={m.observation_min_tokens()} />
-              <span class="font-technical w-14 shrink-0 text-right text-sm tabular-nums" aria-live="polite"
-                >{ws.minTokensFilter > 0 ? formatCompactCount(ws.minTokensFilter) : m.observation_all()}</span>
+              <span class="font-technical w-14 shrink-0 text-right text-sm tabular-nums" aria-live="polite">
+                {ws.minTokensFilter > 0 ? formatCompactCount(ws.minTokensFilter) : m.observation_all()}
+              </span>
             </div>
           </Field.Field>
         {/if}
       </Field.FieldGroup>
     </div>
-    <Sheet.Footer
-      ><Button variant="ghost" onclick={() => ws.clearFilters()}>{m.observation_clear_filters()}</Button><Button
+    <Sheet.Footer>
+      <Button variant="ghost" onclick={() => ws.clearFilters()}>{m.observation_clear_filters()}</Button><Button
         onclick={() => {
           filterOpen = false
           void ws.applyFilters()
-        }}>{m.observation_apply_filters()}</Button
-      ></Sheet.Footer
-    ></Sheet.Content
-  ></Sheet.Root>
+        }}>
+        {m.observation_apply_filters()}
+      </Button>
+    </Sheet.Footer>
+  </Sheet.Content>
+</Sheet.Root>
 
 <AlertDialog.Root bind:open={clearOpen}>
   <AlertDialog.Content>
@@ -870,8 +889,9 @@ async function downloadBundle(): Promise<void> {
     </AlertDialog.Header>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>{m.common_cancel()}</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" disabled={clearing} onclick={() => void clearHistory()}
-        >{clearing ? m.observation_clearing() : m.observation_clear_history()}</AlertDialog.Action>
+      <AlertDialog.Action variant="destructive" disabled={clearing} onclick={() => void clearHistory()}>
+        {clearing ? m.observation_clearing() : m.observation_clear_history()}
+      </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
 </AlertDialog.Root>

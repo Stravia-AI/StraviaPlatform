@@ -199,8 +199,9 @@ let {
                       class="opacity-40 transition-opacity group-hover/sort:opacity-100 group-focus-visible/sort:opacity-100" />
                   {/if}
                   {#if sortMode === 'multiple' && header.column.getSortIndex() >= 0}
-                    <span class="font-technical text-[0.65rem] text-muted-foreground"
-                      >{header.column.getSortIndex() + 1}</span>
+                    <span class="font-technical text-[0.65rem] text-muted-foreground">
+                      {header.column.getSortIndex() + 1}
+                    </span>
                   {/if}
                 </Button>
               {:else}

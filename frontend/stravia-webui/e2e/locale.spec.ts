@@ -91,7 +91,7 @@ test('Login switches language without navigation or losing form state', async ({
   page.on('framenavigated', (frame) => {
     if (frame === page.mainFrame()) navigationCount += 1
   })
-  await page.getByRole('button', { name: 'Language', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Language', exact: true }).click()
   await page.getByRole('option', { name: '简体中文' }).click()
 
   await expect(page.getByRole('heading', { name: '登录 Stravia' })).toBeVisible()
@@ -111,7 +111,7 @@ test('Settings uses the shared language selector and updates immediately', async
   await page.goto('/settings')
 
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Language', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Language', exact: true }).click()
   await page.getByRole('option', { name: '简体中文' }).click()
 
   await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible()

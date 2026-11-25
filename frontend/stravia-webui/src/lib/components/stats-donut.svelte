@@ -118,8 +118,9 @@ function sectorPath(start: number, end: number, outer: number): string {
         onpointerleave={() => (activeKey = null)}>
         <span class="size-2.5 shrink-0 rounded-[2px]" style:background={palette[slice.slot]}></span>
         <span class={['truncate', labelClass]}>{slice.label}</span>
-        <span class="font-technical ml-auto text-muted-foreground tabular-nums"
-          >{formatPercent(total > 0 ? slice.value / total : 0)}</span>
+        <span class="font-technical ml-auto text-muted-foreground tabular-nums">
+          {formatPercent(total > 0 ? slice.value / total : 0)}
+        </span>
       </li>
     {/each}
   </ul>
