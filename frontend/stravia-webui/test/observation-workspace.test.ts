@@ -1454,3 +1454,47 @@ describe('selected path', () => {
     expect([...h.snap().selectedPath]).toEqual(['i1'])
   })
 })
+
+describe('state capture and restore', () => {
+  test('restores active tab, filters, and window before start and loads the active tab directly', async () => {
+    let forestCalls = 0
+    let clientErrorCalls = 0
+    const first = harness({
+      forest: () => {
+        forestCalls += 1
+        return Promise.resolve(forestPage([]))
+      },
+      clientErrors: () => {
+        clientErrorCalls += 1
+        return Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 1 })
+      },
+    })
+    first.controller.setProviderFilter('p1')
+    first.controller.setClientErrorTypeFilter('rejected')
+    await first.controller.choosePreset(60)
+    await first.controller.tabChanged('client-errors')
+    const captured = first.controller.captureState()
+
+    forestCalls = 0
+    clientErrorCalls = 0
+    const restored = harness({
+      forest: () => {
+        forestCalls += 1
+        return Promise.resolve(forestPage([]))
+      },
+      clientErrors: () => {
+        clientErrorCalls += 1
+        return Promise.resolve({ items: [], total: 0, next_cursor: null, snapshot_sequence: 2 })
+      },
+    })
+    restored.controller.restoreState(captured)
+    await restored.controller.start()
+
+    expect(restored.snap().activeTab).toBe('client-errors')
+    expect(restored.snap().providerFilter).toBe('p1')
+    expect(restored.snap().clientErrorTypeFilter).toBe('rejected')
+    expect(restored.snap().durationMs).toBe(60 * 60_000)
+    expect(clientErrorCalls).toBe(1)
+    expect(forestCalls).toBe(0)
+  })
+})

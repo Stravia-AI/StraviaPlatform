@@ -1820,7 +1820,7 @@ test.describe('custom rule Sheet', () => {
     await page.evaluate(() => document.querySelector<HTMLAnchorElement>('a[href="/providers"]')?.click())
     await expect(discard(page)).toBeVisible()
     await discard(page).getByRole('button', { name: 'Keep editing' }).click()
-    await expect(page).toHaveURL(/\/reversible-redaction$/)
+    await expect(page).toHaveURL(/\/reversible-redaction\?tab=rules$/)
     await expect(sheet.getByLabel('Rule name')).toHaveValue('Renamed token')
     expect(state.writes).toEqual([])
   })

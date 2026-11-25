@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import { snapshot } from '$app/navigation'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import { onMount } from 'svelte'
 import { useQueryClient } from '@tanstack/svelte-query'
@@ -71,6 +72,14 @@ interface VisibleAllowance {
 
 type AllowanceValueMode = 'remaining' | 'used'
 
+interface AllowancesSnapshot {
+  searchQuery: string
+  catalogFilter: string
+  conditionFilter: 'all' | AllowanceCondition
+  freshnessFilter: 'all' | ProviderAllowanceStatus
+  expandedProviderIds: string[]
+}
+
 // 仅是本机展示偏好，不进入管理面配置
 const VALUE_MODE_STORAGE_KEY = 'stravia:allowances:value-mode'
 const TIMELINE_PREVIEW_LIMIT = 10
@@ -89,6 +98,27 @@ let exhaustedOpen = $state(false)
 let willExhaustOpen = $state(false)
 let hoveredAllowanceId = $state<string | null>(null)
 let focusedAllowanceId = $state<string | null>(null)
+
+snapshot<AllowancesSnapshot>({
+  id: 'allowances',
+  capture: () => ({
+    searchQuery,
+    catalogFilter,
+    conditionFilter,
+    freshnessFilter,
+    expandedProviderIds: [...expandedProviderIds],
+  }),
+  restore: (value) => {
+    searchQuery = value.searchQuery
+    catalogFilter = value.catalogFilter
+    conditionFilter = value.conditionFilter
+    freshnessFilter = value.freshnessFilter
+    expandedProviderIds.clear()
+    for (const providerId of value.expandedProviderIds) {
+      expandedProviderIds.add(providerId)
+    }
+  },
+})
 
 onMount(() => {
   if (localStorage.getItem(VALUE_MODE_STORAGE_KEY) === 'used') valueMode = 'used'

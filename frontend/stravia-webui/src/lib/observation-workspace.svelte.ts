@@ -3,6 +3,7 @@ import {
   ObservationWorkspaceController,
   type ObservationWorkspaceApi,
   type ObservationWorkspaceHooks,
+  type ObservationWorkspacePersistedState,
   type ObservationWorkspaceSnapshot,
   type ObservationWorkspaceSubscribe,
   type ObservationWorkspaceSubscribeLive,
@@ -27,10 +28,13 @@ export {
   OBSERVATION_MAX_WINDOW_MS,
   OBSERVATION_MIN_TOKEN_STOPS,
   OBSERVATION_PRESET_MINUTES,
+  OBSERVATION_TABS,
 } from '#lib/observation-workspace.js'
 export type {
+  ObservationTab,
   ObservationWorkspaceApi,
   ObservationWorkspaceHooks,
+  ObservationWorkspacePersistedState,
   ObservationWorkspaceSnapshot,
 } from '#lib/observation-workspace.js'
 
@@ -116,6 +120,8 @@ export class ObservationWorkspace {
   }
 
   start = (): Promise<void> => this.#controller.start()
+  captureState = (): ObservationWorkspacePersistedState => this.#controller.captureState()
+  restoreState = (state: Partial<ObservationWorkspacePersistedState>): void => this.#controller.restoreState(state)
   dispose = (): void => this.#controller.dispose()
   advanceClock = (): void => this.#controller.advanceClock()
   choosePreset = (minutes: number): Promise<void> => this.#controller.choosePreset(minutes)

@@ -1,7 +1,8 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { onMount, tick } from 'svelte'
-import { goto } from '$app/navigation'
+import { onMount, tick, untrack } from 'svelte'
+import { SvelteSet } from 'svelte/reactivity'
+import { afterNavigate, goto, snapshot } from '$app/navigation'
 import { resolve } from '$app/paths'
 import { page } from '$app/state'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
@@ -26,8 +27,13 @@ import {
   isValidObservationRange,
   OBSERVATION_MIN_TOKEN_STOPS,
   OBSERVATION_PRESET_MINUTES,
+  OBSERVATION_TABS,
   ObservationWorkspace,
+  type ObservationTab,
+  type ObservationWorkspacePersistedState,
 } from '#lib/observation-workspace.svelte.js'
+import { syncQueryParams } from '#lib/url-query-nav.js'
+import { parseEnumParam } from '#lib/url-query-state.js'
 import type {
   ClientErrorSummary,
   ClientErrorType,
@@ -81,19 +87,42 @@ const providersQuery = createQuery(() => ({ queryKey: ['providers'], queryFn: ad
 const modelsQuery = createQuery(() => ({ queryKey: ['models'], queryFn: admin.models.list }))
 const keysQuery = createQuery(() => ({ queryKey: ['api-keys'], queryFn: admin.apiKeys.list }))
 
+const TAB_QUERY_DEFAULTS = { tab: 'interactions' } as const
+
+interface LogsPageSnapshot {
+  workspace: ObservationWorkspacePersistedState
+  inspectorWidth: number
+}
+
+function toObservationTab(value: string): ObservationTab {
+  return (OBSERVATION_TABS as readonly string[]).includes(value) ? (value as ObservationTab) : 'interactions'
+}
+
+function parseTabFromUrl(params: Pick<URLSearchParams, 'get'>): ObservationTab {
+  if (params.get('interaction')) return 'interactions'
+  return parseEnumParam(params, 'tab', OBSERVATION_TABS, 'interactions')
+}
+
+function syncTabQuery(tab: ObservationTab): Promise<void> {
+  return syncQueryParams({ tab }, { defaults: TAB_QUERY_DEFAULTS })
+}
+
 const ws = new ObservationWorkspace(
   admin.observations,
   subscribeToObservations,
   {
     focusLatest: async () => {
+      if (ws.activeTab !== 'interactions') return
       await tick()
       await canvas?.focusLatest()
     },
     focusNode: async (id) => {
+      if (ws.activeTab !== 'interactions') return
       await tick()
       await canvas?.focusNode(id)
     },
     fitAfterAllLoaded: async () => {
+      if (ws.activeTab !== 'interactions') return
       await tick()
       await canvas?.fitAfterAllLoaded()
     },
@@ -101,6 +130,88 @@ const ws = new ObservationWorkspace(
   },
   subscribeToInteractionLive,
 )
+
+const initialUrlTab = parseTabFromUrl(page.url.searchParams)
+if (initialUrlTab !== 'interactions') {
+  ws.restoreState({ activeTab: initialUrlTab })
+}
+
+const mountedTabs = new SvelteSet<ObservationTab>([toObservationTab(ws.activeTab)])
+$effect(() => {
+  const tab = toObservationTab(ws.activeTab)
+  untrack(() => {
+    if (!mountedTabs.has(tab)) mountedTabs.add(tab)
+  })
+})
+
+let snapshotRestored = false
+let lastRestoredSnapshotKey = ''
+let workspaceStarted = false
+let disposed = false
+let afterNavReady = false
+let pendingTabSync: ObservationTab | null = null
+
+function flushSyncTabQuery(tab: ObservationTab): void {
+  void Promise.resolve()
+    .then(() => Promise.resolve())
+    .then(() => {
+      if (!disposed) void syncTabQuery(tab)
+    })
+}
+
+function scheduleSyncTabQuery(tab: ObservationTab): void {
+  if (!afterNavReady) {
+    pendingTabSync = tab
+    return
+  }
+  flushSyncTabQuery(tab)
+}
+
+snapshot<LogsPageSnapshot>({
+  id: 'logs-page',
+  capture: () => ({
+    workspace: ws.captureState(),
+    inspectorWidth,
+  }),
+  restore: (value) => {
+    if (!value || typeof value !== 'object') return
+    const key = JSON.stringify(value)
+    if (snapshotRestored && key === lastRestoredSnapshotKey) return
+    snapshotRestored = true
+    lastRestoredSnapshotKey = key
+    if (typeof value.inspectorWidth === 'number' && Number.isFinite(value.inspectorWidth)) {
+      inspectorWidth = value.inspectorWidth
+    }
+    if (value.workspace && typeof value.workspace === 'object') {
+      const currentDeepLink = page.url.searchParams.get('interaction')
+      const restoredTab = currentDeepLink ? 'interactions' : toObservationTab(value.workspace.activeTab)
+      ws.restoreState({ ...value.workspace, activeTab: restoredTab })
+      if (workspaceStarted) {
+        void ws.applyFilters()
+        if (currentDeepLink) void ws.deepLinkInteraction(currentDeepLink)
+      }
+      if (!currentDeepLink) {
+        scheduleSyncTabQuery(restoredTab)
+      }
+    }
+  },
+})
+
+afterNavigate(({ shallow, type }) => {
+  afterNavReady = true
+  if (pendingTabSync !== null) {
+    const target = pendingTabSync
+    pendingTabSync = null
+    flushSyncTabQuery(target)
+    return
+  }
+  if (!shallow && type !== 'enter') {
+    const urlTab = parseTabFromUrl(page.url.searchParams)
+    if (urlTab !== ws.activeTab) {
+      void ws.tabChanged(urlTab)
+    }
+  }
+})
 
 const selectedOutputPreview = $derived(
   ws.interactionDetail ? observationOutputPreview(ws.interactionDetail, ws.selectedLiveBlocks) : undefined,
@@ -112,9 +223,17 @@ const draftEndMs = $derived(new Date(draftEnd).getTime())
 const validDraftRange = $derived(isValidObservationRange(draftStartMs, draftEndMs))
 
 onMount(() => {
+  if (!snapshotRestored) {
+    const urlTab = parseTabFromUrl(page.url.searchParams)
+    if (urlTab !== ws.activeTab) {
+      ws.restoreState({ activeTab: urlTab })
+    }
+  }
+  workspaceStarted = true
   void ws.start()
   const clock = setInterval(() => ws.advanceClock(), 1000)
   return () => {
+    disposed = true
     clearInterval(clock)
     ws.dispose()
     if (fullscreen && document.fullscreenElement === workspaceEl) {
@@ -135,8 +254,30 @@ $effect(() => {
 // 派生值按值去重：只改 highlight 参数的导航不会重新打开 Interaction。
 const deepLinkId = $derived(page.url.searchParams.get('interaction'))
 $effect(() => {
-  if (deepLinkId) void ws.deepLinkInteraction(deepLinkId)
+  if (!deepLinkId) return
+  if (untrack(() => ws.activeTab) !== 'interactions') {
+    void ws.tabChanged('interactions')
+  }
+  void ws.deepLinkInteraction(deepLinkId)
+  if (untrack(() => page.url.searchParams.has('tab'))) {
+    scheduleSyncTabQuery('interactions')
+  }
 })
+
+function handleTabChange(value: string): void {
+  const tab = toObservationTab(value)
+  mountedTabs.add(tab)
+  void ws.tabChanged(tab)
+  void syncTabQuery(tab)
+}
+
+async function openErrorInteraction(kind: 'client' | 'upstream'): Promise<void> {
+  if (kind === 'client') await ws.openClientErrorInteraction()
+  else await ws.openUpstreamErrorInteraction()
+  if (ws.activeTab === 'interactions') {
+    await syncTabQuery('interactions')
+  }
+}
 
 // 仅从命中记录进入（highlight 参数）时高亮；离开该 Interaction 或点「清除高亮」即清除参数。
 const highlightId = $derived(page.url.searchParams.get(HIT_HIGHLIGHT_QUERY) === HIT_HIGHLIGHT_VALUE ? deepLinkId : null)
@@ -312,7 +453,7 @@ async function downloadBundle(): Promise<void> {
     <h2 id="observation-workspace-title" class="sr-only">{m.observation_interaction_chains()}</h2>
     <div class="workspace-toolbar">
       <div class="toolbar-tabs">
-        <Tabs.Root value={ws.activeTab} onValueChange={(value: string) => void ws.tabChanged(value)}>
+        <Tabs.Root value={ws.activeTab} onValueChange={handleTabChange}>
           <Tabs.List
             ><Tabs.Trigger value="interactions">{m.observation_interaction_chains()}</Tabs.Trigger><Tabs.Trigger
               value="client-errors">{m.observation_client_errors()}</Tabs.Trigger
@@ -347,8 +488,9 @@ async function downloadBundle(): Promise<void> {
         trailing={windowTrailing} />
     </div>
 
-    {#if ws.activeTab === 'interactions'}
-      <div class="canvas-stage">
+    {#if mountedTabs.has('interactions') || ws.activeTab === 'interactions'}
+      {@const hidden = ws.activeTab !== 'interactions'}
+      <div class="canvas-stage" {hidden} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         {#if ws.loadError && !canvasEmpty}
           <div class="canvas-refresh-error">
             <RequestFailure message={localizeBackendErrorMessage(ws.loadError)} retry={() => ws.reloadForest()} />
@@ -438,8 +580,10 @@ async function downloadBundle(): Promise<void> {
               : undefined} />
         {/if}
       </div>
-    {:else if ws.activeTab === 'client-errors'}
-      <div class="error-list-view">
+    {/if}
+    {#if mountedTabs.has('client-errors') || ws.activeTab === 'client-errors'}
+      {@const hidden = ws.activeTab !== 'client-errors'}
+      <div class="error-list-view" {hidden} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <h2 class="sr-only">{m.observation_client_errors()}</h2>
         {#if ws.clientErrorError}
           <RequestFailure
@@ -471,7 +615,7 @@ async function downloadBundle(): Promise<void> {
             error={ws.clientErrorDetailError ? localizeBackendErrorMessage(ws.clientErrorDetailError) : undefined}
             onretry={() => void ws.refreshSelectedDetail()}
             oninteraction={ws.clientErrorDetail?.request.interaction_id
-              ? () => void ws.openClientErrorInteraction()
+              ? () => void openErrorInteraction('client')
               : undefined}
             loading={ws.clientErrorDetailLoading}
             width={inspectorWidth}
@@ -480,8 +624,10 @@ async function downloadBundle(): Promise<void> {
             onclose={ws.closeInspector}
             onbundle={() => void downloadBundle()} />{/if}
       </div>
-    {:else if ws.activeTab === 'upstream-errors'}
-      <div class="error-list-view">
+    {/if}
+    {#if mountedTabs.has('upstream-errors') || ws.activeTab === 'upstream-errors'}
+      {@const hidden = ws.activeTab !== 'upstream-errors'}
+      <div class="error-list-view" {hidden} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <h2 class="sr-only">{m.observation_upstream_errors()}</h2>
         {#if ws.upstreamErrorError}
           <RequestFailure
@@ -516,7 +662,7 @@ async function downloadBundle(): Promise<void> {
             error={ws.upstreamErrorDetailError ? localizeBackendErrorMessage(ws.upstreamErrorDetailError) : undefined}
             onretry={() => void ws.refreshSelectedDetail()}
             oninteraction={ws.upstreamErrorDetail?.error.interaction_id
-              ? () => void ws.openUpstreamErrorInteraction()
+              ? () => void openErrorInteraction('upstream')
               : undefined}
             loading={ws.upstreamErrorDetailLoading}
             width={inspectorWidth}
@@ -820,6 +966,10 @@ async function downloadBundle(): Promise<void> {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+}
+.canvas-stage[hidden],
+.error-list-view[hidden] {
+  display: none;
 }
 .error-list-view > .border-t {
   flex-shrink: 0;

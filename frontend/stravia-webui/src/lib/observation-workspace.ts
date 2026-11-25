@@ -29,6 +29,26 @@ import type {
   RootChangesPage,
 } from '#lib/types/observation.js'
 
+export const OBSERVATION_TABS = ['interactions', 'client-errors', 'upstream-errors'] as const
+export type ObservationTab = (typeof OBSERVATION_TABS)[number]
+
+export interface ObservationWorkspacePersistedState {
+  activeTab: ObservationTab
+  providerFilter: string
+  modelFilter: string
+  apiKeyFilter: string
+  statusFilter: string
+  minTokenStop: number
+  clientErrorTypeFilter: ClientErrorType | 'all'
+  upstreamErrorOutcomeFilter: UpstreamErrorOutcome | 'all'
+  durationMs: number
+  customRange: boolean
+  windowIndex: number
+  anchorAt: number
+  windowStart: number
+  windowEnd: number
+}
+
 export const OBSERVATION_BATCH_SIZE = 12
 export const OBSERVATION_MAX_WINDOW_MS = 86_400_000
 export const OBSERVATION_DEFAULT_WINDOW_MS = 10 * 60_000
@@ -350,9 +370,95 @@ export class ObservationWorkspaceController {
     this.#windowStart = this.#windowEnd - this.#durationMs
   }
 
+  captureState(): ObservationWorkspacePersistedState {
+    const activeTab: ObservationTab = (OBSERVATION_TABS as readonly string[]).includes(this.#activeTab)
+      ? (this.#activeTab as ObservationTab)
+      : 'interactions'
+    return {
+      activeTab,
+      providerFilter: this.#providerFilter,
+      modelFilter: this.#modelFilter,
+      apiKeyFilter: this.#apiKeyFilter,
+      statusFilter: this.#statusFilter,
+      minTokenStop: this.#minTokenStop,
+      clientErrorTypeFilter: this.#clientErrorTypeFilter,
+      upstreamErrorOutcomeFilter: this.#upstreamErrorOutcomeFilter,
+      durationMs: this.#durationMs,
+      customRange: this.#customRange,
+      windowIndex: this.#windowIndex,
+      anchorAt: this.#anchorAt,
+      windowStart: this.#windowStart,
+      windowEnd: this.#windowEnd,
+    }
+  }
+
+  restoreState(state: Partial<ObservationWorkspacePersistedState>): void {
+    if (state.activeTab && (OBSERVATION_TABS as readonly string[]).includes(state.activeTab)) {
+      this.#activeTab = state.activeTab
+    }
+    if (typeof state.providerFilter === 'string') this.#providerFilter = state.providerFilter
+    if (typeof state.modelFilter === 'string') this.#modelFilter = state.modelFilter
+    if (typeof state.apiKeyFilter === 'string') this.#apiKeyFilter = state.apiKeyFilter
+    if (typeof state.statusFilter === 'string') this.#statusFilter = state.statusFilter
+    if (
+      typeof state.minTokenStop === 'number' &&
+      Number.isInteger(state.minTokenStop) &&
+      state.minTokenStop >= 0 &&
+      state.minTokenStop < OBSERVATION_MIN_TOKEN_STOPS.length
+    ) {
+      this.#minTokenStop = state.minTokenStop
+    }
+    if (typeof state.clientErrorTypeFilter === 'string') {
+      this.#clientErrorTypeFilter = state.clientErrorTypeFilter
+    }
+    if (typeof state.upstreamErrorOutcomeFilter === 'string') {
+      this.#upstreamErrorOutcomeFilter = state.upstreamErrorOutcomeFilter
+    }
+    if (state.customRange && typeof state.windowStart === 'number' && typeof state.windowEnd === 'number') {
+      if (isValidObservationRange(state.windowStart, state.windowEnd)) {
+        this.#customRange = true
+        this.#windowStart = state.windowStart
+        this.#windowEnd = state.windowEnd
+        this.#durationMs = state.windowEnd - state.windowStart
+        this.#windowIndex = 0
+      }
+    } else {
+      if (
+        typeof state.durationMs === 'number' &&
+        OBSERVATION_PRESET_MINUTES.includes(Math.round(state.durationMs / 60_000))
+      ) {
+        this.#durationMs = state.durationMs
+      }
+      if (typeof state.windowIndex === 'number' && Number.isInteger(state.windowIndex) && state.windowIndex >= 0) {
+        this.#windowIndex = state.windowIndex
+      }
+      if (typeof state.anchorAt === 'number' && Number.isFinite(state.anchorAt) && state.anchorAt > 0) {
+        this.#anchorAt = state.anchorAt
+      }
+      this.#customRange = false
+      if (this.#windowIndex === 0) {
+        this.#updateLiveBounds()
+      } else {
+        this.#windowEnd = this.#anchorAt - this.#windowIndex * this.#durationMs
+        this.#windowStart = this.#windowEnd - this.#durationMs
+      }
+    }
+    this.#publish()
+  }
+
   async start(): Promise<void> {
     this.#updateLiveBounds()
-    await this.#loadForest(true)
+    if (this.#activeTab === 'client-errors') {
+      this.#loading = false
+      this.#publish()
+      await this.loadClientErrors()
+    } else if (this.#activeTab === 'upstream-errors') {
+      this.#loading = false
+      this.#publish()
+      await this.loadUpstreamErrors()
+    } else {
+      await this.#loadForest(true)
+    }
   }
 
   dispose(): void {
