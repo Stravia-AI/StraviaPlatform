@@ -225,6 +225,54 @@ impl Gateway {
         &self.mcp_registry
     }
 
+    /// 统一读取并解析 `log_retention_days`，同步内存保留期并返回时间窗口。
+    pub(crate) async fn load_retention_window(&self) -> anyhow::Result<std::time::Duration> {
+        let raw = self.storage.settings().get("log_retention_days").await?;
+        let days = crate::history_retention::HistoryRetention::parse_setting_days(raw.as_deref());
+        self.retention.set_days(days);
+        Ok(self.retention.window())
+    }
+
+    /// 统一解析并校验 `artifact_settings` JSON；缺失时返回默认配置。
+    pub(crate) fn parse_artifact_settings(
+        raw: Option<&str>,
+    ) -> Result<
+        stravia_runtime_contract::artifact::ArtifactSettings,
+        stravia_runtime_contract::artifact::ArtifactError,
+    > {
+        let settings = match raw {
+            Some(value) => serde_json::from_str::<
+                stravia_runtime_contract::artifact::ArtifactSettings,
+            >(value)
+            .map_err(|error| {
+                stravia_runtime_contract::artifact::ArtifactError::Invalid(format!(
+                    "Invalid artifact settings: {error}"
+                ))
+            })?,
+            None => stravia_runtime_contract::artifact::ArtifactSettings::default(),
+        };
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// 统一从存储加载并校验 `artifact_settings`。
+    pub(crate) async fn load_artifact_settings(
+        &self,
+    ) -> Result<
+        stravia_runtime_contract::artifact::ArtifactSettings,
+        stravia_runtime_contract::artifact::ArtifactError,
+    > {
+        let raw = self
+            .storage
+            .settings()
+            .get("artifact_settings")
+            .await
+            .map_err(|error| {
+                stravia_runtime_contract::artifact::ArtifactError::Storage(error.to_string())
+            })?;
+        Self::parse_artifact_settings(raw.as_deref())
+    }
+
     /// Executes a [`PlatformTool`] via the shared ADR-0082 bounded synchronous-wait and
     /// background handoff pipeline with `ExecutionSource::Mcp`.
     pub async fn dispatch_mcp_platform_tool(

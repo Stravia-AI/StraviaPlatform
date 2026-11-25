@@ -328,17 +328,17 @@ impl Gateway {
         let cancellation = CancellationToken::new();
         let domain_cancellation = CancellationToken::new();
         context.cancellation = domain_cancellation.clone();
-        let retention = self
+        let retention_raw = self
             .storage
             .settings()
             .get("log_retention_days")
             .await
-            .map_err(|error| failure(error.to_string()))?
-            .map(|days| days.parse::<u32>())
-            .transpose()
-            .map_err(|_| failure("Invalid history retention setting"))?
-            .unwrap_or(7);
-        let retention = Duration::from_secs(u64::from(retention) * 86400);
+            .map_err(|error| failure(error.to_string()))?;
+        let retention = crate::history_retention::HistoryRetention::days_to_window(
+            crate::history_retention::HistoryRetention::parse_setting_days(
+                retention_raw.as_deref(),
+            ),
+        );
         let call = ToolCall {
             id: stravia_runtime_contract::identifier::new_id().into(),
             name: tool.external_name().to_owned(),

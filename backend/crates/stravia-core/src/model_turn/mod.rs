@@ -10,6 +10,11 @@ mod live;
 mod provider;
 pub(crate) mod support;
 
+/// 同目标可重试的瞬时 HTTP 状态码集合，主模型循环与独立能力路径共享。
+pub(super) fn is_retryable_same_target_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 529)
+}
+
 /// Whether a Route purpose permits this operation.
 pub(crate) fn route_purpose_supports_capability(
     purpose: crate::db::models::RoutePurpose,

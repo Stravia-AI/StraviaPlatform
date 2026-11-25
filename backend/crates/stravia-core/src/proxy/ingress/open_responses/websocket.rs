@@ -50,7 +50,7 @@ impl AllowedWebSocketOrigins {
         }
     }
 
-    fn allows(&self, origin: &str) -> bool {
+    pub(crate) fn allows(&self, origin: &str) -> bool {
         self.allow_any || self.origins.contains(origin)
     }
 }
@@ -520,9 +520,9 @@ async fn serve(
                     let progress = Arc::new(Mutex::new(StreamForwardProgress::default()));
                     let delivery_slot = active_delivery.clone();
                     tokio::spawn(async move {
-                        let result = tokio::time::timeout(
-                            RUN_DEADLINE,
-                            forward_response(
+                        let deadline = request_context.deadline.clone();
+                        let timed_out = tokio::select! {
+                            () = forward_response(
                                 gateway,
                                 headers,
                                 request_context,
@@ -533,10 +533,10 @@ async fn serve(
                                     active_observer: &active_observer,
                                     delivery_slot: &delivery_slot,
                                 },
-                            ),
-                        )
-                        .await;
-                        if result.is_err() {
+                            ) => false,
+                            () = deadline.wait() => true,
+                        };
+                        if timed_out {
                             request_cancellation.cancel();
                             if active_observer.lock().is_none()
                                 && let Some(observer) = timeout_context
@@ -865,8 +865,10 @@ async fn forward_response(
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "invalid_request".into());
-        let event = if upstream_error
-            && let Some(error) = decoded.as_ref().and_then(|body| body.get("error"))
+        let event = if let Some(error) = decoded
+            .as_ref()
+            .and_then(|body| body.get("error"))
+            .filter(|error| upstream_error || error.is_object())
         {
             serde_json::json!({"type": "error", "status": status.as_u16(), "error": error})
         } else {

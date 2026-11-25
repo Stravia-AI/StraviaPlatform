@@ -96,6 +96,21 @@ async fn insert_postgres(
     Ok(())
 }
 
+fn is_terminal_status(status: &str) -> bool {
+    status != "running" && status != "waiting_client"
+}
+
+fn needs_rebuild(
+    terminal: bool,
+    indexed_terminal: bool,
+    last: i64,
+    last_event_sequence: i64,
+    latest: i64,
+) -> bool {
+    (last > last_event_sequence && latest <= last_event_sequence)
+        || (terminal && (!indexed_terminal || latest > last || last_event_sequence > last))
+}
+
 // SQLite 由 begin_write 排队写租约并以 BEGIN IMMEDIATE 串行化写入；PostgreSQL 先锁
 // Interaction 再锁进度行，与删除操作的锁顺序一致，并在修改段之前锁住进度。
 // 返回值表示本批之后是否还需再调用一次。进度统一记录 Interaction 的末事件序号，
@@ -121,12 +136,11 @@ macro_rules! index_in_tx {
             let progress_sql = concat!("SELECT last_event_sequence,indexed_terminal FROM history_search_progress WHERE interaction_id=$1", $progress_lock);
             let (last, indexed_terminal): (i64, bool) = sqlx::query_as(progress_sql)
                 .bind(interaction).fetch_one(&mut *tx).await?;
-            let terminal = status != "running" && status != "waiting_client";
+            let terminal = is_terminal_status(&status);
             let latest: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM observation_events WHERE interaction_id=$1")
                 .bind(interaction).fetch_one(&mut *tx).await?;
             // 若进度越过了当前末事件，重建以恢复一致性；终结态也需重建完整文本。
-            let rebuild = (last > last_event_sequence && latest <= last_event_sequence)
-                || (terminal && (!indexed_terminal || latest > last || last_event_sequence > last));
+            let rebuild = needs_rebuild(terminal, indexed_terminal, last, last_event_sequence, latest);
             if terminal && !rebuild {
                 return Ok(false);
             }
@@ -256,13 +270,12 @@ async fn sqlite_needs_index(pool: &SqlitePool, interaction: &str) -> anyhow::Res
     if !is_member {
         return Ok(progress_last.is_some() || has_segments);
     }
-    let terminal = status != "running" && status != "waiting_client";
+    let terminal = is_terminal_status(&status);
     let Some(last) = progress_last else {
         return Ok(true);
     };
     let indexed_terminal = indexed_terminal.unwrap_or(false);
-    let rebuild = (last > last_event_sequence && latest <= last_event_sequence)
-        || (terminal && (!indexed_terminal || latest > last || last_event_sequence > last));
+    let rebuild = needs_rebuild(terminal, indexed_terminal, last, last_event_sequence, latest);
     if terminal && !rebuild {
         return Ok(false);
     }

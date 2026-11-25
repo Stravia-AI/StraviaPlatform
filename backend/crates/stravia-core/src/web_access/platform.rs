@@ -80,11 +80,6 @@ impl PlatformTool for InternalReadTool {
             context.read_scope = ReadExposureScope::FULL;
             return self.reader.read_target(target, context).await;
         };
-        if !crate::mcp::read::networking_available(&self.gateway, &context.principal).await {
-            return Err(PlatformToolError::new(
-                "Networking capability is unavailable",
-            ));
-        }
         let response = match self
             .gateway
             .web_access()

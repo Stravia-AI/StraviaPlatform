@@ -134,7 +134,8 @@ impl AgentRunner {
                             },
                             arguments,
                         ).instrument(span.clone()).await;
-                        span.record("status", if output.is_ok() { "completed" } else { "error" });
+                        let succeeded = matches!(&output, Ok(out) if !out.is_error);
+                        span.record("status", if succeeded { "completed" } else { "error" });
                         Ok(output)
                     } => result,
                 };
@@ -148,7 +149,7 @@ impl AgentRunner {
                         call_id: call.id.to_string(),
                         content_kind: output.content_kind,
                         content: output.content,
-                        is_error: false,
+                        is_error: output.is_error,
                         metadata: serde_json::Map::new(),
                     },
                     Err(error) => PlatformToolResult {

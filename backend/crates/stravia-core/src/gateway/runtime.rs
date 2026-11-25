@@ -563,17 +563,8 @@ impl Gateway {
             (None, None)
         };
         if let Some(store) = artifact_store.as_ref() {
-            let settings = storage
-                .settings()
-                .get("artifact_settings")
-                .await?
-                .map(|value| {
-                    serde_json::from_str::<stravia_runtime_contract::artifact::ArtifactSettings>(
-                        &value,
-                    )
-                })
-                .transpose()?
-                .unwrap_or_default();
+            let raw = storage.settings().get("artifact_settings").await?;
+            let settings = crate::Gateway::parse_artifact_settings(raw.as_deref())?;
             store.configure(&settings).await?;
         }
         let compaction = if let Some(pool) = history_sqlite_pool.as_ref() {

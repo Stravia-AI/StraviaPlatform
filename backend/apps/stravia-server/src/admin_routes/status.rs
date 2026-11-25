@@ -120,7 +120,47 @@ pub(super) fn err(e: anyhow::Error) -> axum::response::Response {
     if let Some(catalog_error) = e.downcast_ref::<CatalogError>() {
         return catalog_error_response(catalog_error);
     }
-    Json(serde_json::json!({ "error": e.to_string() })).into_response()
+    let message = e.to_string();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&message)
+        && let Some(code) = value.get("code").and_then(serde_json::Value::as_str)
+    {
+        let status = if code.ends_with("_NOT_FOUND") {
+            StatusCode::NOT_FOUND
+        } else if code.ends_with("_CONFLICT")
+            || code.ends_with("_BOUND")
+            || code.ends_with("_UNAVAILABLE")
+        {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        return (
+            status,
+            Json(serde_json::json!({
+                "code": code,
+                "error": value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&message),
+                "params": value.get("params").cloned().unwrap_or(serde_json::Value::Null),
+            })),
+        )
+            .into_response();
+    }
+    let lower = message.to_ascii_lowercase();
+    let status = if lower.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if lower.contains("already exists") || lower.contains("conflict") {
+        StatusCode::CONFLICT
+    } else if e
+        .chain()
+        .any(|cause| cause.is::<sqlx::Error>() || cause.is::<std::io::Error>())
+    {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 pub(super) fn oauth_err(e: anyhow::Error) -> axum::response::Response {

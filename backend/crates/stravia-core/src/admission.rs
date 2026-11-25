@@ -54,26 +54,23 @@ impl PrincipalAdmission {
         principal: &Principal,
         rpm_limit: Option<i32>,
     ) -> Result<(), GatewayError> {
-        let mut state = self.state.lock();
-        if let Some(window) = state.get_mut(principal.api_key_id()) {
-            return window.acquire();
-        }
         if rpm_limit.is_none() {
             return Ok(());
         }
-        let mut window = PrincipalWindow {
-            limit: rpm_limit,
-            starts: VecDeque::new(),
-        };
-        let result = window.acquire();
-        state.insert(principal.api_key_id().to_owned(), window);
-        result
+        let mut state = self.state.lock();
+        let window = state
+            .entry(principal.api_key_id().to_owned())
+            .or_insert_with(|| PrincipalWindow {
+                limit: rpm_limit,
+                starts: VecDeque::new(),
+            });
+        window.acquire(rpm_limit)
     }
 }
 
 impl PrincipalWindow {
-    fn acquire(&mut self) -> Result<(), GatewayError> {
-        let Some(limit) = self.limit else {
+    fn acquire(&mut self, effective_limit: Option<i32>) -> Result<(), GatewayError> {
+        let Some(limit) = effective_limit else {
             return Ok(());
         };
         let limit = usize::try_from(limit)
@@ -101,5 +98,34 @@ impl PrincipalWindow {
         }
         self.starts.push_back(now);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acquire_honors_dynamically_tightened_rpm_limit() {
+        let admission = PrincipalAdmission::new();
+        let principal = Principal::new("key-1");
+        admission.set_limit(principal.api_key_id(), Some(10));
+
+        admission.acquire(&principal, Some(1)).unwrap();
+        let err = admission.acquire(&principal, Some(1)).unwrap_err();
+        assert!(matches!(err, GatewayError::PrincipalRpmExceeded { .. }));
+
+        // 非收紧请求仍可使用原限额
+        admission.acquire(&principal, Some(10)).unwrap();
+    }
+
+    #[test]
+    fn acquire_honors_tightening_after_relaxed_window_creation() {
+        let admission = PrincipalAdmission::new();
+        let principal = Principal::new("key-2");
+
+        admission.acquire(&principal, Some(5)).unwrap();
+        let err = admission.acquire(&principal, Some(1)).unwrap_err();
+        assert!(matches!(err, GatewayError::PrincipalRpmExceeded { .. }));
     }
 }

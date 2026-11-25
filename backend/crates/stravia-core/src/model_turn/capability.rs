@@ -862,7 +862,7 @@ impl RouteFailure {
                 // 错误类别可能合并不同 HTTP 状态；同 Target 重试范围不能因此扩大，
                 // 但仍然是上游失败，按非瞬时失败直接换 Target。
                 let transient_status = upstream_status
-                    .is_none_or(|status| matches!(status, 408 | 429 | 500 | 502 | 503 | 529));
+                    .is_none_or(super::is_retryable_same_target_status);
                 if kind.is_retryable() && !transient_status {
                     AiErrorKind::Unknown
                 } else {

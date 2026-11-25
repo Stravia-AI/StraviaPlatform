@@ -114,6 +114,49 @@ fn json_error(
     response
 }
 
+fn auth_gateway_error(error: crate::error::GatewayError) -> Box<Response> {
+    use crate::error::{AuthFailure, GatewayError};
+    let response = match error {
+        GatewayError::Unauthorized {
+            reason: AuthFailure::Missing,
+        } => json_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_api_key",
+            "invalid_api_key",
+            "Bearer API key is required",
+        ),
+        GatewayError::Unauthorized {
+            reason: AuthFailure::Invalid,
+        } => json_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_api_key",
+            "invalid_api_key",
+            "invalid API key",
+        ),
+        GatewayError::Unauthorized {
+            reason: AuthFailure::Expired,
+        } => json_error(
+            StatusCode::UNAUTHORIZED,
+            "api_key_expired",
+            "api_key_expired",
+            "API key is expired",
+        ),
+        GatewayError::Forbidden { .. } => json_error(
+            StatusCode::FORBIDDEN,
+            "api_key_disabled",
+            "api_key_disabled",
+            "API key is disabled",
+        ),
+        _ => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "auth_unavailable",
+            "auth_unavailable",
+            "API key authentication is unavailable",
+        ),
+    };
+    Box::new(response)
+}
+
 async fn required_principal(
     gateway: &Gateway,
     headers: &HeaderMap,
@@ -131,13 +174,13 @@ async fn required_principal(
         security
             .authorize_principal_capability(&principal)
             .await
-            .map_err(|_| artifact_error(ArtifactError::Unauthorized))?;
+            .map_err(auth_gateway_error)?;
         return Ok(principal);
     }
     security
         .required_principal(&credential)
         .await
-        .map_err(|_| Box::new(artifact_error(ArtifactError::Unauthorized)))
+        .map_err(auth_gateway_error)
 }
 
 pub async fn download(State(gateway): State<Gateway>, Path(token): Path<String>) -> Response {

@@ -745,59 +745,8 @@ impl ArtifactStore for LocalArtifactStore {
         id: &ArtifactId,
         retention: Duration,
     ) -> Result<(), ArtifactError> {
-        let retention_millis = i64::try_from(retention.as_millis()).unwrap_or(i64::MAX);
-        let expires_at = self.now().saturating_add(retention_millis);
-        // SQLite renewal and deletion use the same per-artifact lock, independent
-        // of wall-clock movement between the sweeper's scan and eligibility check.
-        // PostgreSQL keeps the existing row-update serialization inside its sweep
-        // transaction and must not consume a second advisory-lock connection here.
-        let _guard = match &self.database {
-            ArtifactDatabase::Sqlite(_) => Some(self.read_guard(id).await?),
-            ArtifactDatabase::Postgres(_) => None,
-        };
-        let principal_key = principal.continuation_key();
-        let affected = match &self.database {
-            ArtifactDatabase::Sqlite(pool) => {
-                let pool = pool.clone();
-                let id = id.clone();
-                let now = self.now();
-                Self::complete_guarded(async move {
-                    let _guard = _guard;
-                    let mut connection = pool.begin_write().await.map_err(storage_error)?;
-                    let affected = sqlx::query(
-                        "UPDATE artifacts SET expires_at = MAX(expires_at, ?) \
-                 WHERE id = ? AND principal = ? AND state = 'ready' AND expires_at > ?",
-                    )
-                    .bind(expires_at)
-                    .bind(id.as_str())
-                    .bind(&principal_key)
-                    .bind(now)
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(storage_error)?
-                    .rows_affected();
-                    connection.commit().await.map_err(storage_error)?;
-                    Ok(affected)
-                })
-                .await?
-            }
-            ArtifactDatabase::Postgres(pool) => sqlx::query(
-                "UPDATE artifacts SET expires_at = GREATEST(expires_at, $1) \
-                 WHERE id = $2 AND principal = $3 AND state = 'ready' AND expires_at > $4",
-            )
-            .bind(expires_at)
-            .bind(id.as_str())
-            .bind(&principal_key)
-            .bind(self.now())
-            .execute(pool)
+        LocalArtifactStore::extend_retention(self, principal, std::slice::from_ref(id), retention)
             .await
-            .map_err(storage_error)?
-            .rows_affected(),
-        };
-        if affected == 0 {
-            return Err(ArtifactError::NotFound);
-        }
-        Ok(())
     }
 
     async fn sweep_expired(&self) -> Result<u64, ArtifactError> {
@@ -1382,14 +1331,13 @@ impl LocalArtifactStore {
                 guards.push(self.read_guard(id).await?);
             }
         }
-        let extension = self
-            .now()
-            .saturating_add(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
+        let now = self.now();
+        let extension =
+            now.saturating_add(i64::try_from(retention.as_millis()).unwrap_or(i64::MAX));
         let principal_key = principal.continuation_key();
         match &self.database {
             ArtifactDatabase::Sqlite(pool) => {
                 let pool = pool.clone();
-                let store = self.clone();
                 let ids: Vec<_> = ids.into_iter().cloned().collect();
                 Self::complete_guarded(async move {
         let _guards = guards;
@@ -1401,7 +1349,7 @@ impl LocalArtifactStore {
             .bind(extension)
             .bind(id.as_str())
             .bind(&principal_key)
-            .bind(store.now())
+            .bind(now)
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?
@@ -1423,7 +1371,7 @@ impl LocalArtifactStore {
             .bind(extension)
             .bind(id.as_str())
             .bind(&principal_key)
-            .bind(self.now())
+            .bind(now)
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?

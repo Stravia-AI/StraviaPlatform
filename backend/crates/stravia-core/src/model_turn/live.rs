@@ -996,7 +996,7 @@ fn execute_inner(
                     && failure
                         .diagnostic
                         .status_code
-                        .is_some_and(|status| !matches!(status, 408 | 429 | 500 | 502 | 503 | 529))
+                        .is_some_and(|status| !super::is_retryable_same_target_status(status))
                 {
                     record_upstream_failure(&attempts, &target, &failure);
                     attempts.skip_current();

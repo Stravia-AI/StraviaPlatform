@@ -39,6 +39,57 @@ fn validate_admission(admission: &PromptAdmission) -> anyhow::Result<Option<i64>
         .map_err(Into::into)
 }
 
+pub(crate) struct MergedApiKeyUpdate {
+    pub(crate) token: String,
+    pub(crate) name: String,
+    pub(crate) rpm_limit: Option<i32>,
+    pub(crate) spend_limit_nanos: Option<i64>,
+    pub(crate) is_enabled: bool,
+    pub(crate) mcp_access_enabled: bool,
+    pub(crate) transparent_injection_enabled: bool,
+    pub(crate) transparent_injections: crate::db::models::TransparentInjectionSet,
+    pub(crate) expires_at: Option<String>,
+}
+
+pub(crate) fn merge_api_key_update(
+    current: crate::db::models::ApiKey,
+    input: crate::db::models::UpdateApiKey,
+) -> anyhow::Result<MergedApiKeyUpdate> {
+    let spend_limit_nanos = match input.spend_limit {
+        Some(value) => crate::storage::money::parse_spend_limit(value.as_deref())?,
+        None => current.spend_limit_nanos,
+    };
+    Ok(MergedApiKeyUpdate {
+        token: input.key.unwrap_or(current.token),
+        name: input.name.unwrap_or(current.name),
+        rpm_limit: input.rpm_limit.unwrap_or(current.rpm_limit),
+        spend_limit_nanos,
+        is_enabled: input.is_enabled.unwrap_or(current.is_enabled),
+        mcp_access_enabled: input
+            .mcp_access_enabled
+            .unwrap_or(current.mcp_access_enabled),
+        transparent_injection_enabled: input
+            .transparent_injection_enabled
+            .unwrap_or(current.transparent_injection_enabled),
+        transparent_injections: input
+            .transparent_injections
+            .unwrap_or(current.transparent_injections),
+        expires_at: input.expires_at.or(current.expires_at),
+    })
+}
+
+pub(crate) fn normalized_api_key_model_ids(model_ids: &[String]) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for id in model_ids {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() && seen.insert(trimmed) {
+            normalized.push(trimmed);
+        }
+    }
+    normalized
+}
+
 /// 供运行实例发现已提交配置变化的存储键。
 pub const CONFIG_EPOCH_KEY: &str = "config_epoch";
 

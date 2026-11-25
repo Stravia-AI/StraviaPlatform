@@ -793,11 +793,15 @@ impl RouteStore for MemoryStorage {
             "a new Route requires Targets"
         );
         let mut routes = self.models.write().await;
+        let is_update = input.id.is_some();
         let storage_id = input
             .id
             .as_ref()
             .map(|id| id.as_str().to_owned())
             .unwrap_or_else(stravia_runtime_contract::identifier::new_id);
+        if is_update && !routes.iter().any(|route| route.id == storage_id) {
+            anyhow::bail!("Route not found for update");
+        }
         let billing = input.billing.clone().unwrap_or_else(|| {
             routes
                 .iter()

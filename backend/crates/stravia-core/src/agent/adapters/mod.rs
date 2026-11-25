@@ -120,17 +120,11 @@ impl AgentTool for PlatformToolAgentAdapter {
             .map_err(|error| AgentToolError::new("platform_tool_failed", error.message))?;
         let (content, content_kind) = blocks_to_value(output.content)
             .map_err(|error| AgentToolError::new("platform_tool_failed", error.message))?;
-        if output.is_error {
-            Err(AgentToolError::new(
-                "platform_tool_error",
-                content.to_string(),
-            ))
-        } else {
-            Ok(AgentToolOutput {
-                content,
-                content_kind,
-            })
-        }
+        Ok(AgentToolOutput {
+            content,
+            content_kind,
+            is_error: output.is_error,
+        })
     }
 }
 
@@ -172,7 +166,11 @@ impl AgentTool for McpToolAgentAdapter {
         context: AgentToolContext,
         input: Value,
     ) -> Result<AgentToolOutput, AgentToolError> {
-        let mcp = McpContext::new(context.principal.api_key_id().to_owned());
+        let mcp = McpContext::with_execution(
+            context.principal.api_key_id().to_owned(),
+            context.cancellation.clone(),
+            context.deadline,
+        );
         if !self
             .tool
             .available(&mcp)
@@ -189,16 +187,10 @@ impl AgentTool for McpToolAgentAdapter {
             .call(input, &mcp)
             .await
             .map_err(|error| AgentToolError::new(error.code, error.message))?;
-        if output.is_error {
-            Err(AgentToolError::new(
-                "mcp_tool_error",
-                output.structured_content.to_string(),
-            ))
-        } else {
-            Ok(AgentToolOutput {
-                content: output.structured_content,
-                content_kind: ToolResultContentKind::Json,
-            })
-        }
+        Ok(AgentToolOutput {
+            content: output.structured_content,
+            content_kind: ToolResultContentKind::Json,
+            is_error: output.is_error,
+        })
     }
 }

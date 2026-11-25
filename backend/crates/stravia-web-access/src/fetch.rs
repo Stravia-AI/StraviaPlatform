@@ -309,6 +309,83 @@ fn normalize_proxy_url(raw: &str) -> Result<Url, FetchError> {
     Ok(parsed)
 }
 
+pub(super) async fn resolve_url_ips(url: &Url) -> Result<Vec<IpAddr>, FetchError> {
+    match url.host() {
+        Some(Host::Ipv4(address)) => return Ok(vec![IpAddr::V4(address)]),
+        Some(Host::Ipv6(address)) => return Ok(vec![IpAddr::V6(address)]),
+        _ => {}
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| {
+            FetchError::unavailable(format!(
+                "URL hostname could not be resolved: {host}: {error}"
+            ))
+        })?
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    Ok(addresses)
+}
+
+pub(super) fn build_pinned_direct_client(
+    url: &Url,
+    addresses: &[IpAddr],
+    timeout: Duration,
+    label: &str,
+) -> Result<reqwest::Client, FetchError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| FetchError::invalid_url(url.as_str()))?
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
+    let pinned = addresses
+        .iter()
+        .map(|address| std::net::SocketAddr::new(*address, port))
+        .collect::<Vec<_>>();
+    // 固定已验证的全部地址，禁用代理与自动重定向；重定向跳转交回父级算法逐跳复验。
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .resolve_to_addrs(&host, &pinned)
+        .build()
+        .map_err(|error| FetchError::unavailable(format!("{label} client failed: {error}")))
+}
+
+pub(super) async fn send_verified_get(
+    client: &reqwest::Client,
+    url: &Url,
+    pinned_addresses: Option<&[IpAddr]>,
+    label: &str,
+) -> Result<(reqwest::Response, Option<crate::wire::Exchange>), FetchError> {
+    let (response, exchange) = crate::wire::send(
+        client.get(url.as_str()),
+        stravia_runtime_contract::wire_debug::current(),
+        "http",
+    )
+    .await
+    .map_err(|error| FetchError::unavailable(format!("{label} request failed: {error}")))?;
+    if let Some(addresses) = pinned_addresses {
+        let connected = response.remote_addr().ok_or_else(|| {
+            FetchError::unavailable(format!("{label} connection omitted its remote address"))
+        })?;
+        if !is_public_ip(connected.ip())
+            || !addresses.iter().any(|address| *address == connected.ip())
+        {
+            return Err(FetchError::invalid_url(url.as_str()));
+        }
+    }
+    Ok((response, exchange))
+}
+
 impl HttpBackend for RedirectBackend {
     fn pins_origin(&self, url: &Url) -> bool {
         match &self.proxied {
@@ -318,29 +395,7 @@ impl HttpBackend for RedirectBackend {
     }
 
     fn resolve<'a>(&'a self, url: &'a Url) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
-        Box::pin(async move {
-            match url.host() {
-                Some(Host::Ipv4(address)) => return Ok(vec![IpAddr::V4(address)]),
-                Some(Host::Ipv6(address)) => return Ok(vec![IpAddr::V6(address)]),
-                _ => {}
-            }
-            let host = url
-                .host_str()
-                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
-            let port = url
-                .port_or_known_default()
-                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
-            let addresses = tokio::net::lookup_host((host, port))
-                .await
-                .map_err(|error| {
-                    FetchError::unavailable(format!(
-                        "URL hostname could not be resolved: {host}: {error}"
-                    ))
-                })?
-                .map(|address| address.ip())
-                .collect::<Vec<_>>();
-            Ok(addresses)
-        })
+        Box::pin(resolve_url_ips(url))
     }
 
     fn get<'a>(
@@ -351,26 +406,7 @@ impl HttpBackend for RedirectBackend {
         Box::pin(async move {
             let pinned = self.pins_origin(url);
             let client = if pinned {
-                let host = url
-                    .host_str()
-                    .ok_or_else(|| FetchError::invalid_url(url.as_str()))?
-                    .to_owned();
-                let port = url
-                    .port_or_known_default()
-                    .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
-                let addrs = addresses
-                    .iter()
-                    .map(|address| std::net::SocketAddr::new(*address, port))
-                    .collect::<Vec<_>>();
-                reqwest::Client::builder()
-                    .no_proxy()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(HTTP_TIMEOUT)
-                    .resolve_to_addrs(&host, &addrs)
-                    .build()
-                    .map_err(|error| {
-                        FetchError::unavailable(format!("HTTP client failed: {error}"))
-                    })?
+                build_pinned_direct_client(url, addresses, HTTP_TIMEOUT, "HTTP")?
             } else {
                 self.proxied
                     .as_ref()
@@ -378,18 +414,15 @@ impl HttpBackend for RedirectBackend {
                     .0
                     .clone()
             };
-            let response = client.get(url.as_str()).send().await.map_err(|error| {
-                FetchError::unavailable(format!("HTTP request failed: {error}"))
-            })?;
-            if pinned {
-                let connected = response.remote_addr().ok_or_else(|| {
-                    FetchError::unavailable("HTTP connection omitted its remote address")
-                })?;
-                if !is_public_ip(connected.ip())
-                    || !addresses.iter().any(|address| *address == connected.ip())
-                {
-                    return Err(FetchError::invalid_url(url.as_str()));
-                }
+            let (response, exchange) = send_verified_get(
+                &client,
+                url,
+                pinned.then_some(addresses),
+                "HTTP",
+            )
+            .await?;
+            if let Some(exchange) = &exchange {
+                exchange.gap("http_redirect_body_not_consumed");
             }
             let header = |name: &str| {
                 response

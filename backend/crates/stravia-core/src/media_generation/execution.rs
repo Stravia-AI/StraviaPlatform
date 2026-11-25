@@ -28,7 +28,7 @@ const MAX_IMAGE_PIXELS: u64 = 25_000_000;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GenerateRequest {
+pub(crate) struct GenerateRequest {
     #[serde(rename = "type")]
     media_type: String,
     input: ImageInput,
@@ -58,7 +58,7 @@ pub(crate) fn validate_input(input: &Value) -> Result<(), GenerationError> {
     parse_input(input).map(|_| ())
 }
 
-fn parse_input(input: &Value) -> Result<GenerateRequest, GenerationError> {
+pub(crate) fn parse_input(input: &Value) -> Result<GenerateRequest, GenerationError> {
     let input = GenerateRequest::deserialize(input).map_err(|error| {
         GenerationError::new(
             "invalid_generation_input",
@@ -104,14 +104,13 @@ fn parse_input(input: &Value) -> Result<GenerateRequest, GenerationError> {
     Ok(input)
 }
 
-pub(crate) async fn generate(
+pub(crate) async fn generate_parsed(
     gateway: &Gateway,
-    input: Value,
+    input: GenerateRequest,
     principal: Principal,
     cancellation: CancellationToken,
     deadline: Instant,
 ) -> Result<Value, GenerationError> {
-    let input = parse_input(&input)?;
     let references = input.input.reference_images.unwrap_or_default();
     let route = config::validated_route(gateway).await?;
     let download_settings = crate::media::ingest::settings(gateway)

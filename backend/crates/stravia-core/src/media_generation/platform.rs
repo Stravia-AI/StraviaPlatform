@@ -74,7 +74,7 @@ impl GenerateTool {
 
     async fn run(
         &self,
-        arguments: Value,
+        request: execution::GenerateRequest,
         principal: Principal,
         cancellation: CancellationToken,
         deadline: Instant,
@@ -85,19 +85,19 @@ impl GenerateTool {
                 "Media generation is disabled",
             ));
         }
-        execution::generate(&self.gateway, arguments, principal, cancellation, deadline).await
+        execution::generate_parsed(&self.gateway, request, principal, cancellation, deadline).await
     }
 
     async fn run_result(
         &self,
-        arguments: Value,
+        request: execution::GenerateRequest,
         context: ToolExecutionContext,
         deadline: Instant,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
         // 生图 future 包含素材收存和 Vendor 路由状态；在公开执行包装边界固定其
         // 地址，避免 debug 构建逐层内联搬移大型 future 耗尽工作线程栈。
         let result =
-            Box::pin(self.run(arguments, context.principal, context.cancellation, deadline)).await;
+            Box::pin(self.run(request, context.principal, context.cancellation, deadline)).await;
         Ok(match result {
             Ok(value) => PlatformToolOutput::ok(value),
             Err(error) => error_output(error),
@@ -154,12 +154,13 @@ impl PlatformTool for GenerateTool {
         arguments: Value,
         context: ToolExecutionContext,
     ) -> Result<PlatformToolOutput, PlatformToolError> {
-        if let Err(error) = execution::validate_input(&arguments) {
-            return Ok(error_output(error));
-        }
+        let request = match execution::parse_input(&arguments) {
+            Ok(request) => request,
+            Err(error) => return Ok(error_output(error)),
+        };
         let deadline =
             crate::tool_execution::current_deadline().unwrap_or_else(|| Instant::now() + LIMIT);
-        self.run_result(arguments, context, deadline).await
+        self.run_result(request, context, deadline).await
     }
 }
 

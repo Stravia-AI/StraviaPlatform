@@ -64,9 +64,9 @@ impl HistoryRetention {
         Self::new(DEFAULT_RETENTION_DAYS)
     }
 
-    /// 启动时读取存储设置：缺失按默认值；无法解析时告警并回退默认值；
+    /// 解析 `log_retention_days` 配置值：缺失按默认值；无法解析时告警并回退默认值；
     /// 低于最小值的值按最小值处理。
-    pub(crate) fn from_setting(value: Option<&str>) -> Self {
+    pub(crate) fn parse_setting_days(value: Option<&str>) -> u32 {
         let days = match value {
             None => DEFAULT_RETENTION_DAYS,
             Some(raw) => raw.trim().parse::<u32>().unwrap_or_else(|_| {
@@ -77,7 +77,18 @@ impl HistoryRetention {
                 DEFAULT_RETENTION_DAYS
             }),
         };
-        Self::new(days)
+        days.max(MIN_RETENTION_DAYS)
+    }
+
+    pub(crate) fn days_to_window(days: u32) -> Duration {
+        let millis = i64::from(days.max(MIN_RETENTION_DAYS)) * DAY_MILLIS;
+        Duration::from_millis(u64::try_from(millis).unwrap_or(u64::MAX))
+    }
+
+    /// 启动时读取存储设置：缺失按默认值；无法解析时告警并回退默认值；
+    /// 低于最小值的值按最小值处理。
+    pub(crate) fn from_setting(value: Option<&str>) -> Self {
+        Self::new(Self::parse_setting_days(value))
     }
 
     pub(crate) fn days(&self) -> u32 {

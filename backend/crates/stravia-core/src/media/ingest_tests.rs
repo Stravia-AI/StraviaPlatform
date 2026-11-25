@@ -783,10 +783,9 @@ async fn shared_text_normalization_scrubs_parameter_keys_and_keeps_sql_errors() 
         .set("log_retention_days", "invalid")
         .await
         .unwrap();
-    let error = ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
+    ingest::normalize_shared_request(&gateway, &owner, &mut input, &cancellation)
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("Invalid retention"));
+        .unwrap();
     gateway
         .storage
         .settings()

@@ -31,15 +31,16 @@ impl LocalArtifactStore {
         }
         .map_err(storage_error)?;
         let settings = match value {
-            Some(value) => serde_json::from_str(&value).map_err(|error| {
-                ArtifactError::Storage(format!("invalid artifact_settings: {error}"))
-            })?,
-            None => match fallback {
-                Some(settings) => settings.clone(),
-                None => self.settings.read().await.clone(),
-            },
+            Some(value) => crate::Gateway::parse_artifact_settings(Some(&value))?,
+            None => {
+                let settings = match fallback {
+                    Some(settings) => settings.clone(),
+                    None => self.settings.read().await.clone(),
+                };
+                settings.validate()?;
+                settings
+            }
         };
-        settings.validate()?;
         Ok(settings)
     }
 

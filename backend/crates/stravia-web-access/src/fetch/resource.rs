@@ -10,7 +10,7 @@
 use std::{net::IpAddr, time::Duration};
 
 use futures::StreamExt;
-use url::{Host, Url};
+use url::Url;
 
 use super::{
     get_redirects, policy, BackendFuture, FetchError, FetchErrorCode, HttpBackend, HttpResponse,
@@ -85,29 +85,7 @@ struct DirectBackend {
 
 impl HttpBackend for DirectBackend {
     fn resolve<'a>(&'a self, url: &'a Url) -> BackendFuture<'a, Result<Vec<IpAddr>, FetchError>> {
-        Box::pin(async move {
-            match url.host() {
-                Some(Host::Ipv4(address)) => return Ok(vec![IpAddr::V4(address)]),
-                Some(Host::Ipv6(address)) => return Ok(vec![IpAddr::V6(address)]),
-                _ => {}
-            }
-            let host = url
-                .host_str()
-                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
-            let port = url
-                .port_or_known_default()
-                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
-            let addresses = tokio::net::lookup_host((host, port))
-                .await
-                .map_err(|error| {
-                    FetchError::unavailable(format!(
-                        "URL hostname could not be resolved: {host}: {error}"
-                    ))
-                })?
-                .map(|address| address.ip())
-                .collect::<Vec<_>>();
-            Ok(addresses)
-        })
+        Box::pin(super::resolve_url_ips(url))
     }
 
     fn get<'a>(
@@ -116,45 +94,10 @@ impl HttpBackend for DirectBackend {
         addresses: &'a [IpAddr],
     ) -> BackendFuture<'a, Result<HttpResponse, FetchError>> {
         Box::pin(async move {
-            let host = url
-                .host_str()
-                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?
-                .to_owned();
-            let port = url
-                .port_or_known_default()
-                .ok_or_else(|| FetchError::invalid_url(url.as_str()))?;
-            let pinned = addresses
-                .iter()
-                .map(|address| std::net::SocketAddr::new(*address, port))
-                .collect::<Vec<_>>();
-            // 固定已验证的全部地址，禁用代理与自动重定向；
-            // 重定向跳转交回父级算法逐跳复验。
-            let client = reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(DOWNLOAD_TIMEOUT)
-                .resolve_to_addrs(&host, &pinned)
-                .build()
-                .map_err(|error| {
-                    FetchError::unavailable(format!("resource client failed: {error}"))
-                })?;
-            let (response, exchange) = crate::wire::send(
-                client.get(url.as_str()),
-                stravia_runtime_contract::wire_debug::current(),
-                "http",
-            )
-            .await
-            .map_err(|error| {
-                FetchError::unavailable(format!("resource request failed: {error}"))
-            })?;
-            let connected = response.remote_addr().ok_or_else(|| {
-                FetchError::unavailable("resource connection omitted its remote address")
-            })?;
-            if !crate::address_policy::is_public_ip(connected.ip())
-                || !addresses.iter().any(|address| *address == connected.ip())
-            {
-                return Err(FetchError::invalid_url(url.as_str()));
-            }
+            let client =
+                super::build_pinned_direct_client(url, addresses, DOWNLOAD_TIMEOUT, "resource")?;
+            let (response, exchange) =
+                super::send_verified_get(&client, url, Some(addresses), "resource").await?;
             let header = |name: &str| {
                 response
                     .headers()

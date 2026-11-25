@@ -314,6 +314,7 @@ fn build_admin_cors_layer(origins: &[String]) -> CorsLayer {
             Method::GET,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
         ])

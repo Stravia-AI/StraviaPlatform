@@ -5,7 +5,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use stravia_runtime_contract::Principal;
-use stravia_runtime_contract::artifact::{ArtifactError, ArtifactSettings};
+use stravia_runtime_contract::artifact::ArtifactError;
 
 pub(crate) const UPLOAD_PLACEHOLDER: &str = "<stravia-upload-key>";
 const UPLOAD_KEY_PREFIX: &str = "stravia_upload_";
@@ -176,29 +176,14 @@ pub(crate) fn scrub_upload_grant_value(value: &mut serde_json::Value) {
     }
 }
 
-async fn settings(gateway: &crate::Gateway) -> Result<ArtifactSettings, ArtifactError> {
-    gateway
-        .storage
-        .settings()
-        .get("artifact_settings")
-        .await
-        .map_err(|error| ArtifactError::Storage(error.to_string()))?
-        .map(|value| {
-            serde_json::from_str(&value)
-                .map_err(|_| ArtifactError::Invalid("invalid Artifact settings".into()))
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
-}
-
 pub(crate) async fn upload_prompt_enabled(gateway: &crate::Gateway) -> Result<bool, ArtifactError> {
-    Ok(settings(gateway).await?.upload_prompt_injection)
+    Ok(gateway.load_artifact_settings().await?.upload_prompt_injection)
 }
 
 pub(crate) async fn upload_instructions(
     gateway: &crate::Gateway,
 ) -> Result<Option<String>, ArtifactError> {
-    let settings = settings(gateway).await?;
+    let settings = gateway.load_artifact_settings().await?;
     if !settings.upload_prompt_injection {
         return Ok(None);
     }

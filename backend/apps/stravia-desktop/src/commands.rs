@@ -9,7 +9,7 @@ use std::{
 use stravia_core::Gateway;
 use stravia_core::admin::identity::{AdminAuth, AuthError, SessionTokens};
 use stravia_core::admin::provider_allowance::{
-    ProviderAllowanceResetRequest, ProviderAllowanceResetResult,
+    ProviderAllowanceResetError, ProviderAllowanceResetRequest, ProviderAllowanceResetResult,
 };
 use stravia_core::connect_client_apply::{
     ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
@@ -143,6 +143,16 @@ pub async fn reset_provider_allowance(
         .reset_provider_allowance(&provider_id, request)
         .await
         .map_err(|error| {
+            if matches!(
+                error.downcast_ref::<ProviderAllowanceResetError>(),
+                Some(ProviderAllowanceResetError::UnknownRequest)
+            ) {
+                return serde_json::json!({
+                    "code": "PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST",
+                    "error": "This process cannot confirm the previous reset outcome. Review upstream Usage before taking further action.",
+                })
+                .to_string();
+            }
             tracing::error!(provider_id, %error, "Failed to reset provider allowance");
             "failed to reset provider allowance".to_string()
         })

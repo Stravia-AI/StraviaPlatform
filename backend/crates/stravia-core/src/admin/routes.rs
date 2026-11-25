@@ -414,6 +414,7 @@ impl<'a> RouteModule<'a> {
     }
 
     pub(crate) async fn delete(&self, route_id: &str) -> anyhow::Result<()> {
+        let _guard = self.gw.route_media_mutation.lock().await;
         self.delete_record(route_id).await
     }
 
@@ -608,7 +609,9 @@ impl<'a> RouteModule<'a> {
     }
 
     pub(crate) async fn unbind(&self, input: RouteUnbind) -> anyhow::Result<Option<RouteConfig>> {
+        let _guard = self.gw.route_media_mutation.lock().await;
         let route_id = normalize_name(&input.route_id, "model ID sent by clients")?;
+        let provider_id = input.provider_id.trim();
         let provider_model_id = normalize_model_id(&input.provider_model_id)?;
         let route = self
             .gw
@@ -621,8 +624,8 @@ impl<'a> RouteModule<'a> {
             .targets
             .iter()
             .filter(|target| {
-                target.provider_id().as_str() != input.provider_id
-                    || target.model().as_str() != provider_model_id.as_str()
+                target.provider_id().as_str() != provider_id
+                    || !same_target_model(target.model().as_str(), &provider_model_id)
             })
             .map(|target| CreateTarget {
                 provider_id: target.provider_id().clone().into(),
@@ -639,10 +642,10 @@ impl<'a> RouteModule<'a> {
             return Ok(Some(route));
         }
         if targets.is_empty() {
-            self.delete(&route.model_id).await?;
+            self.delete_record(&route.model_id).await?;
             return Ok(None);
         }
-        self.change(
+        self.change_locked(
             &route.model_id,
             UpdateRoute {
                 targets: Some(targets),

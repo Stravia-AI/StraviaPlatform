@@ -146,7 +146,7 @@ impl RouteSelector {
         }
         if policy.is_empty() {
             let error = self
-                .empty_selection_error(route, &snapshot)
+                .empty_selection_error(route, &eligible, &snapshot)
                 .await
                 .map_err(SelectionError::SchedulingEvidence)?;
             return Err(match error {
@@ -205,7 +205,7 @@ impl RouteSelector {
         policy.retain(|target| eligible.contains(&selected_target_key(target)));
         if policy.is_empty() {
             return Err(self
-                .empty_selection_error(route, &snapshot)
+                .empty_selection_error(route, &eligible, &snapshot)
                 .await
                 .map_err(SelectionError::SchedulingEvidence)?);
         }
@@ -249,11 +249,18 @@ impl RouteSelector {
     async fn empty_selection_error(
         &self,
         route: &RouteConfig,
+        eligible: &std::collections::HashSet<String>,
         snapshot: &RouteSchedulingSnapshot,
     ) -> anyhow::Result<SelectionError> {
         let mut any_paused = false;
         let mut any_unpaused = false;
-        for target in route.targets.iter().filter(|target| target.enabled) {
+        for target in route.targets.iter().filter(|target| {
+            target.enabled
+                && eligible.contains(&target_key(
+                    target.provider_id().as_str(),
+                    target.model().as_str(),
+                ))
+        }) {
             let provider_id = target.provider_id().as_str();
             if !snapshot.allowance_suspended_providers.contains(provider_id) {
                 if any_paused {
