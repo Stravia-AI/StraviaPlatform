@@ -2,6 +2,7 @@
 import { browser } from '$app/env'
 import { resolve } from '$app/paths'
 import * as m from '#lib/paraglide/messages.js'
+import { tick } from 'svelte'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
 import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up'
 import CircleCheckIcon from '@lucide/svelte/icons/circle-check'
@@ -21,8 +22,8 @@ import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Progress } from '#lib/components/ui/progress/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
-import * as Select from '#lib/components/ui/select/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
+import { tabsListVariants, tabsTriggerVariants } from '#lib/components/ui/tabs/variants.js'
 import { openExternalUrl } from '#lib/open-external.js'
 import { isPrereleaseVersion, supportsInAppInstallProgress, type UpdateChannel } from '#lib/product-update.js'
 import { getProductUpdateCoordinator } from '#lib/product-update.svelte.js'
@@ -76,9 +77,16 @@ const showPrereleaseFallbackNote = $derived(
     updates.status && updates.status.channel === 'release' && isPrereleaseVersion(updates.status.current_version),
   ),
 )
+const channelOptions: readonly { value: UpdateChannel; label: () => string }[] = [
+  { value: 'release', label: () => m.settings_update_channel_release() },
+  { value: 'beta', label: () => m.settings_update_channel_beta() },
+]
+
 let savingChannel = $state(false)
 let channelError = $state('')
 let retryChannel = $state<UpdateChannel>()
+let channelGroupEl = $state<HTMLDivElement>()
+const channelDisabled = $derived(savingChannel || busy || !updates.status)
 const showInstallingProgress = $derived(supportsInAppInstallProgress(browser ? navigator.userAgent : ''))
 const progressPercent = $derived.by(() => {
   const total = updates.state.totalBytes
@@ -112,8 +120,50 @@ async function selectChannel(nextChannel: UpdateChannel): Promise<void> {
   }
 }
 
-function handleChannelValueChange(value: string | undefined): void {
-  if (value === 'release' || value === 'beta') void selectChannel(value)
+function handleChannelValueChange(value: string | undefined): Promise<void> {
+  if (value === 'release' || value === 'beta') return selectChannel(value)
+  return Promise.resolve()
+}
+
+function focusChannelOption(channel: UpdateChannel): void {
+  channelGroupEl?.querySelector<HTMLButtonElement>(`button[value="${channel}"]`)?.focus()
+}
+
+async function handleChannelKeydown(event: KeyboardEvent, currentIndex: number): Promise<void> {
+  if (channelDisabled) return
+  let nextIndex: number
+  switch (event.key) {
+    case 'ArrowRight':
+    case 'ArrowDown':
+      nextIndex = (currentIndex + 1) % channelOptions.length
+      break
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      nextIndex = (currentIndex - 1 + channelOptions.length) % channelOptions.length
+      break
+    case 'Home':
+      nextIndex = 0
+      break
+    case 'End':
+      nextIndex = channelOptions.length - 1
+      break
+    default:
+      return
+  }
+  event.preventDefault()
+  const nextOption = channelOptions[nextIndex]
+  if (!nextOption) return
+  focusChannelOption(nextOption.value)
+  await handleChannelValueChange(nextOption.value)
+  await tick()
+  if (
+    !channelDisabled &&
+    (!document.activeElement ||
+      document.activeElement === document.body ||
+      channelGroupEl?.contains(document.activeElement))
+  ) {
+    focusChannelOption(currentChannel)
+  }
 }
 
 async function checkNow(): Promise<void> {
@@ -277,36 +327,39 @@ async function checkNow(): Promise<void> {
   {#if !checkUnavailable}
     <SettingRow
       title={m.settings_update_channel()}
-      labelFor="update-channel"
       hint={m.settings_update_channel_hint()}
       description={showPrereleaseFallbackNote ? m.settings_update_channel_prerelease_note() : undefined}
-      controlSize="setting"
       class="border-t">
       {#snippet children({ descriptionId })}
         {#if savingChannel}<Spinner class="shrink-0" aria-label={m.settings_saving()} />{/if}
-        <Select.Root
-          type="single"
-          bind:value={() => currentChannel, handleChannelValueChange}
-          disabled={savingChannel || busy || !updates.status}>
-          <Select.Trigger
-            id="update-channel"
-            class="w-full min-w-0 flex-1"
-            aria-label={m.settings_update_channel()}
-            aria-describedby={descriptionId}
-            aria-busy={savingChannel || undefined}>
-            {currentChannel === 'beta' ? m.settings_update_channel_beta() : m.settings_update_channel_release()}
-          </Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Item value="release" label={m.settings_update_channel_release()}>
-                {m.settings_update_channel_release()}
-              </Select.Item>
-              <Select.Item value="beta" label={m.settings_update_channel_beta()}>
-                {m.settings_update_channel_beta()}
-              </Select.Item>
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
+        <div
+          bind:this={channelGroupEl}
+          id="update-channel"
+          role="radiogroup"
+          data-variant="default"
+          class={tabsListVariants({ variant: 'default' })}
+          aria-label={m.settings_update_channel()}
+          aria-describedby={descriptionId}
+          aria-busy={savingChannel || undefined}
+          aria-disabled={channelDisabled || undefined}>
+          {#each channelOptions as option, index (option.value)}
+            {@const selected = currentChannel === option.value}
+            <button
+              type="button"
+              role="radio"
+              value={option.value}
+              class={tabsTriggerVariants()}
+              tabindex={selected ? 0 : -1}
+              aria-checked={selected}
+              data-state={selected ? 'active' : 'inactive'}
+              data-active={selected ? '' : undefined}
+              disabled={channelDisabled}
+              onclick={() => void handleChannelValueChange(option.value)}
+              onkeydown={(event) => void handleChannelKeydown(event, index)}>
+              {option.label()}
+            </button>
+          {/each}
+        </div>
       {/snippet}
     </SettingRow>
     {#if channelError}

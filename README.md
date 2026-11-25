@@ -17,7 +17,7 @@ and live request observability in a desktop app or single binary.
 [![CI](https://img.shields.io/github/actions/workflow/status/Stravia-AI/StraviaPlatform/ci.yml?style=flat-square&label=CI)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-toolchain-f97316?style=flat-square)](rust-toolchain.toml)
 
-[Quick Start](#quick-start) · [Features](#features) · [Deployment](#desktop-vs-server) · [Docs](#documentation) · [Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) · [Changelog](CHANGELOG.md) · [中文文档](README_CN.md)
+[Website](https://www.stravia.cn/) · [Docs](https://docs.stravia.cn/) · [Quick Start](#quick-start) · [Features](#features) · [Deployment](#desktop-vs-server) · [Community](#community) · [Releases](https://github.com/Stravia-AI/StraviaPlatform/releases) · [Changelog](CHANGELOG.md) · [中文文档](README_CN.md)
 
 </div>
 
@@ -198,12 +198,31 @@ Both editions share the exact same Rust core and embedded Svelte 5 WebUI on a si
 
 | Document | Purpose |
 | --- | --- |
+| [Official Website (`www.stravia.cn`)](https://www.stravia.cn/) | Product overview, desktop downloads & updates |
+| [User Documentation (`docs.stravia.cn`)](https://docs.stravia.cn/) | Online user guides & deployment documentation |
+| [Model Picker (`model-picker.stravia.cn`)](https://model-picker.stravia.cn/) | Compare models and routing capabilities |
 | [Glossary (`GLOSSARY.md`)](GLOSSARY.md) | Domain terminology & concept map (Chinese-first with canonical English terms) |
 | [Design Docs (`docs/design/`)](docs/design/README.md) | Authoritative current system architecture & subsystem contracts |
 | [Architecture Decisions (`docs/adr/`)](docs/adr/README.md) | Active ADRs explaining key engineering trade-offs |
 | [Database Schemas](docs/database/) | Generated reference schemas: [SQLite](docs/database/sqlite.sql) · [PostgreSQL](docs/database/postgres.sql) |
 | [Releasing & Signing](docs/releasing.md) | Release pipeline, Desktop updater signing, macOS notes & plugin catalog publishing |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
+
+---
+
+## Community
+
+| Channel | Details |
+| --- | --- |
+| **Website** | [www.stravia.cn](https://www.stravia.cn/) |
+| **Documentation** | [docs.stravia.cn](https://docs.stravia.cn/) |
+| **QQ Group** | `1125500160` *(search the group number in QQ to request access)* |
+| **Bilibili** | [Stravia Official Channel](https://space.bilibili.com/3747568584494602) |
+| **WeChat Official Account** | `Stravia` *(scan the QR code below or search `Stravia` in WeChat)* |
+
+<p>
+  <img src="docs/assets/wechat-official-qr.jpg" alt="Stravia WeChat Official Account QR Code" width="160">
+</p>
 
 ---
 

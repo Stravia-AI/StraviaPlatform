@@ -17,7 +17,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Stravia-AI/StraviaPlatform/ci.yml?style=flat-square&label=CI)](https://github.com/Stravia-AI/StraviaPlatform/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-toolchain-f97316?style=flat-square)](rust-toolchain.toml)
 
-[快速开始](#快速开始) · [核心特性](#核心特性) · [部署形态](#桌面端-vs-服务端) · [文档地图](#文档地图) · [发布版本](https://github.com/Stravia-AI/StraviaPlatform/releases) · [更新日志](CHANGELOG.md) · [English](README.md)
+[官网](https://www.stravia.cn/) · [在线文档](https://docs.stravia.cn/) · [快速开始](#快速开始) · [核心特性](#核心特性) · [部署形态](#桌面端-vs-服务端) · [社区交流](#社区与关注) · [发布版本](https://github.com/Stravia-AI/StraviaPlatform/releases) · [更新日志](CHANGELOG.md) · [English](README.md)
 
 </div>
 
@@ -198,12 +198,31 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 
 | 文档 | 职责 |
 | --- | --- |
+| [官方网站 (`www.stravia.cn`)](https://www.stravia.cn/) | 产品概览、桌面端下载与版本动态 |
+| [在线文档 (`docs.stravia.cn`)](https://docs.stravia.cn/) | 使用指南与部署文档 |
+| [模型选型 (`model-picker.stravia.cn`)](https://model-picker.stravia.cn/) | 模型能力对比与选型参考 |
 | [领域术语词典 (`GLOSSARY.md`)](GLOSSARY.md) | 面向中文阅读的核心概念关系图与标准术语定义 |
 | [设计文档 (`docs/design/`)](docs/design/README.md) | 当前生效的系统架构与各子系统权威契约 |
 | [架构决策记录 (`docs/adr/`)](docs/adr/README.md) | 记录关键架构权衡与不可逆技术决策 |
 | [数据库结构参考 (`docs/database/`)](docs/database/) | 自动导出的最终表结构：[SQLite](docs/database/sqlite.sql) · [PostgreSQL](docs/database/postgres.sql) |
 | [发布与签名指南 (`docs/releasing.md`)](docs/releasing.md) | 发版流程、Desktop 更新签名、macOS 提示与插件目录发布 |
 | [更新日志 (`CHANGELOG.md`)](CHANGELOG.md) | 版本演进与变更记录 |
+
+---
+
+## 社区与关注
+
+| 渠道 | 入口与说明 |
+| --- | --- |
+| **官方网站** | [www.stravia.cn](https://www.stravia.cn/) |
+| **在线文档** | [docs.stravia.cn](https://docs.stravia.cn/) |
+| **QQ 交流群** | `1125500160` *（在 QQ 中搜索群聊申请加入）* |
+| **哔哩哔哩** | [Stravia 官方账号](https://space.bilibili.com/3747568584494602) |
+| **微信公众号** | `Stravia` *（扫码下方二维码或在微信搜索 `Stravia` 关注）* |
+
+<p>
+  <img src="docs/assets/wechat-official-qr.jpg" alt="Stravia 微信公众号二维码" width="160">
+</p>
 
 ---
 
