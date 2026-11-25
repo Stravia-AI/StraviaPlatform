@@ -1,6 +1,6 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { beforeNavigate, goto } from '$app/navigation'
+import { beforeNavigate, goto, snapshot } from '$app/navigation'
 import { resolve } from '$app/paths'
 import type { Path } from '$app/types'
 import { page } from '$app/state'
@@ -80,6 +80,16 @@ type AvailabilityFilter = 'all' | 'available' | 'unavailable'
 type SourceFilter = 'all' | 'discovered' | 'manual'
 type ReferenceFilter = 'all' | 'referenced' | 'unreferenced'
 
+interface ProviderModelCatalogSnapshot {
+  providerId: string
+  search: string
+  columnFilters: ColumnFiltersState
+}
+
+function cloneColumnFilters(filters: ColumnFiltersState): ColumnFiltersState {
+  return JSON.parse(JSON.stringify($state.snapshot(filters))) as ColumnFiltersState
+}
+
 let { providerId, routes, routeReferencesReady, onSync }: Props = $props()
 const queryClient = useQueryClient()
 let search = $state('')
@@ -92,6 +102,20 @@ let columnFilters = $state<ColumnFiltersState>([
     } satisfies DataTableFilterGroup,
   },
 ])
+
+snapshot<ProviderModelCatalogSnapshot>({
+  id: 'provider-model-catalog',
+  capture: () => ({
+    providerId,
+    search,
+    columnFilters: cloneColumnFilters(columnFilters),
+  }),
+  restore: (value) => {
+    if (!value || value.providerId !== providerId) return
+    search = typeof value.search === 'string' ? value.search : ''
+    columnFilters = Array.isArray(value.columnFilters) ? cloneColumnFilters(value.columnFilters) : []
+  },
+})
 let filtersOpen = $state(false)
 let manualOpen = $state(false)
 let manualTemplateId = $state('')

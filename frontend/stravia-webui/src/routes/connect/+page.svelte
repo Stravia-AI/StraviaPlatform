@@ -4,7 +4,8 @@ import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { resolve } from '$app/paths'
-import { goto } from '$app/navigation'
+import { afterNavigate, goto, snapshot } from '$app/navigation'
+import { page } from '$app/state'
 import { untrack } from 'svelte'
 import type { MouseEventHandler } from 'svelte/elements'
 import { createQuery } from '@tanstack/svelte-query'
@@ -22,6 +23,8 @@ import { copyText } from '#lib/clipboard.js'
 import { applyConnectClient, asConnectClientApplyError, planConnectClient } from '#lib/connect-client-apply.js'
 import { ensureBuildExtensionsRegistered } from '#lib/extensions/index.js'
 import { logicalModelOption, sortLogicalModels } from '#lib/logical-model.js'
+import { syncQueryParams } from '#lib/url-query-nav.js'
+import { parseEnumParam } from '#lib/url-query-state.js'
 import {
   apiKeyAllowsModel,
   apiKeyReadOnlyReason,
@@ -49,6 +52,21 @@ import * as Select from '#lib/components/ui/select/index.js'
 import { Skeleton } from '#lib/components/ui/skeleton/index.js'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
 
+const CONNECT_TABS = ['cli', 'code', 'mcp'] as const
+type ConnectTab = (typeof CONNECT_TABS)[number]
+
+interface ConnectSnapshot {
+  codeLanguage: CodeLanguage
+  codeProtocol: GatewayProtocol
+  codeModelId: string
+  codeKeyId: string
+  cliToolId: CliToolId
+  cliKeyId: string
+  claudeModelIds: Record<keyof ClaudeModelMappings, string>
+  mcpKeyId: string
+  mcpSnippetFormat: 'json' | 'curl'
+}
+
 const emptyKey = 'sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 const setup = getConnectSetup()
 const initial = untrack(() => setup.draft)
@@ -66,7 +84,12 @@ const extensions = ensureBuildExtensionsRegistered()
 const hasConnectMcpSlot = $derived(
   extensions.activeSlots(capabilities, 'connect:mcp-endpoints').some((item) => typeof item.component === 'function'),
 )
-let tab = $state<'cli' | 'code' | 'mcp'>(initial?.tab ?? 'cli')
+const currentUrl = $derived(page.shallow?.url ?? page.url)
+let initialTabOverride = $state<ConnectTab | undefined>(initial?.tab)
+let syncedInitialTab = false
+let tab = $derived<ConnectTab>(
+  initialTabOverride ?? parseEnumParam(currentUrl.searchParams, 'tab', CONNECT_TABS, 'cli'),
+)
 let codeLanguage = $state<CodeLanguage>(initial?.codeLanguage ?? 'python')
 let codeProtocol = $state<GatewayProtocol>(initial?.codeProtocol ?? 'openai-compatible')
 let codeModelId = $state(initial?.codeModelId ?? '')
@@ -79,6 +102,58 @@ let applyingClient = $state(false)
 let claudeModelIds = $state<Record<keyof ClaudeModelMappings, string>>(
   initial?.claudeModelIds ?? { defaultModel: '', haikuModel: '', sonnetModel: '', opusModel: '' },
 )
+
+afterNavigate(() => {
+  if (syncedInitialTab || !initialTabOverride) return
+  syncedInitialTab = true
+  const target = initialTabOverride
+  void syncQueryParams({ tab: target }, { defaults: { tab: 'cli' }, shallow: false }).finally(() => {
+    const syncedUrl = page.shallow?.url ?? page.url
+    if (
+      initialTabOverride === target &&
+      (syncedUrl.searchParams.get('tab') === target ||
+        (target === 'cli' && parseEnumParam(syncedUrl.searchParams, 'tab', CONNECT_TABS, 'cli') === 'cli'))
+    ) {
+      initialTabOverride = undefined
+    }
+  })
+})
+
+function selectTab(next: string): void {
+  if (!(CONNECT_TABS as readonly string[]).includes(next)) return
+  const target = next as ConnectTab
+  syncedInitialTab = true
+  initialTabOverride = undefined
+  tab = target
+  void syncQueryParams({ tab: target }, { defaults: { tab: 'cli' }, shallow: false })
+}
+
+snapshot<ConnectSnapshot>({
+  id: 'connect',
+  capture: () => ({
+    codeLanguage,
+    codeProtocol,
+    codeModelId,
+    codeKeyId,
+    cliToolId,
+    cliKeyId,
+    claudeModelIds: { ...claudeModelIds },
+    mcpKeyId,
+    mcpSnippetFormat,
+  }),
+  restore: (value) => {
+    if (initial) return
+    codeLanguage = value.codeLanguage
+    codeProtocol = value.codeProtocol
+    codeModelId = value.codeModelId
+    codeKeyId = value.codeKeyId
+    cliToolId = value.cliToolId
+    cliKeyId = value.cliKeyId
+    claudeModelIds = { ...value.claudeModelIds }
+    mcpKeyId = value.mcpKeyId
+    mcpSnippetFormat = value.mcpSnippetFormat
+  },
+})
 
 const models = $derived(
   sortLogicalModels(
@@ -312,7 +387,7 @@ function manageResource(path: '/models' | '/api-keys', createKey = false): void 
           retrying={modelsQuery.isFetching || keysQuery.isFetching || proxyQuery.isFetching} />
       {/if}
 
-      <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
+      <Tabs.Root bind:value={() => tab, selectTab} class="min-h-0 flex-1">
         <Tabs.List class="shrink-0" aria-label={m.connect_setup_format()}>
           <Tabs.Trigger value="cli"
             ><TerminalSquareIcon data-icon="inline-start" />{m.connect_clients_label()}</Tabs.Trigger>

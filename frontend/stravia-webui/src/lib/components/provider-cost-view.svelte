@@ -1,5 +1,6 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import { snapshot } from '$app/navigation'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import LightbulbIcon from '@lucide/svelte/icons/lightbulb'
 
@@ -70,7 +71,28 @@ const suggestion = $derived(
 let dismissed = $state('')
 const visibleSuggestion = $derived(suggestion && JSON.stringify(suggestion) !== dismissed ? suggestion : null)
 
-let windowDays = $state<(typeof windows)[number]['days']>('1')
+type WindowDays = (typeof windows)[number]['days']
+
+interface ProviderCostViewSnapshot {
+  providerId: string
+  windowDays: WindowDays
+}
+
+let windowDays = $state<WindowDays>('1')
+
+snapshot<ProviderCostViewSnapshot>({
+  id: 'provider-cost-view',
+  capture: () => ({
+    providerId: provider.id,
+    windowDays,
+  }),
+  restore: (value) => {
+    if (!value || value.providerId !== provider.id) return
+    if (windows.some((item) => item.days === value.windowDays)) {
+      windowDays = value.windowDays
+    }
+  },
+})
 const statsQuery = createQuery(() => ({
   queryKey: ['stats-providers', 'provider-cost', provider.id, windowDays],
   queryFn: async (): Promise<ProviderStats | null> => {

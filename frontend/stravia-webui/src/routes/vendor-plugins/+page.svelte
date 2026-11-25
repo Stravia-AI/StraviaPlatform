@@ -1,5 +1,7 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import { snapshot } from '$app/navigation'
+import { page } from '$app/state'
 import type { ComponentProps } from 'svelte'
 import { onDestroy, onMount } from 'svelte'
 import PluginProgressNotification from './PluginProgressNotification.svelte'
@@ -49,6 +51,8 @@ import { Label } from '#lib/components/ui/label/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
+import { syncQueryParams } from '#lib/url-query-nav.js'
+import { parseEnumParam } from '#lib/url-query-state.js'
 import { cn } from '#lib/utils.js'
 
 const MAX_PLUGIN_BYTES = 64 * 1024 * 1024
@@ -95,11 +99,35 @@ type MarketRow = {
   source?: PluginSourceSummary
   installed?: PluginSummary
 }
+const PLUGIN_TABS = ['all', 'installed', 'updates'] as const
+type PluginTab = (typeof PLUGIN_TABS)[number]
+
+interface VendorPluginsSnapshot {
+  search: string
+  sourceFilter: string
+}
+
 const marketQuery = createQuery(() => ({ queryKey: ['plugin-marketplace'], queryFn: admin.pluginMarketplace.get }))
 let sourceOpen = $state(false)
 let search = $state('')
 let sourceFilter = $state('')
-let tab = $state<'all' | 'installed' | 'updates'>('all')
+let tab = $derived<PluginTab>(parseEnumParam(page.url.searchParams, 'tab', PLUGIN_TABS, 'all'))
+
+function selectTab(next: string): void {
+  if (!(PLUGIN_TABS as readonly string[]).includes(next)) return
+  const target = next as PluginTab
+  tab = target
+  void syncQueryParams({ tab: target }, { defaults: { tab: 'all' } })
+}
+
+snapshot<VendorPluginsSnapshot>({
+  id: 'vendor-plugins',
+  capture: () => ({ search, sourceFilter }),
+  restore: (value) => {
+    search = value.search
+    sourceFilter = value.sourceFilter
+  },
+})
 let detailKey = $state<string>()
 let preparing = $state(false)
 let progress = $state<MarketplaceProgress>()
@@ -803,7 +831,7 @@ function networkPermissionContext(permission: PluginNetworkPermission): string[]
       ></Alert.Root
     >{/if}
   <section class="route-section vendor-plugins-workspace">
-    <Tabs.Root bind:value={tab}>
+    <Tabs.Root bind:value={() => tab, selectTab}>
       <Tabs.List aria-label={m.vendor_plugins_title()}>
         <Tabs.Trigger value="all">{m.market_all()}</Tabs.Trigger>
         <Tabs.Trigger value="installed">{m.market_installed()}</Tabs.Trigger>

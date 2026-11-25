@@ -1,6 +1,8 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
-import { tick } from 'svelte'
+import { snapshot } from '$app/navigation'
+import { page } from '$app/state'
+import { tick, untrack } from 'svelte'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { toast } from 'svelte-sonner'
 import { admin } from '#lib/admin-client.js'
@@ -70,6 +72,19 @@ import { getDataTableLabels } from '#lib/data-table-labels.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { Switch } from '#lib/components/ui/switch/index.js'
 import { Textarea } from '#lib/components/ui/textarea/index.js'
+import { syncQueryParams } from '#lib/url-query-nav.js'
+import { parseEnumParam } from '#lib/url-query-state.js'
+
+const REDACTION_TABS = ['records', 'rules', 'test'] as const
+type RedactionTab = (typeof REDACTION_TABS)[number]
+
+interface ReversibleRedactionSnapshot {
+  originFilter: string
+  ruleSearch: string
+  pagination: { pageIndex: number; pageSize: number }
+  hitWindow: HitWindow
+  testInput: string
+}
 
 const settingKey = 'reversible_redaction_enabled'
 const queryKey = ['setting', settingKey]
@@ -82,7 +97,20 @@ const customRulesQuery = createQuery(() => customCredentialRulesQuery())
 let saving = $state(false)
 let saveError = $state('')
 const storedEnabled = $derived(settingQuery.data === 'true')
-let tab = $state('records')
+let tab = $derived<RedactionTab>(parseEnumParam(page.url.searchParams, 'tab', REDACTION_TABS, 'records'))
+let visitedRecords = $state(untrack(() => tab === 'records'))
+
+$effect(() => {
+  if (tab === 'records') visitedRecords = true
+})
+
+function selectTab(next: string): void {
+  if (!(REDACTION_TABS as readonly string[]).includes(next)) return
+  const target = next as RedactionTab
+  tab = target
+  if (target === 'records') visitedRecords = true
+  void syncQueryParams({ tab: target }, { defaults: { tab: 'records' } })
+}
 let ruleOpen = $state(false)
 let detailsOpen = $state(false)
 let selectedRule = $state.raw<CredentialRule>()
@@ -234,6 +262,24 @@ let testing = $state(false)
 let testError = $state(false)
 let matches = $state.raw<CredentialMatch[]>()
 let resultsPane = $state<HTMLElement | null>(null)
+
+snapshot<ReversibleRedactionSnapshot>({
+  id: 'reversible-redaction',
+  capture: () => ({
+    originFilter,
+    ruleSearch,
+    pagination: { pageIndex: pagination.pageIndex, pageSize: pagination.pageSize },
+    hitWindow: { ...hitWindow },
+    testInput,
+  }),
+  restore: (value) => {
+    originFilter = value.originFilter
+    ruleSearch = value.ruleSearch
+    pagination = { pageIndex: value.pagination.pageIndex, pageSize: value.pagination.pageSize }
+    hitWindow = { ...value.hitWindow }
+    testInput = value.testInput
+  },
+})
 
 async function setEnabled(enabled: boolean): Promise<void> {
   if (!settingQuery.isSuccess || saving || enabled === storedEnabled) return
@@ -434,7 +480,7 @@ function selectMatch(match: CredentialMatch): void {
   {/if}
 
   <Tabs.Root
-    bind:value={tab}
+    bind:value={() => tab, selectTab}
     class="credential-workspace relative min-h-0 min-w-0 gap-0 rounded-lg border bg-background">
     <div class="workspace-toolbar">
       <Tabs.List aria-label={m.reversible_redaction_title()}>
@@ -505,24 +551,29 @@ function selectMatch(match: CredentialMatch): void {
       {/if}
     </div>
 
-    <Tabs.Content value="records" class="flex min-h-0 min-w-0 flex-col">
+    <Tabs.Content
+      value="records"
+      hidden={tab !== 'records'}
+      inert={tab !== 'records'}
+      aria-hidden={tab !== 'records' ? 'true' : undefined}
+      class={tab === 'records' ? 'flex min-h-0 min-w-0 flex-col' : 'hidden min-h-0 min-w-0 flex-col'}>
       <section class="workspace-panel" aria-labelledby="credential-discoveries-title">
         <h2 id="credential-discoveries-title" class="sr-only">
           {m.credential_protection_discoveries_title()}
         </h2>
-        <HitRecords
-          bind:this={hitRecords}
-          active={tab === 'records'}
-          range={hitWindow}
-          {ruleNames}
-          rulesPending={rulesQuery.isPending || customRulesQuery.isPending}
-          onOpenRule={(ruleId: string) => {
-            const row = ruleRowById.get(ruleId)
-            if (row) openRule(row)
-          }}
-          onTest={() => {
-            tab = 'test'
-          }} />
+        {#if visitedRecords}
+          <HitRecords
+            bind:this={hitRecords}
+            active={tab === 'records'}
+            range={hitWindow}
+            {ruleNames}
+            rulesPending={rulesQuery.isPending || customRulesQuery.isPending}
+            onOpenRule={(ruleId: string) => {
+              const row = ruleRowById.get(ruleId)
+              if (row) openRule(row)
+            }}
+            onTest={() => selectTab('test')} />
+        {/if}
       </section>
     </Tabs.Content>
 
@@ -834,7 +885,7 @@ function selectMatch(match: CredentialMatch): void {
           class="self-start"
           onclick={() => {
             ruleOpen = false
-            tab = 'test'
+            selectTab('test')
           }}>
           {m.credential_protection_test_tab()}<ArrowRightIcon data-icon="inline-end" />
         </Button>
