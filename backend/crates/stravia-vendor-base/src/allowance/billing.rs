@@ -113,10 +113,10 @@ pub(super) fn wafer(plan: Option<&str>) -> Option<AllowanceBilling> {
     plan.map(|_| subscription(None))
 }
 
-/// OpenCode Go 与 Go Plus 共用同一用量接口，响应不带套餐标识。
+/// OpenCode Go、Go Plus 与 Go Teams 共用同一用量接口，响应不带套餐标识。
 pub(super) fn opencode_go(subscribed: bool) -> Option<AllowanceBilling> {
-    // 档位价格来源 https://opencode.ai/console/go ，2026-11-02 核对：
-    // Go $10/月、Go Plus $40/月；无法确定当前档位，不写价格。
+    // 档位价格来源 https://opencode.ai/docs/console/go ，2026-11-26 核对：
+    // Go $10/月、Go Plus $40/月、Go Teams $20/成员/月；无法确定当前档位，不写价格。
     subscribed.then(|| subscription(None))
 }
 
