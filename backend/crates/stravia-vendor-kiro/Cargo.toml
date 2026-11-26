@@ -3,7 +3,7 @@ name = "stravia-vendor-kiro"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file = "../../../LICENSE-PLUGINS"
 description = "Kiro CLI-compatible inference, model discovery, and credit usage for Stravia"
 publish = false
 

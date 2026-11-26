@@ -157,6 +157,9 @@ Install from the official catalog, add a third-party public GitHub repository pu
 > [!IMPORTANT]
 > Review a third-party source's public key fingerprint before trusting it. Signature and digest verification confirm provenance, **not code safety**: installed plugins are trusted with the selected connection's upstream credentials and approved network destinations. See [Plugin Marketplace](docs/design/plugin-marketplace.md) and [Vendor Plugins](docs/design/vendor-plugins.md).
 
+> [!WARNING]
+> **Dedicated Vendor Plugins — Non-Commercial & Disclaimer:** The dedicated vendor plugins (**Codex**, **Claude Code**, **Grok**, **Command Code**, **Devin**, **Kiro**, **Antigravity**, **OpenCode Free**) in the Community Edition are provided **strictly for personal technical research and learning** and are **prohibited from commercial use** without written authorization (see [`LICENSE-PLUGINS`](LICENSE-PLUGINS)). They are provided **"AS IS"** without warranty; using them with third-party services or subscriptions may violate upstream Terms of Service and risk account suspension or other consequences — **you assume all risks and responsibility**.
+
 ### Local Credential Protection
 
 Off by default — enable once to protect outbound requests across every Stravia API Key with zero client changes.
@@ -246,7 +249,9 @@ Before invoking `cargo` directly or opening the workspace in an IDE, run `task p
 
 ## License
 
-Stravia is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
+- **Core Platform & Base Vendor (`stravia-vendor-base`):** Licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
+- **Dedicated Vendor Plugins** (`codex`, `claudecode`, `grok`, `devin`, `command-code`, `antigravity`, `opencode-free`, `kiro`): Governed by [`LICENSE-PLUGINS`](LICENSE-PLUGINS) — **non-commercial use only**; provided in the Community Edition solely for **personal research and learning**, on an **"AS IS"** basis with full disclaimer of liability and third-party ToS/account risk borne by the user. For commercial licensing, contact [www.stravia.cn](https://www.stravia.cn/).
+- **Shared Plugin SDK & Codec Crates** (`stravia-vendor-sdk`, `stravia-vendor-common`, `stravia-protocol-codec`, `stravia-runtime-contract`): Dual-licensed under `MIT OR Apache-2.0`.
 
 Third-party bundled assets retain their respective licenses:
 - Credential detection rules (Betterleaks): [MIT License](backend/crates/stravia-credential-protection/src/detection/LICENSE.betterleaks)

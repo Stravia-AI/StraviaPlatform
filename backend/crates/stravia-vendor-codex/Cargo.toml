@@ -3,7 +3,7 @@ name = "stravia-vendor-codex"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file = "../../../LICENSE-PLUGINS"
 description = "Dedicated OpenAI Codex Wasm vendor guest for Stravia"
 publish = false
 

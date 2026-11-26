@@ -106,6 +106,7 @@ let
       "Cargo.lock"
       "rust-toolchain.toml"
       "LICENSE"
+      "LICENSE-PLUGINS"
       "frontend"
       "frontend/stravia-webui"
       "frontend/stravia-webui/src"
@@ -290,11 +291,14 @@ stdenv.mkDerivation (
       runHook preInstall
       install -Dm755 target/release/stravia-server "$out/bin/stravia-server"
       install -Dm644 LICENSE "$out/share/licenses/stravia-server/LICENSE"
+      install -Dm644 LICENSE-PLUGINS "$out/share/licenses/stravia-server/LICENSE-PLUGINS"
       runHook postInstall
     '';
     meta = {
       description = "Stravia Server with embedded production WebUI and official Wasm vendors";
       homepage = "https://github.com/Stravia-AI/StraviaPlatform";
+      # Core server and base vendor are AGPL-3.0-only; bundled dedicated vendor plugins are
+      # governed by LICENSE-PLUGINS (non-commercial / personal research & learning only).
       license = lib.licenses.agpl3Only;
       mainProgram = "stravia-server";
       platforms = [

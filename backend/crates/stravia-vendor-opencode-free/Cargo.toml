@@ -3,7 +3,7 @@ name = "stravia-vendor-opencode-free"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file = "../../../LICENSE-PLUGINS"
 description = "Dedicated OpenCode Zen free-tier Wasm vendor guest"
 publish = false
 
