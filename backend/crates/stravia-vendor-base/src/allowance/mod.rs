@@ -132,7 +132,7 @@ fn requests_for(monitor: Monitor, credential: &str) -> Vec<Request> {
             vec![],
         ),
         Monitor::Wafer => ("GET", &["https://pass.wafer.ai/v1/inference/quota"], vec![]),
-        Monitor::OpenCodeGo => ("GET", &["https://opencode.ai/zen/go/v1/usage"], vec![]),
+        Monitor::OpenCodeGo => ("GET", &["https://opencode.ai/inference/go/v1/usage"], vec![]),
         Monitor::Crof => ("GET", &["https://crof.ai/usage_api/"], vec![]),
         Monitor::DeepSeek => ("GET", &["https://api.deepseek.com/user/balance"], vec![]),
         Monitor::NeuralWatt => ("GET", &["https://api.neuralwatt.com/v1/quota"], vec![]),
@@ -146,7 +146,9 @@ fn requests_for(monitor: Monitor, credential: &str) -> Vec<Request> {
                     headers.push(("editor-version".into(), "vscode/1.141.1".into()));
                     headers.push(("x-github-api-version".into(), "2025-04-01".into()));
                 }
-                Monitor::OpenCodeGo => headers.push(("user-agent".into(), "Stravia".into())),
+                Monitor::OpenCodeGo => {
+                    headers.push(("user-agent".into(), crate::OPENCODE_USER_AGENT.into()))
+                }
                 _ => {}
             }
             Request {
@@ -192,5 +194,22 @@ fn error(kind: ErrorKind, message: &str, upstream_status: Option<u16>) -> Plugin
         kind,
         message: message.into(),
         upstream_status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_go_allowance_uses_inference_endpoint_and_versioned_user_agent() {
+        let requests = requests_for(Monitor::OpenCodeGo, "oc_sk_test");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].url, "https://opencode.ai/inference/go/v1/usage");
+        assert!(requests[0].headers.iter().any(|field| {
+            field.name.eq_ignore_ascii_case("user-agent")
+                && field.bytes == crate::OPENCODE_USER_AGENT.as_bytes()
+        }));
     }
 }

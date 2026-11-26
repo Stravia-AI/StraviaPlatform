@@ -44,6 +44,10 @@ fn net_options() -> stravia_vendor_sdk::net::Options {
     options
 }
 
+/// OpenCode Console / Go 要求客户端使用自有名称与版本标识自身，而非通用 SDK/HTTP 库名。
+/// https://opencode.ai/docs/console/go#where-can-i-use-it
+pub(crate) const OPENCODE_USER_AGENT: &str = concat!("Stravia/", env!("CARGO_PKG_VERSION"));
+
 /// Profiles statically owned by this vendor — not catalog entries. `custom`
 /// is the merged profile covering every selectable egress protocol.
 pub(crate) const INTERNAL_PROVIDER_IDS: &[&str] =

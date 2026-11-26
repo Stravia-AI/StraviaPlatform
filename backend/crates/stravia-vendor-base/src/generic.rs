@@ -621,23 +621,46 @@ fn append_official_session_headers(
     provider: &ProviderSnapshot,
     headers: &mut Fields,
 ) {
-    // OpenRouter 明确支持 sticky/grouping；不能把私有头普发给其它兼容 API。
-    // https://openrouter.ai/docs/guides/best-practices/prompt-caching
-    if vendor_id == "openrouter"
-        && let Some(affinity) = common::session_affinity(provider)
-    {
-        // 官方只要求稳定、至多 256 字符；固定摘要保留完整源身份并使 Unicode/
-        // 控制字符适用于 HTTP header，不把源字符串的空白当作可丢弃内容。
-        let mut digest = Sha256::new();
-        digest.update(b"stravia-openrouter-session-v1\0");
-        digest.update(affinity.as_bytes());
-        let mut session = String::with_capacity(64);
-        for byte in digest.finalize() {
-            use std::fmt::Write as _;
-            write!(&mut session, "{byte:02x}").expect("writing to String");
+    let Some(affinity) = common::session_affinity(provider) else {
+        return;
+    };
+    match vendor_id {
+        // OpenRouter 明确支持 sticky/grouping；不能把私有头普发给其它兼容 API。
+        // https://openrouter.ai/docs/guides/best-practices/prompt-caching
+        "openrouter" => {
+            // 官方只要求稳定、至多 256 字符；固定摘要保留完整源身份并使 Unicode/
+            // 控制字符适用于 HTTP header，不把源字符串的空白当作可丢弃内容。
+            set_header(
+                headers,
+                "x-session-id",
+                hashed_session_id(b"stravia-openrouter-session-v1\0", "", affinity),
+            );
         }
-        set_header(headers, "x-session-id", session);
+        // OpenCode Console / Go 要求按会话发送稳定的 x-opencode-session 以复用路由与前缀缓存。
+        // https://opencode.ai/docs/console/go#where-can-i-use-it
+        // https://opencode.ai/docs/console/harnesses#sessions
+        "opencode" | "opencode-go" => {
+            set_header(
+                headers,
+                "x-opencode-session",
+                hashed_session_id(b"stravia-opencode-session-v1\0", "ses_", affinity),
+            );
+        }
+        _ => {}
     }
+}
+
+fn hashed_session_id(domain: &[u8], prefix: &str, affinity: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(affinity.as_bytes());
+    let mut session = String::with_capacity(prefix.len() + 64);
+    session.push_str(prefix);
+    for byte in digest.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut session, "{byte:02x}").expect("writing to String");
+    }
+    session
 }
 
 fn apply_auth_headers(
@@ -673,6 +696,9 @@ fn apply_auth_headers(
         if let Some(value) = setting(provider, "xTitle").filter(|v| !v.trim().is_empty()) {
             headers.append("X-Title", value);
         }
+    }
+    if matches!(vendor_id, "opencode" | "opencode-go") {
+        set_header(headers, "user-agent", crate::OPENCODE_USER_AGENT.to_owned());
     }
     Ok(())
 }
@@ -1844,5 +1870,90 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn opencode_requests_send_versioned_user_agent_and_stable_session_header() {
+        let header_value = |headers: &Fields, name: &str| -> Option<String> {
+            headers
+                .iter()
+                .find(|field| field.name.eq_ignore_ascii_case(name))
+                .map(|field| String::from_utf8(field.bytes.clone()).unwrap())
+        };
+
+        for vendor_id in ["opencode", "opencode-go"] {
+            let mut snapshot = provider(OPENAI_CHAT_PROTOCOL, "oc_sk_test");
+            snapshot.provider_id = vendor_id.into();
+            snapshot.base_url = if vendor_id == "opencode-go" {
+                "https://opencode.ai/inference/go/openai/v1".into()
+            } else {
+                "https://opencode.ai/inference/openai/v1".into()
+            };
+            snapshot
+                .operation_metadata
+                .insert("session_affinity".into(), json!("chain-root-1"));
+
+            let mut headers = Fields::new();
+            apply_auth_headers(vendor_id, &snapshot, OPENAI_CHAT_PROTOCOL, &mut headers).unwrap();
+            append_official_session_headers(vendor_id, &snapshot, &mut headers);
+            assert_eq!(
+                header_value(&headers, "user-agent").as_deref(),
+                Some(crate::OPENCODE_USER_AGENT)
+            );
+            let session_one = header_value(&headers, "x-opencode-session")
+                .expect("OpenCode session header is set");
+            assert!(session_one.starts_with("ses_"), "{session_one}");
+            assert_eq!(session_one.len(), 4 + 64);
+
+            // Same affinity produces the exact same session ID; different affinity differs.
+            let mut repeat_headers = Fields::new();
+            append_official_session_headers(vendor_id, &snapshot, &mut repeat_headers);
+            assert_eq!(
+                header_value(&repeat_headers, "x-opencode-session").as_deref(),
+                Some(session_one.as_str())
+            );
+
+            snapshot
+                .operation_metadata
+                .insert("session_affinity".into(), json!("chain-root-2"));
+            let mut other_headers = Fields::new();
+            append_official_session_headers(vendor_id, &snapshot, &mut other_headers);
+            assert_ne!(
+                header_value(&other_headers, "x-opencode-session").as_deref(),
+                Some(session_one.as_str())
+            );
+
+            // Without host session affinity, do not fabricate a random session ID.
+            snapshot.operation_metadata.remove("session_affinity");
+            let mut no_session = Fields::new();
+            append_official_session_headers(vendor_id, &snapshot, &mut no_session);
+            assert_eq!(header_value(&no_session, "x-opencode-session"), None);
+
+            // Discovery and connection check also send the Stravia User-Agent.
+            let check = connection_check_request(vendor_id, &snapshot, OPENAI_CHAT_PROTOCOL).unwrap();
+            assert_eq!(
+                header_value(&check.headers, "user-agent").as_deref(),
+                Some(crate::OPENCODE_USER_AGENT)
+            );
+            let discovery =
+                model_discovery_request(vendor_id, &snapshot, &DiscoverRequest { cursor: None })
+                    .unwrap();
+            assert_eq!(
+                header_value(&discovery.headers, "user-agent").as_deref(),
+                Some(crate::OPENCODE_USER_AGENT)
+            );
+        }
+
+        // Unrelated compatible vendors do not receive OpenCode headers.
+        let mut other = provider(OPENAI_CHAT_PROTOCOL, "sk-other");
+        other
+            .operation_metadata
+            .insert("session_affinity".into(), json!("chain-root-1"));
+        let mut other_headers = Fields::new();
+        apply_auth_headers("openai-compatible", &other, OPENAI_CHAT_PROTOCOL, &mut other_headers)
+            .unwrap();
+        append_official_session_headers("openai-compatible", &other, &mut other_headers);
+        assert_eq!(header_value(&other_headers, "user-agent"), None);
+        assert_eq!(header_value(&other_headers, "x-opencode-session"), None);
     }
 }

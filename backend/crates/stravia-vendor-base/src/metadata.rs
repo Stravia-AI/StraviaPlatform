@@ -162,7 +162,7 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         ),
         "mistral" => standard("Mistral AI", Some("https://api.mistral.ai/v1")),
         "nvidia" => standard("Nvidia", Some("https://integrate.api.nvidia.com/v1")),
-        "opencode" => standard("OpenCode Zen", Some("https://opencode.ai/zen/v1")),
+        "opencode" => standard("OpenCode Zen", Some("https://opencode.ai/inference/openai/v1")),
         "perplexity" => standard("Perplexity", Some("https://api.perplexity.ai")),
         "qvac" => standard("Qvac", Some("http://127.0.0.1:11435/v1")),
         "salad-cloud" => standard("SaladCloud", Some("https://ai.salad.cloud/v1")),
@@ -305,7 +305,7 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         "opencode-go" => monitored_vendor(
             "OpenCode Go",
             "openai-compatible",
-            "https://opencode.ai/zen/go/v1",
+            "https://opencode.ai/inference/go/openai/v1",
             &["opencode.ai"],
         ),
         "crof" => monitored_vendor(
@@ -741,7 +741,7 @@ mod tests {
         ("baseten", "https://inference.baseten.co/v1"),
         ("lilac", "https://api.getlilac.com/v1"),
         ("nvidia", "https://integrate.api.nvidia.com/v1"),
-        ("opencode", "https://opencode.ai/zen/v1"),
+        ("opencode", "https://opencode.ai/inference/openai/v1"),
         ("xiaomi", "https://api.xiaomimimo.com/v1"),
         (
             "xiaomi-token-plan-sgp",
@@ -875,5 +875,14 @@ mod tests {
                 "{vendor_id}"
             );
         }
+    }
+
+    #[test]
+    fn opencode_go_uses_current_inference_base_url() {
+        let descriptor = crate::provider_descriptor("opencode-go").unwrap();
+        assert_eq!(
+            descriptor.channels[0].default_base_url.as_deref(),
+            Some("https://opencode.ai/inference/go/openai/v1")
+        );
     }
 }
