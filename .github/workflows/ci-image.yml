@@ -28,8 +28,8 @@ jobs:
       - name: Log in to Forgejo Container Registry
         env:
           REGISTRY_HOST: git.stravia.cn
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           printf '%s\n' "${REGISTRY_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin
 
