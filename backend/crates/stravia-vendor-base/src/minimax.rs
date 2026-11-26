@@ -142,9 +142,7 @@ fn merge_models(
     for id in models {
         let edit = editable.contains(id);
         if let Some(model) = response.models.iter_mut().find(|m| m.id == *id) {
-            if !model.capabilities.iter().any(|c| c == "media_image") {
-                model.capabilities.push("media_image".into());
-            }
+            crate::add_media_image_capability(model);
             let modalities = model
                 .metadata
                 .entry("modalities".into())

@@ -273,22 +273,25 @@ fn discover(
                 .as_object()
                 .map(stravia_vendor_common::thinking::source_metadata)
                 .unwrap_or_default();
-            if !metadata.contains_key("reasoning_efforts")
-                && let Some(caps_obj) = entry.get("capabilities").filter(|value| value.is_object())
-            {
-                let caps =
-                    stravia_protocol_codec::codec::thinking::AnthropicThinkingCapabilities::from_wire(
-                        caps_obj, None,
-                    );
-                let profile =
-                    stravia_protocol_codec::codec::thinking::AnthropicModelProfile::new(id, &caps);
-                let efforts: Vec<Value> = profile
-                    .discovery_efforts()
-                    .into_iter()
-                    .map(Value::String)
-                    .collect();
-                if !efforts.is_empty() {
-                    metadata.insert("reasoning_efforts".into(), Value::Array(efforts));
+            if let Some(caps_obj) = entry.get("capabilities").filter(|value| value.is_object()) {
+                metadata.insert("anthropic_capabilities".into(), caps_obj.clone());
+                if !metadata.contains_key("reasoning_efforts") {
+                    let caps =
+                        stravia_protocol_codec::codec::thinking::AnthropicThinkingCapabilities::from_wire(
+                            caps_obj, None,
+                        );
+                    let profile =
+                        stravia_protocol_codec::codec::thinking::AnthropicModelProfile::new(
+                            id, &caps,
+                        );
+                    let efforts: Vec<Value> = profile
+                        .discovery_efforts()
+                        .into_iter()
+                        .map(Value::String)
+                        .collect();
+                    if !efforts.is_empty() {
+                        metadata.insert("reasoning_efforts".into(), Value::Array(efforts));
+                    }
                 }
             }
             let capabilities = entry

@@ -406,9 +406,10 @@ impl ProviderModelMetadata {
             .and_then(Value::as_array);
         let declares = |capability| {
             capabilities.is_none_or(|values| {
-                values
-                    .iter()
-                    .any(|value| value.as_str() == Some(capability))
+                !has_explicit_operation_capabilities(values)
+                    || values
+                        .iter()
+                        .any(|value| value.as_str() == Some(capability))
             })
         };
         let output = match purpose {
@@ -767,6 +768,17 @@ pub struct ProviderModelRecord {
     pub created_at: String,
     pub updated_at: String,
     pub cost_rules: Vec<ProviderModelCostRule>,
+}
+
+/// 仅操作类能力（而非 `image_input` / `reasoning` / `structured_output` 等特性标签）
+/// 才限定模型的路由用途范围；否则旧快照或上游透传的特性标签会误杀推理与搜索用途。
+pub(crate) fn has_explicit_operation_capabilities(values: &[Value]) -> bool {
+    values.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            Some("infer" | "search" | "media_image" | "image_output")
+        )
+    })
 }
 
 pub(crate) fn eligible_route_purposes(
@@ -1955,5 +1967,55 @@ mod tests {
             metadata.reasoning_efforts.unwrap(),
             ["custom", "none", "max"]
         );
+    }
+
+    #[test]
+    fn feature_tags_in_capabilities_do_not_mask_inference_or_search_purposes() {
+        use super::RoutePurpose;
+
+        let trait_only = ProviderModelMetadata::from_value(
+            "claude-sonnet-5-5",
+            json!({
+                "capabilities": ["image_input", "structured_output", "reasoning"],
+                "modalities": {"input": ["text", "image"], "output": ["text"]}
+            }),
+        )
+        .unwrap();
+        assert!(trait_only.supports_route_purpose(RoutePurpose::Inference));
+        assert!(trait_only.supports_route_purpose(RoutePurpose::WebSearch));
+        assert!(!trait_only.supports_route_purpose(RoutePurpose::ImageGeneration));
+
+        let upstream_endpoints = ProviderModelMetadata::from_value(
+            "gpt-compat",
+            json!({
+                "capabilities": ["/v1/chat/completions", "/v1/responses"],
+                "modalities": {"input": ["text"], "output": ["text"]}
+            }),
+        )
+        .unwrap();
+        assert!(upstream_endpoints.supports_route_purpose(RoutePurpose::Inference));
+
+        let image_only = ProviderModelMetadata::from_value(
+            "image-gen",
+            json!({
+                "capabilities": ["media_image"],
+                "modalities": {"input": ["text"], "output": ["text", "image"]}
+            }),
+        )
+        .unwrap();
+        assert!(!image_only.supports_route_purpose(RoutePurpose::Inference));
+        assert!(!image_only.supports_route_purpose(RoutePurpose::WebSearch));
+        assert!(image_only.supports_route_purpose(RoutePurpose::ImageGeneration));
+
+        let search_only = ProviderModelMetadata::from_value(
+            "search-only",
+            json!({
+                "capabilities": ["search"],
+                "modalities": {"input": ["text"], "output": ["text"]}
+            }),
+        )
+        .unwrap();
+        assert!(!search_only.supports_route_purpose(RoutePurpose::Inference));
+        assert!(search_only.supports_route_purpose(RoutePurpose::WebSearch));
     }
 }

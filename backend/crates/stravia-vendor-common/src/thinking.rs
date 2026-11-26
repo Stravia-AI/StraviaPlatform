@@ -83,6 +83,7 @@ pub fn source_metadata(
             !matches!(
                 key.as_str(),
                 "attachment"
+                    | "capabilities"
                     | "reasoning"
                     | "tool_call"
                     | "structured_output"
@@ -468,10 +469,11 @@ mod tests {
 
     #[test]
     fn discovery_ingress_preserves_native_facts_without_legacy_model_flags() {
-        let value = json!({"reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default","low","custom"]}],"limit":{"context":8192,"output":512},"thinking_toggle":true,"native":{"mode":"real"}});
+        let value = json!({"capabilities":["vision","tools"],"reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"effort","values":[null,"default","low","custom"]}],"limit":{"context":8192,"output":512},"thinking_toggle":true,"native":{"mode":"real"}});
         let metadata = source_metadata(value.as_object().unwrap());
         assert_eq!(metadata["reasoning_efforts"], json!(["low", "custom"]));
         assert_eq!(metadata["limit"], json!({"context":8192}));
+        assert!(!metadata.contains_key("capabilities"));
         assert!(!metadata.contains_key("reasoning"));
         assert!(!metadata.contains_key("reasoning_options"));
         assert!(!metadata.contains_key("thinking_toggle"));

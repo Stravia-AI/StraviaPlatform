@@ -346,8 +346,8 @@ fn ensure_existing_image_capabilities(response: &mut DiscoverResponse) {
             .and_then(|m| m.get("output"))
             .and_then(Value::as_array)
             .is_some_and(|list| list.iter().any(|v| v.as_str() == Some("image")));
-        if outputs_image && !model.capabilities.iter().any(|c| c == "media_image") {
-            model.capabilities.push("media_image".into());
+        if outputs_image {
+            crate::add_media_image_capability(model);
         }
     }
 }
@@ -356,9 +356,7 @@ fn merge_models(response: &mut DiscoverResponse, models: &[ImageModelEntry], res
     for entry in models {
         let edit = entry.supports_image_input;
         if let Some(model) = response.models.iter_mut().find(|m| m.id == entry.id) {
-            if !model.capabilities.iter().any(|c| c == "media_image") {
-                model.capabilities.push("media_image".into());
-            }
+            crate::add_media_image_capability(model);
             let modalities = model
                 .metadata
                 .entry("modalities".into())
