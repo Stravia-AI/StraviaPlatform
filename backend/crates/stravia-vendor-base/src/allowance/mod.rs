@@ -132,7 +132,11 @@ fn requests_for(monitor: Monitor, credential: &str) -> Vec<Request> {
             vec![],
         ),
         Monitor::Wafer => ("GET", &["https://pass.wafer.ai/v1/inference/quota"], vec![]),
-        Monitor::OpenCodeGo => ("GET", &["https://opencode.ai/inference/go/v1/usage"], vec![]),
+        Monitor::OpenCodeGo => (
+            "GET",
+            &["https://opencode.ai/inference/go/v1/usage"],
+            vec![],
+        ),
         Monitor::Crof => ("GET", &["https://crof.ai/usage_api/"], vec![]),
         Monitor::DeepSeek => ("GET", &["https://api.deepseek.com/user/balance"], vec![]),
         Monitor::NeuralWatt => ("GET", &["https://api.neuralwatt.com/v1/quota"], vec![]),

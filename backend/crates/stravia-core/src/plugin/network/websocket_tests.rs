@@ -1,8 +1,6 @@
 use super::*;
-use crate::{
-    plugin::network::transport::{
-        H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport,
-    },
+use crate::plugin::network::transport::{
+    H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport,
 };
 use rustls::{ClientConfig, RootCertStore};
 use std::sync::Arc;

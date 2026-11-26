@@ -441,7 +441,10 @@ fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), Connect
                 rollback_backups(&staged[..index]);
                 return Err(io_error(
                     "write_error",
-                    format!("Failed to prepare Connect Client config backup: {}", cause.error),
+                    format!(
+                        "Failed to prepare Connect Client config backup: {}",
+                        cause.error
+                    ),
                     &staged[index].target,
                 ));
             }

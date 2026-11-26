@@ -126,7 +126,9 @@ impl BundledPlugins {
                     })
                     .await
                     .map_err(|error| {
-                        anyhow::anyhow!("bundled vendor decompress task failed for {vendor_id}: {error}")
+                        anyhow::anyhow!(
+                            "bundled vendor decompress task failed for {vendor_id}: {error}"
+                        )
                     })?
                     .map_err(|error| {
                         anyhow::anyhow!("bundled vendor decompress failed for {vendor_id}: {error}")

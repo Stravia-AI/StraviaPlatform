@@ -177,7 +177,10 @@ pub(crate) fn scrub_upload_grant_value(value: &mut serde_json::Value) {
 }
 
 pub(crate) async fn upload_prompt_enabled(gateway: &crate::Gateway) -> Result<bool, ArtifactError> {
-    Ok(gateway.load_artifact_settings().await?.upload_prompt_injection)
+    Ok(gateway
+        .load_artifact_settings()
+        .await?
+        .upload_prompt_injection)
 }
 
 pub(crate) async fn upload_instructions(

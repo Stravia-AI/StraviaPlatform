@@ -162,7 +162,10 @@ pub(crate) fn descriptor(vendor_id: &str) -> Option<ProviderDescriptor> {
         ),
         "mistral" => standard("Mistral AI", Some("https://api.mistral.ai/v1")),
         "nvidia" => standard("Nvidia", Some("https://integrate.api.nvidia.com/v1")),
-        "opencode" => standard("OpenCode Zen", Some("https://opencode.ai/inference/openai/v1")),
+        "opencode" => standard(
+            "OpenCode Zen",
+            Some("https://opencode.ai/inference/openai/v1"),
+        ),
         "perplexity" => standard("Perplexity", Some("https://api.perplexity.ai")),
         "qvac" => standard("Qvac", Some("http://127.0.0.1:11435/v1")),
         "salad-cloud" => standard("SaladCloud", Some("https://ai.salad.cloud/v1")),

@@ -449,7 +449,14 @@ mod tests {
         }
         let retained_before: usize = regexes
             .iter()
-            .map(|r| r.0.idle.lock().scratches.iter().map(|s| s.accounted_bytes).sum::<usize>())
+            .map(|r| {
+                r.0.idle
+                    .lock()
+                    .scratches
+                    .iter()
+                    .map(|s| s.accounted_bytes)
+                    .sum::<usize>()
+            })
             .sum();
         assert!(retained_before > 0);
         // Tight budget must evict cold idle workspaces and keep global counter consistent.

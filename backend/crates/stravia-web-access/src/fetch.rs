@@ -414,13 +414,8 @@ impl HttpBackend for RedirectBackend {
                     .0
                     .clone()
             };
-            let (response, exchange) = send_verified_get(
-                &client,
-                url,
-                pinned.then_some(addresses),
-                "HTTP",
-            )
-            .await?;
+            let (response, exchange) =
+                send_verified_get(&client, url, pinned.then_some(addresses), "HTTP").await?;
             if let Some(exchange) = &exchange {
                 exchange.gap("http_redirect_body_not_consumed");
             }

@@ -81,8 +81,11 @@ impl AdminService {
             let previous =
                 crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
                     .await?;
-            let next_ids: std::collections::HashSet<&str> =
-                config.proxies.iter().map(|entry| entry.id.as_str()).collect();
+            let next_ids: std::collections::HashSet<&str> = config
+                .proxies
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect();
             let removed: Vec<&crate::outbound_proxy::OutboundProxyEntry> = previous
                 .proxies
                 .iter()
@@ -227,7 +230,12 @@ impl AdminService {
         &self,
         request: crate::outbound_proxy::ProxyIpProbeRequest,
     ) -> anyhow::Result<crate::outbound_proxy::ProxyIpProbeResult> {
-        let resolved = if let Some(url) = request.url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let resolved = if let Some(url) = request
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             crate::outbound_proxy::validate_proxy_url(url)?;
             crate::outbound_proxy::ResolvedOutboundProxy::Explicit {
                 url: url.to_owned(),
@@ -249,7 +257,9 @@ mod tests {
     use std::sync::Arc;
 
     use crate::config::GatewayConfig;
-    use crate::db::models::{CreateProvider, ProviderCredentialInput, ProviderSourceInput, UpdateProvider};
+    use crate::db::models::{
+        CreateProvider, ProviderCredentialInput, ProviderSourceInput, UpdateProvider,
+    };
     use crate::gateway::Gateway;
     use crate::outbound_proxy::{
         OutboundProxyEntry, OutboundProxySettings, PROXY_MODE_NONE, PROXY_MODE_SYSTEM,
@@ -306,7 +316,12 @@ mod tests {
 
         admin.set_setting(UPDATE_PROXY_MODE_KEY, "us-1").await?;
         assert!(admin.set_setting("update_use_proxy", "true").await.is_err());
-        assert!(admin.set_setting(UPDATE_PROXY_MODE_KEY, "nonexistent").await.is_err());
+        assert!(
+            admin
+                .set_setting(UPDATE_PROXY_MODE_KEY, "nonexistent")
+                .await
+                .is_err()
+        );
 
         let only_jp = serde_json::to_string(&OutboundProxySettings {
             proxies: vec![OutboundProxyEntry {
@@ -333,7 +348,9 @@ mod tests {
                 },
             )
             .await?;
-        admin.set_setting(UPDATE_PROXY_MODE_KEY, PROXY_MODE_NONE).await?;
+        admin
+            .set_setting(UPDATE_PROXY_MODE_KEY, PROXY_MODE_NONE)
+            .await?;
         admin.set_setting(SETTINGS_KEY, &only_jp).await?;
 
         gateway.shutdown().await;

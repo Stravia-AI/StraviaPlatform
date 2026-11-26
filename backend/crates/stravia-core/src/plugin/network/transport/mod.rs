@@ -494,9 +494,8 @@ impl VendorTransport {
             let raw_proxy = forward_proxy_url
                 .as_deref()
                 .ok_or_else(|| TransportError::Proxy("missing forward proxy URL".into()))?;
-            let proxy =
-                rama_net::address::ProxyAddress::try_from(raw_proxy.trim_end_matches('/'))
-                    .map_err(|_| TransportError::Proxy("invalid proxy address".into()))?;
+            let proxy = rama_net::address::ProxyAddress::try_from(raw_proxy.trim_end_matches('/'))
+                .map_err(|_| TransportError::Proxy("invalid proxy address".into()))?;
             request
                 .extensions()
                 .insert(rama_net::client::ProxyRoute::Proxy(proxy));

@@ -345,7 +345,11 @@ async fn check_draft(
     let effective_proxy_mode = proxy_mode
         .map(str::to_owned)
         .or_else(|| saved.as_ref().map(|provider| provider.proxy_mode.clone()))
-        .or_else(|| staged.as_ref().map(|staged| staged.session.proxy_mode.clone()))
+        .or_else(|| {
+            staged
+                .as_ref()
+                .map(|staged| staged.session.proxy_mode.clone())
+        })
         .unwrap_or_else(crate::outbound_proxy::default_proxy_mode);
     let validated = match finalize_configuration(validated, &configuration.base_url) {
         Ok(validated) => validated,
@@ -356,10 +360,7 @@ async fn check_draft(
     }
 
     let mut operation_metadata = BTreeMap::new();
-    operation_metadata.insert(
-        "proxy_mode".into(),
-        Value::String(effective_proxy_mode),
-    );
+    operation_metadata.insert("proxy_mode".into(), Value::String(effective_proxy_mode));
     let snapshot = ProviderSnapshot {
         provider_id: validated.descriptor.provider_id.clone(),
         channel: validated.channel.id.clone(),

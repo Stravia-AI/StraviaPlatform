@@ -1072,13 +1072,8 @@ impl VendorPlugins {
             .get(vendor_id)
             .ok_or_else(|| anyhow::anyhow!("no bundled version exists for this vendor"))?;
         let component = bundle.component_bytes().await?;
-        self.preview(
-            gw,
-            component,
-            PluginSource::Builtin,
-            Some(vendor_id),
-        )
-        .await
+        self.preview(gw, component, PluginSource::Builtin, Some(vendor_id))
+            .await
     }
 
     pub(crate) async fn reconcile_bundled(&self, gw: &Gateway) -> anyhow::Result<()> {

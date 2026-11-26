@@ -158,7 +158,8 @@ impl OutboundProxySettings {
 pub fn validate_proxy_url(raw: &str) -> anyhow::Result<()> {
     let raw = raw.trim();
     anyhow::ensure!(!raw.is_empty(), "outbound proxy URL is empty");
-    let url = reqwest::Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid outbound proxy URL"))?;
+    let url =
+        reqwest::Url::parse(raw).map_err(|_| anyhow::anyhow!("invalid outbound proxy URL"))?;
     anyhow::ensure!(
         matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h"),
         "unsupported outbound proxy URL scheme"
@@ -267,8 +268,10 @@ impl ResolvedOutboundProxy {
         impl Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync + 'static,
     > {
         match self {
-            Self::Direct => Ok(Box::new(|builder: reqwest::ClientBuilder| builder.no_proxy())
-                as Box<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>),
+            Self::Direct => Ok(
+                Box::new(|builder: reqwest::ClientBuilder| builder.no_proxy())
+                    as Box<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>,
+            ),
             Self::Explicit { url, .. } => {
                 validate_proxy_url(url)?;
                 let proxy = reqwest::Proxy::all(url.trim())
@@ -279,9 +282,8 @@ impl ResolvedOutboundProxy {
             }
             Self::System(source) => {
                 let matcher = Arc::new(system_proxy_matcher(*source));
-                let proxy = reqwest::Proxy::custom(move |url| {
-                    intercept_matcher_for_url(&matcher, url)
-                });
+                let proxy =
+                    reqwest::Proxy::custom(move |url| intercept_matcher_for_url(&matcher, url));
                 Ok(Box::new(move |builder: reqwest::ClientBuilder| {
                     builder.no_proxy().proxy(proxy.clone())
                 }))
@@ -685,12 +687,32 @@ mod tests {
 
         let result = aggregate_probe_observations(
             vec![
-                (0, "anthropic.com".into(), Some(("1.1.1.1".into(), Some("us".into())))),
-                (1, "claude.ai".into(), Some(("2.2.2.2".into(), Some("jp".into())))),
-                (2, "chatgpt.com".into(), Some(("2.2.2.2".into(), Some("jp".into())))),
-                (3, "openai.com".into(), Some(("2.2.2.2".into(), Some("jp".into())))),
+                (
+                    0,
+                    "anthropic.com".into(),
+                    Some(("1.1.1.1".into(), Some("us".into()))),
+                ),
+                (
+                    1,
+                    "claude.ai".into(),
+                    Some(("2.2.2.2".into(), Some("jp".into()))),
+                ),
+                (
+                    2,
+                    "chatgpt.com".into(),
+                    Some(("2.2.2.2".into(), Some("jp".into()))),
+                ),
+                (
+                    3,
+                    "openai.com".into(),
+                    Some(("2.2.2.2".into(), Some("jp".into()))),
+                ),
                 (4, "sora.com".into(), None),
-                (5, "grok.com".into(), Some(("1.1.1.1".into(), Some("us".into())))),
+                (
+                    5,
+                    "grok.com".into(),
+                    Some(("1.1.1.1".into(), Some("us".into()))),
+                ),
             ],
             "2026-01-01T00:00:00Z".into(),
         );

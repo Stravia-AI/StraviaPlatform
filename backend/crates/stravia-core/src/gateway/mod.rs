@@ -241,14 +241,14 @@ impl Gateway {
         stravia_runtime_contract::artifact::ArtifactError,
     > {
         let settings = match raw {
-            Some(value) => serde_json::from_str::<
-                stravia_runtime_contract::artifact::ArtifactSettings,
-            >(value)
-            .map_err(|error| {
-                stravia_runtime_contract::artifact::ArtifactError::Invalid(format!(
-                    "Invalid artifact settings: {error}"
-                ))
-            })?,
+            Some(value) => {
+                serde_json::from_str::<stravia_runtime_contract::artifact::ArtifactSettings>(value)
+                    .map_err(|error| {
+                        stravia_runtime_contract::artifact::ArtifactError::Invalid(format!(
+                            "Invalid artifact settings: {error}"
+                        ))
+                    })?
+            }
             None => stravia_runtime_contract::artifact::ArtifactSettings::default(),
         };
         settings.validate()?;

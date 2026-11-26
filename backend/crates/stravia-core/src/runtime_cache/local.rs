@@ -293,12 +293,7 @@ impl LocalCache {
         }
     }
 
-    fn purge_expired(
-        &self,
-        ledger: &mut Ledger,
-        now: Instant,
-        dropped: &mut Vec<Arc<LocalEntry>>,
-    ) {
+    fn purge_expired(&self, ledger: &mut Ledger, now: Instant, dropped: &mut Vec<Arc<LocalEntry>>) {
         while let Some(&(expires_at, index, hash)) = ledger.expiry.first() {
             if expires_at > now {
                 break;
@@ -392,12 +387,7 @@ mod tests {
         assert!(cache.get::<u64>("generation", "requested").is_none());
         cache.remove("generation", "requested");
         assert_eq!(
-            cache.values[class]
-                .read()
-                .get(&hash)
-                .unwrap()
-                .key
-                .as_ref(),
+            cache.values[class].read().get(&hash).unwrap().key.as_ref(),
             "collision"
         );
         cache.entries[class].put(hash, hash, 1);

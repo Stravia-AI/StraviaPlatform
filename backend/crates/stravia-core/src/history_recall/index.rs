@@ -275,7 +275,13 @@ async fn sqlite_needs_index(pool: &SqlitePool, interaction: &str) -> anyhow::Res
         return Ok(true);
     };
     let indexed_terminal = indexed_terminal.unwrap_or(false);
-    let rebuild = needs_rebuild(terminal, indexed_terminal, last, last_event_sequence, latest);
+    let rebuild = needs_rebuild(
+        terminal,
+        indexed_terminal,
+        last,
+        last_event_sequence,
+        latest,
+    );
     if terminal && !rebuild {
         return Ok(false);
     }

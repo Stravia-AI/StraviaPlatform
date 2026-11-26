@@ -1930,7 +1930,8 @@ mod tests {
             assert_eq!(header_value(&no_session, "x-opencode-session"), None);
 
             // Discovery and connection check also send the Stravia User-Agent.
-            let check = connection_check_request(vendor_id, &snapshot, OPENAI_CHAT_PROTOCOL).unwrap();
+            let check =
+                connection_check_request(vendor_id, &snapshot, OPENAI_CHAT_PROTOCOL).unwrap();
             assert_eq!(
                 header_value(&check.headers, "user-agent").as_deref(),
                 Some(crate::OPENCODE_USER_AGENT)
@@ -1950,8 +1951,13 @@ mod tests {
             .operation_metadata
             .insert("session_affinity".into(), json!("chain-root-1"));
         let mut other_headers = Fields::new();
-        apply_auth_headers("openai-compatible", &other, OPENAI_CHAT_PROTOCOL, &mut other_headers)
-            .unwrap();
+        apply_auth_headers(
+            "openai-compatible",
+            &other,
+            OPENAI_CHAT_PROTOCOL,
+            &mut other_headers,
+        )
+        .unwrap();
         append_official_session_headers("openai-compatible", &other, &mut other_headers);
         assert_eq!(header_value(&other_headers, "user-agent"), None);
         assert_eq!(header_value(&other_headers, "x-opencode-session"), None);

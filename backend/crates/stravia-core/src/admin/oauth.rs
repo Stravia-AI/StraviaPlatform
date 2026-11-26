@@ -278,9 +278,10 @@ impl AdminService {
                 serde_json::json!({}),
             ));
         }
-        provider
-            .operation_metadata
-            .insert("proxy_mode".into(), Value::String(candidate.proxy_mode.clone()));
+        provider.operation_metadata.insert(
+            "proxy_mode".into(),
+            Value::String(candidate.proxy_mode.clone()),
+        );
         let scope = self.gw.create_vendor_session_scope(
             &candidate.vendor_id,
             candidate.provider_id.as_deref(),
@@ -348,9 +349,10 @@ impl AdminService {
     ) -> anyhow::Result<AuthSessionInitData> {
         let (mut provider, auth_descriptor) =
             self.provider_auth_candidate_snapshot(&candidate).await?;
-        provider
-            .operation_metadata
-            .insert("proxy_mode".into(), Value::String(candidate.proxy_mode.clone()));
+        provider.operation_metadata.insert(
+            "proxy_mode".into(),
+            Value::String(candidate.proxy_mode.clone()),
+        );
         let scope = self.gw.create_vendor_session_scope(
             &candidate.vendor_id,
             candidate.provider_id.as_deref(),
@@ -407,9 +409,10 @@ impl AdminService {
                 std::time::Instant::now() + std::time::Duration::from_secs(10 * 60),
             ),
         );
-        context
-            .metadata
-            .insert("proxy_mode".into(), Value::String(session.proxy_mode.clone()));
+        context.metadata.insert(
+            "proxy_mode".into(),
+            Value::String(session.proxy_mode.clone()),
+        );
         self.gw
             .execute_vendor_session(
                 &runtime.scope,
