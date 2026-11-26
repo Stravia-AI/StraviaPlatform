@@ -41,8 +41,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file .github/docker/ci.Dockerfile \
-            --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ \
-            --build-arg APT_MIRROR_PORTS=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
+            --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu/ \
+            --build-arg APT_MIRROR_PORTS=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
             --build-arg RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
             --build-arg RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
             --build-arg NODE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/nodejs-release \
