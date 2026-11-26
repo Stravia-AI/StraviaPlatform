@@ -132,10 +132,11 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 57 修改 Route 列并克隆受引用的配置，始终保持外键约束开启。
     // 58 重建无入站外键的 web_providers（local_engines 泛化为 config_json）并清理已移除种子设置，保持外键约束开启。
     // 59 原地改写 model_backends.thinking_level_map JSON 列中的旧思考控制类型，不修改表结构与外键。
+    // 60 仅增删 providers/web_providers 的非外键列与触发器并更新 settings，不重建表、不改动外键，保持外键约束开启。
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=59
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=60
     ) {
         return false;
     }
@@ -2130,9 +2131,9 @@ mod tests {
 
         super::migrate_sqlite(&pool, None).await.unwrap();
 
-        type WebProviderRow = (String, String, Option<String>, bool, Option<String>);
+        type WebProviderRow = (String, String, Option<String>, String, Option<String>);
         let rows: Vec<WebProviderRow> = sqlx::query_as(
-            "SELECT id, kind, api_key, use_proxy, config_json FROM web_providers ORDER BY id",
+            "SELECT id, kind, api_key, proxy_mode, config_json FROM web_providers ORDER BY id",
         )
         .fetch_all(&pool)
         .await
@@ -2143,7 +2144,7 @@ mod tests {
                 "existing-exa".into(),
                 "exa".into(),
                 Some("secret-key".into()),
-                true,
+                "system".into(),
                 None
             )]
         );

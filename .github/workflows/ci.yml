@@ -207,8 +207,9 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
-        uses: actions/cache@v6
+      - name: Restore Cargo registry, Bun, and patched crates cache
+        id: deps-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -220,8 +221,9 @@ jobs:
           restore-keys: |
             deps-cargo-bun-v1-
 
-      - name: Cache Linux x64 sccache (rolling)
-        uses: actions/cache@v6
+      - name: Restore Linux x64 sccache (rolling)
+        id: sccache-cache
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -229,10 +231,10 @@ jobs:
             sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             sccache-linux-x64-
 
-      - name: Cache compiled Wasm vendor plugins & fixtures
+      - name: Restore compiled Wasm vendor plugins & fixtures
         id: vendor-cache
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: |
             target/vendor-plugins
@@ -255,6 +257,17 @@ jobs:
           else
             task build:vendor-fixtures
           fi
+
+      - name: Save compiled Wasm vendor plugins & fixtures
+        if: (needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true') && steps.vendor-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: |
+            target/vendor-plugins
+            target/vendor-plugins-all
+            target/vendor-test-fixtures
+          key: vendor-fixtures-v1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
 
       - name: Prepare patched crates (WebUI-only scope)
         if: needs.changes.outputs.rust != 'true' && needs.changes.outputs.full != 'true'
@@ -303,6 +316,27 @@ jobs:
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
+
+      - name: Save Cargo registry, Bun, and patched crates cache
+        if: always() && steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.bun/install/cache
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+
+      - name: Save Linux x64 sccache (rolling, even on test failure)
+        if: always()
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
 
   backend-e2e:
     name: Backend E2E (${{ matrix.suite }})
@@ -409,15 +443,14 @@ jobs:
           restore-keys: |
             ci-uv-v1-
 
-      - name: Cache Linux x64 sccache (rolling)
-        uses: actions/cache@v6
+      - name: Restore Linux x64 sccache (rolling)
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-admin
           restore-keys: |
             sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             sccache-linux-x64-
-            ci-e2e-build-v1-
 
       - name: Download shared E2E binaries
         uses: actions/download-artifact@v8
@@ -440,6 +473,14 @@ jobs:
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
+
+      - name: Save Linux x64 sccache (rolling, even on test failure)
+        if: always()
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-admin
 
   postgres-e2e:
     name: PostgreSQL E2E
@@ -604,8 +645,8 @@ jobs:
           restore-keys: |
             deps-cargo-bun-v1-
 
-      - name: Cache Windows x86_64 sccache (rolling)
-        uses: actions/cache@v6
+      - name: Restore Windows x86_64 sccache (rolling)
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -654,6 +695,14 @@ jobs:
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
+
+      - name: Save Windows x86_64 sccache (rolling, even on test failure)
+        if: always()
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
 
   windows-kvm-desktop-e2e:
     name: Windows Desktop WebView2 E2E (KVM overlay VM)
@@ -787,8 +836,8 @@ jobs:
           restore-keys: |
             deps-cargo-bun-v1-
 
-      - name: Cache macOS sccache (rolling)
-        uses: actions/cache@v6
+      - name: Restore macOS sccache (rolling)
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -821,3 +870,11 @@ jobs:
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
+
+      - name: Save macOS sccache (rolling, even on test failure)
+        if: always()
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}

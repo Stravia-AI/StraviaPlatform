@@ -171,12 +171,16 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
         .set_setting(
             crate::outbound_proxy::SETTINGS_KEY,
             &serde_json::json!({
-                "url": proxy_url, "bypass": "127.0.0.1", "force_http1": false
+                "proxies": [{
+                    "id": "reject",
+                    "name": "Reject",
+                    "url": proxy_url
+                }]
             })
             .to_string(),
         )
         .await
-        .expect("configure bypassed Gateway proxy");
+        .expect("configure named Gateway proxy");
     let model = "websocket-proxy-scope";
     configure_route_with_protocol(&gateway, model, &[base_url], "openai", "open-responses").await;
     let provider_id = gateway
@@ -196,12 +200,12 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
         .update_provider(
             &provider_id,
             crate::db::models::UpdateProvider {
-                proxy_mode: Some("system".into()),
+                proxy_mode: Some("none".into()),
                 ..Default::default()
             },
         )
         .await
-        .expect("enable provider proxy preference");
+        .expect("configure provider for direct connection");
 
     for expected in ["first direct", "second direct"] {
         let response = execute_protocol_request_with_session(
@@ -230,15 +234,15 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
 
     gateway
         .admin()
-        .set_setting(
-            crate::outbound_proxy::SETTINGS_KEY,
-            &serde_json::json!({
-                "url": proxy_url, "bypass": "", "force_http1": false
-            })
-            .to_string(),
+        .update_provider(
+            &provider_id,
+            crate::db::models::UpdateProvider {
+                proxy_mode: Some("reject".into()),
+                ..Default::default()
+            },
         )
         .await
-        .expect("remove Gateway proxy bypass");
+        .expect("switch provider to named rejecting proxy");
     let response = execute_protocol_request_with_session(
         gateway,
         model,
