@@ -46,6 +46,7 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .key
             .unwrap_or_else(|| format!("sk-{}", uuid::Uuid::new_v4().simple()));
         let spend_limit_nanos = parse_spend_limit(input.spend_limit.as_deref())?;
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
     "INSERT INTO api_keys (id, token, name, rpm_limit, spend_limit_nanos, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::timestamptz)",
             )
@@ -58,57 +59,45 @@ impl ApiKeyStore for PostgresApiKeyStore {
             .bind(input.transparent_injection_enabled)
             .bind(sqlx::types::Json(&input.transparent_injections))
             .bind(input.expires_at.as_deref().map(str::trim).unwrap_or(""))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        replace_api_key_models(&self.pool, &id, &input.model_ids).await?;
+        replace_api_key_models_tx(&mut tx, &id, &input.model_ids).await?;
+        tx.commit().await?;
         self.get(&id).await?.context("api key missing after create")
     }
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
-        let current =
-            sqlx::query_as::<_, ApiKey>(sqlx::AssertSqlSafe(api_key_select(Some("WHERE id = $1"))))
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .context("api key not found for update")?;
-        let name = input.name.unwrap_or(current.name);
-        let key = input.key.unwrap_or(current.token);
-        let rpm_limit = input.rpm_limit.unwrap_or(current.rpm_limit);
-        let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
-        let mcp_access_enabled = input
-            .mcp_access_enabled
-            .unwrap_or(current.mcp_access_enabled);
-        let transparent_injection_enabled = input
-            .transparent_injection_enabled
-            .unwrap_or(current.transparent_injection_enabled);
-        let transparent_injections = input
-            .transparent_injections
-            .unwrap_or(current.transparent_injections);
-        let expires_at = input.expires_at.or(current.expires_at);
-        let spend_limit_nanos = match input.spend_limit {
-            Some(value) => parse_spend_limit(value.as_deref())?,
-            None => current.spend_limit_nanos,
-        };
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, ApiKey>(sqlx::AssertSqlSafe(api_key_select(Some(
+            "WHERE id = $1 FOR UPDATE",
+        ))))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("api key not found for update")?;
+        let model_ids = input.model_ids.clone();
+        let merged = crate::storage::merge_api_key_update(current, input)?;
 
         sqlx::query(
     "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, spend_limit_nanos=$4, is_enabled=$5, mcp_access_enabled=$6, transparent_injection_enabled=$7, transparent_injections=$8, expires_at=NULLIF($9, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$10",
             )
-            .bind(key)
-            .bind(name.trim())
-            .bind(rpm_limit)
-            .bind(spend_limit_nanos)
-            .bind(is_enabled)
-            .bind(mcp_access_enabled)
-            .bind(transparent_injection_enabled)
-            .bind(sqlx::types::Json(&transparent_injections))
-            .bind(expires_at.as_deref().map(str::trim).unwrap_or(""))
+            .bind(&merged.token)
+            .bind(merged.name.trim())
+            .bind(merged.rpm_limit)
+            .bind(merged.spend_limit_nanos)
+            .bind(merged.is_enabled)
+            .bind(merged.mcp_access_enabled)
+            .bind(merged.transparent_injection_enabled)
+            .bind(sqlx::types::Json(&merged.transparent_injections))
+            .bind(merged.expires_at.as_deref().map(str::trim).unwrap_or(""))
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
-        if let Some(model_ids) = input.model_ids {
-            replace_api_key_models(&self.pool, id, &model_ids).await?;
+        if let Some(model_ids) = model_ids {
+            replace_api_key_models_tx(&mut tx, id, &model_ids).await?;
         }
+        tx.commit().await?;
         self.get(id).await?.context("api key missing after update")
     }
 
@@ -284,28 +273,26 @@ pub(super) async fn list_api_key_model_ids(
     .await?)
 }
 
-pub(super) async fn replace_api_key_models(
-    pool: &Pool<Postgres>,
+async fn replace_api_key_models_tx(
+    tx: &mut sqlx::PgConnection<'_>,
     api_key_id: &str,
     model_ids: &[String],
 ) -> anyhow::Result<()> {
-    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM api_key_models WHERE api_key_id = $1")
         .bind(api_key_id)
         .execute(&mut *tx)
         .await?;
 
-    for model_id in model_ids.iter().filter(|id| !id.trim().is_empty()) {
+    for model_id in crate::storage::normalized_api_key_model_ids(model_ids) {
         sqlx::query(
             "INSERT INTO api_key_models (api_key_id, model_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         )
         .bind(api_key_id)
-        .bind(model_id.trim())
+        .bind(model_id)
         .execute(&mut *tx)
         .await?;
     }
 
-    tx.commit().await?;
     Ok(())
 }
 

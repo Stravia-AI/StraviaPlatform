@@ -56,10 +56,14 @@ impl WebProviderStore for SqliteWebProviderStore {
     }
 
     async fn update(&self, id: &str, input: UpdateWebProvider) -> anyhow::Result<WebProvider> {
-        let current = self
-            .get(id)
-            .await?
-            .context("Web Provider not found for update")?;
+        let mut tx = self.pool.begin_write().await?;
+        let current = sqlx::query_as::<_, WebProvider>(
+            "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("Web Provider not found for update")?;
         let name = input.name.unwrap_or(current.name);
         let api_key = match input.api_key {
             Some(value) => value,
@@ -70,7 +74,6 @@ impl WebProviderStore for SqliteWebProviderStore {
             Some(value) => value.map(Json),
             None => current.config_json,
         };
-        let mut tx = self.pool.begin_write().await?;
         sqlx::query(
             "UPDATE web_providers
      SET name = ?, api_key = ?, use_proxy = ?, config_json = ?, updated_at = datetime('now')

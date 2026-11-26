@@ -44,19 +44,27 @@ impl McpContext {
         self.request_cancellation.clone()
     }
 
-    fn for_call(
-        &self,
+    pub(crate) fn with_execution(
+        api_key_id: String,
         cancellation: stravia_runtime_contract::CancellationToken,
         deadline: std::time::Instant,
     ) -> Self {
         Self {
-            api_key_id: self.api_key_id.clone(),
+            api_key_id,
             execution: Some(McpExecutionContext {
                 cancellation,
                 deadline,
             }),
             request_cancellation: None,
         }
+    }
+
+    fn for_call(
+        &self,
+        cancellation: stravia_runtime_contract::CancellationToken,
+        deadline: std::time::Instant,
+    ) -> Self {
+        Self::with_execution(self.api_key_id.clone(), cancellation, deadline)
     }
 
     pub(crate) fn execution(

@@ -9,7 +9,7 @@ use std::{
 use stravia_core::Gateway;
 use stravia_core::admin::identity::{AdminAuth, AuthError, SessionTokens};
 use stravia_core::admin::provider_allowance::{
-    ProviderAllowanceResetRequest, ProviderAllowanceResetResult,
+    ProviderAllowanceResetError, ProviderAllowanceResetRequest, ProviderAllowanceResetResult,
 };
 use stravia_core::connect_client_apply::{
     ConnectClientApplyError, ConnectClientApplyInput, ConnectClientApplyPlan,
@@ -143,6 +143,16 @@ pub async fn reset_provider_allowance(
         .reset_provider_allowance(&provider_id, request)
         .await
         .map_err(|error| {
+            if matches!(
+                error.downcast_ref::<ProviderAllowanceResetError>(),
+                Some(ProviderAllowanceResetError::UnknownRequest)
+            ) {
+                return serde_json::json!({
+                    "code": "PROVIDER_ALLOWANCE_RESET_UNKNOWN_REQUEST",
+                    "error": "This process cannot confirm the previous reset outcome. Review upstream Usage before taking further action.",
+                })
+                .to_string();
+            }
             tracing::error!(provider_id, %error, "Failed to reset provider allowance");
             "failed to reset provider allowance".to_string()
         })
@@ -300,6 +310,16 @@ fn validate_global_target(file: &PlannedConnectClientFile) -> Result<(), Connect
         ));
     }
 
+    if let Ok(meta) = fs::symlink_metadata(&target)
+        && meta.file_type().is_symlink()
+    {
+        return Err(io_error(
+            "path_escape",
+            "Connect Client Apply refuses to overwrite a symbolic link",
+            &target,
+        ));
+    }
+
     if root.exists() {
         let canonical_root = fs::canonicalize(&root).map_err(|cause| {
             io_error(
@@ -377,6 +397,13 @@ fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), Connect
                 &target,
             )
         })?;
+        temporary.as_file().sync_all().map_err(|cause| {
+            io_error(
+                "write_error",
+                format!("Failed to sync Connect Client Global Config: {cause}"),
+                &target,
+            )
+        })?;
         staged.push(StagedConnectClientFile {
             target,
             temporary: Some(temporary.into_temp_path()),
@@ -407,16 +434,33 @@ fn apply_planned_files(files: &[PlannedConnectClientFile]) -> Result<(), Connect
             }
         };
         let backup = backup_file.into_temp_path();
-        let backup_path = backup.to_path_buf();
-        if let Err(cause) = backup.close() {
-            rollback_backups(&staged[..index]);
-            return Err(io_error(
-                "write_error",
-                format!("Failed to prepare Connect Client config backup: {cause}"),
-                &staged[index].target,
-            ));
-        }
+        #[cfg(unix)]
+        let backup_path = match backup.keep() {
+            Ok(path) => path,
+            Err(cause) => {
+                rollback_backups(&staged[..index]);
+                return Err(io_error(
+                    "write_error",
+                    format!("Failed to prepare Connect Client config backup: {}", cause.error),
+                    &staged[index].target,
+                ));
+            }
+        };
+        #[cfg(not(unix))]
+        let backup_path = {
+            let path = backup.to_path_buf();
+            if let Err(cause) = backup.close() {
+                rollback_backups(&staged[..index]);
+                return Err(io_error(
+                    "write_error",
+                    format!("Failed to prepare Connect Client config backup: {cause}"),
+                    &staged[index].target,
+                ));
+            }
+            path
+        };
         if let Err(cause) = fs::rename(&staged[index].target, &backup_path) {
+            let _ = fs::remove_file(&backup_path);
             rollback_backups(&staged[..index]);
             return Err(io_error(
                 "write_error",
@@ -485,14 +529,16 @@ fn io_error(
 #[tauri::command]
 pub async fn set_desktop_locale(
     locale: String,
-    tray: State<'_, crate::DesktopTray>,
+    app: tauri::AppHandle,
     gateway: State<'_, Gateway>,
 ) -> Result<(), String> {
     if !matches!(locale.as_str(), "en-US" | "zh-CN") {
         return Err(format!("unsupported interface language: {locale}"));
     }
-    tray.set_locale(&locale)
-        .map_err(|error| error.to_string())?;
+    if let Some(tray) = app.try_state::<crate::DesktopTray>() {
+        tray.set_locale(&locale)
+            .map_err(|error| error.to_string())?;
+    }
     gateway
         .storage
         .settings()

@@ -80,8 +80,8 @@ impl AdminService {
             .transparent_injections
             .unwrap_or(current.transparent_injections);
         let expires_at = match input.expires_at {
-            Some(value) => normalize_api_key_expiry(Some(value))?,
-            None => current.expires_at,
+            Some(value) => Some(normalize_api_key_expiry(value)?),
+            None => None,
         };
 
         let result = self

@@ -976,6 +976,12 @@ impl RouteModule<'_> {
             .await?;
         if reconciled {
             self.gw.route_policy_state.clear_pricing();
+            self.gw
+                .model_cache
+                .write()
+                .await
+                .reload(self.gw.storage.routes())
+                .await?;
         }
         if let Err(error) = self
             .gw

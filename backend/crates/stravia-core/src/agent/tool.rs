@@ -43,6 +43,25 @@ impl AgentToolError {
 pub struct AgentToolOutput {
     pub content: Value,
     pub content_kind: ToolResultContentKind,
+    pub is_error: bool,
+}
+
+impl AgentToolOutput {
+    pub fn ok(content: Value, content_kind: ToolResultContentKind) -> Self {
+        Self {
+            content,
+            content_kind,
+            is_error: false,
+        }
+    }
+
+    pub fn error(content: Value, content_kind: ToolResultContentKind) -> Self {
+        Self {
+            content,
+            content_kind,
+            is_error: true,
+        }
+    }
 }
 
 #[async_trait]

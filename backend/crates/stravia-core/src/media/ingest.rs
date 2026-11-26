@@ -30,35 +30,14 @@ pub(crate) async fn fetch_public_file(
 pub(crate) use stravia_media::ingest::{PublicReadResource, fetch_public_read_resource};
 
 pub(crate) async fn settings(gateway: &crate::Gateway) -> Result<ArtifactSettings, ArtifactError> {
-    gateway
-        .storage
-        .settings()
-        .get("artifact_settings")
-        .await
-        .map_err(|e| ArtifactError::Storage(e.to_string()))?
-        .map(|value| {
-            serde_json::from_str(&value)
-                .map_err(|e| ArtifactError::Invalid(format!("Invalid artifact settings: {e}")))
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+    gateway.load_artifact_settings().await
 }
 
 pub(crate) async fn retention(gateway: &crate::Gateway) -> Result<Duration, ArtifactError> {
-    let days = gateway
-        .storage
-        .settings()
-        .get("log_retention_days")
+    gateway
+        .load_retention_window()
         .await
-        .map_err(|e| ArtifactError::Storage(e.to_string()))?
-        .map(|value| {
-            value
-                .parse::<u32>()
-                .map_err(|e| ArtifactError::Invalid(format!("Invalid retention: {e}")))
-        })
-        .transpose()?
-        .unwrap_or(7);
-    Ok(Duration::from_secs(u64::from(days) * 86400))
+        .map_err(|e| ArtifactError::Storage(e.to_string()))
 }
 
 pub(crate) async fn normalize_request(

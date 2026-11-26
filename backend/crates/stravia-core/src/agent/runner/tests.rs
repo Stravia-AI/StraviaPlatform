@@ -34,10 +34,10 @@ impl AgentTool for EchoTool {
         _context: AgentToolContext,
         input: Value,
     ) -> Result<crate::agent::AgentToolOutput, super::super::AgentToolError> {
-        Ok(crate::agent::AgentToolOutput {
-            content: input,
-            content_kind: stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
-        })
+        Ok(crate::agent::AgentToolOutput::ok(
+            input,
+            stravia_runtime_contract::protocol::ir::ToolResultContentKind::Json,
+        ))
     }
 }
 

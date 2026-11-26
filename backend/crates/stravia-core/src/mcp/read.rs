@@ -1160,17 +1160,10 @@ fn artifact_error(error: stravia_runtime_contract::artifact::ArtifactError) -> P
     PlatformToolError::new(error.to_string())
 }
 async fn retention(gateway: &crate::Gateway) -> Result<Duration, PlatformToolError> {
-    let days = gateway
-        .storage
-        .settings()
-        .get("log_retention_days")
+    gateway
+        .load_retention_window()
         .await
-        .map_err(|error| PlatformToolError::new(error.to_string()))?
-        .map(|value| value.parse::<u32>())
-        .transpose()
-        .map_err(|_| PlatformToolError::new("Invalid retention setting"))?
-        .unwrap_or(7);
-    Ok(Duration::from_secs(u64::from(days) * 86400))
+        .map_err(|error| PlatformToolError::new(error.to_string()))
 }
 async fn download(
     gateway: &crate::Gateway,
@@ -1178,21 +1171,16 @@ async fn download(
     id: &ArtifactId,
     filename: Option<String>,
 ) -> Result<PlatformToolOutput, PlatformToolError> {
-    let settings: ArtifactSettings = gateway
-        .storage
-        .settings()
-        .get("artifact_settings")
-        .await
-        .map_err(|error| PlatformToolError::new(error.to_string()))?
-        .map(|value| serde_json::from_str(&value))
-        .transpose()
-        .map_err(|error| PlatformToolError::new(format!("Invalid Artifact settings: {error}")))?
-        .unwrap_or_default();
     let store = gateway
         .artifact_store()
         .ok_or_else(|| PlatformToolError::new("Artifact storage is unavailable"))?;
     let grant = store
-        .download(principal, id, retention(gateway).await?, &settings)
+        .download(
+            principal,
+            id,
+            retention(gateway).await?,
+            &ArtifactSettings::default(),
+        )
         .await
         .map_err(artifact_error)?;
     Ok(output(json!({

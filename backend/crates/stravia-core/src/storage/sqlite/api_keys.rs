@@ -94,61 +94,43 @@ impl ApiKeyStore for SqliteApiKeyStore {
             .bind(input.expires_at.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()))
             .execute(&mut *connection)
             .await?;
+        replace_api_key_models_tx(&mut connection, &id, &input.model_ids).await?;
         connection.commit().await?;
-
-        replace_api_key_models(&self.pool, &id, &input.model_ids).await?;
         self.get(&id).await?.context("api key missing after create")
     }
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
+        let mut connection = self.pool.begin_write().await?;
         let current = sqlx::query_as::<_, ApiKey>(
     "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
             )
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *connection)
             .await?
             .context("api key not found for update")?;
 
-        let name = input.name.unwrap_or(current.name);
-        let key = input.key.unwrap_or(current.token);
-        let rpm_limit = input.rpm_limit.unwrap_or(current.rpm_limit);
-        let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
-        let mcp_access_enabled = input
-            .mcp_access_enabled
-            .unwrap_or(current.mcp_access_enabled);
-        let transparent_injection_enabled = input
-            .transparent_injection_enabled
-            .unwrap_or(current.transparent_injection_enabled);
-        let transparent_injections = input
-            .transparent_injections
-            .unwrap_or(current.transparent_injections);
-        let expires_at = input.expires_at.or(current.expires_at);
-        let spend_limit_nanos = match input.spend_limit {
-            Some(value) => parse_spend_limit(value.as_deref())?,
-            None => current.spend_limit_nanos,
-        };
+        let model_ids = input.model_ids.clone();
+        let merged = crate::storage::merge_api_key_update(current, input)?;
 
-        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
     "UPDATE api_keys SET token=?, name=?, rpm_limit=?, spend_limit_nanos=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, transparent_injections=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
             )
-            .bind(key)
-            .bind(name.trim())
-            .bind(rpm_limit)
-            .bind(spend_limit_nanos)
-            .bind(is_enabled)
-            .bind(mcp_access_enabled)
-            .bind(transparent_injection_enabled)
-            .bind(sqlx::types::Json(&transparent_injections))
-            .bind(expires_at.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()))
+            .bind(&merged.token)
+            .bind(merged.name.trim())
+            .bind(merged.rpm_limit)
+            .bind(merged.spend_limit_nanos)
+            .bind(merged.is_enabled)
+            .bind(merged.mcp_access_enabled)
+            .bind(merged.transparent_injection_enabled)
+            .bind(sqlx::types::Json(&merged.transparent_injections))
+            .bind(merged.expires_at.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()))
             .bind(id)
             .execute(&mut *connection)
             .await?;
-        connection.commit().await?;
-
-        if let Some(model_ids) = input.model_ids {
-            replace_api_key_models(&self.pool, id, &model_ids).await?;
+        if let Some(model_ids) = model_ids {
+            replace_api_key_models_tx(&mut connection, id, &model_ids).await?;
         }
+        connection.commit().await?;
 
         self.get(id).await?.context("api key missing after update")
     }
@@ -329,26 +311,24 @@ pub(super) async fn list_api_key_model_ids(
     .await?)
 }
 
-pub(super) async fn replace_api_key_models(
-    pool: &SqlitePool,
+async fn replace_api_key_models_tx(
+    tx: &mut sqlx::SqliteConnection<'_>,
     api_key_id: &str,
     model_ids: &[String],
 ) -> anyhow::Result<()> {
-    let mut tx = pool.begin_write().await?;
     sqlx::query("DELETE FROM api_key_models WHERE api_key_id = ?")
         .bind(api_key_id)
         .execute(&mut *tx)
         .await?;
 
-    for model_id in model_ids.iter().filter(|id| !id.trim().is_empty()) {
+    for model_id in crate::storage::normalized_api_key_model_ids(model_ids) {
         sqlx::query("INSERT OR IGNORE INTO api_key_models (api_key_id, model_id) VALUES (?, ?)")
             .bind(api_key_id)
-            .bind(model_id.trim())
+            .bind(model_id)
             .execute(&mut *tx)
             .await?;
     }
 
-    tx.commit().await?;
     Ok(())
 }
 

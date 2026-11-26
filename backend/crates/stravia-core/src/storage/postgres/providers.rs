@@ -65,10 +65,14 @@ impl ProviderStore for PostgresProviderStore {
     }
 
     async fn update(&self, id: &str, input: UpdateProvider) -> anyhow::Result<Provider> {
-        let current = self
-            .get(id)
-            .await?
-            .context("provider not found for update")?;
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, Provider>(sqlx::AssertSqlSafe(provider_select(Some(
+            "WHERE id = $1 FOR UPDATE",
+        ))))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("provider not found for update")?;
         // ADR-0073：黑名单字段之外的写入视为新凭据证据，恢复 ok。不能无条件
         // 回写 credential_status——并发 mark 可能在本 UPDATE 之间落库。
         let reset_credential_status =
@@ -138,8 +142,9 @@ impl ProviderStore for PostgresProviderStore {
             .bind(reset_credential_status)
             .bind(reset_credential_status)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         self.get(id).await?.context("provider missing after update")
     }
 
@@ -152,6 +157,10 @@ impl ProviderStore for PostgresProviderStore {
         let mut tx = self.pool.begin().await?;
         // Serialize provider removal with atomic journal root and lifecycle updates.
         sqlx::query("SELECT pg_advisory_xact_lock(7342179085017261)")
+            .execute(&mut *tx)
+            .await?;
+        // 与 apply_reconciliation / restore 保持同一锁序：先锁 models/model_backends，再锁 providers。
+        sqlx::query("LOCK TABLE models, model_backends IN SHARE ROW EXCLUSIVE MODE")
             .execute(&mut *tx)
             .await?;
         sqlx::query_scalar::<_, String>("SELECT id FROM providers WHERE id = $1 FOR UPDATE")
@@ -251,7 +260,25 @@ impl ProviderStore for PostgresProviderStore {
         result: ProviderConnectionCheckWrite,
     ) -> anyhow::Result<bool> {
         // ADR-0073：只有本次检查实际验证了凭据，成功才构成恢复证据；
-        // 条件写保证迟到的检查不能覆盖更新的凭据/配置代际。
+        // 在事务内锁定 provider 与 OAuth 凭据行，防止与 OAuth 刷新/替换并发交叉。
+        let mut tx = self.pool.begin().await?;
+        let provider_revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM providers WHERE id = $1 FOR UPDATE")
+                .bind(provider_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if provider_revision != Some(expected.provider_revision) {
+            return Ok(false);
+        }
+        let oauth_version: Option<i32> = sqlx::query_scalar(
+            "SELECT status_version FROM provider_oauth_credentials WHERE provider_id = $1 FOR UPDATE",
+        )
+        .bind(provider_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if oauth_version != expected.oauth_status_version {
+            return Ok(false);
+        }
         let updated = sqlx::query(
             "UPDATE providers
      SET last_test_success = $1,
@@ -259,13 +286,7 @@ impl ProviderStore for PostgresProviderStore {
          credential_status = CASE WHEN $2 AND $3 THEN 'ok' ELSE credential_status END,
          credential_invalid_at = CASE WHEN $4 AND $5 THEN NULL ELSE credential_invalid_at END,
          revision = revision + 1
-     WHERE id = $6
-       AND revision = $7
-       AND (($8::integer IS NULL AND NOT EXISTS (
-               SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id))
-            OR ($9::integer IS NOT NULL AND EXISTS (
-               SELECT 1 FROM provider_oauth_credentials
-               WHERE provider_id = providers.id AND status_version = $10)))",
+     WHERE id = $6",
         )
         .bind(result.success)
         .bind(result.success)
@@ -273,12 +294,9 @@ impl ProviderStore for PostgresProviderStore {
         .bind(result.success)
         .bind(result.credentials_verified)
         .bind(provider_id)
-        .bind(expected.provider_revision)
-        .bind(expected.oauth_status_version)
-        .bind(expected.oauth_status_version)
-        .bind(expected.oauth_status_version.unwrap_or(0))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(updated.rows_affected() == 1)
     }
 
@@ -383,26 +401,36 @@ impl ProviderStore for PostgresProviderStore {
         id: &str,
         expected: ProviderCredentialVersion,
     ) -> anyhow::Result<bool> {
-        // 条件写：凭据代际（providers.revision + OAuth status_version）未变
-        // 才把拒绝证据归到当前凭据上，否则放弃标记。
+        // 条件写：事务内锁定 provider 与 OAuth 凭据行，校验代际未变才标记失效。
+        let mut tx = self.pool.begin().await?;
+        let provider_revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM providers WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if provider_revision != Some(expected.provider_revision) {
+            return Ok(false);
+        }
+        let oauth_version: Option<i32> = sqlx::query_scalar(
+            "SELECT status_version FROM provider_oauth_credentials WHERE provider_id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if oauth_version != expected.oauth_status_version {
+            return Ok(false);
+        }
         let result = sqlx::query(
             "UPDATE providers
      SET credential_status = 'invalid',
          credential_invalid_at = COALESCE(credential_invalid_at, CURRENT_TIMESTAMP),
          revision = revision + 1
-     WHERE id = $1
-       AND revision = $2
-       AND (($3::int IS NULL AND NOT EXISTS (
-               SELECT 1 FROM provider_oauth_credentials WHERE provider_id = providers.id))
-            OR ($3::int IS NOT NULL AND EXISTS (
-               SELECT 1 FROM provider_oauth_credentials
-               WHERE provider_id = providers.id AND status_version = $3)))",
+     WHERE id = $1",
         )
         .bind(id)
-        .bind(expected.provider_revision)
-        .bind(expected.oauth_status_version)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() == 1)
     }
 

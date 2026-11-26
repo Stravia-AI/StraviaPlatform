@@ -858,7 +858,8 @@ pub struct UpdateApiKey {
     pub transparent_injection_enabled: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_present")]
     pub transparent_injections: Option<TransparentInjectionSet>,
-    pub expires_at: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub expires_at: Option<Option<String>>,
     pub model_ids: Option<Vec<String>>,
 }
 

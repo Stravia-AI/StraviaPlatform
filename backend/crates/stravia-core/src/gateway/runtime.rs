@@ -563,17 +563,8 @@ impl Gateway {
             (None, None)
         };
         if let Some(store) = artifact_store.as_ref() {
-            let settings = storage
-                .settings()
-                .get("artifact_settings")
-                .await?
-                .map(|value| {
-                    serde_json::from_str::<stravia_runtime_contract::artifact::ArtifactSettings>(
-                        &value,
-                    )
-                })
-                .transpose()?
-                .unwrap_or_default();
+            let raw = storage.settings().get("artifact_settings").await?;
+            let settings = crate::Gateway::parse_artifact_settings(raw.as_deref())?;
             store.configure(&settings).await?;
         }
         let compaction = if let Some(pool) = history_sqlite_pool.as_ref() {
@@ -953,11 +944,10 @@ impl Gateway {
                     };
 
                     if current > known_epoch {
-                        known_epoch = current;
                         // Provider Model prices change inside the same epoch
                         // bump: drop the shared pricing cache as soon as a new
                         // epoch is seen, so a failed route reload cannot leave
-                        // stale prices behind once `known_epoch` advanced.
+                        // stale prices behind.
                         gw_poll.route_policy_state.clear_pricing();
                         let reload = tokio::select! {
                             _ = cancellation.cancelled() => return,
@@ -968,6 +958,7 @@ impl Gateway {
                                 let custom_currency =
                                     gw_poll.storage.money().custom_currency().await?;
                                 gw_poll.apply_custom_currency(custom_currency);
+                                let _ = gw_poll.load_retention_window().await?;
                                 gw_poll
                                     .model_cache
                                     .write()
@@ -976,9 +967,13 @@ impl Gateway {
                                     .await?;
                                 gw_poll.rpm_admission.configure(config);
                                 if let Some(keys) = gw_poll.storage.api_keys() {
-                                    for key in keys.list().await? {
+                                    let listed = keys.list().await?;
+                                    let mut active_ids = std::collections::HashSet::with_capacity(listed.len());
+                                    for key in listed {
                                         gw_poll.principal_admission.set_limit(&key.id, key.rpm_limit);
+                                        active_ids.insert(key.id);
                                     }
+                                    gw_poll.principal_admission.retain_principals(&active_ids);
                                 }
                                 Ok::<(), anyhow::Error>(())
                             } => result,
@@ -986,6 +981,7 @@ impl Gateway {
                         if let Err(error) = reload {
                             tracing::warn!("config epoch reload failed: {error}");
                         } else {
+                            known_epoch = current;
                             tracing::debug!("model_cache reloaded (epoch={current})");
                         }
                     }

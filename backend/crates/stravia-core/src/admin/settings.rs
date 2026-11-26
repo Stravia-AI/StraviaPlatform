@@ -11,26 +11,31 @@ fn reject_removed_proxy_setting(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn reject_managed_or_reserved_setting(key: &str) -> anyhow::Result<()> {
+    if key == "artifact_upload_signing_key" {
+        anyhow::bail!("reserved internal setting");
+    }
+    if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
+        anyhow::bail!("custom_currency is managed through the currency API");
+    }
+    if key == crate::platform_llm::SETTINGS_KEY {
+        anyhow::bail!("platform_llm_config is managed through the platform LLM API");
+    }
+    if key == crate::admin::updates::UPDATE_CHANNEL_KEY {
+        anyhow::bail!("product_update_channel is managed through the updates API");
+    }
+    reject_removed_proxy_setting(key)?;
+    if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {
+        anyhow::bail!("{key} is managed through the credential rules API");
+    }
+    Ok(())
+}
+
 impl AdminService {
     // ── Settings ──
 
     pub async fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
-        if key == "artifact_upload_signing_key" {
-            anyhow::bail!("reserved internal setting");
-        }
-        if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
-            anyhow::bail!("custom_currency is managed through the currency API");
-        }
-        if key == crate::platform_llm::SETTINGS_KEY {
-            anyhow::bail!("platform_llm_config is managed through the platform LLM API");
-        }
-        if key == crate::admin::updates::UPDATE_CHANNEL_KEY {
-            anyhow::bail!("product_update_channel is managed through the updates API");
-        }
-        reject_removed_proxy_setting(key)?;
-        if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {
-            anyhow::bail!("{key} is managed through the credential rules API");
-        }
+        reject_managed_or_reserved_setting(key)?;
         if key == crate::outbound_proxy::SETTINGS_KEY {
             let config =
                 crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
@@ -52,9 +57,7 @@ impl AdminService {
         if key == "artifact_settings" {
             return value
                 .map(|value| {
-                    let settings: crate::agent::artifact::ArtifactSettings =
-                        serde_json::from_str(&value)?;
-                    settings.validate()?;
+                    let settings = crate::Gateway::parse_artifact_settings(Some(&value))?;
                     Ok(serde_json::to_string(&settings)?)
                 })
                 .transpose();
@@ -63,22 +66,7 @@ impl AdminService {
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        if key == "artifact_upload_signing_key" {
-            anyhow::bail!("reserved internal setting");
-        }
-        if key == crate::storage::CUSTOM_CURRENCY_SETTING_KEY {
-            anyhow::bail!("custom_currency is managed through the currency API");
-        }
-        if key == crate::platform_llm::SETTINGS_KEY {
-            anyhow::bail!("platform_llm_config is managed through the platform LLM API");
-        }
-        if key == crate::admin::updates::UPDATE_CHANNEL_KEY {
-            anyhow::bail!("product_update_channel is managed through the updates API");
-        }
-        reject_removed_proxy_setting(key)?;
-        if key == stravia_credential_protection::policy::DISABLED_RULES_KEY {
-            anyhow::bail!("{key} is managed through the credential rules API");
-        }
+        reject_managed_or_reserved_setting(key)?;
         if key == crate::outbound_proxy::SETTINGS_KEY {
             let mut config =
                 crate::outbound_proxy::OutboundProxySettings::from_setting(Some(value))?;

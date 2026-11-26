@@ -1181,11 +1181,7 @@ async fn oauth_refresh_token_route_rejects_missing_token_and_unsupported_channel
     assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
     let missing_body: serde_json::Value =
         serde_json::from_slice(&to_bytes(missing.into_body(), usize::MAX).await?)?;
-    assert!(
-        missing_body["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("AUTH_REFRESH_TOKEN_REQUIRED"))
-    );
+    assert_eq!(missing_body["code"], "AUTH_REFRESH_TOKEN_REQUIRED");
 
     let unsupported = app
         .oneshot(
@@ -1199,11 +1195,7 @@ async fn oauth_refresh_token_route_rejects_missing_token_and_unsupported_channel
     assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
     let unsupported_body: serde_json::Value =
         serde_json::from_slice(&to_bytes(unsupported.into_body(), usize::MAX).await?)?;
-    assert!(
-        unsupported_body["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("AUTH_REFRESH_TOKEN_NOT_SUPPORTED"))
-    );
+    assert_eq!(unsupported_body["code"], "AUTH_REFRESH_TOKEN_NOT_SUPPORTED");
 
     Ok(())
 }
@@ -1637,15 +1629,13 @@ async fn route_purpose_http_contract_rejects_invalid_and_mismatched_writes() -> 
                 .body(Body::from(serde_json::to_vec(&input)?))?,
         )
         .await?;
-    assert_eq!(mismatch.status(), StatusCode::OK);
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
     let envelope: serde_json::Value =
         serde_json::from_slice(&to_bytes(mismatch.into_body(), usize::MAX).await?)?;
-    let error: serde_json::Value =
-        serde_json::from_str(envelope["error"].as_str().expect("Core error envelope"))?;
-    assert_eq!(error["code"], "ROUTE_PURPOSE_MISMATCH");
-    assert_eq!(error["params"]["provider_id"], provider.id);
-    assert_eq!(error["params"]["model_id"], "vision");
-    assert_eq!(error["params"]["purpose"], "image_generation");
+    assert_eq!(envelope["code"], "ROUTE_PURPOSE_MISMATCH");
+    assert_eq!(envelope["params"]["provider_id"], provider.id);
+    assert_eq!(envelope["params"]["model_id"], "vision");
+    assert_eq!(envelope["params"]["purpose"], "image_generation");
 
     let listed = app
         .clone()

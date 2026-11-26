@@ -348,28 +348,29 @@ export const admin = {
     previewConfiguration: (input: ProviderConfigurationPreviewInput) =>
       request<ProviderConfigurationPreview>('POST', '/providers/configuration-preview', input),
     copy: (id: string, options: Record<string, unknown> = {}) =>
-      request<Provider>('POST', `/providers/${id}/copy`, options),
-    update: (id: string, input: UpdateProvider) => request<Provider>('PUT', `/providers/${id}`, input),
-    delete: (id: string) => request<void>('DELETE', `/providers/${id}`),
+      request<Provider>('POST', `/providers/${encodeURIComponent(id)}/copy`, options),
+    update: (id: string, input: UpdateProvider) =>
+      request<Provider>('PUT', `/providers/${encodeURIComponent(id)}`, input),
+    delete: (id: string) => request<void>('DELETE', `/providers/${encodeURIComponent(id)}`),
     test: (id: string, input: ProviderConnectionCheckInput = {}) =>
-      request<ProviderConnectionCheckResult>('POST', `/providers/${id}/test`, input),
-    testModels: (id: string) => request<string[]>('GET', `/providers/${id}/test-models`),
+      request<ProviderConnectionCheckResult>('POST', `/providers/${encodeURIComponent(id)}/test`, input),
+    testModels: (id: string) => request<string[]>('GET', `/providers/${encodeURIComponent(id)}/test-models`),
     capabilityDrifts: () => request<ImageCapabilityDrift[]>('GET', '/providers/image-capability-drifts'),
-    costPlans: (id: string) => request<ProviderCostPlan[]>('GET', `/providers/${id}/cost-plans`),
+    costPlans: (id: string) => request<ProviderCostPlan[]>('GET', `/providers/${encodeURIComponent(id)}/cost-plans`),
     appendCostPlan: (id: string, input: NewProviderCostPlan) =>
-      request<ProviderCostPlan>('POST', `/providers/${id}/cost-plans`, input),
-    models: (id: string) => request<ProviderModelList>('GET', `/providers/${id}/models`),
-    syncModels: (id: string) => request<ProviderModelSyncSummary>('POST', `/providers/${id}/models/sync`),
-    syncState: (id: string) => request<ProviderModelSyncState>('GET', `/providers/${id}/models/sync-state`),
+      request<ProviderCostPlan>('POST', `/providers/${encodeURIComponent(id)}/cost-plans`, input),
+    models: (id: string) => request<ProviderModelList>('GET', `/providers/${encodeURIComponent(id)}/models`),
+    syncModels: (id: string) => request<ProviderModelSyncSummary>('POST', `/providers/${encodeURIComponent(id)}/models/sync`),
+    syncState: (id: string) => request<ProviderModelSyncState>('GET', `/providers/${encodeURIComponent(id)}/models/sync-state`),
     updateSyncState: (id: string, input: UpdateProviderModelSyncState) =>
-      request<ProviderModelSyncState>('PUT', `/providers/${id}/models/sync-state`, input),
+      request<ProviderModelSyncState>('PUT', `/providers/${encodeURIComponent(id)}/models/sync-state`, input),
     prepareModel: (id: string, modelId: string, templateId?: string) =>
-      request<PreparedProviderModel>('POST', `/providers/${id}/model/prepare`, {
+      request<PreparedProviderModel>('POST', `/providers/${encodeURIComponent(id)}/model/prepare`, {
         model_id: modelId,
         template_id: templateId,
       }),
     model: (id: string, modelId: string) =>
-      request<ProviderModelDetail>('GET', `/providers/${id}/model?model=${encodeURIComponent(modelId)}`),
+      request<ProviderModelDetail>('GET', `/providers/${encodeURIComponent(id)}/model?model=${encodeURIComponent(modelId)}`),
     createManualModel: (id: string, modelId: string, metadataJson: string, templateId?: string) =>
       request<ProviderModelDetail>(
         'POST',
@@ -468,12 +469,18 @@ export const admin = {
         ...configuration,
         refresh_token: refreshToken,
       }),
-    status: (sessionId: string) => request<OAuthSessionStatusData>('GET', `/oauth/sessions/${sessionId}/status`),
-    cancel: (sessionId: string) => request<void>('POST', `/oauth/sessions/${sessionId}/cancel`),
+    status: (sessionId: string) =>
+      request<OAuthSessionStatusData>('GET', `/oauth/sessions/${encodeURIComponent(sessionId)}/status`),
+    cancel: (sessionId: string) =>
+      request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/cancel`),
     updateProxy: (sessionId: string, useProxy: boolean) =>
-      request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${sessionId}/proxy`, { use_proxy: useProxy }),
+      request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${encodeURIComponent(sessionId)}/proxy`, {
+        use_proxy: useProxy,
+      }),
     complete: (sessionId: string, type: 'callback_url' | 'manual', value: string) =>
-      request<void>('POST', `/oauth/sessions/${sessionId}/complete`, { input: { type, value } }),
+      request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/complete`, {
+        input: { type, value },
+      }),
   },
   models: {
     list: () => request<Route[]>('GET', '/models'),
@@ -579,7 +586,7 @@ export const admin = {
     get: (providerId: string) =>
       request<ProviderAllowanceSnapshot>('GET', `/provider-allowances/${encodeURIComponent(providerId)}`),
     refresh: (providerId: string) =>
-      request<ProviderAllowanceSnapshot>('POST', `/provider-allowances/${providerId}/refresh`),
+      request<ProviderAllowanceSnapshot>('POST', `/provider-allowances/${encodeURIComponent(providerId)}/refresh`),
     reset: (providerId: string, input: ProviderAllowanceResetRequest) =>
       request<ProviderAllowanceResetResult>(
         'POST',

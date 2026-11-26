@@ -102,14 +102,11 @@ impl AgentTool for RemoteMcpAgentTool {
                     ToolResultContentKind::ContentBlocks,
                 ),
             };
-            if result.is_error.unwrap_or(false) {
-                Err(AgentToolError::new("mcp_tool_error", output.to_string()))
-            } else {
-                Ok(AgentToolOutput {
-                    content: output,
-                    content_kind,
-                })
-            }
+            Ok(AgentToolOutput {
+                content: output,
+                content_kind,
+                is_error: result.is_error.unwrap_or(false),
+            })
         };
         tokio::select! {
             _ = context.cancellation.cancelled() => {

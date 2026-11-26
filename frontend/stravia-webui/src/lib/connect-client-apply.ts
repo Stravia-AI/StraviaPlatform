@@ -28,12 +28,18 @@ export function applyConnectClient(input: ConnectClientApplyRequest): Promise<Co
 
 export function asConnectClientApplyError(error: unknown): ConnectClientApplyError {
   if (typeof error === 'object' && error !== null) {
-    const candidate = error as Partial<ConnectClientApplyError>
+    const candidate = error as Partial<ConnectClientApplyError> & { params?: { path?: unknown } }
     if (typeof candidate.code === 'string' && typeof candidate.message === 'string') {
+      const path =
+        typeof candidate.path === 'string'
+          ? candidate.path
+          : typeof candidate.params?.path === 'string'
+            ? candidate.params.path
+            : undefined
       return {
         code: candidate.code,
         message: candidate.message,
-        ...(typeof candidate.path === 'string' ? { path: candidate.path } : {}),
+        ...(path !== undefined ? { path } : {}),
       }
     }
   }

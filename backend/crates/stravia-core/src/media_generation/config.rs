@@ -57,7 +57,7 @@ pub(crate) async fn load(gateway: &Gateway) -> Result<MediaGenerationConfig, Gen
 pub(crate) async fn validate_route(
     gateway: &Gateway,
     route_id: &str,
-) -> Result<(), GenerationError> {
+) -> Result<RouteConfig, GenerationError> {
     let route = gateway
         .storage
         .routes()
@@ -69,7 +69,8 @@ pub(crate) async fn validate_route(
                 "Select an existing image generation Route",
             )
         })?;
-    validate_targets(gateway, &route).await
+    validate_targets(gateway, &route).await?;
+    Ok(route)
 }
 
 async fn validate_targets(gateway: &Gateway, route: &RouteConfig) -> Result<(), GenerationError> {
@@ -139,7 +140,7 @@ async fn validate_targets(gateway: &Gateway, route: &RouteConfig) -> Result<(), 
 async fn validate(
     gateway: &Gateway,
     config: &MediaGenerationConfig,
-) -> Result<(), GenerationError> {
+) -> Result<RouteConfig, GenerationError> {
     let route_id = config
         .image
         .route_id
@@ -159,7 +160,7 @@ pub(crate) async fn view(
     config: MediaGenerationConfig,
 ) -> Result<MediaGenerationConfigView, GenerationError> {
     let validation = match validate(gateway, &config).await {
-        Ok(()) => MediaGenerationValidation {
+        Ok(_) => MediaGenerationValidation {
             valid: true,
             code: None,
             message: None,
@@ -214,28 +215,5 @@ pub(crate) async fn validated_route(gateway: &Gateway) -> Result<RouteConfig, Ge
             "Media generation is disabled",
         ));
     }
-    let route_id = config
-        .image
-        .route_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| {
-            GenerationError::new(
-                "media_generation_route_missing",
-                "Select an image generation Route",
-            )
-        })?;
-    let route = gateway
-        .storage
-        .routes()
-        .get(route_id)
-        .await?
-        .ok_or_else(|| {
-            GenerationError::new(
-                "media_generation_route_missing",
-                "Select an existing image generation Route",
-            )
-        })?;
-    validate_targets(gateway, &route).await?;
-    Ok(route)
+    validate(gateway, &config).await
 }

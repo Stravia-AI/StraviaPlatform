@@ -482,6 +482,44 @@ pub(super) async fn orchestrate(
     let rpm_limit = execution_policy.tighten_rpm_limit(authenticated_principal.rpm_limit);
     let spend_limit_nanos =
         execution_policy.tighten_spend_limit(authenticated_principal.spend_limit_nanos);
+    let compact = compaction::standalone_compaction_requested(&request);
+    let warmup = ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
+        && request.parameters.generate == Some(false);
+    if warmup && compact {
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "protocol",
+            "invalid_request",
+            coded_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Warmup cannot request standalone compaction",
+            ),
+        );
+    }
+    // Spend admission runs before attachment ingestion & RPM so a rejected root
+    // request never downloads external attachments or consumes an RPM window.
+    if let Err(error) = gw
+        .check_api_key_spend_limit(principal.api_key_id(), spend_limit_nanos)
+        .await
+    {
+        let response = inference_access_error_response(error);
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "admission",
+            "spend_limit",
+            response,
+        );
+    }
+    if let Err(error) = gw.principal_admission.acquire(&principal, rpm_limit) {
+        let response = inference_access_error_response(error);
+        return reject_before_admission(
+            &mut Some(ingress_observer),
+            "admission",
+            "rpm_limit",
+            response,
+        );
+    }
     if let Err(error) =
         crate::media::ingest::normalize_request(&gw, &principal, &mut request, &ctx.cancellation)
             .await
@@ -499,21 +537,6 @@ pub(super) async fn orchestrate(
         api_key_id: Some(principal.api_key_id().to_owned()),
         label: Some(api_key_name.clone()),
     });
-    let compact = compaction::standalone_compaction_requested(&request);
-    let warmup = ingress == stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24
-        && request.parameters.generate == Some(false);
-    if warmup && compact {
-        return reject_before_admission(
-            &mut Some(ingress_observer),
-            "protocol",
-            "invalid_request",
-            coded_error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "Warmup cannot request standalone compaction",
-            ),
-        );
-    }
     let compact_history_epoch = if compact {
         match gw.storage.prompt_admissions().history_epoch().await {
             Ok(epoch) => Some(epoch),
@@ -763,29 +786,6 @@ pub(super) async fn orchestrate(
     }
     ctx.deadline
         .reset(std::time::Instant::now() + execution_window);
-    // Spend admission runs before RPM so a rejected root request never
-    // consumes an RPM window. Only the root request is checked.
-    if let Err(error) = gw
-        .check_api_key_spend_limit(principal.api_key_id(), spend_limit_nanos)
-        .await
-    {
-        let response = inference_access_error_response(error);
-        return reject_before_admission(
-            &mut Some(ingress_observer),
-            "admission",
-            "spend_limit",
-            response,
-        );
-    }
-    if let Err(error) = gw.principal_admission.acquire(&principal, rpm_limit) {
-        let response = inference_access_error_response(error);
-        return reject_before_admission(
-            &mut Some(ingress_observer),
-            "admission",
-            "rpm_limit",
-            response,
-        );
-    }
     if let Some(write) = generation_chain_write.as_mut()
         && let Err(error) = write.admit_user_prompt().await
     {

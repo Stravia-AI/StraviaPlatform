@@ -349,7 +349,12 @@ async fn authenticate_request(
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    if let Err(response) = validate_origin(&headers) {
+    if let Err(response) = validate_origin(
+        &headers,
+        request
+            .extensions()
+            .get::<crate::proxy::server::AllowedWebSocketOrigins>(),
+    ) {
         return *response;
     }
 
@@ -474,15 +479,20 @@ async fn authenticate_request(
         return match admission {
             Ok(_) => next.run(request).await,
             Err(error) => {
-                let spend_rejected = matches!(&error, GatewayError::ApiKeySpendLimitReached);
+                let rejection_code = match &error {
+                    GatewayError::ApiKeySpendLimitReached => Some("spend_limit"),
+                    GatewayError::PrincipalRpmExceeded { .. } => Some("rpm_limit"),
+                    _ => None,
+                };
                 let response = error.render(None);
-                if spend_rejected {
-                    record_spend_rejection(
+                if let Some(code) = rejection_code {
+                    record_admission_rejection(
                         &gateway,
                         authenticated.principal.api_key_id(),
                         &authenticated.api_key_name,
                         request.method(),
                         request.uri().path(),
+                        code,
                         &response,
                     );
                 }
@@ -500,12 +510,13 @@ async fn authenticate_request(
 
 /// MCP admission rejections take the same observation path as proxy ingress:
 /// one rejected row, with the stable reason code rather than the wire code.
-fn record_spend_rejection(
+fn record_admission_rejection(
     gateway: &Gateway,
     api_key_id: &str,
     api_key_name: &str,
     method: &Method,
     path: &str,
+    code: &str,
     response: &Response,
 ) {
     let mut observer = gateway.observation.observe_ingress(IngressStart {
@@ -520,12 +531,12 @@ fn record_spend_rejection(
         .get::<crate::interaction_observation::FailureDiagnostic>()
         .cloned()
         .map(|mut diagnostic| {
-            diagnostic.code = Some("spend_limit".into());
+            diagnostic.code = Some(code.into());
             diagnostic
         });
     observer.reject(RejectedOutcome {
         stage: "admission".into(),
-        code: "spend_limit".into(),
+        code: code.into(),
         status_code: response.status().as_u16(),
         failure,
     });
@@ -583,11 +594,15 @@ fn render_authentication_error(error: GatewayError) -> Response {
     }
 }
 
-fn validate_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
+fn validate_origin(
+    headers: &HeaderMap,
+    allowed_origins: Option<&crate::proxy::server::AllowedWebSocketOrigins>,
+) -> Result<(), Box<Response>> {
     let Some(origin) = header_value(headers, header::ORIGIN) else {
         return Ok(());
     };
-    let allowed = reqwest::Url::parse(origin)
+    let configured_allowed = allowed_origins.is_some_and(|origins| origins.allows(origin));
+    let loopback_allowed = reqwest::Url::parse(origin)
         .ok()
         .filter(|url| matches!(url.scheme(), "http" | "https" | "tauri"))
         .and_then(|url| url.host_str().map(ToString::to_string))
@@ -599,7 +614,7 @@ fn validate_origin(headers: &HeaderMap) -> Result<(), Box<Response>> {
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(|address| address.is_loopback())
         });
-    if allowed {
+    if configured_allowed || loopback_allowed {
         Ok(())
     } else {
         Err(Box::new(

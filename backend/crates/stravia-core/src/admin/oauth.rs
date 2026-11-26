@@ -982,6 +982,7 @@ impl AdminService {
             .await?;
         drop(write_fence);
         drop(publication);
+        self.gw.provider_allowance_state.notify_changed();
 
         Ok(build_provider_oauth_status(
             &updated,
