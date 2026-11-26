@@ -210,7 +210,7 @@ jobs:
           task build:vendors
 
       - name: Upload shared release build inputs
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: release-shared-assets
           path: |
@@ -251,7 +251,7 @@ jobs:
         run: python3 .github/scripts/select_vendor_plugins.py
 
       - name: Upload selection marker
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: vendor-plugin-selection
           path: stravia-plugin-selection-v1.json
@@ -260,7 +260,7 @@ jobs:
 
       - name: Download shared bundled base vendor
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: release-shared-assets
           path: .
@@ -386,7 +386,7 @@ jobs:
 
       - name: Upload dedicated plugin assets
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: vendor-plugins
           path: dist/*
@@ -412,7 +412,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: release-shared-assets
           path: .
@@ -512,7 +512,7 @@ jobs:
           tar -C package -czf "dist-server-arm64/${asset}.tar.gz" "${asset}"
 
       - name: Upload Linux x86_64 server asset
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: server-linux-x86_64-gnu
           path: dist-server-x64/*
@@ -520,7 +520,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Linux x86_64 desktop asset
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: desktop-linux-x86_64
           path: dist-desktop-x64/*
@@ -528,7 +528,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Linux aarch64 server asset
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: server-linux-aarch64-gnu
           path: dist-server-arm64/*
@@ -574,7 +574,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: release-shared-assets
           path: .
@@ -664,7 +664,7 @@ jobs:
           cp "${bundles[0]}.sig" "dist-desktop/${desktop_asset}.sig"
 
       - name: Upload Windows server asset
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: server-${{ matrix.suffix }}
           path: dist-server/*
@@ -672,7 +672,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows desktop asset
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist-desktop/*
@@ -705,7 +705,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: release-shared-assets
           path: .
@@ -804,7 +804,7 @@ jobs:
           cp "${bundles[0]}.sig" "dist/${asset}.sig"
 
       - name: Upload Linux aarch64 desktop asset
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: desktop-linux-aarch64
           path: dist/*
@@ -852,7 +852,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: release-shared-assets
           path: .
@@ -922,7 +922,7 @@ jobs:
             --output-dir dist
 
       - name: Upload macOS release assets
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist/*
@@ -996,76 +996,76 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Download server linux-x86_64-gnu
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: server-linux-x86_64-gnu
           path: release-assets
 
       - name: Download server linux-aarch64-gnu
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: server-linux-aarch64-gnu
           path: release-assets
 
       - name: Download server windows-x86_64
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: server-windows-x86_64
           path: release-assets
 
       - name: Download server windows-aarch64
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: server-windows-aarch64
           path: release-assets
 
       - name: Download desktop linux-x86_64
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: desktop-linux-x86_64
           path: release-assets
 
       - name: Download desktop linux-aarch64
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: desktop-linux-aarch64
           path: release-assets
 
       - name: Download desktop windows-x86_64
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: desktop-windows-x86_64
           path: release-assets
 
       - name: Download desktop windows-aarch64
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: desktop-windows-aarch64
           path: release-assets
 
       - name: Download desktop darwin-aarch64
         if: needs.prepare.outputs.include_macos == 'true'
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: desktop-darwin-aarch64
           path: release-assets
 
       - name: Download desktop darwin-x86_64
         if: needs.prepare.outputs.include_macos == 'true'
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: desktop-darwin-x86_64
           path: release-assets
 
       - name: Download selection marker
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: vendor-plugin-selection
           path: release-assets
 
       - name: Download dedicated plugin assets
         if: needs.build-vendor-plugins.outputs.has_plugins == 'true'
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: vendor-plugins
           path: release-assets
@@ -1091,7 +1091,7 @@ jobs:
           LC_ALL=C sha256sum -- * > SHA256SUMS
 
       - name: Upload consolidated release assets
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: release-assets
           path: release-assets/*
@@ -1141,7 +1141,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download release assets
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: release-assets
           path: release-assets

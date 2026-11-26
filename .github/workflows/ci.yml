@@ -302,7 +302,7 @@ jobs:
         run: task build:test:services
 
       - name: Upload shared E2E binaries & fixtures
-        uses: actions/upload-artifact@v7
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: e2e-binaries-linux-x64
           path: |
@@ -377,7 +377,7 @@ jobs:
             ci-uv-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
           path: target
@@ -453,7 +453,7 @@ jobs:
             sccache-linux-x64-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
           path: target
@@ -500,17 +500,13 @@ jobs:
           POSTGRES_USER: stravia
           POSTGRES_PASSWORD: stravia
           POSTGRES_DB: stravia_test
-        ports:
-          - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U stravia -d stravia_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
       redis:
         image: redis:8-alpine
-        ports:
-          - 26379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -538,7 +534,7 @@ jobs:
             ci-uv-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
           path: target
@@ -546,10 +542,36 @@ jobs:
       - name: Ensure executable permissions
         run: chmod +x target/test-artifacts/services/*
 
+      - name: Wait for PostgreSQL and Redis services
+        run: |
+          python3 - <<'PY'
+          import socket
+          import time
+
+          def wait_tcp(host: str, port: int, *, probe: bytes | None = None, expect: bytes | None = None) -> None:
+              deadline = time.monotonic() + 60.0
+              while True:
+                  try:
+                      with socket.create_connection((host, port), timeout=2.0) as sock:
+                          if probe is not None:
+                              sock.sendall(probe)
+                              reply = sock.recv(64)
+                              if expect is not None and expect not in reply:
+                                  raise OSError(f"unexpected reply from {host}:{port}: {reply!r}")
+                          return
+                  except OSError as exc:
+                      if time.monotonic() >= deadline:
+                          raise SystemExit(f"Service {host}:{port} not ready after 60s: {exc}")
+                      time.sleep(1.0)
+
+          wait_tcp("postgres", 5432)
+          wait_tcp("redis", 6379, probe=b"PING\r\n", expect=b"PONG")
+          PY
+
       - name: Run PostgreSQL E2E suite
         env:
-          DB_URL: postgresql://stravia:stravia@localhost:5432/stravia_test
-          STRAVIA_TEST_REDIS_URL: redis://127.0.0.1:26379/0
+          DB_URL: postgresql://stravia:stravia@postgres:5432/stravia_test
+          STRAVIA_TEST_REDIS_URL: redis://redis:6379/0
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
           STRAVIA_STORAGE_HARNESS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness
@@ -589,7 +611,7 @@ jobs:
             ci-webui-e2e-v1-
 
       - name: Download shared E2E binaries
-        uses: actions/download-artifact@v8
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
           path: target
