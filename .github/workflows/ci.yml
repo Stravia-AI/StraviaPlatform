@@ -42,6 +42,7 @@ jobs:
   # Full matrix always runs on main/dev push, workflow_call (releases), and manual dispatch.
   changes:
     name: Detect changed scopes
+    if: github.server_url != 'https://github.com'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
