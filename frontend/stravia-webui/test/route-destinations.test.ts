@@ -9,7 +9,7 @@ function provider(id: string, overrides: Partial<Provider> = {}): Provider {
     name: `Service ${id}`,
     protocol: 'openai-compatible',
     base_url: 'http://127.0.0.1',
-    use_proxy: false,
+    proxy_mode: 'none',
     is_enabled: true,
     created_at: '',
     updated_at: '',

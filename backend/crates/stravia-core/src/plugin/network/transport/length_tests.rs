@@ -13,7 +13,6 @@ use tokio::{
 };
 
 use super::{H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
-use crate::outbound_proxy::OutboundProxySettings;
 
 struct Frame {
     kind: u8,
@@ -120,7 +119,7 @@ async fn capture_request(omit_h2_content_length: bool) -> (Vec<Vec<u8>>, Vec<u8>
         tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,
-        proxy: OutboundProxySettings::default(),
+        proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
         version: HttpVersionPref::Http2,
         h2: H2Settings::default(),
         resolver: Arc::new(SystemResolver),

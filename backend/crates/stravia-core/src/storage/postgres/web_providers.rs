@@ -9,7 +9,7 @@ use sqlx::{Pool, Postgres, types::Json};
 
 const SEARCH_IDS_KEY: &str = "web_access_search_provider_ids";
 const FETCH_IDS_KEY: &str = "web_access_fetch_provider_ids";
-const SELECT_WEB_PROVIDER: &str = "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, to_char(last_test_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_test_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM web_providers";
+const SELECT_WEB_PROVIDER: &str = "SELECT id, name, kind, api_key, proxy_mode, config_json, last_test_success, to_char(last_test_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS last_test_at, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS created_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS updated_at FROM web_providers";
 
 #[derive(Clone)]
 pub(super) struct PostgresWebProviderStore {
@@ -42,14 +42,14 @@ impl WebProviderStore for PostgresWebProviderStore {
     async fn create(&self, input: CreateWebProvider) -> anyhow::Result<WebProvider> {
         let id = stravia_runtime_contract::identifier::new_id();
         sqlx::query(
-            "INSERT INTO web_providers (id, name, kind, api_key, use_proxy, config_json)
+            "INSERT INTO web_providers (id, name, kind, api_key, proxy_mode, config_json)
      VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&id)
         .bind(input.name.trim())
         .bind(input.kind)
         .bind(input.api_key)
-        .bind(input.use_proxy)
+        .bind(input.proxy_mode)
         .bind(input.config.map(Json))
         .execute(&self.pool)
         .await?;
@@ -72,20 +72,20 @@ impl WebProviderStore for PostgresWebProviderStore {
             Some(value) => value,
             None => current.api_key,
         };
-        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
+        let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
         let config_json = match input.config {
             Some(value) => value.map(Json),
             None => current.config_json,
         };
         sqlx::query(
             "UPDATE web_providers
-     SET name = $1, api_key = $2, use_proxy = $3, config_json = $4,
+     SET name = $1, api_key = $2, proxy_mode = $3, config_json = $4,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $5",
         )
         .bind(name.trim())
         .bind(api_key)
-        .bind(use_proxy)
+        .bind(proxy_mode)
         .bind(config_json)
         .bind(id)
         .execute(&mut *tx)

@@ -79,7 +79,7 @@ impl AdminService {
             name: provider.name,
             kind: provider.kind,
             api_key_configured,
-            use_proxy: provider.use_proxy,
+            proxy_mode: provider.proxy_mode,
             config,
             capabilities,
             registered,
@@ -137,6 +137,17 @@ impl AdminService {
             )
             .map_err(anyhow::Error::msg)?;
         validate_config_object(input.config.as_ref())?;
+        let selection = crate::outbound_proxy::ProxySelection::parse(&input.proxy_mode)?;
+        if let Some(proxy_id) = selection.proxy_id() {
+            let proxies =
+                crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
+                    .await?;
+            anyhow::ensure!(
+                proxies.find(proxy_id).is_some(),
+                "selected outbound proxy does not exist"
+            );
+        }
+        input.proxy_mode = selection.as_str().to_owned();
         let provider = self.web_provider_store()?.create(input).await?;
         crate::storage::bump_config_epoch(self.gw.storage.settings()).await?;
         Ok(provider)
@@ -184,6 +195,19 @@ impl AdminService {
             )
             .map_err(anyhow::Error::msg)?;
         validate_config_object(merged_config.as_ref())?;
+        if let Some(mode) = input.proxy_mode.as_deref() {
+            let selection = crate::outbound_proxy::ProxySelection::parse(mode)?;
+            if let Some(proxy_id) = selection.proxy_id() {
+                let proxies =
+                    crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
+                        .await?;
+                anyhow::ensure!(
+                    proxies.find(proxy_id).is_some(),
+                    "selected outbound proxy does not exist"
+                );
+            }
+            input.proxy_mode = Some(selection.as_str().to_owned());
+        }
         input.name = Some(name);
         input.config = config_supplied.then_some(merged_config);
         let provider = self.web_provider_store()?.update(id, input).await?;
@@ -392,7 +416,7 @@ mod tests {
                 name: "Unregistered".into(),
                 kind: "local".into(),
                 api_key: None,
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await
@@ -432,7 +456,7 @@ mod tests {
                 name: "Worker".into(),
                 kind: "worker-web".into(),
                 api_key: None,
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: Some(serde_json::json!({"endpoint": "http://127.0.0.1:9000"})),
             })
             .await
@@ -444,7 +468,7 @@ mod tests {
                 name: "Worker 2".into(),
                 kind: "worker-web".into(),
                 api_key: None,
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await
@@ -507,7 +531,7 @@ mod tests {
                 name: "Remote".into(),
                 kind: "remote-search".into(),
                 api_key: None,
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await
@@ -519,7 +543,7 @@ mod tests {
                 name: "Remote".into(),
                 kind: "remote-search".into(),
                 api_key: Some("secret".into()),
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await
@@ -542,7 +566,7 @@ mod tests {
                 name: "Legacy Exa".into(),
                 kind: "exa".into(),
                 api_key: Some("legacy-secret".into()),
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await

@@ -577,7 +577,7 @@ async fn gateway_with_captured_protocol(
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Provider");
@@ -826,7 +826,7 @@ async fn first_token_timeout_fixture(
                 value: "test-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .unwrap();
@@ -1178,7 +1178,7 @@ async fn run_anthropic_reasoning_rejection(
                 value: "test-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .unwrap();
@@ -1312,7 +1312,7 @@ async fn request_scoped_http_errors_count_without_same_target_retries() {
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Provider");
@@ -2752,7 +2752,7 @@ async fn execute_tools_without_model_capability_declarations() {
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Provider");
@@ -3012,7 +3012,7 @@ async fn add_captured_thinking_provider(gateway: &Gateway, base_url: String) -> 
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("second Provider");

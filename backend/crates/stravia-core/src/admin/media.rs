@@ -105,7 +105,7 @@ mod tests {
                 adapter_credentials: r#"{"apiKey":"sk-test"}"#.into(),
                 vendor_options: "{}".into(),
                 auth_mode: "apikey".into(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("Provider");

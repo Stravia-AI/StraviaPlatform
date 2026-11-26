@@ -293,23 +293,21 @@ impl WebAccessService {
         provider: &WebProvider,
         proxy_settings: &crate::outbound_proxy::OutboundProxySettings,
     ) -> Result<Arc<dyn WebProviderAdapter>, WebAccessError> {
-        let outbound = if provider.use_proxy {
-            proxy_settings
-                .reqwest_proxy()
-                .map_err(|_| unavailable_proxy_configuration())?;
-            stravia_web_access::OutboundProxyMode::Explicit {
-                url: proxy_settings.url.trim().to_string(),
-                bypass: proxy_settings.bypass.clone(),
-            }
-        } else {
-            stravia_web_access::OutboundProxyMode::Direct
-        };
+        let selection = crate::outbound_proxy::ProxySelection::parse(&provider.proxy_mode)
+            .map_err(|_| unavailable_proxy_configuration())?;
+        let resolved = crate::outbound_proxy::ResolvedOutboundProxy::resolve(
+            &selection,
+            proxy_settings,
+            self.gateway.config.system_proxy_source,
+        )
+        .map_err(|_| unavailable_proxy_configuration())?;
+        let outbound = resolved.web_access_mode();
         let config = stravia_web_access::WebProviderConfig {
             id: provider.id.clone(),
             name: provider.name.clone(),
             kind: provider.kind.clone(),
             api_key: provider.api_key.clone(),
-            use_proxy: provider.use_proxy,
+            use_proxy: !matches!(selection, crate::outbound_proxy::ProxySelection::None),
             config_json: provider.config_json.as_ref().map(|value| value.0.clone()),
         };
         factory.build(&config, outbound).map_err(provider_failure)

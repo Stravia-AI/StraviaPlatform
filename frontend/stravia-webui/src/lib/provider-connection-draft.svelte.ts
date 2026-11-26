@@ -74,7 +74,7 @@ export class ProviderConnectionDraft {
   dispose = (): void => this.#controller.dispose()
   nameChanged = (): void => this.#controller.nameChanged()
   configurationChanged = (): void => this.#controller.configurationChanged()
-  useProxyChanged = (): void => this.#controller.useProxyChanged()
+  proxyModeChanged = (): void => this.#controller.proxyModeChanged()
   oauthStateChanged = (sessionId: string | undefined, ready: boolean): void =>
     this.#controller.oauthStateChanged(sessionId, ready)
   resetConnection = (fields?: ProviderConnectionDraftFields): Promise<void> => this.#controller.resetConnection(fields)

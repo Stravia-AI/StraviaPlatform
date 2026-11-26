@@ -331,7 +331,7 @@ impl Operation<'_, '_> {
                 execution_handle.oauth_connection_id(),
                 &prepared.route.target_id,
                 &prepared.actual_model,
-                execution_handle.use_proxy(),
+                execution_handle.proxy_mode(),
             ) != prepared.namespace;
         if connection_changed {
             return Err(if self.lifecycle.committed {

@@ -283,12 +283,19 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
         })
         .await
         .expect("API key");
+    admin
+        .set_setting(
+            "outbound_proxy",
+            r#"{"proxies":[{"id":"p1","name":"Old Proxy","url":"http://old-proxy.example:8080"}]}"#,
+        )
+        .await
+        .expect("old proxy");
     let primary = admin
         .create_web_provider(crate::db::models::CreateWebProvider {
             name: "Worker".into(),
             kind: "worker-web".into(),
             api_key: None,
-            use_proxy: true,
+            proxy_mode: "p1".into(),
             config: None,
         })
         .await
@@ -298,7 +305,7 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
             name: "Remote".into(),
             kind: "remote-web".into(),
             api_key: Some("test-remote-key".into()),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await
@@ -310,13 +317,6 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
         })
         .await
         .expect("selected sources");
-    admin
-        .set_setting(
-            "outbound_proxy",
-            r#"{"url":"http://old-proxy.example:8080","bypass":".old.internal","force_http1":false}"#,
-        )
-        .await
-        .expect("old proxy");
 
     let failing_primary = Arc::new(FakeSearchProvider {
         response: Err(ProviderFailure::unavailable("Worker unavailable")),
@@ -354,7 +354,7 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
     admin
         .set_setting(
             "outbound_proxy",
-            r#"{"url":"http://new-proxy.example:8080","bypass":".new.internal","force_http1":false}"#,
+            r#"{"proxies":[{"id":"p1","name":"New Proxy","url":"http://new-proxy.example:8080"}]}"#,
         )
         .await
         .expect("new proxy");
@@ -377,7 +377,7 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
             primary.id.clone(),
             stravia_web_access::OutboundProxyMode::Explicit {
                 url: "http://old-proxy.example:8080".into(),
-                bypass: ".old.internal".into(),
+                bypass: String::new(),
             },
         )]
     );
@@ -441,7 +441,7 @@ async fn configured_adapters_observe_proxy_snapshot_empty_success_and_failover()
             primary.id,
             stravia_web_access::OutboundProxyMode::Explicit {
                 url: "http://new-proxy.example:8080".into(),
-                bypass: ".new.internal".into(),
+                bypass: String::new(),
             },
         )
     );
@@ -588,7 +588,7 @@ async fn unavailable_factory_skips_offline_provider_while_retaining_available_so
             name: "Worker".into(),
             kind: "worker-web".into(),
             api_key: None,
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await
@@ -604,7 +604,7 @@ async fn unavailable_factory_skips_offline_provider_while_retaining_available_so
             name: "Remote".into(),
             kind: "remote-web".into(),
             api_key: Some("secret".into()),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await
@@ -720,7 +720,7 @@ async fn legacy_switch_does_not_block_snapshots_and_source_changes_preserve_acti
             name: "Remote".into(),
             kind: "remote-web".into(),
             api_key: Some("test-remote-key".into()),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await
@@ -909,7 +909,7 @@ async fn configured_fetch_retries_only_failed_urls_on_secondary_provider() {
             name: "Worker".into(),
             kind: "worker-web".into(),
             api_key: None,
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await
@@ -919,7 +919,7 @@ async fn configured_fetch_retries_only_failed_urls_on_secondary_provider() {
             name: "Remote".into(),
             kind: "remote-web".into(),
             api_key: Some("test-remote-key".into()),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await

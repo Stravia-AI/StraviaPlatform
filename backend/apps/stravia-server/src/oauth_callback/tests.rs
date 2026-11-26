@@ -229,7 +229,7 @@ fn auth_candidate(vendor_id: &str, channel: &str, base_url: &str) -> AuthSession
         protocol: None,
         options: Default::default(),
         credentials: Default::default(),
-        use_proxy: false,
+        proxy_mode: "none".into(),
     }
 }
 

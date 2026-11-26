@@ -1805,7 +1805,7 @@ mod responses_option_continuation {
                     value: "test-key".into(),
                 },
                 vendor_options,
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("create custom Responses provider");

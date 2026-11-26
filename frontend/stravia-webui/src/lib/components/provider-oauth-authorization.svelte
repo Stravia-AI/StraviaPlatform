@@ -33,7 +33,7 @@ interface Props {
   channel: string
   flow: 'authorization_code' | 'device_code' | 'manual'
   configuration: OAuthCandidateConfiguration
-  useProxy: boolean
+  proxyMode: string
   supportsRefreshToken?: boolean
   mode: 'connect' | 'reconnect'
   providerName?: string
@@ -49,7 +49,7 @@ let {
   channel,
   flow,
   configuration,
-  useProxy,
+  proxyMode,
   mode,
   supportsRefreshToken = false,
   providerName = '',
@@ -201,7 +201,7 @@ async function authorizeWithRefreshToken(): Promise<void> {
   try {
     if (previousSessionId) await cancelSession(previousSessionId, generation)
     if (generation !== sessionGeneration) return
-    const ready = await admin.oauth.authenticateRefreshToken(vendorId, channel, configuration, useProxy, trimmed)
+    const ready = await admin.oauth.authenticateRefreshToken(vendorId, channel, configuration, proxyMode, trimmed)
     if (generation !== sessionGeneration) {
       void cancelSession(ready.session_id)
       return
@@ -242,7 +242,7 @@ async function startSession(action: StartAction): Promise<void> {
       vendorId,
       channel,
       configuration,
-      useProxy,
+      proxyMode,
       callbackMode(),
       localeState.current,
     )
@@ -344,7 +344,7 @@ async function completeManualInput(): Promise<void> {
   }
 }
 
-export async function updateProxy(nextUseProxy: boolean): Promise<void> {
+export async function updateProxy(nextProxyMode: string): Promise<void> {
   if (disabled) return
   // 初始化或验证令牌使用的是旧代理；只有进行中的交互授权可以改用新代理。
   if ((starting && !oauthSession) || authorizingRefreshToken || refreshTokenSession) {
@@ -359,7 +359,7 @@ export async function updateProxy(nextUseProxy: boolean): Promise<void> {
   }
   const generation = sessionGeneration
   try {
-    await admin.oauth.updateProxy(sessionId, nextUseProxy)
+    await admin.oauth.updateProxy(sessionId, nextProxyMode)
   } catch (error) {
     if (!isCurrentSession(generation, sessionId)) return
     toast.error(localizeBackendErrorMessage(error))

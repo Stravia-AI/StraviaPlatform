@@ -256,7 +256,7 @@ mod tests {
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
 
@@ -301,7 +301,7 @@ mod tests {
                         value: "test-key".into(),
                     },
                     vendor_options: Map::new(),
-                    use_proxy: false,
+                    proxy_mode: "none".into(),
                 },
                 authorization_id: None,
             })
@@ -334,7 +334,7 @@ mod tests {
                     value: "test-key".into(),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
 
@@ -376,7 +376,7 @@ mod tests {
                         protocol: None,
                         options: BTreeMap::new(),
                         credentials: BTreeMap::new(),
-                        use_proxy: false,
+                        proxy_mode: "none".into(),
                     }),
                     options: OAuthSessionStartOptions {
                         callback_mode: OAuthCallbackMode::Manual,
@@ -419,7 +419,7 @@ mod tests {
                     values: BTreeMap::from([("unknown".into(), json!("secret"))]),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await
             .expect_err("undeclared Vendor credential must be rejected");
@@ -440,7 +440,7 @@ mod tests {
                     values: BTreeMap::from([("apiKey".into(), json!("first"))]),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
         let updated = providers
@@ -496,7 +496,7 @@ mod tests {
                     value: "sk-cc".into(),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
         assert_eq!(provider.vendor_options, r#"{"zdr":true}"#);
@@ -557,7 +557,7 @@ mod tests {
                     value: "sk-oai".into(),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
         providers
@@ -604,7 +604,7 @@ mod tests {
                 options: input.vendor_options.into_iter().collect(),
                 credentials,
             }),
-            use_proxy: Some(input.use_proxy),
+            proxy_mode: Some(input.proxy_mode),
             authorization_id: None,
         }
     }
@@ -628,7 +628,7 @@ mod tests {
                 value: "test-key".into(),
             },
             vendor_options: Map::new(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         };
 
         let result = admin
@@ -664,7 +664,7 @@ mod tests {
                     value: "test-key".into(),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
 
@@ -703,7 +703,7 @@ mod tests {
                     value: "test-key".into(),
                 },
                 vendor_options: Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             }))
             .await?;
         admin
@@ -766,7 +766,7 @@ mod tests {
                 value: "test-key".into(),
             },
             vendor_options: Map::new(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         };
         let primary = admin.create_provider(save("Primary Connection")).await?;
         let fallback = admin.create_provider(save("Fallback Connection")).await?;

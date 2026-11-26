@@ -49,7 +49,7 @@ async fn test_gateway() -> anyhow::Result<(Gateway, tempfile::TempDir, String)> 
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
 

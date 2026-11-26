@@ -1,6 +1,5 @@
 <script lang="ts">
 import { browser } from '$app/env'
-import { resolve } from '$app/paths'
 import * as m from '#lib/paraglide/messages.js'
 import { tick } from 'svelte'
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right'
@@ -13,11 +12,11 @@ import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw'
 import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert'
 import { toast } from 'svelte-sonner'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
-import { admin } from '#lib/admin-client.js'
+import { admin, PROXY_MODE_SYSTEM } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
+import ProxySelect from '#lib/components/proxy-select.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import SettingsSection from '#lib/components/settings/settings-section.svelte'
-import { Switch } from '#lib/components/ui/switch/index.js'
 import RequestFailure from '#lib/components/request-failure.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Progress } from '#lib/components/ui/progress/index.js'
@@ -27,38 +26,28 @@ import { Spinner } from '#lib/components/ui/spinner/index.js'
 import { openExternalUrl } from '#lib/open-external.js'
 import { isPrereleaseVersion, supportsInAppInstallProgress, type UpdateChannel } from '#lib/product-update.js'
 import { getProductUpdateCoordinator } from '#lib/product-update.svelte.js'
-import { settingsGroupHref } from '#lib/settings-groups.js'
 
 const queryClient = useQueryClient()
 
 const proxyPreferenceQuery = createQuery(() => ({
-  queryKey: ['setting', 'update_use_proxy'],
-  queryFn: () => admin.settings.get('update_use_proxy'),
+  queryKey: ['setting', 'update_proxy_mode'],
+  queryFn: () => admin.settings.get('update_proxy_mode'),
 }))
 
-const useProxy = $derived(proxyPreferenceQuery.data === 'true')
+const proxyMode = $derived(proxyPreferenceQuery.data?.trim() || PROXY_MODE_SYSTEM)
 let savingProxy = $state(false)
 let proxyError = $state('')
-let proxyNeedsConfiguration = $state(false)
-let retryProxyValue = $state<boolean>()
+let retryProxyMode = $state<string>()
 
-async function toggleProxy(value: boolean): Promise<void> {
-  if (savingProxy || proxyPreferenceQuery.data === undefined) return
+async function selectProxyMode(nextMode: string): Promise<void> {
+  if (savingProxy || proxyPreferenceQuery.data === undefined || nextMode === proxyMode) return
   savingProxy = true
   proxyError = ''
-  proxyNeedsConfiguration = false
-  retryProxyValue = value
+  retryProxyMode = nextMode
   try {
-    if (value) {
-      const saved = await admin.settings.proxy()
-      if (!saved.url.trim()) {
-        proxyNeedsConfiguration = true
-        return
-      }
-    }
-    await admin.settings.set('update_use_proxy', value ? 'true' : 'false')
-    queryClient.setQueryData(['setting', 'update_use_proxy'], value ? 'true' : 'false')
-    retryProxyValue = undefined
+    await admin.settings.set('update_proxy_mode', nextMode)
+    queryClient.setQueryData(['setting', 'update_proxy_mode'], nextMode)
+    retryProxyMode = undefined
   } catch (error) {
     proxyError = localizeBackendErrorMessage(error)
   } finally {
@@ -357,23 +346,22 @@ async function checkNow(): Promise<void> {
       </p>
     {:else}
       <SettingRow
-        layout="inline"
-        title={m.settings_update_use_proxy()}
-        labelFor="update-use-proxy"
+        title={m.settings_update_proxy()}
+        hint={m.settings_update_proxy_hint()}
+        labelFor="update-proxy-mode"
+        controlSize="setting"
         class={channelError ? 'border-t border-border/60' : undefined}>
-        {#if savingProxy}<Spinner aria-label={m.settings_saving()} />{/if}
-        <Switch
-          id="update-use-proxy"
-          bind:checked={() => useProxy, (value: boolean) => void toggleProxy(value)}
-          disabled={savingProxy} />
+        {#snippet children({ titleId })}
+          {#if savingProxy}<Spinner class="shrink-0" aria-label={m.settings_saving()} />{/if}
+          <ProxySelect
+            id="update-proxy-mode"
+            class="flex-1"
+            value={proxyMode}
+            disabled={savingProxy}
+            ariaLabelledby={titleId}
+            onchange={(next: string) => void selectProxyMode(next)} />
+        {/snippet}
       </SettingRow>
-    {/if}
-    {#if proxyNeedsConfiguration}
-      <p role="alert" class="px-4 pb-3 text-sm">
-        <a href={resolve(settingsGroupHref('network', 'proxy'))} class="text-primary underline underline-offset-4">
-          {m.settings_update_proxy_configure_first()}
-        </a>
-      </p>
     {/if}
     {#if proxyError}
       <div class="px-4 pb-3">
@@ -381,7 +369,7 @@ async function checkNow(): Promise<void> {
           title={m.settings_update_proxy_save_failed()}
           message={proxyError}
           retry={() => {
-            if (retryProxyValue !== undefined) void toggleProxy(retryProxyValue)
+            if (retryProxyMode !== undefined) void selectProxyMode(retryProxyMode)
           }}
           retrying={savingProxy} />
       </div>

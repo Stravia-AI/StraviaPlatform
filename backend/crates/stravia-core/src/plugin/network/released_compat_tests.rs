@@ -112,7 +112,7 @@ async fn released_component_uses_real_native_http_and_websocket() -> anyhow::Res
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let network = VendorNetwork::new(
@@ -121,7 +121,7 @@ async fn released_component_uses_real_native_http_and_websocket() -> anyhow::Res
             shapes: Arc::new(ShapeRegistry::builtin()?),
             resolver: Arc::new(SystemResolver),
         },
-        crate::outbound_proxy::OutboundProxySettings::default(),
+        crate::outbound_proxy::ResolvedOutboundProxy::Direct,
         NetworkPolicy::compile([
             NetworkOrigin::Exact(format!("http://{address}")),
             NetworkOrigin::Exact(format!("ws://{address}")),

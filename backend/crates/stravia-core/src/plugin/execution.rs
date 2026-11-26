@@ -233,7 +233,7 @@ pub(crate) struct PreparedVendorExecution {
     provider_id: String,
     provider: ProviderSnapshot,
     oauth_connection_id: Option<String>,
-    use_proxy: bool,
+    proxy_mode: String,
     origins: NetworkPolicy,
     kind: Operation,
     /// ADR-0073：连接快照锁定的凭据代际，供上游凭据拒绝的条件写比对。
@@ -279,8 +279,8 @@ impl PreparedVendorExecution {
         self.oauth_connection_id.as_deref()
     }
 
-    pub(crate) fn use_proxy(&self) -> bool {
-        self.use_proxy
+    pub(crate) fn proxy_mode(&self) -> &str {
+        &self.proxy_mode
     }
 
     pub(crate) async fn cancelled(&self) {
@@ -595,7 +595,7 @@ impl Gateway {
                     .as_ref()
                     .map(|credential| credential.status_version),
             };
-            let (mut provider, use_proxy, origins) = provider_snapshot(
+            let (mut provider, proxy_mode, origins) = provider_snapshot(
                 &plugin,
                 descriptor,
                 &connection,
@@ -619,7 +619,7 @@ impl Gateway {
                 provider_id: provider_id.to_owned(),
                 provider,
                 oauth_connection_id,
-                use_proxy,
+                proxy_mode,
                 origins,
                 kind,
                 credential_version,
@@ -655,7 +655,7 @@ impl Gateway {
                     .provider
                     .operation_metadata
                     .remove("catalog_models");
-                let (mut provider, use_proxy, origins) = provider_snapshot(
+                let (mut provider, proxy_mode, origins) = provider_snapshot(
                     &prepared.plugin,
                     prepared.descriptor(),
                     &current,
@@ -675,7 +675,7 @@ impl Gateway {
                         .insert("catalog_models".into(), models);
                 }
                 prepared.provider = provider;
-                prepared.use_proxy = use_proxy;
+                prepared.proxy_mode = proxy_mode;
                 prepared.origins = origins;
                 prepared.credential_version = ProviderCredentialVersion {
                     provider_revision: current.provider.revision,
@@ -889,7 +889,7 @@ impl Gateway {
                 prepared.data_epoch,
                 Some(prepared.provider_id),
                 None,
-                prepared.use_proxy,
+                &prepared.proxy_mode,
                 prepared.origins,
                 prepared.provider,
                 request,
@@ -965,11 +965,12 @@ impl Gateway {
             Value::String(provider.protocol.clone()),
         );
         apply_host_metadata(&mut provider.operation_metadata);
-        let use_proxy = provider
+        let proxy_mode = provider
             .operation_metadata
-            .get("use_proxy")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .get("proxy_mode")
+            .and_then(Value::as_str)
+            .unwrap_or(crate::outbound_proxy::PROXY_MODE_SYSTEM)
+            .to_owned();
 
         self.execute_vendor_input(
             session.plugin.clone(),
@@ -977,7 +978,7 @@ impl Gateway {
             current_epoch,
             None,
             Some(session.private_state.clone()),
-            use_proxy,
+            &proxy_mode,
             session.origins.clone(),
             provider,
             request,
@@ -1077,7 +1078,7 @@ impl Gateway {
         data_epoch: i64,
         provider_id: Option<String>,
         session_state: Option<Arc<Mutex<Option<Vec<u8>>>>>,
-        use_proxy: bool,
+        proxy_mode: &str,
         origins: NetworkPolicy,
         provider: ProviderSnapshot,
         request: VendorRequest,
@@ -1096,7 +1097,7 @@ impl Gateway {
             .descriptor()
             .provider(&provider.provider_id)
             .ok_or_else(|| anyhow::anyhow!("vendor operation profile is unavailable"))?;
-        let proxy = self.vendor_proxy_snapshot(use_proxy).await?;
+        let proxy = self.vendor_proxy_snapshot(proxy_mode).await?;
         if context.cancellation.is_cancelled() {
             return Err(RuntimeError::Cancelled.into());
         }
@@ -1143,7 +1144,7 @@ impl Gateway {
                 shapes: Arc::clone(&plugin.shapes),
                 resolver: Arc::clone(&self.vendor_resolver),
             },
-            proxy.into_settings(),
+            proxy,
             origins,
             operation.clone(),
             context.cancellation.clone(),
@@ -1282,8 +1283,8 @@ fn provider_snapshot(
     discovery_source: Option<&str>,
     context: &VendorCallContext,
     installation_id: &str,
-) -> anyhow::Result<(ProviderSnapshot, bool, NetworkPolicy)> {
-    let use_proxy = connection.provider.use_proxy;
+) -> anyhow::Result<(ProviderSnapshot, String, NetworkPolicy)> {
+    let proxy_mode = connection.provider.proxy_mode.clone();
     let options = json_object(&connection.provider.vendor_options, "provider options")?;
     let saved_credentials = connection_credentials(&connection.provider)?;
     let channel = connection
@@ -1384,7 +1385,7 @@ fn provider_snapshot(
             client_headers: filtered_client_headers(&context.client_headers, selected_channel),
             operation_metadata,
         },
-        use_proxy,
+        proxy_mode,
         origins,
     ))
 }
@@ -1652,7 +1653,7 @@ fn same_provider_generation(left: &Provider, right: &Provider) -> bool {
         && left.adapter_credentials == right.adapter_credentials
         && left.vendor_options == right.vendor_options
         && left.auth_mode == right.auth_mode
-        && left.use_proxy == right.use_proxy
+        && left.proxy_mode == right.proxy_mode
         && left.is_enabled == right.is_enabled
         && left.updated_at == right.updated_at
 }

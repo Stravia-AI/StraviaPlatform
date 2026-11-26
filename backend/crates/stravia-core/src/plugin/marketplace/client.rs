@@ -5,7 +5,8 @@ use reqwest::{StatusCode, Url, header, redirect::Policy};
 use serde::Deserialize;
 
 use super::MarketError;
-use crate::outbound_proxy::{OutboundProxySettings, update_uses_proxy};
+use crate::config::SystemProxySource;
+use crate::outbound_proxy::{ResolvedOutboundProxy, update_proxy_mode};
 use crate::storage::DynStorage;
 
 const DEFAULT_UPDATER: &str = "https://updater.stravia.cn";
@@ -108,15 +109,21 @@ pub fn parse_repository_url(input: &str) -> Result<String, MarketError> {
 pub struct MarketClient {
     storage: DynStorage,
     updater_base: Option<String>,
+    system_proxy_source: SystemProxySource,
     #[cfg(any(test, feature = "test-support"))]
     test_origins: Option<(Url, Url)>,
 }
 
 impl MarketClient {
-    pub fn new(storage: DynStorage, updater_base: Option<String>) -> Self {
+    pub fn new(
+        storage: DynStorage,
+        updater_base: Option<String>,
+        system_proxy_source: SystemProxySource,
+    ) -> Self {
         Self {
             storage,
             updater_base,
+            system_proxy_source,
             #[cfg(any(test, feature = "test-support"))]
             test_origins: None,
         }
@@ -158,6 +165,7 @@ impl MarketClient {
         Ok(Self {
             storage,
             updater_base: Some(updater.to_string()),
+            system_proxy_source: SystemProxySource::Environment,
             test_origins: Some((api, web)),
         })
     }
@@ -269,28 +277,31 @@ impl MarketClient {
             }
         });
         let settings = self.storage.settings();
-        let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .user_agent(format!("Stravia/{}", env!("CARGO_PKG_VERSION")))
-            .redirect(policy)
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd();
-        if update_uses_proxy(settings)
+        let selection = update_proxy_mode(settings)
             .await
-            .map_err(|e| error("network", e.to_string()))?
-        {
-            let proxy = OutboundProxySettings::load(settings)
-                .await
-                .map_err(|e| error("network", e.to_string()))?
-                .reqwest_proxy()
-                .map_err(|e| error("network", e.to_string()))?;
-            builder = builder.proxy(proxy);
-        } else {
-            builder = builder.no_proxy();
-        }
-        builder.build().map_err(|e| error("network", e.to_string()))
+            .map_err(|e| error("network", e.to_string()))?;
+        let resolved = ResolvedOutboundProxy::resolve_from_store(
+            &selection,
+            settings,
+            self.system_proxy_source,
+        )
+        .await
+        .map_err(|e| error("network", e.to_string()))?;
+        let configure = resolved
+            .reqwest_client_config()
+            .map_err(|e| error("network", e.to_string()))?;
+        configure(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .user_agent(format!("Stravia/{}", env!("CARGO_PKG_VERSION")))
+                .redirect(policy)
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
+                .no_zstd(),
+        )
+        .build()
+        .map_err(|e| error("network", e.to_string()))
     }
 
     fn updater_path(base: &Url, parts: &[&str]) -> Result<Url, MarketError> {

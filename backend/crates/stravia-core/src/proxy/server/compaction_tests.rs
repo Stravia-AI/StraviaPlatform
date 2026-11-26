@@ -209,7 +209,7 @@ async fn registry_failure_gates_http_native_publication_and_standalone_compactio
             },
             credential: ProviderCredentialInput::ApiKey { value: "local-provider-key".into() },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         }).await.unwrap();
         admin.create_manual_provider_model(&provider.id, "upstream-model", CreateManualProviderModel {
             metadata: json!({"id":"upstream-model","name":"upstream-model","modalities":{"input":["text"],"output":["text"]}}),
@@ -419,7 +419,7 @@ async fn inbound_responses_websocket_preserves_inline_native_compaction_and_repl
             },
             credential: ProviderCredentialInput::ApiKey { value: "local-provider-key".into() },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         }).await.unwrap();
         admin.create_manual_provider_model(&provider.id, "upstream-model", CreateManualProviderModel {
             metadata: json!({"id":"upstream-model","name":"upstream-model","modalities":{"input":["text"],"output":["text"]}}),
@@ -835,7 +835,7 @@ impl Harness {
                     value: "local-provider-key".into(),
                 },
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .unwrap();

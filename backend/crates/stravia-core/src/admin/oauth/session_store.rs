@@ -106,7 +106,7 @@ impl AdminService {
             auth_descriptor,
             scheme: scheme.as_str().to_string(),
             status: AuthSessionStatus::Pending.as_str().to_string(),
-            use_proxy: candidate.use_proxy,
+            proxy_mode: candidate.proxy_mode,
             user_code,
             verification_uri,
             verification_uri_complete: auth_url,
@@ -170,7 +170,7 @@ impl AdminService {
             auth_descriptor,
             scheme: scheme.as_str().to_string(),
             status: AuthSessionStatus::Ready.as_str().to_string(),
-            use_proxy: candidate.use_proxy,
+            proxy_mode: candidate.proxy_mode,
             user_code: None,
             verification_uri: None,
             verification_uri_complete: None,
@@ -361,8 +361,8 @@ impl AdminService {
         if let Some(value) = input.user_code {
             current.user_code = Some(value);
         }
-        if let Some(value) = input.use_proxy {
-            current.use_proxy = value;
+        if let Some(value) = input.proxy_mode {
+            current.proxy_mode = value;
         }
         if let Some(value) = input.verification_uri {
             current.verification_uri = Some(value);
@@ -474,7 +474,7 @@ mod tests {
             protocol: None,
             options: Default::default(),
             credentials: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         };
         let (provider, auth_descriptor) =
             admin.provider_auth_candidate_snapshot(&candidate).await?;

@@ -109,7 +109,7 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
                 "mode".into(),
                 serde_json::json!("continuation"),
             )]),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Provider");

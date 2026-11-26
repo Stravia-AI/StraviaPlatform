@@ -9,12 +9,13 @@ import Globe2Icon from '@lucide/svelte/icons/globe-2'
 import PlusIcon from '@lucide/svelte/icons/plus'
 import { toast } from 'svelte-sonner'
 
-import { admin } from '#lib/admin-client.js'
+import { admin, PROXY_MODE_SYSTEM } from '#lib/admin-client.js'
 import { localizeBackendErrorMessage } from '#lib/backend-error.js'
 import { DraftBaseline, DraftGuard } from '#lib/draft-guard.svelte.js'
 import { formatDuration } from '#lib/format.js'
 import type { WebAccessSettings, WebProvider, WebProviderKind } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
+import ProxySelect from '#lib/components/proxy-select.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import * as Empty from '#lib/components/ui/empty/index.js'
@@ -28,7 +29,6 @@ import * as Select from '#lib/components/ui/select/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import FieldHelp from '#lib/components/ui/field/field-help.svelte'
-import { Switch } from '#lib/components/ui/switch/index.js'
 
 const queryClient = useQueryClient()
 const kindsQuery = createQuery(() => ({ queryKey: ['web-provider-kinds'], queryFn: admin.webAccess.kinds.list }))
@@ -40,7 +40,7 @@ let editingProvider = $state<WebProvider>()
 let editorName = $state('')
 let editorKind = $state<WebProviderKind>('')
 let editorSecret = $state('')
-let editorUseProxy = $state(false)
+let editorProxyMode = $state<string>(PROXY_MODE_SYSTEM)
 let savingEditor = $state(false)
 let editorError = $state('')
 let actingProviderId = $state<string>()
@@ -76,7 +76,7 @@ function formatKindLabel(kind: WebProviderKind): string {
 }
 
 // 草稿离开保护：打开编辑器时的字段是基线；保存中锁定关闭。
-const editorBaseline = new DraftBaseline(() => ({ editorName, editorKind, editorSecret, editorUseProxy }))
+const editorBaseline = new DraftBaseline(() => ({ editorName, editorKind, editorSecret, editorProxyMode }))
 const editorGuard = new DraftGuard({ dirty: () => editorOpen && editorBaseline.dirty, busy: () => savingEditor })
 
 function openCreate(): void {
@@ -86,7 +86,7 @@ function openCreate(): void {
   editorName = ''
   editorKind = firstKind
   editorSecret = ''
-  editorUseProxy = false
+  editorProxyMode = PROXY_MODE_SYSTEM
   editorError = ''
   editorBaseline.reset()
   editorOpen = true
@@ -98,7 +98,7 @@ function openEdit(provider: WebProvider): void {
   editorName = provider.name
   editorKind = provider.kind
   editorSecret = ''
-  editorUseProxy = provider.use_proxy
+  editorProxyMode = provider.proxy_mode || PROXY_MODE_SYSTEM
   editorError = ''
   editorBaseline.reset()
   editorOpen = true
@@ -136,7 +136,7 @@ async function saveEditor(): Promise<void> {
     if (editingProvider) {
       await admin.webAccess.providers.update(editingProvider.id, {
         name: editorName.trim(),
-        use_proxy: editorUseProxy,
+        proxy_mode: editorProxyMode,
         ...(editorRequiresApiKey && editorSecret.trim() ? { api_key: editorSecret.trim() } : {}),
       })
     } else {
@@ -144,7 +144,7 @@ async function saveEditor(): Promise<void> {
         name: editorName.trim(),
         kind: editorKind,
         ...(editorRequiresApiKey ? { api_key: editorSecret.trim() } : {}),
-        use_proxy: editorUseProxy,
+        proxy_mode: editorProxyMode,
       })
     }
     await refreshWebAccess()
@@ -497,16 +497,14 @@ async function deleteProvider(): Promise<void> {
               </Select.Content>
             </Select.Root>
           </Field.Field>
-          <Field.Field orientation="horizontal">
-            <Field.Content>
-              <Field.Label for="web-provider-use-proxy">{m.common_use_proxy()}</Field.Label>
-              <Field.Description>{m.common_send_requests_service_proxy_configured_settings()}</Field.Description>
-            </Field.Content>
-            <Switch
-              id="web-provider-use-proxy"
+          <Field.Field>
+            <Field.Label for="web-provider-proxy-mode">{m.common_proxy()}</Field.Label>
+            <ProxySelect
+              id="web-provider-proxy-mode"
+              value={editorProxyMode}
               disabled={savingEditor}
-              checked={editorUseProxy}
-              onCheckedChange={(checked: boolean) => (editorUseProxy = checked)} />
+              onchange={(next: string) => (editorProxyMode = next)} />
+            <Field.Description>{m.common_proxy_selection_description()}</Field.Description>
           </Field.Field>
           {#if editorRequiresApiKey}
             <Field.Field>

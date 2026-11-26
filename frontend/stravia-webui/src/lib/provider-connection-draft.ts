@@ -17,12 +17,12 @@ export interface ProviderConnectionDraftFields {
   name: string
   baseUrl: string
   protocol: string
-  useProxy: boolean
+  proxyMode: string
   values: Record<string, unknown>
 }
 
 export function emptyProviderConnectionDraft(): ProviderConnectionDraftFields {
-  return { name: '', baseUrl: '', protocol: '', useProxy: false, values: {} }
+  return { name: '', baseUrl: '', protocol: '', proxyMode: 'system', values: {} }
 }
 
 /** 条件读取当前协议而不写入 vendor_options；隐藏父字段同时隐藏其依赖字段。 */
@@ -63,7 +63,7 @@ export interface ProviderConnectionSubmission {
   name: string
   baseUrl: string
   protocol?: string
-  useProxy: boolean
+  proxyMode: string
   options: Record<string, unknown>
   credentials: Record<string, unknown>
   /** 当前 OAuth session（如有）；create 路径据此选择 createOAuth。 */
@@ -90,7 +90,7 @@ export interface ProviderConnectionOAuthHandle {
   cancel(): Promise<void>
   /** 已写入成功：丢弃本地 session 状态，不再上报/取消。 */
   consume(): void
-  updateProxy(useProxy: boolean): Promise<void>
+  updateProxy(proxyMode: string): Promise<void>
 }
 
 /** UI 结果通知。两个回调被调用时提交锁均已释放，视图可安全 goto / 关闭 Sheet。 */
@@ -245,7 +245,7 @@ export class ProviderConnectionDraftController {
   connectionCheckInput(target: ProviderConnectionDraftTarget): ProviderConnectionCheckInput {
     return {
       configuration: this.#previewInput(target),
-      use_proxy: this.#fields.useProxy,
+      proxy_mode: this.#fields.proxyMode,
       ...(this.#oauthReady && this.#oauthSessionId ? { authorization_id: this.#oauthSessionId } : {}),
     }
   }
@@ -271,14 +271,14 @@ export class ProviderConnectionDraftController {
   }
 
   /** 代理切换：preview 失效；ready session 不能换代理直接丢弃，其余交给子组件 updateProxy。 */
-  useProxyChanged(): void {
+  proxyModeChanged(): void {
     if (this.#disposed) return
     this.#invalidate()
     if (this.#oauthReady) {
       this.#oauthSessionId = undefined
       this.#oauthReady = false
     }
-    void this.#deps.oauth.updateProxy(this.#fields.useProxy)
+    void this.#deps.oauth.updateProxy(this.#fields.proxyMode)
     this.#deps.onSnapshot?.(this.snapshot)
   }
 
@@ -314,7 +314,7 @@ export class ProviderConnectionDraftController {
       this.#fields.name = fields.name
       this.#fields.baseUrl = fields.baseUrl
       this.#fields.protocol = fields.protocol
-      this.#fields.useProxy = fields.useProxy
+      this.#fields.proxyMode = fields.proxyMode
       this.#fields.values = fields.values
     }
     this.#deps.onSnapshot?.(this.snapshot)
@@ -402,7 +402,7 @@ export class ProviderConnectionDraftController {
       name: this.#fields.name.trim(),
       baseUrl,
       protocol: this.#fields.protocol || target.channel.protocol || undefined,
-      useProxy: this.#fields.useProxy,
+      proxyMode: this.#fields.proxyMode,
       options: providerConfigValues(
         this.#fields.values,
         target.descriptor.config_fields,

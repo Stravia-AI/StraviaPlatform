@@ -41,7 +41,7 @@ impl ProviderStore for PostgresProviderStore {
             anyhow::bail!("unsupported provider auth_mode: {}", input.auth_mode);
         }
         sqlx::query(
-    "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+    "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, proxy_mode) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             )
             .bind(&id)
             .bind(input.name.trim())
@@ -56,7 +56,7 @@ impl ProviderStore for PostgresProviderStore {
             .bind(input.adapter_credentials)
             .bind(input.vendor_options)
             .bind(input.auth_mode)
-            .bind(input.use_proxy)
+            .bind(input.proxy_mode)
             .execute(&self.pool)
             .await?;
         self.get(&id)
@@ -119,11 +119,11 @@ impl ProviderStore for PostgresProviderStore {
         if !is_valid_provider_auth_mode(&auth_mode) {
             anyhow::bail!("unsupported provider auth_mode: {}", auth_mode);
         }
-        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
+        let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         sqlx::query(
-    "UPDATE providers SET name=$1, vendor=$2, protocol=$3, base_url=$4, preset_key=$5, channel=$6, models_source=$7, static_models=$8, api_key=$9, adapter_credentials=$10, vendor_options=$11, auth_mode=$12, use_proxy=$13, is_enabled=$14, updated_at=CURRENT_TIMESTAMP, revision=revision+1, credential_status = CASE WHEN $15 THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN $16 THEN NULL ELSE credential_invalid_at END WHERE id=$17",
+    "UPDATE providers SET name=$1, vendor=$2, protocol=$3, base_url=$4, preset_key=$5, channel=$6, models_source=$7, static_models=$8, api_key=$9, adapter_credentials=$10, vendor_options=$11, auth_mode=$12, proxy_mode=$13, is_enabled=$14, updated_at=CURRENT_TIMESTAMP, revision=revision+1, credential_status = CASE WHEN $15 THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN $16 THEN NULL ELSE credential_invalid_at END WHERE id=$17",
             )
             .bind(name.trim())
             .bind(vendor)
@@ -137,7 +137,7 @@ impl ProviderStore for PostgresProviderStore {
             .bind(adapter_credentials)
             .bind(vendor_options)
             .bind(auth_mode)
-            .bind(use_proxy)
+            .bind(proxy_mode)
             .bind(is_enabled)
             .bind(reset_credential_status)
             .bind(reset_credential_status)
@@ -608,7 +608,7 @@ mod tests {
                 adapter_credentials: "{}".into(),
                 vendor_options: "{}".into(),
                 auth_mode: "apikey".into(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
     }

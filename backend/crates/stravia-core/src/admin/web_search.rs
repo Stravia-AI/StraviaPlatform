@@ -70,7 +70,7 @@ mod tests {
                 adapter_credentials: r#"{"apiKey":"sk-test"}"#.into(),
                 vendor_options: "{}".into(),
                 auth_mode: "apikey".into(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("Provider");
@@ -153,7 +153,7 @@ mod tests {
                 name: "Search sources".into(),
                 kind: "test-search".into(),
                 api_key: Some("secret".into()),
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await
@@ -196,7 +196,7 @@ mod tests {
                 name: "Worker".into(),
                 kind: "worker-web".into(),
                 api_key: None,
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await
@@ -225,7 +225,7 @@ mod tests {
                 name: "Remote sources".into(),
                 kind: "remote-web".into(),
                 api_key: Some("secret".into()),
-                use_proxy: false,
+                proxy_mode: "none".into(),
                 config: None,
             })
             .await

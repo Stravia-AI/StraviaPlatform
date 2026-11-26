@@ -226,7 +226,7 @@ impl VendorCatalogSync {
                 shapes: Arc::clone(&plugin.shapes),
                 resolver: Arc::clone(&self.resolver),
             },
-            crate::outbound_proxy::OutboundProxySettings::default(),
+            crate::outbound_proxy::ResolvedOutboundProxy::Direct,
             origins,
             operation.clone(),
             cancellation.clone(),

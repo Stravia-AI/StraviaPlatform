@@ -38,7 +38,7 @@ async fn route_fixture_with_protocol(
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     gateway
@@ -115,7 +115,7 @@ async fn remote_compaction_requires_every_configured_target() -> anyhow::Result<
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await?;
         register_output_model(&admin, &other.id, "upstream-model", json!({
@@ -2118,7 +2118,7 @@ async fn create_effort_route(
                 value: "route-fixture-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let mut metadata = json!({
@@ -2292,7 +2292,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     admin
@@ -2443,7 +2443,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     admin

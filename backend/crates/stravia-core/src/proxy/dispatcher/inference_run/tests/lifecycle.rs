@@ -1465,7 +1465,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
                 value: "test-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("create Catalog provider");

@@ -2142,7 +2142,6 @@ CREATE TABLE public.providers (
     access_token text,
     refresh_token text,
     expires_at timestamp with time zone,
-    use_proxy boolean DEFAULT false NOT NULL,
     last_test_success boolean,
     last_test_at timestamp with time zone,
     is_enabled boolean DEFAULT true NOT NULL,
@@ -2154,9 +2153,11 @@ CREATE TABLE public.providers (
     credential_status text DEFAULT 'ok'::text NOT NULL,
     credential_invalid_at timestamp with time zone,
     revision bigint DEFAULT 0 NOT NULL,
+    proxy_mode text DEFAULT 'system'::text NOT NULL,
     CONSTRAINT providers_adapter_credentials_contract CHECK (((adapter_credentials IS NOT NULL) AND (jsonb_typeof((adapter_credentials)::jsonb) = 'object'::text))),
     CONSTRAINT providers_auth_mode_check CHECK ((auth_mode = ANY (ARRAY['apikey'::text, 'oauth'::text]))),
     CONSTRAINT providers_credential_status_check CHECK ((credential_status = ANY (ARRAY['ok'::text, 'invalid'::text]))),
+    CONSTRAINT providers_proxy_mode_check CHECK ((length(btrim(proxy_mode)) > 0)),
     CONSTRAINT providers_vendor_options_contract CHECK (((vendor_options IS NOT NULL) AND (jsonb_typeof((vendor_options)::jsonb) = 'object'::text)))
 );
 
@@ -3722,11 +3723,12 @@ CREATE TABLE public.web_providers (
     last_test_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    use_proxy boolean DEFAULT false NOT NULL,
     config_json jsonb,
+    proxy_mode text DEFAULT 'system'::text NOT NULL,
     CONSTRAINT web_providers_api_key_check CHECK (((api_key IS NULL) OR (length(TRIM(BOTH FROM api_key)) > 0))),
     CONSTRAINT web_providers_config_json_check CHECK (((config_json IS NULL) OR (jsonb_typeof(config_json) = 'object'::text))),
-    CONSTRAINT web_providers_kind_check CHECK ((length(TRIM(BOTH FROM kind)) > 0))
+    CONSTRAINT web_providers_kind_check CHECK ((length(TRIM(BOTH FROM kind)) > 0)),
+    CONSTRAINT web_providers_proxy_mode_check CHECK ((length(btrim(proxy_mode)) > 0))
 );
 
 

@@ -818,7 +818,7 @@ async function copyProvider(): Promise<void> {
             options: reauthorizationTarget.vendor_options ?? {},
             credentials: {},
           }}
-          useProxy={reauthorizationTarget.use_proxy}
+          proxyMode={reauthorizationTarget.proxy_mode}
           mode="reconnect"
           disabled={reauthorizationBinding}
           onStateChange={authorizationChanged} />

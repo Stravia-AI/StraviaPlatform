@@ -389,6 +389,8 @@ fn create_router_inner(
         .route("/updates/check", post(check_updates))
         .route("/updates/channel", put(set_update_channel))
         .route("/updates/skipped-version", put(set_skipped_update_version))
+        .route("/settings/outbound-proxy/system", get(get_system_proxy))
+        .route("/settings/outbound-proxy/probe", post(probe_outbound_proxy))
         .route("/settings/{key}", get(get_setting).put(set_setting))
         .route("/status", get(get_status))
         .layer(Extension(oauth_callbacks));

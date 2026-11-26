@@ -192,7 +192,7 @@ mod tests {
                     value: "local-fixture-key".into(),
                 },
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await?;
         let installed = gw.vendor_plugins.store.list().await?;

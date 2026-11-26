@@ -29,7 +29,7 @@ async fn local_search_binding_survives_rename_and_cannot_use_a_public_name_colli
             adapter_credentials: r#"{"apiKey":"fixture-key"}"#.into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Provider");

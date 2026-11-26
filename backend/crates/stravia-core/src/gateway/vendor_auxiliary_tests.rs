@@ -391,7 +391,7 @@ async fn create_vendor_provider(
             },
             credential,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
 }
@@ -472,7 +472,7 @@ async fn start_devin_session(
                 protocol: Some("devin-connect".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Auto,
@@ -510,7 +510,7 @@ async fn sign_in_devin_manually(
                 protocol: Some("devin-connect".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -563,7 +563,7 @@ fn devin_oauth_provider(name: &str) -> CreateProvider {
         },
         credential: ProviderCredentialInput::None,
         vendor_options: Default::default(),
-        use_proxy: false,
+        proxy_mode: "none".into(),
     }
 }
 
@@ -596,7 +596,7 @@ async fn synthetic_oauth_provider(
                 protocol: Some(protocol.into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -652,7 +652,7 @@ async fn synthetic_oauth_provider(
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -1128,7 +1128,7 @@ async fn codex_unsaved_connection_authorizes_and_checks_credentials() -> anyhow:
                 protocol: None,
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -1166,7 +1166,7 @@ async fn codex_unsaved_connection_authorizes_and_checks_credentials() -> anyhow:
                 options: BTreeMap::new(),
                 credentials: BTreeMap::new(),
             }),
-            use_proxy: Some(false),
+            proxy_mode: Some("none".into()),
             authorization_id: Some(session.session_id),
         },
     ))
@@ -1289,7 +1289,7 @@ async fn codex_edited_draft_checks_saved_credentials_without_updating_provider()
                 options: BTreeMap::new(),
                 credentials: BTreeMap::new(),
             }),
-            use_proxy: Some(false),
+            proxy_mode: Some("none".into()),
             authorization_id: None,
         },
     ))
@@ -2314,7 +2314,7 @@ async fn gateway_background_discovery_and_allowance_keep_distinct_phases_and_sto
                 protocol: Some("fixture-management".into()),
                 options: BTreeMap::from([("workspace".into(), json!("schedule-workspace"))]),
                 credentials: BTreeMap::new(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -2363,7 +2363,7 @@ async fn gateway_background_discovery_and_allowance_keep_distinct_phases_and_sto
                 vendor_options: BTreeMap::from([("workspace".into(), json!("schedule-workspace"))])
                     .into_iter()
                     .collect(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -2859,7 +2859,7 @@ async fn devin_manual_input_without_a_code_is_rejected_before_any_exchange() -> 
                 protocol: Some("devin-connect".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -3158,7 +3158,7 @@ async fn codex_refresh_token_login_creates_and_binds_provider() -> anyhow::Resul
                 protocol: Some("open-responses".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             " rt-codex-1 ".into(),
         )
@@ -3181,7 +3181,7 @@ async fn codex_refresh_token_login_creates_and_binds_provider() -> anyhow::Resul
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -3206,7 +3206,7 @@ async fn codex_refresh_token_login_creates_and_binds_provider() -> anyhow::Resul
                 protocol: Some("open-responses".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-codex-2".into(),
         )
@@ -3336,7 +3336,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 protocol: Some("anthropic-messages".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-claude".into(),
         )
@@ -3357,7 +3357,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -3387,7 +3387,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 protocol: Some("google-gemini".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-antigravity".into(),
         )
@@ -3408,7 +3408,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -3434,7 +3434,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 protocol: Some("open-responses".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-grok".into(),
         )
@@ -3455,7 +3455,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -3479,7 +3479,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 protocol: Some("devin-connect".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-devin".into(),
         )
@@ -3500,7 +3500,7 @@ async fn claudecode_and_antigravity_and_grok_and_devin_support_refresh_token_log
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await?;
@@ -3544,7 +3544,7 @@ async fn refresh_token_login_rejects_kiro_and_invalid_tokens_without_leaking_ses
                 protocol: Some("open-responses".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "   ".into(),
         )
@@ -3567,7 +3567,7 @@ async fn refresh_token_login_rejects_kiro_and_invalid_tokens_without_leaking_ses
                 protocol: Some("open-responses".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "bad\ntoken".into(),
         )
@@ -3590,7 +3590,7 @@ async fn refresh_token_login_rejects_kiro_and_invalid_tokens_without_leaking_ses
                 protocol: Some("kiro-generate-assistant-response-oauth".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-kiro".into(),
         )
@@ -3613,7 +3613,7 @@ async fn refresh_token_login_rejects_kiro_and_invalid_tokens_without_leaking_ses
                 protocol: Some("open-responses".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             "rt-revoked".into(),
         )

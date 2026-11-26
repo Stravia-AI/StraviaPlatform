@@ -210,11 +210,12 @@ def test_vendor_transport_through_forward_proxy(
     settings = f"{admin_env['admin']}/api/v1/settings/outbound_proxy"
     status, body = http_request("GET", settings, headers=admin_env["auth"])
     assert status == 200, body
-    original = body["data"] or json.dumps({"url": "", "bypass": "", "force_http1": False})
+    original = body["data"] or json.dumps({"proxies": []})
     with _origin() as (origin, received), _forward_proxy(proxy_scheme, urlsplit(origin).port) as (proxy, forwarded, errors):
+        provider_id: str | None = None
         try:
             status, body = http_request("PUT", settings, headers=admin_env["auth"], payload={
-                "value": json.dumps({"url": proxy, "bypass": "", "force_http1": True}),
+                "value": json.dumps({"proxies": [{"id": "e2e-forward", "name": "E2E Forward", "url": proxy}]}),
             })
             assert status == 200 and not body.get("error"), body
             model = f"proxy-forward-{proxy_scheme}-{transport}"
@@ -222,11 +223,12 @@ def test_vendor_transport_through_forward_proxy(
                 manual_session, vendor="fixture.manual-entrypoints", name=model,
                 model_id=model, base_url=origin, secret="local-proxy-origin-key",
             )
+            provider_id = connection["provider_id"]
             options = {"mode": "base"}
             if transport == "websocket":
                 options = {"mode": "websocket", "auxUrl": origin.replace("http://", "ws://", 1) + "/socket"}
-            status, body = manual_session.request("PUT", f"/api/v1/providers/{connection['provider_id']}", {
-                "use_proxy": True, "vendor_options": options,
+            status, body = manual_session.request("PUT", f"/api/v1/providers/{provider_id}", {
+                "proxy_mode": "e2e-forward", "vendor_options": options,
             })
             assert status == 200, body
             status, body = manual_session.request("POST", "/api/v1/api-keys", {
@@ -249,5 +251,7 @@ def test_vendor_transport_through_forward_proxy(
             if proxy_scheme == "http":
                 assert forwarded[0] == {"method": request["method"], "target": origin + request["path"]}
         finally:
+            if provider_id:
+                manual_session.request("PUT", f"/api/v1/providers/{provider_id}", {"proxy_mode": "none"})
             status, body = http_request("PUT", settings, headers=admin_env["auth"], payload={"value": original})
             assert status == 200 and not body.get("error"), body

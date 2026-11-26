@@ -890,7 +890,7 @@ async fn create_test_provider_with_model(
                 value: "test-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("test Provider");
@@ -1335,7 +1335,7 @@ async fn configure_route_with_protocol(
                     value: "test-key".into(),
                 },
                 vendor_options,
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("create provider");

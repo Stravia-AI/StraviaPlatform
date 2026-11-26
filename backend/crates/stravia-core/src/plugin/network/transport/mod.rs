@@ -48,7 +48,7 @@ use rama_http_types::{
 use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::outbound_proxy::OutboundProxySettings;
+use crate::outbound_proxy::ResolvedOutboundProxy;
 use pool::{AlpnPreference, ConnectOptions, Pool, Sender};
 
 pub(crate) use connector::{Resolver, SystemResolver};
@@ -84,7 +84,7 @@ pub(crate) struct Route {
     pub tls: Arc<ClientConfig>,
     pub tls_session_policy: super::shape::SessionPolicy,
     pub proxy_tls: Arc<ClientConfig>,
-    pub proxy: OutboundProxySettings,
+    pub proxy: ResolvedOutboundProxy,
     pub resolver: Arc<dyn Resolver>,
     pub version: HttpVersionPref,
     pub h2: H2Settings,
@@ -400,6 +400,10 @@ impl VendorTransport {
         let mut uri =
             url::Url::parse(&plan.uri).map_err(|e| TransportError::Protocol(e.to_string()))?;
         let proxy = route::select_proxy(&route.proxy, &uri)?;
+        let forward_proxy_url = match &proxy {
+            connector::Route::Proxy(p) => Some(p.redacted_url()),
+            connector::Route::Direct => None,
+        };
         match uri.scheme() {
             "ws" => uri
                 .set_scheme("http")
@@ -419,10 +423,10 @@ impl VendorTransport {
             .port_or_known_default()
             .ok_or_else(|| TransportError::Protocol("URL has no port".into()))?;
         plan.uri = uri.to_string();
-        if route.proxy.force_http1 && matches!(route.version, HttpVersionPref::Http2) {
+        if route.proxy.force_http1() && matches!(route.version, HttpVersionPref::Http2) {
             return Err(TransportError::Proxy("proxy policy requires HTTP/1".into()));
         }
-        let alpn = match (route.proxy.force_http1, route.version) {
+        let alpn = match (route.proxy.force_http1(), route.version) {
             (true, _) | (_, HttpVersionPref::Http1) => AlpnPreference::Http1Only,
             (_, HttpVersionPref::Auto) => AlpnPreference::Http2ThenHttp1,
             (_, HttpVersionPref::Http2) => AlpnPreference::Http2Only,
@@ -487,16 +491,11 @@ impl VendorTransport {
         if connection.forward_proxy {
             // Rama's HTTP/1 encoder uses this extension to select absolute-form.
             // Credentials are carried only in the proxy authorization header.
-            let mut address = url::Url::parse(&route.proxy.url)
-                .map_err(|_| TransportError::Proxy("invalid proxy URL".into()))?;
-            address
-                .set_password(None)
-                .map_err(|_| TransportError::Proxy("invalid proxy URL".into()))?;
-            address
-                .set_username("")
-                .map_err(|_| TransportError::Proxy("invalid proxy URL".into()))?;
+            let raw_proxy = forward_proxy_url
+                .as_deref()
+                .ok_or_else(|| TransportError::Proxy("missing forward proxy URL".into()))?;
             let proxy =
-                rama_net::address::ProxyAddress::try_from(address.as_str().trim_end_matches('/'))
+                rama_net::address::ProxyAddress::try_from(raw_proxy.trim_end_matches('/'))
                     .map_err(|_| TransportError::Proxy("invalid proxy address".into()))?;
             request
                 .extensions()

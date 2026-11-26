@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 #[tokio::test]
 async fn antigravity_two_transport_handshakes_preserve_disabled_resumption() {
     use super::{H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
-    use crate::{outbound_proxy::OutboundProxySettings, plugin::network::shape::ShapeRegistry};
+    use crate::plugin::network::shape::ShapeRegistry;
     use bytes::Bytes;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::{
@@ -31,7 +31,7 @@ async fn antigravity_two_transport_handshakes_preserve_disabled_resumption() {
             tls: shape.tls_for("direct", false),
             tls_session_policy: shape.session_policy(false),
             proxy_tls: registry.proxy_tls(),
-            proxy: OutboundProxySettings::default(),
+            proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
             resolver: Arc::new(SystemResolver),
             version: HttpVersionPref::Http1,
             h2: H2Settings::default(),
@@ -114,7 +114,6 @@ async fn antigravity_two_transport_handshakes_preserve_disabled_resumption() {
 #[tokio::test]
 async fn forced_http1_filters_shape_alpn_in_actual_clienthello() {
     use super::{H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
-    use crate::outbound_proxy::OutboundProxySettings;
     use bytes::Bytes;
 
     timeout(Duration::from_secs(5), async {
@@ -147,7 +146,7 @@ async fn forced_http1_filters_shape_alpn_in_actual_clienthello() {
                 tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
                 tls: tls.clone(),
                 proxy_tls: tls,
-                proxy: OutboundProxySettings::default(),
+                proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
                 version: HttpVersionPref::Http1,
                 h2: H2Settings::default(),
                 omit_h2_content_length: false,

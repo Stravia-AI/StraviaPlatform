@@ -178,7 +178,7 @@ async fn codex_native_compaction_preserves_errors_and_account_identity() {
             })
             .to_string(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .unwrap();

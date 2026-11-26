@@ -24,13 +24,13 @@ import FormSection from '#lib/components/form-section.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
 import ProviderConnectionStatus from '#lib/components/provider-connection-status.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
+import ProxySelect from '#lib/components/proxy-select.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
 import SettingRow from '#lib/components/setting-row.svelte'
-import { Switch } from '#lib/components/ui/switch/index.js'
 
 interface Props {
   provider: Provider
@@ -49,7 +49,7 @@ let testGeneration = 0
 let oauthAuthorization = $state<{
   cancel: () => Promise<void>
   consume: () => void
-  updateProxy: (useProxy: boolean) => Promise<void>
+  updateProxy: (proxyMode: string) => Promise<void>
 }>()
 
 const providerDescriptorsQuery = createQuery(() => ({
@@ -70,7 +70,7 @@ function updateProvider(submission: ProviderConnectionSubmission): Promise<Provi
   const input: UpdateProvider = {
     name: submission.name,
     base_url: submission.baseUrl,
-    use_proxy: submission.useProxy,
+    proxy_mode: submission.proxyMode,
     vendor_options: submission.options,
     ...(Object.keys(submission.credentials).length > 0 ? { adapter_credentials: submission.credentials } : {}),
   }
@@ -83,7 +83,7 @@ const draft = new ProviderConnectionDraft({
     name: initialProvider.name,
     baseUrl: initialProvider.base_url,
     protocol: initialProvider.protocol,
-    useProxy: initialProvider.use_proxy,
+    proxyMode: initialProvider.proxy_mode,
     values: { ...(initialProvider.vendor_options ?? {}) },
   },
 
@@ -93,7 +93,7 @@ const draft = new ProviderConnectionDraft({
   oauth: {
     cancel: () => oauthAuthorization?.cancel() ?? Promise.resolve(),
     consume: () => oauthAuthorization?.consume(),
-    updateProxy: (useProxy: boolean) => oauthAuthorization?.updateProxy(useProxy) ?? Promise.resolve(),
+    updateProxy: (proxyMode: string) => oauthAuthorization?.updateProxy(proxyMode) ?? Promise.resolve(),
   },
   hooks: {
     onSaved: async (saved) => {
@@ -194,7 +194,7 @@ function revert(): void {
       name: provider.name,
       baseUrl: provider.base_url,
       protocol: provider.protocol,
-      useProxy: provider.use_proxy,
+      proxyMode: provider.proxy_mode,
       values: { ...(provider.vendor_options ?? {}) },
     })
     .then(() => baseline.reset())
@@ -216,10 +216,10 @@ function configurationChanged(): void {
   draft.configurationChanged()
 }
 
-function useProxyChanged(checked: boolean): void {
+function proxyModeChanged(next: string): void {
   invalidateConnectionCheck()
-  draft.fields.useProxy = checked
-  draft.useProxyChanged()
+  draft.fields.proxyMode = next
+  draft.proxyModeChanged()
 }
 
 function oauthStateChanged(sessionId: string | undefined, ready: boolean): void {
@@ -340,7 +340,7 @@ async function testConnection(): Promise<void> {
             flow={channel.auth!.flow}
             supportsRefreshToken={Boolean(channel.auth?.supports_refresh_token)}
             configuration={draft.oauthConfiguration}
-            useProxy={draft.fields.useProxy}
+            proxyMode={draft.fields.proxyMode}
             mode="reconnect"
             disabled={busy}
             onStateChange={oauthStateChanged} />
@@ -348,17 +348,21 @@ async function testConnection(): Promise<void> {
       </FormSection>
 
       <FormSection title={m.provider_connection_view_section_network()}>
-        <!-- 代理开关属于连接草稿：随「保存连接」一起提交，不即时生效。 -->
+        <!-- 代理选择属于连接草稿：随「保存连接」一起提交，不即时生效。 -->
         <SettingRow
-          title={m.common_use_proxy()}
-          labelFor="provider-use-proxy"
-          description={m.common_send_requests_service_proxy_configured_settings()}
-          layout="inline">
-          <Switch
-            id="provider-use-proxy"
-            checked={draft.fields.useProxy}
-            disabled={busy}
-            onCheckedChange={useProxyChanged} />
+          title={m.common_proxy()}
+          labelFor="provider-proxy-mode"
+          description={m.common_proxy_selection_description()}
+          controlSize="setting">
+          {#snippet children({ titleId, descriptionId })}
+            <ProxySelect
+              id="provider-proxy-mode"
+              value={draft.fields.proxyMode}
+              disabled={busy}
+              ariaLabelledby={titleId}
+              ariaDescribedby={descriptionId}
+              onchange={proxyModeChanged} />
+          {/snippet}
         </SettingRow>
       </FormSection>
 

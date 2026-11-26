@@ -622,6 +622,7 @@ impl Gateway {
             Arc::clone(&storage),
             config.product_update_download_supported,
             config.update_source_url.clone(),
+            config.system_proxy_source,
         )?);
         let vendor_plugins = crate::plugin::manager::VendorPlugins::open(
             storage.vendor_plugins().clone(),
@@ -646,12 +647,14 @@ impl Gateway {
             crate::plugin::marketplace::client::MarketClient::new(
                 Arc::clone(&storage),
                 config.update_source_url.clone(),
+                config.system_proxy_source,
             )
         };
         #[cfg(not(feature = "test-support"))]
         let marketplace_client = crate::plugin::marketplace::client::MarketClient::new(
             Arc::clone(&storage),
             config.update_source_url.clone(),
+            config.system_proxy_source,
         );
         let marketplace = Arc::new(crate::plugin::marketplace::PluginMarketplace::new(
             Arc::new(storage.vendor_plugins().clone()),
@@ -1200,72 +1203,15 @@ impl Gateway {
 
     pub(crate) async fn vendor_proxy_snapshot(
         &self,
-        use_proxy: bool,
-    ) -> anyhow::Result<EffectiveVendorProxy> {
-        if !use_proxy {
-            return Ok(EffectiveVendorProxy::Direct);
-        }
-        let config =
-            crate::outbound_proxy::OutboundProxySettings::load(self.storage.settings()).await?;
-        config.validate()?;
-        anyhow::ensure!(!config.url.trim().is_empty(), "outbound proxy URL is empty");
-        Ok(EffectiveVendorProxy::Explicit {
-            proxy_url: config.url,
-            bypass: config.bypass,
-            force_http1: config.force_http1,
-        })
-    }
-}
-
-pub(crate) enum EffectiveVendorProxy {
-    Direct,
-    Explicit {
-        proxy_url: String,
-        bypass: String,
-        force_http1: bool,
-    },
-}
-
-impl EffectiveVendorProxy {
-    pub(crate) fn web_access_mode(&self) -> stravia_web_access::OutboundProxyMode {
-        match self {
-            Self::Direct => stravia_web_access::OutboundProxyMode::Direct,
-            Self::Explicit {
-                proxy_url, bypass, ..
-            } => stravia_web_access::OutboundProxyMode::Explicit {
-                url: proxy_url.clone(),
-                bypass: bypass.clone(),
-            },
-        }
-    }
-
-    pub(crate) fn into_settings(self) -> crate::outbound_proxy::OutboundProxySettings {
-        match self {
-            Self::Direct => crate::outbound_proxy::OutboundProxySettings::default(),
-            Self::Explicit {
-                proxy_url,
-                bypass,
-                force_http1,
-            } => crate::outbound_proxy::OutboundProxySettings {
-                url: proxy_url,
-                bypass,
-                force_http1,
-            },
-        }
-    }
-
-    pub(crate) fn reuse_identity(&self) -> anyhow::Result<String> {
-        let encoded = match self {
-            Self::Direct => serde_json::to_vec(&"direct")?,
-            Self::Explicit {
-                proxy_url,
-                bypass,
-                force_http1,
-            } => serde_json::to_vec(&("explicit", proxy_url, bypass, force_http1))?,
-        };
-        Ok(stravia_runtime_contract::protocol::ir::canonical::hash_hex(
-            &stravia_runtime_contract::protocol::ir::canonical::hash_bytes(&encoded),
-        ))
+        proxy_mode: &str,
+    ) -> anyhow::Result<crate::outbound_proxy::ResolvedOutboundProxy> {
+        let selection = crate::outbound_proxy::ProxySelection::parse(proxy_mode)?;
+        crate::outbound_proxy::ResolvedOutboundProxy::resolve_from_store(
+            &selection,
+            self.storage.settings(),
+            self.config.system_proxy_source,
+        )
+        .await
     }
 }
 
@@ -1375,7 +1321,7 @@ mod tests {
 
     fn vendor_request(
         gateway: &Gateway,
-        proxy: EffectiveVendorProxy,
+        proxy: crate::outbound_proxy::ResolvedOutboundProxy,
         http1: bool,
         url: &str,
     ) -> anyhow::Result<Arc<dyn stravia_vendor_runtime::HostHttpResponse>> {
@@ -1394,7 +1340,7 @@ mod tests {
                 shapes: Arc::clone(&gateway.vendor_shapes),
                 resolver: Arc::clone(&gateway.vendor_resolver),
             },
-            proxy.into_settings(),
+            proxy,
             NetworkPolicy::compile([NetworkOrigin::Exact(origin)])?,
             operation,
             stravia_runtime_contract::CancellationToken::new(),
@@ -1413,7 +1359,7 @@ mod tests {
 
     async fn vendor_text(
         gateway: &Gateway,
-        proxy: EffectiveVendorProxy,
+        proxy: crate::outbound_proxy::ResolvedOutboundProxy,
         http1: bool,
         url: &str,
     ) -> anyhow::Result<String> {
@@ -1510,42 +1456,45 @@ mod tests {
         )
         .await?;
         let result = async {
+            use crate::outbound_proxy::{
+                OutboundProxyEntry, OutboundProxySettings, ResolvedOutboundProxy,
+            };
             for http1 in [false, true] {
                 assert_eq!(
-                    vendor_text(&gateway, EffectiveVendorProxy::Direct, http1, &origin).await?,
+                    vendor_text(&gateway, ResolvedOutboundProxy::Direct, http1, &origin).await?,
                     "direct origin"
                 );
-                let selected = EffectiveVendorProxy::Explicit {
-                            proxy_url: explicit.clone(),
-                            bypass: String::new(),
-                            force_http1: http1,
-                        };
+                let selected = ResolvedOutboundProxy::Explicit {
+                    url: explicit.clone(),
+                    force_http1: http1,
+                };
                 assert_eq!(
                     vendor_text(&gateway, selected, http1, &origin).await?,
                     "explicit proxy"
                 );
-                let bypassed = EffectiveVendorProxy::Explicit {
-                    proxy_url: explicit.clone(), bypass: " NONMATCH.INVALID 127.0.0.1\tOTHER.INVALID; ".into(), force_http1: http1,
-                };
-                assert_eq!(vendor_text(&gateway, bypassed, http1, &origin).await?, "direct origin");
-                let switched = EffectiveVendorProxy::Explicit {
-                    proxy_url: explicit.clone(), bypass: String::new(), force_http1: http1,
-                };
-                assert_eq!(vendor_text(&gateway, switched, http1, &origin).await?, "explicit proxy");
+                let system = ResolvedOutboundProxy::System(crate::config::SystemProxySource::Environment);
+                assert_eq!(
+                    vendor_text(&gateway, system, http1, &origin).await?,
+                    "ambient proxy"
+                );
             }
             let admin = gateway.admin();
-            let saved = serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
-                url: explicit.clone(), bypass: "127.0.0.1".into(), force_http1: false,
+            let saved = serde_json::to_string(&OutboundProxySettings {
+                proxies: vec![OutboundProxyEntry {
+                    id: "p1".into(),
+                    name: "Explicit".into(),
+                    url: explicit.clone(),
+                }],
             })?;
             admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, &saved).await?;
-            let invalid = serde_json::json!({"url":"ftp://user:secret@127.0.0.1:1","bypass":"","force_http1":true}).to_string();
+            let invalid = serde_json::json!({"proxies":[{"id":"bad","name":"Bad","url":"ftp://user:secret@127.0.0.1:1"}]}).to_string();
             let error = admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, &invalid).await.unwrap_err();
             assert!(!error.to_string().contains("secret"));
             assert_eq!(admin.get_setting(crate::outbound_proxy::SETTINGS_KEY).await?, Some(saved));
-            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot(true).await?, false, &origin).await?, "direct origin");
-            admin.set_setting(crate::outbound_proxy::SETTINGS_KEY, r#"{"url":"","bypass":"","force_http1":false}"#).await?;
-            assert!(gateway.vendor_proxy_snapshot(true).await.is_err());
-            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot(false).await?, false, &origin).await?, "direct origin");
+            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot("p1").await?, false, &origin).await?, "explicit proxy");
+            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot("system").await?, false, &origin).await?, "ambient proxy");
+            assert_eq!(vendor_text(&gateway, gateway.vendor_proxy_snapshot("none").await?, false, &origin).await?, "direct origin");
+            assert!(gateway.vendor_proxy_snapshot("missing").await.is_err());
             anyhow::Ok(())
         }
         .await;
@@ -1592,13 +1541,12 @@ mod tests {
                     let origin = format!("http://{}", listener.local_addr()?);
                     let server = tokio::spawn(async move { axum::serve(listener, app).await });
                     let proxy = if proxied {
-                        EffectiveVendorProxy::Explicit {
-                            proxy_url: origin.clone(),
-                            bypass: String::new(),
+                        crate::outbound_proxy::ResolvedOutboundProxy::Explicit {
+                            url: origin.clone(),
                             force_http1: http1,
                         }
                     } else {
-                        EffectiveVendorProxy::Direct
+                        crate::outbound_proxy::ResolvedOutboundProxy::Direct
                     };
                     let request_url = if proxied {
                         "http://127.0.0.1:9/stream"
@@ -1707,8 +1655,11 @@ mod tests {
                 vec![(
                     crate::outbound_proxy::SETTINGS_KEY.into(),
                     serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
-                        url: proxy_url,
-                        ..Default::default()
+                        proxies: vec![crate::outbound_proxy::OutboundProxyEntry {
+                            id: "p1".into(),
+                            name: "Reuse Proxy".into(),
+                            url: proxy_url,
+                        }],
                     })?,
                 )],
             )),
@@ -1716,7 +1667,7 @@ mod tests {
         .await?;
         let result = async {
             for _ in 0..2 {
-                let proxy = gateway.vendor_proxy_snapshot(true).await?;
+                let proxy = gateway.vendor_proxy_snapshot("p1").await?;
                 let body = vendor_text(&gateway, proxy, false, "http://127.0.0.1:9/vendor").await?;
                 assert_eq!(body, "proxy response");
             }

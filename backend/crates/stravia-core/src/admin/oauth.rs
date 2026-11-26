@@ -280,7 +280,7 @@ impl AdminService {
         }
         provider
             .operation_metadata
-            .insert("use_proxy".into(), Value::Bool(candidate.use_proxy));
+            .insert("proxy_mode".into(), Value::String(candidate.proxy_mode.clone()));
         let scope = self.gw.create_vendor_session_scope(
             &candidate.vendor_id,
             candidate.provider_id.as_deref(),
@@ -350,7 +350,7 @@ impl AdminService {
             self.provider_auth_candidate_snapshot(&candidate).await?;
         provider
             .operation_metadata
-            .insert("use_proxy".into(), Value::Bool(candidate.use_proxy));
+            .insert("proxy_mode".into(), Value::String(candidate.proxy_mode.clone()));
         let scope = self.gw.create_vendor_session_scope(
             &candidate.vendor_id,
             candidate.provider_id.as_deref(),
@@ -409,7 +409,7 @@ impl AdminService {
         );
         context
             .metadata
-            .insert("use_proxy".into(), Value::Bool(session.use_proxy));
+            .insert("proxy_mode".into(), Value::String(session.proxy_mode.clone()));
         self.gw
             .execute_vendor_session(
                 &runtime.scope,
@@ -572,8 +572,9 @@ impl AdminService {
     pub async fn update_oauth_session_proxy(
         &self,
         session_id: &str,
-        use_proxy: bool,
+        proxy_mode: &str,
     ) -> anyhow::Result<AuthSessionStatusData> {
+        let selection = crate::outbound_proxy::ProxySelection::parse(proxy_mode)?;
         let mut sessions = self.gw.auth_sessions.write().await;
         let session = sessions
             .get_mut(session_id)
@@ -593,7 +594,7 @@ impl AdminService {
                 serde_json::json!({}),
             ));
         }
-        session.use_proxy = use_proxy;
+        session.proxy_mode = selection.as_str().to_owned();
         session.updated_at = now_rfc3339();
         Ok(match session.status.as_str() {
             "exchanging" => build_auth_session_exchanging_data(session),

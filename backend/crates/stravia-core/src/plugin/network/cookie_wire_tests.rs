@@ -147,7 +147,7 @@ fn provider(name: &str) -> CreateProviderRecord {
         adapter_credentials: "{}".into(),
         vendor_options: "{}".into(),
         auth_mode: "apikey".into(),
-        use_proxy: false,
+        proxy_mode: "none".into(),
     }
 }
 
@@ -220,7 +220,7 @@ async fn fixture() -> anyhow::Result<Fixture> {
             shapes: Arc::new(ShapeRegistry::builtin_with_verifier(verifier)?),
             resolver: Arc::new(LocalResolver(address)),
         },
-        OutboundProxySettings::default(),
+        crate::outbound_proxy::ResolvedOutboundProxy::Direct,
         NetworkPolicy::compile(["https", "wss"].into_iter().flat_map(|scheme| {
             ["cookie.test", "other.cookie.test"].map(move |host| {
                 super::super::permissions::NetworkOrigin::Exact(format!("{scheme}://{host}:{port}"))

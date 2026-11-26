@@ -1179,11 +1179,7 @@ fn provider_configuration_digest(
         provider.adapter_credentials.as_str(),
         provider.vendor_options.as_str(),
         provider.auth_mode.as_str(),
-        if provider.use_proxy {
-            "proxy"
-        } else {
-            "direct"
-        },
+        provider.proxy_mode.as_str(),
         provider.updated_at.as_str(),
     ] {
         digest.update(value.as_bytes());
@@ -1851,7 +1847,7 @@ mod tests {
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             cost_basis: crate::pricing::CostBasis::Usage,
             last_test_success: None,
             last_test_at: None,

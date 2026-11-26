@@ -1678,7 +1678,7 @@ pub(crate) fn same_discovery_provider(
         && left.adapter_credentials == right.adapter_credentials
         && left.vendor_options == right.vendor_options
         && left.auth_mode == right.auth_mode
-        && left.use_proxy == right.use_proxy
+        && left.proxy_mode == right.proxy_mode
         && left.is_enabled == right.is_enabled
         && left.updated_at == right.updated_at
 }

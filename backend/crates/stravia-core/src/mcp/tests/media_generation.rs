@@ -157,7 +157,7 @@ async fn generation_app() -> GenerationApp {
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .unwrap();

@@ -9,7 +9,7 @@ export interface Provider {
   vendor?: string | null
   protocol: string
   base_url: string
-  use_proxy: boolean
+  proxy_mode: string
   oauth_status?: ProviderOAuthStatus
   oauth_expires_at?: string | null
   oauth_last_error?: string | null
@@ -94,7 +94,7 @@ export type ProviderConnectionCheckResult =
  */
 export interface ProviderConnectionCheckInput {
   configuration?: ProviderConfigurationPreviewInput
-  use_proxy?: boolean
+  proxy_mode?: string
   authorization_id?: string
 }
 
@@ -326,7 +326,7 @@ export interface CreateProvider {
     | { type: 'fields'; values: Record<string, unknown> }
     | { type: 'none' }
   vendor_options?: Record<string, unknown>
-  use_proxy?: boolean
+  proxy_mode?: string
 }
 
 export type VendorCapability =
@@ -470,7 +470,7 @@ export interface ProviderConfigurationPreview {
 export interface UpdateProvider {
   name?: string
   base_url?: string
-  use_proxy?: boolean
+  proxy_mode?: string
   /** Submitted secret keys replace those values; omitted keys keep their saved values. */
   adapter_credentials?: Record<string, unknown>
   /** Replaces all non-secret Vendor configuration values when present. */

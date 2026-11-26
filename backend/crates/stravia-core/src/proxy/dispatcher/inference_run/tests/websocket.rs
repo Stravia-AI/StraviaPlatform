@@ -196,7 +196,7 @@ async fn reusable_websocket_does_not_cross_effective_proxy_changes() {
         .update_provider(
             &provider_id,
             crate::db::models::UpdateProvider {
-                use_proxy: Some(true),
+                proxy_mode: Some("system".into()),
                 ..Default::default()
             },
         )

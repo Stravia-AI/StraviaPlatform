@@ -13,7 +13,8 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::AdminService;
-use crate::outbound_proxy::{OutboundProxySettings, update_uses_proxy};
+use crate::config::SystemProxySource;
+use crate::outbound_proxy::{ResolvedOutboundProxy, update_proxy_mode};
 use crate::storage::DynStorage;
 
 const UPDATE_STATE_KEY: &str = "product_update_state";
@@ -350,15 +351,21 @@ impl UpdaterBaseUrl {
 struct UpdaterReleaseSource {
     storage: DynStorage,
     base_url: Option<String>,
+    system_proxy_source: SystemProxySource,
     #[cfg(test)]
     allow_http: bool,
 }
 
 impl UpdaterReleaseSource {
-    fn new(storage: DynStorage, base_url: Option<String>) -> Self {
+    fn new(
+        storage: DynStorage,
+        base_url: Option<String>,
+        system_proxy_source: SystemProxySource,
+    ) -> Self {
         Self {
             storage,
             base_url,
+            system_proxy_source,
             #[cfg(test)]
             allow_http: false,
         }
@@ -380,29 +387,26 @@ impl UpdaterReleaseSource {
 
     async fn client_with_timeout(&self, timeout: Duration) -> Result<reqwest::Client, SourceError> {
         let settings = self.storage.settings();
-        let use_proxy = update_uses_proxy(settings)
+        let selection = update_proxy_mode(settings)
             .await
             .map_err(|error| SourceError::new("UPDATE_SETTINGS_UNAVAILABLE", error.to_string()))?;
-
-        let mut builder = reqwest::Client::builder()
-            .timeout(timeout)
-            .user_agent(format!("Stravia/{}", env!("CARGO_PKG_VERSION")));
-        if use_proxy {
-            let config = OutboundProxySettings::load(settings)
-                .await
-                .map_err(|error| {
-                    SourceError::new("UPDATE_SETTINGS_UNAVAILABLE", error.to_string())
-                })?;
-            let proxy = config
-                .reqwest_proxy()
-                .map_err(|error| SourceError::new("UPDATE_PROXY_INVALID", error.to_string()))?;
-            builder = builder.proxy(proxy);
-        } else {
-            builder = builder.no_proxy();
-        }
-        builder
-            .build()
-            .map_err(|error| SourceError::new("UPDATE_CLIENT_FAILED", error.to_string()))
+        let resolved = ResolvedOutboundProxy::resolve_from_store(
+            &selection,
+            settings,
+            self.system_proxy_source,
+        )
+        .await
+        .map_err(|error| SourceError::new("UPDATE_PROXY_INVALID", error.to_string()))?;
+        let configure = resolved
+            .reqwest_client_config()
+            .map_err(|error| SourceError::new("UPDATE_PROXY_INVALID", error.to_string()))?;
+        configure(
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .user_agent(format!("Stravia/{}", env!("CARGO_PKG_VERSION"))),
+        )
+        .build()
+        .map_err(|error| SourceError::new("UPDATE_CLIENT_FAILED", error.to_string()))
     }
 
     async fn get_limited(
@@ -511,12 +515,17 @@ impl UpdateService {
         storage: DynStorage,
         download_supported: bool,
         base_url: Option<String>,
+        system_proxy_source: SystemProxySource,
     ) -> anyhow::Result<Self> {
         let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
             .context("CARGO_PKG_VERSION must be valid SemVer")?;
         Ok(Self::new(
             Arc::clone(&storage),
-            Arc::new(UpdaterReleaseSource::new(storage, base_url)),
+            Arc::new(UpdaterReleaseSource::new(
+                storage,
+                base_url,
+                system_proxy_source,
+            )),
             Arc::new(SystemClock),
             current_version,
             download_supported,
@@ -1132,6 +1141,7 @@ mod tests {
             storage,
             base_url: None,
             allow_http: true,
+            system_proxy_source: crate::config::SystemProxySource::Environment,
         };
         let client = source.client().await.unwrap();
         (source, client, format!("http://{address}"))
@@ -1175,6 +1185,7 @@ mod tests {
         let source = Arc::new(UpdaterReleaseSource::new(
             Arc::clone(&storage),
             Some("https://updates.example.com".to_string()),
+            crate::config::SystemProxySource::Environment,
         ));
         let service = UpdateService::new(
             Arc::clone(&storage),
@@ -1230,6 +1241,7 @@ mod tests {
                 Arc::new(UpdaterReleaseSource::new(
                     Arc::clone(&existing.storage),
                     base.map(str::to_string),
+                    crate::config::SystemProxySource::Environment,
                 )),
                 Arc::new(FakeClock::new("2026-09-01T00:01:00Z")),
                 Version::parse("1.0.0").unwrap(),
@@ -1250,7 +1262,13 @@ mod tests {
     #[tokio::test]
     async fn debug_builds_report_update_checks_as_disabled() {
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let service = UpdateService::updater(storage, false, None).unwrap();
+        let service = UpdateService::updater(
+            storage,
+            false,
+            None,
+            crate::config::SystemProxySource::Environment,
+        )
+        .unwrap();
 
         let status = service.check(UpdateCheckMode::Manual).await.unwrap();
         assert_eq!(status.check_status, UpdateCheckStatus::Error);
@@ -1356,6 +1374,7 @@ mod tests {
             let source = Arc::new(UpdaterReleaseSource::new(
                 Arc::clone(&storage),
                 Some(configured.to_string()),
+                crate::config::SystemProxySource::Environment,
             ));
             let service = UpdateService::new(
                 storage,
@@ -1445,7 +1464,11 @@ mod tests {
         });
 
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let mut source = UpdaterReleaseSource::new(storage, Some(base));
+        let mut source = UpdaterReleaseSource::new(
+            storage,
+            Some(base),
+            crate::config::SystemProxySource::Environment,
+        );
         source.allow_http = true;
         let releases = source.releases().await.unwrap();
 
@@ -1504,7 +1527,11 @@ mod tests {
         });
 
         let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
-        let mut source = UpdaterReleaseSource::new(storage, Some(format!("http://{address}")));
+        let mut source = UpdaterReleaseSource::new(
+            storage,
+            Some(format!("http://{address}")),
+            crate::config::SystemProxySource::Environment,
+        );
         source.allow_http = true;
         let error = source.releases().await.unwrap_err();
 
@@ -1569,15 +1596,27 @@ mod tests {
             storage: Arc::clone(&storage),
             base_url: None,
             allow_http: true,
+            system_proxy_source: crate::config::SystemProxySource::Environment,
         };
+        storage
+            .settings()
+            .set(
+                crate::outbound_proxy::UPDATE_PROXY_MODE_KEY,
+                crate::outbound_proxy::PROXY_MODE_NONE,
+            )
+            .await
+            .unwrap();
         let set_proxy_config = async |url: &str| {
             storage
                 .settings()
                 .set(
                     crate::outbound_proxy::SETTINGS_KEY,
-                    &serde_json::to_string(&OutboundProxySettings {
-                        url: url.to_string(),
-                        ..Default::default()
+                    &serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
+                        proxies: vec![crate::outbound_proxy::OutboundProxyEntry {
+                            id: "p1".into(),
+                            name: "Test".into(),
+                            url: url.to_string(),
+                        }],
                     })
                     .unwrap(),
                 )
@@ -1601,7 +1640,7 @@ mod tests {
 
         storage
             .settings()
-            .set(crate::outbound_proxy::UPDATE_USE_PROXY_KEY, "true")
+            .set(crate::outbound_proxy::UPDATE_PROXY_MODE_KEY, "p1")
             .await
             .unwrap();
         let error = source.client().await.unwrap_err();
@@ -1609,36 +1648,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_proxy_bypass_is_evaluated_on_redirects() {
-        let origin_requests = Arc::new(AtomicUsize::new(0));
-        let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin_port = origin_listener.local_addr().unwrap().port();
-        let observed_origin_requests = Arc::clone(&origin_requests);
-        let origin = Router::new().route(
-            "/done",
-            get(move || {
-                let requests = Arc::clone(&observed_origin_requests);
-                async move {
-                    requests.fetch_add(1, Ordering::SeqCst);
-                    "origin"
-                }
-            }),
-        );
-        tokio::spawn(async move {
-            axum::serve(origin_listener, origin).await.unwrap();
-        });
-
+    async fn update_proxy_routes_through_selected_proxy() {
         let proxy_requests = Arc::new(AtomicUsize::new(0));
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_url = format!("http://{}", proxy_listener.local_addr().unwrap());
-        let redirect_url = format!("http://127.0.0.1:{origin_port}/done");
         let observed_proxy_requests = Arc::clone(&proxy_requests);
         let proxy = Router::new().fallback(move || {
             let requests = Arc::clone(&observed_proxy_requests);
-            let redirect_url = redirect_url.clone();
             async move {
                 requests.fetch_add(1, Ordering::SeqCst);
-                axum::response::Redirect::temporary(&redirect_url)
+                "proxied"
             }
         });
         tokio::spawn(async move {
@@ -1650,10 +1669,12 @@ mod tests {
             .settings()
             .set(
                 crate::outbound_proxy::SETTINGS_KEY,
-                &serde_json::to_string(&OutboundProxySettings {
-                    url: proxy_url,
-                    bypass: "127.0.0.1".to_string(),
-                    force_http1: false,
+                &serde_json::to_string(&crate::outbound_proxy::OutboundProxySettings {
+                    proxies: vec![crate::outbound_proxy::OutboundProxyEntry {
+                        id: "p1".into(),
+                        name: "Local Proxy".into(),
+                        url: proxy_url,
+                    }],
                 })
                 .unwrap(),
             )
@@ -1661,27 +1682,23 @@ mod tests {
             .unwrap();
         storage
             .settings()
-            .set(crate::outbound_proxy::UPDATE_USE_PROXY_KEY, "true")
+            .set(crate::outbound_proxy::UPDATE_PROXY_MODE_KEY, "p1")
             .await
             .unwrap();
         let source = UpdaterReleaseSource {
             storage,
             base_url: None,
             allow_http: true,
+            system_proxy_source: crate::config::SystemProxySource::Environment,
         };
         let client = source.client().await.unwrap();
 
         let body = source
-            .get_limited(
-                &client,
-                &format!("http://localhost:{origin_port}/start"),
-                1024,
-            )
+            .get_limited(&client, "http://example.invalid/start", 1024)
             .await
             .unwrap();
-        assert_eq!(body, b"origin");
+        assert_eq!(body, b"proxied");
         assert_eq!(proxy_requests.load(Ordering::SeqCst), 1);
-        assert_eq!(origin_requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]

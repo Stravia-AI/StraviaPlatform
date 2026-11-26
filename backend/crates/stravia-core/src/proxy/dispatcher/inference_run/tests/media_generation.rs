@@ -320,7 +320,7 @@ async fn generation_http_fixture_with_usage(
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("local Codex Provider");

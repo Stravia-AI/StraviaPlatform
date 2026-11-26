@@ -8,7 +8,8 @@ use serde::Serialize;
 use stravia_core::Gateway;
 use stravia_core::admin::updates::UpdateChannel;
 #[cfg(any(test, not(feature = "desktop-e2e")))]
-use stravia_core::outbound_proxy::{OutboundProxySettings, update_uses_proxy};
+use stravia_core::config::SystemProxySource;
+use stravia_core::outbound_proxy::{ResolvedOutboundProxy, update_proxy_mode};
 #[cfg(any(test, not(feature = "desktop-e2e")))]
 use stravia_core::storage::SettingsStore;
 use tauri::{AppHandle, Emitter, State};
@@ -254,17 +255,12 @@ async fn download_verified_update(
         .map_err(|error| error.to_string())?
         .timeout(Duration::from_secs(300));
     let settings = gateway.storage.settings();
-    if let Some(config) = updater_proxy_settings(settings).await? {
-        // The updater retains this hook for both manifest checks and package downloads.
-        // A destination-aware Proxy applies bypass again after every redirect.
-        builder = builder.configure_client(
-            config
-                .reqwest_client_config()
-                .map_err(|error| error.to_string())?,
-        );
-    } else {
-        builder = builder.no_proxy();
-    }
+    let proxy = updater_proxy_settings(settings).await?;
+    builder = builder.configure_client(
+        proxy
+            .reqwest_client_config()
+            .map_err(|error| error.to_string())?,
+    );
 
     let updater = builder.build().map_err(|error| error.to_string())?;
     let update = updater
@@ -404,23 +400,26 @@ fn atomic_optional(value: &AtomicU64) -> Option<u64> {
 #[cfg(any(test, not(feature = "desktop-e2e")))]
 async fn updater_proxy_settings(
     settings: &dyn SettingsStore,
-) -> Result<Option<OutboundProxySettings>, String> {
-    if !update_uses_proxy(settings)
+) -> Result<ResolvedOutboundProxy, String> {
+    let selection = update_proxy_mode(settings)
         .await
-        .map_err(|error| error.to_string())?
-    {
-        return Ok(None);
-    }
-    OutboundProxySettings::load(settings)
-        .await
-        .map(Some)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    ResolvedOutboundProxy::resolve_from_store(
+        &selection,
+        settings,
+        SystemProxySource::OperatingSystem,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stravia_core::outbound_proxy::{SETTINGS_KEY, UPDATE_USE_PROXY_KEY};
+    use stravia_core::outbound_proxy::{
+        OutboundProxyEntry, OutboundProxySettings, PROXY_MODE_NONE, ResolvedOutboundProxy,
+        SETTINGS_KEY, UPDATE_PROXY_MODE_KEY,
+    };
     use stravia_core::storage::{MemoryStorage, Storage};
 
     #[tokio::test]
@@ -428,18 +427,21 @@ mod tests {
         let storage = MemoryStorage::new(vec![], vec![], vec![]);
         let settings = storage.settings();
         settings.set(SETTINGS_KEY, "invalid JSON").await.unwrap();
-        assert_eq!(updater_proxy_settings(settings).await.unwrap(), None);
-        settings.set(UPDATE_USE_PROXY_KEY, "false").await.unwrap();
-        assert_eq!(updater_proxy_settings(settings).await.unwrap(), None);
-        settings.set(UPDATE_USE_PROXY_KEY, "true").await.unwrap();
+        settings
+            .set(UPDATE_PROXY_MODE_KEY, PROXY_MODE_NONE)
+            .await
+            .unwrap();
+        assert_eq!(
+            updater_proxy_settings(settings).await.unwrap(),
+            ResolvedOutboundProxy::Direct
+        );
+        settings.set(UPDATE_PROXY_MODE_KEY, "p1").await.unwrap();
         assert!(updater_proxy_settings(settings).await.is_err());
     }
 
     #[tokio::test]
-    async fn updater_proxy_callback_bypasses_redirects_and_honors_independent_switch() {
+    async fn updater_proxy_callback_honors_selected_proxy_and_direct_mode() {
         use axum::Router;
-        use axum::extract::OriginalUri;
-        use axum::response::Redirect;
         use axum::routing::get;
         use std::sync::Arc;
 
@@ -460,11 +462,11 @@ mod tests {
 
         let proxy_hits = Arc::new(AtomicU64::new(0));
         let proxy_counter = Arc::clone(&proxy_hits);
-        let proxy = Router::new().fallback(get(move |OriginalUri(uri): OriginalUri| {
+        let proxy = Router::new().fallback(get(move || {
             let counter = Arc::clone(&proxy_counter);
             async move {
                 counter.fetch_add(1, Ordering::Relaxed);
-                Redirect::temporary(&format!("http://{origin_addr}{}", uri.path()))
+                "proxied-local-update-body"
             }
         }));
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -479,18 +481,19 @@ mod tests {
             .set(
                 SETTINGS_KEY,
                 &serde_json::to_string(&OutboundProxySettings {
-                    url: format!("http://{proxy_addr}"),
-                    bypass: "127.0.0.1".to_string(),
-                    ..OutboundProxySettings::default()
+                    proxies: vec![OutboundProxyEntry {
+                        id: "p1".into(),
+                        name: "Local Proxy".into(),
+                        url: format!("http://{proxy_addr}"),
+                    }],
                 })
                 .unwrap(),
             )
             .await
             .unwrap();
-        settings.set(UPDATE_USE_PROXY_KEY, "true").await.unwrap();
+        settings.set(UPDATE_PROXY_MODE_KEY, "p1").await.unwrap();
         let configure_client = updater_proxy_settings(settings)
             .await
-            .unwrap()
             .unwrap()
             .reqwest_client_config()
             .unwrap();
@@ -502,11 +505,16 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.url().host_str(), Some("127.0.0.1"));
-        assert_eq!(response.text().await.unwrap(), "verified-local-update-body");
+        assert_eq!(response.text().await.unwrap(), "proxied-local-update-body");
 
-        settings.set(UPDATE_USE_PROXY_KEY, "false").await.unwrap();
-        assert!(updater_proxy_settings(settings).await.unwrap().is_none());
+        settings
+            .set(UPDATE_PROXY_MODE_KEY, PROXY_MODE_NONE)
+            .await
+            .unwrap();
+        assert_eq!(
+            updater_proxy_settings(settings).await.unwrap(),
+            ResolvedOutboundProxy::Direct
+        );
         let direct_client = reqwest::Client::builder().no_proxy().build().unwrap();
         let direct_body = direct_client
             .get(format!("http://{origin_addr}/manifest.json"))
@@ -520,7 +528,7 @@ mod tests {
         origin_server.abort();
         proxy_server.abort();
         assert_eq!(proxy_hits.load(Ordering::Relaxed), 1);
-        assert_eq!(origin_hits.load(Ordering::Relaxed), 2);
+        assert_eq!(origin_hits.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

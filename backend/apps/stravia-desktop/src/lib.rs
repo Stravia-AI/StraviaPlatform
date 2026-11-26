@@ -476,6 +476,7 @@ async fn initialize_desktop(
                 Gateway::new(GatewayConfig {
                     data_dir: data_dir.clone(),
                     product_update_download_supported: true,
+                    system_proxy_source: stravia_core::config::SystemProxySource::OperatingSystem,
                     // 未覆盖时由 Core 选择内置生产更新源，避免打包与运行环境各维护一份默认值。
                     update_source_url: std::env::var("STRAVIA_UPDATER_URL").ok(),
                     // 桌面冒烟只使用本地快照，避免测试启动直接访问生产 Catalog。

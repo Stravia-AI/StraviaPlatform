@@ -30,6 +30,7 @@ import type { CreateProvider, Provider } from '#lib/types.js'
 import DraftDiscardDialog from '#lib/components/draft-discard-dialog.svelte'
 import ProviderConfigFields from '#lib/components/provider-config-fields.svelte'
 import ProviderOAuthAuthorization from '#lib/components/provider-oauth-authorization.svelte'
+import ProxySelect from '#lib/components/proxy-select.svelte'
 import SettingRow from '#lib/components/setting-row.svelte'
 import * as Alert from '#lib/components/ui/alert/index.js'
 import { Button, buttonVariants } from '#lib/components/ui/button/index.js'
@@ -41,7 +42,6 @@ import { Input } from '#lib/components/ui/input/index.js'
 import * as Select from '#lib/components/ui/select/index.js'
 import * as Sheet from '#lib/components/ui/sheet/index.js'
 import { Spinner } from '#lib/components/ui/spinner/index.js'
-import { Switch } from '#lib/components/ui/switch/index.js'
 import * as Tabs from '#lib/components/ui/tabs/index.js'
 import * as Tooltip from '#lib/components/ui/tooltip/index.js'
 
@@ -59,7 +59,7 @@ let refreshingServices = $state(false)
 let oauthAuthorization = $state<{
   cancel: () => Promise<void>
   consume: () => void
-  updateProxy: (useProxy: boolean) => Promise<void>
+  updateProxy: (proxyMode: string) => Promise<void>
 }>()
 
 const queryClient = useQueryClient()
@@ -92,7 +92,7 @@ function writeProvider(submission: ProviderConnectionSubmission): Promise<Provid
     },
     credential,
     vendor_options: submission.options,
-    use_proxy: submission.useProxy,
+    proxy_mode: submission.proxyMode,
   }
   return oauthProvider && submission.sessionId
     ? admin.providers.createOAuth(submission.sessionId, input)
@@ -109,7 +109,7 @@ const draft = new ProviderConnectionDraft({
   oauth: {
     cancel: () => oauthAuthorization?.cancel() ?? Promise.resolve(),
     consume: () => oauthAuthorization?.consume(),
-    updateProxy: (useProxy: boolean) => oauthAuthorization?.updateProxy(useProxy) ?? Promise.resolve(),
+    updateProxy: (proxyMode: string) => oauthAuthorization?.updateProxy(proxyMode) ?? Promise.resolve(),
   },
   hooks: {
     onSaved: async (savedProvider) => {
@@ -180,7 +180,7 @@ async function chooseOption(option: ProviderOption): Promise<void> {
     name,
     baseUrl: option.channel.default_base_url ?? '',
     protocol: option.channel.protocol ?? option.channel.protocols?.[0]?.value ?? '',
-    useProxy: draft.fields.useProxy,
+    proxyMode: draft.fields.proxyMode,
     values,
   }
 
@@ -452,7 +452,7 @@ function saveProvider(): void {
               flow={selectedOption.channel.auth!.flow}
               supportsRefreshToken={Boolean(selectedOption.channel.auth?.supports_refresh_token)}
               configuration={draft.oauthConfiguration}
-              useProxy={draft.fields.useProxy}
+              proxyMode={draft.fields.proxyMode}
               mode="connect"
               providerName={defaultProviderName(selectedOption)}
               disabled={draft.submitting}
@@ -462,18 +462,22 @@ function saveProvider(): void {
 
           <SettingRow
             class="mt-4"
-            title={m.common_use_proxy()}
-            labelFor="provider-use-proxy"
-            description={m.common_send_requests_service_proxy_configured_settings()}
-            layout="inline">
-            <Switch
-              id="provider-use-proxy"
-              checked={draft.fields.useProxy}
-              disabled={draft.submitting}
-              onCheckedChange={(checked: boolean) => {
-                draft.fields.useProxy = checked
-                draft.useProxyChanged()
-              }} />
+            title={m.common_proxy()}
+            labelFor="provider-proxy-mode"
+            description={m.common_proxy_selection_description()}
+            controlSize="setting">
+            {#snippet children({ titleId, descriptionId })}
+              <ProxySelect
+                id="provider-proxy-mode"
+                value={draft.fields.proxyMode}
+                disabled={draft.submitting}
+                ariaLabelledby={titleId}
+                ariaDescribedby={descriptionId}
+                onchange={(next: string) => {
+                  draft.fields.proxyMode = next
+                  draft.proxyModeChanged()
+                }} />
+            {/snippet}
           </SettingRow>
 
           {#if previewIssueError}

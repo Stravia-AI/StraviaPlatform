@@ -54,7 +54,7 @@ async fn kiro_real_wasm_inference_matches_http_wire() -> anyhow::Result<()> {
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let profile_arn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/synthetic";

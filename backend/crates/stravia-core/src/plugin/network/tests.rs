@@ -140,7 +140,7 @@ fn network(url: &str, pool: Arc<VendorWebSocketPool>) -> VendorNetwork {
             shapes: Arc::new(super::shape::ShapeRegistry::builtin().expect("load shapes")),
             resolver: Arc::new(super::transport::SystemResolver),
         },
-        crate::outbound_proxy::OutboundProxySettings::default(),
+        crate::outbound_proxy::ResolvedOutboundProxy::Direct,
         crate::plugin::permissions::NetworkPolicy::compile([
             crate::plugin::permissions::NetworkOrigin::Exact(origin),
         ])

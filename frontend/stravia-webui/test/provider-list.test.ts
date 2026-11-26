@@ -67,7 +67,7 @@ const provider = (overrides: Partial<Provider> = {}): Provider => ({
   name: 'Provider',
   protocol: 'openai',
   base_url: 'https://example.invalid',
-  use_proxy: false,
+  proxy_mode: 'none',
   is_enabled: true,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',

@@ -573,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 value: "dummy".to_string(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     admin

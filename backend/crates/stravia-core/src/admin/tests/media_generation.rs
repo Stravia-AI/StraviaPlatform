@@ -80,7 +80,7 @@ impl GenerationRouteFixture {
                 adapter_credentials: "{}".into(),
                 vendor_options: "{}".into(),
                 auth_mode: "oauth".into(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await?;
         let incompatible_provider = gateway
@@ -99,7 +99,7 @@ impl GenerationRouteFixture {
                 adapter_credentials: "{}".into(),
                 vendor_options: "{}".into(),
                 auth_mode: "apikey".into(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await?;
 

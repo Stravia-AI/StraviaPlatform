@@ -35,7 +35,7 @@ pub struct ProviderConnectionCheckInput {
     #[serde(default)]
     pub configuration: Option<ProviderConfigurationPreviewInput>,
     #[serde(default)]
-    pub use_proxy: Option<bool>,
+    pub proxy_mode: Option<String>,
     #[serde(default)]
     pub authorization_id: Option<String>,
 }
@@ -75,7 +75,7 @@ pub(super) async fn check_provider_connection(
                 admin,
                 provider_id,
                 configuration,
-                input.use_proxy,
+                input.proxy_mode.as_deref(),
                 input.authorization_id.as_deref(),
                 started,
                 context,
@@ -223,7 +223,7 @@ async fn check_draft(
     admin: &AdminService,
     path_provider_id: &str,
     configuration: ProviderConfigurationPreviewInput,
-    use_proxy: Option<bool>,
+    proxy_mode: Option<&str>,
     authorization_id: Option<&str>,
     started: Instant,
     context: VendorCallContext,
@@ -342,10 +342,11 @@ async fn check_draft(
         Ok(validated) => validated,
         Err(result) => return Ok(result),
     };
-    let effective_use_proxy = use_proxy
-        .or_else(|| saved.as_ref().map(|provider| provider.use_proxy))
-        .or_else(|| staged.as_ref().map(|staged| staged.session.use_proxy))
-        .unwrap_or(false);
+    let effective_proxy_mode = proxy_mode
+        .map(str::to_owned)
+        .or_else(|| saved.as_ref().map(|provider| provider.proxy_mode.clone()))
+        .or_else(|| staged.as_ref().map(|staged| staged.session.proxy_mode.clone()))
+        .unwrap_or_else(crate::outbound_proxy::default_proxy_mode);
     let validated = match finalize_configuration(validated, &configuration.base_url) {
         Ok(validated) => validated,
         Err(result) => return Ok(result),
@@ -355,7 +356,10 @@ async fn check_draft(
     }
 
     let mut operation_metadata = BTreeMap::new();
-    operation_metadata.insert("use_proxy".into(), Value::Bool(effective_use_proxy));
+    operation_metadata.insert(
+        "proxy_mode".into(),
+        Value::String(effective_proxy_mode),
+    );
     let snapshot = ProviderSnapshot {
         provider_id: validated.descriptor.provider_id.clone(),
         channel: validated.channel.id.clone(),
@@ -697,7 +701,7 @@ fn same_connection_configuration(first: &Provider, second: &Provider) -> bool {
         && first.adapter_credentials == second.adapter_credentials
         && first.vendor_options == second.vendor_options
         && first.auth_mode == second.auth_mode
-        && first.use_proxy == second.use_proxy
+        && first.proxy_mode == second.proxy_mode
 }
 
 async fn write_saved(

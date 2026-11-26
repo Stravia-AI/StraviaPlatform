@@ -8,6 +8,15 @@ pub enum StorageBackendKind {
     Postgres,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SystemProxySource {
+    /// Read proxy settings from process environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+    #[default]
+    Environment,
+    /// Read proxy settings from desktop operating system configuration (with environment fallback on headless Linux).
+    OperatingSystem,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqlStorageConfig {
     pub url: Option<String>,
@@ -108,6 +117,8 @@ pub struct GatewayConfig {
     /// default so tests never reach the network; production deployments opt
     /// in explicitly.
     pub catalog_background_refresh: bool,
+    /// How `"system"` proxy selections resolve system proxies (`Environment` for Server, `OperatingSystem` for Desktop).
+    pub system_proxy_source: SystemProxySource,
     /// 仅测试构建：在持久 handoff 提交前与 loopback 控制器同步，不改变产品超时。
     #[cfg(feature = "test-support")]
     pub test_handoff_barrier: Option<std::net::SocketAddr>,
@@ -126,6 +137,7 @@ impl Default for GatewayConfig {
             config_poll_interval: Duration::ZERO,
             catalog_base_url: None,
             catalog_background_refresh: false,
+            system_proxy_source: SystemProxySource::Environment,
             #[cfg(feature = "test-support")]
             test_handoff_barrier: None,
         }

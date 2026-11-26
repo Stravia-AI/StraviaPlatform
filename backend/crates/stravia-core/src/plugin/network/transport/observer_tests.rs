@@ -17,7 +17,6 @@ use tokio::{
 use super::{
     Field, H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport,
 };
-use crate::outbound_proxy::OutboundProxySettings;
 
 fn route(version: HttpVersionPref, h2: H2Settings) -> Route {
     let tls = Arc::new(super::test_support::untrusted_tls());
@@ -26,7 +25,7 @@ fn route(version: HttpVersionPref, h2: H2Settings) -> Route {
         tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,
-        proxy: OutboundProxySettings::default(),
+        proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
         resolver: Arc::new(SystemResolver),
         version,
         h2,

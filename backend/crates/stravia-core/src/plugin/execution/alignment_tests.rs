@@ -747,9 +747,11 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
         .map_err(|_| "invalid_input")?;
     if input.provider.use_proxy {
         let settings = input.outbound_proxy.as_deref().ok_or("invalid_input")?;
-        crate::outbound_proxy::OutboundProxySettings::from_setting(Some(settings))
-            .and_then(|config| config.reqwest_proxy())
+        let parsed = crate::outbound_proxy::OutboundProxySettings::from_setting(Some(settings))
             .map_err(|_| "invalid_input")?;
+        if parsed.proxies.is_empty() {
+            return Err("invalid_input");
+        }
     }
     let url = url::Url::parse(&input.provider.base_url).map_err(|_| "invalid_input")?;
     if !matches!(url.scheme(), "http" | "https")
@@ -894,7 +896,11 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
                     adapter_credentials,
                     vendor_options,
                     auth_mode: input.provider.auth_mode,
-                    use_proxy: input.provider.use_proxy,
+                    proxy_mode: if input.provider.use_proxy {
+                        "default".into()
+                    } else {
+                        "none".into()
+                    },
                 })
                 .await?;
             if let Some(oauth) = input.oauth {
@@ -1063,7 +1069,7 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
                     .required_capability()
                     .map(|capability| channel.capabilities.contains(&capability));
             }
-            let (snapshot, use_proxy, origins) = provider_snapshot(
+            let (snapshot, proxy_mode, origins) = provider_snapshot(
                 &plugin,
                 descriptor,
                 &connection,
@@ -1085,7 +1091,7 @@ async fn run(input: Input, details: &mut ReportDetails) -> Result<usize, &'stati
                     .oauth
                     .as_ref()
                     .map(|oauth| oauth.connection_id.clone()),
-                use_proxy,
+                proxy_mode,
                 origins,
                 kind: request.operation(),
                 credential_version: ProviderCredentialVersion {

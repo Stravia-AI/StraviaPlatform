@@ -22,7 +22,6 @@ use super::super::transport::{
     H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport,
 };
 use super::{Handshake, Message};
-use crate::outbound_proxy::OutboundProxySettings;
 use stravia_vendor_sdk::net::{Field, WsCompression};
 
 struct Frame {
@@ -144,7 +143,7 @@ async fn tls_h2_extended_connect_exchanges_websocket_frames() {
             tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
             tls: Arc::clone(&tls),
             proxy_tls: tls,
-            proxy: OutboundProxySettings::default(),
+            proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
             resolver: Arc::new(SystemResolver),
             version: HttpVersionPref::Http2,
             h2: H2Settings::default(),

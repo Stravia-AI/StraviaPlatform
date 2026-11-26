@@ -10,7 +10,6 @@ use tokio::{
 };
 
 use super::{H2Settings, HttpVersionPref, RequestPlan, Route, SystemResolver, VendorTransport};
-use crate::outbound_proxy::OutboundProxySettings;
 
 async fn serve_connection(mut socket: TcpStream, id: usize) {
     loop {
@@ -92,7 +91,7 @@ async fn http1_reuses_only_matching_shape_revision_and_proxy_identity() {
             tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
             tls: Arc::clone(&tls),
             proxy_tls: tls,
-            proxy: OutboundProxySettings::default(),
+            proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
             version: HttpVersionPref::Http1,
             h2: H2Settings::default(),
             omit_h2_content_length: false,
@@ -129,9 +128,15 @@ async fn http1_reuses_only_matching_shape_revision_and_proxy_identity() {
         // connection demonstrates credential isolation rather than routing to a
         // different server. The proxy responds directly to the forward request.
         let mut proxy_a = route.clone();
-        proxy_a.proxy.url = format!("http://alice:one@{addr}");
+        proxy_a.proxy = crate::outbound_proxy::ResolvedOutboundProxy::Explicit {
+            url: format!("http://alice:one@{addr}"),
+            force_http1: false,
+        };
         let mut proxy_b = proxy_a.clone();
-        proxy_b.proxy.url = format!("http://bob:two@{addr}");
+        proxy_b.proxy = crate::outbound_proxy::ResolvedOutboundProxy::Explicit {
+            url: format!("http://bob:two@{addr}"),
+            force_http1: false,
+        };
         let first_proxy = request(&transport, &uri, proxy_a.clone()).await;
         assert_ne!(
             first_proxy, original,

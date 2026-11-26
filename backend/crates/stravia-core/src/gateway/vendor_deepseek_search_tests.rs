@@ -68,7 +68,7 @@ async fn deepseek_search_follows_bound_flash_thinking_level_through_stravia_read
                 value: "deepseek-search-test-secret".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
 
@@ -295,7 +295,7 @@ async fn deepseek_search_live_upstream_smoke() -> anyhow::Result<()> {
             },
             credential: ProviderCredentialInput::ApiKey { value: api_key },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
 

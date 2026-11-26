@@ -27,7 +27,7 @@ use crate::interaction_observation::{RunEvent, RunObserver};
 
 use super::lifecycle::VendorOperation;
 use super::permissions::NetworkPolicy;
-use crate::outbound_proxy::OutboundProxySettings;
+use crate::outbound_proxy::ResolvedOutboundProxy;
 
 pub(crate) mod shape;
 use shape::ShapeRegistry;
@@ -262,7 +262,7 @@ pub(crate) struct VendorNetworkConfig {
 pub(crate) struct VendorNetwork {
     transport: Arc<transport::VendorTransport>,
     shapes: Arc<ShapeRegistry>,
-    proxy: OutboundProxySettings,
+    proxy: ResolvedOutboundProxy,
     resolver: Arc<dyn transport::Resolver>,
     origins: NetworkPolicy,
     operation: Arc<VendorOperation>,
@@ -309,7 +309,7 @@ impl VendorNetwork {
     pub(crate) fn new(
         transport: Arc<transport::VendorTransport>,
         network: VendorNetworkConfig,
-        proxy: OutboundProxySettings,
+        proxy: ResolvedOutboundProxy,
         origins: NetworkPolicy,
         operation: Arc<VendorOperation>,
         cancellation: CancellationToken,
@@ -668,24 +668,19 @@ impl VendorNetwork {
             .shapes
             .get(name)
             .ok_or_else(|| HostFailure::new(ErrorKind::Unsupported, "unknown network shape"))?;
-        let mut proxy = self.proxy.clone();
-        proxy.normalize();
+        let proxy = self.proxy.clone();
         proxy
             .validate()
             .map_err(|error| HostFailure::new(ErrorKind::Invalid, error.to_string()))?;
-        let mut digest = Sha256::new();
-        digest.update(proxy.url.as_bytes());
-        digest.update([0]);
-        digest.update(proxy.bypass.as_bytes());
-        digest.update([proxy.force_http1 as u8]);
-        let proxy_identity =
-            stravia_runtime_contract::protocol::ir::canonical::hash_hex(&digest.finalize().into());
+        let proxy_identity = proxy
+            .reuse_identity()
+            .map_err(|error| HostFailure::new(ErrorKind::Invalid, error.to_string()))?;
         let preference = if websocket {
             option(options, net::keys::WS_TRANSPORT)
         } else {
             option(options, net::keys::HTTP_VERSION)
         };
-        if proxy.force_http1 && matches!(preference, Some("http2" | "h2")) {
+        if proxy.force_http1() && matches!(preference, Some("http2" | "h2")) {
             return Err(HostFailure::new(
                 ErrorKind::Unsupported,
                 "HTTP/2 conflicts with the proxy HTTP/1 policy",
@@ -700,7 +695,7 @@ impl VendorNetwork {
         let version = match preference {
             Some("http1") => transport::HttpVersionPref::Http1,
             Some("http2" | "h2") => transport::HttpVersionPref::Http2,
-            _ if proxy.force_http1 || (websocket && !shape.ws.over_h2) => {
+            _ if proxy.force_http1() || (websocket && !shape.ws.over_h2) => {
                 transport::HttpVersionPref::Http1
             }
             _ => transport::HttpVersionPref::Auto,
@@ -983,13 +978,15 @@ impl VendorNetwork {
             .unwrap_or(MAX_WEBSOCKET_AGE)
             .min(MAX_WEBSOCKET_AGE);
         let continuation_id = option(&options, net::keys::CONTINUATION);
-        let mut proxy = route.proxy.clone();
-        proxy.normalize();
+        let proxy_identity = route
+            .proxy
+            .reuse_identity()
+            .map_err(|error| HostFailure::new(ErrorKind::Invalid, error.to_string()))?;
         let mut partition_hash = Sha256::new();
         partition_hash.update(b"stravia-websocket-route-v2\0");
         partition_hash.update(route.shape_identity.as_bytes());
         partition_hash.update([0]);
-        partition_hash.update(serde_json::to_vec(&proxy).expect("proxy settings serialize"));
+        partition_hash.update(proxy_identity.as_bytes());
         partition_hash.update(match route.version {
             transport::HttpVersionPref::Auto => b"auto".as_slice(),
             transport::HttpVersionPref::Http1 => b"http1".as_slice(),

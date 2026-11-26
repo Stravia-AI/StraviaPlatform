@@ -103,6 +103,22 @@ pub struct Proxy {
     credentials: Option<(String, String)>,
 }
 
+impl Proxy {
+    pub fn redacted_url(&self) -> String {
+        let scheme = match self.kind {
+            ProxyKind::Http => "http",
+            ProxyKind::Https => "https",
+            ProxyKind::Socks5 => "socks5",
+            ProxyKind::Socks5h => "socks5h",
+        };
+        if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("{scheme}://[{}]:{}", self.host, self.port)
+        } else {
+            format!("{scheme}://{}:{}", self.host, self.port)
+        }
+    }
+}
+
 /// Stage at which a connection attempt failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCategory {

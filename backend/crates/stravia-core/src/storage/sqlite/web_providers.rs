@@ -19,7 +19,7 @@ pub(super) struct SqliteWebProviderStore {
 impl WebProviderStore for SqliteWebProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<WebProvider>> {
         Ok(sqlx::query_as::<_, WebProvider>(
-    "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
+    "SELECT id, name, kind, api_key, proxy_mode, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
             )
             .fetch_all(&self.pool)
             .await?)
@@ -27,7 +27,7 @@ impl WebProviderStore for SqliteWebProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<WebProvider>> {
         Ok(sqlx::query_as::<_, WebProvider>(
-    "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
+    "SELECT id, name, kind, api_key, proxy_mode, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -38,14 +38,14 @@ impl WebProviderStore for SqliteWebProviderStore {
         let id = stravia_runtime_contract::identifier::new_id();
         let mut tx = self.pool.begin_write().await?;
         sqlx::query(
-            "INSERT INTO web_providers (id, name, kind, api_key, use_proxy, config_json)
+            "INSERT INTO web_providers (id, name, kind, api_key, proxy_mode, config_json)
      VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(input.name.trim())
         .bind(input.kind)
         .bind(input.api_key)
-        .bind(input.use_proxy)
+        .bind(input.proxy_mode)
         .bind(input.config.map(Json))
         .execute(&mut *tx)
         .await?;
@@ -58,7 +58,7 @@ impl WebProviderStore for SqliteWebProviderStore {
     async fn update(&self, id: &str, input: UpdateWebProvider) -> anyhow::Result<WebProvider> {
         let mut tx = self.pool.begin_write().await?;
         let current = sqlx::query_as::<_, WebProvider>(
-            "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
+            "SELECT id, name, kind, api_key, proxy_mode, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -69,19 +69,19 @@ impl WebProviderStore for SqliteWebProviderStore {
             Some(value) => value,
             None => current.api_key,
         };
-        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
+        let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
         let config_json = match input.config {
             Some(value) => value.map(Json),
             None => current.config_json,
         };
         sqlx::query(
             "UPDATE web_providers
-     SET name = ?, api_key = ?, use_proxy = ?, config_json = ?, updated_at = datetime('now')
+     SET name = ?, api_key = ?, proxy_mode = ?, config_json = ?, updated_at = datetime('now')
      WHERE id = ?",
         )
         .bind(name.trim())
         .bind(api_key)
-        .bind(use_proxy)
+        .bind(proxy_mode)
         .bind(config_json)
         .bind(id)
         .execute(&mut *tx)
@@ -205,7 +205,7 @@ impl WebProviderStore for SqliteWebProviderStore {
         .fetch_all(&mut *tx)
         .await?;
         let web_providers = sqlx::query_as::<_, WebProvider>(
-    "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
+    "SELECT id, name, kind, api_key, proxy_mode, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers ORDER BY created_at DESC",
             )
             .fetch_all(&mut *tx)
             .await?;
@@ -246,7 +246,7 @@ impl WebProviderStore for SqliteWebProviderStore {
         let mut tx = self.pool.begin_write().await?;
         let result: anyhow::Result<()> = async {
             let providers = sqlx::query_as::<_, WebProvider>(
-                "SELECT id, name, kind, api_key, use_proxy, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers",
+                "SELECT id, name, kind, api_key, proxy_mode, config_json, last_test_success, last_test_at, created_at, updated_at FROM web_providers",
             )
             .fetch_all(&mut *tx)
             .await?;

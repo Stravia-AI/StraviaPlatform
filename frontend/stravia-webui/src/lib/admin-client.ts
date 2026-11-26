@@ -130,11 +130,41 @@ export interface ArtifactS3Settings {
   credentials_expires_at: number | null
 }
 
-export interface ProxySettings {
+export interface OutboundProxyEntry {
+  id: string
+  name: string
   url: string
-  bypass: string
-  force_http1: boolean
 }
+
+export interface ProxySettings {
+  proxies: OutboundProxyEntry[]
+}
+
+export interface SystemProxySummary {
+  source: 'os' | 'env'
+  detected_url: string | null
+}
+
+export interface ProxyIpProbeGroup {
+  ip: string
+  country_code: string | null
+  services: string[]
+}
+
+export interface ProxyIpProbeResult {
+  groups: ProxyIpProbeGroup[]
+  failed_services: string[]
+  total_services: number
+  probed_at: string
+}
+
+export interface ProxyIpProbeRequest {
+  proxy_mode?: string
+  url?: string
+}
+
+export const PROXY_MODE_NONE = 'none'
+export const PROXY_MODE_SYSTEM = 'system'
 
 export interface ArtifactSettings {
   client_base_url: string
@@ -443,14 +473,14 @@ export const admin = {
       vendorId: string,
       channel: string,
       configuration: OAuthCandidateConfiguration,
-      useProxy: boolean,
+      proxyMode: string,
       callbackMode: OAuthCallbackMode,
       locale: Locale,
     ) =>
       request<OAuthSessionInitData>('POST', '/oauth/sessions/init', {
         vendor_id: vendorId,
         channel,
-        use_proxy: useProxy,
+        proxy_mode: proxyMode,
         callback_mode: callbackMode,
         locale,
         ...configuration,
@@ -459,13 +489,13 @@ export const admin = {
       vendorId: string,
       channel: string,
       configuration: OAuthCandidateConfiguration,
-      useProxy: boolean,
+      proxyMode: string,
       refreshToken: string,
     ) =>
       request<OAuthSessionReadyData>('POST', '/oauth/sessions/refresh-token', {
         vendor_id: vendorId,
         channel,
-        use_proxy: useProxy,
+        proxy_mode: proxyMode,
         ...configuration,
         refresh_token: refreshToken,
       }),
@@ -473,9 +503,9 @@ export const admin = {
       request<OAuthSessionStatusData>('GET', `/oauth/sessions/${encodeURIComponent(sessionId)}/status`),
     cancel: (sessionId: string) =>
       request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/cancel`),
-    updateProxy: (sessionId: string, useProxy: boolean) =>
+    updateProxy: (sessionId: string, proxyMode: string) =>
       request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${encodeURIComponent(sessionId)}/proxy`, {
-        use_proxy: useProxy,
+        proxy_mode: proxyMode,
       }),
     complete: (sessionId: string, type: 'callback_url' | 'manual', value: string) =>
       request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/complete`, {
@@ -602,10 +632,15 @@ export const admin = {
   settings: {
     proxy: async (): Promise<ProxySettings> => {
       const value = await request<string | null>('GET', '/settings/outbound_proxy')
-      return value === null ? { url: '', bypass: '', force_http1: false } : (JSON.parse(value) as ProxySettings)
+      if (value === null) return { proxies: [] }
+      const parsed = JSON.parse(value) as Partial<ProxySettings>
+      return { proxies: Array.isArray(parsed.proxies) ? parsed.proxies : [] }
     },
     saveProxy: (settings: ProxySettings) =>
       request<void>('PUT', '/settings/outbound_proxy', { value: JSON.stringify(settings) }),
+    systemProxy: () => request<SystemProxySummary>('GET', '/settings/outbound-proxy/system'),
+    probeProxy: (input: ProxyIpProbeRequest) =>
+      request<ProxyIpProbeResult>('POST', '/settings/outbound-proxy/probe', input),
     artifacts: async (): Promise<ArtifactSettings> => {
       const value = await request<string | null>('GET', '/settings/artifact_settings')
       return value === null

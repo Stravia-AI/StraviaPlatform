@@ -294,7 +294,7 @@ async fn grok_real_wasm_inference_matches_interactive_tls_and_http2() -> anyhow:
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     gateway

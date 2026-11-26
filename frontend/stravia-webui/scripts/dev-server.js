@@ -3,13 +3,24 @@ import { once } from 'node:events'
 import { resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { createServer } from 'vite'
+import { createServer, loadEnv } from 'vite'
+import { DEFAULT_BACKEND_PORT, parseBackendPort, resolveAvailableBackendPort } from './dev-server-port.ts'
 
 const webuiRoot = fileURLToPath(new URL('../', import.meta.url))
 const repositoryRoot = resolve(webuiRoot, '../..')
 const preparation = spawnSync('task', ['prepare:crates'], { cwd: repositoryRoot, stdio: 'inherit' })
 if (preparation.error) throw preparation.error
 if (preparation.status !== 0) throw new Error('Failed to prepare patched Cargo crates')
+
+const env = loadEnv('development', repositoryRoot, 'STRAVIA_')
+const backendHost = env.STRAVIA_HOST || '127.0.0.1'
+const requestedPort = parseBackendPort(env.STRAVIA_PORT ?? String(DEFAULT_BACKEND_PORT))
+const backendPort = await resolveAvailableBackendPort(backendHost, requestedPort)
+if (backendPort !== requestedPort) {
+  console.warn(`Backend port ${requestedPort} on ${backendHost} is already in use; using ${backendPort} instead.`)
+}
+process.env.STRAVIA_PORT = String(backendPort)
+
 const webui = await createServer({ root: webuiRoot, server: { host: true } })
 
 try {
@@ -40,7 +51,7 @@ try {
       '--trusted-proxy',
       '127.0.0.1',
     ],
-    { cwd: repositoryRoot, stdio: 'inherit' },
+    { cwd: repositoryRoot, env: { ...process.env, STRAVIA_PORT: String(backendPort) }, stdio: 'inherit' },
   )
   const [exitCode] = await once(backend, 'exit')
   process.exitCode = exitCode ?? 1

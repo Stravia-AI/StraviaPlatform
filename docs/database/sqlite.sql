@@ -605,7 +605,6 @@ CREATE TABLE providers (
     access_token      TEXT,
     refresh_token     TEXT,
     expires_at        TEXT,
-    use_proxy         INTEGER NOT NULL DEFAULT 0,
     last_test_success INTEGER,
     last_test_at      TEXT,
     is_enabled        INTEGER NOT NULL DEFAULT 1,
@@ -617,7 +616,7 @@ CREATE TABLE providers (
     credential_status TEXT NOT NULL DEFAULT 'ok' CHECK (credential_status IN ('ok', 'invalid')),
     credential_invalid_at TEXT,
     revision          INTEGER NOT NULL DEFAULT 0
-);
+, proxy_mode TEXT NOT NULL DEFAULT 'system' CHECK (length(trim(proxy_mode)) > 0));
 
 CREATE TABLE public_tool_executions (
     id TEXT PRIMARY KEY,
@@ -925,13 +924,12 @@ CREATE TABLE "web_providers" (
     name              TEXT NOT NULL UNIQUE,
     kind              TEXT NOT NULL CHECK (length(trim(kind)) > 0),
     api_key           TEXT CHECK (api_key IS NULL OR length(trim(api_key)) > 0),
-    use_proxy         INTEGER NOT NULL DEFAULT 0,
     config_json       TEXT CHECK (config_json IS NULL OR (json_valid(config_json) AND json_type(config_json) = 'object')),
     last_test_success INTEGER,
     last_test_at      TEXT,
     created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+, proxy_mode TEXT NOT NULL DEFAULT 'system' CHECK (length(trim(proxy_mode)) > 0));
 
 CREATE INDEX credential_mapping_reuses_interaction_idx
     ON credential_mapping_reuses(interaction_id);
@@ -1857,14 +1855,14 @@ BEGIN SELECT RAISE(ABORT, 'invalid boolean value'); END;
 CREATE TRIGGER providers_contract_insert BEFORE INSERT ON providers
 WHEN CASE WHEN json_valid(NEW.adapter_credentials) THEN json_type(NEW.adapter_credentials) <> 'object' ELSE 1 END
     OR CASE WHEN json_valid(NEW.vendor_options) THEN json_type(NEW.vendor_options) <> 'object' ELSE 1 END
-    OR typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)
+    OR typeof(NEW.proxy_mode) <> 'text' OR length(trim(NEW.proxy_mode)) = 0
     OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
 BEGIN SELECT RAISE(ABORT, 'invalid Provider configuration'); END;
 
 CREATE TRIGGER providers_contract_update BEFORE UPDATE ON providers
 WHEN CASE WHEN json_valid(NEW.adapter_credentials) THEN json_type(NEW.adapter_credentials) <> 'object' ELSE 1 END
     OR CASE WHEN json_valid(NEW.vendor_options) THEN json_type(NEW.vendor_options) <> 'object' ELSE 1 END
-    OR typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1)
+    OR typeof(NEW.proxy_mode) <> 'text' OR length(trim(NEW.proxy_mode)) = 0
     OR typeof(NEW.is_enabled) <> 'integer' OR NEW.is_enabled NOT IN (0, 1)
 BEGIN SELECT RAISE(ABORT, 'invalid Provider configuration'); END;
 
@@ -3482,13 +3480,13 @@ BEGIN
 END;
 
 CREATE TRIGGER web_providers_boolean_insert BEFORE INSERT ON web_providers
-WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1))
+WHEN (typeof(NEW.proxy_mode) <> 'text' OR length(trim(NEW.proxy_mode)) = 0)
   OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
   OR (NEW.config_json IS NOT NULL AND CASE WHEN json_valid(NEW.config_json) THEN json_type(NEW.config_json) <> 'object' ELSE 1 END)
 BEGIN SELECT RAISE(ABORT, 'invalid boolean or provider configuration'); END;
 
 CREATE TRIGGER web_providers_boolean_update BEFORE UPDATE ON web_providers
-WHEN (typeof(NEW.use_proxy) <> 'integer' OR NEW.use_proxy NOT IN (0, 1))
+WHEN (typeof(NEW.proxy_mode) <> 'text' OR length(trim(NEW.proxy_mode)) = 0)
   OR (NEW.last_test_success IS NOT NULL AND (typeof(NEW.last_test_success) <> 'integer' OR NEW.last_test_success NOT IN (0, 1)))
   OR (NEW.config_json IS NOT NULL AND CASE WHEN json_valid(NEW.config_json) THEN json_type(NEW.config_json) <> 'object' ELSE 1 END)
 BEGIN SELECT RAISE(ABORT, 'invalid boolean or provider configuration'); END;

@@ -470,7 +470,7 @@ async fn media_test_app_with_answer(
                 value: "test-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Media Provider");

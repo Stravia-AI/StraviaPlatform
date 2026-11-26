@@ -648,7 +648,7 @@ async fn automatic_callback_failure_body(locale: &str) -> anyhow::Result<String>
                     "vendor_id": "devin",
                     "channel": "devin",
                     "base_url": "https://server.codeium.com",
-                    "use_proxy": false,
+                    "proxy_mode": "none",
                     "callback_mode": "auto",
                     "locale": locale,
                 }))?))?,
@@ -702,7 +702,7 @@ async fn manual_oauth_init_exposes_the_effective_callback_contract() -> anyhow::
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"openai-codex","channel":"codex","base_url":"https://chatgpt.com/backend-api/codex","use_proxy":false,"callback_mode":"manual"}"#,
+                    r#"{"vendor_id":"openai-codex","channel":"codex","base_url":"https://chatgpt.com/backend-api/codex","proxy_mode":"none","callback_mode":"manual"}"#,
                 ))?,
         )
         .await?;
@@ -751,7 +751,7 @@ async fn general_provider_endpoint_rejects_oauth_channels_without_a_session() ->
             "fingerprint": fingerprint
         },
         "credential": { "type": "none" },
-        "use_proxy": false
+        "proxy_mode": "none"
     }))?;
     let response = create_unprotected_router(gateway)
         .oneshot(
@@ -789,7 +789,7 @@ async fn provider_endpoints_keep_unavailable_profiles_visible_without_echoing_se
             adapter_credentials: r#"{"apiKey":"available-secret"}"#.into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let unavailable = gateway
@@ -808,7 +808,7 @@ async fn provider_endpoints_keep_unavailable_profiles_visible_without_echoing_se
             adapter_credentials: r#"{"privateToken":"unavailable-secret"}"#.into(),
             vendor_options: r#"{"workspace":"retained"}"#.into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let storage = gateway.storage.clone();
@@ -885,7 +885,7 @@ async fn provider_list_reports_model_inventory_with_the_effective_availability_r
         adapter_credentials: "{}".into(),
         vendor_options: "{}".into(),
         auth_mode: "apikey".into(),
-        use_proxy: false,
+        proxy_mode: "none".into(),
     };
     let stocked = gateway
         .storage
@@ -977,7 +977,7 @@ async fn terminal_manual_completion_releases_the_auto_listener() -> anyhow::Resu
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","proxy_mode":"none","callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -1034,7 +1034,7 @@ async fn automatic_callback_listener_is_loopback_only_and_returns_safe_html() ->
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","proxy_mode":"none","callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -1107,7 +1107,7 @@ async fn automatic_callback_uses_the_requested_simplified_chinese_locale() -> an
                 Request::post("/api/v1/oauth/sessions/init")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","use_proxy":false,"callback_mode":"auto","locale":"zh-CN"}"#,
+                        r#"{"vendor_id":"devin","channel":"devin","base_url":"https://server.codeium.com","proxy_mode":"none","callback_mode":"auto","locale":"zh-CN"}"#,
                     ))?,
             )
             .await?;
@@ -1147,7 +1147,7 @@ async fn oauth_init_rejects_the_removed_claude_code_channel() -> anyhow::Result<
             Request::post("/api/v1/oauth/sessions/init")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","use_proxy":false,"callback_mode":"auto"}"#,
+                    r#"{"vendor_id":"anthropic","channel":"claude-code","base_url":"https://api.anthropic.com","proxy_mode":"none","callback_mode":"auto"}"#,
                 ))?,
         )
         .await?;
@@ -1174,7 +1174,7 @@ async fn oauth_refresh_token_route_rejects_missing_token_and_unsupported_channel
             Request::post("/api/v1/oauth/sessions/refresh-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"kiro","channel":"oauth","base_url":"https://runtime.us-east-1.kiro.dev","use_proxy":false,"refresh_token":"  "}"#,
+                    r#"{"vendor_id":"kiro","channel":"oauth","base_url":"https://runtime.us-east-1.kiro.dev","proxy_mode":"none","refresh_token":"  "}"#,
                 ))?,
         )
         .await?;
@@ -1188,7 +1188,7 @@ async fn oauth_refresh_token_route_rejects_missing_token_and_unsupported_channel
             Request::post("/api/v1/oauth/sessions/refresh-token")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"vendor_id":"kiro","channel":"oauth","base_url":"https://runtime.us-east-1.kiro.dev","use_proxy":false,"refresh_token":"rt-kiro"}"#,
+                    r#"{"vendor_id":"kiro","channel":"oauth","base_url":"https://runtime.us-east-1.kiro.dev","proxy_mode":"none","refresh_token":"rt-kiro"}"#,
                 ))?,
         )
         .await?;
@@ -1304,7 +1304,7 @@ async fn prepare_provider_model_uses_the_post_template_contract() -> anyhow::Res
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let app = create_unprotected_router(gateway);
@@ -1408,7 +1408,7 @@ async fn provider_model_routes_support_slash_ids_and_exact_decimal_costs() -> an
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     let app = create_unprotected_router(gateway);
@@ -1483,7 +1483,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     gateway
@@ -1575,7 +1575,7 @@ async fn route_purpose_http_contract_rejects_invalid_and_mismatched_writes() -> 
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     gateway
@@ -1705,7 +1705,7 @@ async fn route_bind_endpoint_owns_one_click_target_creation() -> anyhow::Result<
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await?;
     gateway

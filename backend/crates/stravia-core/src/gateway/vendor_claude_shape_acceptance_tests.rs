@@ -28,7 +28,7 @@ async fn claude_provider(gateway: &Gateway) -> anyhow::Result<crate::db::models:
                 protocol: Some("anthropic-messages".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -84,7 +84,7 @@ async fn claude_provider(gateway: &Gateway) -> anyhow::Result<crate::db::models:
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
         )
         .await

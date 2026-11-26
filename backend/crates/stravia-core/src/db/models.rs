@@ -189,8 +189,8 @@ pub struct Provider {
     pub vendor_options: String,
     #[serde(default = "default_provider_auth_mode")]
     pub auth_mode: String,
-    #[serde(default)]
-    pub use_proxy: bool,
+    #[serde(default = "crate::outbound_proxy::default_proxy_mode")]
+    pub proxy_mode: String,
     /// Latest effective Provider cost basis; read-only runtime projection.
     #[serde(default)]
     #[sqlx(skip)]
@@ -616,8 +616,8 @@ pub struct CreateProvider {
     pub credential: ProviderCredentialInput,
     #[serde(default)]
     pub vendor_options: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub use_proxy: bool,
+    #[serde(default = "crate::outbound_proxy::default_proxy_mode")]
+    pub proxy_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -673,7 +673,7 @@ pub struct CreateProviderRecord {
     pub adapter_credentials: String,
     pub vendor_options: String,
     pub auth_mode: String,
-    pub use_proxy: bool,
+    pub proxy_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -693,7 +693,7 @@ pub struct UpdateProvider {
     #[serde(default)]
     pub vendor_options: Option<serde_json::Map<String, serde_json::Value>>,
     pub auth_mode: Option<String>,
-    pub use_proxy: Option<bool>,
+    pub proxy_mode: Option<String>,
     pub is_enabled: Option<bool>,
     /// Internal flag, never serialized: admin updates resolve into a
     /// full-field rewrite, so the store cannot distinguish "the caller
@@ -719,7 +719,7 @@ impl UpdateProvider {
             || self.adapter_credentials.is_some()
             || self.vendor_options.is_some()
             || self.auth_mode.is_some()
-            || self.use_proxy.is_some()
+            || self.proxy_mode.is_some()
     }
 }
 
@@ -1029,7 +1029,8 @@ pub struct WebProvider {
     pub kind: String,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,
-    pub use_proxy: bool,
+    #[serde(default = "crate::outbound_proxy::default_proxy_mode")]
+    pub proxy_mode: String,
     #[serde(skip_serializing)]
     pub config_json: Option<Json<serde_json::Value>>,
     pub last_test_success: Option<bool>,
@@ -1043,8 +1044,8 @@ pub struct CreateWebProvider {
     pub name: String,
     pub kind: String,
     pub api_key: Option<String>,
-    #[serde(default)]
-    pub use_proxy: bool,
+    #[serde(default = "crate::outbound_proxy::default_proxy_mode")]
+    pub proxy_mode: String,
     #[serde(default)]
     pub config: Option<serde_json::Value>,
 }
@@ -1070,7 +1071,7 @@ pub struct UpdateWebProvider {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub api_key: Option<Option<String>>,
-    pub use_proxy: Option<bool>,
+    pub proxy_mode: Option<String>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub config: Option<Option<serde_json::Value>>,
 }
@@ -1082,7 +1083,7 @@ pub struct WebProviderView {
     pub name: String,
     pub kind: String,
     pub api_key_configured: bool,
-    pub use_proxy: bool,
+    pub proxy_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
     pub capabilities: Option<WebProviderCapabilities>,

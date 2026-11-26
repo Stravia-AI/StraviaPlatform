@@ -1550,7 +1550,7 @@ async fn prepare_attempt(
         execution.oauth_connection_id(),
         &target_key,
         &actual_model,
-        execution.use_proxy(),
+        execution.proxy_mode(),
     );
     let thinking_source = crate::history_marker::ThinkingSource {
         namespace: target_namespace.clone(),
@@ -3172,7 +3172,7 @@ fn target_namespace(
     oauth_connection_id: Option<&str>,
     target_key: &str,
     actual_model: &str,
-    use_proxy: bool,
+    proxy_mode: &str,
 ) -> String {
     let credential_identity = oauth_connection_id
         .map(|connection_id| namespace_fingerprint(&("oauth", connection_id)))
@@ -3183,7 +3183,7 @@ fn target_namespace(
         supplier_id,
         provider.channel.as_str(),
         provider.protocol.as_str(),
-        use_proxy,
+        proxy_mode,
         provider.base_url.as_str(),
         actual_model,
         credential_identity,

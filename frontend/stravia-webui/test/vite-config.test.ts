@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer as createNetServer, type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type ViteDevServer } from 'vite'
+import { parseBackendPort, resolveAvailableBackendPort } from '../scripts/dev-server-port.ts'
 import config from '../vite.config'
 
 const originalPort = process.env.STRAVIA_PORT
@@ -72,5 +74,64 @@ describe('Vite development proxy', () => {
       for (const server of servers.reverse()) await server.close()
       await rm(directory, { recursive: true, force: true })
     }
+  })
+
+  test('falls back to the next free backend port when the requested port is occupied', async () => {
+    const occupant = createNetServer()
+    const listenReady = Promise.withResolvers<number>()
+    occupant.once('error', listenReady.reject)
+    occupant.listen({ host: '127.0.0.1', port: 0, exclusive: true }, () => {
+      const address = occupant.address() as AddressInfo | null
+      if (!address) {
+        listenReady.reject(new Error('occupied server has no bound address'))
+        return
+      }
+      listenReady.resolve(address.port)
+    })
+
+    const occupiedPort = await listenReady.promise
+    try {
+      const resolvedPort = await resolveAvailableBackendPort('127.0.0.1', occupiedPort)
+      expect(resolvedPort).toBeGreaterThan(occupiedPort)
+      expect(resolvedPort).toBeLessThanOrEqual(65535)
+    } finally {
+      const closed = Promise.withResolvers<void>()
+      occupant.close((error) => {
+        if (error) {
+          closed.reject(error)
+          return
+        }
+        closed.resolve()
+      })
+      await closed.promise
+    }
+  })
+
+  test('keeps the requested backend port when it is available and rejects invalid ports', async () => {
+    const probe = createNetServer()
+    const listenReady = Promise.withResolvers<number>()
+    probe.once('error', listenReady.reject)
+    probe.listen({ host: '127.0.0.1', port: 0, exclusive: true }, () => {
+      const address = probe.address() as AddressInfo | null
+      if (!address) {
+        listenReady.reject(new Error('probe server has no bound address'))
+        return
+      }
+      listenReady.resolve(address.port)
+    })
+    const freePort = await listenReady.promise
+    const closed = Promise.withResolvers<void>()
+    probe.close((error) => {
+      if (error) {
+        closed.reject(error)
+        return
+      }
+      closed.resolve()
+    })
+    await closed.promise
+
+    expect(await resolveAvailableBackendPort('127.0.0.1', freePort)).toBe(freePort)
+    expect(() => parseBackendPort('0')).toThrow('STRAVIA_PORT must be an integer between 1 and 65535')
+    expect(() => parseBackendPort('abc')).toThrow('STRAVIA_PORT must be an integer between 1 and 65535')
   })
 })

@@ -1950,7 +1950,7 @@ mod tests {
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("provider");

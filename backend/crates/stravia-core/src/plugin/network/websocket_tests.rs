@@ -1,6 +1,5 @@
 use super::*;
 use crate::{
-    outbound_proxy::OutboundProxySettings,
     plugin::network::transport::{
         H2Settings, HttpVersionPref, Route, SystemResolver, UpgradeResponse, VendorTransport,
     },
@@ -83,7 +82,7 @@ fn route() -> Route {
         tls_session_policy: crate::plugin::network::shape::SessionPolicy::Standard,
         tls: Arc::clone(&tls),
         proxy_tls: tls,
-        proxy: OutboundProxySettings::default(),
+        proxy: crate::outbound_proxy::ResolvedOutboundProxy::Direct,
         resolver: Arc::new(SystemResolver),
         version: HttpVersionPref::Http1,
         h2: H2Settings::default(),
@@ -485,7 +484,10 @@ async fn http_proxy_forwards_websocket_upgrade_and_frames() {
     let url = Url::parse("ws://websocket.example.invalid/socket").unwrap();
     let handshake = Handshake::new(&url, vec![], WsCompression::Disabled).unwrap();
     let mut proxy_route = route();
-    proxy_route.proxy.url = format!("http://user:pass@{proxy}");
+    proxy_route.proxy = crate::outbound_proxy::ResolvedOutboundProxy::Explicit {
+        url: format!("http://user:pass@{proxy}"),
+        force_http1: false,
+    };
     let (head, io) = match handshake
         .send(&VendorTransport::new(), proxy_route, None)
         .await
@@ -562,7 +564,10 @@ async fn socks5h_proxy_carries_websocket_handshake_and_frames() {
     let url = Url::parse("ws://websocket.example.invalid/socket").unwrap();
     let handshake = Handshake::new(&url, vec![], WsCompression::Disabled).unwrap();
     let mut proxy_route = route();
-    proxy_route.proxy.url = format!("socks5h://{proxy}");
+    proxy_route.proxy = crate::outbound_proxy::ResolvedOutboundProxy::Explicit {
+        url: format!("socks5h://{proxy}"),
+        force_http1: false,
+    };
     let (head, io) = match handshake
         .send(&VendorTransport::new(), proxy_route, None)
         .await

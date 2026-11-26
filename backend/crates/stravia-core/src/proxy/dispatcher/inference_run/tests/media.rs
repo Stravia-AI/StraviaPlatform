@@ -188,7 +188,7 @@ async fn media_only_injection_rejects_guessed_search_before_research_execution()
             name: "Unused search source".into(),
             kind: "test-web".into(),
             api_key: Some("unused-test-key".into()),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             config: None,
         })
         .await
@@ -287,7 +287,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 value: "parent-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("parent Provider");
@@ -342,7 +342,7 @@ async fn non_vision_parent_uses_capability_owned_media_model() {
                 value: "media-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Media Provider");

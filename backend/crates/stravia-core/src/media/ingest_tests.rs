@@ -885,7 +885,7 @@ async fn public_model_input_snapshots_media_without_scanning_text() {
             },
             credential: crate::db::models::ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .unwrap();
@@ -1178,7 +1178,7 @@ async fn public_gemini_generated_media_is_reusable_without_inline_history() {
             },
             credential: crate::db::models::ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .unwrap();

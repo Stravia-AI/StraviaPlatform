@@ -183,7 +183,7 @@ mod tests {
                     value: "provider-secret".into(),
                 },
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("provider");
@@ -493,7 +493,7 @@ mod tests {
                     value: "provider-secret".into(),
                 },
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("provider");

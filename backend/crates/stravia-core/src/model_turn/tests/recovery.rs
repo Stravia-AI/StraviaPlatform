@@ -44,7 +44,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                     value: "test-provider-key".into(),
                 },
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("Provider");
@@ -145,7 +145,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("Provider");
@@ -263,7 +263,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                         value: "test-provider-key".into(),
                     },
                     vendor_options: Default::default(),
-                    use_proxy: false,
+                    proxy_mode: "none".into(),
                 })
                 .await
                 .expect("Provider"),
@@ -428,7 +428,7 @@ async fn clean_empty_stream_eof_caps_same_target_retries_and_fails_over() {
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("primary Provider");
@@ -447,7 +447,7 @@ async fn clean_empty_stream_eof_caps_same_target_retries_and_fails_over() {
                 value: "test-provider-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
         })
         .await
         .expect("fallback Provider");

@@ -45,7 +45,7 @@ pub(in crate::admin) fn same_provider_generation(left: &Provider, right: &Provid
         && left.adapter_credentials == right.adapter_credentials
         && left.vendor_options == right.vendor_options
         && left.auth_mode == right.auth_mode
-        && left.use_proxy == right.use_proxy
+        && left.proxy_mode == right.proxy_mode
         && left.last_test_success == right.last_test_success
         && left.last_test_at == right.last_test_at
         && left.is_enabled == right.is_enabled
@@ -521,8 +521,19 @@ impl AdminService {
             source,
             credential,
             vendor_options,
-            use_proxy,
+            proxy_mode,
         } = input;
+        let proxy_selection = crate::outbound_proxy::ProxySelection::parse(&proxy_mode)?;
+        if let Some(proxy_id) = proxy_selection.proxy_id() {
+            let proxies =
+                crate::outbound_proxy::OutboundProxySettings::load(self.gw.storage.settings())
+                    .await?;
+            anyhow::ensure!(
+                proxies.find(proxy_id).is_some(),
+                "selected outbound proxy does not exist"
+            );
+        }
+        let proxy_mode = proxy_selection.as_str().to_owned();
         match source {
             ProviderSourceInput::Catalog {
                 provider_id,
@@ -644,7 +655,7 @@ impl AdminService {
                         adapter_credentials,
                         vendor_options: serde_json::to_string(&vendor_options)?,
                         auth_mode,
-                        use_proxy,
+                        proxy_mode,
                     },
                     descriptor,
                 ))
@@ -759,7 +770,7 @@ impl AdminService {
                         adapter_credentials,
                         vendor_options: serde_json::to_string(&vendor_options)?,
                         auth_mode: if oauth_requested { "oauth" } else { "apikey" }.to_string(),
-                        use_proxy,
+                        proxy_mode,
                     },
                     descriptor,
                 ))
@@ -825,7 +836,7 @@ impl AdminService {
                     },
                     credential,
                     vendor_options: serde_json::from_str(&original.vendor_options)?,
-                    use_proxy: original.use_proxy,
+                    proxy_mode: original.proxy_mode.clone(),
                 },
                 original.effective_auth_mode() == "oauth",
             )
@@ -1083,7 +1094,21 @@ impl AdminService {
                     adapter_credentials: Some(credentials),
                     vendor_options: Some(options),
                     auth_mode: Some(auth_mode),
-                    use_proxy: Some(input.use_proxy.unwrap_or(current.use_proxy)),
+                    proxy_mode: Some({
+                        let mode = input.proxy_mode.unwrap_or(current.proxy_mode);
+                        let selection = crate::outbound_proxy::ProxySelection::parse(&mode)?;
+                        if let Some(proxy_id) = selection.proxy_id() {
+                            let proxies = crate::outbound_proxy::OutboundProxySettings::load(
+                                self.gw.storage.settings(),
+                            )
+                            .await?;
+                            anyhow::ensure!(
+                                proxies.find(proxy_id).is_some(),
+                                "selected outbound proxy does not exist"
+                            );
+                        }
+                        selection.as_str().to_owned()
+                    }),
                     is_enabled: Some(input.is_enabled.unwrap_or(current.is_enabled)),
                     preserve_credential_status,
                 },

@@ -10,7 +10,7 @@ pub(super) struct SqliteProviderStore {
 impl ProviderStore for SqliteProviderStore {
     async fn list(&self) -> anyhow::Result<Vec<Provider>> {
         let mut providers = sqlx::query_as::<_, Provider>(
-    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers ORDER BY created_at DESC",
+    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, proxy_mode, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers ORDER BY created_at DESC",
             )
             .fetch_all(&self.pool)
             .await?;
@@ -23,7 +23,7 @@ impl ProviderStore for SqliteProviderStore {
 
     async fn get(&self, id: &str) -> anyhow::Result<Option<Provider>> {
         let mut provider = sqlx::query_as::<_, Provider>(
-    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
+    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, proxy_mode, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -43,7 +43,7 @@ impl ProviderStore for SqliteProviderStore {
         }
         let mut tx = self.pool.begin_write().await?;
         sqlx::query(
-    "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO providers (id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, proxy_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&input.name)
@@ -58,7 +58,7 @@ impl ProviderStore for SqliteProviderStore {
             .bind(&input.adapter_credentials)
             .bind(&input.vendor_options)
             .bind(&input.auth_mode)
-            .bind(input.use_proxy)
+            .bind(input.proxy_mode)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -70,7 +70,7 @@ impl ProviderStore for SqliteProviderStore {
     async fn update(&self, id: &str, input: UpdateProvider) -> anyhow::Result<Provider> {
         let mut tx = self.pool.begin_write().await?;
         let current = sqlx::query_as::<_, Provider>(
-    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
+    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, proxy_mode, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
             )
             .bind(id)
             .fetch_optional(&mut *tx)
@@ -122,11 +122,11 @@ impl ProviderStore for SqliteProviderStore {
         if !is_valid_provider_auth_mode(&auth_mode) {
             anyhow::bail!("unsupported provider auth_mode: {}", auth_mode);
         }
-        let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
+        let proxy_mode = input.proxy_mode.unwrap_or(current.proxy_mode);
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
         sqlx::query(
-    "UPDATE providers SET name=?, vendor=?, protocol=?, base_url=?, preset_key=?, channel=?, models_source=?, static_models=?, api_key=?, adapter_credentials=?, vendor_options=?, auth_mode=?, use_proxy=?, is_enabled=?, updated_at=datetime('now'), revision=revision+1, credential_status = CASE WHEN ? THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN ? THEN NULL ELSE credential_invalid_at END WHERE id=?",
+    "UPDATE providers SET name=?, vendor=?, protocol=?, base_url=?, preset_key=?, channel=?, models_source=?, static_models=?, api_key=?, adapter_credentials=?, vendor_options=?, auth_mode=?, proxy_mode=?, is_enabled=?, updated_at=datetime('now'), revision=revision+1, credential_status = CASE WHEN ? THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN ? THEN NULL ELSE credential_invalid_at END WHERE id=?",
             )
             .bind(name)
             .bind(vendor)
@@ -140,7 +140,7 @@ impl ProviderStore for SqliteProviderStore {
             .bind(adapter_credentials)
             .bind(vendor_options)
             .bind(auth_mode)
-            .bind(use_proxy)
+            .bind(proxy_mode)
             .bind(is_enabled)
             .bind(reset_credential_status)
             .bind(reset_credential_status)
@@ -589,7 +589,7 @@ mod tests {
                 adapter_credentials: "{}".into(),
                 vendor_options: "{}".into(),
                 auth_mode: "apikey".into(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             })
             .await
             .expect("create provider")

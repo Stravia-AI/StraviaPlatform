@@ -599,8 +599,8 @@ pub(super) struct ModelCapabilitiesQuery {
 pub(super) struct InitOAuthSessionRequest {
     vendor_id: String,
     channel: String,
-    #[serde(default)]
-    use_proxy: bool,
+    #[serde(default = "stravia_core::outbound_proxy::default_proxy_mode")]
+    proxy_mode: String,
     callback_mode: OAuthCallbackMode,
     locale: Option<String>,
     provider_id: Option<String>,
@@ -616,8 +616,8 @@ pub(super) struct InitOAuthSessionRequest {
 pub(super) struct RefreshTokenOAuthSessionRequest {
     vendor_id: String,
     channel: String,
-    #[serde(default)]
-    use_proxy: bool,
+    #[serde(default = "stravia_core::outbound_proxy::default_proxy_mode")]
+    proxy_mode: String,
     provider_id: Option<String>,
     base_url: String,
     protocol: Option<String>,
@@ -648,7 +648,7 @@ pub(super) async fn init_oauth_session_handler(
                 protocol: input.protocol,
                 options: input.options,
                 credentials: input.credentials,
-                use_proxy: input.use_proxy,
+                proxy_mode: input.proxy_mode,
             },
             input.callback_mode,
             input.locale.as_deref(),
@@ -675,7 +675,7 @@ pub(super) async fn refresh_token_oauth_session_handler(
                 protocol: input.protocol,
                 options: input.options,
                 credentials: input.credentials,
-                use_proxy: input.use_proxy,
+                proxy_mode: input.proxy_mode,
             },
             input.refresh_token,
         )
@@ -740,7 +740,7 @@ pub(super) async fn complete_oauth_session_handler(
 
 #[derive(Deserialize)]
 pub(super) struct UpdateOAuthSessionRequest {
-    use_proxy: bool,
+    proxy_mode: String,
 }
 
 pub(super) async fn update_oauth_session_proxy_handler(
@@ -750,7 +750,7 @@ pub(super) async fn update_oauth_session_proxy_handler(
 ) -> impl IntoResponse {
     match gw
         .admin()
-        .update_oauth_session_proxy(&id, input.use_proxy)
+        .update_oauth_session_proxy(&id, &input.proxy_mode)
         .await
     {
         Ok(v) => Json(serde_json::json!({ "data": v })).into_response(),

@@ -129,8 +129,8 @@ pub struct AuthSessionCandidate {
     pub options: BTreeMap<String, Value>,
     #[serde(default)]
     pub credentials: BTreeMap<String, Value>,
-    #[serde(default)]
-    pub use_proxy: bool,
+    #[serde(default = "crate::outbound_proxy::default_proxy_mode")]
+    pub proxy_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,7 +274,7 @@ pub struct AuthSession {
     pub auth_descriptor: stravia_vendor_sdk::AuthDescriptor,
     pub scheme: String,
     pub status: String,
-    pub use_proxy: bool,
+    pub proxy_mode: String,
     pub callback_mode: OAuthCallbackMode,
     pub listener_state: String,
     pub listener_port: Option<u16>,
@@ -298,7 +298,7 @@ pub struct AuthSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateAuthSession {
-    pub use_proxy: Option<bool>,
+    pub proxy_mode: Option<String>,
     pub status: Option<String>,
     pub user_code: Option<String>,
     pub verification_uri: Option<String>,

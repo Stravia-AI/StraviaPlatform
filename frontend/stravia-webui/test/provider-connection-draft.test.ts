@@ -101,7 +101,7 @@ const existingProvider: Provider = {
   channel: 'default',
   protocol: 'openai',
   base_url: 'https://existing.example.com',
-  use_proxy: false,
+  proxy_mode: 'none',
   vendor_options: { region: 'us' },
   configured_credential_fields: ['api_key'],
   is_enabled: true,
@@ -130,7 +130,7 @@ function createController(
     binds: [] as { provider: Provider; sessionId: string }[],
     cancels: 0,
     consumes: 0,
-    proxyUpdates: [] as boolean[],
+    proxyUpdates: [] as string[],
     saved: [] as Provider[],
     savedWhileSubmitting: [] as boolean[],
     partials: [] as { provider: Provider; error: unknown }[],
@@ -140,7 +140,7 @@ function createController(
       name: 'Draft Name',
       baseUrl: ' https://raw.example.com ',
       protocol: '',
-      useProxy: false,
+      proxyMode: 'none',
       values: { api_key: 'sk-test', region: 'us' },
       ...init.fields,
     },
@@ -173,8 +173,8 @@ function createController(
       consume: () => {
         calls.consumes += 1
       },
-      updateProxy: (useProxy) => {
-        calls.proxyUpdates.push(useProxy)
+      updateProxy: (proxyMode) => {
+        calls.proxyUpdates.push(proxyMode)
         return Promise.resolve()
       },
     },

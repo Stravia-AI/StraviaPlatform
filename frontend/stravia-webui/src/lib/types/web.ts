@@ -20,7 +20,7 @@ export interface WebProvider {
   name: string
   kind: WebProviderKind
   api_key_configured: boolean
-  use_proxy: boolean
+  proxy_mode: string
   config?: Record<string, unknown> | null
   capabilities: WebProviderCapabilities | null
   registered: boolean
@@ -37,14 +37,14 @@ export interface CreateWebProvider {
   name: string
   kind: WebProviderKind
   api_key?: string | null
-  use_proxy?: boolean
+  proxy_mode?: string
   config?: Record<string, unknown> | null
 }
 
 export interface UpdateWebProvider {
   name?: string
   api_key?: string | null
-  use_proxy?: boolean
+  proxy_mode?: string
   config?: Record<string, unknown> | null
 }
 

@@ -361,7 +361,7 @@ fn provider_record(name: &str) -> crate::db::models::CreateProviderRecord {
         adapter_credentials: "{}".into(),
         vendor_options: "{}".into(),
         auth_mode: "apikey".into(),
-        use_proxy: false,
+        proxy_mode: "none".into(),
     }
 }
 

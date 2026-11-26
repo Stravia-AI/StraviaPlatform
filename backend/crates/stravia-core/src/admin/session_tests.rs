@@ -45,7 +45,7 @@ async fn declared_manual_input_is_validated_by_the_guest() -> anyhow::Result<()>
                 protocol: None,
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -207,16 +207,17 @@ async fn oauth_completion_claim_allows_only_one_exchange() -> anyhow::Result<()>
     assert_eq!(claimed.status, AuthSessionStatus::Exchanging.as_str());
     assert!(matches!(
         gw.admin()
-            .update_oauth_session_proxy(&init.session_id, true)
+            .update_oauth_session_proxy(&init.session_id, "system")
             .await?,
         AuthSessionStatusData::Exchanging { .. }
     ));
-    assert!(
+    assert_eq!(
         gw.admin()
             .get_auth_session_record(&init.session_id)
             .await?
             .expect("exchanging session")
-            .use_proxy
+            .proxy_mode,
+        "system"
     );
 
     let error = gw
@@ -238,14 +239,14 @@ async fn pending_oauth_session_uses_the_latest_proxy_setting() -> anyhow::Result
     let init = init_codex_session(&gw).await?;
 
     gw.admin()
-        .update_oauth_session_proxy(&init.session_id, true)
+        .update_oauth_session_proxy(&init.session_id, "system")
         .await?;
     let session = gw
         .admin()
         .get_auth_session_record(&init.session_id)
         .await?
         .expect("pending session");
-    assert!(session.use_proxy);
+    assert_eq!(session.proxy_mode, "system");
 
     gw.shutdown().await;
     drop(gw);
@@ -508,7 +509,7 @@ async fn init_codex_session(gw: &Gateway) -> anyhow::Result<AuthSessionInitData>
                 protocol: None,
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".into(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -569,7 +570,7 @@ async fn oauth_provider_input(gw: &Gateway) -> anyhow::Result<CreateProvider> {
         },
         credential: ProviderCredentialInput::None,
         vendor_options: serde_json::Map::new(),
-        use_proxy: false,
+        proxy_mode: "none".into(),
     })
 }
 

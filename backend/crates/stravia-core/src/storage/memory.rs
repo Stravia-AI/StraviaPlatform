@@ -398,7 +398,7 @@ impl ProviderStore for MemoryStorage {
             adapter_credentials: input.adapter_credentials,
             vendor_options: input.vendor_options,
             auth_mode: input.auth_mode,
-            use_proxy: input.use_proxy,
+            proxy_mode: input.proxy_mode,
             cost_basis: CostBasis::Usage,
             last_test_success: None,
             last_test_at: None,
@@ -458,8 +458,8 @@ impl ProviderStore for MemoryStorage {
         if let Some(value) = input.auth_mode {
             provider.auth_mode = value;
         }
-        if let Some(value) = input.use_proxy {
-            provider.use_proxy = value;
+        if let Some(value) = input.proxy_mode {
+            provider.proxy_mode = value;
         }
         if let Some(value) = input.is_enabled {
             provider.is_enabled = value;
@@ -1908,7 +1908,7 @@ mod tests {
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".into(),
             cost_basis: CostBasis::Usage,
             last_test_success: None,
             last_test_at: None,

@@ -27,3 +27,17 @@ pub(super) async fn set_setting(
         Err(e) => err(e),
     }
 }
+
+pub(super) async fn get_system_proxy(State(gw): State<Gateway>) -> impl IntoResponse {
+    Json(serde_json::json!({ "data": gw.admin().describe_system_proxy() }))
+}
+
+pub(super) async fn probe_outbound_proxy(
+    State(gw): State<Gateway>,
+    Json(body): Json<stravia_core::outbound_proxy::ProxyIpProbeRequest>,
+) -> impl IntoResponse {
+    match gw.admin().probe_outbound_proxy(body).await {
+        Ok(result) => Json(serde_json::json!({ "data": result })).into_response(),
+        Err(e) => err(e),
+    }
+}
