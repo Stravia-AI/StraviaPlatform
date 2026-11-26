@@ -265,8 +265,8 @@ fn ensure_existing_image_capabilities(response: &mut DiscoverResponse) {
             .and_then(|m| m.get("output"))
             .and_then(Value::as_array)
             .is_some_and(|list| list.iter().any(|v| v.as_str() == Some("image")));
-        if outputs_image && !model.capabilities.iter().any(|c| c == "media_image") {
-            model.capabilities.push("media_image".into());
+        if outputs_image {
+            crate::add_media_image_capability(model);
         }
     }
 }
@@ -275,9 +275,7 @@ fn merge_models(response: &mut DiscoverResponse, models: &[ImageModelEntry], res
     for entry in models {
         let edit = entry.supports_image_input;
         if let Some(model) = response.models.iter_mut().find(|m| m.id == entry.id) {
-            if !model.capabilities.iter().any(|c| c == "media_image") {
-                model.capabilities.push("media_image".into());
-            }
+            crate::add_media_image_capability(model);
             let modalities = model
                 .metadata
                 .entry("modalities".into())
@@ -784,6 +782,41 @@ mod tests {
             response.models[1].metadata["modalities"],
             json!({"input": ["text"], "output": ["image"]})
         );
+
+        let mut unlabeled = DiscoverResponse {
+            models: vec![
+                DiscoveredModel {
+                    id: "dual-output".into(),
+                    display_name: "Dual".into(),
+                    family: None,
+                    selector: None,
+                    capabilities: Vec::new(),
+                    metadata: [(
+                        "modalities".into(),
+                        json!({"input": ["text"], "output": ["text", "image"]}),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+                DiscoveredModel {
+                    id: "image-only".into(),
+                    display_name: "Image Only".into(),
+                    family: None,
+                    selector: None,
+                    capabilities: Vec::new(),
+                    metadata: [(
+                        "modalities".into(),
+                        json!({"input": ["text"], "output": ["image"]}),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            ],
+            next_cursor: None,
+        };
+        ensure_existing_image_capabilities(&mut unlabeled);
+        assert_eq!(unlabeled.models[0].capabilities, vec!["infer", "media_image"]);
+        assert_eq!(unlabeled.models[1].capabilities, vec!["media_image"]);
     }
 
     #[test]

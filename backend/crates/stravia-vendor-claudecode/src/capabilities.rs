@@ -168,7 +168,7 @@ pub(crate) fn discovered_model(entry: &Value) -> Option<DiscoveredModel> {
             .to_owned(),
         family: None,
         selector: None,
-        capabilities: Vec::new(),
+        capabilities: vec!["infer".to_owned()],
         metadata: BTreeMap::from([(
             "modalities".into(),
             json!({"input": input, "output": ["text"]}),
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(model.metadata[METADATA_KEY], opus_5_5());
         assert_eq!(
             model.capabilities,
-            ["image_input", "structured_output", "reasoning"]
+            ["infer", "image_input", "structured_output", "reasoning"]
         );
     }
 

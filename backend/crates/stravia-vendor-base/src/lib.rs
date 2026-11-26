@@ -111,6 +111,36 @@ fn is_static_profile(provider_id: &str) -> bool {
         || metadata::CATALOG_VENDOR_IDS.contains(&provider_id)
 }
 
+/// 给既有模型追加 `media_image` 能力；若该模型原本未显式声明任何操作能力且
+/// 支持文本输出（或未声明输出模态），同时补上 `infer`，避免把原本可用的推理
+/// 模型收窄成纯生图模型。
+pub(crate) fn add_media_image_capability(model: &mut stravia_vendor_sdk::DiscoveredModel) {
+    let has_operation_capability = model.capabilities.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "infer" | "search" | "media_image" | "image_output"
+        )
+    });
+    let outputs_text = model
+        .metadata
+        .get("modalities")
+        .and_then(|modalities| modalities.get("output"))
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|list| list.iter().any(|value| value.as_str() == Some("text")));
+    if !has_operation_capability && outputs_text {
+        model.capabilities.push(Capability::Infer.as_str().into());
+    }
+    if !model
+        .capabilities
+        .iter()
+        .any(|capability| capability == Capability::MediaImage.as_str())
+    {
+        model
+            .capabilities
+            .push(Capability::MediaImage.as_str().into());
+    }
+}
+
 fn add_allowance_capabilities(mut descriptor: ProviderDescriptor) -> ProviderDescriptor {
     for channel in &mut descriptor.channels {
         if allowance::supports(&descriptor.provider_id, &channel.id) {
