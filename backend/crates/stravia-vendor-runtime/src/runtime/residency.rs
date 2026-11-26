@@ -24,8 +24,9 @@ use super::{LoadedPlugin, StoreState, VendorRuntime};
 use crate::bindings;
 use crate::error::{LoadError, RuntimeError};
 
-/// 带持久编译缓存的运行时在插件空闲这么久之后释放其编译产物。
-pub(super) const IDLE_UNLOAD: Duration = Duration::from_secs(60 * 60);
+/// 带持久编译缓存的运行时在插件空闲这么久之后释放其编译产物（15 分钟）；
+/// 下次调用直接从磁盘 `.cwasm` 文件映射快速恢复，避免冷门插件长期常驻内存。
+pub(super) const IDLE_UNLOAD: Duration = Duration::from_secs(15 * 60);
 
 pub type SourceError = Box<dyn std::error::Error + Send + Sync>;
 pub type ComponentBytes = Box<dyn AsRef<[u8]> + Send>;

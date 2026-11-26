@@ -597,6 +597,7 @@ impl<E: AttributionEvidence> RunAttribution<E> {
 
     pub(super) fn sweep(&mut self, now: i64) {
         self.tail.sweep(now);
+        self.grouping.sweep(now);
     }
 
     /// Tail evidence follows the retention setting; grouping assignments are

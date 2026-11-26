@@ -1071,9 +1071,10 @@ impl VendorPlugins {
             .plugins
             .get(vendor_id)
             .ok_or_else(|| anyhow::anyhow!("no bundled version exists for this vendor"))?;
+        let component = bundle.component_bytes().await?;
         self.preview(
             gw,
-            Bytes::from_static(bundle.component),
+            component,
             PluginSource::Builtin,
             Some(vendor_id),
         )

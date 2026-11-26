@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use stravia_runtime_contract::protocol::ir::canonical::{hash_bytes, hash_hex};
 use stravia_vendor_runtime::{
     ComponentBytes, ComponentSource, LoadedPlugin, SourceError, VendorRuntime,
 };
@@ -11,13 +10,21 @@ use tokio::sync::OnceCell;
 
 include!(concat!(env!("OUT_DIR"), "/vendor_components.rs"));
 
-/// 内嵌组件的字节随二进制常驻，释放编译产物后直接取回，不经过磁盘。
-struct EmbeddedSource(&'static [u8]);
+/// 内嵌组件以 zstd 压缩形式存放在静态只读段中；温启动命中准入与编译缓存时
+/// 完全不触发组件字节缺页，仅在冷启动或空闲释放后的按需重载时解压。
+struct EmbeddedSource(&'static BundledComponent);
 
 #[async_trait]
 impl ComponentSource for EmbeddedSource {
     async fn read(&self) -> Result<ComponentBytes, SourceError> {
-        Ok(Box::new(self.0))
+        let entry = self.0;
+        let bytes = tokio::task::spawn_blocking(move || {
+            zstd::bulk::decompress(entry.zstd_bytes, entry.uncompressed_len)
+        })
+        .await
+        .map_err(|error| Box::new(error) as SourceError)?
+        .map_err(|error| Box::new(error) as SourceError)?;
+        Ok(Box::new(bytes))
     }
 }
 
@@ -37,10 +44,28 @@ impl CompileCache {
 }
 
 pub(super) struct BundledPlugin {
-    pub(super) component: &'static [u8],
-    /// 内嵌字节的完整 SHA-256（小写十六进制），与安装记录的 digest 同一格式。
+    entry: &'static BundledComponent,
+    /// 内嵌字节的完整 SHA-256（小写十六进制），构建期预计算，与安装记录的 digest 同一格式。
     pub(super) digest: String,
     pub(super) loaded: LoadedPlugin,
+}
+
+impl BundledPlugin {
+    pub(super) async fn component_bytes(&self) -> anyhow::Result<bytes::Bytes> {
+        let entry = self.entry;
+        let vendor_id = entry.vendor_id;
+        let bytes = tokio::task::spawn_blocking(move || {
+            zstd::bulk::decompress(entry.zstd_bytes, entry.uncompressed_len)
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("bundled vendor decompress task failed for {vendor_id}: {error}")
+        })?
+        .map_err(|error| {
+            anyhow::anyhow!("bundled vendor decompress failed for {vendor_id}: {error}")
+        })?;
+        Ok(bytes::Bytes::from(bytes))
+    }
 }
 
 pub(super) struct BundledPlugins {
@@ -87,20 +112,31 @@ impl BundledPlugins {
             None => Self::uncached_runtime().await?,
         };
         let mut plugins = BTreeMap::new();
-        for &(vendor_id, component) in COMPONENTS {
-            let digest = hash_hex(&hash_bytes(component));
-            let source: Arc<dyn ComponentSource> = Arc::new(EmbeddedSource(component));
-            // 此前由本二进制完整校验过的组件无需再实例化：用记录得到 descriptor，
-            // 首次使用时才装入并核对。
+        for entry in COMPONENTS {
+            let vendor_id = entry.vendor_id;
+            let digest = entry.sha256.to_owned();
+            let source: Arc<dyn ComponentSource> = Arc::new(EmbeddedSource(entry));
+            // 此前由本二进制完整校验过的组件无需再实例化，也不需要解压或哈希只读段字节：
+            // 直接用构建期摘要恢复 descriptor，首次使用时再从持久编译缓存装入。
             let loaded = match runtime.restore(&digest, Arc::clone(&source)).await {
                 Some(loaded) => loaded,
                 None => {
-                    let loaded = runtime.load(component).await.map_err(|error| {
+                    let bytes = tokio::task::spawn_blocking(move || {
+                        zstd::bulk::decompress(entry.zstd_bytes, entry.uncompressed_len)
+                    })
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("bundled vendor decompress task failed for {vendor_id}: {error}")
+                    })?
+                    .map_err(|error| {
+                        anyhow::anyhow!("bundled vendor decompress failed for {vendor_id}: {error}")
+                    })?;
+                    let loaded = runtime.load(&bytes).await.map_err(|error| {
                         tracing::error!(vendor_id, error = ?error, "bundled component load failed");
                         anyhow::anyhow!("bundled vendor component is invalid: {vendor_id}")
                     })?;
                     record_admission(&runtime, &loaded).await;
-                    // 已装入的编译产物沿用，空闲 60 分钟后释放，再从持久编译缓存恢复。
+                    // 已装入的编译产物沿用，空闲后释放，再从持久编译缓存恢复。
                     loaded.with_source(source)
                 }
             };
@@ -111,7 +147,7 @@ impl BundledPlugins {
             plugins.insert(
                 vendor_id.to_owned(),
                 BundledPlugin {
-                    component,
+                    entry,
                     digest,
                     loaded,
                 },

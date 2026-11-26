@@ -1,6 +1,10 @@
 //! 搜索工作区按同时进行的搜索借还，不随扫描线程数永久复制。
 //! 编译语义与 regex::bytes 相同；锁只保护空闲工作区，不串行化匹配。
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use parking_lot::Mutex;
 use regex_automata::{
@@ -13,12 +17,25 @@ pub(super) struct Regex(Arc<Compiled>);
 
 struct Compiled {
     engine: meta::Regex,
-    idle: Mutex<Vec<Scratch>>,
+    idle: Mutex<IdlePool>,
+}
+
+#[derive(Default)]
+struct IdlePool {
+    scratches: Vec<Scratch>,
+    queued: bool,
 }
 
 struct Scratch {
     cache: meta::Cache,
     captures: captures::Captures,
+    accounted_bytes: usize,
+}
+
+impl Scratch {
+    fn memory_usage(&self) -> usize {
+        self.cache.memory_usage()
+    }
 }
 
 struct Lease<'r> {
@@ -31,13 +48,87 @@ struct Lease<'r> {
 /// periods while keeping steady-state concurrent scans (up to 4 threads) warm.
 const MAX_IDLE_SCRATCHES: usize = 4;
 
+/// Global byte budget for idle regex workspaces across all compiled rules so a
+/// diverse workload touching hundreds of rules cannot retain hundreds of MiB of
+/// cold lazy-DFA state tables simultaneously.
+const GLOBAL_IDLE_SCRATCH_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+static IDLE_SCRATCH_BYTES: AtomicUsize = AtomicUsize::new(0);
+static IDLE_SCRATCH_RING: Mutex<VecDeque<Weak<Compiled>>> = Mutex::new(VecDeque::new());
+
+impl Drop for Compiled {
+    fn drop(&mut self) {
+        let pool = self.idle.get_mut();
+        let bytes: usize = pool.scratches.iter().map(|s| s.accounted_bytes).sum();
+        if bytes > 0 {
+            IDLE_SCRATCH_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+fn evict_idle_scratches_to_budget(budget_bytes: usize) {
+    let mut dropped = Vec::new();
+    while IDLE_SCRATCH_BYTES.load(Ordering::Relaxed) > budget_bytes {
+        let next = IDLE_SCRATCH_RING.lock().pop_front();
+        let Some(weak) = next else {
+            break;
+        };
+        let Some(compiled) = weak.upgrade() else {
+            continue;
+        };
+        let still_queued = {
+            let mut pool = compiled.idle.lock();
+            if !pool.scratches.is_empty() {
+                // Evict the oldest idle workspace for this rule first.
+                let scratch = pool.scratches.remove(0);
+                IDLE_SCRATCH_BYTES.fetch_sub(scratch.accounted_bytes, Ordering::Relaxed);
+                dropped.push(scratch);
+            }
+            if pool.scratches.is_empty() {
+                pool.queued = false;
+                false
+            } else {
+                true
+            }
+        };
+        if still_queued {
+            IDLE_SCRATCH_RING.lock().push_back(weak);
+        }
+    }
+    drop(dropped);
+}
+
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
-        if let Some(scratch) = self.scratch.take() {
-            let mut idle = self.regex.0.idle.lock();
-            if idle.len() < MAX_IDLE_SCRATCHES {
-                idle.push(scratch);
+        let Some(mut scratch) = self.scratch.take() else {
+            return;
+        };
+        let bytes = scratch.memory_usage();
+        if bytes > GLOBAL_IDLE_SCRATCH_BUDGET_BYTES {
+            return;
+        }
+        let need_enqueue = {
+            let mut pool = self.regex.0.idle.lock();
+            if pool.scratches.len() >= MAX_IDLE_SCRATCHES {
+                return;
             }
+            scratch.accounted_bytes = bytes;
+            pool.scratches.push(scratch);
+            IDLE_SCRATCH_BYTES.fetch_add(bytes, Ordering::Relaxed);
+            if pool.queued {
+                false
+            } else {
+                pool.queued = true;
+                true
+            }
+        };
+        if need_enqueue {
+            IDLE_SCRATCH_RING
+                .lock()
+                .push_back(Arc::downgrade(&self.regex.0));
+        }
+        if IDLE_SCRATCH_BYTES.load(Ordering::Relaxed) > GLOBAL_IDLE_SCRATCH_BUDGET_BYTES {
+            evict_idle_scratches_to_budget(GLOBAL_IDLE_SCRATCH_BUDGET_BYTES);
         }
     }
 }
@@ -65,16 +156,26 @@ impl Regex {
             .map_err(Box::new)?;
         Ok(Self(Arc::new(Compiled {
             engine,
-            idle: Mutex::new(Vec::new()),
+            idle: Mutex::new(IdlePool::default()),
         })))
     }
 
     fn lease(&self) -> Lease<'_> {
-        let available = self.0.idle.lock().pop();
-        let scratch = available.unwrap_or_else(|| Scratch {
-            cache: self.0.engine.create_cache(),
-            captures: self.0.engine.create_captures(),
-        });
+        let available = self.0.idle.lock().scratches.pop();
+        let scratch = match available {
+            Some(mut scratch) => {
+                if scratch.accounted_bytes > 0 {
+                    IDLE_SCRATCH_BYTES.fetch_sub(scratch.accounted_bytes, Ordering::Relaxed);
+                    scratch.accounted_bytes = 0;
+                }
+                scratch
+            }
+            None => Scratch {
+                cache: self.0.engine.create_cache(),
+                captures: self.0.engine.create_captures(),
+                accounted_bytes: 0,
+            },
+        };
         Lease {
             regex: self,
             scratch: Some(scratch),
@@ -330,5 +431,45 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn global_idle_scratch_eviction_bounds_retained_memory() {
+        let regexes: Vec<Regex> = (0..32)
+            .map(|i| {
+                Regex::new(&format!(
+                    r"(?i)(?:token_{i}|secret_{i}|key_{i})\s*[:=]\s*['\x22]?([A-Za-z0-9_\-]{{20,64}})['\x22]?"
+                ))
+                .unwrap()
+            })
+            .collect();
+        let haystack = b"token_7: ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 padding ".repeat(64);
+        for r in &regexes {
+            let _ = r.find(&haystack);
+        }
+        let retained_before: usize = regexes
+            .iter()
+            .map(|r| r.0.idle.lock().scratches.iter().map(|s| s.accounted_bytes).sum::<usize>())
+            .sum();
+        assert!(retained_before > 0);
+        // Tight budget must evict cold idle workspaces and keep global counter consistent.
+        evict_idle_scratches_to_budget(16 * 1024);
+        let retained_after: usize = regexes
+            .iter()
+            .map(|r| {
+                r.0.idle
+                    .lock()
+                    .scratches
+                    .iter()
+                    .map(|s| s.accounted_bytes)
+                    .sum::<usize>()
+            })
+            .sum();
+        assert!(
+            retained_after <= 16 * 1024 && retained_after < retained_before,
+            "expected eviction below 16 KiB budget: before={retained_before}, after={retained_after}"
+        );
+        // Subsequent scan after eviction still works identically.
+        assert!(regexes[7].is_match(&haystack));
     }
 }

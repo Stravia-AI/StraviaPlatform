@@ -48,8 +48,22 @@ fn main() -> anyhow::Result<()> {
             };
             format!("builtin components are missing; run `{task}` before invoking Cargo directly")
         })?)?;
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").context("missing OUT_DIR")?);
+    let zstd_level = if std::env::var("OPT_LEVEL").as_deref() == Ok("3") {
+        19
+    } else {
+        9
+    };
     let mut seen = BTreeSet::new();
-    let mut source = String::from("pub(crate) const COMPONENTS: &[(&str, &[u8])] = &[\n");
+    let mut source = String::from(
+        "pub(crate) struct BundledComponent {\n\
+         \x20   pub(crate) vendor_id: &'static str,\n\
+         \x20   pub(crate) sha256: &'static str,\n\
+         \x20   pub(crate) uncompressed_len: usize,\n\
+         \x20   pub(crate) zstd_bytes: &'static [u8],\n\
+         }\n\n\
+         pub(crate) static COMPONENTS: &[BundledComponent] = &[\n",
+    );
     // 普通发行版只随附基础包；声明式部署可把整组官方插件作为宿主的一部分管理。
     for record in records
         .into_iter()
@@ -86,15 +100,25 @@ fn main() -> anyhow::Result<()> {
             "builtin component digest mismatch for {}; rebuild with `task build:vendors`",
             record.vendor_id
         );
+        let compressed = zstd::bulk::compress(&component, zstd_level)
+            .with_context(|| format!("compress builtin component for {}", record.vendor_id))?;
+        let compressed_path = output.join(format!("{}.wasm.zst", record.vendor_id));
+        fs::write(&compressed_path, &compressed)?;
         source.push_str(&format!(
-            "    ({:?}, include_bytes!({:?})),\n",
+            "    BundledComponent {{\n\
+             \x20       vendor_id: {:?},\n\
+             \x20       sha256: {:?},\n\
+             \x20       uncompressed_len: {},\n\
+             \x20       zstd_bytes: include_bytes!({:?}),\n\
+             \x20   }},\n",
             record.vendor_id,
-            path.to_string_lossy()
+            record.sha256,
+            component.len(),
+            compressed_path.to_string_lossy()
         ));
     }
     ensure!(seen.contains("base"), "builtin base component is missing");
     source.push_str("];\n");
-    let output = PathBuf::from(std::env::var_os("OUT_DIR").context("missing OUT_DIR")?);
     fs::write(output.join("vendor_components.rs"), source)?;
     Ok(())
 }

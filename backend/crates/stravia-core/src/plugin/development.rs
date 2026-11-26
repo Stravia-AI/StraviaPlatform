@@ -51,7 +51,7 @@ pub(crate) async fn reconcile(gw: &Gateway, manifest: &Path) -> anyhow::Result<(
         let source = if bundled
             .plugins
             .get(&record.vendor_id)
-            .is_some_and(|bundle| bundle.component == component.as_slice())
+            .is_some_and(|bundle| bundle.digest == digest)
         {
             PluginSource::Builtin
         } else {
