@@ -7,6 +7,7 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUST_VERSION=1.99.1
+ARG NODE_VERSION=24.14.0
 ARG BUN_VERSION=1.4.2
 ARG TASK_VERSION=3.52.0
 ARG UV_VERSION=0.11.28
@@ -18,15 +19,19 @@ ARG APT_MIRROR=""
 ARG APT_MIRROR_PORTS=""
 ARG RUSTUP_DIST_SERVER=""
 ARG RUSTUP_UPDATE_ROOT=""
+ARG NODE_MIRROR=""
+ARG UV_DEFAULT_INDEX=""
 
+# Keep CARGO_HOME unset at runtime so cargo uses $HOME/.cargo (matching standard actions/cache paths),
+# while preinstalled rustup/cargo binaries live under /usr/local/cargo/bin on PATH.
 ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
     BUN_INSTALL=/usr/local/bun \
     XWIN_CACHE_DIR=/usr/local/xwin \
     XWIN_VERSION=16 \
     SCCACHE_CACHE_SIZE=20G \
     CARGO_INCREMENTAL=0 \
     WINEDEBUG=-all \
+    UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX} \
     PATH=/usr/local/cargo/bin:/usr/local/bun/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Enable multiarch arm64 repositories for Linux aarch64 GTK/WebKitGTK cross-compilation.
@@ -66,12 +71,19 @@ EOF
       libgtk-3-dev:arm64 \
       libayatana-appindicator3-dev:arm64 \
       librsvg2-dev:arm64 \
-      wine64 wine \
-      nodejs npm; \
+      wine64 wine; \
     rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 24 (required by actions/checkout@v7, actions/cache@v6, etc.).
+RUN set -eux; \
+    node_base="${NODE_MIRROR:-https://nodejs.org/dist}"; \
+    curl -fsSL "${node_base%/}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+      | tar -xJ --strip-components=1 -C /usr/local; \
+    node -v; npm -v
 
 # Install pinned Rust toolchain + cross-compilation targets.
 RUN set -eux; \
+    export CARGO_HOME=/usr/local/cargo; \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --no-modify-path --default-toolchain "${RUST_VERSION}" --profile minimal --component rustfmt,clippy; \
     rustup target add \
@@ -98,6 +110,7 @@ RUN set -eux; \
 # do not depend on live Microsoft download availability at build time.
 RUN set -eux; \
     if [ "${PREFETCH_XWIN}" = "1" ]; then \
+      export CARGO_HOME=/usr/local/cargo; \
       mkdir -p "${XWIN_CACHE_DIR}"; \
       cargo install --locked xwin; \
       xwin --accept-license --cache-dir "${XWIN_CACHE_DIR}" --manifest-version "${XWIN_VERSION}" --arch x86_64,aarch64 download; \

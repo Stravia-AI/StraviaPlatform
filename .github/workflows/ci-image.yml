@@ -1,0 +1,55 @@
+name: CI Base Image
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - ".github/docker/ci.Dockerfile"
+      - ".github/workflows/ci-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ci-image:
+    name: Build & publish CI x64 base image
+    if: github.server_url != 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Forgejo Container Registry
+        env:
+          REGISTRY_HOST: git.stravia.cn
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s\n' "${REGISTRY_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin
+
+      - name: Build and push git.stravia.cn/stravia/stravia-ci:x64
+        env:
+          IMAGE: git.stravia.cn/stravia/stravia-ci
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file .github/docker/ci.Dockerfile \
+            --build-arg APT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ \
+            --build-arg APT_MIRROR_PORTS=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
+            --build-arg RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup \
+            --build-arg RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup \
+            --build-arg NODE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/nodejs-release \
+            --build-arg UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+            --tag "${IMAGE}:x64" \
+            --tag "${IMAGE}:x64-${SHORT_SHA:0:12}" \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            .
