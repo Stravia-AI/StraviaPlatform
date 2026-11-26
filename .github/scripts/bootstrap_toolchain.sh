@@ -40,6 +40,7 @@ NEED_MINISIGN="${NEED_MINISIGN:-0}"
 NEED_XWIN="${NEED_XWIN:-0}"
 NEED_LINUX_DESKTOP="${NEED_LINUX_DESKTOP:-0}"
 NEED_LINUX_ARM64="${NEED_LINUX_ARM64:-0}"
+NEED_LINUX_ARM64_DESKTOP="${NEED_LINUX_ARM64_DESKTOP:-0}"
 NEED_WINE="${NEED_WINE:-0}"
 NEED_MACOS_CROSS="${NEED_MACOS_CROSS:-0}"
 RUST_TARGETS="${RUST_TARGETS:-wasm32-wasip2}"
@@ -135,6 +136,37 @@ if command -v apt-get >/dev/null 2>&1; then
   fi
   if [[ "$NEED_LINUX_ARM64" == "1" ]]; then
     for pkg in gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; do
+      add_pkg_if_missing "$pkg"
+    done
+  fi
+  if [[ "$NEED_LINUX_ARM64_DESKTOP" == "1" && "$HOST_ARCH" == "x86_64" ]]; then
+    if ! dpkg --print-foreign-architectures 2>/dev/null | grep -qx "arm64"; then
+      $SUDO dpkg --add-architecture arm64
+    fi
+    if [[ ! -f /etc/apt/sources.list.d/ubuntu-arm64-ports.sources ]]; then
+      ubuntu_codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-noble}")"
+      if grep -Rq "mirrors.tuna.tsinghua.edu.cn" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        arm64_ports_uri="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/"
+      else
+        arm64_ports_uri="http://ports.ubuntu.com/ubuntu-ports/"
+      fi
+      # Pin existing x86_64 Ubuntu sources to amd64 so `apt-get update` does not 404 on arm64 indices.
+      if [[ -f /etc/apt/sources.list.d/ubuntu.sources ]] && ! grep -q '^Architectures:' /etc/apt/sources.list.d/ubuntu.sources; then
+        $SUDO sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+      fi
+      if [[ -f /etc/apt/sources.list ]]; then
+        $SUDO sed -Ei 's|^deb (http[^ ]+)|deb [arch=amd64] \1|g' /etc/apt/sources.list
+      fi
+      $SUDO tee /etc/apt/sources.list.d/ubuntu-arm64-ports.sources >/dev/null <<EOF
+Types: deb
+URIs: ${arm64_ports_uri}
+Suites: ${ubuntu_codename} ${ubuntu_codename}-updates ${ubuntu_codename}-security
+Components: main universe restricted multiverse
+Architectures: arm64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+    fi
+    for pkg in libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 libayatana-appindicator3-dev:arm64 librsvg2-dev:arm64 libssl-dev:arm64 patchelf xdg-utils file; do
       add_pkg_if_missing "$pkg"
     done
   fi

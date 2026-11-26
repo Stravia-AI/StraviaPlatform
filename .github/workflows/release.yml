@@ -44,7 +44,7 @@ jobs:
     name: Validate release inputs
     needs: checks
     if: ${{ github.server_url != 'https://github.com' && !cancelled() && (needs.checks.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.skip_checks)) }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       publish: ${{ steps.release.outputs.publish }}
       tag: ${{ steps.release.outputs.tag }}
@@ -171,10 +171,81 @@ jobs:
                   output.write(f"{key}={value}\n")
           PY
 
+  build-shared-assets:
+    name: Build shared WebUI & bundled base vendor once
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect persistent host cache volume
+        id: host-cache
+        shell: bash
+        run: |
+          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.bun/bin
+            ~/.local/bin
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
+          restore-keys: |
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
+
+      - name: Bootstrap Linux x64 toolchain
+        id: bootstrap
+        env:
+          RUST_TARGETS: "wasm32-wasip2"
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo, sccache, and Bun
+        if: steps.bootstrap.outputs.host_cache != 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/sccache
+            ~/.bun/install/cache
+          key: ci-rust-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          restore-keys: |
+            ci-rust-v2-
+
+      - name: Build WebUI dist and bundled base Wasm vendor once
+        run: |
+          task prepare:crates
+          task install:web
+          task build:web
+          task build:vendors
+
+      - name: Upload shared release build inputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-shared-assets
+          path: |
+            frontend/stravia-webui/dist
+            target/vendor-plugins
+          if-no-files-found: error
+          retention-days: 1
+
   build-vendor-plugins:
     name: Standalone vendor plugins (wasm32-wasip2)
-    needs: prepare
-    runs-on: ubuntu-24.04
+    needs:
+      - prepare
+      - build-shared-assets
+    runs-on: ubuntu-latest
     outputs:
       has_plugins: ${{ steps.select.outputs.has_plugins }}
     steps:
@@ -203,6 +274,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Download shared bundled base vendor
+        if: steps.select.outputs.has_plugins == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: release-shared-assets
+          path: .
+
       - name: Detect persistent host cache volume
         id: host-cache
         if: steps.select.outputs.has_plugins == 'true'
@@ -223,9 +301,9 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-release-plugins
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -244,8 +322,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cache/sccache
-          key: release-plugins-v1-${{ hashFiles('Cargo.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: ci-rust-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
+            ci-rust-v2-
             release-plugins-v1-
 
       - name: Prepare patched crates
@@ -302,9 +381,9 @@ jobs:
           Path("plugin-input.json").write_text(json.dumps(declarations))
           PY
 
-      - name: Prepare builtin components for catalog tool
+      - name: Verify prebuilt bundled base vendor exists
         if: steps.select.outputs.has_plugins == 'true'
-        run: task build:vendors
+        run: test -s target/vendor-plugins/manifest.json
 
       - name: Generate catalog and compressed assets
         if: steps.select.outputs.has_plugins == 'true'
@@ -345,38 +424,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-server:
-    name: Server cross-build (${{ matrix.suffix }})
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suffix: linux-x86_64-gnu
-            target: x86_64-unknown-linux-gnu
-            kind: linux-native
-            binary: target/x86_64-unknown-linux-gnu/release/stravia-server
-            archive: tar.gz
-          - suffix: linux-aarch64-gnu
-            target: aarch64-unknown-linux-gnu
-            kind: linux-arm64
-            binary: target/aarch64-unknown-linux-gnu/release/stravia-server
-            archive: tar.gz
-          - suffix: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            kind: windows-xwin
-            binary: target/x86_64-pc-windows-msvc/release/stravia-server.exe
-            archive: zip
-          - suffix: windows-aarch64
-            target: aarch64-pc-windows-msvc
-            kind: windows-xwin
-            binary: target/aarch64-pc-windows-msvc/release/stravia-server.exe
-            archive: zip
+  # Combined Linux x64 build: compiles stravia-server (x64), stravia-desktop AppImage (x64),
+  # and stravia-server (arm64 cross) in one container to reuse stravia-core, sccache, and WebUI dist.
+  build-linux-x64:
+    name: Linux builds (x64 server + x64 desktop + arm64 server)
+    needs:
+      - prepare
+      - build-shared-assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Download shared WebUI dist & bundled vendors
+        uses: actions/download-artifact@v8
+        with:
+          name: release-shared-assets
+          path: .
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -388,7 +453,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Cache Rust cross-compile toolchain binaries
+      - name: Cache Rust toolchain binaries
         if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
@@ -397,20 +462,19 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-release-server-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
           restore-keys: |
-            toolchain-release-server-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
-      - name: Bootstrap Linux x64 cross-compile toolchain
+      - name: Bootstrap Linux x64 desktop + arm64 cross toolchain
         id: bootstrap
         env:
-          NEED_XWIN: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
-          NEED_LINUX_ARM64: ${{ matrix.kind == 'linux-arm64' && '1' || '0' }}
-          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
+          NEED_LINUX_DESKTOP: "1"
+          NEED_LINUX_ARM64: "1"
+          RUST_TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, Bun, and xwin SDK
+      - name: Cache Cargo, sccache, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
@@ -419,35 +483,208 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cache/sccache
-            ~/.cache/cargo-xwin
             ~/.bun/install/cache
-          key: release-server-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: release-linux-x64-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
-            release-server-${{ matrix.suffix }}-v1-
+            release-linux-x64-v2-
+            ci-rust-v2-
 
-      - name: Prepare patched crates, WebUI, and bundled vendors
-        run: |
-          task prepare:crates
-          task build:web
-          task build:vendors
-
-      - name: Build server (Linux native)
-        if: matrix.kind == 'linux-native'
-        run: cargo build --locked -p stravia-server --release --target ${{ matrix.target }}
-
-      - name: Build server (Linux aarch64 cross)
-        if: matrix.kind == 'linux-arm64'
+      - name: Validate updater signing credentials
         env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python3 .github/scripts/configure_updater_signing.py
+
+      - name: Prepare patched crates
+        run: task prepare:crates
+
+      - name: Build & package Linux x86_64 server
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo build --locked -p stravia-server --release --target x86_64-unknown-linux-gnu
+          asset="stravia-server-v${VERSION}-linux-x86_64-gnu"
+          mkdir -p "package/${asset}" dist-server-x64
+          install -m 0755 target/x86_64-unknown-linux-gnu/release/stravia-server "package/${asset}/stravia-server"
+          install -m 0644 LICENSE "package/${asset}/LICENSE"
+          tar -C package -czf "dist-server-x64/${asset}.tar.gz" "${asset}"
+
+      - name: Build & package Linux x86_64 desktop AppImage (reuses target/ & WebUI dist)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          (
+            cd backend/apps/stravia-desktop
+            bunx --bun @tauri-apps/cli@2.12.6 build \
+              --target x86_64-unknown-linux-gnu \
+              --config tauri.release.conf.json \
+              --config '{"build":{"beforeBuildCommand":""}}' \
+              --bundles appimage -- --locked
+          )
+          mkdir -p dist-desktop-x64
+          bundles=(target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          if [[ ${#bundles[@]} -ne 1 ]]; then
+            echo "Expected 1 x86_64 AppImage, found ${#bundles[@]}" >&2
+            exit 1
+          fi
+          asset="stravia-desktop-v${VERSION}-linux-x86_64.AppImage"
+          cp "${bundles[0]}" "dist-desktop-x64/${asset}"
+          cp "${bundles[0]}.sig" "dist-desktop-x64/${asset}.sig"
+
+      - name: Build & package Linux aarch64 server (cross)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
           AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-        run: cargo build --locked -p stravia-server --release --target ${{ matrix.target }}
-
-      - name: Build server (Windows MSVC via cargo-xwin)
-        if: matrix.kind == 'windows-xwin'
         run: |
-          if [[ "${{ matrix.target }}" == "aarch64-pc-windows-msvc" ]]; then
+          set -euo pipefail
+          cargo build --locked -p stravia-server --release --target aarch64-unknown-linux-gnu
+          asset="stravia-server-v${VERSION}-linux-aarch64-gnu"
+          mkdir -p "package/${asset}" dist-server-arm64
+          install -m 0755 target/aarch64-unknown-linux-gnu/release/stravia-server "package/${asset}/stravia-server"
+          install -m 0644 LICENSE "package/${asset}/LICENSE"
+          tar -C package -czf "dist-server-arm64/${asset}.tar.gz" "${asset}"
+
+      - name: Upload Linux x86_64 server asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-linux-x86_64-gnu
+          path: dist-server-x64/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Linux x86_64 desktop asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-linux-x86_64
+          path: dist-desktop-x64/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Linux aarch64 server asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-linux-aarch64-gnu
+          path: dist-server-arm64/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  # Combined Windows MSVC cross-build per arch: compiles server + desktop NSIS in one container
+  # sharing cargo-xwin SDK, target/<triple>/release/, sccache, and prebuilt WebUI dist.
+  build-windows:
+    name: Windows builds (${{ matrix.suffix }} server + desktop)
+    needs:
+      - prepare
+      - build-shared-assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: windows-x86_64
+            target: x86_64-pc-windows-msvc
+          - suffix: windows-aarch64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download shared WebUI dist & bundled vendors
+        uses: actions/download-artifact@v8
+        with:
+          name: release-shared-assets
+          path: .
+
+      - name: Detect persistent host cache volume
+        id: host-cache
+        shell: bash
+        run: |
+          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Rust + cargo-xwin toolchain binaries
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.rustup
+            ~/.cargo/bin
+            ~/.bun/bin
+            ~/.local/bin
+          key: toolchain-xwin-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          restore-keys: |
+            toolchain-xwin-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-
+
+      - name: Cache Windows MSVC xwin SDK
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/cargo-xwin
+          key: xwin-sdk-${{ env.XWIN_VERSION }}-v1
+          restore-keys: |
+            xwin-sdk-${{ env.XWIN_VERSION }}-
+
+      - name: Bootstrap Linux x64 Windows cross-compile toolchain
+        id: bootstrap
+        env:
+          NEED_XWIN: "1"
+          RUST_TARGETS: "${{ matrix.target }}"
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo, sccache, and Bun
+        if: steps.bootstrap.outputs.host_cache != 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cache/sccache
+            ~/.bun/install/cache
+          key: release-win-${{ matrix.suffix }}-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          restore-keys: |
+            release-win-${{ matrix.suffix }}-v2-
+            ci-win-v2-
+            ci-rust-v2-
+
+      - name: Validate updater signing credentials
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python3 .github/scripts/configure_updater_signing.py
+
+      - name: Prepare patched crates
+        run: task prepare:crates
+
+      - name: Build & package Windows server + desktop NSIS (shared target/)
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.suffix }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          if [[ "${TARGET_TRIPLE}" == "aarch64-pc-windows-msvc" ]]; then
             shim_dir="$(mktemp -d)"
             trap 'rm -rf "${shim_dir}"' EXIT
             export STRAVIA_REAL_CLANG="$(command -v clang)"
@@ -455,71 +692,71 @@ jobs:
             chmod +x "${shim_dir}/clang"
             export PATH="${shim_dir}:${PATH}"
           fi
-          cargo xwin build --locked -p stravia-server --release --target ${{ matrix.target }}
 
-      - name: Package server artifact
-        shell: bash
-        env:
-          ASSET_BASENAME: stravia-server-v${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
-          BINARY_PATH: ${{ matrix.binary }}
-          ARCHIVE_KIND: ${{ matrix.archive }}
-        run: |
-          set -euo pipefail
-          mkdir -p "package/${ASSET_BASENAME}" dist
-          if [[ "${ARCHIVE_KIND}" == "tar.gz" ]]; then
-            install -m 0755 "${BINARY_PATH}" "package/${ASSET_BASENAME}/stravia-server"
-            install -m 0644 LICENSE "package/${ASSET_BASENAME}/LICENSE"
-            tar -C package -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
-          else
-            cp "${BINARY_PATH}" "package/${ASSET_BASENAME}/stravia-server.exe"
-            cp LICENSE "package/${ASSET_BASENAME}/LICENSE"
-            (cd package && zip -r "../dist/${ASSET_BASENAME}.zip" "${ASSET_BASENAME}")
+          cargo xwin build --locked -p stravia-server --release --target "${TARGET_TRIPLE}"
+          server_asset="stravia-server-v${VERSION}-${SUFFIX}"
+          mkdir -p "package/${server_asset}" dist-server
+          cp "target/${TARGET_TRIPLE}/release/stravia-server.exe" "package/${server_asset}/stravia-server.exe"
+          cp LICENSE "package/${server_asset}/LICENSE"
+          (cd package && zip -r "../dist-server/${server_asset}.zip" "${server_asset}")
+
+          (
+            cd backend/apps/stravia-desktop
+            bunx --bun @tauri-apps/cli@2.12.6 build \
+              --runner cargo-xwin \
+              --target "${TARGET_TRIPLE}" \
+              --config tauri.release.conf.json \
+              --config '{"build":{"beforeBuildCommand":""}}' \
+              --bundles nsis -- --locked
+          )
+          mkdir -p dist-desktop
+          bundles=(target/"${TARGET_TRIPLE}"/release/bundle/nsis/*-setup.exe)
+          if [[ ${#bundles[@]} -ne 1 ]]; then
+            echo "Expected 1 NSIS bundle for ${TARGET_TRIPLE}, found ${#bundles[@]}" >&2
+            exit 1
           fi
+          desktop_asset="stravia-desktop-v${VERSION}-${SUFFIX}-setup.exe"
+          cp "${bundles[0]}" "dist-desktop/${desktop_asset}"
+          cp "${bundles[0]}.sig" "dist-desktop/${desktop_asset}.sig"
 
-      - name: Upload server asset
+      - name: Upload Windows server asset
         uses: actions/upload-artifact@v7
         with:
           name: server-${{ matrix.suffix }}
-          path: dist/*
+          path: dist-server/*
           if-no-files-found: error
           retention-days: 7
 
-  build-desktop:
-    name: Desktop build (${{ matrix.suffix }})
-    needs: prepare
-    runs-on: ${{ matrix.runner }}
+      - name: Upload Windows desktop asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.suffix }}
+          path: dist-desktop/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  # Cross-compile Linux aarch64 desktop binary natively on x86_64 (fast rustc + arm64 multiarch sysroot),
+  # then bundle AppImage using host aarch64 binfmt (only linuxdeploy/appimagetool run under QEMU).
+  build-linux-arm64-desktop:
+    name: Desktop cross-build (linux-aarch64)
+    needs:
+      - prepare
+      - build-shared-assets
+    runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suffix: linux-x86_64
-            runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            kind: linux-native
-            bundle: appimage
-            bundle_directory: appimage
-          - suffix: linux-aarch64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            kind: linux-native
-            bundle: appimage
-            bundle_directory: appimage
-          - suffix: windows-x86_64
-            runner: ubuntu-24.04
-            target: x86_64-pc-windows-msvc
-            kind: windows-xwin
-            bundle: nsis
-            bundle_directory: nsis
-          - suffix: windows-aarch64
-            runner: ubuntu-24.04
-            target: aarch64-pc-windows-msvc
-            kind: windows-xwin
-            bundle: nsis
-            bundle_directory: nsis
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Download shared WebUI dist & bundled vendors
+        uses: actions/download-artifact@v8
+        with:
+          name: release-shared-assets
+          path: .
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -540,19 +777,19 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
           restore-keys: |
-            toolchain-release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
-      - name: Bootstrap desktop build toolchain
+      - name: Bootstrap Linux arm64 desktop cross-compile toolchain
         id: bootstrap
         env:
-          NEED_LINUX_DESKTOP: ${{ startsWith(matrix.kind, 'linux-') && '1' || '0' }}
-          NEED_XWIN: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
-          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
+          NEED_LINUX_ARM64: "1"
+          NEED_LINUX_ARM64_DESKTOP: "1"
+          RUST_TARGETS: "aarch64-unknown-linux-gnu"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, Bun, and xwin SDK
+      - name: Cache Cargo, sccache, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
@@ -561,11 +798,12 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cache/sccache
-            ~/.cache/cargo-xwin
             ~/.bun/install/cache
-          key: release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: release-desktop-arm64-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
-            release-desktop-${{ runner.arch }}-${{ matrix.suffix }}-v1-
+            release-desktop-arm64-v2-
+            release-linux-x64-v2-
+            ci-rust-v2-
 
       - name: Validate updater signing credentials
         env:
@@ -573,80 +811,69 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: python3 .github/scripts/configure_updater_signing.py
 
-      - name: Prepare patched crates, WebUI, and bundled vendors
-        run: |
-          task prepare:crates
-          task install:web
-          task build:vendors
+      - name: Prepare patched crates
+        run: task prepare:crates
 
-      - name: Build desktop bundle (Linux native AppImage)
-        if: matrix.kind == 'linux-native'
+      - name: Cross-compile & package Linux aarch64 desktop AppImage
         env:
+          ARCH: aarch64
           APPIMAGE_EXTRACT_AND_RUN: "1"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: task build:desktop CONFIG=tauri.release.conf.json BUNDLES=appimage RUST_TARGET=${{ matrix.target }}
-
-      - name: Build desktop bundle (Windows NSIS via cargo-xwin)
-        if: matrix.kind == 'windows-xwin'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if [[ "${{ matrix.target }}" == "aarch64-pc-windows-msvc" ]]; then
-            shim_dir="$(mktemp -d)"
-            trap 'rm -rf "${shim_dir}"' EXIT
-            export STRAVIA_REAL_CLANG="$(command -v clang)"
-            cp .github/scripts/xwin_clang_wrapper.sh "${shim_dir}/clang"
-            chmod +x "${shim_dir}/clang"
-            export PATH="${shim_dir}:${PATH}"
-          fi
-          cd backend/apps/stravia-desktop
-          bunx --bun @tauri-apps/cli@2.12.6 build \
-            --runner cargo-xwin \
-            --target ${{ matrix.target }} \
-            --config tauri.release.conf.json \
-            --bundles nsis -- --locked
-
-      - name: Collect desktop bundle
-        shell: bash
-        env:
-          TARGET_TRIPLE: ${{ matrix.target }}
-          BUNDLE_DIR: ${{ matrix.bundle_directory }}
-          IS_WINDOWS: ${{ startsWith(matrix.kind, 'windows-') && '1' || '0' }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          PKG_CONFIG_LIBDIR: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          OPENSSL_DIR: /usr
+          OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
+          OPENSSL_INCLUDE_DIR: /usr/include
           VERSION: ${{ needs.prepare.outputs.version }}
-          SUFFIX: ${{ matrix.suffix }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          mkdir -p dist
-          if [[ "${IS_WINDOWS}" == "1" ]]; then
-            bundles=(target/"${TARGET_TRIPLE}"/release/bundle/"${BUNDLE_DIR}"/*-setup.exe)
-            asset="stravia-desktop-v${VERSION}-${SUFFIX}-setup.exe"
-          else
-            bundles=(target/"${TARGET_TRIPLE}"/release/bundle/"${BUNDLE_DIR}"/*.AppImage)
-            asset="stravia-desktop-v${VERSION}-${SUFFIX}.AppImage"
-          fi
-          if [[ ${#bundles[@]} -ne 1 ]]; then
-            printf 'Expected exactly one bundle in target/%s/release/bundle/%s, found %s\n' \
-              "${TARGET_TRIPLE}" "${BUNDLE_DIR}" "${#bundles[@]}" >&2
+          if [[ "$(uname -m)" == "x86_64" ]] && ! ls /proc/sys/fs/binfmt_misc/*aarch64* >/dev/null 2>&1; then
+            echo "ERROR: aarch64 binfmt_misc handler is required on x86_64 to run linuxdeploy-aarch64 (enable boot.binfmt.emulatedSystems = [ \"aarch64-linux\" ] on host)" >&2
             exit 1
           fi
+          (
+            cd backend/apps/stravia-desktop
+            bunx --bun @tauri-apps/cli@2.12.6 build \
+              --target aarch64-unknown-linux-gnu \
+              --config tauri.release.conf.json \
+              --config '{"build":{"beforeBuildCommand":""}}' \
+              --bundles appimage -- --locked
+          )
+          mkdir -p dist
+          bundles=(target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          if [[ ${#bundles[@]} -ne 1 ]]; then
+            echo "Expected 1 aarch64 AppImage, found ${#bundles[@]}" >&2
+            exit 1
+          fi
+          asset="stravia-desktop-v${VERSION}-linux-aarch64.AppImage"
           cp "${bundles[0]}" "dist/${asset}"
           cp "${bundles[0]}.sig" "dist/${asset}.sig"
 
-      - name: Upload desktop asset
+      - name: Upload Linux aarch64 desktop asset
         uses: actions/upload-artifact@v7
         with:
-          name: desktop-${{ matrix.suffix }}
+          name: desktop-linux-aarch64
           path: dist/*
           if-no-files-found: error
           retention-days: 7
 
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   build-macos-cross:
     name: Desktop cross-build (${{ matrix.suffix }}, osxcross)
-    needs: prepare
-    runs-on: ubuntu-24.04
+    needs:
+      - prepare
+      - build-shared-assets
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -663,6 +890,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Download shared WebUI dist & bundled vendors
+        uses: actions/download-artifact@v8
+        with:
+          name: release-shared-assets
+          path: .
 
       - name: Detect persistent host cache volume
         id: host-cache
@@ -681,31 +914,32 @@ jobs:
           path: |
             ~/.rustup
             ~/.cargo/bin
-            ~/.bun/bin
             ~/.local/bin
-          key: toolchain-macos-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-macos-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-macos-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
         if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: /opt/osxcross/target
-          key: osxcross-899260ca-sdk15.5-linux-x64-v1-${{ matrix.suffix }}
+          key: osxcross-899260ca-sdk15.5-linux-x64-v1
           restore-keys: |
-            osxcross-899260ca-sdk15.5-linux-x64-v1-
+            osxcross-899260ca-sdk15.5-linux-x64-v1
 
       - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
         id: bootstrap
         env:
+          NEED_BUN: "0"
           NEED_MACOS_CROSS: "1"
-          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
+          RUST_TARGETS: "${{ matrix.target }}"
           MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL || 'https://github.com/joseluisq/macosx-sdks/releases/download/15.5/MacOSX15.5.sdk.tar.xz' }}
           MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo and sccache
         if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
@@ -714,10 +948,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cache/sccache
-            ~/.bun/install/cache
-          key: release-macos-${{ matrix.suffix }}-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: release-macos-${{ matrix.suffix }}-v2-${{ hashFiles('Cargo.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
-            release-macos-${{ matrix.suffix }}-v1-
+            release-macos-${{ matrix.suffix }}-v2-
+            ci-rust-v2-
 
       - name: Validate updater signing credentials
         env:
@@ -725,11 +959,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: python3 .github/scripts/configure_updater_signing.py
 
-      - name: Prepare patched crates, WebUI, and bundled vendors
-        run: |
-          task prepare:crates
-          task build:web
-          task build:vendors
+      - name: Prepare patched crates
+        run: task prepare:crates
 
       - name: Cross-compile macOS desktop binary via osxcross
         env:
@@ -755,11 +986,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   docker-build:
     name: Docker cross-validation (${{ matrix.platform }})
     if: needs.prepare.outputs.publish != 'true'
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -798,12 +1033,13 @@ jobs:
     name: Collect release assets
     needs:
       - prepare
-      - build-server
-      - build-desktop
+      - build-linux-x64
+      - build-linux-arm64-desktop
+      - build-windows
       - build-macos-cross
       - build-vendor-plugins
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build-server.result == 'success' && needs.build-desktop.result == 'success' && needs.build-vendor-plugins.result == 'success' && (needs.build-macos-cross.result == 'success' || needs.build-macos-cross.result == 'skipped') }}
-    runs-on: ubuntu-24.04
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build-linux-x64.result == 'success' && needs.build-linux-arm64-desktop.result == 'success' && needs.build-windows.result == 'success' && needs.build-vendor-plugins.result == 'success' && (needs.build-macos-cross.result == 'success' || needs.build-macos-cross.result == 'skipped') }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout manifest generator
         uses: actions/checkout@v7
@@ -917,7 +1153,7 @@ jobs:
     needs:
       - prepare
       - collect-assets
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -976,7 +1212,7 @@ jobs:
     needs:
       - prepare
       - prepare-draft
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -1038,7 +1274,7 @@ jobs:
     needs:
       - prepare
       - publish-image
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:

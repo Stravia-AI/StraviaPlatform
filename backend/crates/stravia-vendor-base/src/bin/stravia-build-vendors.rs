@@ -60,12 +60,14 @@ fn main() -> anyhow::Result<()> {
     let guest_target = root.join("target/vendor-guest-build");
     fs::create_dir_all(&output)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut records = Vec::with_capacity(components.len());
-    // 每个组件独立构建，避免选择集合改变依赖 feature 并集与组件内容。
-    for &(vendor_id, package) in components {
-        if only.is_some_and(|names| !names.split(',').any(|name| name == vendor_id)) {
-            continue;
-        }
+    let selected: Vec<(&str, &str)> = components
+        .iter()
+        .copied()
+        .filter(|&(vendor_id, _)| {
+            only.is_none_or(|names| names.split(',').any(|name| name == vendor_id))
+        })
+        .collect();
+    if !selected.is_empty() {
         let mut command = Command::new(&cargo);
         command
             .current_dir(root)
@@ -81,12 +83,17 @@ fn main() -> anyhow::Result<()> {
             .arg(&guest_target)
             .env_remove("RUSTFLAGS")
             .env_remove("CARGO_ENCODED_RUSTFLAGS");
-        command.args(["--package", package]);
+        for &(_, package) in &selected {
+            command.args(["--package", package]);
+        }
         let status = command
             .status()
             .context("cannot start vendor component build")?;
         ensure!(status.success(), "vendor component build failed");
+    }
 
+    let mut records = Vec::with_capacity(selected.len());
+    for &(vendor_id, package) in &selected {
         let source = guest_target
             .join("wasm32-wasip2/release")
             .join(format!("{}.wasm", package.replace('-', "_")));

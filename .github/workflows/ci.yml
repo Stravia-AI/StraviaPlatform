@@ -43,7 +43,7 @@ jobs:
   changes:
     name: Detect changed scopes
     if: github.server_url != 'https://github.com'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
@@ -117,7 +117,7 @@ jobs:
     name: Fast checks (WebUI lint/typecheck/unit & CI scripts)
     needs: changes
     if: needs.changes.outputs.web == 'true' || needs.changes.outputs.ci_scripts == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -140,9 +140,9 @@ jobs:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-check-fast
+          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
           restore-keys: |
-            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-
+            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
 
       - name: Bootstrap Bun & Task (no Rust)
         id: bootstrap
@@ -199,162 +199,14 @@ jobs:
           done
           exit "$failed"
 
-  # Rust static checks (runs in parallel with check-fast & unit-tests).
-  check-rust:
-    name: Rust fmt, WIT compat & clippy
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
-        if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-check-rust
-          restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
-
-      - name: Bootstrap Linux x64 Rust toolchain
-        id: bootstrap
-        env:
-          NEED_LINUX_DESKTOP: "1"
-          RUST_TARGETS: "wasm32-wasip2"
-        run: bash .github/scripts/bootstrap_toolchain.sh
-
-      - name: Cache Cargo & sccache
-        if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            ~/.cache/sccache
-          key: ci-rust-check-v1-${{ hashFiles('Cargo.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
-          restore-keys: |
-            ci-rust-check-v1-
-
-      - name: Prepare patched crates & bundled vendors
-        run: |
-          task prepare:crates
-          task build:vendors
-
-      - name: Check formatting, WIT compatibility, and clippy
-        run: |
-          cargo fmt --all -- --check
-          cargo run --locked -p stravia-devtools --bin stravia-tools -- wit-compat
-          cargo clippy --locked --workspace \
-            --exclude stravia-vendor-capability-contract-fixture \
-            --exclude stravia-vendor-lifecycle-contract-fixture \
-            --exclude stravia-vendor-management-contract-fixture \
-            --exclude stravia-vendor-manual-contract-fixture \
-            --exclude stravia-vendor-net-1-0-compat-fixture \
-            --exclude stravia-vendor-state-contract-fixture \
-            --all-targets -- -D warnings
-
-      - name: Show sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  unit-tests:
-    name: Rust unit tests
-    needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
-        if: steps.host-cache.outputs.enabled != 'true'
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-unit-tests
-          restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
-
-      - name: Bootstrap Linux x64 Rust toolchain
-        id: bootstrap
-        env:
-          RUST_TARGETS: "wasm32-wasip2"
-        run: bash .github/scripts/bootstrap_toolchain.sh
-
-      - name: Cache Cargo & sccache
-        if: steps.bootstrap.outputs.host_cache != 'true'
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            ~/.cache/sccache
-          key: ci-rust-unit-v1-${{ hashFiles('Cargo.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
-          restore-keys: |
-            ci-rust-unit-v1-
-            ci-rust-check-v1-
-
-      - name: Prepare patched crates and vendor fixtures
-        run: |
-          task prepare:crates
-          task build:vendor-fixtures
-
-      - name: Run locked Rust unit test suite
-        run: |
-          bun tests/common/run-in-tempdir.ts cargo test --locked --workspace \
-            --exclude stravia-desktop \
-            --exclude stravia-vendor-capability-contract-fixture \
-            --exclude stravia-vendor-lifecycle-contract-fixture \
-            --exclude stravia-vendor-management-contract-fixture \
-            --exclude stravia-vendor-manual-contract-fixture \
-            --exclude stravia-vendor-net-1-0-compat-fixture \
-            --exclude stravia-vendor-state-contract-fixture
-
-      - name: Show sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  # Build E2E binaries ONCE and fan out to proxy, sqlite, postgres, and webui E2E jobs.
-  build-e2e-artifacts:
-    name: Build shared E2E server & fixture binaries
+  # Unified Linux Rust lane: fmt, WIT compat, clippy, unit tests, and shared E2E binaries
+  # run in one container to reuse target/, sccache, and prepared Wasm vendors without rebuilding.
+  rust-ci:
+    name: Rust check, unit tests & shared E2E build
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -369,7 +221,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task)
+      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task, uv)
         if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
@@ -378,13 +230,15 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-e2e-build
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
-      - name: Bootstrap Linux x64 toolchain
+      - name: Bootstrap Linux x64 Rust toolchain
         id: bootstrap
         env:
+          NEED_LINUX_DESKTOP: ${{ (needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true') && '1' || '0' }}
+          NEED_UV: "1"
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
@@ -398,16 +252,54 @@ jobs:
             ~/.cargo/git/db
             ~/.cache/sccache
             ~/.bun/install/cache
-          key: ci-e2e-build-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: ci-rust-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
+            ci-rust-v2-
             ci-e2e-build-v1-
             ci-rust-unit-v1-
+            ci-rust-check-v1-
 
-      - name: Build shared services and vendor fixtures
+      - name: Check Rust formatting
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Prepare patched crates and vendor fixtures
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
         run: |
           task prepare:crates
-          task build:test:services
           task build:vendor-fixtures
+
+      - name: Prepare patched crates (WebUI-only scope)
+        if: needs.changes.outputs.rust != 'true' && needs.changes.outputs.full != 'true'
+        run: task prepare:crates
+
+      - name: Check WIT compatibility and clippy
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+        run: |
+          cargo run --locked -p stravia-devtools --bin stravia-tools -- wit-compat
+          cargo clippy --locked --workspace \
+            --exclude stravia-vendor-capability-contract-fixture \
+            --exclude stravia-vendor-lifecycle-contract-fixture \
+            --exclude stravia-vendor-management-contract-fixture \
+            --exclude stravia-vendor-manual-contract-fixture \
+            --exclude stravia-vendor-net-1-0-compat-fixture \
+            --exclude stravia-vendor-state-contract-fixture \
+            --all-targets -- -D warnings
+
+      - name: Run locked Rust unit test suite
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+        run: |
+          bun tests/common/run-in-tempdir.ts cargo test --locked --workspace \
+            --exclude stravia-desktop \
+            --exclude stravia-vendor-capability-contract-fixture \
+            --exclude stravia-vendor-lifecycle-contract-fixture \
+            --exclude stravia-vendor-management-contract-fixture \
+            --exclude stravia-vendor-manual-contract-fixture \
+            --exclude stravia-vendor-net-1-0-compat-fixture \
+            --exclude stravia-vendor-state-contract-fixture
+
+      - name: Build shared E2E services
+        run: task build:test:services
 
       - name: Upload shared E2E binaries & fixtures
         uses: actions/upload-artifact@v7
@@ -427,9 +319,9 @@ jobs:
 
   backend-e2e:
     name: Backend E2E (${{ matrix.suite }})
-    needs: [changes, build-e2e-artifacts]
+    needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -458,9 +350,9 @@ jobs:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-${{ matrix.suite == 'storage:sqlite' && 'storage-sqlite' || matrix.suite }}
+          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
           restore-keys: |
-            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-
+            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -476,9 +368,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/uv
-          key: ci-uv-v1-${{ matrix.suite == 'storage:sqlite' && 'storage-sqlite' || matrix.suite }}-${{ hashFiles('uv.lock') }}
+          key: ci-uv-v1-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            ci-uv-v1-${{ matrix.suite == 'storage:sqlite' && 'storage-sqlite' || matrix.suite }}-
             ci-uv-v1-
 
       - name: Download shared E2E binaries
@@ -495,7 +386,7 @@ jobs:
         env:
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
-        run: bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/proxy -q -m proxy
+        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/proxy -q -m proxy
 
       - name: Run SQLite storage E2E suite
         if: matrix.suite == 'storage:sqlite'
@@ -503,13 +394,13 @@ jobs:
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
           STRAVIA_STORAGE_HARNESS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness
-        run: bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q -n auto --dist loadgroup --durations=0 -m storage -k sqlite
+        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/storage -q -n auto --dist loadgroup --durations=0 -m storage -k sqlite
 
   admin-e2e:
     name: Backend E2E (admin)
-    needs: [changes, build-e2e-artifacts]
+    needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
       - name: Checkout
@@ -534,10 +425,9 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1-admin-e2e
+          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1-
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -557,8 +447,10 @@ jobs:
             ~/.cache/sccache
             ~/.bun/install/cache
             ~/.cache/uv
-          key: ci-e2e-admin-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'uv.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: ci-e2e-admin-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'uv.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
+            ci-e2e-admin-v2-
+            ci-rust-v2-
             ci-e2e-admin-v1-
             ci-e2e-build-v1-
 
@@ -578,7 +470,7 @@ jobs:
           CARGO_TARGET_DIR="${{ github.workspace }}/target/test-development" \
             STRAVIA_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-server" \
             STRAVIA_STORAGE_HARNESS_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness" \
-            bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin
+            bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin
 
       - name: Show sccache stats
         if: always()
@@ -586,9 +478,9 @@ jobs:
 
   postgres-e2e:
     name: PostgreSQL E2E
-    needs: [changes, build-e2e-artifacts]
+    needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
       postgres:
@@ -634,9 +526,9 @@ jobs:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-postgres
+          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
           restore-keys: |
-            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1-
+            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -652,9 +544,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/uv
-          key: ci-uv-v1-postgres-${{ hashFiles('uv.lock') }}
+          key: ci-uv-v1-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            ci-uv-v1-postgres-
             ci-uv-v1-
 
       - name: Download shared E2E binaries
@@ -673,13 +564,13 @@ jobs:
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
           STRAVIA_STORAGE_HARNESS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness
-        run: bun tests/common/run-in-tempdir.ts uv run --locked --default-index https://pypi.org/simple --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k postgres
+        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k postgres
 
   webui-e2e:
     name: WebUI E2E
-    needs: [changes, build-e2e-artifacts]
+    needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -702,9 +593,9 @@ jobs:
           path: |
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-webui-e2e
+          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
           restore-keys: |
-            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1-
+            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
 
       - name: Bootstrap Bun & Task (no Rust needed)
         id: bootstrap
@@ -750,7 +641,7 @@ jobs:
     name: Windows cross-compile & Wine smoke (x86_64-pc-windows-msvc)
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -775,10 +666,19 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-smoke
+          key: toolchain-xwin-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-xwin-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-
+
+      - name: Cache Windows MSVC xwin SDK
+        if: steps.host-cache.outputs.enabled != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/cargo-xwin
+          key: xwin-sdk-${{ env.XWIN_VERSION }}-v1
+          restore-keys: |
+            xwin-sdk-${{ env.XWIN_VERSION }}-
 
       - name: Bootstrap Linux x64 cross-compile + Wine toolchain
         id: bootstrap
@@ -788,7 +688,7 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2 x86_64-pc-windows-msvc"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, xwin SDK, and Bun
+      - name: Cache Cargo, sccache, and Bun
         if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
@@ -797,10 +697,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cache/sccache
-            ~/.cache/cargo-xwin
             ~/.bun/install/cache
-          key: ci-win-xwin16-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+          key: ci-win-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
           restore-keys: |
+            ci-win-v2-
+            ci-rust-v2-
             ci-win-xwin16-v1-
 
       - name: Prepare patched crates & bundled Wasm vendors
@@ -847,7 +748,7 @@ jobs:
 
   windows-kvm-desktop-e2e:
     name: Windows Desktop WebView2 E2E (KVM overlay VM)
-    if: ${{ vars.ENABLE_WINDOWS_KVM_E2E == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_kvm_e2e) }}
+    if: ${{ github.server_url != 'https://github.com' && (vars.ENABLE_WINDOWS_KVM_E2E == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_kvm_e2e)) }}
     runs-on: linux-x64-kvm
     timeout-minutes: 90
     steps:
@@ -936,8 +837,8 @@ jobs:
 
   macos-cross-smoke:
     name: macOS cross-compile & rcodesign/DMG smoke (${{ matrix.suffix }})
-    if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke) }}
-    runs-on: ubuntu-24.04
+    if: ${{ github.server_url != 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke)) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -974,18 +875,19 @@ jobs:
             ~/.cargo/bin
             ~/.bun/bin
             ~/.local/bin
-          key: toolchain-macos-${{ matrix.suffix }}-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
+          key: toolchain-macos-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
           restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
+            toolchain-macos-${{ env.RUST_VERSION }}-
+            toolchain-rust-${{ env.RUST_VERSION }}-
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
         if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: /opt/osxcross/target
-          key: osxcross-899260ca-sdk15.5-linux-x64-v1-${{ matrix.suffix }}
+          key: osxcross-899260ca-sdk15.5-linux-x64-v1
           restore-keys: |
-            osxcross-899260ca-sdk15.5-linux-x64-v1-
+            osxcross-899260ca-sdk15.5-linux-x64-v1
 
       - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
         id: bootstrap
