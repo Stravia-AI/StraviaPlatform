@@ -7,8 +7,9 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 const SQLITE_WAL_CHECKPOINT_BYTES: i64 = 32 * 1024 * 1024;
-/// 16 MiB per-connection SQLite page cache (allocated lazily on read).
-const SQLITE_CACHE_SIZE_KIB: i64 = -16_384;
+/// 8 MiB per-connection SQLite page cache (4 conns <= 32 MiB private max,
+/// backed by 128 MiB shared OS page cache via `mmap_size`).
+const SQLITE_CACHE_SIZE_KIB: i64 = -8_192;
 /// 128 MiB memory-mapped read I/O (OS page cache backed; avoids per-page `pread`).
 const SQLITE_MMAP_SIZE_BYTES: i64 = 128 * 1024 * 1024;
 

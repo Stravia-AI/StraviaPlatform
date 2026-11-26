@@ -64,6 +64,9 @@ winapi = { workspace = true, features = ["handleapi", "impl-debug", "impl-defaul
 windows-core = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# 在 Linux 上用 mimalloc 接管 C 库（SQLite、zstd 等）的 malloc/free，避免 glibc 为每个
+# 工作线程创建独立 64 MiB arena 导致常驻内存膨胀；macOS/Windows 保持原生系统分配器。
+mimalloc = { workspace = true, features = ["override"] }
 # GTK 桌面依赖扩大这些已有共享库的目标特性；仅复用底层库，不引入 GTK。
 rustix = { workspace = true, features = ["pipe"] }
 toml_datetime = { workspace = true }

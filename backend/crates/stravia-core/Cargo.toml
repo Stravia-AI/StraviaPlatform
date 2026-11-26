@@ -102,6 +102,7 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["alloc", "unbounded_depth"] }
 stravia-runtime-contract = { workspace = true }
+zstd = { workspace = true }
 # 这些依赖通过 feature 合并参与构建，不由 build.rs 直接引用。
 # 保持 host/target 的基础库特性一致，避免不同 feature 组合导致重复编译；
 # Cargo 的 unused_dependencies 只检查直接使用，不能据此删除这些声明。

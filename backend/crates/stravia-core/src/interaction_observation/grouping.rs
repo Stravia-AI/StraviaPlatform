@@ -2,6 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 const RETRY_WINDOW_MS: i64 = 120_000;
 pub(super) const TAIL_MERGE_WINDOW_MS: i64 = 300_000;
+/// Terminal runs older than both the retry window (2 min) and rapid continuation
+/// window (2 s) are no longer referenced in memory; sweeping them bounds
+/// `GroupingIndex.runs` across long-running server uptimes.
+const FINISHED_RUN_RETENTION_MS: i64 = TAIL_MERGE_WINDOW_MS;
 
 /// Kernel input: caller-confirmed facts plus evidence Run Attribution computed.
 /// The decision table never reads request or store types directly.
@@ -67,8 +71,10 @@ struct RetryCandidate {
     principal: String,
     fingerprint: String,
     failed_at: Option<i64>,
+    finished_at: Option<i64>,
     client_output_committed: bool,
     active: bool,
+    waiting_client: bool,
     has_new_user: bool,
     generation_parent_id: Option<String>,
 }
@@ -235,8 +241,10 @@ impl GroupingIndex {
                 principal: input.principal.to_owned(),
                 fingerprint: input.canonical_fingerprint.to_owned(),
                 failed_at: None,
+                finished_at: None,
                 client_output_committed: false,
                 active: true,
+                waiting_client: false,
                 has_new_user: input.has_new_user,
                 generation_parent_id: input.generation_parent_id.map(str::to_owned),
             },
@@ -261,10 +269,23 @@ impl GroupingIndex {
     pub fn finish(&mut self, run_id: &str, status: &str, now: i64) {
         if let Some(run) = self.runs.get_mut(run_id) {
             run.active = false;
+            run.waiting_client = status == "waiting_client";
+            run.finished_at = Some(now);
             if status == "failed" || status == "delivery_failed" {
                 run.failed_at = Some(now);
             }
         }
+    }
+
+    pub(super) fn sweep(&mut self, now: i64) {
+        self.runs.retain(|_, run| {
+            run.active
+                || run.waiting_client
+                || run.finished_at.is_none_or(|finished_at| {
+                    now < finished_at
+                        || now.saturating_sub(finished_at) <= FINISHED_RUN_RETENTION_MS
+                })
+        });
     }
 
     pub fn interaction_for_run(&self, run_id: &str) -> Option<&str> {
@@ -634,5 +655,35 @@ mod tests {
             "completed"
         );
         assert_eq!(rollup_status([("failed", true)]), "interrupted");
+    }
+
+    #[test]
+    fn grouping_index_sweep_prunes_only_expired_terminal_runs() {
+        let mut index = GroupingIndex::default();
+        let make_input = |run_id| AssignInput {
+            run_id,
+            principal: "p",
+            canonical_fingerprint: "fp",
+            has_new_user: true,
+            has_matching_pending_tool_result: false,
+            generation_parent_id: None,
+            ingress_received_at: 1_000,
+        };
+        index.assign(make_input("active"), 1_000, None, None);
+        index.assign(make_input("waiting"), 1_000, None, None);
+        index.finish("waiting", "waiting_client", 2_000);
+        index.assign(make_input("recent_done"), 1_000, None, None);
+        index.finish("recent_done", "completed", 250_000);
+        index.assign(make_input("old_done"), 1_000, None, None);
+        index.finish("old_done", "completed", 2_000);
+        index.assign(make_input("old_failed"), 1_000, None, None);
+        index.finish("old_failed", "failed", 2_000);
+
+        index.sweep(2_000 + FINISHED_RUN_RETENTION_MS + 1);
+        assert!(index.interaction_for_run("active").is_some());
+        assert!(index.interaction_for_run("waiting").is_some());
+        assert!(index.interaction_for_run("recent_done").is_some());
+        assert!(index.interaction_for_run("old_done").is_none());
+        assert!(index.interaction_for_run("old_failed").is_none());
     }
 }
