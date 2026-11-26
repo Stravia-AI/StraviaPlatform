@@ -1613,4 +1613,53 @@ describe('failures, authorization and local history', () => {
     expect(h.controller.snapshot.currentConversation?.title).toBe('My Manual Title')
     expect(h.controller.snapshot.currentConversation?.titleSource).toBe('manual')
   })
+  test('retry, regenerate and edit trigger auto title when still using fallback title', async () => {
+    // First turn fails, then retry succeeds -> auto title runs.
+    const retryCalls: string[] = []
+    const retryHarness = harness({
+      script: (_signal, index) => {
+        if (index === 0) return [{ type: 'error', message: 'transient upstream failure' }]
+        return [complete('Recovered')]
+      },
+      generateTitle: (input) => {
+        retryCalls.push(input.userMessage)
+        return Promise.resolve('Recovered Retry Title')
+      },
+    })
+    await retryHarness.controller.start()
+    await retryHarness.controller.send('Retry me')
+    expect(retryCalls).toEqual([])
+    expect(retryHarness.controller.snapshot.currentConversation?.titleSource).toBe('fallback')
+
+    await retryHarness.controller.retry()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(retryCalls).toEqual(['Retry me'])
+    expect(retryHarness.controller.snapshot.currentConversation?.title).toBe('Recovered Retry Title')
+    expect(retryHarness.controller.snapshot.currentConversation?.titleSource).toBe('generated')
+
+    // First turn defers title, then editing the user message triggers auto title with the edited text.
+    let editAttempt = 0
+    const editCalls: string[] = []
+    const editHarness = harness({
+      generateTitle: (input) => {
+        editAttempt += 1
+        editCalls.push(input.userMessage)
+        return Promise.resolve(editAttempt === 1 ? null : 'Edited Topic Title')
+      },
+    })
+    await editHarness.controller.start()
+    await editHarness.controller.send('hi')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(editHarness.controller.snapshot.currentConversation?.titleSource).toBe('fallback')
+
+    const userMsgId = editHarness.controller.snapshot.currentConversation!.messages[0].id
+    await editHarness.controller.edit(userMsgId, 'Explain Raft consensus')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(editCalls).toEqual(['hi', 'Explain Raft consensus'])
+    expect(editHarness.controller.snapshot.currentConversation?.title).toBe('Edited Topic Title')
+    expect(editHarness.controller.snapshot.currentConversation?.titleSource).toBe('generated')
+  })
 })

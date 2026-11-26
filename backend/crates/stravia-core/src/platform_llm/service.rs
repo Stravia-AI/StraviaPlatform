@@ -14,8 +14,7 @@ use super::{
 use crate::Gateway;
 use crate::model_turn::{ModelTurnAuthorization, TurnInput};
 
-const TITLE_TIMEOUT: Duration = Duration::from_secs(20);
-const TITLE_MAX_TOKENS: u32 = 64;
+const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
 const TITLE_INPUT_CHAR_LIMIT: usize = 1500;
 const TITLE_OUTPUT_CHAR_LIMIT: usize = 80;
 const TITLE_OUTPUT_WORD_LIMIT: usize = 12;
@@ -41,7 +40,7 @@ fn conversation_title_instructions(locale: Option<&str>) -> String {
         "Generate a concise, specific title for the conversation below, wrapped in <title>...</title>. \
 {} \
 Keep it brief (under 10 words or 24 Chinese characters), single line, with no quotes, markdown, or trailing punctuation. \
-If the conversation has no concrete topic yet (for example a bare greeting or connectivity check), output <title/>.",
+Output <title/> only if the user message is purely a bare greeting or connectivity check with no actual question or request; if the user asks anything concrete even after a greeting, generate a title.",
         title_language_instruction(locale)
     )
 }
@@ -149,7 +148,9 @@ impl PlatformLlmTask {
                 Ok(PlatformLlmTaskSpec {
                     instructions: conversation_title_instructions(locale.as_deref()),
                     input,
-                    max_tokens: Some(TITLE_MAX_TOKENS),
+                    // Do not cap max_tokens tightly: reasoning models count thinking tokens
+                    // toward max_tokens/max_output_tokens and can return empty text when capped.
+                    max_tokens: None,
                     thinking_level: *thinking_level,
                     timeout: TITLE_TIMEOUT,
                 })
@@ -187,6 +188,7 @@ pub async fn execute_text_task(
     let mut request = AiRequest::new(route.id.as_str(), vec![user_item]);
     request.instructions = Some(spec.instructions);
     request.generation.max_tokens = spec.max_tokens;
+    request.stream.enabled = true;
     request.tools = None;
     request.parallel_tool_calls = None;
     // Only override reasoning.level when the task specifies one; `None` lets the
@@ -261,8 +263,21 @@ pub async fn generate_conversation_title(
         thinking_level: input.thinking_level,
     };
     let spec = task.to_spec()?;
-    let raw = execute_text_task(gateway, Principal::new(api_key_id.to_owned()), spec).await?;
-    Ok(ConversationTitleResult {
-        title: sanitize_title(&raw),
-    })
+    let raw = execute_text_task(gateway, Principal::new(api_key_id.to_owned()), spec)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                code = error.code,
+                error = %error.message,
+                "platform LLM conversation title generation failed"
+            );
+        })?;
+    let title = sanitize_title(&raw);
+    if title.is_none() {
+        tracing::debug!(
+            raw_len = raw.len(),
+            "platform LLM conversation title deferred or rejected by sanitization"
+        );
+    }
+    Ok(ConversationTitleResult { title })
 }

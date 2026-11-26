@@ -61,7 +61,8 @@ export function createConsoleChat(): ConsoleChat {
           locale: getLocale(),
         })
         return result.title
-      } catch {
+      } catch (error) {
+        console.debug('Failed to generate conversation title', error)
         return null
       }
     },
