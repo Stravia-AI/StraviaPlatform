@@ -177,6 +177,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -226,6 +229,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     outputs:
       has_plugins: ${{ steps.select.outputs.has_plugins }}
     steps:
@@ -390,6 +396,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -525,6 +534,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -766,6 +778,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
