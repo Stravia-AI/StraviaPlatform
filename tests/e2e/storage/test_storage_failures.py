@@ -6,6 +6,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -99,12 +100,23 @@ def isolated_host(host, backend, stravia_binary, storage_runtime, tmp_path, cont
             command = [binary]
             native_root = tempfile.TemporaryDirectory(prefix='stravia-desktop-e2e-storage-')
             run_root = Path(native_root.name)
+            platform_env = {}
+            if sys.platform == 'linux':
+                for key, name in (
+                    ('XDG_DATA_HOME', 'xdg-data'),
+                    ('XDG_CONFIG_HOME', 'xdg-config'),
+                    ('XDG_CACHE_HOME', 'xdg-cache'),
+                ):
+                    directory = run_root / name
+                    directory.mkdir(parents=True, exist_ok=True)
+                    platform_env[key] = str(directory)
             # Native readiness uses the existing private storage-test bootstrap.
             # Negative controls never arm this default fault; storage failure cases
             # override these values with their explicit isolated arm file.
             controls = {'STRAVIA_TEST_STORAGE_FAULT': 'observation',
                         'STRAVIA_TEST_STORAGE_FAULT_KIND': 'io-full',
                         'STRAVIA_TEST_STORAGE_FAULT_ARM_FILE': str(run_root / 'never-arm-storage-fault'),
+                        **platform_env,
                         **controls, 'STRAVIA_DESKTOP_E2E_RUN_ROOT': str(run_root)}
         else:
             port = find_free_port()

@@ -31,6 +31,7 @@ Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、�
 | 前端 UI 设计、实现、评审 | 根目录 `DESIGN.md` 全文 |
 | 修改已有设计 | `docs/design/` 下相关文档 |
 | 工具链或工作流 | `rust-toolchain.toml`、根 `package.json`、`uv.lock`、`Taskfile.yml`；版本号以它们为准，不复制到本文件 |
+| Linux 上执行 Windows E2E、交叉编译或 KVM 黄金镜像 | `docs/ci/windows-testing-without-windows.md` |
 | 数据库 schema、migration、升级钩子或启动数据转换 | 修改或评审前必须读取 [migration-startup skill](.agents/skills/migration-startup/SKILL.md)；schema 变更另见下方「数据库变更」 |
 
 ## 约定
@@ -67,7 +68,8 @@ Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、�
 | PostgreSQL 存储 E2E | 设 `DB_URL` 与 `STRAVIA_TEST_REDIS_URL` 后 `task test:e2e:storage:postgres` |
 | 完整后端 E2E 矩阵 | 设 `DB_URL` 与 `STRAVIA_TEST_REDIS_URL` 后 `task test:e2e` |
 | Chromium WebUI E2E | `task test:e2e:web` |
-| Windows 桌面冒烟测试 | `task test:e2e:desktop` |
+| 桌面冒烟测试（Linux / Windows 原生） | `task test:e2e:desktop` |
+| Windows KVM 桌面 E2E（Linux x64 `devenv` / Nix） | `stravia-win-e2e`（或 `nix run .#windows-e2e`）；前置交叉编译产物与参数见 `docs/ci/windows-testing-without-windows.md` |
 
 `DB_URL`、`STRAVIA_TEST_POSTGRES_URL` 与 `STRAVIA_TEST_REDIS_URL` 必须指向隔离的测试数据库与 Redis，不得使用生产服务。未显式提供测试 PostgreSQL 且处于 `devenv` 环境（存在 `$PGHOST` / `start-postgres`）时，直接使用 `devenv` 提供的 PostgreSQL（如 `postgresql://$USER@localhost/postgres?host=$PGHOST`；未就绪时用 `start-postgres` 启动）运行 PostgreSQL 单元测试、存储 E2E 与 `dump-schema`。
 

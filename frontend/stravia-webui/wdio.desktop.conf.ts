@@ -9,13 +9,10 @@ import { fileURLToPath } from 'node:url'
 
 import type { TauriCapabilities } from '@wdio/tauri-service'
 
-import { prepareDesktopDriver } from './e2e/desktop-driver'
-
-prepareDesktopDriver()
-
+const binaryName = process.platform === 'win32' ? 'stravia-desktop.exe' : 'stravia-desktop'
 const appBinaryPath =
   process.env.STRAVIA_DESKTOP_E2E_BINARY ??
-  fileURLToPath(new URL('../../target/debug/stravia-desktop.exe', import.meta.url))
+  fileURLToPath(new URL(`../../target/debug/${binaryName}`, import.meta.url))
 const runRootPrefix = 'stravia-desktop-e2e-'
 const inheritedRunRoot = process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT
 const inheritedRelativePath = inheritedRunRoot ? relative(resolve(tmpdir()), resolve(inheritedRunRoot)) : ''
@@ -35,9 +32,17 @@ const ownsRunRoot = !inheritedRootIsSafe
 const runRoot =
   inheritedRootIsSafe && inheritedRunRoot ? resolve(inheritedRunRoot) : mkdtempSync(join(tmpdir(), runRootPrefix))
 const codexHome = join(runRoot, 'codex')
+const xdgDataHome = join(runRoot, 'xdg-data')
+const xdgConfigHome = join(runRoot, 'xdg-config')
+const xdgCacheHome = join(runRoot, 'xdg-cache')
 
 try {
   mkdirSync(codexHome, { recursive: true })
+  if (process.platform === 'linux') {
+    mkdirSync(xdgDataHome, { recursive: true })
+    mkdirSync(xdgConfigHome, { recursive: true })
+    mkdirSync(xdgCacheHome, { recursive: true })
+  }
   if (startupFailure && ownsRunRoot) {
     const fixtureDirectory = join(runRoot, 'data', ...(startupFailure === 'database' ? ['db'] : []))
     mkdirSync(fixtureDirectory, { recursive: true })
@@ -78,8 +83,14 @@ if (!startupFailure && !process.env.STRAVIA_TEST_PLUGIN_MARKETPLACE_URL) {
   })
   process.env.STRAVIA_TEST_PLUGIN_MARKETPLACE_URL = `http://127.0.0.1:${await promise}`
 }
-// 恢复窗口不依赖业务数据根；测试仍将 WebView2 配置隔离到可清理的临时目录。
-process.env.WEBVIEW2_USER_DATA_FOLDER = join(runRoot, 'webview')
+// 恢复窗口不依赖业务数据根；测试仍将 WebView 配置隔离到可清理的临时目录。
+if (process.platform === 'win32') {
+  process.env.WEBVIEW2_USER_DATA_FOLDER = join(runRoot, 'webview')
+} else if (process.platform === 'linux') {
+  process.env.XDG_DATA_HOME = xdgDataHome
+  process.env.XDG_CONFIG_HOME = xdgConfigHome
+  process.env.XDG_CACHE_HOME = xdgCacheHome
+}
 
 const capabilities: TauriCapabilities[] = [{ browserName: 'tauri', 'tauri:options': { application: appBinaryPath } }]
 
@@ -94,10 +105,10 @@ export const config: WebdriverIO.Config = {
         appBinaryPath,
         driverProvider: 'embedded',
         embeddedPort: 4445,
-        // The private preparer owns downloads; the patched service still validates
-        // the official driver's version without invoking its global fallback.
+        // Embedded WebDriver runs inside stravia-desktop via tauri-plugin-wdio-webdriver;
+        // neither msedgedriver nor tauri-driver is used.
         autoDownloadEdgeDriver: false,
-        autoInstallTauriDriver: true,
+        autoInstallTauriDriver: false,
         captureBackendLogs: true,
         captureFrontendLogs: true,
         startTimeout: 180_000,

@@ -580,7 +580,7 @@ jobs:
             export PATH="${shim_dir}:${PATH}"
           fi
           cd backend/apps/stravia-desktop
-          bunx --bun @tauri-apps/cli@2.12.3 build \
+          bunx --bun @tauri-apps/cli@2.12.6 build \
             --runner cargo-xwin \
             --target ${{ matrix.target }} \
             --config tauri.release.conf.json \

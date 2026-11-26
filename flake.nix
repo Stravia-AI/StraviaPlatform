@@ -46,16 +46,23 @@
           bun2nix = generatorFor system;
           bun = pkgs.bun;
         };
+      winVmFor = system: import ./nix/win-vm { pkgs = packagesFor system; };
     in
     {
       packages = forAllSystems (
         system:
         let
+          pkgs = packagesFor system;
           server = serverFor system;
+          winVm = winVmFor system;
         in
         {
           stravia-server = server;
           default = server;
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          windows-e2e-image = winVm.image;
+          windows-e2e-runner = winVm.runner;
         }
       );
 
@@ -78,6 +85,13 @@
             type = "app";
             program = pkgs.lib.getExe updateBunDeps;
             meta.description = "Regenerate Stravia's fixed Bun dependency sources";
+          };
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          windows-e2e = {
+            type = "app";
+            program = pkgs.lib.getExe (winVmFor system).runner;
+            meta.description = "Run Stravia Windows Desktop E2E in an ephemeral KVM overlay";
           };
         }
       );
