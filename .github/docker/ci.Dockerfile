@@ -34,24 +34,15 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX} \
     PATH=/usr/local/cargo/bin:/usr/local/bun/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Enable multiarch arm64 repositories for Linux aarch64 GTK/WebKitGTK cross-compilation.
+# Configure Ubuntu apt mirror (defaults to archive.ubuntu.com; override via APT_MIRROR for domestic runners).
 RUN set -eux; \
-    dpkg --add-architecture arm64; \
     amd64_uri="${APT_MIRROR:-http://archive.ubuntu.com/ubuntu/}"; \
-    arm64_uri="${APT_MIRROR_PORTS:-http://ports.ubuntu.com/ubuntu-ports/}"; \
     printf '%s\n' \
       'Types: deb' \
       "URIs: ${amd64_uri}" \
       'Suites: noble noble-updates noble-security' \
       'Components: main universe restricted multiverse' \
       'Architectures: amd64' \
-      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-      '' \
-      'Types: deb' \
-      "URIs: ${arm64_uri}" \
-      'Suites: noble noble-updates noble-security' \
-      'Components: main universe restricted multiverse' \
-      'Architectures: arm64' \
       'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
       > /etc/apt/sources.list.d/ubuntu.sources; \
     apt-get update; \
@@ -66,11 +57,6 @@ RUN set -eux; \
       librsvg2-dev \
       patchelf xdg-utils squashfs-tools minisign nsis \
       gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
-      libssl-dev:arm64 \
-      libwebkit2gtk-4.1-dev:arm64 \
-      libgtk-3-dev:arm64 \
-      libayatana-appindicator3-dev:arm64 \
-      librsvg2-dev:arm64 \
       wine64 wine; \
     rm -rf /var/lib/apt/lists/*
 
