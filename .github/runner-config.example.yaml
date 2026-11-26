@@ -1,11 +1,7 @@
-# Example forgejo-runner config for a single Linux x64 host with persistent
-# build cache volume (/var/cache/stravia-ci -> /ci-cache inside job containers).
-#
-# Uses the standard `ubuntu-24.04` label so `.github/workflows/*.yml` runs
-# identically on both GitHub Actions and self-hosted Forgejo Actions.
+# Example forgejo-runner config for a single Linux x64 host using the runner's
+# built-in actions/cache proxy.
 #
 # Host setup (one-time):
-#   sudo mkdir -p /var/cache/stravia-ci && sudo chmod 1777 /var/cache/stravia-ci
 #   forgejo-runner daemon -c .github/runner-config.example.yaml
 
 log:
@@ -13,16 +9,12 @@ log:
 
 runner:
   file: .runner
-  capacity: 2
+  capacity: 4
   timeout: 3h
   labels:
-    # Unified label matching GitHub Actions `runs-on: ubuntu-24.04`.
-    # Recommended: prebuilt `.github/docker/ci.Dockerfile` image.
-    - "ubuntu-24.04:docker://ghcr.io/stravia-ai/stravia-ci-x64:latest"
+    - "ubuntu-latest:docker://ghcr.io/stravia-ai/stravia-ci-x64:latest"
     # Fallback using stock Ubuntu 24.04 (bootstrap_toolchain.sh installs missing tools).
-    # - "ubuntu-24.04:docker://ubuntu:24.04"
-    # Native Linux ARM64 AppImage desktop release builds (Tauri linuxdeploy requires ARM64 host/container).
-    # - "ubuntu-24.04-arm:docker://ubuntu:24.04"
+    # - "ubuntu-latest:docker://ubuntu:24.04"
     # Optional KVM-enabled runner for Layer-2 Windows Desktop WebView2 E2E.
     - "linux-x64-kvm:host"
 
@@ -33,9 +25,5 @@ cache:
 container:
   network: ""
   privileged: false
-  # Mount persistent host cache volume so Cargo/sccache/xwin/osxcross/Bun/uv/Playwright
-  # survive across containers with zero tar/HTTP overhead.
-  options: "-v /var/cache/stravia-ci:/ci-cache"
-  valid_volumes:
-    - "/var/cache/stravia-ci"
+  options: ""
   force_pull: false

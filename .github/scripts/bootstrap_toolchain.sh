@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent toolchain bootstrap for unified GitHub Actions & Forgejo Actions Linux runners (x86_64 and aarch64).
 # - No-ops quickly inside the prebuilt .github/docker/ci.Dockerfile image or after toolchain cache restore.
-# - Supports persistent host cache volume (/ci-cache) AND standard actions/cache fallback.
+# - Uses standard actions/cache paths under $HOME.
 # - Installs only the apt packages and toolchains requested by NEED_* flags.
 set -euo pipefail
 
@@ -30,7 +30,6 @@ UV_VERSION="${UV_VERSION:-0.11.28}"
 CARGO_XWIN_VERSION="${CARGO_XWIN_VERSION:-0.22.0}"
 PATCH_CRATE_VERSION="${PATCH_CRATE_VERSION:-0.1.13}"
 SCCACHE_VERSION="${SCCACHE_VERSION:-0.10.0}"
-CI_CACHE_DIR="${CI_CACHE_DIR:-/ci-cache}"
 
 NEED_RUST="${NEED_RUST:-1}"
 NEED_BUN="${NEED_BUN:-1}"
@@ -52,50 +51,16 @@ MACOS_SDK_URL="${MACOS_SDK_URL:-https://github.com/joseluisq/macosx-sdks/release
 MACOS_SDK_SHA256="${MACOS_SDK_SHA256:-c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd}"
 APPLE_CODESIGN_VERSION="${APPLE_CODESIGN_VERSION:-0.29.0}"
 
-HOST_CACHE="false"
-if [[ -d "${CI_CACHE_DIR}" && -w "${CI_CACHE_DIR}" ]]; then
-  HOST_CACHE="true"
-  mkdir -p \
-    "${CI_CACHE_DIR}/cargo" \
-    "${CI_CACHE_DIR}/rustup" \
-    "${CI_CACHE_DIR}/sccache" \
-    "${CI_CACHE_DIR}/xwin" \
-    "${CI_CACHE_DIR}/bun-install" \
-    "${CI_CACHE_DIR}/bun" \
-    "${CI_CACHE_DIR}/bin" \
-    "${CI_CACHE_DIR}/uv" \
-    "${CI_CACHE_DIR}/eslint" \
-    "${CI_CACHE_DIR}/playwright"
-  export CARGO_HOME="${CI_CACHE_DIR}/cargo"
-  export RUSTUP_HOME="${CI_CACHE_DIR}/rustup"
-  export SCCACHE_DIR="${CI_CACHE_DIR}/sccache"
-  export XWIN_CACHE_DIR="${CI_CACHE_DIR}/xwin"
-  export BUN_INSTALL="${CI_CACHE_DIR}/bun-install"
-  export BUN_INSTALL_CACHE_DIR="${CI_CACHE_DIR}/bun"
-  export LOCAL_BIN="${CI_CACHE_DIR}/bin"
-  export UV_CACHE_DIR="${CI_CACHE_DIR}/uv"
-  export ESLINT_CACHE_DIR="${CI_CACHE_DIR}/eslint"
-  export PLAYWRIGHT_BROWSERS_PATH="${CI_CACHE_DIR}/playwright"
-  if [[ ! -x "${OSXCROSS_ROOT}/target/bin/oa64-clang" ]]; then
-    OSXCROSS_ROOT="${CI_CACHE_DIR}/osxcross"
-  fi
-  echo "Using persistent host cache volume at ${CI_CACHE_DIR}"
-else
-  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-  export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-  export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
-  export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$HOME/.cache/cargo-xwin}"
-  export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-  export BUN_INSTALL_CACHE_DIR="${BUN_INSTALL_CACHE_DIR:-$HOME/.bun/install/cache}"
-  export LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
-  export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
-  export ESLINT_CACHE_DIR="${ESLINT_CACHE_DIR:-$HOME/.cache/eslint}"
-  mkdir -p "${LOCAL_BIN}" "${ESLINT_CACHE_DIR}"
-fi
-
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  echo "host_cache=${HOST_CACHE}" >> "$GITHUB_OUTPUT"
-fi
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
+export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$HOME/.cache/cargo-xwin}"
+export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+export BUN_INSTALL_CACHE_DIR="${BUN_INSTALL_CACHE_DIR:-$HOME/.bun/install/cache}"
+export LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}"
+export ESLINT_CACHE_DIR="${ESLINT_CACHE_DIR:-$HOME/.cache/eslint}"
+mkdir -p "${LOCAL_BIN}" "${ESLINT_CACHE_DIR}"
 
 SUDO=""
 if [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then

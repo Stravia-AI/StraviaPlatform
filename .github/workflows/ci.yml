@@ -123,18 +123,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache lightweight toolchain (Bun & Task)
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -153,7 +142,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Bun packages & ESLint content cache
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -211,18 +199,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task, uv)
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -243,7 +220,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo, sccache, and Bun
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -333,18 +309,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache lightweight toolchain (Bun & uv)
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -364,7 +329,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache uv
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.cache/uv
@@ -406,18 +370,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache Rust + uv toolchain binaries
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -437,7 +390,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo, sccache, Bun, and uv
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -509,18 +461,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache lightweight toolchain (Bun & uv)
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -540,7 +481,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache uv
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.cache/uv
@@ -576,18 +516,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache lightweight toolchain (Bun & Task)
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -606,7 +535,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Bun & Playwright
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -647,18 +575,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache Rust + cargo-xwin toolchain binaries
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -672,7 +589,6 @@ jobs:
             toolchain-rust-${{ env.RUST_VERSION }}-
 
       - name: Cache Windows MSVC xwin SDK
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.cache/cargo-xwin
@@ -689,7 +605,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo, sccache, and Bun
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -755,18 +670,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache Rust + cargo-xwin toolchain binaries
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -787,7 +691,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo, sccache, xwin SDK, and Bun
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -826,7 +729,6 @@ jobs:
           WINDOWS_SSH_KEY: ${{ vars.WINDOWS_KVM_SSH_KEY_PATH }}
           WINDOWS_SSH_USER: ${{ vars.WINDOWS_KVM_SSH_USER || 'stravia' }}
           WINDOWS_SUITES: ${{ vars.WINDOWS_KVM_SUITES || 'desktop,legacy,database,storage-failures' }}
-          WINDOWS_DEPS_CACHE_DIR: ${{ steps.bootstrap.outputs.host_cache == 'true' && format('{0}/stravia-win-deps', env.CI_CACHE_DIR || '/ci-cache') || '' }}
           DESKTOP_EXE: target/x86_64-pc-windows-msvc/debug/stravia-desktop.exe
           HARNESS_EXE: target/x86_64-pc-windows-msvc/debug/stravia-storage-test-harness.exe
         run: bash .github/scripts/kvm_windows_e2e.sh
@@ -856,18 +758,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Detect persistent host cache volume
-        id: host-cache
-        shell: bash
-        run: |
-          if [[ -d "${CI_CACHE_DIR:-/ci-cache}" && -w "${CI_CACHE_DIR:-/ci-cache}" ]]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cache Rust + rcodesign toolchain binaries
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -881,7 +772,6 @@ jobs:
             toolchain-rust-${{ env.RUST_VERSION }}-
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
-        if: steps.host-cache.outputs.enabled != 'true'
         uses: actions/cache@v6
         with:
           path: /opt/osxcross/target
@@ -899,7 +789,6 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo, sccache, and Bun
-        if: steps.bootstrap.outputs.host_cache != 'true'
         uses: actions/cache@v6
         with:
           path: |
