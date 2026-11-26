@@ -207,21 +207,38 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: ci-rust-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-rust-v2-
-            ci-e2e-build-v1-
-            ci-rust-unit-v1-
-            ci-rust-check-v1-
+            deps-cargo-bun-v1-
+
+      - name: Cache Linux x64 sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-
+
+      - name: Cache compiled Wasm vendor plugins & fixtures
+        id: vendor-cache
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/vendor-plugins
+            target/vendor-plugins-all
+            target/vendor-test-fixtures
+          key: vendor-fixtures-v1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
 
       - name: Check Rust formatting
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
@@ -229,9 +246,15 @@ jobs:
 
       - name: Prepare patched crates and vendor fixtures
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+        env:
+          VENDOR_CACHE_HIT: ${{ steps.vendor-cache.outputs.cache-hit }}
         run: |
           task prepare:crates
-          task build:vendor-fixtures
+          if [[ "${VENDOR_CACHE_HIT}" == "true" ]]; then
+            echo "Restored compiled Wasm vendor plugins & fixtures from cache; skipping rebuild."
+          else
+            task build:vendor-fixtures
+          fi
 
       - name: Prepare patched crates (WebUI-only scope)
         if: needs.changes.outputs.rust != 'true' && needs.changes.outputs.full != 'true'
@@ -365,21 +388,35 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, Bun, and uv
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-            ~/.cache/uv
-          key: ci-e2e-admin-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'uv.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-e2e-admin-v2-
-            ci-rust-v2-
-            ci-e2e-admin-v1-
+            deps-cargo-bun-v1-
+
+      - name: Cache uv
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/uv
+          key: ci-uv-v1-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ci-uv-v1-
+
+      - name: Cache Linux x64 sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-admin
+          restore-keys: |
+            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-
             ci-e2e-build-v1-
 
       - name: Download shared E2E binaries
@@ -554,20 +591,27 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2 x86_64-pc-windows-msvc"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: ci-win-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-win-v2-
-            ci-rust-v2-
-            ci-win-xwin16-v1-
+            deps-cargo-bun-v1-
+
+      - name: Cache Windows x86_64 sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-windows-x86_64-
 
       - name: Prepare patched crates & bundled Wasm vendors
         run: |
@@ -730,18 +774,27 @@ jobs:
           MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: ci-macos-${{ matrix.suffix }}-sdk15.5-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-macos-${{ matrix.suffix }}-sdk15.5-v1-
+            deps-cargo-bun-v1-
+
+      - name: Cache macOS sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-macos-${{ matrix.suffix }}-
 
       - name: Prepare patched crates, WebUI, and bundled vendors
         run: |

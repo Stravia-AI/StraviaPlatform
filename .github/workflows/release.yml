@@ -191,18 +191,27 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: ci-rust-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-rust-v2-
+            deps-cargo-bun-v1-
+
+      - name: Cache Linux x64 sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
+          restore-keys: |
+            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-
 
       - name: Build WebUI dist and bundled base Wasm vendor once
         run: |
@@ -275,7 +284,7 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo and sccache
+      - name: Cache Cargo registry and patched crates
         if: steps.select.outputs.has_plugins == 'true'
         uses: actions/cache@v6
         with:
@@ -283,11 +292,20 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
-          key: ci-rust-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-rust-v2-
-            release-plugins-v1-
+            deps-cargo-bun-v1-
+
+      - name: Cache Linux x64 sccache (rolling)
+        if: steps.select.outputs.has_plugins == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
+          restore-keys: |
+            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-
 
       - name: Prepare patched crates
         if: steps.select.outputs.has_plugins == 'true'
@@ -418,19 +436,27 @@ jobs:
           RUST_TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: release-linux-x64-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            release-linux-x64-v2-
-            ci-rust-v2-
+            deps-cargo-bun-v1-
+
+      - name: Cache Linux x64 sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-release
+          restore-keys: |
+            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-
 
       - name: Validate updater signing credentials
         env:
@@ -563,20 +589,27 @@ jobs:
           RUST_TARGETS: "${{ matrix.target }}"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: release-win-${{ matrix.suffix }}-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            release-win-${{ matrix.suffix }}-v2-
-            ci-win-v2-
-            ci-rust-v2-
+            deps-cargo-bun-v1-
+
+      - name: Cache Windows sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-${{ matrix.suffix }}-
 
       - name: Validate updater signing credentials
         env:
@@ -692,20 +725,27 @@ jobs:
           RUST_TARGETS: "aarch64-unknown-linux-gnu"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, and Bun
+      - name: Cache Cargo registry, Bun, and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
             ~/.bun/install/cache
-          key: release-desktop-arm64-v2-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            release-desktop-arm64-v2-
-            release-linux-x64-v2-
-            ci-rust-v2-
+            deps-cargo-bun-v1-
+
+      - name: Cache Linux arm64 sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-arm64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-linux-arm64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-arm64-
 
       - name: Validate updater signing credentials
         env:
@@ -822,18 +862,26 @@ jobs:
           MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo and sccache
+      - name: Cache Cargo registry and patched crates
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
-          key: release-macos-${{ matrix.suffix }}-v2-${{ hashFiles('Cargo.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            release-macos-${{ matrix.suffix }}-v2-
-            ci-rust-v2-
+            deps-cargo-bun-v1-
+
+      - name: Cache macOS sccache (rolling)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-macos-${{ matrix.suffix }}-
 
       - name: Validate updater signing credentials
         env:
