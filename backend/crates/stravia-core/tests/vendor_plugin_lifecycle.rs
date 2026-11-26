@@ -279,7 +279,7 @@ async fn connection(
                 )]),
             },
             vendor_options: options,
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway

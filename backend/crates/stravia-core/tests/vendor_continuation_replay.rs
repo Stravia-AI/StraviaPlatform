@@ -194,7 +194,7 @@ impl Harness {
                 adapter_credentials: "{}".into(),
                 vendor_options: "{}".into(),
                 auth_mode: "oauth".into(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await?;
         gateway

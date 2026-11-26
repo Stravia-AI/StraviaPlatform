@@ -97,8 +97,9 @@ pub(crate) fn validate_target_capability(
         .get("capabilities")
         .and_then(serde_json::Value::as_array);
     if capability == Capability::MediaImage
-        || capabilities
-            .is_some_and(|values| crate::provider_models::has_explicit_operation_capabilities(values))
+        || capabilities.is_some_and(|values| {
+            crate::provider_models::has_explicit_operation_capabilities(values)
+        })
     {
         anyhow::ensure!(
             capabilities.is_some_and(|values| values.iter().any(|value| {

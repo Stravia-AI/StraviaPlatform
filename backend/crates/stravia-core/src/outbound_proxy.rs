@@ -522,8 +522,10 @@ pub fn parse_cf_trace(body: &str) -> (Option<String>, Option<String>) {
     (ip, loc)
 }
 
+pub type ProbeObservation = (usize, String, Option<(String, Option<String>)>);
+
 pub fn aggregate_probe_observations(
-    observations: Vec<(usize, String, Option<(String, Option<String>)>)>,
+    observations: Vec<ProbeObservation>,
     probed_at: String,
 ) -> ProxyIpProbeResult {
     let total_services = observations.len();

@@ -74,7 +74,7 @@ async fn configure_opencode(gateway: &Gateway, url: String) -> anyhow::Result<(S
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway.admin().create_manual_provider_model(&provider.id, "big-pickle", CreateManualProviderModel {
@@ -381,7 +381,7 @@ async fn configure_grok(gateway: &Gateway, url: String) -> anyhow::Result<(Strin
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway

@@ -226,7 +226,7 @@ async fn provider_route_and_key(
             source,
             credential,
             vendor_options,
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway
@@ -545,7 +545,7 @@ async fn supplemental_discovery_discards_legacy_flags_and_preserves_modalities()
                 value: "fixture-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway.admin().sync_provider_models(&provider.id).await?;
@@ -630,7 +630,7 @@ async fn discovery_declared_context_window_overrides_catalog_defaults() -> anyho
                 value: "fixture-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway.admin().sync_provider_models(&provider.id).await?;
@@ -1122,7 +1122,7 @@ async fn base_cline_pass_allowance_reads_usage_limits_and_reports_window_quotas(
                 value: "cline-pass-contract-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
 
@@ -1530,7 +1530,7 @@ async fn explicit_model_sources_keep_vendor_auth_through_real_wasm() -> anyhow::
                 },
                 credential,
                 vendor_options: options,
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await?;
         assert_eq!(
@@ -1635,7 +1635,7 @@ async fn vertex_curated_inventory_preserves_channel_model_ids_without_network() 
                     value: "local-contract-token".into(),
                 },
                 vendor_options: serde_json::Map::new(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await?;
         let mut models = gateway.admin().get_provider_models(&provider.id).await?;
@@ -1703,7 +1703,7 @@ async fn bedrock_and_watsonx_explicit_and_default_catalog_models_discover_throug
                     value: "local-contract-key".into(),
                 },
                 vendor_options: case.options.clone(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await?;
 
@@ -1745,7 +1745,7 @@ async fn bedrock_and_watsonx_explicit_and_default_catalog_models_discover_throug
                     value: "local-contract-key".into(),
                 },
                 vendor_options: case.options,
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await?;
         assert_eq!(catalog_provider.models_source.as_deref(), Some("catalog"));
@@ -2410,7 +2410,7 @@ async fn command_code_discovery_returns_subscription_models_with_native_efforts(
                 values: BTreeMap::from([("apiKey".into(), json!("local-command-key"))]),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway.admin().sync_provider_models(&provider.id).await?;
@@ -2878,7 +2878,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway
@@ -3182,7 +3182,7 @@ async fn devin_oauth_start_is_owned_by_the_manually_installed_component_without_
                 protocol: Some("devin-connect".into()),
                 options: Default::default(),
                 credentials: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,

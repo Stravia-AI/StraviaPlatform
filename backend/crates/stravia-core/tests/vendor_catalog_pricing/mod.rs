@@ -50,7 +50,7 @@ fn discovered_provider(catalog: &FakeCatalog) -> CreateProvider {
         },
         credential: ProviderCredentialInput::None,
         vendor_options: Default::default(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }
 }
 

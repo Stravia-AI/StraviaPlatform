@@ -324,7 +324,7 @@ where
                 .map(str::to_owned)
                 .unwrap_or_else(|| value.to_string());
             headers.append(
-                &format!("x-probe-{}", key.replace('_', "-")),
+                format!("x-probe-{}", key.replace('_', "-")),
                 value.into_bytes(),
             );
         }

@@ -24,7 +24,7 @@ fn provider_input(name: &str) -> CreateProviderRecord {
         adapter_credentials: "{}".into(),
         vendor_options: "{}".into(),
         auth_mode: "apikey".into(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }
 }
 

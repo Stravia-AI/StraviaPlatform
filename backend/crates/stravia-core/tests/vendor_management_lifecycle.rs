@@ -275,7 +275,7 @@ fn provider_input(vendor: &str, name: &str, base_url: &str) -> CreateProvider {
         },
         credential: ProviderCredentialInput::None,
         vendor_options: options().into_iter().collect(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }
 }
 
@@ -296,7 +296,7 @@ async fn begin_oauth(
                 protocol: Some("fixture-management".into()),
                 options: options(),
                 credentials: BTreeMap::new(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             },
             OAuthSessionStartOptions {
                 callback_mode: OAuthCallbackMode::Manual,
@@ -609,7 +609,7 @@ async fn disabled_saved_provider_explicit_test_validates_and_persists_success_wi
                 value: "synthetic-validation-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let disabled = gateway
@@ -675,7 +675,7 @@ async fn saved_connection_check_reports_upstream_status_and_parse_failures() -> 
                 value: "synthetic-check-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
 
@@ -795,7 +795,7 @@ async fn draft_connection_check_uses_draft_base_url_and_keeps_saved_provider() -
                 value: "saved-secret".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let input = ProviderConnectionCheckInput {
@@ -808,7 +808,7 @@ async fn draft_connection_check_uses_draft_base_url_and_keeps_saved_provider() -
             options: BTreeMap::new(),
             credentials: BTreeMap::new(),
         }),
-        use_proxy: Some(false),
+        proxy_mode: Some("none".to_string()),
         authorization_id: None,
     };
     let check = spawn_connection_check(&gateway, &provider.id, input);
@@ -860,7 +860,7 @@ async fn draft_connection_check_uses_saved_or_staged_oauth_without_binding_or_sa
             options: options(),
             credentials: BTreeMap::new(),
         }),
-        use_proxy: Some(false),
+        proxy_mode: Some("none".to_string()),
         authorization_id: None,
     };
     let check = spawn_connection_check(&gateway, &provider.id, input.clone());
@@ -2095,7 +2095,7 @@ async fn allowance_guard_validation_rejects_model_keys_whitespace_and_unsupporte
             },
             credential: ProviderCredentialInput::None,
             vendor_options: serde_json::Map::new(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     assert!(

@@ -815,7 +815,10 @@ mod tests {
             next_cursor: None,
         };
         ensure_existing_image_capabilities(&mut unlabeled);
-        assert_eq!(unlabeled.models[0].capabilities, vec!["infer", "media_image"]);
+        assert_eq!(
+            unlabeled.models[0].capabilities,
+            vec!["infer", "media_image"]
+        );
         assert_eq!(unlabeled.models[1].capabilities, vec!["media_image"]);
     }
 

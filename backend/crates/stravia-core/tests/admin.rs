@@ -106,7 +106,7 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
 
@@ -132,7 +132,7 @@ async fn catalog_provider_creation_resolves_runtime_fields_in_core() -> anyhow::
             },
             credential: ProviderCredentialInput::None,
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await
         .unwrap_err();
@@ -210,7 +210,7 @@ async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> any
                 values: azure_credentials,
             },
             vendor_options: azure_options.into_iter().collect(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     assert_eq!(azure.vendor.as_deref(), Some("azure-cognitive-services"));
@@ -365,7 +365,7 @@ async fn catalog_provider_creation_uses_declarative_cloud_configuration() -> any
                 values: sap_credentials,
             },
             vendor_options: sap_options.into_iter().collect(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     assert_eq!(sap.vendor.as_deref(), Some("sap-ai-core"));
@@ -1004,7 +1004,7 @@ async fn discovered_models_are_persisted_and_enriched_without_expanding_ids() ->
             adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let summary = gw.admin().sync_provider_models(&provider.id).await?;
@@ -1071,7 +1071,7 @@ async fn custom_provider_sync_applies_unique_canonical_templates() -> anyhow::Re
             adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let summary = gw.admin().sync_provider_models(&provider.id).await?;
@@ -1144,7 +1144,7 @@ async fn custom_provider_resync_fills_bare_discovered_canonical_templates() -> a
             adapter_credentials: r#"{"apiKey":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gw.storage
@@ -1265,7 +1265,7 @@ async fn copy_provider_creates_disabled_provider_with_copy_suffix() -> anyhow::R
     assert_eq!(copied.static_models, original.static_models);
     assert_eq!(copied.api_key, original.api_key);
     assert_eq!(copied.auth_mode, original.auth_mode);
-    assert_eq!(copied.use_proxy, original.use_proxy);
+    assert_eq!(copied.proxy_mode, original.proxy_mode);
     assert!(original.is_enabled);
     assert!(!copied.is_enabled);
 
@@ -1296,7 +1296,7 @@ async fn upgraded_cloud_provider_can_be_edited_and_copied_with_separated_fields(
             vendor_options:
                 r#"{"apiVersion":"2025-04-01-preview","resourceName":"legacy-resource"}"#.into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
 
@@ -1651,7 +1651,7 @@ async fn catalog_provider_uses_runtime_discovery_without_expanding_scope() -> an
             adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let stored = gw.admin().get_provider(&provider.id).await?;
@@ -1719,7 +1719,7 @@ async fn catalog_marker_on_a_live_channel_never_reaches_the_catalog() -> anyhow:
             adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
 
@@ -1764,7 +1764,7 @@ async fn catalog_marker_on_a_consuming_channel_still_propagates_catalog_failures
             adapter_credentials: r#"{"api_key":"sk-test"}"#.to_string(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
 
@@ -1830,7 +1830,7 @@ async fn inventory_runtime_fixture() -> anyhow::Result<(
             adapter_credentials: r#"{"apiKey":"synthetic-key"}"#.into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let data_dir = tempfile::tempdir()?;
@@ -2359,7 +2359,7 @@ fn oauth_provider_record() -> CreateProviderRecord {
         adapter_credentials: "{}".to_string(),
         vendor_options: "{}".into(),
         auth_mode: "oauth".to_string(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }
 }
 
@@ -2378,7 +2378,7 @@ fn api_key_provider_input(name: &str) -> CreateProvider {
             value: "sk-test".to_string(),
         },
         vendor_options: Default::default(),
-        use_proxy: true,
+        proxy_mode: "system".to_string(),
     }
 }
 
@@ -2414,7 +2414,7 @@ async fn catalog_provider_input_for(
             value: "sk-test".to_string(),
         },
         vendor_options: Default::default(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     })
 }
 
@@ -2498,7 +2498,7 @@ async fn saved_icon_provider(
             adapter_credentials: "{}".to_string(),
             vendor_options: "{}".to_string(),
             auth_mode: "apikey".to_string(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     Ok(provider)

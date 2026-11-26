@@ -203,7 +203,7 @@ fn create_catalog_provider(
         },
         credential: ProviderCredentialInput::None,
         vendor_options: Default::default(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }
 }
 
@@ -259,7 +259,7 @@ fn editor_provider(catalog: &FakeCatalog, vendor: &str) -> CreateProvider {
         },
         credential: ProviderCredentialInput::None,
         vendor_options: Default::default(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }
 }
 
@@ -385,7 +385,7 @@ async fn unlinked_provider_recovers_catalog_metadata_without_overwriting_edits()
             adapter_credentials: "{}".to_owned(),
             vendor_options: "{}".to_owned(),
             auth_mode: "apikey".to_owned(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     for (model_id, edited) in [("glm-5.3", false), ("glm-4.6v", true)] {
@@ -497,7 +497,7 @@ async fn failed_catalog_enrichment_preserves_specs_lifecycle_and_restore_source(
             adapter_credentials: "{}".to_owned(),
             vendor_options: "{}".to_owned(),
             auth_mode: "apikey".to_owned(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let mut prior_models = Vec::new();
@@ -766,7 +766,7 @@ async fn catalog_entries_register_create_sync_retire_and_survive_restart() -> an
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await
             .is_err(),
@@ -834,7 +834,7 @@ async fn catalog_entries_register_create_sync_retire_and_survive_restart() -> an
                 },
                 credential: ProviderCredentialInput::None,
                 vendor_options: Default::default(),
-                use_proxy: false,
+                proxy_mode: "none".to_string(),
             })
             .await
             .is_err(),
@@ -1110,7 +1110,7 @@ async fn legacy_preset_key_syncs_commandcode_channel_catalog_prices() -> anyhow:
             adapter_credentials: "{}".to_owned(),
             vendor_options: "{}".to_owned(),
             auth_mode: "apikey".to_owned(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let summary = gw.admin().sync_provider_models(&legacy.id).await?;
@@ -1192,7 +1192,7 @@ async fn discovered_channel_cost_wins_over_catalog_and_official_prices() -> anyh
             adapter_credentials: "{}".to_owned(),
             vendor_options: "{}".to_owned(),
             auth_mode: "apikey".to_owned(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gw.admin().sync_provider_models(&provider.id).await?;

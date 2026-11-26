@@ -270,7 +270,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
                 )]),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     gateway

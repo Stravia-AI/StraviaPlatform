@@ -541,7 +541,7 @@ async fn create_provider(
             adapter_credentials: r#"{"apiKey":"fixture-secret-not-production"}"#.into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await
 }
@@ -4194,7 +4194,7 @@ async fn newer_builtin_removes_bound_search_and_media_without_confirmation_or_re
                 )]),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let search_route = create_route(
@@ -4467,7 +4467,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "apikey".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let search_route = create_route(
@@ -4594,7 +4594,7 @@ async fn dedicated_profile_wholly_replaces_base_and_never_falls_back_when_its_ar
                 value: "unaffected-base-key".into(),
             },
             vendor_options: Default::default(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     let openai_route = create_route(
@@ -4789,7 +4789,7 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
             adapter_credentials: "{}".into(),
             vendor_options: "{}".into(),
             auth_mode: "oauth".into(),
-            use_proxy: false,
+            proxy_mode: "none".to_string(),
         })
         .await?;
     harness
@@ -5445,7 +5445,7 @@ async fn manually_installed_codex_component_continues_client_tool_results_on_one
             "websocket_url":format!("{}/responses", upstream.url.replacen("http://", "ws://", 1))
         }).to_string(),
         auth_mode: "oauth".into(),
-        use_proxy: false,
+        proxy_mode: "none".to_string(),
     }).await?;
     harness
         .gateway
