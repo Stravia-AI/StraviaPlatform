@@ -1098,11 +1098,38 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  wait-ci:
+    name: Wait for CI on this commit
+    if: needs.prepare.outputs.publish == 'true'
+    needs:
+      - prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout CI gate script
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/scripts/wait_for_ci.py
+          sparse-checkout-cone-mode: false
+
+      - name: Wait for CI workflow to succeed on commit SHA
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/wait_for_ci.py \
+            --api-url "${GITHUB_API_URL}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --workflow-file "ci.yml"
+
   prepare-draft:
     name: Prepare draft release
     if: needs.prepare.outputs.publish == 'true'
     needs:
       - prepare
+      - wait-ci
       - collect-assets
     runs-on: ubuntu-latest
     permissions:
