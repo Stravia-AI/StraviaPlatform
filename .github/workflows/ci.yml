@@ -118,20 +118,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.web == 'true' || needs.changes.outputs.ci_scripts == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache lightweight toolchain (Bun & Task)
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
-          restore-keys: |
-            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
 
       - name: Bootstrap Bun & Task (no Rust)
         id: bootstrap
@@ -194,22 +186,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache Rust toolchain binaries (rustup, patch-crate, sccache, bun, task, uv)
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1
-          restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
       - name: Bootstrap Linux x64 Rust toolchain
         id: bootstrap
@@ -298,6 +280,8 @@ jobs:
     needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -308,16 +292,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache lightweight toolchain (Bun & uv)
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
-          restore-keys: |
-            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -365,22 +339,12 @@ jobs:
     needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache Rust + uv toolchain binaries
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-uv${{ env.UV_VERSION }}-wasip2-v1
-          restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -433,6 +397,8 @@ jobs:
     needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 30
     services:
       postgres:
@@ -460,16 +426,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache lightweight toolchain (Bun & uv)
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
-          restore-keys: |
-            toolchain-e2e-bun${{ env.BUN_VERSION }}-uv${{ env.UV_VERSION }}-v1
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -511,20 +467,12 @@ jobs:
     needs: [changes, rust-ci]
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache lightweight toolchain (Bun & Task)
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
-          restore-keys: |
-            toolchain-lite-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-v1
 
       - name: Bootstrap Bun & Task (no Rust needed)
         id: bootstrap
@@ -570,31 +518,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache Rust + cargo-xwin toolchain binaries
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-xwin-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
-          restore-keys: |
-            toolchain-xwin-${{ env.RUST_VERSION }}-
-            toolchain-rust-${{ env.RUST_VERSION }}-
-
-      - name: Cache Windows MSVC xwin SDK
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/cargo-xwin
-          key: xwin-sdk-${{ env.XWIN_VERSION }}-v1
-          restore-keys: |
-            xwin-sdk-${{ env.XWIN_VERSION }}-
 
       - name: Bootstrap Linux x64 cross-compile + Wine toolchain
         id: bootstrap
@@ -741,6 +670,8 @@ jobs:
     name: macOS cross-compile & rcodesign/DMG smoke (${{ matrix.suffix }})
     if: ${{ github.server_url != 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke)) }}
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -757,19 +688,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache Rust + rcodesign toolchain binaries
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-macos-${{ env.RUST_VERSION }}-rcodesign${{ env.APPLE_CODESIGN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1
-          restore-keys: |
-            toolchain-macos-${{ env.RUST_VERSION }}-
-            toolchain-rust-${{ env.RUST_VERSION }}-
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
         uses: actions/cache@v6
