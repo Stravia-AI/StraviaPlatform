@@ -39,21 +39,21 @@ RUN set -eux; \
     dpkg --add-architecture arm64; \
     amd64_uri="${APT_MIRROR:-http://archive.ubuntu.com/ubuntu/}"; \
     arm64_uri="${APT_MIRROR_PORTS:-http://ports.ubuntu.com/ubuntu-ports/}"; \
-    cat <<EOF > /etc/apt/sources.list.d/ubuntu.sources
-Types: deb
-URIs: ${amd64_uri}
-Suites: noble noble-updates noble-security
-Components: main universe restricted multiverse
-Architectures: amd64
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-Types: deb
-URIs: ${arm64_uri}
-Suites: noble noble-updates noble-security
-Components: main universe restricted multiverse
-Architectures: arm64
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-EOF
+    printf '%s\n' \
+      'Types: deb' \
+      "URIs: ${amd64_uri}" \
+      'Suites: noble noble-updates noble-security' \
+      'Components: main universe restricted multiverse' \
+      'Architectures: amd64' \
+      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+      '' \
+      'Types: deb' \
+      "URIs: ${arm64_uri}" \
+      'Suites: noble noble-updates noble-security' \
+      'Components: main universe restricted multiverse' \
+      'Architectures: arm64' \
+      'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+      > /etc/apt/sources.list.d/ubuntu.sources; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl git jq unzip zip tar xz-utils file \
