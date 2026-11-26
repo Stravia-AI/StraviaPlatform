@@ -67,16 +67,17 @@ impl ApiKeyStore for PostgresApiKeyStore {
     }
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
-        let current =
-            sqlx::query_as::<_, ApiKey>(sqlx::AssertSqlSafe(api_key_select(Some("WHERE id = $1"))))
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .context("api key not found for update")?;
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, ApiKey>(sqlx::AssertSqlSafe(api_key_select(Some(
+            "WHERE id = $1 FOR UPDATE",
+        ))))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("api key not found for update")?;
         let model_ids = input.model_ids.clone();
         let merged = crate::storage::merge_api_key_update(current, input)?;
 
-        let mut tx = self.pool.begin().await?;
         sqlx::query(
     "UPDATE api_keys SET token=$1, name=$2, rpm_limit=$3, spend_limit_nanos=$4, is_enabled=$5, mcp_access_enabled=$6, transparent_injection_enabled=$7, transparent_injections=$8, expires_at=NULLIF($9, '')::timestamptz, updated_at=CURRENT_TIMESTAMP WHERE id=$10",
             )

@@ -33,9 +33,18 @@ impl LocalArtifactStore {
         let settings = match value {
             Some(value) => crate::Gateway::parse_artifact_settings(Some(&value))?,
             None => {
+                let stored = self.settings.read().await.clone();
                 let settings = match fallback {
-                    Some(settings) => settings.clone(),
-                    None => self.settings.read().await.clone(),
+                    Some(settings)
+                        if !settings.client_base_url.is_empty()
+                            || settings.file_public_base_url.is_some()
+                            || settings.s3.is_some()
+                            || settings.external_signed_downloads
+                            || settings.upload_prompt_injection =>
+                    {
+                        settings.clone()
+                    }
+                    _ => stored,
                 };
                 settings.validate()?;
                 settings
@@ -324,6 +333,38 @@ impl LocalArtifactStore {
                 },
             )
             .await?;
+        struct StagingCleanupGuard {
+            store: LocalArtifactStore,
+            principal: Principal,
+            upload_id: String,
+            armed: bool,
+        }
+        impl Drop for StagingCleanupGuard {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                let store = self.store.clone();
+                let principal = self.principal.clone();
+                let upload_id = self.upload_id.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = tokio::fs::remove_dir_all(store.staging_dir(&upload_id)).await;
+                        if let Ok(Some(row)) = store.load_upload(&upload_id).await {
+                            let _ = store
+                                .delete_ready(&principal, &ArtifactId::new(row.artifact_id))
+                                .await;
+                        }
+                    });
+                }
+            }
+        }
+        let mut cleanup_guard = StagingCleanupGuard {
+            store: self.clone(),
+            principal: principal.clone(),
+            upload_id: upload.upload_id.clone(),
+            armed: true,
+        };
         let result = async {
     let part = self
         .upload_part(principal, &upload.upload_id, &upload.upload_token, 1, bytes)
@@ -368,6 +409,7 @@ impl LocalArtifactStore {
         .await
         }
         .await;
+        cleanup_guard.armed = false;
         if let Err(original) = &result {
             // Failed automatic ingestion has no client upload task to resume.
             let cleanup = async {

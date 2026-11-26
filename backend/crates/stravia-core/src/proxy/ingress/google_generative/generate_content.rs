@@ -55,7 +55,20 @@ pub async fn handler(
         Some((m, a)) => (m.to_string(), a.to_string()),
         None => (model_action.clone(), "generateContent".to_string()),
     };
-    let is_stream = action == "streamGenerateContent";
+    let is_stream = match action.as_str() {
+        "generateContent" => false,
+        "streamGenerateContent" => true,
+        _ => {
+            return observation::reject(
+                observer,
+                "decode",
+                "unsupported_action",
+                crate::proxy::dispatcher::decode_error_response(format!(
+                    "unsupported Gemini action: :{action}; expected :generateContent or :streamGenerateContent"
+                )),
+            );
+        }
+    };
     let flat_headers: std::collections::HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {

@@ -61,7 +61,7 @@ impl WebProviderStore for PostgresWebProviderStore {
     async fn update(&self, id: &str, input: UpdateWebProvider) -> anyhow::Result<WebProvider> {
         let mut tx = self.pool.begin().await?;
         let current = sqlx::query_as::<_, WebProvider>(sqlx::AssertSqlSafe(format!(
-            "{SELECT_WEB_PROVIDER} WHERE id = $1"
+            "{SELECT_WEB_PROVIDER} WHERE id = $1 FOR UPDATE"
         )))
         .bind(id)
         .fetch_optional(&mut *tx)

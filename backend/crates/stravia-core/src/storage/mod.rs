@@ -74,7 +74,7 @@ pub(crate) fn merge_api_key_update(
         transparent_injections: input
             .transparent_injections
             .unwrap_or(current.transparent_injections),
-        expires_at: input.expires_at.or(current.expires_at),
+        expires_at: input.expires_at.unwrap_or(current.expires_at),
     })
 }
 
@@ -95,15 +95,8 @@ pub const CONFIG_EPOCH_KEY: &str = "config_epoch";
 
 /// 普通配置写入后的刷新通知；原子操作应在自身事务中更新。
 pub async fn bump_config_epoch(store: &dyn SettingsStore) -> anyhow::Result<()> {
-    let current: i64 = store
-        .get(CONFIG_EPOCH_KEY)
-        .await?
-        .as_deref()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    store
-        .set(CONFIG_EPOCH_KEY, &(current + 1).to_string())
-        .await
+    let _ = store.increment_u64(CONFIG_EPOCH_KEY).await?;
+    Ok(())
 }
 
 pub use memory::MemoryStorage;

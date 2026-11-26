@@ -49,6 +49,10 @@ impl PrincipalAdmission {
         self.state.lock().remove(principal_id);
     }
 
+    pub(crate) fn retain_principals(&self, active_ids: &std::collections::HashSet<String>) {
+        self.state.lock().retain(|id, _| active_ids.contains(id));
+    }
+
     pub(crate) fn acquire(
         &self,
         principal: &Principal,

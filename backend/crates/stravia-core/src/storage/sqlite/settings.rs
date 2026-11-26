@@ -44,4 +44,20 @@ impl SettingsStore for SqliteSettingsStore {
         connection.commit().await?;
         Ok(())
     }
+
+    async fn increment_u64(&self, key: &str) -> anyhow::Result<u64> {
+        let mut connection = self.pool.begin_write().await?;
+        let next: i64 = sqlx::query_scalar(
+            "INSERT INTO settings (name, value, updated_at) VALUES (?, '1', datetime('now')) \
+             ON CONFLICT(name) DO UPDATE SET \
+             value = CAST(COALESCE(CAST(settings.value AS INTEGER), 0) + 1 AS TEXT), \
+             updated_at = excluded.updated_at \
+             RETURNING CAST(value AS INTEGER)",
+        )
+        .bind(key)
+        .fetch_one(&mut *connection)
+        .await?;
+        connection.commit().await?;
+        Ok(next.max(0) as u64)
+    }
 }

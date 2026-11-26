@@ -226,7 +226,7 @@ fn json_rejection(rejection: JsonRejection) -> Response {
             StatusCode::PAYLOAD_TOO_LARGE,
             "request_too_large",
             None,
-            "Request body exceeds the 100 MiB limit.",
+            "Request body exceeds the 140 MiB limit.",
         );
     }
     protocol_error(

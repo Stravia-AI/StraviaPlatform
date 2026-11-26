@@ -123,13 +123,15 @@ async fn observe_inference_ingress(
             .get::<super::context::RequestContext>()
             .cloned()
     {
+        let (redacted_uri, _) =
+            crate::interaction_observation::redact_url(&request.uri().to_string());
         let observer =
             gateway
                 .observation
                 .observe_ingress(crate::interaction_observation::IngressStart {
                     id: context.request_id.clone(),
                     method: request.method().to_string(),
-                    path: request.uri().to_string(),
+                    path: redacted_uri.clone(),
                     protocol: protocol.to_string(),
                 });
         observer.record_debug(|| RunEvent::Wire {
@@ -140,7 +142,7 @@ async fn observe_inference_ingress(
             model_turn_id: None,
             attempt_id: None,
             status_code: None,
-            url: Some(request.uri().to_string()),
+            url: Some(redacted_uri.clone()),
             headers: crate::interaction_observation::wire_headers_value(request.headers()),
             payload: serde_json::Value::Null.into(),
         });

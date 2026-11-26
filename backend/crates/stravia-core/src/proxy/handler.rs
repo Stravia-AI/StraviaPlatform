@@ -398,7 +398,7 @@ mod tests {
                     mcp_access_enabled: None,
                     transparent_injection_enabled: None,
                     transparent_injections: None,
-                    expires_at: Some("2000-01-01T00:00:00Z".into()),
+                    expires_at: Some(Some("2000-01-01T00:00:00Z".into())),
                     model_ids: None,
                     spend_limit: None,
                 },

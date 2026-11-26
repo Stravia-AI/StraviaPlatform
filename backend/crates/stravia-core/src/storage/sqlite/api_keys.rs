@@ -100,18 +100,18 @@ impl ApiKeyStore for SqliteApiKeyStore {
     }
 
     async fn update(&self, id: &str, input: UpdateApiKey) -> anyhow::Result<ApiKeyWithBindings> {
+        let mut connection = self.pool.begin_write().await?;
         let current = sqlx::query_as::<_, ApiKey>(
     "SELECT id, token, name, rpm_limit, spend_limit_nanos, is_enabled, mcp_access_enabled, transparent_injection_enabled, transparent_injections, expires_at, created_at, updated_at FROM api_keys WHERE id = ?",
             )
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *connection)
             .await?
             .context("api key not found for update")?;
 
         let model_ids = input.model_ids.clone();
         let merged = crate::storage::merge_api_key_update(current, input)?;
 
-        let mut connection = self.pool.begin_write().await?;
         sqlx::query(
     "UPDATE api_keys SET token=?, name=?, rpm_limit=?, spend_limit_nanos=?, is_enabled=?, mcp_access_enabled=?, transparent_injection_enabled=?, transparent_injections=?, expires_at=?, updated_at=datetime('now') WHERE id=?",
             )

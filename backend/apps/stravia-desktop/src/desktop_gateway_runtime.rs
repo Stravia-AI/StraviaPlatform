@@ -857,6 +857,14 @@ impl DesktopGatewayRuntime {
                     inner.state.external_access = previous;
                 }
                 let _state = self.install_rebound(restored).await;
+                if restored_port != port {
+                    let publisher = self.switch_publisher.read().clone();
+                    if let Some(publisher) = publisher
+                        && let Err(error) = publisher.publish(restored_port)
+                    {
+                        tracing::warn!(%error, "failed to publish fallback desktop port switch");
+                    }
+                }
                 self.drain_server(old_server);
                 Err(PortOperationError {
                     code: PortOperationErrorCode::BindFailed,

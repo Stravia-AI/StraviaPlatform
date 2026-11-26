@@ -338,6 +338,7 @@ fn build_proxy_cors_layer(origins: &[String]) -> CorsLayer {
             header::CONTENT_TYPE,
             header::ACCEPT,
             header::HeaderName::from_static("x-api-key"),
+            header::HeaderName::from_static("x-goog-api-key"),
             header::HeaderName::from_static("anthropic-version"),
             header::HeaderName::from_static("anthropic-beta"),
             header::HeaderName::from_static("openai-beta"),

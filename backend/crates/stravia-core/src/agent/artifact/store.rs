@@ -972,43 +972,50 @@ impl LocalArtifactStore {
         artifact_id: &str,
         now: i64,
     ) -> Result<u64, ArtifactError> {
-        let settings = self.transfer_settings(None).await?;
-        let mut transaction = pool.begin().await.map_err(storage_error)?;
-        let locked: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))")
-                .bind(artifact_id)
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(storage_error)?;
-        if !locked {
-            return Ok(0);
-        }
-        let location = self.object_location(artifact_id).await?;
-        let claimed = sqlx::query(
+        let store = self.clone();
+        let pool = pool.clone();
+        let artifact_id = artifact_id.to_owned();
+        Self::complete_guarded(async move {
+            let settings = store.transfer_settings(None).await?;
+            let mut transaction = pool.begin().await.map_err(storage_error)?;
+            let locked: bool =
+                sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))")
+                    .bind(&artifact_id)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            if !locked {
+                return Ok(0);
+            }
+            let location = store.object_location(&artifact_id).await?;
+            let claimed = sqlx::query(
     "UPDATE artifacts SET expires_at = expires_at WHERE id = $1 AND state = 'ready' AND expires_at <= $2 AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>$2)",
-        )
-        .bind(artifact_id)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage_error)?
-        .rows_affected();
-        if claimed == 0 {
-            return Ok(0);
-        }
-        self.remove_object_at(artifact_id, location, &settings)
-            .await?;
-        let deleted = sqlx::query(
+            )
+            .bind(&artifact_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?
+            .rows_affected();
+            if claimed == 0 {
+                return Ok(0);
+            }
+            store
+                .remove_object_at(&artifact_id, location, &settings)
+                .await?;
+            let deleted = sqlx::query(
     "DELETE FROM artifacts WHERE id = $1 AND state = 'ready' AND expires_at <= $2 AND NOT EXISTS (SELECT 1 FROM artifact_download_grants g WHERE g.artifact_id=artifacts.id AND g.expires_at>$2)",
-        )
-        .bind(artifact_id)
-        .bind(now)
-        .execute(&mut *transaction)
+            )
+            .bind(&artifact_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?
+            .rows_affected();
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(deleted)
+        })
         .await
-        .map_err(storage_error)?
-        .rows_affected();
-        transaction.commit().await.map_err(storage_error)?;
-        Ok(deleted)
     }
 
     async fn load_parts(

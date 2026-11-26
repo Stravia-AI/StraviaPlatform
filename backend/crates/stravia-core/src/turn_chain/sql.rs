@@ -83,7 +83,8 @@ async fn dependency_references_postgres(
     for reference in references {
         list.push_bind(reference);
     }
-    list.push_unseparated(") FOR KEY SHARE");
+    list.push_unseparated(") ORDER BY ");
+    query.push(column).push(" FOR KEY SHARE");
     query
         .build_query_scalar::<String>()
         .fetch_all(&mut *connection)

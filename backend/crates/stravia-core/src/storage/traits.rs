@@ -575,6 +575,17 @@ pub trait SettingsStore: Send + Sync {
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
     /// Atomically preserve an existing setting or insert and return the supplied value.
     async fn get_or_insert(&self, key: &str, value: &str) -> anyhow::Result<String>;
+    /// Atomically increment an unsigned integer setting and return the new value.
+    async fn increment_u64(&self, key: &str) -> anyhow::Result<u64> {
+        let current = self
+            .get(key)
+            .await?
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let next = current + 1;
+        self.set(key, &next.to_string()).await?;
+        Ok(next)
+    }
 }
 
 /// Durable cumulative spend for one API Key. A missing row is zero.

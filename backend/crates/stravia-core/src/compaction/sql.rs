@@ -57,9 +57,15 @@ impl Store {
             .map(|state| serde_json::to_string(&state.payload).map_err(storage))
             .collect::<Result<Vec<_>, _>>()?;
         macro_rules! insert {
-            ($pool:expr, $for_key_share:literal, $lease_lock:literal) => {{
+            ($pool:expr, $for_key_share:literal, $lease_lock:literal, $lock_turn_nodes:expr) => {{
                 let mut tx = $pool.begin_write().await.map_err(storage)?;
                 if let Some(source) = record.source_generation_id.as_deref() {
+                    if $lock_turn_nodes {
+                        sqlx::query("LOCK TABLE turn_nodes IN ROW EXCLUSIVE MODE")
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(storage)?;
+                    }
                     let query = format!(
                         "SELECT CAST(1 AS BIGINT) FROM turn_nodes n \
                          JOIN content_scopes s ON s.id=n.scope_id \
@@ -119,8 +125,8 @@ impl Store {
             }};
         }
         match self {
-            Self::Sqlite(pool) => insert!(pool, "", ""),
-            Self::Postgres(pool) => insert!(pool, " FOR KEY SHARE", " FOR UPDATE OF l"),
+            Self::Sqlite(pool) => insert!(pool, "", "", false),
+            Self::Postgres(pool) => insert!(pool, " FOR KEY SHARE", " FOR UPDATE OF l", true),
         }
     }
 

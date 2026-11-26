@@ -42,4 +42,18 @@ impl SettingsStore for PostgresSettingsStore {
             .await?;
         Ok(())
     }
+
+    async fn increment_u64(&self, key: &str) -> anyhow::Result<u64> {
+        let next: i64 = sqlx::query_scalar(
+            "INSERT INTO settings (name, value, updated_at) VALUES ($1, '1', CURRENT_TIMESTAMP) \
+             ON CONFLICT(name) DO UPDATE SET \
+             value = (CASE WHEN settings.value ~ '^[0-9]+$' THEN settings.value::bigint ELSE 0 END + 1)::text, \
+             updated_at = EXCLUDED.updated_at \
+             RETURNING value::bigint",
+        )
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(next.max(0) as u64)
+    }
 }

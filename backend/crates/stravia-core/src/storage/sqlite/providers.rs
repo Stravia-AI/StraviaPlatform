@@ -68,8 +68,12 @@ impl ProviderStore for SqliteProviderStore {
     }
 
     async fn update(&self, id: &str, input: UpdateProvider) -> anyhow::Result<Provider> {
-        let current = self
-            .get(id)
+        let mut tx = self.pool.begin_write().await?;
+        let current = sqlx::query_as::<_, Provider>(
+    "SELECT id, name, vendor, protocol, base_url, preset_key, channel, models_source, static_models, api_key, adapter_credentials, vendor_options, auth_mode, use_proxy, last_test_success, last_test_at, is_enabled, credential_status, credential_invalid_at, revision, created_at, updated_at FROM providers WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
             .await?
             .context("provider not found for update")?;
         // ADR-0073：黑名单字段之外的写入视为新凭据证据，恢复 ok。不能无条件
@@ -121,7 +125,6 @@ impl ProviderStore for SqliteProviderStore {
         let use_proxy = input.use_proxy.unwrap_or(current.use_proxy);
         let is_enabled = input.is_enabled.unwrap_or(current.is_enabled);
 
-        let mut tx = self.pool.begin_write().await?;
         sqlx::query(
     "UPDATE providers SET name=?, vendor=?, protocol=?, base_url=?, preset_key=?, channel=?, models_source=?, static_models=?, api_key=?, adapter_credentials=?, vendor_options=?, auth_mode=?, use_proxy=?, is_enabled=?, updated_at=datetime('now'), revision=revision+1, credential_status = CASE WHEN ? THEN 'ok' ELSE credential_status END, credential_invalid_at = CASE WHEN ? THEN NULL ELSE credential_invalid_at END WHERE id=?",
             )

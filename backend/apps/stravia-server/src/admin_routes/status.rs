@@ -164,9 +164,5 @@ pub(super) fn err(e: anyhow::Error) -> axum::response::Response {
 }
 
 pub(super) fn oauth_err(e: anyhow::Error) -> axum::response::Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": e.to_string() })),
-    )
-        .into_response()
+    err(e)
 }
