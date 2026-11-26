@@ -44,7 +44,6 @@ jobs:
             --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu/ \
             --build-arg APT_MIRROR_PORTS=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
             --build-arg NODE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/nodejs-release \
-            --build-arg UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
             --cache-from=type=registry,ref=${IMAGE}:buildcache \
             --cache-to=type=registry,ref=${IMAGE}:buildcache,mode=max \
             --tag "${IMAGE}:x64" \

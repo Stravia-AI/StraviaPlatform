@@ -180,21 +180,31 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
 
-      - name: Cache Linux x64 sccache (rolling)
+      - name: Cache Bun packages
         uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
+
+      - name: Restore Linux x64 sccache (rolling)
+        id: sccache-cache
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
@@ -202,12 +212,39 @@ jobs:
             sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             sccache-linux-x64-
 
+      - name: Restore compiled Wasm vendor plugins
+        id: vendor-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/vendor-plugins
+            .task/checksum/build-vendors
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
+
       - name: Build WebUI dist and bundled base Wasm vendor once
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
-          task prepare:crates
+          bash .github/scripts/prepare_cargo_deps.sh
           task install:web
           task build:web
           task build:vendors
+
+      - name: Show sccache stats
+        id: sccache-stats
+        if: always()
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
+
+      - name: Save Linux x64 sccache (rolling)
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
 
       - name: Upload shared release build inputs
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
@@ -274,6 +311,7 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         if: steps.select.outputs.has_plugins == 'true'
         uses: actions/cache@v6
         with:
@@ -282,13 +320,15 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
 
-      - name: Cache Linux x64 sccache (rolling)
+      - name: Restore Linux x64 sccache (rolling)
+        id: sccache-cache
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
@@ -298,7 +338,9 @@ jobs:
 
       - name: Prepare patched crates
         if: steps.select.outputs.has_plugins == 'true'
-        run: task prepare:crates
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: bash .github/scripts/prepare_cargo_deps.sh
 
       - name: Build standalone plugins
         if: steps.select.outputs.has_plugins == 'true'
@@ -393,6 +435,22 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Show sccache stats
+        id: sccache-stats
+        if: always() && steps.select.outputs.has_plugins == 'true'
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
+
+      - name: Save Linux x64 sccache (rolling)
+        if: always() && steps.select.outputs.has_plugins == 'true' && steps.sccache-stats.outputs.should_save == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
+
   # Combined Linux x64 build: compiles stravia-server (x64), stravia-desktop AppImage (x64),
   # and stravia-server (arm64 cross) in one container to reuse stravia-core, sccache, and WebUI dist.
   build-linux-x64:
@@ -425,20 +483,30 @@ jobs:
           RUST_TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
 
       - name: Restore Linux x64 sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -454,7 +522,9 @@ jobs:
         run: python3 .github/scripts/configure_updater_signing.py
 
       - name: Prepare patched crates
-        run: task prepare:crates
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: bash .github/scripts/prepare_cargo_deps.sh
 
       - name: Build & package Linux x86_64 server
         env:
@@ -536,11 +606,15 @@ jobs:
           retention-days: 7
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save Linux x64 sccache (rolling, even on build failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -586,20 +660,30 @@ jobs:
           RUST_TARGETS: "${{ matrix.target }}"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
 
       - name: Restore Windows sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -615,7 +699,9 @@ jobs:
         run: python3 .github/scripts/configure_updater_signing.py
 
       - name: Prepare patched crates
-        run: task prepare:crates
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: bash .github/scripts/prepare_cargo_deps.sh
 
       - name: Build & package Windows server + desktop NSIS (shared target/)
         shell: bash
@@ -680,11 +766,15 @@ jobs:
           retention-days: 7
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save Windows sccache (rolling, even on build failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -730,20 +820,30 @@ jobs:
           RUST_TARGETS: "aarch64-unknown-linux-gnu"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
 
       - name: Restore Linux arm64 sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -759,7 +859,9 @@ jobs:
         run: python3 .github/scripts/configure_updater_signing.py
 
       - name: Prepare patched crates
-        run: task prepare:crates
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: bash .github/scripts/prepare_cargo_deps.sh
 
       - name: Cross-compile & package Linux aarch64 desktop AppImage
         env:
@@ -812,11 +914,15 @@ jobs:
           retention-days: 7
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-arm64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save Linux arm64 sccache (rolling, even on build failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -876,6 +982,7 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
@@ -883,11 +990,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
 
       - name: Restore macOS sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -903,7 +1012,9 @@ jobs:
         run: python3 .github/scripts/configure_updater_signing.py
 
       - name: Prepare patched crates
-        run: task prepare:crates
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: bash .github/scripts/prepare_cargo_deps.sh
 
       - name: Cross-compile macOS desktop binary via osxcross
         env:
@@ -930,11 +1041,15 @@ jobs:
           retention-days: 7
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save macOS sccache (rolling, even on build failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:

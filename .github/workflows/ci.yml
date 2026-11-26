@@ -36,6 +36,8 @@ env:
   APPLE_CODESIGN_VERSION: "0.29.0"
   XWIN_VERSION: "16"
   CARGO_TERM_COLOR: always
+  # Clear any container-baked index override (e.g. domestic PyPI mirror) so `uv run --locked` matches uv.lock.
+  UV_DEFAULT_INDEX: ""
 
 jobs:
   # Fast path-filter gate (pure git, works identically on GitHub & Forgejo).
@@ -50,6 +52,7 @@ jobs:
       web: ${{ steps.filter.outputs.web }}
       ci_scripts: ${{ steps.filter.outputs.ci_scripts }}
       full: ${{ steps.filter.outputs.full }}
+      windows_kvm_runner: ${{ steps.filter.outputs.windows_kvm_runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -59,14 +62,27 @@ jobs:
       - name: Classify changed files
         id: filter
         shell: bash
+        env:
+          ENABLE_WINDOWS_KVM_E2E: ${{ vars.ENABLE_WINDOWS_KVM_E2E }}
+          INPUT_RUN_WINDOWS_KVM_E2E: ${{ inputs.run_windows_kvm_e2e }}
         run: |
           set -euo pipefail
+          kvm_enabled="false"
+          if [[ "${ENABLE_WINDOWS_KVM_E2E}" == "true" || ( "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_RUN_WINDOWS_KVM_E2E}" == "true" ) ]]; then
+            kvm_enabled="true"
+          fi
+
           if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            windows_kvm_runner="ubuntu-latest"
+            if [[ "${kvm_enabled}" == "true" ]]; then
+              windows_kvm_runner="linux-x64-kvm"
+            fi
             {
               echo "rust=true"
               echo "web=true"
               echo "ci_scripts=true"
               echo "full=true"
+              echo "windows_kvm_runner=${windows_kvm_runner}"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -105,11 +121,20 @@ jobs:
             esac
           done <<< "$changed"
 
+          # Forgejo evaluates job-level `if:` on the runner rather than the server, so a skipped
+          # job targeting an offline `linux-x64-kvm` label would wait forever. Route disabled or
+          # out-of-scope runs to `ubuntu-latest` so the runner immediately marks them skipped.
+          windows_kvm_runner="ubuntu-latest"
+          if [[ "${kvm_enabled}" == "true" && ( "${rust}" == "true" || "${web}" == "true" ) ]]; then
+            windows_kvm_runner="linux-x64-kvm"
+          fi
+
           {
             echo "rust=${rust}"
             echo "web=${web}"
             echo "ci_scripts=${ci_scripts}"
             echo "full=false"
+            echo "windows_kvm_runner=${windows_kvm_runner}"
           } >> "$GITHUB_OUTPUT"
 
   # Ultra-fast lane: no Rust/GTK needed; cached Bun/Task/ESLint + parallel WebUI checks.
@@ -136,15 +161,21 @@ jobs:
           NEED_TASK: "1"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Bun packages & ESLint content cache
+      - name: Cache Bun packages
         uses: actions/cache@v6
         with:
-          path: |
-            ~/.bun/install/cache
-            ~/.cache/eslint
-          key: ci-web-v2-${{ hashFiles('bun.lock', 'package.json', 'frontend/stravia-webui/eslint.config.js', 'frontend/stravia-webui/tsconfig*.json') }}
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
           restore-keys: |
-            ci-web-v2-
+            deps-bun-v2-
+
+      - name: Cache ESLint content cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/eslint
+          key: ci-eslint-v1-${{ hashFiles('frontend/stravia-webui/eslint.config.js', 'frontend/stravia-webui/tsconfig*.json') }}
+          restore-keys: |
+            ci-eslint-v1-
 
       - name: Run CI script unit tests (GitHub & Forgejo)
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
@@ -207,19 +238,28 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Restore Cargo registry, Bun, and patched crates cache
-        id: deps-cache
+      - name: Restore Cargo registry and patched crates cache
+        id: cargo-cache
         uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
+
+      - name: Restore Bun package cache
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
 
       - name: Restore Linux x64 sccache (rolling)
         id: sccache-cache
@@ -233,33 +273,43 @@ jobs:
 
       - name: Restore compiled Wasm vendor plugins & fixtures
         id: vendor-cache
-        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
         uses: actions/cache/restore@v6
         with:
           path: |
             target/vendor-plugins
             target/vendor-plugins-all
             target/vendor-test-fixtures
-          key: vendor-fixtures-v1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
+            .task/checksum/build-vendors
+            .task/checksum/build-vendors-all
+            .task/checksum/build-vendor-fixtures
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
 
       - name: Check Rust formatting
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
         run: cargo fmt --all -- --check
 
       - name: Prepare patched crates and vendor fixtures
-        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
         env:
-          VENDOR_CACHE_HIT: ${{ steps.vendor-cache.outputs.cache-hit }}
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
-          task prepare:crates
-          if [[ "${VENDOR_CACHE_HIT}" == "true" ]]; then
-            echo "Restored compiled Wasm vendor plugins & fixtures from cache; skipping rebuild."
-          else
-            task build:vendor-fixtures
-          fi
+          bash .github/scripts/prepare_cargo_deps.sh
+          task build:vendor-fixtures
+
+      - name: Save Cargo registry and patched crates cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/patch
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
 
       - name: Save compiled Wasm vendor plugins & fixtures
-        if: (needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true') && steps.vendor-cache.outputs.cache-hit != 'true'
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -267,11 +317,10 @@ jobs:
             target/vendor-plugins
             target/vendor-plugins-all
             target/vendor-test-fixtures
-          key: vendor-fixtures-v1-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
-
-      - name: Prepare patched crates (WebUI-only scope)
-        if: needs.changes.outputs.rust != 'true' && needs.changes.outputs.full != 'true'
-        run: task prepare:crates
+            .task/checksum/build-vendors
+            .task/checksum/build-vendors-all
+            .task/checksum/build-vendor-fixtures
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
 
       - name: Check WIT compatibility and clippy
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
@@ -299,14 +348,27 @@ jobs:
             --exclude stravia-vendor-state-contract-fixture
 
       - name: Build shared E2E services
-        run: task build:test:services
+        run: |
+          task build:test:services
+          mkdir -p target/test-artifacts/task-checksums
+          cp -f .task/checksum/* target/test-artifacts/task-checksums/
+
+      - name: Save Bun package cache
+        if: steps.bun-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
 
       - name: Upload shared E2E binaries & fixtures
         uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: e2e-binaries-linux-x64
           path: |
+            frontend/stravia-webui/dist
             target/test-artifacts/services
+            target/test-artifacts/task-checksums
             target/vendor-plugins
             target/vendor-plugins-all
             target/vendor-test-fixtures
@@ -314,24 +376,15 @@ jobs:
           retention-days: 1
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
-
-      - name: Save Cargo registry, Bun, and patched crates cache
-        if: always() && steps.deps-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        continue-on-error: true
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            ~/.bun/install/cache
-            target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save Linux x64 sccache (rolling, even on test failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -380,7 +433,7 @@ jobs:
         uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
-          path: target
+          path: .
 
       - name: Ensure executable permissions on downloaded binaries
         run: chmod +x target/test-artifacts/services/*
@@ -422,18 +475,27 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
 
       - name: Cache uv
         uses: actions/cache@v6
@@ -444,6 +506,7 @@ jobs:
             ci-uv-v1-
 
       - name: Restore Linux x64 sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -456,14 +519,21 @@ jobs:
         uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
-          path: target
+          path: .
 
       - name: Ensure executable permissions
         run: chmod +x target/test-artifacts/services/*
 
       - name: Prepare development-origin server profile & run admin E2E
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
-          task prepare:crates
+          if [[ -d target/test-artifacts/task-checksums ]]; then
+            mkdir -p .task/checksum
+            cp -f target/test-artifacts/task-checksums/* .task/checksum/
+          fi
+          bash .github/scripts/prepare_cargo_deps.sh
+          task install:web
           task build:test:development
           CARGO_TARGET_DIR="${{ github.workspace }}/target/test-development" \
             STRAVIA_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-server" \
@@ -471,11 +541,15 @@ jobs:
             bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save Linux x64 sccache (rolling, even on test failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -537,7 +611,7 @@ jobs:
         uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
-          path: target
+          path: .
 
       - name: Ensure executable permissions
         run: chmod +x target/test-artifacts/services/*
@@ -600,30 +674,47 @@ jobs:
           NEED_TASK: "1"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Bun & Playwright
+      - name: Cache Bun packages
         uses: actions/cache@v6
         with:
-          path: |
-            ~/.bun/install/cache
-            ~/.cache/ms-playwright
-          key: ci-webui-e2e-v1-${{ hashFiles('bun.lock', 'package.json') }}
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
           restore-keys: |
-            ci-webui-e2e-v1-
+            deps-bun-v2-
+
+      - name: Restore Playwright browsers
+        id: playwright-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ci-playwright-v2-${{ hashFiles('frontend/stravia-webui/package.json') }}
+          restore-keys: |
+            ci-playwright-v2-
 
       - name: Download shared E2E binaries
         uses: https://data.forgejo.org/forgejo/download-artifact@v4
         with:
           name: e2e-binaries-linux-x64
-          path: target
+          path: .
 
       - name: Ensure executable permissions
         run: chmod +x target/test-artifacts/services/*
 
-      - name: Install locked WebUI dependencies, build WebUI & install Chromium
+      - name: Install locked WebUI dependencies & Chromium
         run: |
           task install:web
-          task build:web
+          if [[ ! -f frontend/stravia-webui/dist/index.html ]]; then
+            task build:web
+          fi
           bun run playwright:install:web -- --with-deps chromium
+
+      - name: Save Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/ms-playwright
+          key: ci-playwright-v2-${{ hashFiles('frontend/stravia-webui/package.json') }}
 
       - name: Run WebUI E2E tests
         env:
@@ -654,20 +745,22 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2 x86_64-pc-windows-msvc"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
 
       - name: Restore Windows x86_64 sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -676,9 +769,20 @@ jobs:
             sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             sccache-windows-x86_64-
 
+      - name: Restore compiled Wasm vendor plugins
+        id: vendor-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/vendor-plugins
+            .task/checksum/build-vendors
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
+
       - name: Prepare patched crates & bundled Wasm vendors
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
-          task prepare:crates
+          bash .github/scripts/prepare_cargo_deps.sh
           task build:vendors
 
       - name: Cross-compile Windows server binary
@@ -715,11 +819,15 @@ jobs:
             cargo xwin test --locked -p stravia-web-access --target x86_64-pc-windows-msvc --lib
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save Windows x86_64 sccache (rolling, even on test failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:
@@ -728,25 +836,18 @@ jobs:
 
   windows-kvm-desktop-e2e:
     name: Windows Desktop WebView2 E2E (KVM overlay VM)
-    if: ${{ github.server_url != 'https://github.com' && (vars.ENABLE_WINDOWS_KVM_E2E == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_kvm_e2e)) }}
-    runs-on: linux-x64-kvm
+    needs: [changes]
+    if: ${{ github.server_url != 'https://github.com' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true') && (vars.ENABLE_WINDOWS_KVM_E2E == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_windows_kvm_e2e)) }}
+    runs-on: ${{ needs.changes.outputs.windows_kvm_runner }}
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Cache Rust + cargo-xwin toolchain binaries
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-kvm
-          restore-keys: |
-            toolchain-win-${{ env.RUST_VERSION }}-xwin${{ env.CARGO_XWIN_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-v1-
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1-
 
       - name: Bootstrap Linux x64 cross-compile toolchain
         id: bootstrap
@@ -755,24 +856,56 @@ jobs:
           RUST_TARGETS: "wasm32-wasip2 x86_64-pc-windows-msvc"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo, sccache, xwin SDK, and Bun
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.cache/sccache
-            ~/.cache/cargo-xwin
-            ~/.bun/install/cache
-          key: ci-win-kvm-xwin16-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch', '.cargo/config.toml') }}
+            target/patch
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            ci-win-kvm-xwin16-v1-
-            ci-win-xwin16-v1-
+            deps-cargo-v2-
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
+
+      - name: Restore compiled Wasm vendor plugins & fixtures
+        id: vendor-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/vendor-plugins
+            target/vendor-plugins-all
+            target/vendor-test-fixtures
+            .task/checksum/build-vendors
+            .task/checksum/build-vendors-all
+            .task/checksum/build-vendor-fixtures
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
+
+      - name: Restore Windows x86_64 sccache (rolling)
+        id: sccache-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-kvm
+          restore-keys: |
+            sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-windows-x86_64-
 
       - name: Prepare patched crates and fixtures
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
-          task prepare:crates
+          bash .github/scripts/prepare_cargo_deps.sh
           task build:vendor-fixtures
           task build:web:desktop-e2e
 
@@ -790,17 +923,39 @@ jobs:
 
       - name: Run Windows Desktop E2E inside ephemeral KVM Windows guest
         env:
-          WINDOWS_BASE_IMAGE: ${{ vars.WINDOWS_KVM_BASE_IMAGE }}
+          WINDOWS_BASE_IMAGE: ${{ vars.WINDOWS_KVM_BASE_IMAGE || '/opt/stravia-win-vm/win10-ltsc-2021-e2e-golden.qcow2' }}
+          WINDOWS_DEPS_CACHE_DIR: ${{ vars.WINDOWS_KVM_DEPS_CACHE_DIR }}
           WINDOWS_SSH_KEY: ${{ vars.WINDOWS_KVM_SSH_KEY_PATH }}
           WINDOWS_SSH_USER: ${{ vars.WINDOWS_KVM_SSH_USER || 'stravia' }}
           WINDOWS_SUITES: ${{ vars.WINDOWS_KVM_SUITES || 'desktop,legacy,database,storage-failures' }}
           DESKTOP_EXE: target/x86_64-pc-windows-msvc/debug/stravia-desktop.exe
           HARNESS_EXE: target/x86_64-pc-windows-msvc/debug/stravia-storage-test-harness.exe
-        run: bash .github/scripts/kvm_windows_e2e.sh
+        run: |
+          if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v qemu-img >/dev/null 2>&1 || ! command -v genisoimage >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              qemu-system-x86 qemu-utils genisoimage openssh-client
+          fi
+          if [[ -z "${WINDOWS_DEPS_CACHE_DIR}" && -d /var/cache/stravia-win-vm ]]; then
+            export WINDOWS_DEPS_CACHE_DIR=/var/cache/stravia-win-vm/deps-cache
+          fi
+          bash .github/scripts/kvm_windows_e2e.sh
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
+
+      - name: Save Windows x86_64 sccache (rolling, even on test failure)
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
+        uses: actions/cache/save@v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-kvm
 
   macos-cross-smoke:
     name: macOS cross-compile & rcodesign/DMG smoke (${{ matrix.suffix }})
@@ -845,20 +1000,30 @@ jobs:
           MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
         run: bash .github/scripts/bootstrap_toolchain.sh
 
-      - name: Cache Cargo registry, Bun, and patched crates
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ~/.bun/install/cache
             target/patch
-          key: deps-cargo-bun-v1-${{ hashFiles('Cargo.lock', 'bun.lock', 'patches/*+*.patch') }}
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
           restore-keys: |
-            deps-cargo-bun-v1-
+            deps-cargo-v2-
+
+      - name: Cache Bun packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: deps-bun-v2-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            deps-bun-v2-
 
       - name: Restore macOS sccache (rolling)
+        id: sccache-cache
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/sccache
@@ -867,9 +1032,20 @@ jobs:
             sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             sccache-macos-${{ matrix.suffix }}-
 
+      - name: Restore compiled Wasm vendor plugins
+        id: vendor-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/vendor-plugins
+            .task/checksum/build-vendors
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
+
       - name: Prepare patched crates, WebUI, and bundled vendors
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
-          task prepare:crates
+          bash .github/scripts/prepare_cargo_deps.sh
           task build:web
           task build:vendors
 
@@ -890,11 +1066,15 @@ jobs:
           ls -lh dist/
 
       - name: Show sccache stats
+        id: sccache-stats
         if: always()
-        run: sccache --show-stats || true
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
 
       - name: Save macOS sccache (rolling, even on test failure)
-        if: always()
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@v6
         continue-on-error: true
         with:

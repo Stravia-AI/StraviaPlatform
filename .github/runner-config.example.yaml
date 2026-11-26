@@ -16,7 +16,9 @@ runner:
     # Fallback using stock Ubuntu 24.04 (bootstrap_toolchain.sh installs missing tools).
     # - "ubuntu-latest:docker://ubuntu:24.04"
     # Optional KVM-enabled runner for Layer-2 Windows Desktop WebView2 E2E.
-    - "linux-x64-kvm:host"
+    # Runs `windows-kvm-desktop-e2e` inside stravia-ci:x64 (needs `--device /dev/kvm`
+    # and read-only golden qcow2 + writable deps-cache mounts in container.options).
+    - "linux-x64-kvm:docker://ghcr.io/stravia-ai/stravia-ci-x64:latest"
 
 cache:
   enabled: true
@@ -25,5 +27,5 @@ cache:
 container:
   network: ""
   privileged: false
-  options: ""
+  options: "--device /dev/kvm -v /var/lib/stravia-win-vm:/opt/stravia-win-vm:ro -v /var/cache/stravia-win-vm:/var/cache/stravia-win-vm"
   force_pull: false

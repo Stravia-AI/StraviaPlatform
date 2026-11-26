@@ -20,10 +20,10 @@ ARG APT_MIRROR_PORTS=""
 ARG RUSTUP_DIST_SERVER=""
 ARG RUSTUP_UPDATE_ROOT=""
 ARG NODE_MIRROR=""
-ARG UV_DEFAULT_INDEX=""
 
 # Keep CARGO_HOME unset at runtime so cargo uses $HOME/.cargo (matching standard actions/cache paths),
 # while preinstalled rustup/cargo binaries live under /usr/local/cargo/bin on PATH.
+# Do not bake UV_DEFAULT_INDEX here: overriding the default index breaks `uv run --locked` against uv.lock.
 ENV RUSTUP_HOME=/usr/local/rustup \
     BUN_INSTALL=/usr/local/bun \
     XWIN_CACHE_DIR=/usr/local/xwin \
@@ -31,7 +31,6 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     SCCACHE_CACHE_SIZE=20G \
     CARGO_INCREMENTAL=0 \
     WINEDEBUG=-all \
-    UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX} \
     PATH=/usr/local/cargo/bin:/usr/local/bun/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Configure Ubuntu apt mirror (defaults to archive.ubuntu.com; override via APT_MIRROR for domestic runners).
@@ -57,7 +56,8 @@ RUN set -eux; \
       librsvg2-dev \
       patchelf xdg-utils squashfs-tools minisign nsis \
       gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
-      wine64 wine; \
+      wine64 wine \
+      qemu-system-x86 qemu-utils genisoimage openssh-client; \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 (required by actions/checkout@v7, actions/cache@v6, etc.).
@@ -90,7 +90,7 @@ RUN set -eux; \
       | tar -xz --strip-components=1 -C /usr/local/bin uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
     curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache"; \
-    rustc --version; cargo --version; cargo xwin --version; sccache --version; bun --version; task --version; uv --version; makensis -VERSION; wine --version
+    rustc --version; cargo --version; cargo xwin --version; sccache --version; bun --version; task --version; uv --version; makensis -VERSION; wine --version; qemu-system-x86_64 --version; qemu-img --version; genisoimage --version; ssh -V
 
 # Pre-populate Windows MSVC CRT + Windows SDK cache (x86_64 & aarch64) so CI jobs
 # do not depend on live Microsoft download availability at build time.
