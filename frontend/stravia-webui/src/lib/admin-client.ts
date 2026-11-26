@@ -390,8 +390,10 @@ export const admin = {
     appendCostPlan: (id: string, input: NewProviderCostPlan) =>
       request<ProviderCostPlan>('POST', `/providers/${encodeURIComponent(id)}/cost-plans`, input),
     models: (id: string) => request<ProviderModelList>('GET', `/providers/${encodeURIComponent(id)}/models`),
-    syncModels: (id: string) => request<ProviderModelSyncSummary>('POST', `/providers/${encodeURIComponent(id)}/models/sync`),
-    syncState: (id: string) => request<ProviderModelSyncState>('GET', `/providers/${encodeURIComponent(id)}/models/sync-state`),
+    syncModels: (id: string) =>
+      request<ProviderModelSyncSummary>('POST', `/providers/${encodeURIComponent(id)}/models/sync`),
+    syncState: (id: string) =>
+      request<ProviderModelSyncState>('GET', `/providers/${encodeURIComponent(id)}/models/sync-state`),
     updateSyncState: (id: string, input: UpdateProviderModelSyncState) =>
       request<ProviderModelSyncState>('PUT', `/providers/${encodeURIComponent(id)}/models/sync-state`, input),
     prepareModel: (id: string, modelId: string, templateId?: string) =>
@@ -400,7 +402,10 @@ export const admin = {
         template_id: templateId,
       }),
     model: (id: string, modelId: string) =>
-      request<ProviderModelDetail>('GET', `/providers/${encodeURIComponent(id)}/model?model=${encodeURIComponent(modelId)}`),
+      request<ProviderModelDetail>(
+        'GET',
+        `/providers/${encodeURIComponent(id)}/model?model=${encodeURIComponent(modelId)}`,
+      ),
     createManualModel: (id: string, modelId: string, metadataJson: string, templateId?: string) =>
       request<ProviderModelDetail>(
         'POST',
@@ -501,16 +506,13 @@ export const admin = {
       }),
     status: (sessionId: string) =>
       request<OAuthSessionStatusData>('GET', `/oauth/sessions/${encodeURIComponent(sessionId)}/status`),
-    cancel: (sessionId: string) =>
-      request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/cancel`),
+    cancel: (sessionId: string) => request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/cancel`),
     updateProxy: (sessionId: string, proxyMode: string) =>
       request<OAuthSessionStatusData>('PUT', `/oauth/sessions/${encodeURIComponent(sessionId)}/proxy`, {
         proxy_mode: proxyMode,
       }),
     complete: (sessionId: string, type: 'callback_url' | 'manual', value: string) =>
-      request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/complete`, {
-        input: { type, value },
-      }),
+      request<void>('POST', `/oauth/sessions/${encodeURIComponent(sessionId)}/complete`, { input: { type, value } }),
   },
   models: {
     list: () => request<Route[]>('GET', '/models'),

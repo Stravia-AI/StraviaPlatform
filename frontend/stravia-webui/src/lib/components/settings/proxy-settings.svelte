@@ -40,10 +40,7 @@ interface ProbeState {
 }
 
 const queryClient = useQueryClient()
-const proxyQuery = createQuery(() => ({
-  queryKey: ['outbound-proxy-settings'],
-  queryFn: admin.settings.proxy,
-}))
+const proxyQuery = createQuery(() => ({ queryKey: ['outbound-proxy-settings'], queryFn: admin.settings.proxy }))
 const systemProxyQuery = createQuery(() => ({
   queryKey: ['outbound-proxy-system'],
   queryFn: admin.settings.systemProxy,
@@ -245,7 +242,8 @@ async function confirmDelete(): Promise<void> {
               {/if}
             </Tooltip.Trigger>
             <Tooltip.Content side="top" sideOffset={6} class="max-w-72 flex-col items-start gap-1.5 py-2">
-              <div class="flex w-full items-center justify-between gap-3 border-b border-background/15 pb-1 text-[11px]">
+              <div
+                class="flex w-full items-center justify-between gap-3 border-b border-background/15 pb-1 text-[11px]">
                 <span class="font-medium">
                   {group.services.length === 1
                     ? m.settings_proxy_probe_service_single()

@@ -36,11 +36,7 @@ export function asConnectClientApplyError(error: unknown): ConnectClientApplyErr
           : typeof candidate.params?.path === 'string'
             ? candidate.params.path
             : undefined
-      return {
-        code: candidate.code,
-        message: candidate.message,
-        ...(path !== undefined ? { path } : {}),
-      }
+      return { code: candidate.code, message: candidate.message, ...(path !== undefined ? { path } : {}) }
     }
   }
   return { code: 'unknown_error', message: error instanceof Error ? error.message : String(error) }

@@ -11,8 +11,7 @@ import type { TauriCapabilities } from '@wdio/tauri-service'
 
 const binaryName = process.platform === 'win32' ? 'stravia-desktop.exe' : 'stravia-desktop'
 const appBinaryPath =
-  process.env.STRAVIA_DESKTOP_E2E_BINARY ??
-  fileURLToPath(new URL(`../../target/debug/${binaryName}`, import.meta.url))
+  process.env.STRAVIA_DESKTOP_E2E_BINARY ?? fileURLToPath(new URL(`../../target/debug/${binaryName}`, import.meta.url))
 const runRootPrefix = 'stravia-desktop-e2e-'
 const inheritedRunRoot = process.env.STRAVIA_DESKTOP_E2E_RUN_ROOT
 const inheritedRelativePath = inheritedRunRoot ? relative(resolve(tmpdir()), resolve(inheritedRunRoot)) : ''

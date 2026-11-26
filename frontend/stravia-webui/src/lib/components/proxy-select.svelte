@@ -36,10 +36,7 @@ let {
 let open = $state(false)
 let query = $state('')
 
-const proxyQuery = createQuery(() => ({
-  queryKey: ['outbound-proxy-settings'],
-  queryFn: admin.settings.proxy,
-}))
+const proxyQuery = createQuery(() => ({ queryKey: ['outbound-proxy-settings'], queryFn: admin.settings.proxy }))
 
 const systemProxyQuery = createQuery(() => ({
   queryKey: ['outbound-proxy-system'],
@@ -56,9 +53,7 @@ const systemDetail = $derived.by(() => {
 })
 
 const selectedSavedProxy = $derived(
-  value !== PROXY_MODE_NONE && value !== PROXY_MODE_SYSTEM
-    ? proxies.find((entry) => entry.id === value)
-    : undefined,
+  value !== PROXY_MODE_NONE && value !== PROXY_MODE_SYSTEM ? proxies.find((entry) => entry.id === value) : undefined,
 )
 const isMissingProxy = $derived(
   Boolean(value) &&
@@ -117,13 +112,7 @@ const savedOptions = $derived.by(() => {
     const label = proxyDisplayName(entry)
     const redacted = redactProxyUrl(entry.url)
     const hostPort = proxyHostPort(entry.url)
-    return {
-      id: entry.id,
-      label,
-      named,
-      redacted,
-      searchText: `${entry.name} ${hostPort} ${redacted}`,
-    }
+    return { id: entry.id, label, named, redacted, searchText: `${entry.name} ${hostPort} ${redacted}` }
   })
   if (!needle) return mapped
   return mapped.filter((item) => item.searchText.toLocaleLowerCase(localeState.current).includes(needle))
