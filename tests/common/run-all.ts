@@ -322,9 +322,9 @@ let ownsPostgres = false;
 let failure: unknown;
 
 try {
-  if (process.platform !== "win32")
+  if (process.platform !== "win32" && process.platform !== "linux")
     throw new Error(
-      "The complete native desktop matrix currently requires Windows/WebView2",
+      "The complete native desktop matrix currently requires Windows or Linux",
     );
   console.log(`Full matrix: ${logDirectory}`);
   console.log(
@@ -737,7 +737,13 @@ try {
               try {
                 await run(
                   mode ? `desktop-${mode}-recovery` : "desktop",
-                  ["bun", "run", "test:e2e:desktop"],
+                  [
+                    "bun",
+                    "tests/common/run-desktop-e2e.ts",
+                    "bun",
+                    "run",
+                    "test:e2e:desktop",
+                  ],
                   {
                     env: { STRAVIA_DESKTOP_E2E_STARTUP_FAILURE: mode },
                   },
@@ -753,6 +759,8 @@ try {
                 await run(
                   "desktop-storage-failures",
                   [
+                    "bun",
+                    "tests/common/run-desktop-e2e.ts",
                     ...python,
                     "-m",
                     "pytest",

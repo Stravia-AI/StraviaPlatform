@@ -124,6 +124,52 @@ async function refreshDesktop(): Promise<void> {
   )
 }
 
+async function nativeClipboardMatches(expected: string): Promise<boolean> {
+  const normalizedExpected = expected.replaceAll('\r\n', '\n')
+  if (process.platform === 'win32') {
+    // 原生读取器内比较，避免输出剪贴板内容或测试密钥；只统一 Windows CRLF，不丢弃其他空白。
+    const { stdout } = await promisify(execFile)(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-STA',
+        '-Command',
+        '$ErrorActionPreference = \'Stop\'; $actual = [string](Get-Clipboard -Raw); $expected = $env:STRAVIA_EXPECTED_CLIPBOARD; $actual.Replace("`r`n", "`n") -ceq $expected.Replace("`r`n", "`n")',
+      ],
+      { windowsHide: true, env: { ...process.env, STRAVIA_EXPECTED_CLIPBOARD: expected } },
+    )
+    return stdout.trim() === 'True'
+  }
+  if (process.platform === 'darwin') {
+    const { stdout } = await promisify(execFile)('pbpaste', [], { encoding: 'utf8' })
+    return stdout.replaceAll('\r\n', '\n') === normalizedExpected
+  }
+  const candidates: Array<[string, string[]]> = process.env.WAYLAND_DISPLAY
+    ? [['wl-paste', ['--no-newline']]]
+    : [
+        ['xclip', ['-o', '-selection', 'clipboard']],
+        ['xsel', ['--clipboard', '--output']],
+      ]
+  let missingTools = 0
+  for (const [command, args] of candidates) {
+    try {
+      const { stdout } = await promisify(execFile)(command, args, { encoding: 'utf8' })
+      return stdout.replaceAll('\r\n', '\n') === normalizedExpected
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        missingTools += 1
+        continue
+      }
+      return false
+    }
+  }
+  if (missingTools === candidates.length) {
+    throw new Error('Native Linux clipboard check requires xclip, xsel, or wl-paste')
+  }
+  return false
+}
+
 async function unusedPort(): Promise<number> {
   const server = createServer()
   await new Promise<void>((resolve, reject) => {
@@ -1247,24 +1293,10 @@ describe('Stravia desktop smoke', () => {
         return preview.textContent
       })
       await copyConfiguration.click()
-      await browser.waitUntil(
-        async () => {
-          // 原生读取器内比较，避免输出剪贴板内容或测试密钥；只统一 Windows CRLF，不丢弃其他空白。
-          const { stdout } = await promisify(execFile)(
-            'powershell.exe',
-            [
-              '-NoProfile',
-              '-NonInteractive',
-              '-STA',
-              '-Command',
-              '$ErrorActionPreference = \'Stop\'; $actual = [string](Get-Clipboard -Raw); $expected = $env:STRAVIA_EXPECTED_CLIPBOARD; $actual.Replace("`r`n", "`n") -ceq $expected.Replace("`r`n", "`n")',
-            ],
-            { windowsHide: true, env: { ...process.env, STRAVIA_EXPECTED_CLIPBOARD: renderedConfiguration } },
-          )
-          return stdout.trim() === 'True'
-        },
-        { timeout: 10_000, timeoutMsg: 'native clipboard did not contain the rendered configuration' },
-      )
+      await browser.waitUntil(() => nativeClipboardMatches(renderedConfiguration), {
+        timeout: 10_000,
+        timeoutMsg: 'native clipboard did not contain the rendered configuration',
+      })
 
       await writeConfiguration.click()
       let writtenConfig: unknown

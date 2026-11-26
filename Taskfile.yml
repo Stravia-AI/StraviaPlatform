@@ -297,19 +297,19 @@ tasks:
           BUNDLES: nsis
 
   build:desktop:e2e:
-    desc: Build the Windows desktop WebDriver smoke-test binary.
+    desc: Build the Tauri desktop WebDriver smoke-test binary.
     deps: [install:web, build:vendors]
     dir: "{{.DESKTOP_DIR}}"
     cmds:
       - bunx --bun @tauri-apps/cli@{{.TAURI_CLI_VERSION}} build --ci --debug --no-bundle --config tauri.e2e.conf.json
 
   test:e2e:desktop:
-    desc: Run the Windows Tauri desktop smoke test.
+    desc: Run the Tauri desktop smoke test (Windows or Linux).
     deps: [build:test:desktop-native, build:vendor-fixtures]
     env:
       STRAVIA_DESKTOP_E2E_BINARY: '{{.ROOT_DIR}}/target/test-artifacts/desktop-native/stravia-desktop{{if eq OS "windows"}}.exe{{end}}'
     cmds:
-      - bun tests/common/run-in-tempdir.ts bun run test:e2e:desktop
+      - bun tests/common/run-in-tempdir.ts bun tests/common/run-desktop-e2e.ts bun run test:e2e:desktop
 
   check:web:
     internal: true

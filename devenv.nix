@@ -32,7 +32,12 @@ let
     libayatana-appindicator
     librsvg
     gsettings-desktop-schemas
+    xvfb-run
+    xclip
+    openbox
   ];
+  isX86Linux = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
+  winVm = lib.optionalAttrs isX86Linux (import ./nix/win-vm { inherit pkgs; });
   patchCrate = pkgs.callPackage ./nix/patch-crate.nix { };
   workspaceInit = pkgs.writeScript "stravia-workspace-init" ''
     #!${lib.getExe pkgs.python3}
@@ -135,59 +140,82 @@ let
   '';
 in
 {
-  stdenv = nativeStdenv;
-
-  assertions = [
-    {
-      assertion = config.languages.javascript.bun.package.version == packageJson.engines.bun;
-      message = "devenv.lock 中的 Bun 与 package.json 不一致，请选择包含所需 Bun 版本的 nixpkgs。";
-    }
-  ];
-
-  packages = with pkgs; [
-    go-task
-    uv
-    python3
-    git
-    pkg-config
-    cmake
-    openssl
-    docker-client
-  ] ++ [ patchCrate ] ++ cDevelopmentPackages
-    ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux ([ pkgs.mold pkgs.perf ] ++ desktopPackages);
-
-  services.postgres = {
-    enable = true;
-    package = pkgs.postgresql_16;
+  options.stravia.windowsVm = {
+    enable = lib.mkEnableOption "materialize the reproducible Windows KVM E2E golden image in devenv shell";
+    package = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = if isX86Linux then winVm.image else null;
+      description = "Read-only Windows KVM golden image package bound to WINDOWS_BASE_IMAGE when enabled.";
+    };
   };
 
-  languages.c.enable = false;
+  config = {
+    stdenv = nativeStdenv;
 
-  languages.rust = {
-    enable = true;
-    toolchainFile = ./rust-toolchain.toml;
-    toolchainPackage = lib.mkForce rustToolchain;
-    lsp.package = rustToolchain;
-    # 不再额外注入默认 Clang wrapper；Cargo 直接使用同一套编译器和链接配置。
-    clangLinker.enable = false;
+    assertions = [
+      {
+        assertion = config.languages.javascript.bun.package.version == packageJson.engines.bun;
+        message = "devenv.lock 中的 Bun 与 package.json 不一致，请选择包含所需 Bun 版本的 nixpkgs。";
+      }
+    ];
+
+    packages = with pkgs; [
+      go-task
+      uv
+      python3
+      git
+      pkg-config
+      cmake
+      openssl
+      docker-client
+    ] ++ [ patchCrate ] ++ cDevelopmentPackages
+      ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux ([ pkgs.mold pkgs.perf ] ++ desktopPackages)
+      ++ lib.optionals isX86Linux [
+        (if config.stravia.windowsVm.enable && config.stravia.windowsVm.package != null
+         then pkgs.callPackage ./nix/win-vm/runner.nix { baseImage = config.stravia.windowsVm.package; }
+         else winVm.lazyRunner)
+      ];
+
+    services.postgres = {
+      enable = true;
+      package = pkgs.postgresql_16;
+    };
+
+    languages.c.enable = false;
+
+    languages.rust = {
+      enable = true;
+      toolchainFile = ./rust-toolchain.toml;
+      toolchainPackage = lib.mkForce rustToolchain;
+      lsp.package = rustToolchain;
+      # 不再额外注入默认 Clang wrapper；Cargo 直接使用同一套编译器和链接配置。
+      clangLinker.enable = false;
+    };
+
+    languages.javascript = {
+      enable = true;
+      bun.enable = true;
+    };
+
+    env = {
+      LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+      "CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" =
+        "${nativeStdenv.cc}/bin/clang";
+    } // lib.optionalAttrs (isX86Linux && config.stravia.windowsVm.enable && config.stravia.windowsVm.package != null) {
+      WINDOWS_BASE_IMAGE = "${config.stravia.windowsVm.package}/${config.stravia.windowsVm.package.imagePath}";
+    };
+
+    # 放在实际 shell hook 中，避免 CLI 忽略初始化 task 的失败后继续启动。
+    enterShell = ''
+      STRAVIA_PORT="$(${workspaceInit})" || exit $?
+      export STRAVIA_PORT
+      (cd "$DEVENV_ROOT" && task prepare:crates) || exit $?
+    '' + lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+      # 未安装到系统目录的 GTK schema 仍须能被桌面进程找到。
+      export XDG_DATA_DIRS="${lib.makeSearchPath "share/gsettings-schemas/${pkgs.gtk3.name}" [ pkgs.gtk3 ]}:${lib.makeSearchPath "share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}" [ pkgs.gsettings-desktop-schemas ]}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+      # @tauri-apps/cli-linux-x64-gnu 预编译二进制动态依赖 liblzma.so.5；
+      # libappindicator-sys 在运行时 dlopen libayatana-appindicator3.so.1（不在 ELF RPATH 中）。
+      export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.xz pkgs.libayatana-appindicator ]}:''${LD_LIBRARY_PATH:-}"
+    '';
   };
-
-  languages.javascript = {
-    enable = true;
-    bun.enable = true;
-  };
-
-  env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-  env."CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" =
-    "${nativeStdenv.cc}/bin/clang";
-
-  # 放在实际 shell hook 中，避免 CLI 忽略初始化 task 的失败后继续启动。
-  enterShell = ''
-    STRAVIA_PORT="$(${workspaceInit})" || exit $?
-    export STRAVIA_PORT
-    (cd "$DEVENV_ROOT" && task prepare:crates) || exit $?
-  '' + lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-    # 未安装到系统目录的 GTK schema 仍须能被桌面进程找到。
-    export XDG_DATA_DIRS="${lib.makeSearchPath "share/gsettings-schemas/${pkgs.gtk3.name}" [ pkgs.gtk3 ]}:${lib.makeSearchPath "share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}" [ pkgs.gsettings-desktop-schemas ]}:''${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-  '';
 }

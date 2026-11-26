@@ -909,18 +909,24 @@ jobs:
       - name: Cross-compile Windows desktop E2E binary
         run: |
           cd backend/apps/stravia-desktop
-          bunx --bun @tauri-apps/cli@2.12.3 build \
+          bunx --bun @tauri-apps/cli@2.12.6 build \
             --ci --debug --no-bundle \
             --runner cargo-xwin \
             --target x86_64-pc-windows-msvc \
             --config tauri.e2e.conf.json -- --locked
+
+      - name: Cross-compile Windows storage test harness
+        run: cargo xwin build --locked -p stravia-server --bin stravia-storage-test-harness --features stravia-server/test-harness --target x86_64-pc-windows-msvc
 
       - name: Run Windows Desktop E2E inside ephemeral KVM Windows guest
         env:
           WINDOWS_BASE_IMAGE: ${{ vars.WINDOWS_KVM_BASE_IMAGE }}
           WINDOWS_SSH_KEY: ${{ vars.WINDOWS_KVM_SSH_KEY_PATH }}
           WINDOWS_SSH_USER: ${{ vars.WINDOWS_KVM_SSH_USER || 'stravia' }}
+          WINDOWS_SUITES: ${{ vars.WINDOWS_KVM_SUITES || 'desktop,legacy,database,storage-failures' }}
+          WINDOWS_DEPS_CACHE_DIR: ${{ steps.bootstrap.outputs.host_cache == 'true' && format('{0}/stravia-win-deps', env.CI_CACHE_DIR || '/ci-cache') || '' }}
           DESKTOP_EXE: target/x86_64-pc-windows-msvc/debug/stravia-desktop.exe
+          HARNESS_EXE: target/x86_64-pc-windows-msvc/debug/stravia-storage-test-harness.exe
         run: bash .github/scripts/kvm_windows_e2e.sh
 
       - name: Show sccache stats
