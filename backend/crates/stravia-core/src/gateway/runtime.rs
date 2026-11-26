@@ -660,7 +660,23 @@ impl Gateway {
             Arc::new(storage.vendor_plugins().clone()),
             marketplace_client,
         ));
-        if let Err(error) = marketplace.initialize_official().await {
+        let official_include_prerelease = match update_service.current_channel().await {
+            Ok(channel) => channel == admin::updates::UpdateChannel::Beta,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "failed to load product update channel for official plugin source"
+                );
+                admin::updates::UpdateChannel::default_for_version(
+                    &semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                        .expect("package version must be valid semver"),
+                ) == admin::updates::UpdateChannel::Beta
+            }
+        };
+        if let Err(error) = marketplace
+            .initialize_official(official_include_prerelease)
+            .await
+        {
             tracing::warn!(error = ?error, "plugin marketplace official source initialization failed");
         }
         let catalog_base_url = config.catalog_base_url.clone();

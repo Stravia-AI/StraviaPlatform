@@ -733,7 +733,7 @@ impl UpdateService {
         self.status().await
     }
 
-    async fn current_channel(&self) -> anyhow::Result<UpdateChannel> {
+    pub(crate) async fn current_channel(&self) -> anyhow::Result<UpdateChannel> {
         let Some(raw) = self.storage.settings().get(UPDATE_CHANNEL_KEY).await? else {
             return Ok(UpdateChannel::default_for_version(&self.current_version));
         };
@@ -827,7 +827,13 @@ impl AdminService {
     }
 
     pub async fn set_update_channel(&self, channel: UpdateChannel) -> anyhow::Result<UpdateStatus> {
-        self.gw.update_service.set_channel(channel).await
+        let status = self.gw.update_service.set_channel(channel).await?;
+        self.gw
+            .marketplace
+            .sync_official_prerelease(channel == UpdateChannel::Beta)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to sync official plugin source: {error}"))?;
+        Ok(status)
     }
 
     pub async fn set_skipped_update_version(

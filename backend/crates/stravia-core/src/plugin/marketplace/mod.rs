@@ -153,7 +153,7 @@ impl PluginMarketplace {
             refresh_locks: Mutex::new(HashMap::new()),
         }
     }
-    pub async fn initialize_official(&self) -> Result<(), MarketError> {
+    pub async fn initialize_official(&self, include_prerelease: bool) -> Result<(), MarketError> {
         let id = OFFICIAL_ID.to_string();
         let existing = self.store.get_source(&id).await.map_err(storage_error)?;
         let expected = existing.clone();
@@ -170,7 +170,7 @@ impl PluginMarketplace {
             fingerprint: String::new(),
             trust_revision: 1,
             enabled: true,
-            include_prerelease: false,
+            include_prerelease,
             mirrored: None,
             checked_at: None,
             succeeded_at: None,
@@ -185,6 +185,10 @@ impl PluginMarketplace {
             {
                 source.error = None;
             }
+        }
+        if source.include_prerelease != include_prerelease {
+            source.include_prerelease = include_prerelease;
+            source.succeeded_at = None;
         }
         source.official = true;
         source.public_key = key.to_string();
@@ -201,6 +205,34 @@ impl PluginMarketplace {
             .put_source(&source, expected.as_ref())
             .await
             .map_err(storage_error)
+    }
+    pub async fn sync_official_prerelease(
+        &self,
+        include_prerelease: bool,
+    ) -> Result<(), MarketError> {
+        let id = OFFICIAL_ID.to_string();
+        for attempt in 0..3 {
+            let Some(mut source) = self.store.get_source(&id).await.map_err(storage_error)? else {
+                return Ok(());
+            };
+            if source.include_prerelease == include_prerelease {
+                return Ok(());
+            }
+            let expected = source.clone();
+            source.include_prerelease = include_prerelease;
+            source.succeeded_at = None;
+            match self.store.put_source(&source, Some(&expected)).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let market_error = storage_error(error);
+                    if market_error.code == "source_changed" && attempt < 2 {
+                        continue;
+                    }
+                    return Err(market_error);
+                }
+            }
+        }
+        Ok(())
     }
     pub async fn list_sources(&self) -> Result<Vec<PluginSourceSummary>, MarketError> {
         self.store.list_sources().await.map_err(storage_error)
@@ -520,6 +552,12 @@ impl PluginMarketplace {
             return Err(MarketError::new(
                 "source_not_configured",
                 "Official public key is not configured",
+            ));
+        }
+        if source.official && include_prerelease.is_some() {
+            return Err(MarketError::new(
+                "invalid_request",
+                "Official source prerelease setting follows the product update channel",
             ));
         }
         if let Some(v) = enabled {

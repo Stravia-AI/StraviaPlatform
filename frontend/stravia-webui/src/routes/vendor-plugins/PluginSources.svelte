@@ -1,9 +1,11 @@
 <script lang="ts">
 import * as m from '#lib/paraglide/messages.js'
+import { resolve } from '$app/paths'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
 import { admin as api } from '#lib/admin-client.js'
 import { localizeMarketplaceError } from '#lib/backend-error.js'
 import { openExternalUrl } from '#lib/open-external.js'
+import { settingsGroupHref } from '#lib/settings-groups.js'
 import type { MarketplaceError, PluginSourceSummary, SourcePreview } from '#lib/types.js'
 import TechnicalValue from '#lib/components/technical-value.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
@@ -282,20 +284,34 @@ function dateLabel(timestamp: number): string {
                     ? m.plugin_sources_last_success({ date: dateLabel(source.succeeded_at) })
                     : m.plugin_sources_never_checked()}
                 </p>
+                {#if source.official}
+                  <p class="text-xs text-muted-foreground">
+                    {source.include_prerelease
+                      ? m.plugin_sources_prerelease_follows_beta()
+                      : m.plugin_sources_prerelease_follows_release()}
+                    <a
+                      href={resolve(settingsGroupHref('general', 'updates'))}
+                      class="text-foreground underline underline-offset-2 hover:text-primary">
+                      {m.plugin_sources_open_update_settings()}
+                    </a>
+                  </p>
+                {/if}
                 <div class="flex flex-wrap gap-x-6 gap-y-3 text-sm">
                   <label class="flex items-center gap-2">
                     <Switch
                       bind:checked={() => source.enabled, (checked: boolean) => update(source, { enabled: checked })}
                       disabled={busy} />{m.plugin_sources_enabled()}
                   </label>
-                  <label class="flex items-center gap-2">
-                    <Switch
-                      bind:checked={
-                        () => source.include_prerelease,
-                        (checked: boolean) => update(source, { include_prerelease: checked })
-                      }
-                      disabled={busy} />{m.plugin_sources_prerelease()}
-                  </label>
+                  {#if !source.official}
+                    <label class="flex items-center gap-2">
+                      <Switch
+                        bind:checked={
+                          () => source.include_prerelease,
+                          (checked: boolean) => update(source, { include_prerelease: checked })
+                        }
+                        disabled={busy} />{m.plugin_sources_prerelease()}
+                    </label>
+                  {/if}
                 </div>
                 {#if source.error}<p role="alert" class="text-sm text-destructive">{sourceError(source.error)}</p>{/if}
                 <div class="flex flex-wrap gap-2">

@@ -96,6 +96,14 @@ updater 的插件路由部署、镜像白名单及 WorkBuddy 发布迁移由相�
 
 ## 发布
 
+### Beta 版本号与 Pre-release 规则
+
+- Beta 版本采用极简单阶段递增：`X.Y.Z-beta.N`（点分隔、无前导零、不含 `+build` 元数据，例如 `0.8.0-beta.1` → `0.8.0-beta.2` → `0.8.0`）。
+- 确定下一个 beta 版本号时，按 SemVer 比较已发布的最新正式 release 与最新 beta：
+  - 若最新已发布版本是 beta，或最新 beta 的 SemVer 高于最新正式 release，直接递增当前 beta 序号（`beta.N` → `beta.(N+1)`）。
+  - 否则（最新正式 release 已大于等于所有已有 beta，或尚无 beta），必须显式指明新的目标 beta 版本号。
+- Beta 版本在 GitHub Release 上必须标记为 **Pre-release**（`release.yml` 会对带 SemVer prerelease 段的 tag 自动传入 `--prerelease true`，且容器镜像仅推送精确版本标签，不更新 `latest` / 主次版本标签）；若手工创建或编辑 Release，同样必须保持 `Pre-release` 标记。
+
 1. 确保 `Cargo.toml`、`package.json` 和 `backend/apps/stravia-desktop/tauri.conf.json` 版本一致，并在 `CHANGELOG.md` 中存在该版本的非空章节。
 2. 从 `main` 中的目标 commit 创建 `vMAJOR.MINOR.PATCH` 或合法 SemVer prerelease tag。
 3. 推送 tag。`.github/workflows/release.yml`（同时兼容 GitHub Actions 与 Forgejo Actions）会确认完整 CI 通过，签署平台产物，执行 `.github/scripts/generate_updater_manifest.py`，通过 `.github/scripts/release_api.py` 创建 draft Release，发布容器镜像，最后公开 Release。

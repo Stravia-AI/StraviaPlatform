@@ -466,6 +466,29 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
         storage.settings().get("product_update_channel").await?,
         Some("beta".to_string())
     );
+    let sources_in_beta = app
+        .clone()
+        .oneshot(Request::get("/api/v1/plugin-sources").body(Body::empty())?)
+        .await?;
+    assert_eq!(sources_in_beta.status(), StatusCode::OK);
+    let body = to_bytes(sources_in_beta.into_body(), usize::MAX).await?;
+    let sources_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let official_source = sources_json["data"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["official"] == true))
+        .expect("official plugin source should exist");
+    let official_id = official_source["id"].as_str().unwrap().to_string();
+    assert_eq!(official_source["include_prerelease"], true);
+
+    let official_patch_denied = app
+        .clone()
+        .oneshot(
+            Request::patch(format!("/api/v1/plugin-sources/{official_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"include_prerelease":false}"#))?,
+        )
+        .await?;
+    assert_eq!(official_patch_denied.status(), StatusCode::BAD_REQUEST);
 
     let invalid_channel = app
         .clone()
@@ -509,6 +532,18 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
     let body = to_bytes(channel_restored.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     assert_eq!(json["data"]["channel"], "release");
+    let sources_in_release = app
+        .clone()
+        .oneshot(Request::get("/api/v1/plugin-sources").body(Body::empty())?)
+        .await?;
+    assert_eq!(sources_in_release.status(), StatusCode::OK);
+    let body = to_bytes(sources_in_release.into_body(), usize::MAX).await?;
+    let sources_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let official_source = sources_json["data"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["official"] == true))
+        .expect("official plugin source should exist");
+    assert_eq!(official_source["include_prerelease"], false);
 
     for mode in ["automatic", "manual"] {
         let checked = app

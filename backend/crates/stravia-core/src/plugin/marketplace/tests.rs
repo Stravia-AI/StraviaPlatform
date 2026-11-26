@@ -39,9 +39,9 @@ async fn official_source_has_embedded_trust_and_recovers_missing_key() {
             .unwrap();
     let store = Arc::new(storage.vendor_plugins().clone());
     let market = PluginMarketplace::new(store.clone(), client);
-    market.initialize_official().await.unwrap();
+    market.initialize_official(false).await.unwrap();
     let source = market.list_sources().await.unwrap().pop().unwrap();
-    assert!(source.official && source.enabled);
+    assert!(source.official && source.enabled && !source.include_prerelease);
     assert!(source.error.is_none());
     assert!(!source.public_key.is_empty());
     assert_eq!(
@@ -61,20 +61,35 @@ async fn official_source_has_embedded_trust_and_recovers_missing_key() {
         .put_source(&unconfigured, Some(&source))
         .await
         .unwrap();
-    market.initialize_official().await.unwrap();
+    market.initialize_official(true).await.unwrap();
     let restored = market.list_sources().await.unwrap().pop().unwrap();
-    assert!(restored.enabled);
+    assert!(restored.enabled && restored.include_prerelease);
     assert!(restored.error.is_none());
     assert_eq!(restored.public_key, source.public_key);
     assert_eq!(restored.fingerprint, source.fingerprint);
     assert!(restored.trust_revision > unconfigured.trust_revision);
 
+    let patch_err = market
+        .patch_source(&source.id, None, Some(false))
+        .await
+        .unwrap_err();
+    assert_eq!(patch_err.code, "invalid_request");
+
     market
         .patch_source(&source.id, Some(false), None)
         .await
         .unwrap();
-    market.initialize_official().await.unwrap();
+    market.initialize_official(true).await.unwrap();
     assert!(!market.list_sources().await.unwrap().pop().unwrap().enabled);
+
+    let mut checked = market.list_sources().await.unwrap().pop().unwrap();
+    checked.succeeded_at = Some(1234);
+    let current = market.list_sources().await.unwrap().pop().unwrap();
+    store.put_source(&checked, Some(&current)).await.unwrap();
+    market.sync_official_prerelease(false).await.unwrap();
+    let synced = market.list_sources().await.unwrap().pop().unwrap();
+    assert!(!synced.include_prerelease);
+    assert!(synced.succeeded_at.is_none());
 }
 
 #[derive(Default)]

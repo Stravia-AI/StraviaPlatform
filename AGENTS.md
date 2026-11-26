@@ -33,6 +33,7 @@ Stravia 是本地运行、可自托管的 Agent 基础设施（模型接入、�
 | 工具链或工作流 | `rust-toolchain.toml`、根 `package.json`、`uv.lock`、`Taskfile.yml`；版本号以它们为准，不复制到本文件 |
 | Linux 上执行 Windows E2E、交叉编译或 KVM 黄金镜像 | `docs/ci/windows-testing-without-windows.md` |
 | 数据库 schema、migration、升级钩子或启动数据转换 | 修改或评审前必须读取 [migration-startup skill](.agents/skills/migration-startup/SKILL.md)；schema 变更另见下方「数据库变更」 |
+| 版本发布、Beta 版本号决策或 GitHub Release 核对 | 发布前必须读取 [releasing skill](.agents/skills/releasing/SKILL.md) 与 `docs/releasing.md` |
 
 ## 约定
 

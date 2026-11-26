@@ -117,6 +117,8 @@ async function selectChannel(nextChannel: UpdateChannel): Promise<void> {
   try {
     await updates.setChannel(nextChannel)
     retryChannel = undefined
+    void queryClient.invalidateQueries({ queryKey: ['plugin-sources'] })
+    void queryClient.invalidateQueries({ queryKey: ['plugin-marketplace'] })
     void updates.silentCheck()
   } catch (error) {
     channelError = localizeBackendErrorMessage(error)
