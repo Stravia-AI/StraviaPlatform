@@ -186,6 +186,10 @@ export function scrollToKey(key: string, align: 'start' | 'center' | 'end' | 'au
 export function scrollToOffset(offset: number): void {
   virtualizer.scrollToOffset(offset)
 }
+
+export function cancelScroll(): void {
+  virtualizer.cancelScroll()
+}
 </script>
 
 {#snippet measured(entry: VirtualRow<T>)}

@@ -235,7 +235,11 @@ function distanceFromBottom(viewport: Locator): Promise<number> {
 }
 
 /** Windowed bodies only mount nearby text: walk the viewport top to bottom and tally every `Increment N` paragraph. */
-function collectIncrements(viewport: Locator): Promise<{ seen: number[]; duplicated: number[] }> {
+async function collectIncrements(viewport: Locator): Promise<{ seen: number[]; duplicated: number[] }> {
+  // 通过 Home 键取消贴底并收敛回顶端，避免直接写 scrollTop 与进行中的 scrollToEnd 竞争。
+  await viewport.focus()
+  await viewport.press('Home')
+  await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBeLessThanOrEqual(1)
   return viewport.evaluate(async (element) => {
     const seen = new Set<number>()
     const duplicated = new Set<number>()

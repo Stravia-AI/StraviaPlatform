@@ -54,6 +54,7 @@ let list = $state<{
   scrollToEnd(): void
   scrollToKey(key: string, align?: 'start' | 'center' | 'end' | 'auto'): boolean
   scrollToOffset(offset: number): void
+  cancelScroll(): void
 }>()
 // 贴底：到达底部或回到最新时为真；读者向上翻阅、展开详情时为假，此后的新内容只提示不跟随。
 let pinned = $state(true)
@@ -78,6 +79,13 @@ function returnToLatest(): void {
   pinned = true
   hasNewActivity = false
   list?.scrollToEnd()
+}
+
+// 取消贴底时同步终止尚未收敛的贴底滚动并更新基线，避免此前排队的异步 scroll 事件把贴底翻回真。
+function unpin(): void {
+  pinned = false
+  list?.cancelScroll()
+  if (viewport) previousTop = viewport.scrollTop
 }
 
 // 首次定位完成前收到的目标：改为停在目标行，而不是默认的最新内容。
@@ -106,7 +114,7 @@ $effect(() => {
         positioned = true
         const target = pendingReveal
         pendingReveal = undefined
-        if (target === undefined || !reveal(target)) list?.scrollToEnd()
+        if ((target === undefined || !reveal(target)) && pinned) list?.scrollToEnd()
         previousTop = viewport?.scrollTop ?? 0
         void loadOlder()
       }),
@@ -173,8 +181,10 @@ function onscroll(): void {
   if (!viewport || viewport.clientHeight === 0) return
   const top = viewport.scrollTop
   if (atEnd(viewport)) {
-    pinned = true
-    hasNewActivity = false
+    if (!pinned && top > previousTop) {
+      pinned = true
+      hasNewActivity = false
+    }
   } else if (top < previousTop) pinned = false
   previousTop = top
   distance = viewport.scrollHeight - top
@@ -182,11 +192,11 @@ function onscroll(): void {
 }
 
 function onwheel(event: WheelEvent): void {
-  if (event.deltaY < 0) pinned = false
+  if (event.deltaY < 0) unpin()
 }
 
 function onkeydown(event: KeyboardEvent): void {
-  if (['ArrowUp', 'PageUp'].includes(event.key)) pinned = false
+  if (['ArrowUp', 'PageUp'].includes(event.key)) unpin()
   // 首尾行的高度未量过：原生跳转会被逐行测量打断，改由虚拟化器逐步收敛到真正的端点。
   else if (event.key === 'Home' && event.target === event.currentTarget) {
     event.preventDefault()
@@ -200,7 +210,7 @@ function onkeydown(event: KeyboardEvent): void {
 
 // 展开或收起详情是阅读动作：停止贴底，避免展开的内容被自动滚走。
 function oninspect(event: MouseEvent): void {
-  if (event.target instanceof Element && event.target.closest('[aria-expanded]')) pinned = false
+  if (event.target instanceof Element && event.target.closest('[aria-expanded]')) unpin()
 }
 
 $effect(() => {
