@@ -208,7 +208,7 @@ describe('Stravia desktop smoke', () => {
             base_url: 'https://native-purpose.invalid',
           },
           credential: { type: 'none' },
-          use_proxy: false,
+          proxy_mode: 'none',
         }),
       }),
       'Provider',
@@ -250,10 +250,8 @@ describe('Stravia desktop smoke', () => {
           modelId,
         )
         if (input.purpose === 'image_generation') {
-          expect(rejected.status).toBe(200)
-          const envelope = JSON.parse(rejected.body) as { error: string }
-          expect(typeof envelope.error).toBe('string')
-          const error = JSON.parse(envelope.error) as {
+          expect(rejected.status).toBe(400)
+          const error = JSON.parse(rejected.body) as {
             code: string
             params: { provider_id: string; model_id: string; purpose: string }
           }
@@ -1228,7 +1226,7 @@ describe('Stravia desktop smoke', () => {
               base_url: 'https://desktop-smoke.invalid',
             },
             credential: { type: 'none' },
-            use_proxy: false,
+            proxy_mode: 'none',
           }),
         }),
         'Provider',
@@ -1516,7 +1514,7 @@ describe('Stravia desktop smoke', () => {
           },
           credential: { type: 'none' },
           vendor_options: {},
-          use_proxy: false,
+          proxy_mode: 'none',
         }),
         'Tray provider',
       )

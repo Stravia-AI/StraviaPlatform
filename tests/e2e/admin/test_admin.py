@@ -246,7 +246,7 @@ def test_model_discovery_uses_saved_proxy_and_preserves_direct_access(admin_env:
             status, body = http_request(
                 "PUT", provider_url, payload={"proxy_mode": "probe-p1"}, headers=admin_env["auth"],
             )
-            assert status == 200 and body.get("error"), body
+            assert status == 400 and body.get("error"), (status, body)
         finally:
             http_request("PUT", provider_url, payload={"proxy_mode": "none"}, headers=admin_env["auth"])
             status, body = http_request(
@@ -281,7 +281,7 @@ def test_outbound_proxy_atomic_save_and_independent_consumers(admin_env: dict[st
             confirmed = read("outbound_proxy")
             for url in ("invalid://127.0.0.1:7890", "ftp://proxy-user:proxy-secret@127.0.0.1:7890"):
                 status, body = save("outbound_proxy", json.dumps({"proxies": [{"id": "bad", "name": "Bad", "url": url}]}))
-                assert status == 200 and body.get("error") and "ok" not in body, body
+                assert status == 400 and body.get("error") and "ok" not in body, (status, body)
                 assert "proxy-user" not in json.dumps(body) and "proxy-secret" not in json.dumps(body)
                 assert read("outbound_proxy") == confirmed
 
@@ -295,7 +295,7 @@ def test_outbound_proxy_atomic_save_and_independent_consumers(admin_env: dict[st
                     """)
             try:
                 status, body = save("outbound_proxy", json.dumps({"proxies": [{"id": "atomic-p1", "name": "Origin", "url": origin}]}))
-                assert status == 200 and body.get("error") and "ok" not in body, body
+                assert status == 500 and body.get("error") and "ok" not in body, (status, body)
                 assert read("outbound_proxy") == confirmed
             finally:
                 with closing(sqlite3.connect(database)) as connection, connection:
@@ -331,7 +331,7 @@ def test_outbound_proxy_atomic_save_and_independent_consumers(admin_env: dict[st
 
             # Deleting a proxy still referenced by a provider must be rejected.
             status, body = save("outbound_proxy", json.dumps({"proxies": []}))
-            assert status == 200 and body.get("error") and "ok" not in body, body
+            assert status == 400 and body.get("error") and "ok" not in body, (status, body)
 
             status, body = http_request("PUT", f"{admin_env['admin']}/api/v1/providers/{provider}", payload={"proxy_mode": "none"}, headers=admin_env["auth"])
             assert status == 200, body
@@ -341,7 +341,7 @@ def test_outbound_proxy_atomic_save_and_independent_consumers(admin_env: dict[st
             status, body = save("outbound_proxy", json.dumps({"proxies": []}))
             assert status == 200 and not body.get("error"), body
             status, body = save("update_proxy_mode", "atomic-p1")
-            assert status == 200 and body.get("error") and "ok" not in body, body
+            assert status == 400 and body.get("error") and "ok" not in body, (status, body)
             assert read("update_proxy_mode") == "none"
             infer(1, 0)
         finally:

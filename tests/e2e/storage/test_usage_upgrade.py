@@ -185,7 +185,7 @@ def test_supported0017_real_server_upgrade_retains_usage_without_duplicate_backf
             ("providers", "deleted-provider", "provider not found: deleted-provider"),
         ]:
             status, body = http_request("GET", f"{base}/api/v1/{resource}/{identity}", headers=env["auth"])
-            assert status == 200, body
+            assert status == 404, (status, body)
             assert body == {"error": error}
         wait_until_observations_swept(env, "observations/interactions/historical", "pre-retention interaction")
         assert snapshot(env) == before

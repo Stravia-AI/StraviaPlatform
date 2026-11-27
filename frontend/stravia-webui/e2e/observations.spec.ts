@@ -1003,6 +1003,7 @@ test.describe('Interaction Observation canvas', () => {
     const renderedTable = await conversation.getByRole('table').elementHandle()
     await sendObservation(page, 'live_content', block)
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
+    expect(await renderedTable.evaluate((element) => element.isConnected)).toBe(true)
     expect(fixture.detailRequests).toHaveLength(1)
     const durable: ObservationEvent = {
       sequence: 11,
@@ -1023,8 +1024,8 @@ test.describe('Interaction Observation canvas', () => {
     }
     fixture.emit(durable)
     await sendObservation(page, 'observation', durable, durable.sequence)
+    await expect.poll(() => fixture.eventRequests.length).toBe(1)
     await expect(conversation.getByRole('cell', { name: 'live-cell', exact: true })).toHaveCount(1)
-    expect(await renderedTable.evaluate((element) => element.isConnected)).toBe(true)
     expect(fixture.detailRequests).toHaveLength(1)
     await sendObservation(page, 'live_content', { ...block, block_id: 'transient', text: '\n\ntransient-unsaved' })
     await expect(conversation).toContainText('transient-unsaved')

@@ -1151,6 +1151,8 @@ test('history searches message content, renames, deletes and confirms exact clea
   await expect(page.getByRole('main').getByRole('link', { name: /^History title/ })).toHaveCount(5)
   await openClearAll(page)
   await page.getByRole('alertdialog').getByRole('button', { name: 'Clear all conversations', exact: true }).click()
+  await expect(page.getByRole('alertdialog')).toHaveCount(0)
+  await expect(page.getByRole('main').getByRole('link', { name: 'Start new conversation' })).toBeVisible()
   await page.goto('/conversations')
   await page.reload()
   await expect(page.getByRole('main').getByRole('link', { name: 'Start new conversation' })).toBeVisible()
@@ -1309,7 +1311,9 @@ test('keyboard selection determines the identity, model and reasoning used for a
 test('request timer runs before output and freezes per turn; Enter sends and Control+Enter inserts a newline', async ({
   page,
 }) => {
-  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+  // install() starts a running clock; pause before navigation so real wall-clock time cannot cross a 1s boundary.
+  await page.clock.install({ time: new Date('2025-12-31T23:59:59Z') })
+  await page.clock.pauseAt(new Date('2026-01-01T00:00:00Z'))
   await prepareChat(page)
   await page.goto('/')
   const input = page.getByRole('textbox', { name: 'Message', exact: true })

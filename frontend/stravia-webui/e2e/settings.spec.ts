@@ -33,7 +33,7 @@ const searchSource: WebProvider = {
   name: 'Search source',
   kind: primaryKind.kind,
   api_key_configured: true,
-  use_proxy: false,
+  proxy_mode: 'none',
   config: null,
   capabilities: { search: true, fetch: true },
   registered: true,
@@ -379,12 +379,48 @@ test('settings fields align in wide containers and stack in narrow containers', 
   expect(Math.abs(clientAddress.x - (dataPanel.x + panelInset))).toBeLessThan(1.5)
   expect(Math.abs(dataPanel.right - panelInset - clientAddress.right)).toBeLessThan(1.5)
 
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
+  await page.route('**/api/v1/settings/outbound_proxy', (route) =>
+    route.fulfill({
+      json: { data: JSON.stringify({ proxies: [{ id: 'proxy-1', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }) },
+    }),
+  )
   await page.goto('/settings?view=network')
-  await expect(page.locator('#proxy-bypass')).toBeVisible()
-  const bypass = await boxOf(page, '#proxy-bypass')
+  await expect(page.locator('#proxy')).toContainText('Tokyo')
   const networkPanel = await boxOf(page, panel)
-  expect(Math.abs(bypass.x - (networkPanel.x + panelInset))).toBeLessThan(1.5)
-  expect(Math.abs(networkPanel.right - panelInset - bypass.right)).toBeLessThan(1.5)
+  const addProxy = await page
+    .locator('#proxy')
+    .getByRole('button', { name: 'Add proxy', exact: true })
+    .boundingBox()
+    .then((box) => box!)
+  const systemTitle = await page
+    .locator('#proxy')
+    .getByText('System proxy', { exact: true })
+    .boundingBox()
+    .then((box) => box!)
+  const systemProbe = await page
+    .locator('#proxy')
+    .getByRole('button', { name: 'Probe IP', exact: true })
+    .first()
+    .boundingBox()
+    .then((box) => box!)
+  const savedProbe = await page
+    .locator('#proxy')
+    .getByRole('button', { name: 'Probe IP', exact: true })
+    .nth(1)
+    .boundingBox()
+    .then((box) => box!)
+  const savedMore = await page
+    .locator('#proxy')
+    .getByRole('button', { name: 'More actions', exact: true })
+    .boundingBox()
+    .then((box) => box!)
+  expect(Math.abs(addProxy.x + addProxy.width - networkPanel.right)).toBeLessThan(1.5)
+  expect(Math.abs(systemTitle.x - (networkPanel.x + panelInset))).toBeLessThan(1.5)
+  expect(Math.abs(networkPanel.right - panelInset - (savedMore.x + savedMore.width))).toBeLessThan(1.5)
+  expect(Math.abs(systemProbe.x - savedProbe.x)).toBeLessThan(1.5)
 
   await page.setViewportSize({ width: 500, height: 900 })
   await page.goto('/settings')
@@ -399,15 +435,32 @@ test('settings fields align in wide containers and stack in narrow containers', 
   const narrowDataPanel = await boxOf(page, panel)
   const narrowRetention = await boxOf(page, '#log-retention')
   expect(Math.abs(narrowRetention.width - (narrowDataPanel.width - panelInset * 2))).toBeLessThan(2)
+  await page.goto('/settings?view=network')
+  await expect(page.locator('#proxy')).toContainText('System proxy')
+  const narrowSystemTitle = await page
+    .locator('#proxy')
+    .getByText('System proxy', { exact: true })
+    .boundingBox()
+    .then((box) => box!)
+  const narrowSystemProbe = await page
+    .locator('#proxy')
+    .getByRole('button', { name: 'Probe IP', exact: true })
+    .first()
+    .boundingBox()
+    .then((box) => box!)
+  expect(narrowSystemTitle.y + narrowSystemTitle.height).toBeLessThanOrEqual(narrowSystemProbe.y)
 })
 
 test('settings column stays 48rem and centered with its navigation on ultra-wide screens', async ({ page }) => {
   await page.setViewportSize({ width: 2560, height: 1440 })
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
   const rem = 16
   const rows = [
     ['/settings', '#appearance [data-slot="setting-row"] span', '#theme-preference', 'inline'],
     ['/settings?view=data', 'label[for="log-retention"]', '#log-retention', 'inline'],
-    ['/settings?view=network', 'label[for="proxy-bypass"]', '#proxy-bypass', 'stacked'],
+    ['/settings?view=data', 'label[for="artifact-client-base-url"]', '#artifact-client-base-url', 'stacked'],
   ] as const
   const edges: number[] = []
   for (const [url, labelSelector, controlSelector, layout] of rows) {
@@ -433,6 +486,20 @@ test('settings column stays 48rem and centered with its navigation on ultra-wide
   }
   // Every control ends on the settings column's right edge, whatever its layout.
   expect(Math.max(...edges) - Math.min(...edges)).toBeLessThan(1)
+
+  await page.goto('/settings?view=network')
+  await expect(page.locator('#proxy')).toContainText('System proxy')
+  const networkColumn = await boxOf(page, '.settings-column')
+  const networkPanel = await boxOf(page, '#proxy [data-slot="settings-section-panel"]')
+  const networkRoute = await boxOf(page, '.route-page')
+  const networkNav = await boxOf(page, 'nav[aria-label="Settings sections"]')
+  expect(networkColumn.width).toBeLessThanOrEqual(48 * rem + 1)
+  expect(Math.abs(networkPanel.right - networkColumn.right)).toBeLessThan(1)
+  expect(Math.abs(networkNav.x - networkRoute.x - (networkRoute.right - networkColumn.right))).toBeLessThan(1)
+  expect(Math.abs(networkNav.x - (await boxOf(page, '.route-page-header')).x)).toBeLessThan(1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(
+    true,
+  )
 })
 
 test('settings navigation switches between vertical and horizontal at a 64rem route width', async ({ page }) => {
@@ -1217,69 +1284,99 @@ test('search activation saves only confirmed configuration without discarding th
 
 test('unloaded settings stay non-editable until a failed baseline is recovered', async ({ page }) => {
   let unavailable = true
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
   await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
     await route.fulfill(
       unavailable
         ? { status: 503, json: { error: 'Fixture settings unavailable' } }
-        : { json: { data: JSON.stringify({ url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }) } },
+        : {
+            json: {
+              data: JSON.stringify({ proxies: [{ id: 'proxy-1', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }),
+            },
+          },
     )
   })
   await page.goto('/settings?view=network')
-  await expect(page.locator('#proxy').getByRole('alert')).toBeVisible()
-  await expect(page.locator('#proxy-bypass')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /^Edit/ })).toHaveCount(0)
+  const proxySection = page.locator('#proxy')
+  await expect(proxySection.getByRole('alert')).toBeVisible()
+  await expect(proxySection.getByRole('button', { name: 'Add proxy', exact: true })).toBeDisabled()
+  await expect(proxySection.getByRole('button', { name: 'More actions', exact: true })).toHaveCount(0)
   unavailable = false
-  await page.locator('#proxy').getByRole('button').click()
-  await expect(page.locator('#proxy')).toContainText('http://127.0.0.1:7890')
-  await page.getByRole('button', { name: /^Edit/ }).click()
+  await proxySection.getByRole('alert').getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(proxySection).toContainText('Tokyo')
+  await expect(proxySection).toContainText('http://127.0.0.1:7890')
+  await expect(proxySection.getByRole('button', { name: 'Add proxy', exact: true })).toBeEnabled()
+  await proxySection.getByRole('button', { name: 'More actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
+  await expect(page.locator('#proxy-name')).toHaveValue('Tokyo')
   await expect(page.locator('#proxy-url')).toHaveValue('http://127.0.0.1:7890')
 })
 
 test('proxy URL saves one complete snapshot from its sheet and retains the draft after failure', async ({ page }) => {
-  let saved = { url: 'http://127.0.0.1:7890', bypass: 'localhost', force_http1: true }
+  let saved = { proxies: [{ id: 'proxy-1', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }
   const submitted: (typeof saved)[] = []
   let rejectSave = true
   let releaseSave: (() => void) | undefined
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
   await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
     if (route.request().method() === 'PUT') {
       const value = JSON.parse(route.request().postDataJSON().value) as typeof saved
       submitted.push(value)
-      await new Promise<void>((resolve) => {
-        releaseSave = resolve
-      })
+      const deferred = Promise.withResolvers<void>()
+      releaseSave = deferred.resolve
+      await deferred.promise
       if (rejectSave) return route.fulfill({ status: 503, json: { error: 'Proxy storage unavailable' } })
       saved = value
     }
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
   await page.goto('/settings?view=network')
+  const proxySection = page.locator('#proxy')
   const sheet = page.getByRole('dialog', { name: 'Edit proxy' })
+  const name = page.locator('#proxy-name')
   const url = page.locator('#proxy-url')
-  await page.getByRole('button', { name: /^Edit/ }).click()
+  await proxySection.getByRole('button', { name: 'More actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
+  await name.fill('Osaka')
   await url.fill('socks5h://127.0.0.1:1080')
   expect(submitted).toHaveLength(0)
   await sheet.getByRole('button', { name: 'Save proxy', exact: true }).click()
+  await expect(name).toBeDisabled()
   await expect(url).toBeDisabled()
   await expect.poll(() => submitted.length).toBe(1)
-  expect(submitted).toEqual([{ url: 'socks5h://127.0.0.1:1080', bypass: 'localhost', force_http1: true }])
+  expect(submitted).toEqual([{ proxies: [{ id: 'proxy-1', name: 'Osaka', url: 'socks5h://127.0.0.1:1080' }] }])
   releaseSave?.()
   await expect(sheet.getByRole('alert')).toContainText('Proxy storage unavailable')
+  await expect(name).toHaveValue('Osaka')
   await expect(url).toHaveValue('socks5h://127.0.0.1:1080')
-  expect(saved.url).toBe('http://127.0.0.1:7890')
+  expect(saved.proxies[0].url).toBe('http://127.0.0.1:7890')
   rejectSave = false
   await sheet.getByRole('button', { name: 'Save proxy', exact: true }).click()
   await expect.poll(() => submitted.length).toBe(2)
   releaseSave?.()
   await expect(sheet).toHaveCount(0)
   await page.reload()
-  await expect(page.locator('#proxy')).toContainText('socks5h://127.0.0.1:1080')
+  await expect(proxySection).toContainText('Osaka')
+  await expect(proxySection).toContainText('socks5h://127.0.0.1:1080')
   expect(submitted).toHaveLength(2)
 })
 
-test('bypass hosts save inline with the saved proxy URL and keep the draft after failure', async ({ page }) => {
-  let saved = { url: 'http://127.0.0.1:7890', bypass: 'localhost', force_http1: true }
+test('named proxy list adds and deletes entries while keeping a failed add draft', async ({ page }) => {
+  let saved: { proxies: Array<{ id: string; name: string; url: string }> } = { proxies: [] }
   const submitted: (typeof saved)[] = []
   let rejectSave = true
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
+  await page.route('**/api/v1/settings/outbound-proxy/probe', (route) =>
+    route.fulfill({
+      json: { data: { groups: [], failed_services: [], total_services: 0, probed_at: '2026-11-26T00:00:00Z' } },
+    }),
+  )
   await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
     if (route.request().method() === 'PUT') {
       const value = JSON.parse(route.request().postDataJSON().value) as typeof saved
@@ -1290,77 +1387,106 @@ test('bypass hosts save inline with the saved proxy URL and keep the draft after
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
   await page.goto('/settings?view=network')
-  const bypass = page.locator('#proxy-bypass')
-  await bypass.fill('localhost,.internal')
+  const proxySection = page.locator('#proxy')
+  await expect(proxySection).toContainText('No custom proxies configured.')
+  await proxySection.getByRole('button', { name: 'Add proxy', exact: true }).click()
+  const sheet = page.getByRole('dialog', { name: 'Add proxy' })
+  const name = sheet.locator('#proxy-name')
+  const url = sheet.locator('#proxy-url')
+  const submit = sheet.getByRole('button', { name: 'Add proxy', exact: true })
+  await expect(submit).toBeDisabled()
+  await name.fill('Tokyo')
+  await url.fill('http://127.0.0.1:7890')
+  await expect(submit).toBeEnabled()
   expect(submitted).toHaveLength(0)
-  await bypass.press('Enter')
-  await expect(page.locator('#proxy').getByRole('alert')).toContainText('Proxy storage unavailable')
-  await expect(bypass).toHaveValue('localhost,.internal')
-  expect(submitted).toEqual([{ url: 'http://127.0.0.1:7890', bypass: 'localhost,.internal', force_http1: true }])
+
+  await submit.click()
+  await expect(sheet.getByRole('alert')).toContainText('Proxy storage unavailable')
+  await expect(name).toHaveValue('Tokyo')
+  await expect(url).toHaveValue('http://127.0.0.1:7890')
+  expect(submitted).toHaveLength(1)
+  expect(saved.proxies).toHaveLength(0)
+
   rejectSave = false
-  await bypass.press('Enter')
-  await expect(page.locator('#proxy').getByRole('status')).toHaveText('Saved')
-  await page.reload()
-  await expect(bypass).toHaveValue('localhost,.internal')
+  await submit.click()
+  await expect(sheet).toHaveCount(0)
+  await expect(proxySection).toContainText('Tokyo')
+  await expect(proxySection).toContainText('http://127.0.0.1:7890')
   expect(submitted).toHaveLength(2)
+  expect(saved.proxies).toMatchObject([{ name: 'Tokyo', url: 'http://127.0.0.1:7890' }])
+  expect(saved.proxies[0].id).toBeTruthy()
+  await page.reload()
+  await expect(proxySection).toContainText('Tokyo')
+
+  await proxySection.getByRole('button', { name: 'More actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+  const confirmDelete = page.getByRole('alertdialog', { name: 'Delete proxy' })
+  await confirmDelete.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(confirmDelete).toHaveCount(0)
+  await expect(proxySection).toContainText('No custom proxies configured.')
+  expect(saved.proxies).toEqual([])
 })
 
 test('update proxy preference uses saved configuration without submitting the proxy draft', async ({ page }) => {
-  let savedProxy = { url: '', bypass: 'localhost', force_http1: true }
-  let preference = 'false'
+  const savedProxy = { proxies: [{ id: 'proxy-tokyo', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }
+  let preference = 'system'
   let configWrites = 0
   const preferences: string[] = []
-  let rejectPreference = false
+  let rejectPreference = true
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: 'http://127.0.0.1:8888' } } }),
+  )
   await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
-    if (route.request().method() === 'PUT') {
-      configWrites++
-      savedProxy = JSON.parse(route.request().postDataJSON().value)
-    }
+    if (route.request().method() === 'PUT') configWrites++
     await route.fulfill({ json: { data: JSON.stringify(savedProxy) } })
   })
-  await page.route('**/api/v1/settings/update_use_proxy', async (route) => {
+  await page.route('**/api/v1/settings/update_proxy_mode', async (route) => {
     if (route.request().method() === 'PUT') {
-      preferences.push(route.request().postDataJSON().value)
+      const value = route.request().postDataJSON().value as string
+      preferences.push(value)
       if (rejectPreference) return route.fulfill({ status: 503, json: { error: 'Preference unavailable' } })
-      preference = route.request().postDataJSON().value
+      preference = value
     }
     await route.fulfill({ json: { data: preference } })
   })
   await page.goto('/settings')
-  const toggle = page.locator('#update-use-proxy')
-  await toggle.click()
-  const configure = page.locator('#updates a[href$="view=network#proxy"]')
-  await expect(configure).toBeVisible()
-  await expect(toggle).not.toBeChecked()
-  expect(preferences).toEqual([])
-  expect(configWrites).toBe(0)
-  savedProxy = { ...savedProxy, url: 'http://127.0.0.1:7890' }
-  rejectPreference = true
-  await toggle.click()
+  const selector = page.locator('#update-proxy-mode')
+  await expect(selector).toContainText('Use system proxy')
+  await selector.click()
+  await page.getByRole('option', { name: /Tokyo/ }).click()
   await expect(page.locator('#updates').getByRole('alert')).toBeVisible()
-  await expect(toggle).not.toBeChecked()
+  await expect(selector).toContainText('Use system proxy')
   rejectPreference = false
-  await page.locator('#updates').getByRole('alert').getByRole('button').click()
-  await expect(toggle).toBeChecked()
-  await toggle.click()
-  await expect(toggle).not.toBeChecked()
-  expect(preferences).toEqual(['true', 'true', 'false'])
+  await page.locator('#updates').getByRole('alert').getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(selector).toContainText('Tokyo')
+  await selector.click()
+  await page.getByRole('option', { name: /No proxy/ }).click()
+  await expect(selector).toContainText('No proxy')
+  expect(preferences).toEqual(['proxy-tokyo', 'proxy-tokyo', 'none'])
   expect(configWrites).toBe(0)
 })
 
 test('update proxy preference recovers loading failures without displaying an unchecked default', async ({ page }) => {
   let unavailable = true
-  await page.route('**/api/v1/settings/update_use_proxy', (route) =>
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
+  await page.route('**/api/v1/settings/outbound_proxy', (route) =>
+    route.fulfill({
+      json: { data: JSON.stringify({ proxies: [{ id: 'proxy-tokyo', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }) },
+    }),
+  )
+  await page.route('**/api/v1/settings/update_proxy_mode', (route) =>
     route.fulfill(
-      unavailable ? { status: 503, json: { error: 'Preference unavailable' } } : { json: { data: 'true' } },
+      unavailable ? { status: 503, json: { error: 'Preference unavailable' } } : { json: { data: 'proxy-tokyo' } },
     ),
   )
   await page.goto('/settings')
   await expect(page.locator('#updates').getByRole('alert')).toBeVisible()
-  await expect(page.locator('#update-use-proxy')).toHaveCount(0)
+  await expect(page.locator('#update-proxy-mode')).toHaveCount(0)
   unavailable = false
-  await page.locator('#updates').getByRole('alert').getByRole('button').click()
-  await expect(page.locator('#update-use-proxy')).toBeChecked()
+  await page.locator('#updates').getByRole('alert').getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(page.locator('#update-proxy-mode')).toContainText('Tokyo')
 })
 
 test('source save failures preserve selection and drafts before the single search switch can enable', async ({
@@ -1666,7 +1792,7 @@ test('source load recovery blocks enabling an unavailable provider until availab
   workerAvailable = true
   await dialog.getByRole('button', { name: 'Save service', exact: true }).click()
   await expect(dialog).toHaveCount(0)
-  expect(providerUpdates).toEqual([{ name: 'Worker web', use_proxy: false }])
+  expect(providerUpdates).toEqual([{ name: 'Worker web', proxy_mode: 'none' }])
   await expect(searchCheckbox).toBeEnabled()
   await searchCheckbox.click()
   await expect(searchCheckbox).toBeChecked()
@@ -1945,7 +2071,7 @@ test('binding sheet and source editor guard dirty drafts and lock while saving',
   await expect(editor.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
   await page.keyboard.press('Escape')
   await expect(editor).toBeVisible()
-  expect(providerSaves).toEqual([{ name: 'Renamed source', use_proxy: false }])
+  expect(providerSaves).toEqual([{ name: 'Renamed source', proxy_mode: 'none' }])
   releaseProviderSave?.()
   await expect(editor.getByRole('alert')).toContainText('Fixture provider save unavailable')
   await expect(name).toHaveValue('Renamed source')
@@ -2822,8 +2948,11 @@ test('credential protection separates setting load failure from empty rules and 
 const discardDialog = (page: Page) => page.getByRole('alertdialog', { name: 'Discard unsaved changes?' })
 
 test('a settings Sheet closes freely when clean and confirms before discarding a draft', async ({ page }) => {
-  let saved = { url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }
+  let saved = { proxies: [{ id: 'proxy-1', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }
   const writes: unknown[] = []
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
   await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
     if (route.request().method() === 'PUT') {
       writes.push(route.request().postDataJSON())
@@ -2832,18 +2961,23 @@ test('a settings Sheet closes freely when clean and confirms before discarding a
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
   await page.goto('/settings?view=network')
+  const proxySection = page.locator('#proxy')
   const sheet = page.getByRole('dialog', { name: 'Edit proxy' })
   const url = page.locator('#proxy-url')
+  const openEditProxy = async () => {
+    await proxySection.getByRole('button', { name: 'More actions', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
+  }
 
   // No draft: Escape closes without asking.
-  await page.getByRole('button', { name: /^Edit/ }).click()
+  await openEditProxy()
   await expect(sheet).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(sheet).toHaveCount(0)
   await expect(discardDialog(page)).toHaveCount(0)
 
   // Draft: Escape asks; keeping the draft leaves the Sheet and the text untouched.
-  await page.getByRole('button', { name: /^Edit/ }).click()
+  await openEditProxy()
   await url.fill('socks5h://127.0.0.1:1080')
   await page.keyboard.press('Escape')
   await expect(discardDialog(page)).toBeVisible()
@@ -2858,7 +2992,7 @@ test('a settings Sheet closes freely when clean and confirms before discarding a
   await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
   await expect(sheet).toHaveCount(0)
   expect(writes).toHaveLength(0)
-  await page.getByRole('button', { name: /^Edit/ }).click()
+  await openEditProxy()
   await expect(url).toHaveValue('http://127.0.0.1:7890')
 
   // Reverting the draft by hand makes it clean again.
@@ -2870,18 +3004,24 @@ test('a settings Sheet closes freely when clean and confirms before discarding a
 })
 
 test('a settings Sheet is locked while saving and closes without asking after a successful save', async ({ page }) => {
-  let saved = { url: 'http://127.0.0.1:7890', bypass: '', force_http1: true }
+  let saved = { proxies: [{ id: 'proxy-1', name: 'Tokyo', url: 'http://127.0.0.1:7890' }] }
   let release: (() => void) | undefined
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
+  )
   await page.route('**/api/v1/settings/outbound_proxy', async (route) => {
     if (route.request().method() === 'PUT') {
-      await new Promise<void>((resolve) => (release = resolve))
+      const deferred = Promise.withResolvers<void>()
+      release = deferred.resolve
+      await deferred.promise
       saved = JSON.parse(route.request().postDataJSON().value)
     }
     await route.fulfill({ json: { data: JSON.stringify(saved) } })
   })
   await page.goto('/settings?view=network')
   const sheet = page.getByRole('dialog', { name: 'Edit proxy' })
-  await page.getByRole('button', { name: /^Edit/ }).click()
+  await page.locator('#proxy').getByRole('button', { name: 'More actions', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
   await page.locator('#proxy-url').fill('http://127.0.0.1:9999')
   await sheet.getByRole('button', { name: 'Save proxy', exact: true }).click()
   await expect.poll(() => release !== undefined).toBe(true)
@@ -2896,51 +3036,59 @@ test('a settings Sheet is locked while saving and closes without asking after a 
 
 test('switching settings groups with a dirty inline input asks first and stays quiet when clean', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.route('**/api/v1/settings/outbound_proxy', (route) =>
-    route.fulfill({ json: { data: JSON.stringify({ url: '', bypass: 'localhost', force_http1: true }) } }),
+  let savedRetention = '7'
+  await page.route('**/api/v1/settings/log_retention_days', async (route) => {
+    if (route.request().method() === 'PUT') {
+      savedRetention = route.request().postDataJSON().value as string
+      return route.fulfill({ json: { data: null } })
+    }
+    await route.fulfill({ json: { data: savedRetention } })
+  })
+  await page.route('**/api/v1/settings/outbound-proxy/system', (route) =>
+    route.fulfill({ json: { data: { source: 'os', detected_url: null } } }),
   )
-  await page.goto('/settings?view=network')
+  await page.goto('/settings?view=data')
   const nav = page.getByRole('navigation', { name: 'Settings sections' })
-  const bypass = page.locator('#proxy-bypass')
+  const retention = page.locator('#log-retention')
 
   // Clean: no prompt.
-  await nav.getByRole('link', { name: 'Data' }).click()
-  await expect(page).toHaveURL(/view=data$/)
-  await expect(discardDialog(page)).toHaveCount(0)
   await nav.getByRole('link', { name: 'Network' }).click()
   await expect(page).toHaveURL(/view=network$/)
+  await expect(discardDialog(page)).toHaveCount(0)
+  await nav.getByRole('link', { name: 'Data' }).click()
+  await expect(page).toHaveURL(/view=data$/)
 
   // Dirty: the switch is held until the draft is discarded; keeping it leaves group and text unchanged.
-  await bypass.fill('localhost,.internal')
-  await nav.getByRole('link', { name: 'Data' }).click()
+  await retention.fill('30')
+  await nav.getByRole('link', { name: 'Network' }).click()
   await expect(discardDialog(page)).toBeVisible()
-  await expect(page).toHaveURL(/view=network$/)
-  await discardDialog(page).getByRole('button', { name: 'Keep editing' }).click()
-  await expect(page).toHaveURL(/view=network$/)
-  await expect(bypass).toHaveValue('localhost,.internal')
-
-  await nav.getByRole('link', { name: 'Data' }).click()
-  await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
   await expect(page).toHaveURL(/view=data$/)
-  await expect(page.getByRole('heading', { level: 2, name: 'History retention' })).toBeVisible()
+  await discardDialog(page).getByRole('button', { name: 'Keep editing' }).click()
+  await expect(page).toHaveURL(/view=data$/)
+  await expect(retention).toHaveValue('30')
+
+  await nav.getByRole('link', { name: 'Network' }).click()
+  await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
+  await expect(page).toHaveURL(/view=network$/)
+  await expect(page.getByRole('heading', { level: 2, name: 'Proxy' })).toBeVisible()
 
   // The discarded draft is gone, and leaving the page is guarded the same way once dirty again.
-  await nav.getByRole('link', { name: 'Network' }).click()
-  await expect(bypass).toHaveValue('localhost')
-  await bypass.fill('changed')
+  await nav.getByRole('link', { name: 'Data' }).click()
+  await expect(retention).toHaveValue('7')
+  await retention.fill('14')
   await page.getByRole('navigation', { name: 'Primary navigation' }).getByRole('link', { name: 'Models' }).click()
   await expect(discardDialog(page)).toBeVisible()
-  await expect(page).toHaveURL(/\/settings\?view=network$/)
+  await expect(page).toHaveURL(/\/settings\?view=data$/)
   await discardDialog(page).getByRole('button', { name: 'Discard changes' }).click()
   await expect(page).toHaveURL(/\/models$/)
 
   // Saving clears the draft: nothing to confirm afterwards.
-  await page.goto('/settings?view=network')
-  await bypass.fill('saved-host')
-  await bypass.press('Enter')
-  await expect(page.locator('#proxy').getByRole('status')).toHaveText('Saved')
-  await nav.getByRole('link', { name: 'Data' }).click()
-  await expect(page).toHaveURL(/view=data$/)
+  await page.goto('/settings?view=data')
+  await retention.fill('14')
+  await retention.press('Enter')
+  await expect(page.locator('#logs').getByRole('status')).toHaveText('Saved')
+  await nav.getByRole('link', { name: 'Network' }).click()
+  await expect(page).toHaveURL(/view=network$/)
   await expect(discardDialog(page)).toHaveCount(0)
 })
 
@@ -2985,7 +3133,7 @@ test('platform task model setting supports configure, unavailable recovery, clea
 
   // Configure a model; first attempt fails inline, retry succeeds.
   await section.getByRole('button', { name: /Edit/ }).click()
-  const dialog = page.getByRole('dialog')
+  const dialog = page.getByRole('dialog', { name: 'Configure platform task model' })
   await dialog.locator('#platform-llm-route').click()
   await page.getByRole('option', { name: /Fast Chat/ }).click()
 
@@ -3007,7 +3155,7 @@ test('platform task model setting supports configure, unavailable recovery, clea
   await expect(section).toContainText('removed-route-id')
 
   await section.getByRole('button', { name: /Edit/ }).click()
-  const clearDialog = page.getByRole('dialog')
+  const clearDialog = page.getByRole('dialog', { name: 'Edit platform task model' })
   await clearDialog.getByRole('button', { name: 'Clear model selection' }).click()
   await clearDialog.getByRole('button', { name: 'Save' }).click()
   await expect(clearDialog).toBeHidden()

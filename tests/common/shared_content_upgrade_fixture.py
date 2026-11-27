@@ -14,11 +14,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import threading
 from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:  # Windows 无 fcntl
+    fcntl = None  # type: ignore[assignment]
 
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "e2e" / "fixtures" / "shared_content_upgrade" / "fixture.json"
 SCHEMA_VERSION = 36
@@ -76,15 +82,23 @@ def native_responses_upstream() -> Iterator[tuple[str, list[dict[str, Any]]]]:
             self.end_headers()
             self.wfile.write(data)
 
-    server = ThreadingHTTPServer(("127.0.0.1", COMPACTION_UPSTREAM_PORT), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", received
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
+    # pytest 9.2 将 Node._nodeid 改为 _id 后，pytest-xdist 3.8 的 --dist loadgroup 不再把同组用例约束到
+    # 同一 worker；用跨进程文件锁保护固定端口 28431，保证任意并发调度下同一时刻只有一个测试绑定它。
+    lock_path = Path(tempfile.gettempdir()) / f"stravia-compaction-upstream-{COMPACTION_UPSTREAM_PORT}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        server = ThreadingHTTPServer(("127.0.0.1", COMPACTION_UPSTREAM_PORT), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}", received
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def load_fixture(path: Path = FIXTURE_PATH) -> dict[str, Any]:

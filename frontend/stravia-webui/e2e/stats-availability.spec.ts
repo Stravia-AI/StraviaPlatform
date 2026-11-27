@@ -238,11 +238,30 @@ test.describe('statistics request success chart', () => {
     // 没有自动恢复时两条线的图例读数相同。
     await expect(header.getByText('90%', { exact: true })).toHaveCount(2)
 
-    // 没有自动恢复时两条线使用完全相同的点，差值带退化为零面积。
-    const pathData = (label: string) => region.locator(`path[aria-label="${label}"]`).getAttribute('d')
-    const finalPath = await pathData('Final success rate')
+    // 没有自动恢复时两条线使用完全相同的点，差值带退化为零面积；等待 300ms 补间落稳后再比对路径。
+    await expect(region.locator('path[aria-label="Final success rate"]')).toBeVisible()
+    await expect(region.locator('path[aria-label="First-pass success rate"]')).toBeVisible()
+    const { finalPath, firstPassPath } = await region.evaluate((container) => {
+      const { promise, resolve } = Promise.withResolvers<{ finalPath: string | null; firstPassPath: string | null }>()
+      let lastFinal: string | null = null
+      let lastFirstPass: string | null = null
+      let steadyFrames = 0
+      const sample = () => {
+        const currentFinal = container.querySelector('path[aria-label="Final success rate"]')?.getAttribute('d') ?? null
+        const currentFirstPass =
+          container.querySelector('path[aria-label="First-pass success rate"]')?.getAttribute('d') ?? null
+        steadyFrames =
+          currentFinal && currentFinal === lastFinal && currentFirstPass === lastFirstPass ? steadyFrames + 1 : 0
+        lastFinal = currentFinal
+        lastFirstPass = currentFirstPass
+        if (steadyFrames >= 3) resolve({ finalPath: currentFinal, firstPassPath: currentFirstPass })
+        else requestAnimationFrame(sample)
+      }
+      requestAnimationFrame(sample)
+      return promise
+    })
     expect(finalPath).toBeTruthy()
-    expect(await pathData('First-pass success rate')).toBe(finalPath)
+    expect(firstPassPath).toBe(finalPath)
 
     await slider.focus()
     await expect(page.locator('.lc-tooltip-root')).toContainText('0 recovered · 0 pp')

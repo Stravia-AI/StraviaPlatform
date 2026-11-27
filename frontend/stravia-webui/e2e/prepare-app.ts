@@ -196,8 +196,8 @@ const settingValues: Record<string, string> = {
     s3: null,
   }),
   log_retention_days: '7',
-  outbound_proxy: JSON.stringify({ url: '', bypass: '', force_http1: false }),
-  update_use_proxy: 'false',
+  outbound_proxy: JSON.stringify({ proxies: [] }),
+  update_proxy_mode: 'none',
 }
 
 export async function prepareApp(page: Page): Promise<void> {
@@ -271,6 +271,10 @@ export async function prepareApp(page: Page): Promise<void> {
       return
     }
 
+    if (path === '/settings/outbound-proxy/system') {
+      await route.fulfill({ json: { data: { source: 'env', detected_url: null } } })
+      return
+    }
     if (path.startsWith('/settings/')) {
       const key = path.slice('/settings/'.length)
       await route.fulfill({ json: { data: request.method() === 'GET' ? (settingValues[key] ?? '') : null } })

@@ -17,7 +17,7 @@ for (const locale of ['en-US', 'zh-CN']) {
       channel: 'default',
       protocol: 'openai-compatible',
       base_url: 'https://fixture.invalid/v1',
-      use_proxy: false,
+      proxy_mode: 'none',
       configured_credential_fields: ['api_key'],
       is_enabled: true,
       credential_status: 'invalid',
@@ -92,7 +92,7 @@ test('Provider detail header names the provider, keeps status on the title row, 
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://fixture.invalid/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     configured_credential_fields: ['api_key'],
     is_enabled: true,
     credential_status: 'invalid',
@@ -133,7 +133,7 @@ interface CheckRequestBody {
     options?: Record<string, unknown>
     credentials?: Record<string, unknown>
   }
-  use_proxy?: boolean
+  proxy_mode?: string
   authorization_id?: string
 }
 
@@ -146,7 +146,7 @@ test('Provider detail checks the current draft, separates stages, and never save
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://fixture.invalid/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     configured_credential_fields: ['api_key'],
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
@@ -245,7 +245,7 @@ test('Provider detail checks the current draft, separates stages, and never save
       options: {},
       credentials: {},
     },
-    use_proxy: false,
+    proxy_mode: 'none',
   })
   expect(requests[0].body).not.toHaveProperty('authorization_id')
 
@@ -496,7 +496,7 @@ test('configured Providers table shows inventory, linked models and cost, and pe
       vendor: 'openai',
       protocol: 'openai-compatible',
       base_url: 'https://zeta.example/v1',
-      use_proxy: false,
+      proxy_mode: 'none',
       channel: 'default',
       configured_credential_fields: ['api_key'],
       is_enabled: true,
@@ -515,7 +515,7 @@ test('configured Providers table shows inventory, linked models and cost, and pe
       vendor: 'openai-codex',
       protocol: 'open-responses',
       base_url: 'https://alpha.example/v1',
-      use_proxy: false,
+      proxy_mode: 'none',
       channel: 'codex',
       configured_credential_fields: [],
       is_enabled: false,
@@ -762,7 +762,7 @@ test('Provider draft submission locks editing and dismissal until a failed write
     await expect(name).toBeDisabled()
     await expect(baseUrl).toBeDisabled()
     await expect(secret).toBeDisabled()
-    await expect(page.getByRole('switch')).toBeDisabled()
+    await expect(page.getByRole('combobox', { name: 'Proxy' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Back', exact: true })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Close provider setup' })).toBeDisabled()
@@ -805,7 +805,7 @@ test('editing a Provider keeps saved credentials write-only', async ({ page }) =
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://credential.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     vendor_options: {},
     configured_credential_fields: ['api_key'],
     is_enabled: true,
@@ -870,7 +870,7 @@ test('Provider configuration follows plugin field visibility conditions', async 
     channel: 'default',
     protocol: '',
     base_url: 'https://conditional.example',
-    use_proxy: false,
+    proxy_mode: 'none',
     vendor_options: { mode: 'basic' },
     configured_credential_fields: [],
     is_enabled: true,
@@ -960,7 +960,7 @@ test('OAuth Provider connection view reconnects the saved vendor channel', async
     vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://api.openai.com/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'codex',
     vendor_options: {},
     configured_credential_fields: [],
@@ -990,7 +990,7 @@ test('OAuth Provider connection view reconnects the saved vendor channel', async
   expect((await initRequest).postDataJSON()).toMatchObject({
     vendor_id: provider.vendor,
     channel: provider.channel,
-    use_proxy: false,
+    proxy_mode: 'none',
     callback_mode: 'auto',
   })
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
@@ -1005,7 +1005,7 @@ test('OAuth service menu reauthorizes without updating the saved connection', as
     vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://fixture.invalid/codex',
-    use_proxy: true,
+    proxy_mode: 'system',
     channel: 'codex',
     vendor_options: { workspace: 'keep-existing' },
     configured_credential_fields: [],
@@ -1053,7 +1053,7 @@ test('OAuth service menu reauthorizes without updating the saved connection', as
     vendor_id: provider.vendor,
     channel: provider.channel,
     base_url: provider.base_url,
-    use_proxy: true,
+    proxy_mode: 'system',
     options: provider.vendor_options,
   })
   await expect.poll(() => bindings).toBe(1)
@@ -1079,7 +1079,7 @@ test('Provider list tests the saved connection over POST and localizes the faile
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://fixture.invalid/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     configured_credential_fields: ['api_key'],
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
@@ -1108,7 +1108,7 @@ test('OAuth Provider connection view saves and binds automatically when authoriz
     vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://api.openai.com/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'codex',
     vendor_options: {},
     configured_credential_fields: [],
@@ -1161,7 +1161,7 @@ test('Provider draft keeps partial save failure visible and blocks navigation du
     vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://api.openai.com/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'codex',
     vendor_options: {},
     configured_credential_fields: [],
@@ -1240,7 +1240,7 @@ test('Provider Model specifications preserve direction, precision, and unknown s
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://specification.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -1362,7 +1362,7 @@ test('Model specification filters combine all conditions and compose with catalo
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://filter.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     is_enabled: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -1566,7 +1566,7 @@ test('Provider Model editor uses structured fields and preserves exact decimal i
     vendor: 'openai',
     protocol: 'openai-compatible',
     base_url: 'https://models.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'default',
     vendor_options: {},
     configured_credential_fields: ['api_key'],
@@ -1876,7 +1876,7 @@ test('OAuth Provider configuration allows manual completion while the localhost 
   expect((await initRequest).postDataJSON()).toMatchObject({
     vendor_id: 'openai-codex',
     channel: 'codex',
-    use_proxy: false,
+    proxy_mode: 'system',
     callback_mode: 'auto',
   })
   await expect(page.getByText('Waiting for authorization…')).toBeVisible()
@@ -1982,7 +1982,7 @@ test('OAuth refresh-token tab verifies a token, preserves input on error, and ca
   expect((await refreshRequest).postDataJSON()).toMatchObject({
     vendor_id: 'openai-codex',
     channel: 'codex',
-    use_proxy: false,
+    proxy_mode: 'system',
     refresh_token: 'rt-valid-token',
   })
   await expect.poll(() => createBody).toMatchObject({ session_id: 'oauth-session-refresh-1' })
@@ -1995,7 +1995,7 @@ test('OAuth reauthorize dialog and connection view support refresh-token authori
     vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://fixture.invalid/codex',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'codex',
     vendor_options: {},
     configured_credential_fields: [],
@@ -2189,7 +2189,7 @@ test('completed OAuth satisfies session credential fields and submits the provid
           channel: 'devin',
           protocol: 'devin-connect',
           base_url: 'https://server.codeium.test',
-          use_proxy: false,
+          proxy_mode: 'none',
           vendor_options: {},
           configured_credential_fields: ['apiKey'],
           is_enabled: true,
@@ -2344,7 +2344,7 @@ test('Provider detail separates connection, inventory, references, and guarded m
     vendor: 'openai',
     protocol: 'openai-compatible',
     base_url: 'https://provider.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'default',
     vendor_options: {},
     configured_credential_fields: ['api_key'],
@@ -2710,7 +2710,7 @@ for (const locale of ['en-US', 'zh-CN']) {
       channel: 'default',
       protocol: 'openai-compatible',
       base_url: 'https://fixture.example/v1',
-      use_proxy: false,
+      proxy_mode: 'none',
       is_enabled: true,
       created_at: '2026-08-17T00:00:00Z',
       updated_at: '2026-08-17T00:00:00Z',
@@ -2831,7 +2831,7 @@ test('provider shortcut refreshes a stale destination count before deleting', as
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://fixture.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     is_enabled: true,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
@@ -2874,7 +2874,7 @@ test('dependency previews block referenced Provider deletion and explain Route d
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://used.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     is_enabled: true,
     created_at: '2026-08-17T00:00:00Z',
     updated_at: '2026-08-17T00:00:00Z',
@@ -2965,7 +2965,7 @@ test('creating a Provider opens its saved detail and recovers automatic model sy
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://created.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     vendor_options: {},
     configured_credential_fields: ['apiKey'],
     is_enabled: true,
@@ -3085,7 +3085,7 @@ test('visible provider model actions bind exact IDs and keep inventory open', as
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://primary.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     is_enabled: true,
     created_at: '2026-08-21T00:00:00Z',
     updated_at: '2026-08-21T00:00:00Z',
@@ -3265,7 +3265,7 @@ const listProviders = [
     vendor: 'openai',
     protocol: 'openai-compatible',
     base_url: 'https://zeta.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'default',
     configured_credential_fields: ['api_key'],
     is_enabled: true,
@@ -3278,7 +3278,7 @@ const listProviders = [
     vendor: 'openai-codex',
     protocol: 'open-responses',
     base_url: 'https://alpha.example/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     channel: 'codex',
     oauth_status: 'disconnected',
     configured_credential_fields: [],
@@ -3400,10 +3400,12 @@ test('Add provider Sheet keeps one width across both steps and uses a flat proxy
   expect(Math.round(configure.width)).toBe(896)
   expect(Math.round(configure.x)).toBe(Math.round(picker.x))
   // 代理是草稿的一部分，扁平设置行：没有外框。
-  const proxyRow = page.locator('[data-slot="setting-row"]').filter({ has: page.getByRole('switch') })
+  const proxySelect = page.getByRole('combobox', { name: 'Proxy' })
+  const proxyRow = page.locator('[data-slot="setting-row"]').filter({ has: proxySelect })
   await expect(proxyRow).toHaveCount(1)
   expect(await proxyRow.evaluate((row) => getComputedStyle(row).borderTopWidth)).toBe('0px')
-  await expect(page.getByRole('switch', { name: 'Use proxy' })).toBeVisible()
+  await expect(proxySelect).toBeVisible()
+  await expect(proxySelect).toContainText('Use system proxy')
 })
 
 test('Add provider draft asks before every close path', async ({ page }) => {
@@ -3461,7 +3463,7 @@ interface DetailProvider {
   channel: string
   protocol: string
   base_url: string
-  use_proxy: boolean
+  proxy_mode: string
   vendor_options: Record<string, unknown>
   configured_credential_fields: string[]
   is_enabled: boolean
@@ -3478,7 +3480,7 @@ function detailProvider(id: string, overrides: Record<string, unknown> = {}): De
     channel: 'default',
     protocol: 'openai-compatible',
     base_url: 'https://fixture.invalid/v1',
-    use_proxy: false,
+    proxy_mode: 'none',
     vendor_options: {},
     configured_credential_fields: ['api_key'],
     is_enabled: true,
@@ -3574,8 +3576,12 @@ test('Provider connection draft confirms before tab switch, route leave and relo
   await expect(name).toHaveValue('Saved name')
   await expect(cancel).toBeDisabled()
 
-  // 代理开关属于草稿：改动后离开同样确认，放弃后不产生任何保存请求。
-  await page.getByRole('switch', { name: 'Use proxy' }).click()
+  // 代理选择属于草稿：改动后离开同样确认，放弃后不产生任何保存请求。
+  const proxySelect = page.getByRole('combobox', { name: 'Proxy' })
+  await expect(proxySelect).toContainText('No proxy')
+  await proxySelect.click()
+  await page.getByRole('option', { name: /Use system proxy/ }).click()
+  await expect(proxySelect).toContainText('Use system proxy')
   await expect(cancel).toBeEnabled()
   await tabs.getByRole('link', { name: 'Linked models' }).click()
   await expect(dialog).toBeVisible()
@@ -3585,7 +3591,7 @@ test('Provider connection draft confirms before tab switch, route leave and relo
 
   // 放弃后回到连接页：显示已保存的值，切换页签不再确认。
   await tabs.getByRole('link', { name: 'Connection settings' }).click()
-  await expect(page.getByRole('switch', { name: 'Use proxy' })).not.toBeChecked()
+  await expect(page.getByRole('combobox', { name: 'Proxy' })).toContainText('No proxy')
   await expect(page.getByLabel('Connection name')).toHaveValue('Saved name')
   await tabs.getByRole('link', { name: 'Linked models' }).click()
   await expect(page).toHaveURL(/view=routes/)
@@ -3708,9 +3714,9 @@ test('Provider connection form fills a centered 48rem column and shows the side 
   )
   const proxyRow = page
     .locator('[data-slot="setting-row"]')
-    .filter({ has: page.getByRole('switch', { name: 'Use proxy' }) })
+    .filter({ has: page.getByRole('combobox', { name: 'Proxy' }) })
   // 代理数据流向是常驻 Description，不再进问号。
-  await expect(proxyRow).toContainText('Send requests to this service through the proxy configured in Settings.')
+  await expect(proxyRow).toContainText('Choose how requests to this service route outbound traffic.')
   await expect(proxyRow.locator('[data-slot="field-hint"]')).toHaveCount(0)
 
   // 辅助栏：只含真实状态，位于表单右侧、与表单顶部对齐。

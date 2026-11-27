@@ -698,7 +698,7 @@ def test_deleted_recreated_and_renamed_resources_keep_distinct_history(usage_env
     key_id = stats(env, "api-keys")[0]["api_key_id"]
     assert stats(env, "models")[0]["model_id"] == model_id
     for resource, identity, update in [
-        ("models", model_id, {"display_name": "renamed model"}),
+        ("models", "usage-identity", {"display_name": "renamed model"}),
         ("providers", provider_id, {"name": "renamed provider"}),
         ("api-keys", key_id, {"name": "renamed key"}),
     ]:
@@ -720,18 +720,16 @@ def test_deleted_recreated_and_renamed_resources_keep_distinct_history(usage_env
             assert rows[0]["request_count"] == 2
         assert rows[0]["deleted"] is False, rows[0]
         renamed_history[view] = rows[0]
-    for resource, identity in [("api-keys", key_id), ("models", model_id), ("providers", provider_id)]:
+    for resource, identity in [("api-keys", key_id), ("models", "usage-identity"), ("providers", provider_id)]:
         status, body = http_request("DELETE", f"{env['admin']}/api/v1/{resource}/{identity}", headers=env["auth"])
         assert status == 200, body
         status, body = http_request("GET", f"{env['admin']}/api/v1/{resource}/{identity}", headers=env["auth"])
-        # Management lookups report missing configuration in an error envelope,
-        # unlike inference and observation endpoints that use HTTP 404.
         missing_error = {
             "models": f"Route not found: {identity}",
             "providers": f"provider not found: {identity}",
             "api-keys": "api key not found",
         }[resource]
-        assert status == 200, body
+        assert status == 404, (status, body)
         assert body == {"error": missing_error}, body
     status, body = _proxy(env, key, "usage-identity", [{"role": "user", "content": "known"}])
     assert status == 401, body
