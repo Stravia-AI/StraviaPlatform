@@ -133,6 +133,7 @@ for (const routePath of ['/stats']) {
     await expect(chart.getByText('tok/s', { exact: true })).toBeVisible()
     expect(await firstToken.evaluate((el) => getComputedStyle(el).strokeDasharray)).toBe('none')
     expect(await tps.evaluate((el) => getComputedStyle(el).strokeDasharray)).not.toBe('none')
+    await waitForSettledLatencyCurves(chart)
     const baseline = await axisGeometry(chart)
     expect(baseline.leftTicks[0]).toBe(0)
     expect(baseline.rightTicks[0]).toBe(0)
@@ -164,6 +165,7 @@ for (const routePath of ['/stats']) {
     await expect
       .poll(async () => (await axisGeometry(chart)).rightTicks.at(-1))
       .toBeGreaterThan(baseline.rightTicks.at(-1)! * 50)
+    await waitForSettledLatencyCurves(chart)
     const tpsScaled = await axisGeometry(chart)
     expect(tpsScaled.leftTicks).toEqual(baseline.leftTicks)
     expect(tpsScaled.firstTokenPath).toBe(baseline.firstTokenPath)
@@ -174,6 +176,7 @@ for (const routePath of ['/stats']) {
     await expect
       .poll(async () => (await axisGeometry(chart)).leftTicks.at(-1))
       .toBeGreaterThan(baseline.leftTicks.at(-1)! * 500)
+    await waitForSettledLatencyCurves(chart)
     const bothScaled = await axisGeometry(chart)
     expect(bothScaled.rightTicks).toEqual(tpsScaled.rightTicks)
     expect(bothScaled.tpsPath).toBe(tpsScaled.tpsPath)
@@ -213,6 +216,7 @@ for (const routePath of ['/stats']) {
     const section = page.locator('section').filter({ has: chart })
     await expect(section.getByText('—', { exact: true })).toBeVisible()
     await expect(section.getByText('0 tok/s', { exact: true })).toBeVisible()
+    await waitForSettledLatencyCurves(chart)
     const first = await curvePoints(chart.getByLabel('Time to first token', { exact: true }))
     const speed = await curvePoints(chart.getByLabel('TPS', { exact: true }))
     const pitch = (first.at(-1)!.x - first[0].x) / 9
@@ -851,6 +855,29 @@ async function curvePoints(curve: Locator): Promise<Array<{ x: number; y: number
       const point = path.getPointAtLength((length * i) / 2000)
       return { x: point.x, y: point.y }
     })
+  })
+}
+
+async function waitForSettledLatencyCurves(chart: Locator) {
+  // 延迟与速度折线在挂载或重载后会执行 300ms 补间；等两条路径连续数帧不再变化后再采样坐标与 path 字符串。
+  await chart.evaluate((element) => {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const snapshot = () => {
+      const first = element.querySelector('[aria-label="Time to first token"]')?.getAttribute('d') ?? ''
+      const tps = element.querySelector('[aria-label="TPS"]')?.getAttribute('d') ?? ''
+      return first && tps ? `${first}|${tps}` : ''
+    }
+    let last = ''
+    let steadyFrames = 0
+    const sample = () => {
+      const current = snapshot()
+      steadyFrames = current && current === last ? steadyFrames + 1 : 0
+      last = current
+      if (steadyFrames >= 3) resolve()
+      else requestAnimationFrame(sample)
+    }
+    requestAnimationFrame(sample)
+    return promise
   })
 }
 
