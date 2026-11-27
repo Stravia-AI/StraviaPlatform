@@ -451,7 +451,7 @@ jobs:
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
           STRAVIA_STORAGE_HARNESS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness
-        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/storage -q -n auto --dist loadgroup --durations=0 -m storage -k sqlite
+        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/storage -q -n 4 --dist loadgroup --durations=0 -m storage -k sqlite
 
   admin-e2e:
     name: Backend E2E (admin)
@@ -543,7 +543,7 @@ jobs:
           CARGO_TARGET_DIR="${{ github.workspace }}/target/test-development" \
             STRAVIA_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-server" \
             STRAVIA_STORAGE_HARNESS_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness" \
-            bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin \
+            bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/admin -q -n 4 --dist loadscope -m admin \
               --deselect tests/e2e/admin/test_auth.py::test_development_task_accepts_vite_origin_without_bypassing_csrf
 
       - name: Show sccache stats
