@@ -552,7 +552,7 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
     provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
         extensions: BTreeMap::from([(
             "antigravity".into(),
-            json!({"default":"account-model","variants":[{"id":"account-model","metadata":{"modelProvider":4}}]}),
+            json!({"default":"account-model","variants":[{"id":"account-model","metadata":{"modelProvider":4,"apiProvider":1}}]}),
         )]),
         ..Default::default()
     });
@@ -571,7 +571,7 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
         .insert("context_window_index".into(), json!(0));
     provider
         .operation_metadata
-        .insert("user_prompt_index".into(), json!(1));
+        .insert("user_prompt_index".into(), json!(5));
     provider
         .operation_metadata
         .insert("model_turn_index".into(), json!(0));
@@ -580,9 +580,22 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
         .insert("model_turn_mixed_providers".into(), json!(false));
     let endpoint = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let request = ProtocolTransform::global()
-        .bind(endpoint, endpoint)
+        .bind(
+            stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+            endpoint,
+        )
         .unwrap()
-        .decode_request(json!({"contents":[{"role":"user","parts":[{"text":"first"}]}]}))
+        .decode_request(json!({
+            "model":"test-route",
+            "input":[
+                {"role":"developer","content":"Answer briefly."},
+                {"role":"user","content":"First context."},
+                {"role":"user","content":"Second context."},
+                {"role":"user","content":"Third context."},
+                {"role":"user","content":"Fourth context."},
+                {"role":"user","content":"Reply OK."}
+            ]
+        }))
         .unwrap();
     run(
         runtime,
@@ -632,6 +645,18 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
             .unwrap()
             .ends_with("-0")
     );
+    let first_labels = &first["request"]["labels"];
+    assert_eq!(first_labels["last_step_index"], "0");
+    assert_eq!(first_labels["used_claude"], "false");
+    assert_eq!(first_labels["used_claude_conservative"], "false");
+    assert_eq!(first_labels["used_non_gemini_model"], "false");
+    let dispatch: Vec<_> = first["requestId"].as_str().unwrap().split('/').collect();
+    assert_eq!(dispatch.len(), 5);
+    assert_eq!(dispatch[0], "agent");
+    assert_eq!(dispatch[1], first_labels["cascade_id"].as_str().unwrap());
+    assert!(dispatch[2].parse::<i64>().unwrap() > 0);
+    assert_eq!(dispatch[3], first_labels["trajectory_id"].as_str().unwrap());
+    assert_eq!(dispatch[4], "1");
     let labels = &last["request"]["labels"];
     assert!(labels.get("request_id").is_none());
     assert!(labels.get("last_step_index").is_none());
@@ -1281,6 +1306,78 @@ async fn tool_schemas_match_official_projection_at_real_http_boundary() {
     expected["properties"]["mixedEnum"] = json!({"type":"STRING"});
     expected["properties"]["emptyEnumMember"] = json!({"type":"STRING"});
     expected["default"] = schema["default"].clone();
+    // 补充真实 400 的结构组合；不把新边界伪装成既有官方抓包样本。
+    for (name, input, projected) in [
+        (
+            "cursor_theme",
+            json!({
+                "type":["object","null"],
+                "description":"Optional cursor settings",
+                "properties":{"visible":{"type":"boolean"}},
+                "required":["visible"],
+                "default":{"visible":true}
+            }),
+            json!({"description":"Optional cursor settings","default":{"visible":true}}),
+        ),
+        (
+            "expect",
+            json!({
+                "type":"array", "minItems":1, "maxItems":3,
+                "items":{
+                    "type":"object",
+                    "properties":{
+                        "window":{
+                            "type":["object","null"],
+                            "properties":{
+                                "bounds":{
+                                    "type":["object","null"],
+                                    "properties":{"left":{"type":"number"}},
+                                    "required":["left"]
+                                }
+                            },
+                            "required":["bounds"]
+                        },
+                        "element":{
+                            "type":["object","null"],
+                            "properties":{"name":{"type":"string"}},
+                            "required":["name"]
+                        },
+                        "label":{"type":"string"}
+                    },
+                    "required":["label"]
+                }
+            }),
+            json!({
+                "type":"ARRAY", "minItems":"1", "maxItems":"3",
+                "items":{
+                    "type":"OBJECT",
+                    "properties":{"window":{},"element":{},"label":{"type":"STRING"}},
+                    "required":["label"]
+                }
+            }),
+        ),
+        (
+            "nullableArray",
+            json!({
+                "type":["array","null"], "items":{"type":"string"},
+                "minItems":1, "maxItems":3, "description":"Optional names"
+            }),
+            json!({"description":"Optional names"}),
+        ),
+        (
+            "untypedObject",
+            json!({"properties":{"name":{"type":"string"}},"required":["name"]}),
+            json!({}),
+        ),
+        (
+            "untypedArray",
+            json!({"items":{"type":"string"},"minItems":1,"maxItems":3}),
+            json!({}),
+        ),
+    ] {
+        schema["properties"][name] = input;
+        expected["properties"][name] = projected;
+    }
     let endpoint = stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
     let google = GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA;
     let raw_native =

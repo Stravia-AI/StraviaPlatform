@@ -1111,6 +1111,17 @@ fn tool_schema_projection(value: &mut Value) -> Result<(), PluginError> {
         }
         None => {}
     }
+    // 沿用 CLI 对不可表达联合类型的宽化投影，不补 OBJECT/ARRAY 收紧可空语义。
+    // typed Schema 的结构字段依赖具体类型；保留孤立字段会被上游以 400 拒绝。
+    if object.get("type").and_then(Value::as_str) != Some("OBJECT") {
+        object.remove("properties");
+        object.remove("required");
+    }
+    if object.get("type").and_then(Value::as_str) != Some("ARRAY") {
+        for key in ["items", "minItems", "maxItems"] {
+            object.remove(key);
+        }
+    }
     // Native enum members must be nonempty strings. The CLI incorrectly emits empty
     // strings for numeric members, which upstream rejects; omit the whole enum rather
     // than narrowing its accepted values.

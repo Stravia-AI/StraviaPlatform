@@ -26,8 +26,10 @@
 
 - Model capability trait tags (such as `image_input`, `reasoning`, `structured_output`, or upstream endpoint paths) no longer mask inference or web-search route eligibility; only explicit operation capabilities (`infer`, `search`, `media_image`, `image_output`) restrict route purposes.
 - Updated built-in OpenCode Zen (`https://opencode.ai/inference/openai/v1`) and OpenCode Go (`https://opencode.ai/inference/go/openai/v1`) inference endpoints and required session request headers.
+- Antigravity tool schemas now omit object/array-only constraints when their concrete type is absent after the CLI-compatible projection, preventing HTTP 400 for nullable object fields and nested MCP schemas without narrowing unions to non-null types. Descriptions, defaults and supported structures remain intact. Rebuild and re-import the standalone Antigravity plugin to apply this fix.
+- Antigravity now recognizes a fresh first request containing multiple user items when their prompt count matches trusted host metadata, preserving the five-part dispatch `requestId` and accurate lifecycle labels. Missing history, assistant/tool history, later windows and mixed-provider turns remain conservative. Rebuild and re-import the standalone Antigravity plugin to apply this fix.
 - Fixed gateway, storage, and desktop consistency issues including desktop port-rebind fallback publication, connect-client apply error path propagation, compaction namespace fingerprint backward compatibility for `proxy_mode = "none"` across migration `0060`, deterministic built-in vendor builds, and settings drawer focus handling.
-- Preserved atomic `partial_trace_count` handoff across observation batch commits, fixed virtualized log auto-scroll races when unpinning (cancelling active `scrollToEnd` convergence and ignoring stale scroll events), and stabilized latency/speed chart E2E assertions against 300ms curve tweens.
+- Preserved atomic `partial_trace_count` handoff across observation batch commits, fixed virtualized log auto-scroll races when unpinning (cancelling active `scrollToEnd` convergence and ignoring stale scroll events), added `live_window` upper-bound parity for client/upstream error lists alongside Logs tab navigation guards, and stabilized latency/speed chart E2E assertions against 300ms curve tweens.
 
 ## [0.7.7] - 2026-11-26
 
