@@ -50,6 +50,14 @@
   --sidebar-accent-foreground: oklch(0.345 0.076 244);
   --sidebar-border: oklch(0.82 0.018 241);
   --sidebar-ring: oklch(0.4693 0.0775 244.17);
+  /* 桌面与 Web 壳层表面（默认 opaque 实色基线；mica / sidebar 材质在下方按宿主能力覆盖）。 */
+  --shell-chrome-bg: var(--sidebar);
+  --shell-main-border: color-mix(in oklch, var(--sidebar-border) 68%, transparent);
+  --shell-nav-hover: color-mix(in oklch, var(--sidebar-accent) 68%, transparent);
+  --shell-nav-active-border: transparent;
+  --shell-control-hover: oklch(0.2159 0.0075 248.17 / 0.075);
+  --shell-control-active: oklch(0.2159 0.0075 248.17 / 0.12);
+  --shell-window-frame: oklch(0.2159 0.0075 248.17 / 0.15);
   --font-sans: 'IBM Plex Sans', 'Noto Sans SC Variable', 'Noto Sans SC', system-ui, sans-serif;
   --font-structural: 'IBM Plex Sans Condensed', 'IBM Plex Sans', 'Noto Sans SC Variable', 'Noto Sans SC', sans-serif;
   --font-mono: 'IBM Plex Mono', 'Noto Sans SC Variable', 'Noto Sans SC', ui-monospace, monospace;
@@ -108,12 +116,50 @@
   --sidebar-accent-foreground: oklch(0.86 0.056 239);
   --sidebar-border: oklch(0.37 0.018 240.38);
   --sidebar-ring: oklch(0.7329 0.066 238.9);
+  --shell-main-border: color-mix(in oklch, var(--sidebar-border) 65%, transparent);
+  --shell-nav-hover: color-mix(in oklch, var(--sidebar-accent) 72%, transparent);
+  --shell-control-hover: oklch(0.9561 0.0035 219.53 / 0.09);
+  --shell-control-active: oklch(0.9561 0.0035 219.53 / 0.14);
+  --shell-window-frame: oklch(0.9561 0.0035 219.53 / 0.14);
   --signal: oklch(0.72 0.12 48);
   --peak: oklch(0.76 0.13 302);
   --shadow-md: 0 12px 32px rgb(0 0 0 / 0.36), 0 2px 8px rgb(0 0 0 / 0.24);
   --shadow-lg: 0 20px 56px rgb(0 0 0 / 0.44), 0 4px 14px rgb(0 0 0 / 0.28);
   --shadow-xl: 0 30px 80px rgb(0 0 0 / 0.52), 0 6px 20px rgb(0 0 0 / 0.34);
   --shadow-2xl: 0 40px 108px rgb(0 0 0 / 0.58), 0 10px 28px rgb(0 0 0 / 0.38);
+}
+
+/* Windows 11 原生 Mica：仅叠轻度冷灰钢蓝壳层薄色，保留壁纸采样透出并确保任意壁纸下导航与工作区边界清晰。 */
+html.window-material[data-window-material='mica'] {
+  --shell-chrome-bg: oklch(0.9 0.018 241 / 0.16);
+  --shell-main-border: oklch(0.32 0.022 242 / 0.12);
+  --shell-nav-hover: oklch(0.47 0.055 242 / 0.08);
+  --shell-nav-active-border: oklch(0.47 0.072 243 / 0.16);
+  --shell-control-hover: oklch(0.2159 0.0075 248.17 / 0.065);
+  --shell-control-active: oklch(0.2159 0.0075 248.17 / 0.105);
+  --sidebar-accent: oklch(0.47 0.072 243 / 0.145);
+  --sidebar-border: oklch(0.32 0.024 242 / 0.13);
+}
+
+html.dark.window-material[data-window-material='mica'] {
+  --shell-chrome-bg: oklch(0.22 0.02 242 / 0.2);
+  --shell-main-border: oklch(0.88 0.018 238 / 0.11);
+  --shell-nav-hover: oklch(0.84 0.04 240 / 0.08);
+  --shell-nav-active-border: oklch(0.75 0.064 240 / 0.18);
+  --shell-control-hover: oklch(0.9561 0.0035 219.53 / 0.08);
+  --shell-control-active: oklch(0.9561 0.0035 219.53 / 0.13);
+  --sidebar-accent: oklch(0.75 0.064 240 / 0.16);
+  --sidebar-border: oklch(0.88 0.018 238 / 0.12);
+}
+
+/* macOS 原生 Sidebar 材质：保留 50% 侧栏冷灰通透底色与轻柔工作区边界。 */
+html.window-material[data-window-material='sidebar'] {
+  --shell-chrome-bg: color-mix(in oklch, var(--sidebar) 50%, transparent);
+  --shell-main-border: oklch(0.32 0.02 241 / 0.14);
+}
+
+html.dark.window-material[data-window-material='sidebar'] {
+  --shell-main-border: oklch(0.88 0.018 240 / 0.12);
 }
 
 /* text-sm 是 13px 正文档，text-xs 是 12px 辅助档；与 body 保持同一基准。 */
@@ -285,6 +331,26 @@ html[lang='zh-CN'] body {
 html[lang='zh-CN'] .font-structural {
   font-family: 'Noto Sans SC Variable', 'Noto Sans SC', 'IBM Plex Sans', sans-serif;
   letter-spacing: 0;
+}
+
+/* 无边框实色桌面窗口（Win10 / Linux）在未最大化时绘制 1px 内框线，避免深色窗口与桌面粘连，不改变布局尺寸。 */
+.shell-window-frame::after {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px var(--shell-window-frame);
+  content: '';
+}
+
+/* Mica 壳层上区分未选中项悬停与当前激活态：悬停采用更轻的半透明钢蓝，当前项补 1px 细内描边。 */
+html.window-material[data-window-material='mica'] [data-slot='sidebar-menu-button']:not([data-active='true']):hover {
+  background-color: var(--shell-nav-hover);
+  color: var(--sidebar-foreground);
+}
+
+html.window-material[data-window-material='mica'] [data-slot='sidebar-menu-button'][data-active='true'] {
+  box-shadow: inset 0 0 0 1px var(--shell-nav-active-border);
 }
 
 /* Field 的语义宽度（number、setting、datetime）只限制控件；label、说明与错误仍占满设置列。其余控件占满设置列。 */

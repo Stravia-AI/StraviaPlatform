@@ -4,6 +4,7 @@ mod desktop_icons;
 mod product_update;
 mod startup;
 mod window_geometry;
+mod window_material;
 
 use std::{
     path::{Path, PathBuf},
@@ -901,6 +902,7 @@ fn build_main_window(
     {
         tracing::warn!(%error, "failed to configure desktop window geometry");
     }
+    let window_material = window_material::configure(&mut window_config);
     let profile_key = shell_profile_key(preferred_data_dir.unwrap_or_else(|| Path::new("default")));
     let profile_name = format!("{profile_key:016x}");
     let (webview_dir, used_fallback) =
@@ -911,6 +913,7 @@ fn build_main_window(
         };
     // 原生窗口必须带着位置创建；Windows 可能在 WebView 初始化时重置创建后的坐标。
     let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
+        .initialization_script(window_material.initialization_script())
         .data_directory(webview_dir)
         .on_download(|webview, event| {
             if let DownloadEvent::Finished { url, path, success } = event

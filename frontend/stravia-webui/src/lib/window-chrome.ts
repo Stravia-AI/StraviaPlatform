@@ -2,7 +2,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { Window as TauriWindow } from '@tauri-apps/api/window'
 
 type ShellPlatform = 'windows' | 'macos' | 'linux' | 'other'
-export type WindowMaterial = 'opaque' | 'acrylic' | 'sidebar'
+export type WindowMaterial = 'opaque' | 'mica' | 'sidebar'
 export type WindowControlsMode = 'none' | 'custom' | 'native'
 
 export interface WindowChrome {
@@ -17,9 +17,13 @@ export interface WindowChrome {
   observeMaximized: (listener: (maximized: boolean) => void) => Promise<() => void>
 }
 
+interface MaximizedWindowObserverTarget {
+  isMaximized: () => Promise<boolean>
+  onResized: (handler: () => void) => Promise<() => void>
+}
+
 const DRAG_SUPPRESSION_SELECTOR =
   "button,a,input,textarea,select,[role='button'],[data-no-drag],[data-window-drag='false']"
-const isNativeRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 function detectPlatform(): ShellPlatform {
   if (typeof navigator === 'undefined') return 'other'
@@ -29,6 +33,68 @@ function detectPlatform(): ShellPlatform {
   if (fingerprint.includes('win')) return 'windows'
   if (fingerprint.includes('linux')) return 'linux'
   return 'other'
+}
+
+function isWindowMaterial(value: unknown): value is WindowMaterial {
+  return value === 'opaque' || value === 'mica' || value === 'sidebar'
+}
+
+export function resolveWindowMaterial(platform: ShellPlatform, hostMaterial: unknown): WindowMaterial {
+  if (isWindowMaterial(hostMaterial)) return hostMaterial
+  // Windows User-Agent 已冻结为 NT 10.0，无法区分 Win10/Win11；未注入宿主能力时保守回退实色。
+  return platform === 'macos' ? 'sidebar' : 'opaque'
+}
+
+export async function observeWindowMaximized(
+  target: MaximizedWindowObserverTarget,
+  listener: (maximized: boolean) => void,
+): Promise<() => void> {
+  let disposed = false
+  let unlistenResize: (() => void) | undefined
+  let inFlight = false
+  let pending = false
+  let lastReported: boolean | undefined
+
+  const sync = async () => {
+    if (disposed) return
+    if (inFlight) {
+      pending = true
+      return
+    }
+    inFlight = true
+    try {
+      do {
+        pending = false
+        try {
+          const maximized = await target.isMaximized()
+          if (!disposed && maximized !== lastReported) {
+            lastReported = maximized
+            listener(maximized)
+          }
+        } catch (error) {
+          console.error('Stravia window state read failed', error)
+        }
+      } while (pending && !disposed)
+    } finally {
+      inFlight = false
+    }
+  }
+
+  try {
+    // 仅监听 onResized：最大化/还原与贴边均伴随尺寸变化；不监听 onMoved，避免拖拽时触发高频 IPC。
+    unlistenResize = await target.onResized(() => {
+      void sync()
+    })
+    await sync()
+  } catch (error) {
+    unlistenResize?.()
+    console.error('Stravia window state observer failed', error)
+  }
+
+  return () => {
+    disposed = true
+    unlistenResize?.()
+  }
 }
 
 function isEligibleTitlebarEvent(event: MouseEvent, allowDoubleClick: boolean): boolean {
@@ -58,7 +124,8 @@ const webWindowChrome: WindowChrome = {
 
 function createDesktopWindowChrome(platform: ShellPlatform): WindowChrome {
   const controls: WindowControlsMode = platform === 'macos' ? 'native' : 'custom'
-  const material: WindowMaterial = platform === 'windows' ? 'acrylic' : platform === 'macos' ? 'sidebar' : 'opaque'
+  const hostMaterial = typeof window === 'undefined' ? undefined : window.__STRAVIA_WINDOW_MATERIAL__
+  const material = resolveWindowMaterial(platform, hostMaterial)
 
   return {
     material,
@@ -90,39 +157,12 @@ function createDesktopWindowChrome(platform: ShellPlatform): WindowChrome {
       }
     },
     async observeMaximized(listener) {
-      let disposed = false
-      let unlistenResize: (() => void) | undefined
-      let unlistenMove: (() => void) | undefined
-
-      try {
-        const current = getCurrentWindow()
-        const notify = async () => {
-          try {
-            const maximized = await current.isMaximized()
-            if (!disposed) listener(maximized)
-          } catch (error) {
-            console.error('Stravia window state read failed', error)
-          }
-        }
-
-        unlistenResize = await current.onResized(() => void notify())
-        unlistenMove = await current.onMoved(() => void notify())
-        await notify()
-      } catch (error) {
-        unlistenResize?.()
-        unlistenMove?.()
-        console.error('Stravia window state observer failed', error)
-      }
-
-      return () => {
-        disposed = true
-        unlistenResize?.()
-        unlistenMove?.()
-      }
+      return observeWindowMaximized(getCurrentWindow(), listener)
     },
   }
 }
 
 export function createWindowChrome(): WindowChrome {
-  return isNativeRuntime ? createDesktopWindowChrome(detectPlatform()) : webWindowChrome
+  const isNative = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  return isNative ? createDesktopWindowChrome(detectPlatform()) : webWindowChrome
 }

@@ -1,8 +1,10 @@
 import type { RouteErrorReason } from '#lib/route-error.js'
+import type { WindowMaterial } from '#lib/window-chrome.js'
 
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown
+    __STRAVIA_WINDOW_MATERIAL__?: WindowMaterial
   }
 
   namespace App {
