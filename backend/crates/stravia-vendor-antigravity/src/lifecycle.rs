@@ -104,10 +104,38 @@ impl Input {
             })?;
         let window_index = meta.get("context_window_index").and_then(Value::as_u64);
         let prompt_index = meta.get("user_prompt_index").and_then(Value::as_u64);
+        // 与宿主准入的 prompt 计数一致：首轮可拆成多个 user 项，
+        // 但元数据必须证明这些项就是完整的用户输入，不能把缺失历史当成首轮。
         let fresh = host_index == 0
-            && prompt_index == Some(1)
             && window_index == Some(0)
-            && request.items.iter().any(|item| item.role == Role::User)
+            && prompt_index.is_some_and(|index| {
+                index > 0
+                    && usize::try_from(index).ok()
+                        == Some(
+                            request
+                                .items
+                                .iter()
+                                .filter(|item| {
+                                    item.role == Role::User
+                                        && match &item.content {
+                                            MessageContent::Text(_) => true,
+                                            MessageContent::Blocks(blocks) => {
+                                                blocks.iter().any(|block| {
+                                                    matches!(
+                                                        block,
+                                                        ContentBlock::Text { .. }
+                                                            | ContentBlock::Image { .. }
+                                                            | ContentBlock::Audio { .. }
+                                                            | ContentBlock::File { .. }
+                                                            | ContentBlock::Video { .. }
+                                                    )
+                                                })
+                                            }
+                                        }
+                                })
+                                .count(),
+                        )
+            })
             && request.items.iter().all(|item| {
                 !matches!(item.role, Role::Assistant | Role::Tool)
                     && item.tool_call_id.is_none()
@@ -608,6 +636,172 @@ mod tests {
         let mut state = new_state(&input);
         let labels = state.begin(&input).unwrap();
         assert!(labels.request_id.is_none() && labels.last_step_index.is_none());
+    }
+
+    #[test]
+    fn fresh_user_items_require_matching_trusted_prompt_count() {
+        use serde_json::json;
+        use stravia_protocol_codec::transform::ProtocolTransform;
+        use stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24;
+
+        let request = ProtocolTransform::global()
+            .bind(OPEN_RESPONSES_2026_04_24, OPEN_RESPONSES_2026_04_24)
+            .unwrap()
+            .decode_request(json!({
+                "model": "test-route",
+                "input": [
+                    {"role":"developer","content":"Answer briefly."},
+                    {"role":"user","content":"First context."},
+                    {"role":"user","content":"Second context."},
+                    {"role":"user","content":"Third context."},
+                    {"role":"user","content":"Fourth context."},
+                    {"role":"user","content":[
+                        {"type":"input_text","text":"Final context."},
+                        {"type":"input_text","text":"Reply OK."}
+                    ]}
+                ]
+            }))
+            .unwrap();
+        let provider: ProviderSnapshot = serde_json::from_value(json!({
+            "provider_id":"antigravity", "channel":"oauth", "base_url":crate::BASE_URL,
+            "protocol":"google-gemini", "operation_metadata":{
+                "client_conversation_id":"root", "context_window_id":"window",
+                "logical_turn_id":"logical", "model_turn_id":"turn",
+                "model_turn_index":0, "model_turn_mixed_providers":false,
+                "context_window_index":0, "user_prompt_index":5
+            }
+        }))
+        .unwrap();
+
+        for (name, key, value, role, empty_user, expected_fresh) in [
+            (
+                "multiple user items",
+                "user_prompt_index",
+                json!(5),
+                Role::User,
+                false,
+                true,
+            ),
+            (
+                "empty blocks are not a prompt",
+                "user_prompt_index",
+                json!(4),
+                Role::User,
+                true,
+                true,
+            ),
+            (
+                "missing prompt index",
+                "user_prompt_index",
+                Value::Null,
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "zero prompts",
+                "user_prompt_index",
+                json!(0),
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "underreported prompts",
+                "user_prompt_index",
+                json!(1),
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "missing history",
+                "user_prompt_index",
+                json!(6),
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "empty blocks overcounted",
+                "user_prompt_index",
+                json!(5),
+                Role::User,
+                true,
+                false,
+            ),
+            (
+                "later model turn",
+                "model_turn_index",
+                json!(1),
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "later window",
+                "context_window_index",
+                json!(1),
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "missing window",
+                "context_window_index",
+                Value::Null,
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "mixed providers",
+                "model_turn_mixed_providers",
+                json!(true),
+                Role::User,
+                false,
+                false,
+            ),
+            (
+                "assistant history",
+                "user_prompt_index",
+                json!(4),
+                Role::Assistant,
+                false,
+                false,
+            ),
+            (
+                "tool history",
+                "user_prompt_index",
+                json!(4),
+                Role::Tool,
+                false,
+                false,
+            ),
+        ] {
+            let mut provider = provider.clone();
+            provider.operation_metadata.insert(key.into(), value);
+            let mut request = request.clone();
+            request.items[1].role = role;
+            if empty_user {
+                request.items[1].content = MessageContent::Blocks(Vec::new());
+            }
+            let input = Input::new(&provider, &request, Some(&json!(1)), Some(&json!(4))).unwrap();
+            let labels = new_state(&input).begin(&input).unwrap();
+            assert_eq!(
+                labels.request_id,
+                expected_fresh.then(|| format!("{}-0", uuid::Uuid::nil())),
+                "{name}"
+            );
+            assert_eq!(
+                labels.last_step_index,
+                expected_fresh.then_some(0),
+                "{name}"
+            );
+            assert!(!labels.used_claude, "{name}");
+            assert_eq!(labels.used_claude_conservative, !expected_fresh, "{name}");
+            assert_eq!(labels.used_non_gemini_model, !expected_fresh, "{name}");
+        }
     }
 
     #[test]

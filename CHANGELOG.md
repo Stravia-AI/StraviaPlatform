@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Antigravity tool schemas now omit object/array-only constraints when their concrete type is absent after the CLI-compatible projection, preventing HTTP 400 for nullable object fields and nested MCP schemas without narrowing unions to non-null types. Descriptions, defaults and supported structures remain intact. Rebuild and re-import the standalone Antigravity plugin to apply this fix.
+- Antigravity now recognizes a fresh first request containing multiple user items when their prompt count matches trusted host metadata, preserving the five-part dispatch `requestId` and accurate lifecycle labels. Missing history, assistant/tool history, later windows and mixed-provider turns remain conservative. Rebuild and re-import the standalone Antigravity plugin to apply this fix.
+
 ## [0.7.7] - 2026-11-26
 
 ### Verification
