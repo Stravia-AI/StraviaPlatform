@@ -67,7 +67,16 @@ fn main() -> anyhow::Result<()> {
             only.is_none_or(|names| names.split(',').any(|name| name == vendor_id))
         })
         .collect();
-    if !selected.is_empty() {
+    // base 必须与单独执行 build:vendors 时保持相同的 Cargo feature 图，避免与其余插件一起编译时
+    // 发生工作区依赖 feature 合并（如 uuid v4/v5/v7），导致内置摘要与 target/vendor-plugins-all 不一致。
+    let (base_packages, extra_packages): (Vec<_>, Vec<_>) = selected
+        .iter()
+        .copied()
+        .partition(|&(vendor_id, _)| vendor_id == "base");
+    for batch in [&base_packages, &extra_packages] {
+        if batch.is_empty() {
+            continue;
+        }
         let mut command = Command::new(&cargo);
         command
             .current_dir(root)
@@ -83,7 +92,7 @@ fn main() -> anyhow::Result<()> {
             .arg(&guest_target)
             .env_remove("RUSTFLAGS")
             .env_remove("CARGO_ENCODED_RUSTFLAGS");
-        for &(_, package) in &selected {
+        for &(_, package) in batch {
             command.args(["--package", package]);
         }
         let status = command

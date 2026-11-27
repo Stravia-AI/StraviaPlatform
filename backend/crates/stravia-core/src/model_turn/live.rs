@@ -3177,13 +3177,20 @@ fn target_namespace(
     let credential_identity = oauth_connection_id
         .map(|connection_id| namespace_fingerprint(&("oauth", connection_id)))
         .unwrap_or_else(|| namespace_fingerprint(&provider.credentials));
+    // 兼容 0060 迁移前按 use_proxy: bool 编码的持久化指纹：直连（none）继续序列化为 false，
+    // system 与命名代理 ID 序列化为字符串，JSON 布尔与字符串互不碰撞。
+    let proxy_identity = if proxy_mode == crate::outbound_proxy::PROXY_MODE_NONE {
+        serde_json::Value::Bool(false)
+    } else {
+        serde_json::Value::String(proxy_mode.to_owned())
+    };
     namespace_fingerprint(&(
         target_key,
         provider_id,
         supplier_id,
         provider.channel.as_str(),
         provider.protocol.as_str(),
-        proxy_mode,
+        proxy_identity,
         provider.base_url.as_str(),
         actual_model,
         credential_identity,

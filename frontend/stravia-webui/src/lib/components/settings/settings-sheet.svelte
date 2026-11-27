@@ -23,6 +23,42 @@ export interface SettingsSheetProps {
   onclose?: () => void
   children: Snippet
 }
+
+const PRIMARY_CONTROL_SELECTOR = [
+  'input:not([type="hidden"]):not([disabled])',
+  'textarea:not([disabled])',
+  'select:not([disabled])',
+  '[role="combobox"]:not([disabled]):not([aria-disabled="true"])',
+  '[role="switch"]:not([disabled]):not([aria-disabled="true"])',
+].join(', ')
+
+const FALLBACK_FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([type="hidden"]):not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(', ')
+
+function isAutoFocusable(element: HTMLElement): boolean {
+  if (element.closest('[data-slot="field-hint"], [hidden], [inert], [aria-hidden="true"]')) return false
+  if (element.matches(':disabled, [disabled]') || element.getAttribute('aria-disabled') === 'true') return false
+  if (element.tabIndex < 0) return false
+  if (element.getClientRects().length === 0) return false
+  const { visibility } = getComputedStyle(element)
+  return visibility !== 'hidden' && visibility !== 'collapse'
+}
+
+function findInitialFocusTarget(container: HTMLElement): HTMLElement | null {
+  for (const selector of [PRIMARY_CONTROL_SELECTOR, FALLBACK_FOCUSABLE_SELECTOR]) {
+    for (const candidate of container.querySelectorAll(selector)) {
+      if (candidate instanceof HTMLElement && isAutoFocusable(candidate)) return candidate
+    }
+  }
+  return null
+}
 </script>
 
 <script lang="ts">
@@ -51,6 +87,7 @@ let {
 }: SettingsSheetProps = $props()
 
 const noteId = $props.id()
+let content = $state<HTMLElement | null>(null)
 
 const baseline = new DraftBaseline(() => draft())
 const guard = new DraftGuard({ dirty: () => open && baseline.dirty, busy: () => saving })
@@ -64,6 +101,15 @@ function apply(next: boolean): void {
   open = next
   if (!next) onclose?.()
 }
+
+// 默认初始焦点会落在首个字段的问号提示（field-hint）上，打开即弹出气泡并吞掉第一次 Escape。
+function focusInitialControl(event: Event): void {
+  if (!content) return
+  const target = findInitialFocusTarget(content)
+  if (!target) return
+  event.preventDefault()
+  target.focus({ preventScroll: true })
+}
 </script>
 
 <!--
@@ -72,10 +118,12 @@ function apply(next: boolean): void {
 -->
 <Sheet.Root bind:open={() => open, guard.openChange(apply)}>
   <Sheet.Content
+    bind:ref={content}
     side="right"
     class="route-overlay-content w-full! gap-0 overflow-hidden p-0 sm:max-w-[32rem]!"
     closeLabel={m.common_close()}
-    locked={guard.busy}>
+    locked={guard.busy}
+    onOpenAutoFocus={focusInitialControl}>
     <Sheet.Header class="border-b pr-12">
       <Sheet.Title>{title}</Sheet.Title>
     </Sheet.Header>
