@@ -867,6 +867,8 @@ jobs:
         env:
           ARCH: aarch64
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          DEB_HOST_MULTIARCH: aarch64-linux-gnu
+          LD_GTK_LIBRARY_PATH: /usr/lib/aarch64-linux-gnu
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
@@ -883,18 +885,57 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          cross_tmp=""
+          verify_dir=""
+          cleanup_cross_tmp() {
+            if [[ -n "${cross_tmp}" ]]; then
+              rm -rf "${cross_tmp}"
+            fi
+            if [[ -n "${verify_dir}" ]]; then
+              rm -rf "${verify_dir}"
+            fi
+          }
+          trap cleanup_cross_tmp EXIT
           if [[ "$(uname -m)" == "x86_64" ]]; then
             # Inside containers `/proc/sys/fs/binfmt_misc` may be unmounted even when the host kernel
-            # has `fixBinary = true` (F flag) registered. Probe real aarch64 execution directly.
-            probe_bin="$(mktemp /tmp/aarch64-probe.XXXXXX)"
-            trap 'rm -f "${probe_bin}"' EXIT
+            # has `fixBinary = true` (F flag) registered. Probe real aarch64 execution directly,
+            # including AppImage Type 2 magic ("AI\x02" at ELF e_ident[8..10]) used by linuxdeploy-aarch64.
+            cross_tmp="$(mktemp -d /tmp/aarch64-cross.XXXXXX)"
+            probe_bin="${cross_tmp}/aarch64-probe"
+            probe_appimage="${cross_tmp}/aarch64-probe-ai2"
             printf 'int main(void){return 0;}\n' | aarch64-linux-gnu-gcc -static -x c - -o "${probe_bin}"
             if ! "${probe_bin}" 2>/dev/null; then
               echo "ERROR: aarch64 binfmt_misc handler (with F/fixBinary flag for containers) is required on x86_64 to run linuxdeploy-aarch64 (enable boot.binfmt.preferStaticEmulators = true on NixOS host)" >&2
               exit 1
             fi
-            rm -f "${probe_bin}"
-            trap - EXIT
+            cp "${probe_bin}" "${probe_appimage}"
+            printf '\x41\x49\x02' | dd of="${probe_appimage}" bs=1 seek=8 count=3 conv=notrunc status=none
+            if ! "${probe_appimage}" 2>/dev/null; then
+              echo "ERROR: aarch64 binfmt_misc handler rejected AppImage Type 2 magic (AI\\x02 at ELF offset 8); register an aarch64-linux-appimage binfmt entry on the host" >&2
+              exit 1
+            fi
+
+            # Host x86_64 `/usr/bin/ldd` only inspects x86_64 dynamic linkers and reports aarch64 ELFs
+            # as "not a dynamic executable", leaving linuxdeploy with zero bundled shared libraries.
+            # Dispatch aarch64 ELFs (e_machine == 0x00b7) to the multiarch arm64 dynamic linker instead.
+            if [[ ! -x /lib/ld-linux-aarch64.so.1 ]]; then
+              echo "ERROR: /lib/ld-linux-aarch64.so.1 missing; install libc6:arm64 before bundling aarch64 AppImage" >&2
+              exit 1
+            fi
+            mkdir -p "${cross_tmp}/bin"
+            cat >"${cross_tmp}/bin/ldd" <<'LDD_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ $# -eq 1 && -f "$1" ]]; then
+            magic="$(od -An -tx1 -N 20 "$1" 2>/dev/null | tr -d ' \n')"
+            if [[ "$magic" == 7f454c460201*b700 ]]; then
+              exec /lib/ld-linux-aarch64.so.1 --list "$1"
+            fi
+          fi
+          exec /usr/bin/ldd "$@"
+          LDD_EOF
+            chmod +x "${cross_tmp}/bin/ldd"
+            export PATH="${cross_tmp}/bin:${PATH}"
           fi
           (
             cd backend/apps/stravia-desktop
@@ -910,6 +951,40 @@ jobs:
             echo "Expected 1 aarch64 AppImage, found ${#bundles[@]}" >&2
             exit 1
           fi
+          # Verify the built AppImage actually bundled aarch64 desktop binary & shared libraries
+          # without leaking host x86-64 libraries from the cross-compile container.
+          bundle_abs="$(realpath "${bundles[0]}")"
+          verify_dir="$(mktemp -d /tmp/verify-aarch64-appimage.XXXXXX)"
+          (
+            cd "${verify_dir}"
+            "${bundle_abs}" --appimage-extract >/dev/null
+            file_bin="$(file squashfs-root/usr/bin/stravia-desktop)"
+            echo "Bundled binary: ${file_bin}"
+            if [[ "${file_bin}" != *"ARM aarch64"* ]]; then
+              echo "ERROR: bundled stravia-desktop is not ARM aarch64: ${file_bin}" >&2
+              exit 1
+            fi
+            arm64_libs=0
+            x64_libs=0
+            while IFS= read -r -d '' lib; do
+              info="$(file -L "${lib}")"
+              if [[ "${info}" == *"ARM aarch64"* ]]; then
+                arm64_libs=$((arm64_libs + 1))
+              elif [[ "${info}" == *"x86-64"* ]]; then
+                echo "ERROR: host x86-64 library leaked into aarch64 AppImage: ${info}" >&2
+                x64_libs=$((x64_libs + 1))
+              fi
+            done < <(find squashfs-root/usr/lib -type f -name '*.so*' -print0)
+            echo "Verified aarch64 AppImage libraries: arm64=${arm64_libs}, x86_64=${x64_libs}"
+            if [[ "${x64_libs}" -ne 0 ]]; then
+              exit 1
+            fi
+            if [[ "${arm64_libs}" -lt 50 ]]; then
+              echo "ERROR: expected >= 50 ARM aarch64 shared libraries in AppImage, found ${arm64_libs}" >&2
+              exit 1
+            fi
+          )
+          rm -rf "${verify_dir}"
           asset="stravia-desktop-v${VERSION}-linux-aarch64.AppImage"
           cp "${bundles[0]}" "dist/${asset}"
           cp "${bundles[0]}.sig" "dist/${asset}.sig"
