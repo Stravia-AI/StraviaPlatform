@@ -728,7 +728,7 @@ jobs:
         env:
           PLAYWRIGHT_USE_PREBUILT: "1"
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
-        run: bun tests/common/run-in-tempdir.ts bun run test:e2e:web
+        run: bun tests/common/run-in-tempdir.ts bun run --filter stravia-webui test:e2e --workers 4
 
   windows-cross-smoke:
     name: Windows cross-compile & Wine smoke (x86_64-pc-windows-msvc)
