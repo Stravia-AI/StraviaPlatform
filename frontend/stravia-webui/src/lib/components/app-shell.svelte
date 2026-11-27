@@ -52,7 +52,8 @@ const shellMode = $derived(
 )
 const SIDEBAR_STORAGE_KEY = 'stravia-sidebar-state'
 const windowChrome = createWindowChrome()
-const materialAvailable = windowChrome.material !== 'opaque'
+const windowMaterial = windowChrome.material
+const translucentChrome = windowMaterial !== 'opaque'
 let navigationOpen = $state(false)
 let navigationPanel = $state<HTMLElement | null>(null)
 let navigationTrigger = $state<HTMLButtonElement | null>(null)
@@ -61,7 +62,9 @@ let sidebarCollapsed = $state(false)
 let conversationGroupHovered = $state(false)
 let conversationGroupFocused = $state(false)
 let isWindowMaximized = $state(false)
-let translucentChrome = $state(false)
+const showWindowFrame = $derived(
+  windowChrome.controls === 'custom' && windowMaterial === 'opaque' && !isWindowMaximized,
+)
 const hasNavigation = $derived(shellMode === 'navigation')
 
 const statusQuery = createQuery(() => ({
@@ -364,8 +367,25 @@ onMount(() => {
   syncNavigationMode()
   media.addEventListener('change', syncNavigationMode)
   sidebarCollapsed = localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'collapsed'
-  translucentChrome = materialAvailable
-  document.documentElement.classList.toggle('window-material', translucentChrome)
+
+  let releaseWindowMaterial: (() => void) | undefined
+  if (translucentChrome) {
+    const root = document.documentElement
+    const owners = Number.parseInt(root.dataset.windowMaterialOwners ?? '0', 10) || 0
+    root.dataset.windowMaterialOwners = String(owners + 1)
+    root.dataset.windowMaterial = windowMaterial
+    root.classList.add('window-material')
+    releaseWindowMaterial = () => {
+      const remaining = Math.max(0, (Number.parseInt(root.dataset.windowMaterialOwners ?? '1', 10) || 1) - 1)
+      if (remaining === 0) {
+        delete root.dataset.windowMaterialOwners
+        delete root.dataset.windowMaterial
+        root.classList.remove('window-material')
+      } else {
+        root.dataset.windowMaterialOwners = String(remaining)
+      }
+    }
+  }
 
   let disposed = false
   let stopWindowObservation: (() => void) | undefined
@@ -381,7 +401,7 @@ onMount(() => {
   return () => {
     disposed = true
     media.removeEventListener('change', syncNavigationMode)
-    document.documentElement.classList.remove('window-material')
+    releaseWindowMaterial?.()
     stopWindowObservation?.()
   }
 })
@@ -429,10 +449,10 @@ onMount(() => {
                 <li>
                   <a
                     class={[
-                      'flex min-w-0 items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-sidebar-accent',
+                      'flex min-w-0 items-center gap-2 rounded-md px-3 py-2 text-sm transition-[background-color,color] duration-[140ms]',
                       activeConversationId === conversation.id
-                        ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                        : '',
+                        ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground shadow-[inset_0_0_0_1px_var(--shell-nav-active-border)]'
+                        : 'hover:bg-(--shell-nav-hover) hover:text-sidebar-foreground',
                     ]}
                     href={resolve(`?conversation=${encodeURIComponent(conversation.id)}`)}
                     aria-current={activeConversationId === conversation.id ? 'page' : undefined}
@@ -452,8 +472,10 @@ onMount(() => {
                   <a
                     href={resolve('conversations')}
                     class={[
-                      'flex items-center rounded-md px-3 py-2 text-sm hover:bg-sidebar-accent',
-                      allConversationsActive ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
+                      'flex items-center rounded-md px-3 py-2 text-sm transition-[background-color,color] duration-[140ms]',
+                      allConversationsActive
+                        ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground shadow-[inset_0_0_0_1px_var(--shell-nav-active-border)]'
+                        : 'hover:bg-(--shell-nav-hover) hover:text-sidebar-foreground',
                     ]}
                     aria-current={allConversationsActive ? 'page' : undefined}
                     onclick={() => (navigationOpen = false)}>
@@ -523,13 +545,11 @@ onMount(() => {
   class={[
     'shell-root relative flex h-svh min-h-0 flex-col overflow-hidden text-foreground',
     translucentChrome ? 'bg-transparent' : 'bg-background',
+    showWindowFrame ? 'shell-window-frame' : '',
   ]}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
-    class={[
-      'relative z-40 flex h-10 shrink-0 select-none items-stretch',
-      translucentChrome ? 'bg-sidebar/50' : 'bg-sidebar',
-    ]}
+    class="relative z-40 flex h-10 shrink-0 select-none items-stretch bg-(--shell-chrome-bg)"
     onmousedown={(event) => windowChrome.startDrag(event)}
     ondblclick={(event) => windowChrome.toggleMaximize(event)}>
     <div
@@ -549,7 +569,7 @@ onMount(() => {
           bind:ref={navigationTrigger}
           type="button"
           variant="ghost"
-          class="relative me-2 ms-auto shrink-0 rounded-md p-1 text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground aria-expanded:hover:bg-sidebar-accent aria-expanded:hover:text-sidebar-accent-foreground"
+          class="relative me-2 ms-auto shrink-0 rounded-md p-1 text-sidebar-foreground hover:bg-(--shell-control-hover) hover:text-sidebar-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground aria-expanded:hover:bg-(--shell-control-hover) aria-expanded:hover:text-sidebar-foreground"
           size="icon-sm"
           onclick={handleNavigationTrigger}
           aria-expanded={isDesktopNavigation ? !sidebarCollapsed : navigationOpen}
@@ -594,7 +614,7 @@ onMount(() => {
   </header>
 
   {#if hasNavigation}
-    <div class={['flex min-h-0 flex-1', translucentChrome ? 'bg-sidebar/50' : 'bg-sidebar']}>
+    <div class="flex min-h-0 flex-1 bg-(--shell-chrome-bg)">
       <Sidebar.Root
         bind:ref={navigationPanel}
         collapsible="icon"
@@ -641,7 +661,8 @@ onMount(() => {
         </Sidebar.Footer>
       </Sidebar.Root>
 
-      <div class="min-w-0 flex-1 overflow-hidden p-0 md:pr-2 md:pb-2">
+      <div
+        class="relative min-w-0 flex-1 overflow-hidden p-0 after:pointer-events-none after:absolute after:inset-0 after:z-30 after:shadow-[inset_0_1px_0_0_var(--shell-main-border)] md:pr-2 md:pb-2 md:after:right-2 md:after:bottom-2 md:after:rounded-lg md:after:shadow-[inset_0_0_0_1px_var(--shell-main-border)]">
         <main
           class="shell-main shell-scrollbar flex h-full min-w-0 flex-col overflow-y-auto bg-background p-4 md:rounded-lg">
           <div class="mx-auto w-full max-w-(--content-max-width)">
@@ -698,8 +719,11 @@ onMount(() => {
       </div>
     </div>
   {:else}
-    <div class="grid min-h-0 flex-1 overflow-y-auto bg-background">
-      {@render children()}
+    <div
+      class="relative flex min-h-0 flex-1 flex-col overflow-hidden after:pointer-events-none after:absolute after:inset-0 after:z-30 after:shadow-[inset_0_1px_0_0_var(--shell-main-border)]">
+      <div class="grid min-h-0 flex-1 overflow-y-auto bg-background">
+        {@render children()}
+      </div>
     </div>
   {/if}
 </Sidebar.Provider>

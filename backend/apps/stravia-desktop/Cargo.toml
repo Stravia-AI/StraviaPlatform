@@ -44,7 +44,11 @@ tauri-plugin-wdio = { workspace = true, optional = true }
 tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = [
+  "Wdk_System_SystemServices",
+  "Win32_System_SystemInformation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 tauri-build = { workspace = true }

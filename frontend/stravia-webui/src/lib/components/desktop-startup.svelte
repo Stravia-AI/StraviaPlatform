@@ -23,7 +23,12 @@ import { createWindowChrome } from '#lib/window-chrome.js'
 let { state: startup }: { state: DesktopStartupState } = $props()
 
 const windowChrome = createWindowChrome()
+const windowMaterial = windowChrome.material
+const translucentChrome = windowMaterial !== 'opaque'
 let isWindowMaximized = $state(false)
+const showWindowFrame = $derived(
+  windowChrome.controls === 'custom' && windowMaterial === 'opaque' && !isWindowMaximized,
+)
 let pendingAction = $state<'restart' | 'exit' | 'logs' | null>(null)
 let feedback = $state.raw<{ message: string; error: boolean } | null>(null)
 
@@ -107,6 +112,25 @@ async function runAction(action: 'restart' | 'exit' | 'logs'): Promise<void> {
 }
 
 onMount(() => {
+  let releaseWindowMaterial: (() => void) | undefined
+  if (translucentChrome) {
+    const root = document.documentElement
+    const owners = Number.parseInt(root.dataset.windowMaterialOwners ?? '0', 10) || 0
+    root.dataset.windowMaterialOwners = String(owners + 1)
+    root.dataset.windowMaterial = windowMaterial
+    root.classList.add('window-material')
+    releaseWindowMaterial = () => {
+      const remaining = Math.max(0, (Number.parseInt(root.dataset.windowMaterialOwners ?? '1', 10) || 1) - 1)
+      if (remaining === 0) {
+        delete root.dataset.windowMaterialOwners
+        delete root.dataset.windowMaterial
+        root.classList.remove('window-material')
+      } else {
+        root.dataset.windowMaterialOwners = String(remaining)
+      }
+    }
+  }
+
   let disposed = false
   let stopWindowObservation: (() => void) | undefined
   if (windowChrome.controls === 'custom') {
@@ -120,18 +144,23 @@ onMount(() => {
 
   return () => {
     disposed = true
+    releaseWindowMaterial?.()
     stopWindowObservation?.()
   }
 })
 </script>
 
 <div
-  class="flex h-svh min-h-screen flex-col overflow-hidden bg-background text-foreground"
+  class={[
+    'relative flex h-svh min-h-0 flex-col overflow-hidden text-foreground',
+    translucentChrome ? 'bg-transparent' : 'bg-background',
+    showWindowFrame ? 'shell-window-frame' : '',
+  ]}
   data-testid="desktop-startup"
   data-status={startup.status}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
-    class="flex h-10 shrink-0 select-none items-stretch bg-sidebar"
+    class="relative z-40 flex h-10 shrink-0 select-none items-stretch bg-(--shell-chrome-bg)"
     onmousedown={(event) => windowChrome.startDrag(event)}
     ondblclick={(event) => windowChrome.toggleMaximize(event)}>
     <div
@@ -154,104 +183,107 @@ onMount(() => {
     {/if}
   </header>
 
-  <main class="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-y-auto p-4 sm:p-8">
-    <section class="m-auto flex w-full min-w-0 max-w-2xl flex-col gap-6" aria-labelledby="desktop-startup-title">
-      {#if startup.status === 'starting'}
-        <div class="flex items-center gap-4">
-          <div class="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-card">
-            <Spinner class="size-5" />
-          </div>
-          <h1 id="desktop-startup-title" class="font-structural min-w-0 text-2xl font-semibold text-balance">
-            {m.desktop_startup_starting_title()}
-          </h1>
-        </div>
-        <StartupProgress
-          progress={startup.progress ?? { phase: startup.stage, label: stage, completed: 0, total: null }} />
-      {:else}
-        <div class="flex items-start gap-4" role="alert">
-          <div
-            class="flex size-10 shrink-0 items-center justify-center rounded-lg border border-destructive/40 text-destructive">
-            <AlertTriangleIcon aria-hidden="true" />
-          </div>
-          <div class="min-w-0">
-            <p class="font-structural text-xs font-semibold text-destructive">{stage}</p>
-            <h1 id="desktop-startup-title" class="font-structural mt-1 text-2xl font-semibold text-balance">
-              {m.desktop_startup_failed_title()}
+  <div
+    class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden after:pointer-events-none after:absolute after:inset-0 after:z-30 after:shadow-[inset_0_1px_0_0_var(--shell-main-border)]">
+    <main class="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-y-auto bg-background p-4 sm:p-8">
+      <section class="m-auto flex w-full min-w-0 max-w-2xl flex-col gap-6" aria-labelledby="desktop-startup-title">
+        {#if startup.status === 'starting'}
+          <div class="flex items-center gap-4">
+            <div class="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-card">
+              <Spinner class="size-5" />
+            </div>
+            <h1 id="desktop-startup-title" class="font-structural min-w-0 text-2xl font-semibold text-balance">
+              {m.desktop_startup_starting_title()}
             </h1>
-            <p class="mt-2 text-sm text-pretty">{failureImpact(startup.stage)}</p>
-            <p class="mt-2 text-sm text-muted-foreground text-pretty">
-              {m.desktop_startup_failed_action()}
-            </p>
           </div>
-        </div>
+          <StartupProgress
+            progress={startup.progress ?? { phase: startup.stage, label: stage, completed: 0, total: null }} />
+        {:else}
+          <div class="flex items-start gap-4" role="alert">
+            <div
+              class="flex size-10 shrink-0 items-center justify-center rounded-lg border border-destructive/40 text-destructive">
+              <AlertTriangleIcon aria-hidden="true" />
+            </div>
+            <div class="min-w-0">
+              <p class="font-structural text-xs font-semibold text-destructive">{stage}</p>
+              <h1 id="desktop-startup-title" class="font-structural mt-1 text-2xl font-semibold text-balance">
+                {m.desktop_startup_failed_title()}
+              </h1>
+              <p class="mt-2 text-sm text-pretty">{failureImpact(startup.stage)}</p>
+              <p class="mt-2 text-sm text-muted-foreground text-pretty">
+                {m.desktop_startup_failed_action()}
+              </p>
+            </div>
+          </div>
 
-        <details class="rounded-lg border bg-card px-4 py-3">
-          <summary class="cursor-pointer py-2 font-medium">
-            {m.desktop_startup_technical_summary()}
-          </summary>
-          <pre
-            class="mt-3 overflow-x-auto border-t pt-3 font-mono text-xs whitespace-pre-wrap text-muted-foreground">{technicalDiagnostics}</pre>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <Button data-testid="startup-copy" variant="outline" size="sm" onclick={handleCopyDiagnostics}>
-              <CopyIcon data-icon="inline-start" />
-              {m.desktop_startup_copy_diagnostics()}
-            </Button>
-            {#if startup.logPath}
-              <Button
-                data-testid="startup-logs"
-                variant="outline"
-                size="sm"
-                disabled={pendingAction !== null}
-                aria-busy={pendingAction === 'logs'}
-                onclick={() => void runAction('logs')}>
-                {#if pendingAction === 'logs'}
-                  <Spinner data-icon="inline-start" />
-                {:else}
-                  <FileTextIcon data-icon="inline-start" />
-                {/if}
-                {m.desktop_startup_open_logs()}
+          <details class="rounded-lg border bg-card px-4 py-3">
+            <summary class="cursor-pointer py-2 font-medium">
+              {m.desktop_startup_technical_summary()}
+            </summary>
+            <pre
+              class="mt-3 overflow-x-auto border-t pt-3 font-mono text-xs whitespace-pre-wrap text-muted-foreground">{technicalDiagnostics}</pre>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <Button data-testid="startup-copy" variant="outline" size="sm" onclick={handleCopyDiagnostics}>
+                <CopyIcon data-icon="inline-start" />
+                {m.desktop_startup_copy_diagnostics()}
               </Button>
-            {/if}
+              {#if startup.logPath}
+                <Button
+                  data-testid="startup-logs"
+                  variant="outline"
+                  size="sm"
+                  disabled={pendingAction !== null}
+                  aria-busy={pendingAction === 'logs'}
+                  onclick={() => void runAction('logs')}>
+                  {#if pendingAction === 'logs'}
+                    <Spinner data-icon="inline-start" />
+                  {:else}
+                    <FileTextIcon data-icon="inline-start" />
+                  {/if}
+                  {m.desktop_startup_open_logs()}
+                </Button>
+              {/if}
+            </div>
+          </details>
+
+          <div class="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button
+              data-testid="startup-exit"
+              variant="outline"
+              disabled={pendingAction !== null}
+              aria-busy={pendingAction === 'exit'}
+              onclick={() => void runAction('exit')}>
+              {#if pendingAction === 'exit'}
+                <Spinner data-icon="inline-start" />
+              {:else}
+                <LogOutIcon data-icon="inline-start" />
+              {/if}
+              {m.desktop_startup_exit()}
+            </Button>
+            <Button
+              data-testid="startup-restart"
+              disabled={pendingAction !== null}
+              aria-busy={pendingAction === 'restart'}
+              onclick={() => void runAction('restart')}>
+              {#if pendingAction === 'restart'}
+                <Spinner data-icon="inline-start" />
+              {:else}
+                <RotateCcwIcon data-icon="inline-start" />
+              {/if}
+              {m.desktop_startup_restart()}
+            </Button>
           </div>
-        </details>
+        {/if}
 
-        <div class="flex flex-col gap-2 sm:flex-row sm:justify-end">
-          <Button
-            data-testid="startup-exit"
-            variant="outline"
-            disabled={pendingAction !== null}
-            aria-busy={pendingAction === 'exit'}
-            onclick={() => void runAction('exit')}>
-            {#if pendingAction === 'exit'}
-              <Spinner data-icon="inline-start" />
-            {:else}
-              <LogOutIcon data-icon="inline-start" />
-            {/if}
-            {m.desktop_startup_exit()}
-          </Button>
-          <Button
-            data-testid="startup-restart"
-            disabled={pendingAction !== null}
-            aria-busy={pendingAction === 'restart'}
-            onclick={() => void runAction('restart')}>
-            {#if pendingAction === 'restart'}
-              <Spinner data-icon="inline-start" />
-            {:else}
-              <RotateCcwIcon data-icon="inline-start" />
-            {/if}
-            {m.desktop_startup_restart()}
-          </Button>
-        </div>
-      {/if}
-
-      {#if feedback}
-        <p
-          class={['text-sm', feedback.error ? 'text-destructive' : 'text-signal']}
-          role={feedback.error ? 'alert' : 'status'}
-          aria-live="polite">
-          {feedback.message}
-        </p>
-      {/if}
-    </section>
-  </main>
+        {#if feedback}
+          <p
+            class={['text-sm', feedback.error ? 'text-destructive' : 'text-signal']}
+            role={feedback.error ? 'alert' : 'status'}
+            aria-live="polite">
+            {feedback.message}
+          </p>
+        {/if}
+      </section>
+    </main>
+  </div>
 </div>
