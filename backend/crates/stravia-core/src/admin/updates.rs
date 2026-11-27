@@ -815,6 +815,35 @@ impl UpdateService {
             download_supported: self.download_supported,
         })
     }
+
+    /// 供桌面 E2E 持 check_lock 写入当前时钟的新鲜候选状态，与后台自动检查互斥并命中缓存。
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn seed_e2e_available_update(
+        &self,
+        version: &str,
+        release_url: &str,
+        manifest_url: &str,
+    ) -> anyhow::Result<()> {
+        let version = Version::parse(version)?;
+        let _check = self.check_lock.lock().await;
+        let now = self.clock.now();
+        let state = PersistedUpdateState {
+            channel: Some(UpdateChannel::Release),
+            last_success_at: Some(now),
+            last_failure: None,
+            available_update: Some(AvailableUpdate {
+                version,
+                published_at: now - chrono::Duration::days(1),
+                release_url: release_url.to_string(),
+                manifest_url: manifest_url.to_string(),
+                download_available: true,
+                download_error: None,
+            }),
+        };
+        self.save_state(&state).await?;
+        *self.last_completed_at.lock().await = Some(Instant::now());
+        Ok(())
+    }
 }
 
 impl AdminService {
@@ -824,6 +853,19 @@ impl AdminService {
 
     pub async fn check_for_updates(&self, mode: UpdateCheckMode) -> anyhow::Result<UpdateStatus> {
         self.gw.update_service.check(mode).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_e2e_available_update(
+        &self,
+        version: &str,
+        release_url: &str,
+        manifest_url: &str,
+    ) -> anyhow::Result<()> {
+        self.gw
+            .update_service
+            .seed_e2e_available_update(version, release_url, manifest_url)
+            .await
     }
 
     pub async fn set_update_channel(&self, channel: UpdateChannel) -> anyhow::Result<UpdateStatus> {
@@ -1282,6 +1324,36 @@ mod tests {
             status.last_failure.map(|failure| failure.code),
             Some("UPDATE_CHECK_DISABLED".to_string())
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn e2e_seeded_update_survives_subsequent_automatic_check_in_debug_build() {
+        let storage: DynStorage = Arc::new(MemoryStorage::new(vec![], vec![], vec![]));
+        let service = UpdateService::updater(
+            storage,
+            true,
+            Some("https://updates.example.com".to_string()),
+            crate::config::SystemProxySource::Environment,
+        )
+        .unwrap();
+
+        service
+            .seed_e2e_available_update(
+                "9.9.9",
+                "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v9.9.9",
+                "https://updates.example.com/api/v1/releases/v9.9.9/manifest.json",
+            )
+            .await
+            .unwrap();
+
+        let status = service.check(UpdateCheckMode::Automatic).await.unwrap();
+        assert_eq!(status.check_status, UpdateCheckStatus::Available);
+        assert_eq!(status.last_failure, None);
+        assert!(status.download_supported);
+        let available = status.available_update.expect("seeded update preserved");
+        assert_eq!(available.version, Version::new(9, 9, 9));
+        assert!(available.download_available);
     }
 
     #[test]

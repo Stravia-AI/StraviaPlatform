@@ -1400,9 +1400,29 @@ describe('failures paging', () => {
     await h.controller.loadClientErrors(false)
     expect(h.snap().clientErrors.map((f) => f.id)).toEqual(['f1', 'f2'])
     expect(h.snap().clientErrorCursor).toBeNull()
-    const queries = h.calls.filter((c) => c.method === 'clientErrors').map((c) => c.args[0] as { cursor?: string })
+    const queries = h.calls
+      .filter((c) => c.method === 'clientErrors')
+      .map((c) => c.args[0] as { cursor?: string; live_window?: boolean })
     expect(queries[0].cursor).toBeUndefined()
+    expect(queries[0].live_window).toBe(true)
     expect(queries[1].cursor).toBe('c2')
+    expect(queries[1].live_window).toBe(true)
+  })
+
+  test('error tabs send live_window=false when viewing a historical range', async () => {
+    const h = harness()
+    await h.controller.tabChanged('client-errors')
+    await h.controller.applyRange(1_000, 61_000)
+    await h.controller.tabChanged('upstream-errors')
+    const clientQueries = h.calls
+      .filter((c) => c.method === 'clientErrors')
+      .map((c) => c.args[0] as { live_window?: boolean })
+    const upstreamQueries = h.calls
+      .filter((c) => c.method === 'upstreamErrors')
+      .map((c) => c.args[0] as { live_window?: boolean })
+    expect(clientQueries[0].live_window).toBe(true)
+    expect(clientQueries.at(-1)?.live_window).toBe(false)
+    expect(upstreamQueries.at(-1)?.live_window).toBe(false)
   })
 })
 

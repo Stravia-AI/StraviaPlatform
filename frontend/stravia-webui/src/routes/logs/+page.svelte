@@ -150,6 +150,8 @@ let workspaceStarted = false
 let disposed = false
 let afterNavReady = false
 let pendingTabSync: ObservationTab | null = null
+let userTabSyncTarget: ObservationTab | null = null
+let userTabSyncSeq = 0
 
 function flushSyncTabQuery(tab: ObservationTab): void {
   void Promise.resolve()
@@ -157,6 +159,18 @@ function flushSyncTabQuery(tab: ObservationTab): void {
     .then(() => {
       if (!disposed) void syncTabQuery(tab)
     })
+}
+
+async function syncUserTabQuery(tab: ObservationTab): Promise<void> {
+  const seq = ++userTabSyncSeq
+  userTabSyncTarget = tab
+  try {
+    await syncTabQuery(tab)
+  } finally {
+    if (seq === userTabSyncSeq && parseTabFromUrl((page.shallow?.url ?? page.url).searchParams) === tab) {
+      userTabSyncTarget = null
+    }
+  }
 }
 
 function scheduleSyncTabQuery(tab: ObservationTab): void {
@@ -204,6 +218,18 @@ afterNavigate(({ shallow, type }) => {
   }
   if (!shallow && type !== 'enter') {
     const urlTab = parseTabFromUrl(page.url.searchParams)
+    if (userTabSyncTarget !== null) {
+      if (urlTab === userTabSyncTarget) {
+        userTabSyncTarget = null
+      } else {
+        // 在途链接导航（如侧栏重复点击 /logs）晚于用户切页签提交时，保留用户选择的页签并重新同步 URL。
+        const target = userTabSyncTarget
+        void Promise.resolve().then(() => {
+          if (!disposed && userTabSyncTarget === target) void syncUserTabQuery(target)
+        })
+      }
+      return
+    }
     if (urlTab !== ws.activeTab) {
       void ws.tabChanged(urlTab)
     }
@@ -265,14 +291,14 @@ function handleTabChange(value: string): void {
   const tab = toObservationTab(value)
   mountedTabs.add(tab)
   void ws.tabChanged(tab)
-  void syncTabQuery(tab)
+  void syncUserTabQuery(tab)
 }
 
 async function openErrorInteraction(kind: 'client' | 'upstream'): Promise<void> {
   if (kind === 'client') await ws.openClientErrorInteraction()
   else await ws.openUpstreamErrorInteraction()
   if (ws.activeTab === 'interactions') {
-    await syncTabQuery('interactions')
+    await syncUserTabQuery('interactions')
   }
 }
 

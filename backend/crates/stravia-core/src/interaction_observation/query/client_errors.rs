@@ -177,7 +177,10 @@ impl ObservationStore {
                 ObservationQueryError::InvalidFilter
             );
         }
-        let window = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
+        let mut window = query_window(q.start_at, q.end_at, q.anchor_at, q.window_index)?;
+        if q.live_window {
+            window.bounded_end = false;
+        }
         let cursor: Option<ClientErrorCursor> = q
             .cursor
             .as_deref()

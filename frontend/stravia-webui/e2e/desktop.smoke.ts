@@ -1140,6 +1140,7 @@ describe('Stravia desktop smoke', () => {
 
     expect(await adminRequest(replacementPort, '/updates')).toMatchObject({
       download_supported: true,
+      last_failure: null,
       available_update: { version: '9.9.9', download_available: true },
     })
     await openSettingsGroup('general')

@@ -501,29 +501,17 @@ async fn initialize_desktop(
         let gateway_ref = gateway
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("gateway initialization state is missing"))?;
-        // 首次后台检查可能仍持有空状态；先加入该检查，避免它在夹具写入后覆盖候选。
+        // 持 check_lock 写入当前时间的新鲜夹具，与 Gateway 首次后台检查互斥且命中 1h 缓存，
+        // 避免后台检查晚到时在 debug 构建中写入 UPDATE_CHECK_DISABLED 覆盖夹具。
         #[cfg(feature = "desktop-e2e")]
         gateway_ref
             .admin()
-            .check_for_updates(stravia_core::admin::updates::UpdateCheckMode::Automatic)
+            .seed_e2e_available_update(
+                "9.9.9",
+                "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v9.9.9",
+                "https://updates.example.com/api/v1/releases/v9.9.9/manifest.json",
+            )
             .await?;
-        #[cfg(feature = "desktop-e2e")]
-        gateway_ref.storage.settings().set(
-            "product_update_state",
-            &serde_json::json!({
-                "last_success_at": "2026-09-05T00:00:00Z",
-                "last_failure": null,
-                "available_update": {
-                    "version": "9.9.9",
-                    "published_at": "2026-09-04T00:00:00Z",
-                    "release_url": "https://github.com/Stravia-AI/StraviaPlatform/releases/tag/v9.9.9",
-                    "manifest_url": "https://updates.example.com/api/v1/releases/v9.9.9/manifest.json",
-                    "download_available": true,
-                    "download_error": null
-                }
-            })
-            .to_string(),
-        ).await?;
 
         stage = StartupStage::Session;
         startup.stage(&app, stage);

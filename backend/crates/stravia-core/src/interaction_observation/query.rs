@@ -3351,6 +3351,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_errors_live_window_ignores_upper_bound_clock_skew() -> anyhow::Result<()> {
+        use crate::interaction_observation::store::Rejection;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        crate::migrations::migrate_sqlite(&pool, None).await?;
+        let store = ObservationStore::Sqlite(
+            pool,
+            std::sync::Arc::new(super::super::manifest_index::DebugTraceIndex::empty(
+                std::path::Path::new(""),
+            )),
+        );
+        let at = 1_000i64;
+        let metadata = crate::interaction_observation::RequestMetadata::default();
+        store
+            .reject(Rejection {
+                ingress: &IngressStart {
+                    id: "skewed-rejection".into(),
+                    method: "POST".into(),
+                    path: "/v1/responses".into(),
+                    protocol: "openai".into(),
+                },
+                outcome: &RejectedOutcome {
+                    stage: "decode".into(),
+                    code: "model_not_found".into(),
+                    status_code: 404,
+                    failure: None,
+                },
+                metadata: &metadata,
+                debug_enabled: false,
+                occurred_at: at,
+                started_at: at,
+                duration_ms: 0,
+            })
+            .await?;
+
+        // 严格上界（历史窗口）排除 started_at >= end_at 的记录；live_window 放开上界以免疫时钟偏差。
+        let historical = store
+            .client_errors(ClientErrorQuery {
+                start_at: Some(at - 100),
+                end_at: Some(at),
+                live_window: false,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(historical.total, 0);
+        assert!(historical.items.is_empty());
+
+        let live = store
+            .client_errors(ClientErrorQuery {
+                start_at: Some(at - 100),
+                end_at: Some(at - 10),
+                live_window: true,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(live.total, 1);
+        assert_eq!(live.items[0].id, "skewed-rejection");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn interaction_summary_flags_failed_request_and_client_delivery() -> anyhow::Result<()> {
         use crate::interaction_observation::store::Admission;
 

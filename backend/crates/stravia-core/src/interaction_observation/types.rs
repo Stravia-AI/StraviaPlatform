@@ -206,6 +206,8 @@ pub(crate) fn upstream_body_code(body: &serde_json::Value) -> Option<String> {
 pub struct ClientErrorQuery {
     pub start_at: Option<i64>,
     pub end_at: Option<i64>,
+    #[serde(default)]
+    pub live_window: bool,
     pub anchor_at: Option<i64>,
     pub window_index: Option<u32>,
     pub cursor: Option<String>,
@@ -269,6 +271,8 @@ pub struct ClientErrorDetail {
 pub struct UpstreamErrorQuery {
     pub start_at: Option<i64>,
     pub end_at: Option<i64>,
+    #[serde(default)]
+    pub live_window: bool,
     pub anchor_at: Option<i64>,
     pub window_index: Option<u32>,
     pub cursor: Option<String>,
