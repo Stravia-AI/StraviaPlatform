@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## [0.7.8] - 2026-11-27
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
+### Added
+
+- Added named outbound proxy lists and per-connection/update proxy selection (`proxy_mode`: `none`, `system`, or `<proxy_id>`), along with `GET /api/v1/settings/outbound-proxy/system`, `POST /api/v1/settings/outbound-proxy/probe`, and Settings UI controls for managing proxy entries and probing egress IPs.
+- Official Vendor Plugin marketplace sources now follow the configured product update channel: the `beta` channel discovers prerelease standalone plugins while `release` stays on stable releases.
+- Added OS-version-aware native desktop window materials: Windows 11 (build `>= 22000`) enables native Mica backdrop, Windows 10 and unknown builds use an opaque window to avoid DWM drag lag from Acrylic on Windows 10 1903+, macOS retains Sidebar vibrancy, and the host injects `window.__STRAVIA_WINDOW_MATERIAL__` prior to document parsing so the shell and startup view render without first-frame flicker.
+- Added Linux desktop smoke and Linux-hosted KVM Windows WebView2 Desktop E2E testing workflows.
+
+### Changed
+
+- **Breaking for outbound proxy configuration and admin API clients**: Migration `0060_proxy_list_and_selection.sql` (SQLite and PostgreSQL) converts `outbound_proxy` from a single `{url, bypass}` object to a named `{proxies: [...]}` list (removing bypass rules) and replaces `use_proxy` booleans across `providers`, `web_providers`, OAuth sessions, and `update_use_proxy` with `proxy_mode` (`none`, `system`, or `<proxy_id>`). New connections default to `system` (OS proxy on Desktop, process proxy environment variables on Server, direct when unset), while existing disabled connections remain `none`.
+- Reduced runtime resident memory by enabling `mimalloc` (with C allocator override) on Linux server builds, lowering per-connection SQLite page cache from 16 MiB to 8 MiB alongside the 128 MiB `mmap_size` window, and optimizing local runtime caches, observation grouping, pattern detection, and built-in plugin residency.
+- Migrated CI and Release automation to Forgejo Actions with split Cargo/sccache/Wasm caches and Linux-hosted cross-compilation while continuing to publish releases to GitHub Releases and multi-architecture container images to GHCR.
+- Rebuilt and published all eight standalone Wasm vendor plugins (`openai-codex`, `xai-grok`, `command-code`, `devin`, `opencode-free`, `claude-code`, `antigravity`, `kiro`) alongside this release; refresh standalone plugins from the catalog after upgrading the host.
+
+### Fixed
+
+- Model capability trait tags (such as `image_input`, `reasoning`, `structured_output`, or upstream endpoint paths) no longer mask inference or web-search route eligibility; only explicit operation capabilities (`infer`, `search`, `media_image`, `image_output`) restrict route purposes.
+- Updated built-in OpenCode Zen (`https://opencode.ai/inference/openai/v1`) and OpenCode Go (`https://opencode.ai/inference/go/openai/v1`) inference endpoints and required session request headers.
+- Fixed gateway, storage, and desktop consistency issues including desktop port-rebind fallback publication, connect-client apply error path propagation, compaction namespace fingerprint backward compatibility for `proxy_mode = "none"` across migration `0060`, deterministic built-in vendor builds, and settings drawer focus handling.
+- Preserved atomic `partial_trace_count` handoff across observation batch commits, fixed virtualized log auto-scroll races when unpinning (cancelling active `scrollToEnd` convergence and ignoring stale scroll events), and stabilized latency/speed chart E2E assertions against 300ms curve tweens.
+
 ## [0.7.7] - 2026-11-26
 
 ### Verification

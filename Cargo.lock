@@ -7947,7 +7947,7 @@ checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
 
 [[package]]
 name = "stravia-core"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "TinyUFO",
  "anyhow",
@@ -8045,7 +8045,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-credential-protection"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -8067,7 +8067,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-desktop"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -8105,7 +8105,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-devtools"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -8138,7 +8138,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-media"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -8162,7 +8162,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-protocol-codec"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -8180,7 +8180,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-runtime-contract"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8198,7 +8198,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-server"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8247,7 +8247,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-sql"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "futures",
  "log 0.4.35",
@@ -8262,7 +8262,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-antigravity"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -8286,7 +8286,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-base"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "aws-credential-types",
@@ -8310,7 +8310,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-capability-contract-fixture"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "semver",
  "serde",
@@ -8320,7 +8320,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-claudecode"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -8341,7 +8341,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-codex"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -8364,7 +8364,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-command-code"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8382,7 +8382,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-common"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "chrono",
  "http",
@@ -8394,7 +8394,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-devin"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -8419,7 +8419,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-grok"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -8438,7 +8438,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-kiro"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "crc32fast",
@@ -8457,7 +8457,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-lifecycle-contract-fixture"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "semver",
  "serde",
@@ -8467,7 +8467,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-management-contract-fixture"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "semver",
  "serde",
@@ -8477,7 +8477,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-manual-contract-fixture"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "flate2",
  "serde_json",
@@ -8486,7 +8486,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-net-1-0-compat-fixture"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "serde_json",
  "wit-bindgen 0.63.0",
@@ -8494,7 +8494,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-opencode-free"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -8513,7 +8513,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-runtime"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "libc",
@@ -8538,7 +8538,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-sdk"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "base64 0.23.1",
  "regex",
@@ -8552,7 +8552,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-vendor-state-contract-fixture"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "serde_json",
  "stravia-vendor-sdk",
@@ -8560,7 +8560,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-web-access"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "bytes",
  "dom_smoothie",
@@ -8585,7 +8585,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-web-access-contract"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "serde",
@@ -8596,7 +8596,7 @@ dependencies = [
 
 [[package]]
 name = "stravia-web-search"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "async-trait",
  "chrono",
