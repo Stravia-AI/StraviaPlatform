@@ -1080,14 +1080,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up QEMU
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Check host arm64 BuildKit support
         if: matrix.platform == 'linux/arm64'
+        id: buildx-check
+        shell: bash
+        run: |
+          if docker buildx inspect --bootstrap | grep -q 'linux/arm64'; then
+            echo "has_arm64=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_arm64=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: matrix.platform == 'linux/arm64' && steps.buildx-check.outputs.has_arm64 != 'true'
         uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
 
       - name: Build image via BuildKit cross-compilation without publishing
         env:
@@ -1322,13 +1333,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Check host arm64 BuildKit support
+        id: buildx-check
+        shell: bash
+        run: |
+          if docker buildx inspect --bootstrap | grep -q 'linux/arm64'; then
+            echo "has_arm64=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_arm64=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up QEMU
+        if: steps.buildx-check.outputs.has_arm64 != 'true'
         uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
 
       - name: Login to Container Registry
         shell: bash

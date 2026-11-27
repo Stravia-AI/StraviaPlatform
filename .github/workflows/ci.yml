@@ -538,7 +538,13 @@ jobs:
           CARGO_TARGET_DIR="${{ github.workspace }}/target/test-development" \
             STRAVIA_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-server" \
             STRAVIA_STORAGE_HARNESS_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness" \
-            bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin
+            bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest \
+              tests/e2e/admin/test_auth.py::test_development_task_accepts_vite_origin_without_bypassing_csrf -q
+          CARGO_TARGET_DIR="${{ github.workspace }}/target/test-development" \
+            STRAVIA_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-server" \
+            STRAVIA_STORAGE_HARNESS_BINARY="${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness" \
+            bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/admin -q -n auto --dist loadscope -m admin \
+              --deselect tests/e2e/admin/test_auth.py::test_development_task_accepts_vite_origin_without_bypassing_csrf
 
       - name: Show sccache stats
         id: sccache-stats
@@ -705,6 +711,8 @@ jobs:
           task install:web
           if [[ ! -f frontend/stravia-webui/dist/index.html ]]; then
             task build:web
+          else
+            bun run --filter stravia-webui i18n:compile
           fi
           bun run playwright:install:web -- --with-deps chromium
 
