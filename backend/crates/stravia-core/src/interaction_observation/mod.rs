@@ -340,21 +340,21 @@ impl InteractionObservation {
     }
 
     pub(crate) fn debug_state(&self) -> DebugState {
-        let active_partial = self
-            .inner
-            .active_traces
-            .lock()
-            .values()
-            .filter(|trace| trace.manifest().status == "partial")
-            .count() as u64;
+        let partial_trace_count = {
+            let active = self.inner.active_traces.lock();
+            let active_partial = active
+                .values()
+                .filter(|trace| trace.manifest().status == "partial")
+                .count() as u64;
+            self.inner
+                .partial_trace_count
+                .load(Ordering::Acquire)
+                .saturating_add(active_partial)
+        };
         DebugState {
             enabled: self.inner.debug.load(Ordering::Acquire),
             retained_bytes: self.inner.traces.retained_bytes(),
-            partial_trace_count: self
-                .inner
-                .partial_trace_count
-                .load(Ordering::Acquire)
-                .saturating_add(active_partial),
+            partial_trace_count,
             retention_days: self.inner.retention.days(),
         }
     }

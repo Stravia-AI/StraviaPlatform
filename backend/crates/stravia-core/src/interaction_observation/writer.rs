@@ -881,6 +881,7 @@ async fn run_deferred_trace_actions(
     actions: Vec<DeferredTraceAction>,
     debug_trace_index: &super::manifest_index::DebugTraceIndex,
     traces: &super::trace::TraceManager,
+    active_traces: &Mutex<HashMap<String, super::trace::TraceHandle>>,
     persisted_manifests: &mut HashMap<String, TraceManifest>,
     partial_trace_count: &std::sync::atomic::AtomicU64,
 ) {
@@ -986,11 +987,16 @@ async fn run_deferred_trace_actions(
                 {
                     tracing::warn!(trace_id=%manifest.trace_id,%error,"trace manifest persistence failed");
                 }
-                if persisted_partial {
-                    partial_trace_count.fetch_add(1, Ordering::AcqRel);
-                }
                 if let Some(run_id) = run_id {
+                    let mut active = active_traces.lock();
+                    active.remove(&run_id);
+                    if persisted_partial {
+                        partial_trace_count.fetch_add(1, Ordering::AcqRel);
+                    }
+                    drop(active);
                     persisted_manifests.remove(&run_id);
+                } else if persisted_partial {
+                    partial_trace_count.fetch_add(1, Ordering::AcqRel);
                 }
             }
             DeferredTraceAction::DiscardTrace(trace) => {
@@ -2428,13 +2434,13 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                     }
                     if let Some(run_id) = run_id {
                         terminal_facts.remove(&run_id);
-                        let mut active = active_traces.lock();
-                        active.remove(&run_id);
-                        if persisted_partial {
-                            partial_trace_count.fetch_add(1, Ordering::AcqRel);
-                        }
-                        drop(active);
                         if !deferred_finalize_trace {
+                            let mut active = active_traces.lock();
+                            active.remove(&run_id);
+                            if persisted_partial {
+                                partial_trace_count.fetch_add(1, Ordering::AcqRel);
+                            }
+                            drop(active);
                             persisted_manifests.remove(&run_id);
                         }
                     } else if persisted_partial {
@@ -2575,6 +2581,7 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                             post.actions,
                             &debug_trace_index,
                             &traces,
+                            &active_traces,
                             &mut persisted_manifests,
                             &partial_trace_count,
                         )
@@ -2587,6 +2594,16 @@ pub(super) fn spawn(deps: WriterDeps) -> (WriterSender, tokio::task::JoinHandle<
                         for run_id in post.admitted_runs {
                             attribution.abandon_admission(&run_id);
                             replayed_tool_results.remove(&run_id);
+                        }
+                        for action in post.actions {
+                            if let DeferredTraceAction::FinalizeTrace {
+                                run_id: Some(run_id),
+                                ..
+                            } = action
+                            {
+                                active_traces.lock().remove(&run_id);
+                                persisted_manifests.remove(&run_id);
+                            }
                         }
                         for (interaction_id, at) in post.touched_interactions {
                             failures.gaps.insert(interaction_id.clone(), at);
