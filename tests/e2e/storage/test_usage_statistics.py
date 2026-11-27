@@ -531,6 +531,11 @@ def test_client_disconnect_does_not_invent_failure_or_tokens(usage_env):
         assert response.readline().startswith(b"data: ")
         assert env["entered"].wait(10)
         response.close()
+        connection.close()
+        _wait_for(
+            "cancelled request recorded",
+            lambda: stats(env) if stats(env)["total_requests"] == 1 else None,
+        )
     finally:
         connection.close()
         env["release"].set()

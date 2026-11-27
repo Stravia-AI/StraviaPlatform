@@ -480,13 +480,14 @@ def test_retry_failure_and_disconnect_never_add_successful_billing(usage_env):
         assert response.readline().startswith(b"data: ")
         assert env["entered"].wait(10)
         response.close()
+        connection.close()
+        def terminal_amounts():
+            row = stats(env, "models")[0]
+            return row if row["cost"]["unknown_count"] == 4 else None
+        row = _wait_for("retry failure and disconnected attempt amounts", terminal_amounts)
     finally:
         connection.close()
         env["release"].set()
-    def terminal_amounts():
-        row = stats(env, "models")[0]
-        return row if row["cost"]["unknown_count"] == 4 else None
-    row = _wait_for("retry failure and disconnected attempt amounts", terminal_amounts)
     money(row["cost"], "0.00003", 1, 4)
     money(row["billing"], "0.02", 1)
     wait_spent(env, key, "0.02")
