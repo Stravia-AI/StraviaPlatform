@@ -332,7 +332,7 @@
 - **避免混用**：Session 存储、长期记忆（Memory）、控制台对话的浏览器本地历史、调试包。
 
 ### 内置 MCP 与商业版集中式 MCP 管控边界（Built-in MCP / Commercial MCP Hub）
-- **内置 MCP（Built-in MCP，社区版 CE）**：社区版仅通过统一 `/mcp` 端点暴露平台内置工具（如 `StraviaRead`、`generate`、联网搜索等），按 API Key 的 `mcp_access_enabled` 总开关控制可见性；不提供外部 MCP 接入、HTTP 转 MCP 桥接、分组编排或细粒度作用域子路径（`/mcp/category/*`、`/mcp/server/*`、`/mcp/group/*` 返回 404）。
+- **内置 MCP（Built-in MCP，社区版 CE）**：社区版仅通过统一 `/mcp` 端点暴露平台内置工具（如 `StraviaRead`、`StraviaGenerate`、联网搜索等），按 API Key 的 `mcp_access_enabled` 总开关控制可见性；不提供外部 MCP 接入、HTTP 转 MCP 桥接、分组编排或细粒度作用域子路径（`/mcp/category/*`、`/mcp/server/*`、`/mcp/group/*` 返回 404）。
 - **集中式 MCP 管控与 HTTP 转 MCP 桥接（商业版 `StraviaPlatformEE` Pro / Enterprise）**：通过社区版暴露的 `McpCatalogProvider`、`DynamicPlatformToolLoader`、`GatewayExtensionFactory`、`HttpAppExtensions` 与 WebUI 扩展点在商业版仓库中实现并受离线 License capability（`mcp_external`、`mcp_http_bridge`）门禁控制，提供外部 MCP（Streamable HTTP）接入与透明注入、HTTP 转 MCP 桥接（含 Artifact 附件上传与纯文本绑定）、自定义分组、多作用域 `/mcp*` 入口及独立的 API Key MCP 策略表。
 - **避免混用**：MCP Provider、插件、Agent Definition、Route、Webhook、模型绑定、Platform Capability Gate。
 

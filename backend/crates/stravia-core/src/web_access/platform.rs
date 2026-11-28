@@ -40,7 +40,7 @@ impl PlatformTool for InternalReadTool {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read a single path with optional body (object or null); omit it for ordinary reads. For basic public web retrieval use path stravia://search and body.question as plain text, optionally body.allowed_domains as an array of domains; this never starts a research Agent. Public HTTP(S) pages return Markdown and body.question does not answer questions about HTML. Images and files follow platform artifact rules; use body.question for media. Resource paths accept :raw, :download or :1-50 selectors. For media continuation use a turn path with body.question and optional body.attachments. Research continuation is not supported here.",
+            "Read one `path` with optional `body` (object or `null`; omit for ordinary reads).\nWeb: `path: \"stravia://search\"` with `body.question` (plain text) and optional `body.allowed_domains` runs basic retrieval (never starts a research Agent); public HTTP(S) pages return Markdown (`body.question` does not run QA on HTML).\nMedia/Files: Artifact paths follow platform rules; use `body.question` for media, `:raw`/`:download`/line ranges (`:1-50`) for resources, and `stravia://turns/<turn-id>` with `body.question` and optional `body.attachments` for media follow-ups (research continuation is unsupported).",
         )
     }
 

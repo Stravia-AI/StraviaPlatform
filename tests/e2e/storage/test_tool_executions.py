@@ -124,7 +124,7 @@ class ToolHandler(BaseHTTPRequestHandler):
         if results:
             items = [{"role": "assistant", "content": json.dumps(results[-1])}]
         else:
-            name = next(tool["name"] for tool in request["tools"] if "generate" in tool["name"])
+            name = next(tool["name"] for tool in request["tools"] if tool["name"] == "StraviaGenerate")
             items = [{"role": "assistant", "content": "", "tool_calls": [{
                 "id": "fixture_generate", "name": name,
                 "arguments": json.dumps({"type": "image", "input": {"prompt": "source-owned square"}}),
@@ -231,13 +231,13 @@ def test_public_tool_execution_cleanup_and_restart(
         other = admin(session, "POST", "/api/v1/api-keys", {
             "name": "Other Principal", "model_ids": [], "mcp_access_enabled": True,
         })["key"]
-        first = pool.submit(call, key, "generate", {"type": "image", "input": {"prompt": "durable square"}})
+        first = pool.submit(call, key, "StraviaGenerate", {"type": "image", "input": {"prompt": "durable square"}})
         release_first = upstream.images.get(timeout=30)
 
         def inference() -> tuple[dict[str, Any], dict[str, Any]]:
             status, body = http_request("POST", origin + "/v1/chat/completions", {
                 "model": routes["text"]["model_id"], "messages": [{"role": "user", "content": "Generate a square"}],
-                "tools": [{"type": "function", "function": {"name": "generate", "parameters": {"type": "object"}}}],
+                "tools": [{"type": "function", "function": {"name": "StraviaGenerate", "parameters": {"type": "object"}}}],
                 "stream": False,
             }, headers={"authorization": "Bearer " + key}, timeout=150)
             assert status == 200, (status, body)
@@ -250,7 +250,7 @@ def test_public_tool_execution_cleanup_and_restart(
         source_delivery, source_message = source.result(timeout=90)
         source_path = source_delivery["path"]
         # 来源任务已排队并交接后才提交下一项，明确 gate 顺序，不依赖线程调度。
-        pending = pool.submit(call, key, "generate", {"type": "image", "input": {"prompt": "interrupted square"}})
+        pending = pool.submit(call, key, "StraviaGenerate", {"type": "image", "input": {"prompt": "interrupted square"}})
         pending_path = pending.result(timeout=90)["structuredContent"]["path"]
         assert read(key, first_path)["structuredContent"]["status"] == "running"
         assert read(key, source_path)["structuredContent"]["status"] == "pending"
@@ -310,7 +310,7 @@ def test_public_tool_execution_cleanup_and_restart(
             try:
                 connection.request("POST", "/mcp", json.dumps({
                     "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                        "name": "generate", "arguments": {
+                        "name": "StraviaGenerate", "arguments": {
                             "type": "image", "input": {"prompt": "disconnected square"},
                         }, "_meta": {
                             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -321,7 +321,7 @@ def test_public_tool_execution_cleanup_and_restart(
                     "content-type": "application/json", "authorization": "Bearer " + key,
                     "accept": "application/json, text/event-stream",
                     "MCP-Protocol-Version": "2026-07-28",
-                    "Mcp-Method": "tools/call", "Mcp-Name": "generate",
+                    "Mcp-Method": "tools/call", "Mcp-Name": "StraviaGenerate",
                 })
                 response = connection.getresponse()
                 raise AssertionError(("handoff returned before the controlled disconnect", response.status))
@@ -338,7 +338,7 @@ def test_public_tool_execution_cleanup_and_restart(
         connection.sock.shutdown(socket.SHUT_RDWR)
         with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError)):
             disconnect.result(timeout=30)
-        following = pool.submit(call, key, "generate", {
+        following = pool.submit(call, key, "StraviaGenerate", {
             "type": "image", "input": {"prompt": "after disconnect"},
         })
         # handoff 和旧上游仍阻塞；新上游受理证明断线已释放本地执行门。
@@ -363,7 +363,7 @@ def test_public_tool_execution_cleanup_and_restart(
                 "model": routes["text"]["model_id"],
                 "messages": [{"role": "user", "content": "Generate a cancellable square"}],
                 "tools": [{"type": "function", "function": {
-                    "name": "generate", "parameters": {"type": "object"},
+                    "name": "StraviaGenerate", "parameters": {"type": "object"},
                 }}],
                 "stream": True,
             }), headers={"content-type": "application/json", "authorization": "Bearer " + key})
@@ -390,7 +390,7 @@ def test_public_tool_execution_cleanup_and_restart(
                 response.close()
             connection.close()
 
-        following = pool.submit(call, key, "generate", {
+        following = pool.submit(call, key, "StraviaGenerate", {
             "type": "image", "input": {"prompt": "after marker disconnect"},
         })
         # 后续调用被供应商受理，证明断连已释放本地执行门；不要求上游撤销旧请求。

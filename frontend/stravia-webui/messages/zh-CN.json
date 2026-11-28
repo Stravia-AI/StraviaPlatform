@@ -80,7 +80,7 @@
   "console_chat_image_input_unsupported": "此模型不支持本条消息或历史对话中的图片，请选择支持图片输入的模型。",
   "markdown_math_error": "公式无法呈现，已保留源码。",
   "markdown_mermaid_error": "图表无法呈现，已保留源码。",
-  "markdown_image_error": "图片不可用。已保留提供的 Artifact 引用。",
+  "markdown_image_error": "图片不可用。",
   "markdown_image_open": "打开图片",
   "markdown_image_download": "下载图片",
   "observation_activity_running": "执行中",

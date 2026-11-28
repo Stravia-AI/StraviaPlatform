@@ -248,7 +248,7 @@ async fn generation_app() -> GenerationApp {
 async fn call_generate(client: &SdkClient, input: Value) -> rmcp::model::CallToolResult {
     client
         .call_tool(
-            CallToolRequestParams::new("generate")
+            CallToolRequestParams::new("StraviaGenerate")
                 .with_arguments(input.as_object().unwrap().clone()),
         )
         .await
@@ -1486,7 +1486,7 @@ async fn generation_gate_controls_discovery_without_injection_permission() {
             .unwrap()
             .tools
             .iter()
-            .all(|tool| tool.name != "generate")
+            .all(|tool| tool.name != "StraviaGenerate")
     );
     app.gateway
         .storage
@@ -1504,11 +1504,11 @@ async fn generation_gate_controls_discovery_without_injection_permission() {
             .unwrap()
             .tools
             .iter()
-            .any(|tool| tool.name == "generate")
+            .any(|tool| tool.name == "StraviaGenerate")
     );
     let result = client
         .call_tool(
-            CallToolRequestParams::new("generate").with_arguments(
+            CallToolRequestParams::new("StraviaGenerate").with_arguments(
                 json!({"type":"image","input":{"prompt":"A blue square"}})
                     .as_object()
                     .unwrap()
@@ -1538,7 +1538,7 @@ async fn generation_gate_controls_discovery_without_injection_permission() {
             .unwrap()
             .tools
             .iter()
-            .all(|tool| tool.name != "generate")
+            .all(|tool| tool.name != "StraviaGenerate")
     );
 }
 

@@ -158,6 +158,12 @@ pub(super) async fn configure_gateway_extensions(
         }),
     );
     *gateway.web_search_runner_state.write().await = Some(search_runner);
+    if tools
+        .iter()
+        .any(|tool| tool.external_name() == crate::media_generation::platform::TOOL_NAME)
+    {
+        anyhow::bail!("StraviaGenerate is reserved for the built-in media generation tool");
+    }
     let generate = crate::media_generation::platform::GenerateTool::new(gateway);
     hooks.push(crate::media_generation::platform::hook(generate.clone()));
     tools.push(Arc::new(generate.clone()));

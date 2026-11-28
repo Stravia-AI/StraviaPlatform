@@ -157,4 +157,25 @@ end`,
     expect(html('| 项目 | 详情 |\n| --- | --- |\n| 处理器 | **AMD** |')).toContain('<table>')
     expect(html('| 项目 | 详情 |\n| --- | --- |\n| 处理器 | **AMD** |')).toContain('<strong>AMD</strong>')
   })
+
+  test('omits internal Artifact URIs from rendered image HTML while preserving alt text and URLs', () => {
+    const artifact = `stravia://artifacts/${'a'.repeat(55)}`
+    const downloadUrl = `https://example.com/client/v1/artifacts/downloads/${'1'.repeat(64)}`
+    const source = [
+      `![Generated portrait](${downloadUrl} "${artifact}")`,
+      `![Historical reference](${artifact})`,
+      `![](${downloadUrl} "${artifact}")`,
+    ].join('\n\n')
+    const blocks = markdownBlocks(source)
+    const rendered = blocks.map((block) => block.html).join('')
+    expect(rendered).not.toContain('stravia://')
+    expect(rendered).not.toContain(artifact)
+    expect(rendered).toContain('Generated portrait')
+    expect(rendered).toContain('Historical reference')
+    expect(blocks.flatMap((block) => block.images)).toEqual([
+      { id: 0, url: downloadUrl, alt: 'Generated portrait' },
+      { id: 1, url: artifact, alt: 'Historical reference' },
+      { id: 2, url: downloadUrl, alt: '' },
+    ])
+  })
 })

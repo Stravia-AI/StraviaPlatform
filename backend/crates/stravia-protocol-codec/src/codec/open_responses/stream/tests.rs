@@ -2627,3 +2627,105 @@ fn thinking_resuming_after_a_function_call_opens_a_new_reasoning_item() {
         .collect::<Vec<_>>();
     assert_eq!(reasoning_texts, [Some("first"), Some("second")]);
 }
+
+#[test]
+fn hidden_round_trailing_reasoning_marker_seals_open_item_without_clobbering_prior_round() {
+    use stravia_runtime_contract::protocol::ir::AiItem;
+
+    // Reproduces a hidden platform tool round followed by a second model turn whose trailing
+    // signature-only reasoning block has the same per-turn output_index (1) as an already-sealed
+    // reasoning item from the first model turn.
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-hidden".into(),
+            model: "model".into(),
+        },
+        // Round 1: previewed reasoning (0), trailing redacted reasoning (1), platform marker (2)
+        AiStreamDelta::ThinkingDelta("round1 preview".into()),
+        AiStreamDelta::ItemDone {
+            index: 0,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("<!--sh:round1a-->".into())),
+        },
+        AiStreamDelta::ThinkingDelta(String::new()),
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("<!--sh:round1b-->".into())),
+        },
+        AiStreamDelta::ThinkingDelta("<!--sh:platform-->".into()),
+        // Round 2: assistant text (3), trailing redacted reasoning at per-turn index 1 -> slot 4
+        AiStreamDelta::TextDelta("Here is your image.".into()),
+        AiStreamDelta::ThinkingDelta(String::new()),
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("<!--sh:round2-->".into())),
+        },
+        AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        },
+    ]);
+
+    let bodies = event_bodies(&events);
+    let terminal = bodies
+        .iter()
+        .find(|body| body["type"] == "response.completed")
+        .expect("response completed");
+    let output = terminal["response"]["output"]
+        .as_array()
+        .expect("terminal output");
+    assert_eq!(output.len(), 5, "{output:?}");
+    assert_eq!(output[0]["type"], "reasoning");
+    assert_eq!(output[0]["encrypted_content"], "<!--sh:round1a-->");
+    assert_eq!(output[1]["type"], "reasoning");
+    assert_eq!(
+        output[1]["encrypted_content"], "<!--sh:round1b-->",
+        "prior round's sealed reasoning ciphertext must never be overwritten"
+    );
+    assert_eq!(output[2]["type"], "reasoning");
+    assert_eq!(output[2]["content"][0]["text"], "<!--sh:platform-->");
+    assert!(output[2].get("encrypted_content").is_none());
+    assert_eq!(output[3]["type"], "message");
+    assert_eq!(output[3]["content"][0]["text"], "Here is your image.");
+    assert_eq!(output[4]["type"], "reasoning");
+    assert_eq!(
+        output[4]["encrypted_content"], "<!--sh:round2-->",
+        "trailing reasoning marker in round 2 must seal the newly opened item"
+    );
+    assert_eq!(completed_history(&events), *output);
+}
+
+#[test]
+fn standalone_reasoning_item_done_allocates_fresh_index_on_prior_round_collision() {
+    use stravia_runtime_contract::protocol::ir::AiItem;
+
+    let mut formatter = ResponsesStreamFormatter::new();
+    let events = formatter.format_deltas(&[
+        AiStreamDelta::MessageStart {
+            id: "resp-collision".into(),
+            model: "model".into(),
+        },
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("round1".into())),
+        },
+        AiStreamDelta::ItemDone {
+            index: 1,
+            item: AiItem::reasoning(Vec::new(), Vec::new(), Some("round2".into())),
+        },
+        AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        },
+    ]);
+
+    let terminal = event_bodies(&events)
+        .into_iter()
+        .find(|body| body["type"] == "response.completed")
+        .expect("response completed");
+    let output = terminal["response"]["output"]
+        .as_array()
+        .expect("terminal output");
+    assert_eq!(output.len(), 2, "{output:?}");
+    assert_eq!(output[0]["encrypted_content"], "round1");
+    assert_eq!(output[1]["encrypted_content"], "round2");
+    assert_ne!(output[0]["id"], output[1]["id"]);
+}

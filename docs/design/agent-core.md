@@ -136,7 +136,7 @@ API Key 的 `transparent_injection_enabled` 是总开关；`transparent_injectio
 
 | 调用面 | 权限与暴露 |
 | --- | --- |
-| 客户端显式声明 `StraviaRead`、`generate` 或支持的 hosted/native 声明 | 有效 Key 加适用 Gate；不要求对应透明注入项，不追加 History Recall。 |
+| 客户端显式声明 `StraviaRead`、`StraviaGenerate` 或支持的 hosted/native 声明 | 有效 Key 加适用 Gate；不要求对应透明注入项，不追加 History Recall。 |
 | 模型请求透明注入 | Key 总开关、已选项和适用 Gate 决定本次暴露范围；基础 Read 不要求选中高级工具。 |
 | `POST /mcp` | 另要求 `mcp_access_enabled`，高级工具仍检查平台 Gate；不读取透明注入选择，永不提供 History Recall。 |
 | 内部 Agent | 由可信 registry 和不可变 Definition 装配，不继承父模型的透明注入或 MCP 工具集合。 |

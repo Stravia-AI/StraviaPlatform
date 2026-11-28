@@ -646,6 +646,7 @@ pub(super) async fn complete_canonical_response(
     }
     let background_executions = platform_jobs;
     ledger.apply_hidden_rounds(&mut response);
+    stamp_canonical_item_metadata(context, &mut response);
     if let Err(error) = phase.transition(Phase::SemanticComplete) {
         return CompletionOutcome::Failed(CompletionFailure::hook(error, commit));
     }
@@ -748,47 +749,58 @@ fn fill_canonical_defaults(context: &CompletionContext, response: &mut AiRespons
     if let Some(response_id) = context.generation_chain_id() {
         response.id = response_id.to_owned();
         response.model.clone_from(&context.logical_model);
-        let terminal_item_status = response_item_default_status(response);
-        for (index, item) in response.items.iter_mut().enumerate() {
-            if item.is_compaction() || item.is_compaction_trigger() {
-                continue;
-            }
-            let prefix = if item.thinking_ref().is_some()
-                || item.reasoning_ref().is_some()
-                || item.redacted_thinking_ref().is_some()
-            {
-                "rs"
-            } else if item.function_call_ref().is_some() {
-                "fc"
-            } else if item.function_call_output_ref().is_some() {
-                "fco"
-            } else if item.unknown_ref().is_some() {
-                "item"
-            } else {
-                "msg"
-            };
-            item.set_graph_metadata(
-                Some(
-                    stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
-                        prefix,
-                        response_id,
-                        index,
-                    ),
-                ),
-                item.status().or(Some(terminal_item_status)),
-                if item
-                    .unknown_ref()
-                    .and_then(|raw| raw.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|item_type| item_type.starts_with("stravia:"))
-                {
-                    AiItemProvenance::Platform
-                } else {
-                    AiItemProvenance::Provider
-                },
-                AiItemAudience::Client,
-            );
+    }
+    stamp_canonical_item_metadata(context, response);
+}
+
+fn stamp_canonical_item_metadata(context: &CompletionContext, response: &mut AiResponse) {
+    let Some(response_id) = context.generation_chain_id() else {
+        return;
+    };
+    stamp_canonical_item_metadata_with_id(response_id, response);
+}
+
+fn stamp_canonical_item_metadata_with_id(response_id: &str, response: &mut AiResponse) {
+    let terminal_item_status = response_item_default_status(response);
+    for (index, item) in response.items.iter_mut().enumerate() {
+        if item.is_compaction() || item.is_compaction_trigger() {
+            continue;
         }
+        let prefix = if item.thinking_ref().is_some()
+            || item.reasoning_ref().is_some()
+            || item.redacted_thinking_ref().is_some()
+        {
+            "rs"
+        } else if item.function_call_ref().is_some() {
+            "fc"
+        } else if item.function_call_output_ref().is_some() {
+            "fco"
+        } else if item.unknown_ref().is_some() {
+            "item"
+        } else {
+            "msg"
+        };
+        item.set_graph_metadata(
+            Some(
+                stravia_protocol_codec::codec::open_responses::formatter::gateway_item_id(
+                    prefix,
+                    response_id,
+                    index,
+                ),
+            ),
+            item.status().or(Some(terminal_item_status)),
+            if item
+                .unknown_ref()
+                .and_then(|raw| raw.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|item_type| item_type.starts_with("stravia:"))
+            {
+                AiItemProvenance::Platform
+            } else {
+                AiItemProvenance::Provider
+            },
+            AiItemAudience::Client,
+        );
     }
 }
 
@@ -1279,5 +1291,279 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn hidden_platform_round_stream_replay_discovers_parent_instead_of_splitting_chain() {
+        use super::super::ledger::retain_hidden_round_item;
+        use super::super::projection::{ClientProjectionSession, ProjectionDelivery};
+        use crate::history_marker::{
+            HistoryMarkerStore, PlatformExecutionState, PlatformMarkerInput,
+        };
+        use std::sync::Arc;
+        use stravia_protocol_codec::{
+            codec::open_responses::{
+                decoder::ResponsesDecoder, stream::ResponsesStreamFormatter,
+            },
+            transform::ThinkingCarrierFacts,
+        };
+        use stravia_runtime_contract::protocol::ids::{
+            GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA, OPEN_RESPONSES_2026_04_24,
+        };
+        use stravia_runtime_contract::protocol::ir::{
+            AiItem, AiStreamDelta, ContentBlock, MessageContent, Role, ToolCall,
+        };
+
+        let ttl = std::time::Duration::from_secs(60);
+        let pool = crate::test_support::migrated_sqlite_pool().await.unwrap();
+        let markers = Arc::new(crate::history_marker::SqlHistoryMarkerStore::sqlite(pool));
+        let backend = Arc::new(crate::turn_chain::test_store().await);
+        let chain = crate::generation_chain::GenerationChain::from_turn_chain(
+            backend,
+            None,
+            crate::runtime_cache::RuntimeCache::tinyufo(16 * 1024 * 1024),
+            crate::history_retention::HistoryRetention::for_tests(),
+        )
+        .with_history_markers(markers.clone());
+        let owner = stravia_runtime_contract::Principal::new("chain-split-owner");
+
+        let mut turn1_input = AiRequest::new(
+            "model",
+            vec![AiItem {
+                role: Role::User,
+                content: MessageContent::Text(Arc::new("Draw a portrait.".into())),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            }],
+        );
+        turn1_input.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
+        let mut turn1 = chain.begin(owner.clone(), turn1_input).await.unwrap();
+        let turn1_id = turn1.id().to_owned();
+
+        let source = crate::history_marker::ThinkingSource {
+            namespace: "gemini:model".into(),
+            protocol: Some(GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA.into()),
+            actual_model: "gemini-4".into(),
+            target_id: "gemini:model".into(),
+            authority: None,
+            issued: Vec::new(),
+        };
+        let mut projection = ClientProjectionSession::new(
+            markers.clone(),
+            owner.clone(),
+            OPEN_RESPONSES_2026_04_24,
+        );
+        let mut formatter = ResponsesStreamFormatter::new();
+        let mut events = formatter.format_deltas(&[AiStreamDelta::MessageStart {
+            id: turn1_id.clone(),
+            model: "model".into(),
+        }]);
+
+        // Round 1: visible thinking (index 0), trailing signature-only thinking (index 1),
+        // and hidden StraviaGenerate tool call (index 2).
+        projection.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: false,
+                may_be_protected: true,
+                stream_unprotected_summaries: false,
+            },
+            vec!["StraviaGenerate".into()],
+            Some(source.clone()),
+        );
+        let call = ToolCall {
+            id: "call_gen_1".into(),
+            name: "StraviaGenerate".into(),
+            arguments: r#"{"type":"image","input":{"prompt":"portrait"}}"#.into(),
+        };
+        let platform_marker = markers
+            .create_platform(
+                &owner,
+                PlatformMarkerInput {
+                    tool_id: "media-generation".into(),
+                    call: call.clone(),
+                    activity: "Generating media".into(),
+                    execution_limit: ttl,
+                },
+            )
+            .await
+            .unwrap();
+        markers
+            .claim_execution(&owner, &platform_marker.reference, "worker", ttl)
+            .await
+            .unwrap();
+        markers
+            .finish_execution(
+                &owner,
+                &platform_marker.reference,
+                "worker",
+                PlatformExecutionState::Completed,
+                HiddenHistorySegment::Platform {
+                    call: call.clone(),
+                    result: ContentBlock::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: serde_json::json!({"path": "stravia://artifacts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+                        content_kind: None,
+                        is_error: Some(false),
+                        cache_control: None,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        for batch in projection
+            .project_live_deltas(
+                vec![
+                    AiStreamDelta::ThinkingDelta("plan portrait".into()),
+                    AiStreamDelta::ThinkingSignature("sig-r1-0".into()),
+                    AiStreamDelta::ToolCallStart {
+                        index: 2,
+                        id: call.id.to_string(),
+                        name: call.name.clone(),
+                    },
+                    AiStreamDelta::ToolCallComplete {
+                        index: 2,
+                        tool_call: call.clone(),
+                    },
+                ],
+                true,
+            )
+            .await
+            .unwrap()
+        {
+            events.extend(formatter.format_deltas(batch.deltas()));
+            projection
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .unwrap();
+        }
+        let mut round1_response = AiResponse::new("r1", "model");
+        round1_response.items = vec![
+            AiItem::thinking("plan portrait", Some("sig-r1-0".into())),
+            AiItem::redacted_thinking("sig-r1-1"),
+            AiItem::function_call(call.clone()),
+        ];
+        stamp_canonical_item_metadata_with_id(&turn1_id, &mut round1_response);
+        let staged1 = projection
+            .project_staged(&mut round1_response, &[("call_gen_1", &platform_marker)])
+            .await
+            .unwrap();
+        events.extend(formatter.format_deltas(staged1.deltas()));
+        projection
+            .report_delivery(staged1, ProjectionDelivery::Sent)
+            .await
+            .unwrap();
+        let hidden_items: Vec<AiItem> = round1_response
+            .items
+            .iter()
+            .filter(|item| retain_hidden_round_item(item))
+            .cloned()
+            .collect();
+
+        // Round 2: assistant text (index 0) and trailing signature-only thinking at local index 1
+        // (same per-turn index as Round 1's sealed reasoning item).
+        projection.begin_model_leg(
+            ThinkingCarrierFacts {
+                indexed: false,
+                may_be_protected: true,
+                stream_unprotected_summaries: false,
+            },
+            vec!["StraviaGenerate".into()],
+            Some(source.clone()),
+        );
+        for batch in projection
+            .project_live_deltas(
+                vec![AiStreamDelta::TextDelta("Here is your portrait.".into())],
+                true,
+            )
+            .await
+            .unwrap()
+        {
+            events.extend(formatter.format_deltas(batch.deltas()));
+            projection
+                .report_delivery(batch, ProjectionDelivery::Sent)
+                .await
+                .unwrap();
+        }
+        let mut round2_response = AiResponse::new("r2", "model");
+        round2_response.items = vec![
+            AiItem::output_text("Here is your portrait."),
+            AiItem::redacted_thinking("sig-r2-1"),
+        ];
+        stamp_canonical_item_metadata_with_id(&turn1_id, &mut round2_response);
+        let staged2 = projection
+            .project_staged(&mut round2_response, &[])
+            .await
+            .unwrap();
+        events.extend(formatter.format_deltas(staged2.deltas()));
+        projection
+            .report_delivery(staged2, ProjectionDelivery::Sent)
+            .await
+            .unwrap();
+        events.extend(formatter.format_deltas(&[AiStreamDelta::Done {
+            stop_reason: "stop".into(),
+        }]));
+
+        round2_response.items.splice(0..0, hidden_items);
+        stamp_canonical_item_metadata_with_id(&turn1_id, &mut round2_response);
+        let item_ids: Vec<&str> = round2_response
+            .items
+            .iter()
+            .filter_map(AiItem::id_ref)
+            .collect();
+        assert_eq!(
+            item_ids,
+            vec![
+                format!("rs_{turn1_id}_0"),
+                format!("rs_{turn1_id}_1"),
+                format!("rs_{turn1_id}_2"),
+                format!("msg_{turn1_id}_3"),
+                format!("rs_{turn1_id}_4"),
+            ],
+            "re-stamped final output must have monotonic, type-accurate, unique item IDs"
+        );
+
+        let chain_source = crate::generation_chain::GenerationSource::Target(source);
+        assert!(turn1.stage(&mut round2_response, &chain_source, None));
+        turn1.persist().await.unwrap();
+
+        // Extract the exact SSE response.completed output and replay it statelessly as Turn 2.
+        let completed = events
+            .iter()
+            .find(|event| event.event.as_deref() == Some("response.completed"))
+            .map(|event| serde_json::from_str::<serde_json::Value>(&event.data).unwrap())
+            .expect("response.completed SSE event");
+        let sse_output = completed["response"]["output"]
+            .as_array()
+            .expect("SSE output array");
+        assert_eq!(sse_output.len(), 5, "{sse_output:?}");
+
+        let mut next_input = vec![serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "Draw a portrait."
+        })];
+        next_input.extend(sse_output.iter().cloned());
+        next_input.push(serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "Make it modern."
+        }));
+        let mut turn2_request = ResponsesDecoder
+            .decode_request(serde_json::json!({
+                "model": "model",
+                "input": next_input
+            }))
+            .unwrap();
+        turn2_request.meta.source_protocol = Some(OPEN_RESPONSES_2026_04_24);
+
+        let turn2 = chain.begin(owner, turn2_request).await.unwrap();
+        assert_eq!(
+            turn2.parent_id(),
+            Some(turn1_id.as_str()),
+            "stateless SSE replay after a hidden platform round must link to Turn 1 rather than splitting into a new root"
+        );
+        assert_eq!(turn2.root_id(), turn1_id);
     }
 }

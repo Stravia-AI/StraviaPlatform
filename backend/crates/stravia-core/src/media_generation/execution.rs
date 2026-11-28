@@ -132,7 +132,7 @@ pub(crate) async fn generate_parsed(
         crate::mcp::bridge::StandaloneMcpObservation {
             run_id: stravia_runtime_contract::identifier::new_id(),
             principal_id: principal.api_key_id().to_owned(),
-            tool_name: "generate".to_owned(),
+            tool_name: super::platform::TOOL_NAME.to_owned(),
             route_id: route.model_id.to_string(),
             model_display_name: route.display_name.clone(),
             client_request: observation_request.clone(),

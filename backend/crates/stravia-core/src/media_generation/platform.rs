@@ -24,9 +24,9 @@ use crate::{
 };
 
 const TOOL_ID: &str = "media-generation";
-const TOOL_NAME: &str = "generate";
+pub(crate) const TOOL_NAME: &str = "StraviaGenerate";
 const LIMIT: Duration = PUBLIC_BOUNDED_TOOL_EXECUTION_LIMIT;
-const DESCRIPTION: &str = "Generate one image from a prompt, optionally using up to five ordered JPEG/PNG/WebP reference images (owned plain stravia://artifacts/<artifact-id> paths without selectors, or public HTTP(S) image URLs; at most 32 MiB and 25 megapixels each). aspect_ratio and resolution are preferences mapped by the selected image Provider and are not exact guarantees. Returns a stable Artifact path, actual image dimensions, and a 15-minute bearer download_url. Display the image using Markdown ![description](download_url \"stravia://artifacts/<artifact-id>\"), substituting the returned download_url and path; keep the stable path in the title for download recovery and reuse it as a reference image. No extra Read is needed to display a fresh result; use StraviaRead with the path plus the :download selector when a new download link is needed. If link issuance fails after storage, the structured error includes the retained artifact; do not regenerate it. Waits up to 60 seconds, then returns an execution path and status; read that path with StraviaRead and optionally set wait to a number of seconds for status and the original result or error. Cancelling a query stops only its wait. Local cancellation does not guarantee upstream generation or quota consumption stops; retries may repeat generation and consume quota.";
+const DESCRIPTION: &str = "Generate one image from `input.prompt`, optionally with up to 5 ordered JPEG/PNG/WebP `reference_images` (owned `stravia://artifacts/<artifact-id>` paths without selectors, or public HTTP(S) image URLs; max 32 MiB and 25 MP each). `aspect_ratio` and `resolution` are provider preferences, not guarantees.\nReturns `path` (reusable Artifact reference), actual dimensions, and a 15-minute `download_url`. Display the image directly with `![description](download_url)`—no extra `StraviaRead` is needed for a fresh result. Never output any `stravia://` URI in user-facing text, Markdown links, titles, or alt text; keep `path` internal for `reference_images` or `StraviaRead` (`<path>:download`) when a new link is needed. If link issuance fails after storage, the error returns the retained `artifact`; refresh its link instead of regenerating.\nWaits up to 60s before returning a `stravia://tool-executions/<id>` path; poll it via `StraviaRead` with optional `body.wait` (seconds). Cancelling stops only the local wait and may not stop upstream generation or quota use; retries can repeat generation.";
 
 pub(crate) fn input_schema() -> Value {
     json!({
@@ -124,6 +124,9 @@ impl PlatformTool for GenerateTool {
     }
     fn external_name(&self) -> &str {
         TOOL_NAME
+    }
+    fn preserve_external_name(&self) -> bool {
+        true
     }
     fn description(&self) -> Option<&str> {
         Some(DESCRIPTION)

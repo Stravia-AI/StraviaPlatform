@@ -201,8 +201,7 @@ pub(crate) async fn upload_instructions(
         .trim_end_matches('/')
         .replace('\'', "'\\''");
     Ok(Some(format!(
-        r#"When a client needs to submit a local file, explain or execute this client-side upload command. The temporary upload credential below grants only uploads for fifteen minutes and can upload multiple files. Never send a local path for Stravia to fetch. Use the returned `path` in a structured attachment or as the StraviaRead path to read its content.
-Requires curl and a POSIX shell. Set FILE to the local file and MIME to its actual media type.
+        r#"To submit a local file, run or show this client-side upload command (requires curl and a POSIX shell; max 100 MiB per file; never ask Stravia to fetch a local path). The temporary credential grants uploads only for 15 minutes across multiple files. Set `FILE` and its actual `MIME` type:
 ```sh
 FILE='/path/to/file'
 MIME='application/octet-stream'
@@ -210,6 +209,6 @@ BASE='{base}'
 AUTH='Bearer <stravia-upload-key>'
 curl --fail-with-body -sS "$BASE/v1/artifacts" -H "Authorization: $AUTH" -H "Content-Type: $MIME" --data-binary "@$FILE"
 ```
-The response includes the stable `path`. It is not a download credential; only the same Principal may resolve it. Upload at most 100 MiB per file."#
+Use the returned `path` only in structured attachments or `StraviaRead`/`StraviaGenerate` inputs (same Principal only; not a download credential). Never output `stravia://` URIs in user-facing responses."#
     )))
 }

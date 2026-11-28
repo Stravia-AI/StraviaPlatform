@@ -52,7 +52,6 @@ export interface MarkdownImage {
   id: number
   url: string
   alt: string
-  artifact: string | null
 }
 
 export interface MarkdownFragment {
@@ -111,13 +110,11 @@ class ObservationRenderer extends Renderer {
     return block ? `<p>${escaped}</p>` : escaped
   }
 
-  image({ href, text, title }: Tokens.Image): string {
+  image({ href, text }: Tokens.Image): string {
     const id = this.images.length
-    const reference = /^stravia:\/\/artifacts\/[a-z]{55}$/
-    const artifact = reference.test(title ?? '') ? title! : reference.test(href) ? href : null
-    this.images.push({ id, url: href, alt: text, artifact })
+    this.images.push({ id, url: href, alt: text })
     // URL 不进入普通 HTML sink；只有受控 DOM 渲染器可以加载图片。
-    return `<span data-markdown-image="${id}">${escapeHtml(text)}${artifact ? ` <code>${escapeHtml(artifact)}</code>` : ''}</span>`
+    return `<span data-markdown-image="${id}">${escapeHtml(text)}</span>`
   }
 
   fragment(fragment: Omit<MarkdownFragment, 'id'>): string {

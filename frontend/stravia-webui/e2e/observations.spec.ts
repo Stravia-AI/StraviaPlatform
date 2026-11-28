@@ -4049,7 +4049,7 @@ test.describe('Interaction Observation canvas', () => {
     await expect(answer.locator('.markdown-render-error')).toHaveCount(4)
   })
 
-  test('previews only configured Artifact image grants and retains references when links expire', async ({ page }) => {
+  test('previews only configured Artifact image grants without exposing Artifact URIs', async ({ page }) => {
     const artifact = `stravia://artifacts/${'a'.repeat(55)}`
     const validToken = '1'.repeat(64)
     const expiredToken = '2'.repeat(64)
@@ -4108,6 +4108,8 @@ test.describe('Interaction Observation canvas', () => {
       const viewer = page.getByRole('dialog', { name: 'Open image', exact: true })
       await expect(viewer).toBeVisible()
       await expect(viewer.getByRole('img', { name: 'Generated portrait', exact: true })).toBeVisible()
+      await expect(viewer).not.toContainText('stravia://')
+      await expect(viewer).not.toContainText(artifact)
       const downloadPromise = page.waitForEvent('download')
       await viewer.getByRole('link', { name: 'Download image', exact: true }).click()
       const download = await downloadPromise
@@ -4119,13 +4121,22 @@ test.describe('Interaction Observation canvas', () => {
       await expect(conversation.getByRole('button', { name: 'Open image', exact: true })).toBeFocused()
       await expect(conversation.getByRole('link', { name: 'Download image', exact: true })).toHaveCount(1)
       await expect(conversation).toContainText('Image unavailable')
-      await expect(conversation).toContainText(artifact)
+      await expect(conversation).not.toContainText('stravia://')
+      await expect(conversation).not.toContainText(artifact)
       await expect(conversation.getByRole('img', { name: 'External tracker', exact: true })).toHaveCount(0)
       expect(externalRequests).toBe(0)
       expect(downloads.filter((token) => token === expiredToken)).toHaveLength(1)
       await page.reload()
       await expect(portrait).toBeVisible()
-      await expect(conversation).toContainText(artifact)
+      await expect(conversation).toContainText('Image unavailable')
+      await expect(conversation).not.toContainText('stravia://')
+      await expect(conversation).not.toContainText(artifact)
+      await conversation.getByRole('button', { name: 'Open image', exact: true }).click()
+      await expect(viewer).toBeVisible()
+      await expect(viewer).not.toContainText('stravia://')
+      await expect(viewer).not.toContainText(artifact)
+      await page.keyboard.press('Escape')
+      await expect(viewer).toHaveCount(0)
       expect(externalRequests).toBe(0)
     } finally {
       server.closeAllConnections()
