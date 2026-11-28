@@ -2,7 +2,7 @@
 
 Stravia Desktop 使用 Tauri updater 的独立签名密钥。GitHub Release 仍是更新产物、清单与签名的权威来源；应用更新发现默认通过内置的生产更新分发服务进行，也可用 `STRAVIA_UPDATER_URL` 覆盖，该服务提供 GitHub 兼容的 Release 列表与重写后的清单，`release_url` 仍指向官方 GitHub Release。发布流程要求 Windows x86_64、Windows ARM64、Linux x86_64、Linux ARM64、macOS Intel、macOS Apple Silicon 六个平台的 updater 产物与签名全部存在，才会生成 `stravia-updater.json` 并公开 Release。
 
-Server 压缩包发布 Linux x86_64/ARM64 GNU 和 Windows x86_64/ARM64 版本；不再提供 Linux musl 静态二进制包。容器镜像仍使用 Debian 基础镜像。
+Server 压缩包发布 Linux x86_64/ARM64 GNU 和 Windows x86_64/ARM64 版本；不再提供 Linux musl 静态二进制包。容器镜像仍使用 Debian 基础镜像：正式发布任务通过 `.github/docker/release.Dockerfile`（`debian:trixie-slim`）直接打包 `build-linux-x64` 产出的 `linux-x86_64-gnu` / `linux-aarch64-gnu` 服务端二进制以消除重复编译，根目录 `Dockerfile` 继续保留给源码构建与非发布态跨架构构建校验。
 
 容器 WebUI 依赖安装层必须同时复制 workspace manifests、`bun.lock` 和 `patches/`，再运行锁定安装；补丁变化必须使该层缓存失效。不得因补丁仅用于桌面测试而从容器安装输入或 `patchedDependencies` 中移除它。Rust 编译层还必须保留 `frontend/stravia-webui/src/assets/icons/` 的原始 SVG（供 Vendor Plugins 编译时内嵌品牌图标）和 `frontend/stravia-webui/static/stravia-logo.svg`（供 Gateway 与插件管理器内嵌）；WebUI 的 `dist` 不能替代这些源文件。
 

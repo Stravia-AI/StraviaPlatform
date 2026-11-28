@@ -1399,6 +1399,7 @@ jobs:
     if: needs.prepare.outputs.publish == 'true'
     needs:
       - prepare
+      - build-linux-x64
       - prepare-draft
     runs-on: ubuntu-latest
     permissions:
@@ -1407,6 +1408,39 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Download prebuilt Linux x86_64 server archive
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: server-linux-x86_64-gnu
+          path: prebuilt-server/amd64
+
+      - name: Download prebuilt Linux aarch64 server archive
+        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: server-linux-aarch64-gnu
+          path: prebuilt-server/arm64
+
+      - name: Stage multi-arch server binaries for Docker build context
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p docker-context/linux/amd64 docker-context/linux/arm64
+          tar -xzf "prebuilt-server/amd64/stravia-server-v${VERSION}-linux-x86_64-gnu.tar.gz" \
+            -O "stravia-server-v${VERSION}-linux-x86_64-gnu/stravia-server" \
+            > docker-context/linux/amd64/stravia-server
+          tar -xzf "prebuilt-server/arm64/stravia-server-v${VERSION}-linux-aarch64-gnu.tar.gz" \
+            -O "stravia-server-v${VERSION}-linux-aarch64-gnu/stravia-server" \
+            > docker-context/linux/arm64/stravia-server
+          chmod 0755 docker-context/linux/amd64/stravia-server docker-context/linux/arm64/stravia-server
+          amd64_info="$(file docker-context/linux/amd64/stravia-server)"
+          arm64_info="$(file docker-context/linux/arm64/stravia-server)"
+          echo "amd64 binary: ${amd64_info}"
+          echo "arm64 binary: ${arm64_info}"
+          [[ "${amd64_info}" == *"x86-64"* ]] || { echo "ERROR: expected x86-64 binary: ${amd64_info}" >&2; exit 1; }
+          [[ "${arm64_info}" == *"ARM aarch64"* ]] || { echo "ERROR: expected ARM aarch64 binary: ${arm64_info}" >&2; exit 1; }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1437,7 +1471,7 @@ jobs:
           [[ -n "${REGISTRY_PASS}" ]] || { echo 'Missing CONTAINER_REGISTRY_TOKEN (or RELEASE_GITHUB_TOKEN) secret' >&2; exit 1; }
           printf '%s\n' "${REGISTRY_PASS}" | docker login "${CONTAINER_REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
 
-      - name: Build and push multi-architecture image from Linux x64
+      - name: Build and push multi-architecture image from prebuilt Linux binaries
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -1456,6 +1490,7 @@ jobs:
             )
           fi
           docker buildx build \
+            --file .github/docker/release.Dockerfile \
             --platform linux/amd64,linux/arm64 \
             --push \
             --provenance=false \
@@ -1465,7 +1500,7 @@ jobs:
             --label "org.opencontainers.image.version=${VERSION}" \
             --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
             "${tags[@]}" \
-            .
+            docker-context
 
   publish-release:
     name: Publish release
