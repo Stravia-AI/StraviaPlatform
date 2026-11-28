@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Aligned the Antigravity vendor plugin with official Antigravity CLI `1.5.18` (`cl=1030252320`): updated `User-Agent`, switched `streamGenerateContent` HTTP/1.1 framing from `Transfer-Encoding: chunked` to buffered `Content-Length` (matching `ccpahttp.(*Transport).Stream`), consolidated tool `functionDeclarations` into a single tool object (matching `ccpa.buildFunctionDeclarations`), added `request.labels.trajectory_source = "CORTEX_TRAJECTORY_SOURCE_CLI"`, set `systemInstruction.role = "user"` when `system_prompt_prefix` is active (and preserved `role` on raw Gemini `systemInstruction`), and refreshed sanitized native capture fixtures. TLS ClientHello parameters remain unchanged (`revision: 2`). Rebuild and re-import the standalone Antigravity plugin to apply this alignment.
+
 ### Fixed
 
 - Gemini imported-tool-history validation fallback (`skip_thought_signature_validator`) now matches Gemini 3+ versioned models (`major >= 3`, including `gemini-4-neon`, `gemini-4-hydrogen`, and `gemini-<major>.<minor>-*`) on both the official Gemini `generativelanguage.googleapis.com` endpoint and Antigravity's default native endpoint, while continuing to exclude Gemini 2.5 and earlier, unversioned aliases, and unverified endpoints. This prevents HTTP 400 missing-`thought_signature` errors when continuing an unsigned tool loop across models (for example switching between `gemini-4-hydrogen` and `gemini-4-neon` over Open Responses). Rebuild and re-import the standalone Antigravity plugin to apply this fix.

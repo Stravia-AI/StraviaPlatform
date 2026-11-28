@@ -197,6 +197,21 @@ CLI 1.3.2 历史记录中的 Gemini 3.8 Flash Medium/High 预算分别为 `4000`
 
 ## 6. 本地及真实账号验证与限制
 
+### 2026-11-28：CLI 1.5.18 官方发行与隔离推理抓包
+
+当日核对，[GitHub 官方 latest release API](https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest) 的稳定版与 [Linux amd64 官方 updater manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) 的版本一致，均为 `1.5.18`（GitHub 发布于 2026-11-26）。[Linux x64 GitHub 发行包](https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.18/agy_cli_linux_x64.tar.gz)的 asset SHA-256 为 `a4960723ed9cf5b5ac72ed541db8df4d62741795261eb93a4681006ccb23d5ad`；manifest 指向独立下载地址并提供 SHA-512，不凭版本一致断言字节相同。
+
+在临时 HOME/XDG、空工作区、经授权从生产只读数据库提取的临时 consumer access token（不复制或刷新 refresh token）、进程级 CA 与 loopback HTTPS 代理（`HTTPS_PROXY`）下，独立采集五组 `1.5.18` 样本：转发真实 Google 上游并返回 HTTP 200 及 `OK` 输出的三组（`gemini-3.8-flash-low`、`gemini-4-hydrogen-medium`、`gemini-4-hydrogen-xhigh`），以及本地合成 SSE 终止的两组（`gemini-4-neon-xhigh`、`claude-sonnet-5-5-low`）；并对照本机 `1.5.11` 同条件抓包。原始 HOME 与生产数据库未写入；未保留凭据、账号或项目 ID、提示正文或响应正文。完整脱敏结构见 [CLI 1.5.18 fixture](../../backend/crates/stravia-vendor-antigravity/tests/cli-request-1.5.18.json)，同连接 TLS/HTTP 夹具已同步刷新至 [inference fixture](../../backend/crates/stravia-core/src/plugin/network/shape/fixtures/antigravity-inference.json)、[XHigh repeat fixture](../../backend/crates/stravia-core/src/plugin/network/shape/fixtures/antigravity-inference.repeat.json) 与 [loadCodeAssist fixture](../../backend/crates/stravia-core/src/plugin/network/shape/fixtures/antigravity.json)。
+
+与 `1.5.13` 相比，实测网络抓包及 `1.5.18` 二进制反汇编共同证实四项出站协议变化：
+
+- **身份 UA**：`antigravity/cli/1.5.18 (aidev_client; os_type=linux; arch=amd64; cl=1030252320; auth_method=consumer)`。
+- **推理 HTTP/1.1 帧封装**：`POST /v1internal:streamGenerateContent?alt=sse` 不再使用 `Transfer-Encoding: chunked`，改为与所有一元 RPC 相同的显式 `Content-Length` 缓冲请求，头顺序为 `Host`、`User-Agent`、`Content-Length`、`Authorization`、`Content-Type`、`Accept-Encoding`（二进制由 `ccpahttp.(*Transport).Stream` 与 `Unary` 共用同一请求构造路径）。
+- **工具声明合并**：`request.tools` 不再按每个函数拆成独立工具对象，而是由 `ccpa.buildFunctionDeclarations` 合并为单个 `{"functionDeclarations": [...]}` 对象（该次捕获含 15 个内置声明）。
+- **新增 `trajectory_source` 标签与 `systemInstruction.role`**：`request.labels` 由 9 键增至 10 键，新增 `"trajectory_source": "CORTEX_TRAJECTORY_SOURCE_CLI"`（`utils.GetModelRequestCustomMetadata` 与 `startConversation` 枚举值 `17`）；`request.systemInstruction` 携带 `"role": "user"`（296 字节身份前缀 SHA-256 `acea3799fe9d52bc0fbabb261219491f2e707e87f12a337a6d1c81aa717bcd39` 不变）。
+
+ClientHello 的 legacy version、cipher suites、EC point formats、supported groups、signature algorithms、ALPN（`http/1.1`）、supported versions、key share groups、extensions 及 JA3（`03117a8ed39ef02427ebbc39f121275c`）/JA4（`t13d1312h1_f57a46bbacb6_f50d94e863eb`）均与 `1.5.8` 样本完全一致，故宿主 shape 保持 `revision: 2`，仅刷新 provenance 元数据。代理限制 ALPN 为 HTTP/1.1，仅代表 Linux amd64 consumer print 模式，不外推为其他平台或完整 TLS/TCP 等价。
+
 ### 2026-11-20：CLI 1.5.13 官方发行证据
 
 当日核对，[GitHub 官方 latest release API](https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest) 的稳定版与 [Linux amd64 官方 updater manifest](https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json) 的版本一致，均为 `1.5.13`；GitHub 发布于 2026-11-19 21:48:43 UTC，非预发布。[Linux x64 GitHub 发行包](https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.13/agy_cli_linux_x64.tar.gz)的 asset SHA-256 为 `7fa9cc6df0d09562693d637c406a86c1b0f52ab3364714b1fd2d79cc6060d4b2`；manifest 指向另一个下载地址并提供 SHA-512，不能仅凭版本一致断言两个归档字节相同。[发行说明](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.5.13)称在 ADC 登录和企业模型网关下新增 Gemini 4 Neon 模型支持，并修复自定义模型的 `modelFeatures=false` 被忽略等问题。这些是官方发布元数据与说明，不是网络抓包，也不是上游接受 Stravia 请求的证据。

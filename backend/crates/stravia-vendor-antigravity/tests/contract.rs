@@ -647,6 +647,10 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
     );
     let first_labels = &first["request"]["labels"];
     assert_eq!(first_labels["last_step_index"], "0");
+    assert_eq!(
+        first_labels["trajectory_source"],
+        "CORTEX_TRAJECTORY_SOURCE_CLI"
+    );
     assert_eq!(first_labels["used_claude"], "false");
     assert_eq!(first_labels["used_claude_conservative"], "false");
     assert_eq!(first_labels["used_non_gemini_model"], "false");
@@ -660,6 +664,7 @@ async fn trusted_model_turn_gap_marks_lifecycle_counts_unknown() {
     let labels = &last["request"]["labels"];
     assert!(labels.get("request_id").is_none());
     assert!(labels.get("last_step_index").is_none());
+    assert_eq!(labels["trajectory_source"], "CORTEX_TRAJECTORY_SOURCE_CLI");
     assert_eq!(labels["used_claude_conservative"], "true");
     assert_eq!(labels["used_non_gemini_model"], "true");
     server.abort();
@@ -1829,6 +1834,7 @@ async fn system_prompt_prefix_applies_across_client_protocols() {
         let contents = body["contents"].as_array().unwrap();
         let system = parts[0]["text"].as_str().unwrap();
         if enabled != Some(false) {
+            assert_eq!(body["systemInstruction"]["role"], "user", "{name}");
             assert_eq!(
                 parts.len(),
                 1,
@@ -2066,7 +2072,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
                     .collect()
             })
             .collect();
-        assert_eq!(groups, [["read"], ["list"]]);
+        assert_eq!(groups, [["read", "list"]]);
     };
     let call = output
         .items
@@ -2096,11 +2102,12 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             .unwrap();
         assert!(!headers.contains_key("x-downstream-secret"));
         assert!(!headers.contains_key("x-goog-api-client"));
-        assert_eq!(headers["transfer-encoding"], "chunked");
+        assert!(!headers.contains_key("transfer-encoding"));
+        assert_eq!(headers["content-length"], body.len().to_string());
         assert_eq!(headers["accept-encoding"], "gzip");
         assert_eq!(
             headers["user-agent"],
-            "antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)"
+            "antigravity/cli/1.5.18 (aidev_client; os_type=linux; arch=amd64; cl=1030252320; auth_method=consumer)"
         );
         let body: Value = serde_json::from_slice(body).unwrap();
         assert_eq!(body["project"], "test-project");
@@ -2134,6 +2141,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
             &json!({
                 "request_id": format!("{trajectory}-0"),
                 "cascade_id": cascade, "root_cascade_id": cascade, "trajectory_id": trajectory,
+                "trajectory_source": "CORTEX_TRAJECTORY_SOURCE_CLI",
                 "last_step_index": "0", "used_claude": "false",
                 "used_claude_conservative": "true", "used_non_gemini_model": "true"
             })
@@ -2141,7 +2149,7 @@ async fn oauth_and_inference_enforce_native_wire_at_real_http_boundary() {
         assert!(body["request"].get("cachedContent").is_none());
         assert_read_list_groups(&body["request"]);
         let tools = body["request"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 2);
         assert!(
             tools
                 .iter()
