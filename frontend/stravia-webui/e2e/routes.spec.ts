@@ -2701,3 +2701,67 @@ test('Model editor pools same-model accounts, deduplicates strategy labels, and 
   expect(poolD?.config_mode).toBe('shared')
   expect(poolD?.first_token_timeout_ms).toBe(240_000)
 })
+
+for (const locale of ['en-US', 'zh-CN'] as const) {
+  test(`Model editor layer stats deduplicate accounts shared across model groups (${locale})`, async ({ page }) => {
+    await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
+    const zh = locale === 'zh-CN'
+    const providers = [geometryProvider('opencode', 'OpenCode'), geometryProvider('openrouter', 'OpenRouter')]
+    const target = (id: string, provider_id: string, model: string, model_name: string, priority: number) => ({
+      id,
+      model_id: 'shared-account-route',
+      provider_id,
+      model,
+      model_name,
+      route_purposes: ['inference'],
+      enabled: true,
+      priority,
+      first_token_timeout_ms: 120_000,
+      target_retry_budget: 5,
+      target_cooldown_ms: 120_000,
+      config_mode: 'shared',
+      created_at: '2026-08-17T00:00:00Z',
+      thinking_level_map: [],
+    })
+    const saved = {
+      id: 'shared-account-route',
+      model_id: 'shared-account-route',
+      display_name: 'Shared Account Route',
+      balance: 'traffic_equalization',
+      purpose: 'inference',
+      image_generation_bound: false,
+      web_search_bound: false,
+      is_enabled: true,
+      supported_thinking_levels: [],
+      created_at: '2026-08-17T00:00:00Z',
+      targets: [
+        target('t1', 'opencode', 'big-pickle', 'Big Pickle', 20),
+        target('t2', 'opencode', 'flint-40b-free', 'Flint 40B Free', 20),
+        target('t3', 'opencode', 'model-c', 'Model C', 10),
+        target('t4', 'openrouter', 'model-c', 'Model C', 10),
+        target('t5', 'opencode', 'model-d', 'Model D', 10),
+        target('t6', 'opencode', 'model-e', 'Model E', 0),
+      ],
+    }
+
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: providers } }))
+    await page.route('**/api/v1/providers/*/models', (route) => route.fulfill({ json: { data: { models: [] } } }))
+    await page.route('**/api/v1/models/shared-account-route', (route) => route.fulfill({ json: { data: saved } }))
+    await page.route('**/api/v1/models/shared-account-route/target-statuses', (route) =>
+      route.fulfill({ json: { data: [] } }),
+    )
+
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.goto('/models/shared-account-route')
+
+    const lanes = page.locator('[data-slot="target-lane-stack"] [data-slot="target-lane"]')
+    await expect(lanes).toHaveCount(3)
+    await expect(lanes.nth(0).locator('[data-slot="target-lane-stats"]')).toHaveText(
+      zh ? '2 模型组 · 1 账号' : '2 model groups · 1 account',
+    )
+    await expect(lanes.nth(1).locator('[data-slot="target-lane-stats"]')).toHaveText(
+      zh ? '2 模型组 · 2 账号' : '2 model groups · 2 accounts',
+    )
+    await expect(lanes.nth(2).locator('[data-slot="target-lane-stats"]')).toHaveText(zh ? '1 账号' : '1 account')
+  })
+}

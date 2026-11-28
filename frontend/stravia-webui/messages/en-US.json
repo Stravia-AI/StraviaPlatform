@@ -2369,7 +2369,16 @@
   "model_editor_layer_move_up": "Move layer up",
   "model_editor_layer_move_down": "Move layer down",
   "model_editor_layer_merge_upper": "Merge up",
-  "model_editor_layer_stats": "{groups} model groups · {accounts} accounts",
+  "model_editor_layer_stats": [
+    {
+      "declarations": ["input groups", "input accounts", "local accountsPlural = accounts: plural"],
+      "selectors": ["accountsPlural"],
+      "match": {
+        "accountsPlural=one": "{groups} model groups · {accounts} account",
+        "accountsPlural=other": "{groups} model groups · {accounts} accounts"
+      }
+    }
+  ],
   "model_editor_layer_stats_single_group": "{accounts} accounts",
   "model_editor_layer_stats_single_account": "1 account",
   "model_editor_group_config": "Group config",

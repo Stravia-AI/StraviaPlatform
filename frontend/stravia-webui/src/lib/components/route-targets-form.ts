@@ -290,6 +290,16 @@ export function priorityLanes<T extends PriorityLaneMember>(targets: readonly T[
     .map(([priority, laneTargets]) => ({ priority, targets: laneTargets }))
 }
 
+/** 统计目标列表中去重后的供应商账号数（按非空 `providerId` 去重）。 */
+export function countDistinctTargetAccounts(targets: readonly Pick<RouteTargetForm, 'providerId'>[]): number {
+  const providerIds = new Set<string>()
+  for (const target of targets) {
+    const providerId = target.providerId.trim()
+    if (providerId) providerIds.add(providerId)
+  }
+  return providerIds.size
+}
+
 /** 同一优先级层（或停用区）内按精确上游模型 ID 聚合为模型组，保留首次出现顺序。 */
 export function groupLaneTargetsByModel(
   targets: readonly RouteTargetForm[],
