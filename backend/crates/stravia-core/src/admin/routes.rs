@@ -35,6 +35,27 @@ pub struct UnbindRouteInput {
     pub provider_model_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetGroupThinkingResetInput {
+    pub enabled: bool,
+    pub priority: i32,
+    pub model: String,
+    pub level: ThinkingLevel,
+    #[serde(default)]
+    pub include_custom: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetGroupThinkingRegenerateInput {
+    pub enabled: bool,
+    pub priority: i32,
+    pub model: String,
+    #[serde(default)]
+    pub include_custom: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RouteBind {
     OneClick {
@@ -131,6 +152,7 @@ impl<'a> RouteModule<'a> {
         self.prepare_thinking_maps(&[], &mut input.targets).await?;
         self.ensure_thinking_controls_representable(&input.targets)
             .await?;
+        self.resolve_target_config_modes(&[], &mut input.targets)?;
         self.create_record(input).await
     }
 
@@ -200,6 +222,7 @@ impl<'a> RouteModule<'a> {
             self.prepare_thinking_maps(&current.targets, targets)
                 .await?;
             self.ensure_thinking_controls_representable(targets).await?;
+            self.resolve_target_config_modes(&current.targets, targets)?;
         }
         self.change_record(route_id, input).await
     }
@@ -333,6 +356,7 @@ impl<'a> RouteModule<'a> {
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    config_mode: Some(target.config_mode),
                     thinking_level_map: target.thinking_level_map.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -346,7 +370,8 @@ impl<'a> RouteModule<'a> {
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
-                    thinking_level_map: Vec::new(),
+                    config_mode: Some(target.config_mode),
+                    thinking_level_map: target.thinking_level_map,
                 }
             }));
 
@@ -462,6 +487,7 @@ impl<'a> RouteModule<'a> {
                     first_token_timeout_ms: Some(first_token_timeout_ms),
                     target_retry_budget: Some(target_retry_budget),
                     target_cooldown_ms: Some(target_cooldown_ms),
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 };
                 ensure_route_targets_valid(std::slice::from_ref(&target))?;
@@ -569,11 +595,20 @@ impl<'a> RouteModule<'a> {
                         first_token_timeout_ms: Some(first_token_timeout_ms),
                         target_retry_budget: Some(target_retry_budget),
                         target_cooldown_ms: Some(target_cooldown_ms),
+                        config_mode: Some(TargetConfigMode::Shared),
                         thinking_level_map: Vec::new(),
                     }],
                 })
                 .await;
         };
+        let shared_peer = one_click.then(|| {
+            existing.targets.iter().find(|target| {
+                target.enabled
+                    && target.priority == priority
+                    && target.model().as_str() == provider_model_id
+                    && target.config_mode == TargetConfigMode::Shared
+            })
+        }).flatten();
         let mut targets = existing
             .targets
             .iter()
@@ -585,18 +620,56 @@ impl<'a> RouteModule<'a> {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                config_mode: Some(target.config_mode),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
+        let (
+            bound_timeout_ms,
+            bound_retry_budget,
+            bound_cooldown_ms,
+            bound_thinking_map,
+        ) = if let Some(peer) = shared_peer {
+            let compatible = thinking_map::ensure_thinking_map_representable(
+                &provider,
+                &provider_model_id,
+                &provider_model.metadata,
+                &peer.thinking_level_map,
+            )
+            .is_ok();
+            if compatible {
+                (
+                    peer.first_token_timeout_ms,
+                    peer.target_retry_budget,
+                    peer.target_cooldown_ms,
+                    peer.thinking_level_map.clone(),
+                )
+            } else {
+                (
+                    first_token_timeout_ms,
+                    target_retry_budget,
+                    target_cooldown_ms,
+                    Vec::new(),
+                )
+            }
+        } else {
+            (
+                first_token_timeout_ms,
+                target_retry_budget,
+                target_cooldown_ms,
+                Vec::new(),
+            )
+        };
         targets.push(CreateTarget {
             provider_id,
             model: provider_model_id,
             enabled: true,
             priority: Some(priority),
-            first_token_timeout_ms: Some(first_token_timeout_ms),
-            target_retry_budget: Some(target_retry_budget),
-            target_cooldown_ms: Some(target_cooldown_ms),
-            thinking_level_map: Vec::new(),
+            first_token_timeout_ms: Some(bound_timeout_ms),
+            target_retry_budget: Some(bound_retry_budget),
+            target_cooldown_ms: Some(bound_cooldown_ms),
+            config_mode: None,
+            thinking_level_map: bound_thinking_map,
         });
         self.change_locked(
             &existing.model_id,
@@ -635,6 +708,7 @@ impl<'a> RouteModule<'a> {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                config_mode: Some(target.config_mode),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect::<Vec<_>>();
@@ -716,6 +790,26 @@ impl AdminService {
             .regenerate_thinking_map(route_id, target_id)
             .await
     }
+
+    pub async fn reset_target_group_thinking_mapping(
+        &self,
+        route_id: &str,
+        input: TargetGroupThinkingResetInput,
+    ) -> anyhow::Result<RouteConfig> {
+        RouteModule::new(&self.gw)
+            .reset_group_thinking_mapping(route_id, input)
+            .await
+    }
+
+    pub async fn regenerate_target_group_thinking_map(
+        &self,
+        route_id: &str,
+        input: TargetGroupThinkingRegenerateInput,
+    ) -> anyhow::Result<RouteConfig> {
+        RouteModule::new(&self.gw)
+            .regenerate_group_thinking_map(route_id, input)
+            .await
+    }
 }
 
 fn same_target_model(left: &str, right: &str) -> bool {
@@ -742,6 +836,7 @@ fn route_targets_for_update(route: &RouteConfig) -> Vec<CreateTarget> {
             first_token_timeout_ms: Some(target.first_token_timeout_ms),
             target_retry_budget: Some(target.target_retry_budget),
             target_cooldown_ms: Some(target.target_cooldown_ms),
+            config_mode: Some(target.config_mode),
             thinking_level_map: target.thinking_level_map.clone(),
         })
         .collect()

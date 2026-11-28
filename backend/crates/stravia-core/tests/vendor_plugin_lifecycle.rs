@@ -313,6 +313,7 @@ async fn connection(
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
                 target_cooldown_ms: Some(0),
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -1392,6 +1393,7 @@ async fn compatible_update_keeps_continuation_recovery_on_the_original_component
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(1),
                     target_cooldown_ms: Some(0),
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 }]),
                 ..Default::default()

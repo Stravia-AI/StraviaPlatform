@@ -138,6 +138,7 @@ async fn api_key_auth_projection_caches_reads_and_invalidates_immediately() -> a
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }]),
             default_thinking_level: None,

@@ -4,14 +4,18 @@ import { beforeNavigate, goto } from '$app/navigation'
 import { resolve } from '$app/paths'
 import type { Path } from '$app/types'
 import { createQuery, useQueryClient } from '@tanstack/svelte-query'
+import ArrowDownIcon from '@lucide/svelte/icons/arrow-down'
+import ArrowUpIcon from '@lucide/svelte/icons/arrow-up'
 import CheckIcon from '@lucide/svelte/icons/check'
 import CirclePlusIcon from '@lucide/svelte/icons/circle-plus'
+import EllipsisIcon from '@lucide/svelte/icons/ellipsis'
 import GripVerticalIcon from '@lucide/svelte/icons/grip-vertical'
 import ImageIcon from '@lucide/svelte/icons/image'
+import MergeIcon from '@lucide/svelte/icons/merge'
 import MessageSquareIcon from '@lucide/svelte/icons/message-square'
 import PlusIcon from '@lucide/svelte/icons/plus'
-import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw'
 import SearchIcon from '@lucide/svelte/icons/search'
+import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal'
 import Trash2Icon from '@lucide/svelte/icons/trash-2'
 import { tick, untrack } from 'svelte'
 import { toast } from 'svelte-sonner'
@@ -19,23 +23,18 @@ import { admin, currencyQueryOptions, invalidateRouteCatalogs } from '#lib/admin
 import { modelIdFromCatalogId } from '#lib/catalog-model-id.js'
 import { isRouteBindingError, localizeBackendErrorMessage, unrepresentableThinkingTarget } from '#lib/backend-error.js'
 import { startDragAutoscroll } from '#lib/drag-autoscroll.js'
-import { beginTouchDrag, touchDragInProgress } from '#lib/touch-drag.js'
+import { beginPointerDrag } from '#lib/pointer-drag.js'
 import { idNameOption, type SearchComboboxOption } from '#lib/search-combobox-option.js'
 import { formatList } from '#lib/format.js'
 import { currencyForKind } from '#lib/money.js'
 import { routePurposeLabels } from '#lib/logical-model.js'
 import { routePurposes, type RoutePurpose } from '#lib/types.js'
-import { inputValue } from '#lib/utils.js'
 import PriceEditor from '#lib/components/price-editor.svelte'
 import { buildModelCostJson, emptyPriceForm, priceFormFromCost, type PriceForm } from '#lib/components/price-form.js'
 
 import {
-  defaultEffortControl,
-  effortCandidates,
   thinkingControlContext,
-  thinkingControlWritable,
   unrepresentableThinkingLevels,
-  writableThinkingControlKinds,
   type ThinkingControlContext,
 } from '#lib/thinking-control.js'
 import type {
@@ -46,29 +45,44 @@ import type {
   RouteBilling,
   RouteSelectionStrategy,
   TargetRuntimeStatus,
-  TargetThinkingControl,
   ThinkingLevel,
   ThinkingLevelMapping,
 } from '#lib/types.js'
 import {
   addRouteTarget,
   buildRouteTargets,
+  createRouteTarget,
   createRouteTargetForms,
-  isValidTargetRetryBudget,
-  isValidTargetSeconds,
+  extractTargetGroupConfig,
+  groupLaneTargetsByModel,
+  inheritGroupConfigForNewTarget,
+  mergeLaneIntoUpper,
+  moveModelGroupToDock,
+  moveModelGroupToInsertion,
+  moveModelGroupToLane,
   moveRouteTargetToDock,
   moveRouteTargetToInsertion,
-  moveRouteTargetToLane,
-  planRouteTargetInsertion,
+  moveTargetToLaneWithInheritance,
   priorityLanes,
   removeRouteTarget,
   reorderRouteTargetBefore,
   routeSupportedThinkingLevels,
+  stepModelGroup,
+  stepTargetSplitMerge,
+  summarizeTargetGroupConfig,
+  swapAdjacentLanes,
+  THINKING_LEVELS,
+  updateModelGroupConfig,
   type RouteTargetForm,
+  type RouteTargetGroupScope,
   type RouteTargetInsertion,
+  type RouteTargetModelGroup,
+  type TargetGroupConfig,
 } from './route-targets-form.js'
 
-import ModelDetailsDialog from '#lib/components/model-details-dialog.svelte'
+import BatchAddSheet from './model-editor/batch-add-sheet.svelte'
+import GroupConfigSheet from './model-editor/group-config-sheet.svelte'
+import TargetDetailSheet from './model-editor/target-detail-sheet.svelte'
 import ModelSpecification from '#lib/components/model-specification.svelte'
 import PageHeader from '#lib/components/page-header.svelte'
 import SearchCombobox from '#lib/components/search-combobox.svelte'
@@ -77,7 +91,7 @@ import StatusIndicator from '#lib/components/status-indicator.svelte'
 import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js'
 import { Badge } from '#lib/components/ui/badge/index.js'
 import { Button } from '#lib/components/ui/button/index.js'
-import * as Dialog from '#lib/components/ui/dialog/index.js'
+import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js'
 import * as Field from '#lib/components/ui/field/index.js'
 import { Input } from '#lib/components/ui/input/index.js'
 import * as InputGroup from '#lib/components/ui/input-group/index.js'
@@ -95,14 +109,41 @@ interface Props {
   onSaved?: () => void
 }
 
-const thinkingControlKinds = ['effort', 'hidden'] as const
-const thinkingLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+type BillingMode = 'none' | 'per_call' | 'per_token'
+
+type ActiveDrag =
+  | { kind: 'target'; key: string }
+  | { kind: 'group'; keys: string[]; model: string }
+  | null
+
+interface GroupSheetState {
+  open: boolean
+  sessionId: number
+  scope: RouteTargetGroupScope
+  model: string
+}
+
+interface BatchAddSheetState {
+  open: boolean
+  sessionId: number
+  scope: RouteTargetGroupScope
+  model: string
+}
+
 const UNSPECIFIED_THINKING_LEVEL = 'unspecified'
+const purposeIcons = { inference: MessageSquareIcon, image_generation: ImageIcon, web_search: SearchIcon }
+
+const DROP_ZONE_SELECTOR = [
+  '[data-slot="target-priority-connector"]',
+  '[data-slot="target-card"][data-enabled="true"]',
+  '[data-slot="target-lane"]',
+  '[data-slot="target-dock"]',
+].join(', ')
 
 let { model, providers, initialProviderId = '', initialModelId = '', onSaved }: Props = $props()
-const purposeIcons = { inference: MessageSquareIcon, image_generation: ImageIcon, web_search: SearchIcon }
 const initialModel = untrack(() => model)
 const queryClient = useQueryClient()
+
 let form = $state({
   modelId: initialModel?.model_id ?? '',
   purpose: initialModel ? initialModel.purpose : 'inference',
@@ -111,8 +152,6 @@ let form = $state({
   enabled: initialModel?.is_enabled ?? true,
   defaultThinkingLevel: initialModel?.default_thinking_level ?? UNSPECIFIED_THINKING_LEVEL,
 })
-
-type BillingMode = 'none' | 'per_call' | 'per_token'
 
 const initialBilling = untrack(() => initialModel?.billing ?? null)
 let billingMode = $state<BillingMode>(initialBilling?.mode ?? 'none')
@@ -138,11 +177,28 @@ let targets = $state<RouteTargetForm[]>(
 let saving = $state(false)
 let saveError = $state('')
 let initialized = $state(false)
+
 let targetEditorOpen = $state(false)
 let targetEditorTarget = $state<RouteTargetForm>()
 let targetEditorIsNew = $state(false)
+let targetEditorInitiallyEnabled = $state(false)
 let targetEditorClosing = false
-let draggedTargetKey = $state('')
+
+let groupSheet = $state<GroupSheetState>({
+  open: false,
+  sessionId: 0,
+  scope: { enabled: false },
+  model: '',
+})
+
+let batchAddSheet = $state<BatchAddSheetState>({
+  open: false,
+  sessionId: 0,
+  scope: { enabled: false },
+  model: '',
+})
+
+let activeDrag = $state<ActiveDrag>(null)
 let leaveConfirmOpen = $state(false)
 let pendingNavigation = $state<() => void | Promise<void>>()
 
@@ -154,6 +210,7 @@ function draftTarget(target: RouteTargetForm) {
     model: target.model,
     enabled: target.enabled,
     priority: target.priority,
+    configMode: target.configMode,
     firstTokenTimeoutSeconds: target.firstTokenTimeoutSeconds,
     targetRetryBudget: target.targetRetryBudget,
     targetCooldownSeconds: target.targetCooldownSeconds,
@@ -198,13 +255,26 @@ beforeNavigate((navigation) => {
 
 const availableProviders = $derived(providers)
 const targetLanes = $derived(priorityLanes(targets))
+const enabledTargetCount = $derived(targets.filter((target) => target.enabled).length)
 const disabledTargets = $derived(targets.filter((target) => !target.enabled))
-const isDraggingTarget = $derived(Boolean(draggedTargetKey))
+const disabledGroups = $derived(groupLaneTargetsByModel(disabledTargets, { enabled: false }))
+const isDragging = $derived(activeDrag !== null)
+const draggedKeys = $derived.by(() => {
+  if (!activeDrag) return new Set<string>()
+  return activeDrag.kind === 'target' ? new Set([activeDrag.key]) : new Set(activeDrag.keys)
+})
 
-// 目标卡片拖到视口外的层或停用区时，页面需随指针滚动；浏览器自带的边缘滚动圈太窄，且被底部固定操作栏盖住。
-// 触屏拖拽（手柄 touch-action: none）更没有任何浏览器自带的滚动，同样依赖它。
+const knownInventories = $derived(
+  new Map(
+    targets
+      .filter((target) => target.providerId && !target.loading && target.inventory.length > 0)
+      .toReversed()
+      .map((target) => [target.providerId, target.inventory] as const),
+  ),
+)
+
 $effect(() => {
-  if (isDraggingTarget) return startDragAutoscroll()
+  if (isDragging) return startDragAutoscroll()
 })
 
 const canonicalModelsQuery = createQuery(() => ({
@@ -227,7 +297,6 @@ const targetStatusesQuery = createQuery(() => ({
 }))
 const targetStatusesFailed = $derived(Boolean(savedRouteId) && targetStatusesQuery.isError)
 const targetStatusMap = $derived.by(() => {
-  // A failed refresh must not keep showing stale status as if it were current.
   const statuses = Object.create(null) as Record<string, TargetRuntimeStatus>
   if (targetStatusesFailed) return statuses
   for (const status of targetStatusesQuery.data ?? []) {
@@ -239,8 +308,8 @@ const targetStatusMap = $derived.by(() => {
 function targetRuntimeStatus(target: RouteTargetForm): TargetRuntimeStatus | undefined {
   if (!target.persisted || !target.id) return undefined
   const status = targetStatusMap[target.id]
-  const model = target.model.trim()
-  if (!status || status.provider_id !== target.providerId || status.model !== model) return undefined
+  const modelId = target.model.trim()
+  if (!status || status.provider_id !== target.providerId || status.model !== modelId) return undefined
   return status
 }
 
@@ -320,7 +389,11 @@ function selectedSummary(target: RouteTargetForm): ProviderModelSummary | undefi
   return target.inventory.find((item) => item.id === target.model)
 }
 
-async function loadInventory(target: RouteTargetForm, initializeDraft = false): Promise<void> {
+async function loadInventory(
+  target: RouteTargetForm,
+  initializeDraft = false,
+  preserveThinkingMap = false,
+): Promise<void> {
   if (!target.providerId) return
   target.loading = true
   target.validationError = ''
@@ -329,7 +402,8 @@ async function loadInventory(target: RouteTargetForm, initializeDraft = false): 
     if (target.model) {
       const summary = selectedSummary(target)
       target.custom = !summary
-      if (summary && !target.persisted) {
+      if (summary?.name.trim()) target.modelName = summary.name.trim()
+      if (summary && !target.persisted && (!preserveThinkingMap || target.thinkingLevelMap.length === 0)) {
         await loadThinkingMap(target)
         // 初次加载的映射不是表单编辑；只推进该字段基线，保留加载期间的其他草稿。
         if (initializeDraft) acceptImmediateThinkingMap(target, target.thinkingLevelMap)
@@ -347,6 +421,7 @@ async function changeProvider(target: RouteTargetForm, providerId: string): Prom
   if (target.providerId === providerId) return
   target.providerId = providerId
   target.model = ''
+  target.modelName = null
   target.inventory = []
   target.custom = false
   target.persisted = false
@@ -360,7 +435,14 @@ async function selectModel(target: RouteTargetForm, modelId: string): Promise<vo
   target.custom = false
   target.validationError = ''
   target.thinkingLevelMap = []
-  await loadThinkingMap(target)
+  const summary = selectedSummary(target)
+  target.modelName = summary?.name.trim() || null
+  const scope: RouteTargetGroupScope = target.enabled ? { enabled: true, priority: target.priority } : { enabled: false }
+  const peers = targets.filter((candidate) => candidate.key !== target.key)
+  const inherited = target.configMode === 'shared' && inheritGroupConfigForNewTarget(peers, target, scope)
+  if (!inherited || target.thinkingLevelMap.length === 0) {
+    await loadThinkingMap(target)
+  }
 }
 
 async function loadThinkingMap(target: RouteTargetForm): Promise<void> {
@@ -379,6 +461,7 @@ async function loadThinkingMap(target: RouteTargetForm): Promise<void> {
 function useInventory(target: RouteTargetForm): void {
   target.custom = false
   target.model = ''
+  target.modelName = null
   target.validationError = ''
 }
 
@@ -396,9 +479,12 @@ function cloneTarget(target: RouteTargetForm): RouteTargetForm {
 }
 
 function editTarget(target: RouteTargetForm, isNew = false): void {
+  groupSheet.open = false
+  batchAddSheet.open = false
   targetEditorClosing = false
   targetEditorTarget = cloneTarget(target)
   targetEditorIsNew = isNew
+  targetEditorInitiallyEnabled = target.enabled
   targetEditorOpen = true
   if (targetEditorTarget.providerId && (target.loading || targetEditorTarget.inventory.length === 0)) {
     void loadInventory(targetEditorTarget)
@@ -418,6 +504,18 @@ function closeTargetEditor(save: boolean): void {
   if (target) {
     const index = targets.findIndex((candidate) => candidate.key === target.key)
     if (save && index >= 0) {
+      const previous = targets[index]
+      const scopeChanged =
+        previous.enabled !== target.enabled ||
+        previous.priority !== target.priority ||
+        previous.model.trim() !== target.model.trim()
+      if (scopeChanged && target.configMode === 'shared') {
+        const nextScope: RouteTargetGroupScope = target.enabled
+          ? { enabled: true, priority: target.priority }
+          : { enabled: false }
+        const peers = targets.filter((candidate) => candidate.key !== target.key)
+        inheritGroupConfigForNewTarget(peers, target, nextScope)
+      }
       Object.assign(targets[index], cloneTarget(target))
     } else if (!save && targetEditorIsNew && index >= 0) {
       removeRouteTarget(targets, index)
@@ -425,6 +523,7 @@ function closeTargetEditor(save: boolean): void {
   }
   targetEditorTarget = undefined
   targetEditorIsNew = false
+  targetEditorInitiallyEnabled = false
   targetEditorOpen = false
 }
 
@@ -492,9 +591,50 @@ function targetModelIdentity(
   summary: ProviderModelSummary | undefined,
 ): { label: string; technical: boolean } {
   const modelId = target.model.trim()
-  const name = summary?.name.trim()
+  const name = summary?.name.trim() || target.modelName?.trim()
   if (name) return { label: name, technical: name === modelId }
   return modelId ? { label: modelId, technical: true } : { label: m.model_editor_choose_model(), technical: false }
+}
+
+function groupModelSummary(group: RouteTargetModelGroup): ProviderModelSummary | undefined {
+  for (const member of group.targets) {
+    const summary = selectedSummary(member)
+    if (summary) return summary
+  }
+  return undefined
+}
+
+function groupDisplayName(group: RouteTargetModelGroup, summary: ProviderModelSummary | undefined): string {
+  const fromSummary = summary?.name.trim()
+  if (fromSummary) return fromSummary
+  const fromTarget = group.targets.find((member) => member.modelName?.trim())?.modelName?.trim()
+  if (fromTarget) return fromTarget
+  return group.model.trim() || m.model_editor_choose_model()
+}
+
+function formatThinkingRange(levels: readonly ThinkingLevel[]): string {
+  if (levels.length === 0) return ''
+  if (levels.length === 1) return levels[0]
+  return `${levels[0]}–${levels[levels.length - 1]}`
+}
+
+function formatGroupConfigSummary(config: TargetGroupConfig): string {
+  const summary = summarizeTargetGroupConfig(config)
+  const parts = [
+    `${summary.timeoutSeconds}${m.model_editor_unit_seconds()}`,
+    m.model_editor_summary_retries({ count: summary.retryBudget }),
+    `${summary.cooldownSeconds}${m.model_editor_unit_seconds()}`,
+  ]
+  const range = formatThinkingRange(summary.enabledThinkingLevels)
+  if (range) parts.push(m.model_editor_thinking_summary_prefix({ range }))
+  return parts.join(' · ')
+}
+
+function layerStatsLabel(groupCount: number, accountCount: number): string {
+  if (groupCount > 1) return m.model_editor_layer_stats({ groups: groupCount, accounts: accountCount })
+  return accountCount === 1
+    ? m.model_editor_layer_stats_single_account()
+    : m.model_editor_layer_stats_single_group({ accounts: accountCount })
 }
 
 function targetIssueLabels(target: RouteTargetForm, summary: ProviderModelSummary | undefined): string[] {
@@ -510,154 +650,476 @@ function targetConfigured(target: RouteTargetForm): boolean {
   return Boolean(target.providerId && target.model.trim())
 }
 
-function startTargetDrag(event: DragEvent, target: RouteTargetForm): void {
-  // 触屏手柄的拖拽由 Pointer Events 接管；长按后浏览器补发的原生 dragstart 会与之抢同一手势。
-  if (touchDragInProgress()) {
-    event.preventDefault()
+function matchesScope(target: RouteTargetForm, scope: RouteTargetGroupScope): boolean {
+  if (!scope.enabled) return !target.enabled
+  return target.enabled && target.priority === scope.priority
+}
+
+function layerNumberForScope(scope: RouteTargetGroupScope): number | null {
+  if (!scope.enabled) return null
+  const idx = targetLanes.findIndex((lane) => lane.priority === scope.priority)
+  return idx >= 0 ? idx + 1 : null
+}
+
+// Derived state for TargetDetailSheet's group context
+const targetEditorGroupPeers = $derived.by(() => {
+  const edited = targetEditorTarget
+  if (!edited || !edited.model.trim()) return { count: 0, sharedPeerConfig: undefined as TargetGroupConfig | undefined }
+  const normalized = edited.model.trim()
+  const scope: RouteTargetGroupScope = edited.enabled
+    ? { enabled: true, priority: edited.priority }
+    : { enabled: false }
+  const peers = targets.filter(
+    (candidate) => candidate.key !== edited.key && matchesScope(candidate, scope) && candidate.model.trim() === normalized,
+  )
+  const sharedPeer = peers.find((candidate) => candidate.configMode === 'shared')
+  return {
+    count: peers.length + 1,
+    sharedPeerConfig: sharedPeer ? extractTargetGroupConfig(sharedPeer) : undefined,
+  }
+})
+
+// Derived state for GroupConfigSheet
+const activeGroupMembers = $derived.by(() => {
+  if (!groupSheet.open) return [] as RouteTargetForm[]
+  const normalized = groupSheet.model.trim()
+  return targets.filter(
+    (candidate) => matchesScope(candidate, groupSheet.scope) && candidate.model.trim() === normalized,
+  )
+})
+
+const activeGroupData = $derived.by(() => {
+  if (activeGroupMembers.length === 0) return undefined
+  const groups = groupLaneTargetsByModel(activeGroupMembers, groupSheet.scope)
+  return groups[0]
+})
+
+const activeGroupSummary = $derived(activeGroupData ? groupModelSummary(activeGroupData) : undefined)
+const activeGroupModelName = $derived(
+  activeGroupData ? groupDisplayName(activeGroupData, activeGroupSummary) : groupSheet.model,
+)
+const activeGroupLayerNumber = $derived(layerNumberForScope(groupSheet.scope))
+
+// Derived state for BatchAddSheet
+const batchAddExistingProviders = $derived.by(() => {
+  if (!batchAddSheet.open) return new Set<string>()
+  const normalized = batchAddSheet.model.trim()
+  return new Set(
+    targets
+      .filter((candidate) => matchesScope(candidate, batchAddSheet.scope) && candidate.model.trim() === normalized)
+      .map((candidate) => candidate.providerId),
+  )
+})
+
+const batchAddModelName = $derived.by(() => {
+  const normalized = batchAddSheet.model.trim()
+  const sample = targets.find((candidate) => candidate.model.trim() === normalized)
+  if (!sample) return normalized
+  const summary = selectedSummary(sample)
+  return summary?.name.trim() || sample.modelName?.trim() || normalized
+})
+const batchAddLayerNumber = $derived(layerNumberForScope(batchAddSheet.scope))
+
+function openGroupConfig(scope: RouteTargetGroupScope, modelId: string): void {
+  targetEditorOpen = false
+  targetEditorTarget = undefined
+  batchAddSheet.open = false
+  groupSheet = {
+    open: true,
+    sessionId: groupSheet.sessionId + 1,
+    scope,
+    model: modelId,
+  }
+}
+
+function openBatchAdd(scope: RouteTargetGroupScope, modelId: string): void {
+  if (!modelId.trim()) return
+  targetEditorOpen = false
+  targetEditorTarget = undefined
+  groupSheet.open = false
+  batchAddSheet = {
+    open: true,
+    sessionId: batchAddSheet.sessionId + 1,
+    scope,
+    model: modelId,
+  }
+}
+
+function handleApplyGroupConfig(nextConfig: TargetGroupConfig, overwriteCustom: boolean): void {
+  const result = updateModelGroupConfig(targets, groupSheet.scope, groupSheet.model, nextConfig, {
+    overwriteCustom,
+  })
+  groupSheet.open = false
+  if (result.updatedCount > 0) {
+    toast.success(m.model_editor_group_updated_toast({ count: result.updatedCount }))
+  }
+}
+
+function resolveGroupServerPriority(scope: RouteTargetGroupScope, members: RouteTargetForm[]): number | null {
+  if (scope.enabled) return scope.priority
+  const persisted = members.filter((member) => member.persisted && Boolean(member.id))
+  if (persisted.length === 0) return null
+  return persisted[0].priority
+}
+
+function applyServerGroupThinkingResponse(
+  updated: Route,
+  affectedIds: ReadonlySet<string>,
+): ThinkingLevelMapping[] | null {
+  let firstMap: ThinkingLevelMapping[] | null = null
+  const updatedById = new Map(updated.targets.map((item) => [item.id, item]))
+  const nextSavedTargets = savedDraft.targets.map((saved) => {
+    if (!saved.id || !affectedIds.has(saved.id)) return saved
+    const fresh = updatedById.get(saved.id)
+    if (!fresh) return saved
+    const cloned = fresh.thinking_level_map.map((row) => ({ ...row, control: { ...row.control } }))
+    return { ...saved, thinkingLevelMap: cloned }
+  })
+  for (const target of targets) {
+    if (!target.id || !affectedIds.has(target.id)) continue
+    const fresh = updatedById.get(target.id)
+    if (!fresh) continue
+    const cloned = fresh.thinking_level_map.map((row) => ({ ...row, control: { ...row.control } }))
+    target.thinkingLevelMap = cloned
+    if (!firstMap) firstMap = cloned
+  }
+  savedDraft = { ...savedDraft, targets: nextSavedTargets }
+  return firstMap
+}
+
+async function handleRegenerateGroupThinking(overwriteCustom: boolean): Promise<ThinkingLevelMapping[] | null> {
+  if (!savedRouteId) return null
+  const affected = overwriteCustom
+    ? activeGroupMembers
+    : activeGroupMembers.filter((member) => member.configMode === 'shared')
+  const priority = resolveGroupServerPriority(groupSheet.scope, affected)
+  if (priority === null) return null
+  try {
+    const updated = await admin.models.regenerateGroupThinkingMap(savedRouteId, {
+      enabled: groupSheet.scope.enabled,
+      priority,
+      model: groupSheet.model,
+      include_custom: overwriteCustom,
+    })
+    const affectedIds = new Set(affected.map((member) => member.id).filter((id): id is string => Boolean(id)))
+    return applyServerGroupThinkingResponse(updated, affectedIds)
+  } catch (error) {
+    throw new Error(localizeBackendErrorMessage(error))
+  }
+}
+
+async function handleResetGroupThinkingRow(
+  level: ThinkingLevel,
+  overwriteCustom: boolean,
+): Promise<ThinkingLevelMapping[] | null> {
+  if (!savedRouteId) return null
+  const affected = overwriteCustom
+    ? activeGroupMembers
+    : activeGroupMembers.filter((member) => member.configMode === 'shared')
+  const priority = resolveGroupServerPriority(groupSheet.scope, affected)
+  if (priority === null) return null
+  try {
+    const updated = await admin.models.resetGroupThinkingMapping(savedRouteId, {
+      enabled: groupSheet.scope.enabled,
+      priority,
+      model: groupSheet.model,
+      level,
+      include_custom: overwriteCustom,
+    })
+    const affectedIds = new Set(affected.map((member) => member.id).filter((id): id is string => Boolean(id)))
+    return applyServerGroupThinkingResponse(updated, affectedIds)
+  } catch (error) {
+    throw new Error(localizeBackendErrorMessage(error))
+  }
+}
+
+function handleBatchAddSubmit(
+  providerIds: string[],
+  loadedInventories: ReadonlyMap<string, ProviderModelSummary[]>,
+): void {
+  const scope = batchAddSheet.scope
+  const modelId = batchAddSheet.model.trim()
+  const modelName = batchAddModelName !== modelId ? batchAddModelName : null
+  batchAddSheet.open = false
+  if (providerIds.length === 0 || !modelId) return
+
+  const created: { target: RouteTargetForm; inherited: boolean }[] = []
+  for (const providerId of providerIds) {
+    const preloaded = loadedInventories.get(providerId)
+    const draft = createRouteTarget(targets, {
+      providerId,
+      model: modelId,
+      modelName,
+      enabled: scope.enabled,
+      priority: scope.enabled ? scope.priority : 0,
+      configMode: 'shared',
+      inventory: preloaded ? [...preloaded] : [],
+    })
+    const inherited = inheritGroupConfigForNewTarget(targets, draft, scope)
+    targets.push(draft)
+    created.push({ target: draft, inherited })
+  }
+
+  void Promise.all(
+    created.map(async ({ target, inherited }) => {
+      if (target.inventory.length > 0) {
+        const summary = selectedSummary(target)
+        target.custom = !summary
+        const trimmedName = summary?.name?.trim()
+        if (trimmedName) target.modelName = trimmedName
+        if (summary && (!inherited || target.thinkingLevelMap.length === 0)) {
+          await loadThinkingMap(target)
+        }
+      } else {
+        await loadInventory(target, false, inherited)
+      }
+    }),
+  )
+
+  toast.success(m.model_editor_batch_add_added_toast({ count: created.length }))
+}
+
+// ==================== Unified Pointer Drag Engine ====================
+
+async function dropSingleTarget(key: string, zone: Element): Promise<void> {
+  const slot = zone.getAttribute('data-slot')
+  if (!slot) return
+  if (slot === 'target-dock') {
+    if (!moveRouteTargetToDock(targets, key)) {
+      toast.error(m.model_editor_last_enabled_target_required())
+    }
     return
   }
-  draggedTargetKey = target.key
-  event.dataTransfer?.setData('text/plain', target.key)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'all'
-}
 
-function finishTargetDrag(): void {
-  // 部分浏览器会先派发 dragend 再 drop；延后清空以免空层 drop 丢失拖拽源。
-  setTimeout(() => {
-    draggedTargetKey = ''
-  }, 0)
-}
-
-function allowTargetDrop(event: DragEvent): void {
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-}
-
-function draggedKey(event: DragEvent): string {
-  return draggedTargetKey || event.dataTransfer?.getData('text/plain') || ''
-}
-
-async function moveTargetToLane(key: string, priority: number, beforeKey?: string): Promise<void> {
   const target = targets.find((candidate) => candidate.key === key)
   if (!target) return
+
+  if (slot === 'target-priority-connector') {
+    if (!targetConfigured(target)) {
+      toast.error(m.model_editor_complete_target_before_enabling())
+      return
+    }
+    if (!target.enabled && (await blockEnableForUnwritableThinking(target))) return
+    const insertion = insertionFromZone(zone)
+    if (!insertion) return
+    if (!moveRouteTargetToInsertion(targets, key, insertion)) {
+      toast.error(m.model_editor_cannot_create_priority_layer())
+    }
+    return
+  }
+
+  const priority = Number(zone.closest('[data-slot="target-lane"]')?.getAttribute('data-priority'))
+  if (!Number.isFinite(priority)) return
+  const beforeKey = slot === 'target-card' ? (zone.getAttribute('data-key') ?? undefined) : undefined
+
   if (beforeKey && target.enabled && target.priority === priority) {
     reorderRouteTargetBefore(targets, key, beforeKey)
-    draggedTargetKey = ''
     return
   }
   if (!target.enabled && (await blockEnableForUnwritableThinking(target))) return
-  if (!moveRouteTargetToLane(targets, key, priority)) {
+  const moved = moveTargetToLaneWithInheritance(targets, key, priority)
+  if (!moved.ok) {
     toast.error(m.model_editor_complete_target_before_enabling())
     return
   }
-  draggedTargetKey = ''
-}
-
-async function moveTargetToInsertion(key: string, insertion: RouteTargetInsertion): Promise<void> {
-  const target = targets.find((candidate) => candidate.key === key)
-  if (!target) return
-  if (!targetConfigured(target)) {
-    toast.error(m.model_editor_complete_target_before_enabling())
-    return
+  if (moved.inheritedFromGroup) {
+    toast.info(m.model_editor_group_inherited_toast({ provider: targetProviderLabel(target) }))
   }
-  if (!target.enabled && (await blockEnableForUnwritableThinking(target))) return
-  if (!moveRouteTargetToInsertion(targets, key, insertion)) {
-    toast.error(m.model_editor_cannot_create_priority_layer())
-    return
-  }
-  draggedTargetKey = ''
 }
 
-function moveTargetToDock(key: string): void {
-  if (!moveRouteTargetToDock(targets, key)) {
-    toast.error(m.model_editor_last_enabled_target_required())
-    return
-  }
-  draggedTargetKey = ''
-}
-
-async function dropOnLane(event: DragEvent, priority: number, beforeKey?: string): Promise<void> {
-  event.preventDefault()
-  event.stopPropagation()
-  await moveTargetToLane(draggedKey(event), priority, beforeKey)
-}
-
-async function dropOnInsertion(event: DragEvent, insertion: RouteTargetInsertion): Promise<void> {
-  event.preventDefault()
-  event.stopPropagation()
-  await moveTargetToInsertion(draggedKey(event), insertion)
-}
-
-function dropInDock(event: DragEvent): void {
-  event.preventDefault()
-  moveTargetToDock(draggedKey(event))
-}
-
-// 与模板中各落点元素的 data 属性一一对应；卡片落点复用其所在层。
-const TOUCH_DROP_ZONES = [
-  '[data-slot="target-card"][data-enabled="true"]',
-  '[data-slot="target-priority-connector"]',
-  '[data-slot="target-lane"]',
-  '[data-slot="target-dock"]',
-].join(', ')
-
-async function dropTouchTarget(key: string, zone: Element | null): Promise<void> {
-  try {
-    const slot = zone?.getAttribute('data-slot')
-    if (!zone || !slot) return
-    if (slot === 'target-dock') {
-      moveTargetToDock(key)
-    } else if (slot === 'target-priority-connector') {
-      const position = zone.getAttribute('data-position') ?? ''
-      if (position === 'top' || position === 'empty') await moveTargetToInsertion(key, { position: 'top' })
-      else if (position === 'bottom') await moveTargetToInsertion(key, { position: 'bottom' })
-      else {
-        await moveTargetToInsertion(key, {
-          position: 'between',
-          upperPriority: Number(zone.getAttribute('data-upper-priority')),
-          lowerPriority: Number(zone.getAttribute('data-lower-priority')),
-        })
-      }
-    } else {
-      const priority = Number(zone.closest('[data-slot="target-lane"]')?.getAttribute('data-priority'))
-      if (Number.isFinite(priority)) {
-        await moveTargetToLane(
-          key,
-          priority,
-          slot === 'target-card' ? (zone.getAttribute('data-key') ?? undefined) : undefined,
-        )
-      }
+async function dropModelGroup(keys: readonly string[], zone: Element): Promise<void> {
+  const slot = zone.getAttribute('data-slot')
+  if (!slot) return
+  if (slot === 'target-dock') {
+    if (!moveModelGroupToDock(targets, keys)) {
+      toast.error(m.model_editor_last_enabled_target_required())
     }
-  } finally {
-    // 触屏没有 dragend；无论落在哪里，结束后都要退出拖拽态。
-    draggedTargetKey = ''
+    return
+  }
+
+  const members = targets.filter((candidate) => keys.includes(candidate.key))
+  if (members.length === 0) return
+  if (members.some((member) => !targetConfigured(member))) {
+    toast.error(m.model_editor_complete_target_before_enabling())
+    return
+  }
+  for (const member of members) {
+    if (!member.enabled && (await blockEnableForUnwritableThinking(member))) return
+  }
+
+  if (slot === 'target-priority-connector') {
+    const insertion = insertionFromZone(zone)
+    if (!insertion) return
+    if (!moveModelGroupToInsertion(targets, keys, insertion)) {
+      toast.error(m.model_editor_cannot_create_priority_layer())
+    }
+    return
+  }
+
+  const priority = Number(zone.closest('[data-slot="target-lane"]')?.getAttribute('data-priority'))
+  if (!Number.isFinite(priority)) return
+  const moved = moveModelGroupToLane(targets, keys, priority)
+  if (!moved.ok) {
+    toast.error(m.model_editor_complete_target_before_enabling())
+    return
+  }
+  if (moved.syncedShared > 0) {
+    toast.info(m.model_editor_group_synced_toast({ count: moved.syncedShared }))
   }
 }
 
-function startTargetTouchDrag(event: PointerEvent, target: RouteTargetForm): void {
+function insertionFromZone(zone: Element): RouteTargetInsertion | null {
+  const position = zone.getAttribute('data-position') ?? ''
+  if (position === 'top' || position === 'empty') return { position: 'top' }
+  if (position === 'bottom') return { position: 'bottom' }
+  const upperPriority = Number(zone.getAttribute('data-upper-priority'))
+  const lowerPriority = Number(zone.getAttribute('data-lower-priority'))
+  if (!Number.isFinite(upperPriority) || !Number.isFinite(lowerPriority)) return null
+  return { position: 'between', upperPriority, lowerPriority }
+}
+
+function startTargetPointerDrag(event: PointerEvent, target: RouteTargetForm, fromHandle: boolean): void {
+  if (!fromHandle) {
+    if (event.pointerType === 'touch') return
+    if ((event.target as Element | null)?.closest('button, a, input, select')) return
+  } else {
+    event.stopPropagation()
+  }
   const source = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="target-card"]')
   if (!source) return
-  beginTouchDrag(event, {
+  beginPointerDrag(event, {
     source,
-    zoneSelector: TOUCH_DROP_ZONES,
+    zoneSelector: DROP_ZONE_SELECTOR,
     onStart: () => {
-      draggedTargetKey = target.key
+      activeDrag = { kind: 'target', key: target.key }
     },
-    onDrop: (zone) => dropTouchTarget(target.key, zone),
+    onDrop: async (zone) => {
+      try {
+        if (zone) await dropSingleTarget(target.key, zone)
+      } finally {
+        activeDrag = null
+      }
+    },
     onCancel: () => {
-      draggedTargetKey = ''
+      activeDrag = null
     },
   })
 }
 
-function insertionLabel(insertion: RouteTargetInsertion): string {
+function startGroupPointerDrag(event: PointerEvent, group: RouteTargetModelGroup): void {
+  event.stopPropagation()
+  const source = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="target-model-group"]')
+  if (!source) return
+  const keys = group.targets.map((member) => member.key)
+  beginPointerDrag(event, {
+    source,
+    zoneSelector: DROP_ZONE_SELECTOR,
+    onStart: () => {
+      activeDrag = { kind: 'group', keys, model: group.model }
+    },
+    onDrop: async (zone) => {
+      try {
+        if (zone) await dropModelGroup(keys, zone)
+      } finally {
+        activeDrag = null
+      }
+    },
+    onCancel: () => {
+      activeDrag = null
+    },
+  })
+}
+
+function handleTargetCardKeydown(event: KeyboardEvent, target: RouteTargetForm): void {
+  if (event.target !== event.currentTarget) return
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault()
+    editTarget(target)
+    return
+  }
+  if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && target.enabled) {
+    event.preventDefault()
+    const result = stepTargetSplitMerge(targets, target.key, event.key === 'ArrowUp' ? 'up' : 'down')
+    if (result.ok && result.inheritedFromGroup) {
+      toast.info(m.model_editor_group_inherited_toast({ provider: targetProviderLabel(target) }))
+    }
+  }
+}
+
+// ==================== Layer & Group Quick Actions ====================
+
+function handleSwapLanes(upperPriority: number, lowerPriority: number): void {
+  swapAdjacentLanes(targets, upperPriority, lowerPriority)
+}
+
+function handleMergeLaneIntoUpper(lowerPriority: number, upperPriority: number): void {
+  const result = mergeLaneIntoUpper(targets, lowerPriority, upperPriority)
+  if (result.syncedShared > 0) {
+    toast.info(m.model_editor_group_synced_toast({ count: result.syncedShared }))
+  }
+}
+
+function handleStepGroup(group: RouteTargetModelGroup, direction: 'up' | 'down'): void {
+  stepModelGroup(
+    targets,
+    group.targets.map((member) => member.key),
+    direction,
+  )
+}
+
+function handleMoveGroupToExistingLayer(group: RouteTargetModelGroup, targetPriority: number): void {
+  const moved = moveModelGroupToLane(
+    targets,
+    group.targets.map((member) => member.key),
+    targetPriority,
+  )
+  if (!moved.ok) {
+    toast.error(m.model_editor_complete_target_before_enabling())
+    return
+  }
+  if (moved.syncedShared > 0) {
+    toast.info(m.model_editor_group_synced_toast({ count: moved.syncedShared }))
+  }
+}
+
+function handleSplitGroupToNewLayer(group: RouteTargetModelGroup, laneIndex: number): void {
+  const keys = group.targets.map((member) => member.key)
+  const currentLane = targetLanes[laneIndex]
+  if (!currentLane) return
+  const insertion: RouteTargetInsertion =
+    laneIndex < targetLanes.length - 1
+      ? { position: 'between', upperPriority: currentLane.priority, lowerPriority: targetLanes[laneIndex + 1].priority }
+      : { position: 'bottom' }
+  if (!moveModelGroupToInsertion(targets, keys, insertion)) {
+    toast.error(m.model_editor_cannot_create_priority_layer())
+  }
+}
+
+function handleDisableGroup(group: RouteTargetModelGroup): void {
+  if (
+    !moveModelGroupToDock(
+      targets,
+      group.targets.map((member) => member.key),
+    )
+  ) {
+    toast.error(m.model_editor_last_enabled_target_required())
+  }
+}
+
+function insertionLabel(
+  insertion: RouteTargetInsertion,
+  upperLayer: number | null,
+  lowerLayer: number | null,
+): string {
   if (insertion.position === 'top') return m.model_editor_insert_higher_priority()
   if (insertion.position === 'bottom') return m.model_editor_insert_lower_priority()
-  const priority = planRouteTargetInsertion(targets, draggedTargetKey, insertion)?.priority
-  return priority === undefined
-    ? m.model_editor_insert_new_priority()
-    : m.model_editor_insert_priority_value({ priority })
+  if (upperLayer !== null && lowerLayer !== null) {
+    return m.model_editor_insert_between_layers({ upper: upperLayer, lower: lowerLayer })
+  }
+  return m.model_editor_insert_new_priority()
 }
+
+// ==================== Thinking Levels & Validation ====================
 
 function targetSupportsThinkingLevel(target: RouteTargetForm, level: ThinkingLevel): boolean {
   return target.thinkingLevelMap.some((row) => row.level === level && row.control.type !== 'hidden')
@@ -678,8 +1140,8 @@ function defaultThinkingLevelLabel(): string {
 function targetLabel(target: RouteTargetForm, index: number): string {
   const destination = m.model_editor_destination_value({ index: index + 1 })
   const provider = providers.find((candidate) => candidate.id === target.providerId)
-  const model = target.model.trim()
-  return [destination, provider?.name ?? target.providerId, model].filter(Boolean).join(' · ')
+  const modelId = target.model.trim()
+  return [destination, provider?.name ?? target.providerId, modelId].filter(Boolean).join(' · ')
 }
 
 function thinkingLevelBlockers(level: ThinkingLevel): string[] {
@@ -688,29 +1150,9 @@ function thinkingLevelBlockers(level: ThinkingLevel): string[] {
   )
 }
 
-function changeThinkingControlKind(
-  row: ThinkingLevelMapping,
-  type: TargetThinkingControl['type'],
-  context: ThinkingControlContext,
-): void {
-  row.control = type === 'effort' ? defaultEffortControl(row.level, context) : { type }
-  row.source = 'overridden'
-  if (targetEditorTarget) targetEditorTarget.validationError = ''
-}
-
-function changeThinkingEffort(row: ThinkingLevelMapping, value: string): void {
-  row.control = { type: 'effort', value }
-  row.source = 'overridden'
-  if (targetEditorTarget) targetEditorTarget.validationError = ''
-}
-
-function thinkingControlLabel(type: TargetThinkingControl['type']): string {
-  return type === 'effort' ? m.model_editor_thinking_effort() : m.model_editor_thinking_hidden()
-}
-
 function targetThinkingContext(
   target: RouteTargetForm,
-  summary: ProviderModelSummary | undefined,
+  summary: ProviderModelSummary | undefined = selectedSummary(target),
 ): ThinkingControlContext {
   return thinkingControlContext(
     providers.find((provider) => provider.id === target.providerId),
@@ -729,7 +1171,7 @@ async function blockEnableForUnwritableThinking(target: RouteTargetForm): Promis
   const levels = unwritableThinkingLevels(target)
   if (levels.length === 0) return false
   toast.error(m.model_editor_thinking_enable_blocked({ levels: formatList(levels) }))
-  draggedTargetKey = ''
+  activeDrag = null
   editTarget(target)
   return true
 }
@@ -762,6 +1204,8 @@ async function regenerateThinkingMap(target: RouteTargetForm): Promise<void> {
     target.validationError = localizeBackendErrorMessage(error)
   }
 }
+
+// ==================== Save Model ====================
 
 async function saveModel(): Promise<void> {
   saveError = ''
@@ -901,50 +1345,112 @@ async function saveModel(): Promise<void> {
 }
 </script>
 
-{#snippet priorityConnector(insertion: RouteTargetInsertion, position: string)}
+{#snippet priorityConnector(
+  insertion: RouteTargetInsertion,
+  position: string,
+  upperLayer: number | null,
+  lowerLayer: number | null,
+)}
+  {@const isBetween = insertion.position === 'between'}
+  {@const label = insertionLabel(insertion, upperLayer, lowerLayer)}
   <div
     data-slot="target-priority-connector"
     data-position={position}
     data-upper-priority={insertion.position === 'between' ? insertion.upperPriority : undefined}
     data-lower-priority={insertion.position === 'between' ? insertion.lowerPriority : undefined}
     class={[
-      'relative mx-auto flex w-full items-center justify-center overflow-hidden transition-[height,border-color,background-color,color] duration-150 motion-reduce:transition-none',
-      isDraggingTarget
-        ? 'h-10 rounded-lg border border-dashed border-primary/60 bg-primary/5 text-primary data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/20'
-        : 'h-2 border border-transparent text-transparent',
+      'relative mx-auto flex w-full items-center justify-center rounded-lg border transition-[border-color,background-color,color] duration-150 motion-reduce:transition-none',
+      'h-6',
+      isDragging
+        ? 'border-dashed border-primary/60 bg-primary/5 text-primary data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/20'
+        : 'border-transparent text-muted-foreground',
     ]}
     role="group"
-    aria-label={insertionLabel(insertion)}
-    ondragenter={allowTargetDrop}
-    ondragover={allowTargetDrop}
-    ondrop={(event) => dropOnInsertion(event, insertion)}>
-    {#if isDraggingTarget}
-      <span class="relative inline-flex items-center gap-2 rounded-md bg-background/90 px-3 py-1 text-sm">
-        <PlusIcon class="size-4" aria-hidden="true" />
-        {insertionLabel(insertion)}
+    aria-label={label}>
+    {#if isDragging}
+      <span class="inline-flex items-center gap-1.5 rounded-md bg-background/90 px-2.5 py-0.5 text-xs font-medium">
+        <PlusIcon class="size-3.5" aria-hidden="true" />
+        {label}
+      </span>
+    {:else if isBetween}
+      <span class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        <ArrowDownIcon class="size-3.5" aria-hidden="true" />
+        {m.model_editor_layer_fallback_connector()}
       </span>
     {/if}
   </div>
 {/snippet}
 
-{#snippet targetIdentity(target: RouteTargetForm, summary: ProviderModelSummary | undefined)}
+{#snippet disabledTargetCard(target: RouteTargetForm)}
+  {@const summary = selectedSummary(target)}
+  {@const issueLabels = targetIssueLabels(target, summary)}
   {@const modelIdentity = targetModelIdentity(target, summary)}
-  <!-- 触屏拖拽手柄：负外距把 40px 触控区叠在卡片左上角，不改变版面；touch-none 让手指在此拖动时页面不滚动。 -->
-  <span
-    data-slot="target-drag-handle"
-    role="presentation"
-    class="-m-3 flex size-10 shrink-0 touch-none items-center justify-center pt-1 text-muted-foreground"
-    onpointerdown={(event) => startTargetTouchDrag(event, target)}>
-    <GripVerticalIcon class="size-4" />
-  </span>
-  <span class="min-w-0">
-    <span class={['block font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}>
-      {modelIdentity.label}
-    </span>
-    <span class="mt-0.5 block text-sm text-muted-foreground wrap-anywhere">
-      {targetProviderLabel(target)}
-    </span>
-  </span>
+  {@const mismatch = targetPurposeMismatch(target)}
+  {@const isCustom = target.configMode === 'custom'}
+  {@const hasError = mismatch || issueLabels.length > 0}
+  <div class="relative min-w-0">
+    <div
+      role="button"
+      tabindex="0"
+      aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+      data-slot="target-card"
+      data-enabled="false"
+      data-key={target.key}
+      data-config-mode={target.configMode}
+      class={[
+        'group flex w-full min-w-0 cursor-grab select-none flex-col items-start rounded-md border bg-background px-2.5 py-2 pr-10 text-left transition-[border-color,background-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
+        hasError
+          ? 'border-destructive/50 bg-destructive/[0.04]'
+          : isCustom
+            ? 'border-warning/50 bg-warning/[0.04]'
+            : 'border-border',
+        draggedKeys.has(target.key) && 'opacity-50',
+      ]}
+      onpointerdown={(event) => startTargetPointerDrag(event, target, false)}
+      onclick={() => editTarget(target)}
+      onkeydown={(event) => handleTargetCardKeydown(event, target)}>
+      <div class="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          data-slot="target-drag-handle"
+          role="presentation"
+          class="-my-1 -ml-1 flex size-7 shrink-0 touch-none items-center justify-center text-muted-foreground"
+          onpointerdown={(event) => startTargetPointerDrag(event, target, true)}>
+          <GripVerticalIcon class="size-3.5" aria-hidden="true" />
+        </span>
+        <span class={['min-w-0 font-medium wrap-anywhere', modelIdentity.technical && 'font-technical text-sm']}>
+          {modelIdentity.label}
+        </span>
+        <span class="text-muted-foreground" aria-hidden="true">·</span>
+        <span class="min-w-0 truncate text-sm text-muted-foreground">
+          {targetProviderLabel(target)}
+        </span>
+        {#if isCustom}
+          <span class="inline-flex shrink-0 items-center rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[11px] font-medium leading-none text-warning">
+            {m.model_editor_custom_badge()}
+          </span>
+        {/if}
+        {#if mismatch}
+          <StatusIndicator compact label={m.route_purpose_mismatch()} tone="error" />
+        {/if}
+      </div>
+      {#if issueLabels.length > 0}
+        <div class="mt-1.5 flex w-full min-w-0 flex-wrap gap-1.5 pl-6">
+          {#each issueLabels as label (label)}
+            <Badge variant="destructive">{label}</Badge>
+          {/each}
+        </div>
+      {/if}
+    </div>
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      class="absolute right-1 top-1/2 size-8 -translate-y-1/2"
+      aria-label={m.model_editor_remove_destination_value({ index: targetIndex(target) + 1 })}
+      onclick={() => removeDisabledTarget(target)}>
+      <Trash2Icon />
+    </Button>
+  </div>
 {/snippet}
 
 <div class="route-page route-page-column min-h-[calc(100svh-5rem)]">
@@ -1153,7 +1659,7 @@ async function saveModel(): Promise<void> {
     </section>
 
     <section class="route-section" aria-labelledby="route-targets-title">
-      <div class="route-section-header items-center">
+      <div class={['route-section-header items-center', targetLanes.length > 0 && 'mb-1']}>
         <div class="flex min-w-0 items-center gap-2">
           <h2 id="route-targets-title" class="route-section-title">{m.model_editor_request_destinations()}</h2>
           {#if savedRouteId}<Field.Help hint={m.model_editor_target_status_refresh_note()} />{/if}
@@ -1189,131 +1695,349 @@ async function saveModel(): Promise<void> {
             data-slot="target-lane-stack"
             class="relative min-w-0"
             role="group"
-            aria-label={m.model_editor_enabled_targets()}
-            ondragenter={targetLanes.length === 0 ? allowTargetDrop : undefined}
-            ondragover={targetLanes.length === 0 ? allowTargetDrop : undefined}
-            ondrop={targetLanes.length === 0 ? (event) => dropOnInsertion(event, { position: 'top' }) : undefined}>
+            aria-label={m.model_editor_enabled_targets()}>
             {#if targetLanes.length === 0}
               <div
                 data-slot="target-priority-connector"
                 data-position="empty"
                 class={[
                   'relative mx-auto flex min-h-16 w-full items-center justify-center rounded-lg border border-dashed transition-[border-color,background-color,color] duration-150 motion-reduce:transition-none',
-                  isDraggingTarget
+                  isDragging
                     ? 'border-primary/60 bg-primary/5 text-primary data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/20'
                     : 'border-border/80 bg-muted/20 text-muted-foreground',
                 ]}
                 role="group"
-                aria-label={m.model_editor_insert_higher_priority()}
-                ondragenter={allowTargetDrop}
-                ondragover={allowTargetDrop}
-                ondrop={(event) => dropOnInsertion(event, { position: 'top' })}>
+                aria-label={m.model_editor_insert_higher_priority()}>
                 <span class="inline-flex items-center gap-2 text-sm">
                   <PlusIcon class="size-4" aria-hidden="true" />
                   {m.model_editor_insert_higher_priority()}
                 </span>
               </div>
             {:else}
-              {@render priorityConnector({ position: 'top' }, 'top')}
+              {@render priorityConnector({ position: 'top' }, 'top', null, null)}
               <div class="flex flex-col">
                 {#each targetLanes as lane, laneIndex (lane.priority)}
+                  {@const laneScope = { enabled: true as const, priority: lane.priority }}
+                  {@const groups = groupLaneTargetsByModel(lane.targets, laneScope)}
                   <section
                     data-slot="target-lane"
                     data-priority={lane.priority}
                     class={[
-                      'grid min-h-20 grid-cols-[3rem_minmax(0,1fr)] rounded-lg border transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
-                      isDraggingTarget
+                      'overflow-hidden rounded-lg border bg-card/40 transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
+                      isDragging
                         ? 'border-dashed border-primary/60 bg-primary/[0.025] data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/10'
-                        : 'border-transparent',
+                        : 'border-border',
                     ]}
-                    aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}
-                    ondragenter={allowTargetDrop}
-                    ondragover={allowTargetDrop}
-                    ondrop={(event) => dropOnLane(event, lane.priority)}>
-                    <div class="flex flex-col items-center justify-center border-e px-1 text-center">
-                      <span class="font-technical text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground">
-                        {m.model_editor_layer()}
-                      </span>
-                      <strong class="font-technical text-lg tabular-nums">{laneIndex + 1}</strong>
+                    aria-label={m.model_editor_layer_value({ index: laneIndex + 1 })}>
+                    <div class="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/30 px-2.5 py-1">
+                      <div class="flex min-w-0 items-center gap-2">
+                        <span
+                          class={[
+                            'inline-flex items-center rounded-md px-2 py-0.5 font-technical text-xs font-medium tabular-nums',
+                            laneIndex === 0
+                              ? 'bg-primary text-primary-foreground'
+                              : 'border border-border bg-background text-foreground',
+                          ]}>
+                          {m.model_editor_layer_value({ index: laneIndex + 1 })}
+                        </span>
+                        <span class="text-xs text-muted-foreground tabular-nums">
+                          {layerStatsLabel(groups.length, lane.targets.length)}
+                        </span>
+                      </div>
+                      <div class="flex shrink-0 items-center gap-1">
+                        {#if laneIndex > 0}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            onclick={() =>
+                              handleMergeLaneIntoUpper(lane.priority, targetLanes[laneIndex - 1].priority)}>
+                            <MergeIcon data-icon="inline-start" />
+                            {m.model_editor_layer_merge_upper()}
+                          </Button>
+                        {/if}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          disabled={laneIndex === 0}
+                          aria-label={m.model_editor_layer_move_up()}
+                          title={m.model_editor_layer_move_up()}
+                          onclick={() => handleSwapLanes(targetLanes[laneIndex - 1].priority, lane.priority)}>
+                          <ArrowUpIcon />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          disabled={laneIndex === targetLanes.length - 1}
+                          aria-label={m.model_editor_layer_move_down()}
+                          title={m.model_editor_layer_move_down()}
+                          onclick={() => handleSwapLanes(lane.priority, targetLanes[laneIndex + 1].priority)}>
+                          <ArrowDownIcon />
+                        </Button>
+                      </div>
                     </div>
-                    <div class="@container/lane min-w-0 p-2">
-                      <div
-                        class={[
-                          'grid gap-2',
-                          lane.targets.length > 1 ? 'grid-cols-1 @2xl/lane:grid-cols-2' : 'grid-cols-1',
-                        ]}>
-                        {#each lane.targets as target (target.key)}
-                          {@const summary = selectedSummary(target)}
-                          {@const status = targetRuntimeStatus(target)}
-                          {@const issueLabels = targetIssueLabels(target, summary)}
-                          <div
-                            role="button"
-                            tabindex="0"
-                            aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                            data-slot="target-card"
-                            data-enabled="true"
-                            data-key={target.key}
-                            draggable="true"
-                            class={[
-                              'group @container/target flex min-h-20 w-full min-w-0 cursor-grab select-none flex-col items-start rounded-lg border bg-card p-3 text-left transition-opacity data-[drag-over=true]:border-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing motion-reduce:transition-none',
-                              draggedTargetKey === target.key && 'opacity-50',
-                            ]}
-                            onclick={() => editTarget(target)}
-                            onkeydown={(event) => {
-                              if (
-                                event.target === event.currentTarget &&
-                                (event.key === 'Enter' || event.key === ' ')
-                              ) {
-                                event.preventDefault()
-                                editTarget(target)
-                              }
-                            }}
-                            ondragstart={(event) => startTargetDrag(event, target)}
-                            ondragend={finishTargetDrag}
-                            ondragenter={allowTargetDrop}
-                            ondragover={allowTargetDrop}
-                            ondrop={(event) => dropOnLane(event, lane.priority, target.key)}>
-                            <div
-                              class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
-                              {@render targetIdentity(target, summary)}
-                              {#if targetPurposeMismatch(target)}
-                                <StatusIndicator
-                                  compact
-                                  class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                                  label={m.route_purpose_mismatch()}
-                                  tone="error" />
-                              {:else if status}
-                                <StatusIndicator
-                                  compact
-                                  class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                                  label={status.credential_invalid
+
+                    <div class="divide-y divide-border">
+                      {#each groups as group (group.model)}
+                        {@const groupSummary = groupModelSummary(group)}
+                        {@const groupName = groupDisplayName(group, groupSummary)}
+                        {@const showTechnicalId = Boolean(group.model.trim() && groupName !== group.model.trim())}
+                        {@const showGroupMetaRow = group.targets.length > 1 || group.customTargets.length > 0}
+                        {@const isSoloTopGroup = laneIndex === 0 && groups.length === 1}
+                        {@const isSoloBottomGroup = laneIndex === targetLanes.length - 1 && groups.length === 1}
+                        {@const disableGroupBlocked = enabledTargetCount <= group.targets.length}
+                        {@const groupBeingDragged =
+                          activeDrag?.kind === 'group' &&
+                          activeDrag.keys.every((key) => group.targets.some((member) => member.key === key))}
+                        <div
+                          data-slot="target-model-group"
+                          data-model={group.model}
+                          class={['min-w-0 transition-opacity', groupBeingDragged && 'opacity-50']}>
+                          <div class="flex flex-col gap-1 border-b border-border/60 px-2.5 py-1.5">
+                            <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                              <div class="flex min-w-40 flex-1 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                                <span
+                                  data-slot="target-group-drag-handle"
+                                  role="presentation"
+                                  title={m.model_editor_group_drag_hint()}
+                                  class="-ml-1 flex size-6 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:cursor-grabbing"
+                                  onpointerdown={(event) => startGroupPointerDrag(event, group)}>
+                                  <GripVerticalIcon class="size-3.5" aria-hidden="true" />
+                                </span>
+                                <span
+                                  title={groupName}
+                                  class={[
+                                    'max-w-full truncate font-medium text-foreground',
+                                    !showTechnicalId && 'font-technical text-sm',
+                                  ]}>
+                                  {groupName}
+                                </span>
+                                {#if showTechnicalId}
+                                  <span class="max-w-full truncate font-technical text-xs text-muted-foreground">
+                                    {group.model}
+                                  </span>
+                                {/if}
+                                {#if groupSummary}
+                                  <ModelSpecification specification={groupSummary.specification} density="target" />
+                                {/if}
+                                {#if !showGroupMetaRow}
+                                  <button
+                                    type="button"
+                                    class="inline-block max-w-full truncate whitespace-nowrap rounded px-1 py-0.5 text-left font-technical text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                                    onclick={() => openGroupConfig(laneScope, group.model)}>
+                                    {formatGroupConfigSummary(group.sharedConfig)}
+                                  </button>
+                                {/if}
+                              </div>
+
+                              <div class="flex shrink-0 flex-wrap items-center gap-1">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="xs"
+                                  class="h-6 gap-1 px-1.5 text-xs"
+                                  onclick={() => openGroupConfig(laneScope, group.model)}>
+                                  <SlidersHorizontalIcon data-icon="inline-start" />
+                                  {m.model_editor_group_config()}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  class="h-6 gap-1 px-1.5 text-xs"
+                                  disabled={!group.model.trim()}
+                                  onclick={() => openBatchAdd(laneScope, group.model)}>
+                                  <PlusIcon data-icon="inline-start" />
+                                  {m.model_editor_group_add_accounts()}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  class="size-6"
+                                  disabled={isSoloTopGroup}
+                                  aria-label={m.model_editor_group_move_up({ model: groupName })}
+                                  title={m.model_editor_group_move_up({ model: groupName })}
+                                  onclick={() => handleStepGroup(group, 'up')}>
+                                  <ArrowUpIcon />
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  class="size-6"
+                                  disabled={isSoloBottomGroup}
+                                  aria-label={m.model_editor_group_move_down({ model: groupName })}
+                                  title={m.model_editor_group_move_down({ model: groupName })}
+                                  onclick={() => handleStepGroup(group, 'down')}>
+                                  <ArrowDownIcon />
+                                </Button>
+                                <DropdownMenu.Root>
+                                  <DropdownMenu.Trigger>
+                                    {#snippet child({ props })}
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon-xs"
+                                        class="size-6"
+                                        aria-label={m.model_editor_group_more_actions({ model: groupName })}
+                                        {...props}>
+                                        <EllipsisIcon />
+                                      </Button>
+                                    {/snippet}
+                                  </DropdownMenu.Trigger>
+                                  <DropdownMenu.Content align="end">
+                                    <DropdownMenu.Group>
+                                      {#each targetLanes as destLane, destIdx (destLane.priority)}
+                                        {#if destLane.priority !== lane.priority}
+                                          <DropdownMenu.Item
+                                            onclick={() => handleMoveGroupToExistingLayer(group, destLane.priority)}>
+                                            {m.model_editor_group_move_to_layer({ index: destIdx + 1 })}
+                                          </DropdownMenu.Item>
+                                        {/if}
+                                      {/each}
+                                      {#if groups.length > 1}
+                                        <DropdownMenu.Item onclick={() => handleSplitGroupToNewLayer(group, laneIndex)}>
+                                          {m.model_editor_group_split_layer()}
+                                        </DropdownMenu.Item>
+                                      {/if}
+                                    </DropdownMenu.Group>
+                                    {#if targetLanes.length > 1 || groups.length > 1}
+                                      <DropdownMenu.Separator />
+                                    {/if}
+                                    <DropdownMenu.Group>
+                                      <DropdownMenu.Item
+                                        variant="destructive"
+                                        disabled={disableGroupBlocked}
+                                        onclick={() => handleDisableGroup(group)}>
+                                        {m.model_editor_group_disable()}
+                                      </DropdownMenu.Item>
+                                    </DropdownMenu.Group>
+                                  </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                              </div>
+                            </div>
+
+                            {#if showGroupMetaRow}
+                              <div class="flex flex-wrap items-center gap-x-2 gap-y-1 pl-7 text-xs">
+                                <Badge variant="secondary" class="tabular-nums">
+                                  {group.targets.length === 1
+                                    ? m.model_editor_group_single_account()
+                                    : m.model_editor_group_accounts_count({ count: group.targets.length })}
+                                </Badge>
+                                {#if group.customTargets.length > 0}
+                                  <span
+                                    class="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-xs font-medium text-warning tabular-nums">
+                                    {m.model_editor_group_custom_badge({ count: group.customTargets.length })}
+                                  </span>
+                                {/if}
+                                <button
+                                  type="button"
+                                  class="inline-block max-w-full truncate whitespace-nowrap rounded px-1 py-0.5 text-left font-technical text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                                  onclick={() => openGroupConfig(laneScope, group.model)}>
+                                  {formatGroupConfigSummary(group.sharedConfig)}
+                                </button>
+                              </div>
+                            {/if}
+                          </div>
+
+                          <div class="flex flex-wrap gap-1.5 px-2 py-1.5">
+                            {#each group.targets as target (target.key)}
+                              {@const summary = selectedSummary(target)}
+                              {@const status = targetRuntimeStatus(target)}
+                              {@const mismatch = targetPurposeMismatch(target)}
+                              {@const issueLabels = targetIssueLabels(target, summary)}
+                              {@const modelIdentity = targetModelIdentity(target, summary)}
+                              {@const isCustom = target.configMode === 'custom'}
+                              {@const hasError = mismatch || Boolean(status?.credential_invalid) || issueLabels.length > 0}
+                              {@const timeoutDiffHint =
+                                isCustom &&
+                                target.firstTokenTimeoutSeconds !== group.sharedConfig.firstTokenTimeoutSeconds
+                                  ? `${target.firstTokenTimeoutSeconds}${m.model_editor_unit_seconds()}`
+                                  : ''}
+                              <div
+                                role="button"
+                                tabindex="0"
+                                aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
+                                data-slot="target-card"
+                                data-enabled="true"
+                                data-key={target.key}
+                                data-config-mode={target.configMode}
+                                class={[
+                                  'group relative inline-flex max-w-full min-w-0 cursor-grab select-none flex-wrap items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-[border-color,background-color,opacity] hover:border-primary/50 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/10 motion-reduce:transition-none',
+                                  hasError
+                                    ? 'border-destructive/50 bg-destructive/[0.04]'
+                                    : isCustom
+                                      ? 'border-warning/50 bg-warning/[0.04]'
+                                      : 'border-border bg-card',
+                                  draggedKeys.has(target.key) && 'opacity-50',
+                                ]}
+                                onpointerdown={(event) => startTargetPointerDrag(event, target, false)}
+                                onclick={() => editTarget(target)}
+                                onkeydown={(event) => handleTargetCardKeydown(event, target)}>
+                                <span
+                                  data-slot="target-drag-handle"
+                                  role="presentation"
+                                  class="-my-1 -ml-1 flex size-7 shrink-0 touch-none items-center justify-center text-muted-foreground"
+                                  onpointerdown={(event) => startTargetPointerDrag(event, target, true)}>
+                                  <GripVerticalIcon class="size-3.5" aria-hidden="true" />
+                                </span>
+
+                                {#if mismatch}
+                                  <StatusIndicator compact tone="error" label={m.route_purpose_mismatch()} />
+                                {:else if status}
+                                  {@const statusLabel = status.credential_invalid
                                     ? m.model_editor_target_status_credential_invalid()
                                     : status.allowance_suspended
                                       ? m.allowances_suspended()
                                       : targetStateLabel(status.state, status.cooldown_remaining_ms)}
-                                  tone={status.credential_invalid
+                                  {@const statusTone = status.credential_invalid
                                     ? 'error'
                                     : status.allowance_suspended
                                       ? 'warning'
                                       : status.state === 'available'
                                         ? 'healthy'
-                                        : 'warning'} />
-                              {/if}
-                            </div>
-                            <div class="mt-auto flex w-full min-w-0 flex-wrap items-center gap-1.5 pl-6 pt-3">
-                              {#each issueLabels as label (label)}
-                                <Badge variant="destructive">{label}</Badge>
-                              {/each}
-                              <ModelSpecification specification={summary?.specification ?? {}} density="target" />
-                            </div>
+                                        : 'warning'}
+                                  {#if statusTone === 'healthy'}
+                                    <span
+                                      class="route-status route-status--compact"
+                                      data-tone="healthy"
+                                      role="status"
+                                      title={statusLabel}>
+                                      <span class="route-status__mark" aria-hidden="true"></span>
+                                      <span class="sr-only">{statusLabel}</span>
+                                    </span>
+                                  {:else}
+                                    <StatusIndicator compact tone={statusTone} label={statusLabel} />
+                                  {/if}
+                                {/if}
+
+                                <span class="min-w-0 max-w-[14rem] truncate font-medium text-foreground">
+                                  {targetProviderLabel(target)}
+                                </span>
+
+                                <span class="sr-only">{modelIdentity.label}</span>
+
+                                {#if isCustom}
+                                  <span
+                                    class="inline-flex shrink-0 items-center gap-1 rounded border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[11px] font-medium leading-none text-warning">
+                                    {m.model_editor_custom_badge()}
+                                    {#if timeoutDiffHint}
+                                      <span class="font-technical tabular-nums">{timeoutDiffHint}</span>
+                                    {/if}
+                                  </span>
+                                {/if}
+
+                                {#each issueLabels as label (label)}
+                                  <Badge variant="destructive">{label}</Badge>
+                                {/each}
+                              </div>
+                            {/each}
                           </div>
-                        {/each}
-                        {#if isDraggingTarget}
-                          <span class="col-span-full flex min-h-10 items-center justify-end px-3 text-sm text-primary">
-                            {m.model_editor_drop_same_priority()}
-                          </span>
-                        {/if}
-                      </div>
+                        </div>
+                      {/each}
                     </div>
                   </section>
 
@@ -1322,11 +2046,13 @@ async function saveModel(): Promise<void> {
                     {@render priorityConnector(
                       { position: 'between', upperPriority: lane.priority, lowerPriority: lowerLane.priority },
                       `between-${lane.priority}-${lowerLane.priority}`,
+                      laneIndex + 1,
+                      laneIndex + 2,
                     )}
                   {/if}
                 {/each}
               </div>
-              {@render priorityConnector({ position: 'bottom' }, 'bottom')}
+              {@render priorityConnector({ position: 'bottom' }, 'bottom', null, null)}
             {/if}
           </div>
 
@@ -1334,75 +2060,64 @@ async function saveModel(): Promise<void> {
             data-slot="target-dock"
             class={[
               'min-w-0 rounded-lg border border-dashed p-3 transition-[border-color,background-color] duration-150 motion-reduce:transition-none',
-              isDraggingTarget &&
-                'border-primary/60 bg-primary/5 data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/15',
+              isDragging
+                ? 'border-primary/60 bg-primary/5 data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/15'
+                : 'border-border',
             ]}
-            aria-label={m.model_editor_disabled_targets()}
-            ondragenter={allowTargetDrop}
-            ondragover={allowTargetDrop}
-            ondrop={dropInDock}>
-            <div class={['flex items-center justify-between gap-3 px-1', disabledTargets.length > 0 && 'mb-3']}>
+            aria-label={m.model_editor_disabled_targets()}>
+            <div class={['flex items-center justify-between gap-3 px-1', disabledTargets.length > 0 && 'mb-2.5']}>
               <div class="flex min-w-0 items-center gap-2">
                 <h3 class="font-medium">{m.model_editor_disabled_targets()}</h3>
                 <Field.Help hint={m.model_editor_disabled_targets_help()} />
               </div>
-              <Badge variant="secondary">{disabledTargets.length}</Badge>
+              <Badge variant="secondary" class="tabular-nums">{disabledTargets.length}</Badge>
             </div>
             {#if disabledTargets.length > 0}
               <div class="flex flex-col gap-2">
-                {#each disabledTargets as target (target.key)}
-                  {@const summary = selectedSummary(target)}
-                  {@const issueLabels = targetIssueLabels(target, summary)}
-                  <div class="relative">
+                {#each disabledGroups as group (group.model)}
+                  {#if group.targets.length >= 2}
+                    {@const groupSummary = groupModelSummary(group)}
+                    {@const groupName = groupDisplayName(group, groupSummary)}
                     <div
-                      role="button"
-                      tabindex="0"
-                      aria-label={m.model_editor_edit_destination_value({ index: targetIndex(target) + 1 })}
-                      data-slot="target-card"
-                      data-key={target.key}
-                      draggable="true"
-                      class={[
-                        'group @container/target flex w-full cursor-grab select-none flex-col items-start rounded-lg border bg-background p-3 pr-12 text-left transition-[border-color,opacity] hover:border-primary/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 active:cursor-grabbing',
-                        draggedTargetKey === target.key && 'opacity-50',
-                      ]}
-                      onclick={() => editTarget(target)}
-                      onkeydown={(event) => {
-                        if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
-                          event.preventDefault()
-                          editTarget(target)
-                        }
-                      }}
-                      ondragstart={(event) => startTargetDrag(event, target)}
-                      ondragend={finishTargetDrag}>
-                      <div
-                        class="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 text-left @max-sm/target:grid-cols-[auto_minmax(0,1fr)]">
-                        {@render targetIdentity(target, summary)}
-                        {#if targetPurposeMismatch(target)}
-                          <StatusIndicator
-                            compact
-                            class="justify-self-end @max-sm/target:col-start-2 @max-sm/target:justify-self-start"
-                            label={m.route_purpose_mismatch()}
-                            tone="error" />
-                        {/if}
-                      </div>
-                      {#if issueLabels.length > 0}
-                        <div class="flex w-full min-w-0 flex-wrap gap-1.5 pl-6 pt-2">
-                          {#each issueLabels as label (label)}
-                            <Badge variant="destructive">{label}</Badge>
-                          {/each}
+                      data-slot="target-model-group"
+                      data-model={group.model}
+                      class="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/20 p-2">
+                      <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-0.5">
+                        <div class="flex min-w-40 flex-1 items-center gap-1.5 text-xs">
+                          <span
+                            data-slot="target-group-drag-handle"
+                            role="presentation"
+                            title={m.model_editor_group_drag_hint()}
+                            class="flex size-5 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground active:cursor-grabbing"
+                            onpointerdown={(event) => startGroupPointerDrag(event, group)}>
+                            <GripVerticalIcon class="size-3.5" aria-hidden="true" />
+                          </span>
+                          <span title={groupName} class="truncate font-medium text-muted-foreground">{groupName}</span>
+                          <Badge variant="secondary" class="shrink-0 tabular-nums">
+                            {m.model_editor_group_accounts_count({ count: group.targets.length })}
+                          </Badge>
                         </div>
-                      {/if}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="xs"
+                          class="h-6 gap-1 px-1.5 text-xs"
+                          onclick={() => openGroupConfig({ enabled: false }, group.model)}>
+                          <SlidersHorizontalIcon data-icon="inline-start" />
+                          {m.model_editor_group_config()}
+                        </Button>
+                      </div>
+                      <div class="flex flex-col gap-1.5">
+                        {#each group.targets as target (target.key)}
+                          {@render disabledTargetCard(target)}
+                        {/each}
+                      </div>
                     </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      class="absolute right-1.5 top-1.5 size-9"
-                      aria-label={m.model_editor_remove_destination_value({ index: targetIndex(target) + 1 })}
-                      onclick={() => removeDisabledTarget(target)}>
-                      <Trash2Icon />
-                    </Button>
-                  </div>
+                  {:else}
+                    {#each group.targets as target (target.key)}
+                      {@render disabledTargetCard(target)}
+                    {/each}
+                  {/if}
                 {/each}
               </div>
             {/if}
@@ -1410,340 +2125,85 @@ async function saveModel(): Promise<void> {
         </div>
       {/if}
 
-      <Dialog.Root
-        bind:open={targetEditorOpen}
-        onOpenChange={(open) => {
+      <TargetDetailSheet
+        open={targetEditorOpen}
+        target={targetEditorTarget}
+        index={targetEditorTarget ? targetIndex(targetEditorTarget) : 0}
+        isNew={targetEditorIsNew}
+        wasInitiallyEnabled={targetEditorInitiallyEnabled}
+        purpose={form.purpose}
+        providers={availableProviders}
+        otherEnabledTargetCount={targets.filter((candidate) => candidate.enabled && candidate.key !== targetEditorTarget?.key)
+          .length}
+        groupMemberCount={targetEditorGroupPeers.count}
+        sharedPeerConfig={targetEditorGroupPeers.sharedPeerConfig}
+        providerLabel={targetProviderLabel}
+        modelDisplayName={(candidate: RouteTargetForm) => targetModelIdentity(candidate, selectedSummary(candidate)).label}
+        {selectedSummary}
+        {modelCandidates}
+        thinkingContextFor={targetThinkingContext}
+        onOpenChange={(open: boolean) => {
           if (open) {
             targetEditorClosing = false
           } else if (!targetEditorClosing && targetEditorTarget) {
             closeTargetEditor(false)
           }
-        }}>
-        {#if targetEditorTarget}
-          {@const target = targetEditorTarget}
-          {@const index = targetIndex(target)}
-          {@const summary = selectedSummary(target)}
-          {@const firstTokenInvalid = !isValidTargetSeconds(target.firstTokenTimeoutSeconds)}
-          {@const retryBudgetInvalid = !isValidTargetRetryBudget(target.targetRetryBudget)}
-          {@const cooldownInvalid = !isValidTargetSeconds(target.targetCooldownSeconds)}
-          <Dialog.Layout class="sm:max-w-4xl">
-            {#snippet header()}
-              <Dialog.Title id={`target-title-${target.key}`}>
-                {m.model_editor_edit_destination_value({ index: index + 1 })}
-              </Dialog.Title>
-            {/snippet}
-            <div aria-labelledby={`target-title-${target.key}`}>
-              <div class="mb-4 flex items-center justify-between gap-3 border-b pb-4">
-                <div class="flex items-center gap-2">
-                  <Badge variant={target.enabled ? 'default' : 'secondary'}>
-                    {target.enabled ? m.model_editor_enabled() : m.model_editor_disabled()}
-                  </Badge>
-                  {#if target.persisted && summary && !summary.available}<Badge variant="destructive">
-                      {m.model_editor_model_no_longer_available()}
-                    </Badge>{/if}
-                </div>
-                <div class="flex items-center gap-1">
-                  {#if !target.enabled}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      aria-label={m.model_editor_remove_destination_value({ index: index + 1 })}
-                      onclick={deleteEditedTarget}>
-                      <Trash2Icon />
-                    </Button>
-                  {/if}
-                </div>
-              </div>
+        }}
+        onClose={closeTargetEditor}
+        onDelete={deleteEditedTarget}
+        onChangeProvider={changeProvider}
+        onSelectModel={selectModel}
+        onUseInventory={useInventory}
+        onResetThinkingRow={resetThinkingRow}
+        onRegenerateThinkingMap={regenerateThinkingMap}
+        onOpenGroupConfig={() => {
+          const current = targetEditorTarget
+          if (!current) return
+          const scope: RouteTargetGroupScope = current.enabled
+            ? { enabled: true, priority: current.priority }
+            : { enabled: false }
+          const modelId = current.model
+          closeTargetEditor(false)
+          openGroupConfig(scope, modelId)
+        }} />
 
-              <Field.Group class="grid gap-4 lg:grid-cols-2">
-                <Field.Field>
-                  <Field.Label for={`target-provider-${target.key}`}>{m.common_model_service()}</Field.Label>
-                  <SearchCombobox
-                    id={`target-provider-${target.key}`}
-                    value={target.providerId}
-                    options={availableProviders.map((provider) => ({ value: provider.id, label: provider.name }))}
-                    placeholder={m.model_editor_choose_model_service()}
-                    emptyText={m.common_no_matching_providers()}
-                    ariaLabel={m.model_editor_destination_value_model_service({ index: index + 1 })}
-                    onValueChange={(value: string) => void changeProvider(target, value)} />
-                </Field.Field>
+      <GroupConfigSheet
+        open={groupSheet.open && Boolean(activeGroupData)}
+        sessionId={groupSheet.sessionId}
+        model={groupSheet.model}
+        modelDisplayName={activeGroupModelName}
+        scope={groupSheet.scope}
+        layerNumber={activeGroupLayerNumber}
+        members={activeGroupMembers}
+        initialConfig={activeGroupData?.sharedConfig ?? {
+          firstTokenTimeoutSeconds: 120,
+          targetRetryBudget: 5,
+          targetCooldownSeconds: 120,
+          thinkingLevelMap: [],
+        }}
+        specification={activeGroupSummary?.specification}
+        {savedRouteId}
+        providerLabel={targetProviderLabel}
+        thinkingContextFor={(candidate: RouteTargetForm) => targetThinkingContext(candidate, selectedSummary(candidate))}
+        onClose={() => (groupSheet.open = false)}
+        onApply={handleApplyGroupConfig}
+        onInspectMember={(member: RouteTargetForm) => editTarget(member)}
+        onRegenerateGroup={handleRegenerateGroupThinking}
+        onResetGroupRow={handleResetGroupThinkingRow} />
 
-                <Field.Field>
-                  <Field.Label for={`target-model-${target.key}`}>{m.common_model()}</Field.Label>
-                  {#if target.custom}
-                    <Input
-                      id={`target-model-${target.key}`}
-                      class="font-technical"
-                      bind:value={target.model}
-                      aria-label={m.model_editor_destination_value_custom_model_id({ index: index + 1 })}
-                      placeholder="private-model" />
-                    <Field.Description class="text-warning">
-                      {m.model_editor_model_not_synced_list_requests_fail_if_id()}
-                    </Field.Description>
-                    <Button class="mt-2" type="button" variant="ghost" size="sm" onclick={() => useInventory(target)}>
-                      {m.model_editor_choose_synced_model()}
-                    </Button>
-                  {:else}
-                    {@const candidates = modelCandidates(target)}
-                    <SearchCombobox
-                      id={`target-model-${target.key}`}
-                      value={target.model}
-                      options={candidates.map(idNameOption)}
-                      placeholder={m.model_editor_choose_model()}
-                      emptyText={m.common_no_matching_models()}
-                      ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
-                      disabled={!target.providerId || target.loading || candidates.length === 0}
-                      onValueChange={(value: string) => void selectModel(target, value)} />
-                    {#if target.providerId && !target.loading && !target.validationError && candidates.length === 0}
-                      <p class="text-sm text-warning" role="status">
-                        {form.purpose ? m.route_purpose_no_candidates() : m.route_purpose_placeholder()}
-                      </p>
-                    {:else if form.purpose && candidates.length > 0 && candidates.length < target.inventory.length}
-                      <Field.Description>
-                        {m.route_purpose_candidates_filtered({ purpose: routePurposeLabels[form.purpose]() })}
-                      </Field.Description>
-                    {/if}
-                  {/if}
-                </Field.Field>
-              </Field.Group>
-
-              <Field.Group class="mt-4 grid gap-4 border-t pt-4 md:grid-cols-3">
-                <Field.Field orientation="vertical" data-invalid={firstTokenInvalid ? 'true' : undefined}>
-                  <Field.Label
-                    for={`target-first-token-timeout-${target.key}`}
-                    hint={m.model_editor_first_token_timeout_help()}>
-                    {m.model_editor_first_token_timeout()}
-                  </Field.Label>
-                  <InputGroup.Root class="w-28">
-                    <InputGroup.Input
-                      id={`target-first-token-timeout-${target.key}`}
-                      type="number"
-                      min="0"
-                      step="0.001"
-                      aria-invalid={firstTokenInvalid}
-                      aria-describedby={firstTokenInvalid
-                        ? `target-first-token-timeout-constraint-${target.key}`
-                        : undefined}
-                      bind:value={target.firstTokenTimeoutSeconds} />
-                    <InputGroup.Addon align="inline-end">
-                      <InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text>
-                    </InputGroup.Addon>
-                  </InputGroup.Root>
-                  {#if firstTokenInvalid}<Field.Error id={`target-first-token-timeout-constraint-${target.key}`}>
-                      {m.model_editor_seconds_constraint()}
-                    </Field.Error>{/if}
-                </Field.Field>
-                <Field.Field orientation="vertical" data-invalid={retryBudgetInvalid ? 'true' : undefined}>
-                  <Field.Label
-                    for={`target-retry-budget-${target.key}`}
-                    hint={m.model_editor_target_retry_budget_help()}>
-                    {m.model_editor_target_retry_budget()}
-                  </Field.Label>
-                  <InputGroup.Root class="w-28">
-                    <InputGroup.Input
-                      id={`target-retry-budget-${target.key}`}
-                      type="number"
-                      min="0"
-                      step="1"
-                      aria-invalid={retryBudgetInvalid}
-                      aria-describedby={retryBudgetInvalid ? `target-retry-budget-constraint-${target.key}` : undefined}
-                      bind:value={target.targetRetryBudget} />
-                    <InputGroup.Addon align="inline-end">
-                      <InputGroup.Text>{m.model_editor_unit_times()}</InputGroup.Text>
-                    </InputGroup.Addon>
-                  </InputGroup.Root>
-                  {#if retryBudgetInvalid}<Field.Error id={`target-retry-budget-constraint-${target.key}`}>
-                      {m.model_editor_retry_budget_constraint()}
-                    </Field.Error>{/if}
-                </Field.Field>
-                <Field.Field orientation="vertical" data-invalid={cooldownInvalid ? 'true' : undefined}>
-                  <Field.Label for={`target-cooldown-${target.key}`} hint={m.model_editor_target_cooldown_help()}>
-                    {m.model_editor_target_cooldown()}
-                  </Field.Label>
-                  <InputGroup.Root class="w-28">
-                    <InputGroup.Input
-                      id={`target-cooldown-${target.key}`}
-                      type="number"
-                      min="0"
-                      step="0.001"
-                      aria-invalid={cooldownInvalid}
-                      aria-describedby={cooldownInvalid ? `target-cooldown-constraint-${target.key}` : undefined}
-                      bind:value={target.targetCooldownSeconds} />
-                    <InputGroup.Addon align="inline-end">
-                      <InputGroup.Text>{m.model_editor_unit_seconds()}</InputGroup.Text>
-                    </InputGroup.Addon>
-                  </InputGroup.Root>
-                  {#if cooldownInvalid}<Field.Error id={`target-cooldown-constraint-${target.key}`}>
-                      {m.model_editor_seconds_constraint()}
-                    </Field.Error>{/if}
-                </Field.Field>
-              </Field.Group>
-
-              {#if target.loading}
-                <div class="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
-                  <Spinner />{m.model_editor_loading_models_supported_features()}
-                </div>
-              {:else if summary}
-                <div class="mt-4 flex flex-wrap items-center gap-2 border-t pt-3">
-                  <ModelSpecification specification={summary.specification} />
-                  <ModelDetailsDialog
-                    providerId={target.providerId}
-                    modelId={target.model ?? ''}
-                    triggerLabel={m.model_editor_view_model_details()} />
-                </div>
-              {/if}
-              {#if !target.loading && target.providerId && target.model?.trim() && target.thinkingLevelMap.length > 0}
-                {@const context = targetThinkingContext(target, summary)}
-                {@const writableKinds = writableThinkingControlKinds(context)}
-                {@const candidates = effortCandidates(context)}
-                <div class="mt-4 border-t pt-4">
-                  <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="flex items-center gap-2">
-                        <h4 class="font-medium">{m.model_editor_thinking_map()}</h4>
-                        <Field.Help hint={m.model_editor_thinking_map_help()} />
-                      </div>
-                      {#if target.id}
-                        <p class="mt-1 text-sm text-muted-foreground">{m.model_editor_thinking_map_immediate()}</p>
-                      {/if}
-                    </div>
-                    {#if target.id}
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onclick={() => void regenerateThinkingMap(target)}>
-                        {m.model_editor_thinking_regenerate()}
-                      </Button>
-                    {/if}
-                  </div>
-                  <div data-slot="thinking-map" class="divide-y border-y">
-                    {#each target.thinkingLevelMap as row (row.level)}
-                      {@const kindWritable = writableKinds.includes(row.control.type)}
-                      {@const rowWritable = thinkingControlWritable(row.control, context)}
-                      {@const errorId = `thinking-error-${target.key}-${row.level}`}
-                      <div
-                        data-slot="thinking-map-row"
-                        class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 py-2 sm:grid-cols-[minmax(8rem,0.8fr)_minmax(0,2.2fr)_auto]">
-                        <div class="flex min-w-0 items-center gap-2">
-                          <span class="font-technical text-sm">{row.level}</span>
-                          {#if row.source === 'overridden'}
-                            <span class="text-xs text-muted-foreground">
-                              {m.model_editor_thinking_overridden()}
-                            </span>
-                          {/if}
-                        </div>
-                        <div class="col-span-2 flex min-w-0 gap-2 sm:col-span-1">
-                          <Select.Root
-                            type="single"
-                            value={row.control.type}
-                            onValueChange={(value: string) =>
-                              value && changeThinkingControlKind(row, value as TargetThinkingControl['type'], context)}>
-                            <Select.Trigger
-                              class="w-36 shrink-0"
-                              aria-invalid={!kindWritable}
-                              aria-describedby={!kindWritable ? errorId : undefined}
-                              aria-label={m.model_editor_thinking_control({ level: row.level })}>
-                              {thinkingControlLabel(row.control.type)}
-                            </Select.Trigger>
-                            <Select.Content>
-                              <Select.Group>
-                                {#each thinkingControlKinds as type (type)}
-                                  <Select.Item value={type} disabled={!writableKinds.includes(type)}>
-                                    {thinkingControlLabel(type)}
-                                  </Select.Item>
-                                {/each}
-                              </Select.Group>
-                            </Select.Content>
-                          </Select.Root>
-                          {#if row.control.type === 'effort'}
-                            {#if candidates?.length}
-                              {@const current = row.control.value}
-                              <Select.Root
-                                type="single"
-                                value={current}
-                                onValueChange={(value: string) => value && changeThinkingEffort(row, value)}>
-                                <Select.Trigger
-                                  title={current}
-                                  class="min-w-0 flex-1 font-technical"
-                                  aria-invalid={!rowWritable}
-                                  aria-describedby={!rowWritable ? errorId : undefined}
-                                  aria-label={m.model_editor_thinking_upstream_level({ level: row.level })}>
-                                  <span class={['truncate', !current.trim() && 'font-sans text-muted-foreground']}>
-                                    {current.trim() ? current : m.model_editor_thinking_choose_level()}
-                                  </span>
-                                </Select.Trigger>
-                                <Select.Content class="max-w-[calc(100vw-2rem)]">
-                                  <Select.Group>
-                                    {#each candidates as effort (effort)}
-                                      <Select.Item value={effort} class="font-technical">
-                                        <span class="min-w-0 whitespace-normal wrap-anywhere">{effort}</span>
-                                      </Select.Item>
-                                    {/each}
-                                  </Select.Group>
-                                </Select.Content>
-                              </Select.Root>
-                            {:else}
-                              <Input
-                                class="min-w-0 flex-1 font-technical"
-                                value={row.control.value}
-                                aria-label={m.model_editor_thinking_upstream_level({ level: row.level })}
-                                readonly={candidates !== null}
-                                aria-invalid={!rowWritable}
-                                aria-describedby={!rowWritable ? errorId : undefined}
-                                oninput={(event: Event) => changeThinkingEffort(row, inputValue(event))} />
-                            {/if}
-                          {/if}
-                        </div>
-                        {#if target.id}
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            class="col-start-2 row-start-1 justify-self-end sm:col-auto sm:row-auto"
-                            aria-label={`${m.model_editor_thinking_reset_row()}: ${row.level}`}
-                            title={m.model_editor_thinking_reset_row()}
-                            onclick={() => void resetThinkingRow(target, row.level)}>
-                            <RotateCcwIcon />
-                          </Button>
-                        {/if}
-                        {#if !rowWritable}
-                          <p id={errorId} class="col-span-full text-sm wrap-anywhere text-destructive" role="status">
-                            {!kindWritable
-                              ? m.model_editor_thinking_row_unwritable()
-                              : candidates
-                                ? m.model_editor_thinking_effort_undeclared({ efforts: formatList(candidates) })
-                                : m.model_editor_thinking_effort_required()}
-                          </p>
-                        {/if}
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-              {#if target.validationError}<p class="mt-3 text-sm text-warning" role="status">
-                  {target.validationError}
-                </p>{/if}
-            </div>
-            {#snippet footer()}
-              <Button type="button" variant="outline" onclick={() => closeTargetEditor(false)}>
-                {m.common_cancel()}
-              </Button>
-
-              <Button
-                type="button"
-                disabled={target.loading || (target.enabled && !targetConfigured(target))}
-                onclick={() => closeTargetEditor(true)}>
-                {m.common_confirm()}
-              </Button>
-              <p class="text-sm text-muted-foreground sm:order-first sm:mr-auto sm:self-center">
-                {m.model_editor_target_draft_note()}
-              </p>
-            {/snippet}
-          </Dialog.Layout>
-        {/if}
-      </Dialog.Root>
+      <BatchAddSheet
+        open={batchAddSheet.open}
+        sessionId={batchAddSheet.sessionId}
+        model={batchAddSheet.model}
+        modelDisplayName={batchAddModelName}
+        scope={batchAddSheet.scope}
+        layerNumber={batchAddLayerNumber}
+        purpose={form.purpose}
+        providers={availableProviders}
+        existingProviderIds={batchAddExistingProviders}
+        {knownInventories}
+        onClose={() => (batchAddSheet.open = false)}
+        onSubmit={handleBatchAddSubmit} />
     </section>
 
     <section class="route-section" aria-labelledby="route-thinking-title">
@@ -1757,7 +2217,7 @@ async function saveModel(): Promise<void> {
             <Field.Help hint={m.model_editor_thinking_levels_help()} />
           </div>
           <div role="group" aria-label={m.model_editor_thinking_levels()} class="flex flex-wrap gap-1.5">
-            {#each thinkingLevels as level (level)}
+            {#each THINKING_LEVELS as level (level)}
               {@const blockers = thinkingLevelBlockers(level)}
               {#if !supportedThinkingLevels.includes(level)}
                 <Tooltip.Root>

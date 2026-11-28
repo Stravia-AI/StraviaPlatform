@@ -255,6 +255,7 @@ async fn provider_route_and_key(
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -2315,6 +2316,7 @@ async fn deepseek_builtin_applies_thinking_and_tool_history_on_the_real_wire() -
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    config_mode: None,
                     thinking_level_map,
                 }]),
                 ..Default::default()
@@ -2949,6 +2951,7 @@ async fn manually_installed_devin_discovers_families_assigns_a_router_and_stream
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

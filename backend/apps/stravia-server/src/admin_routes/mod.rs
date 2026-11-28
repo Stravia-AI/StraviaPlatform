@@ -14,7 +14,8 @@ use crate::http_auth::{AdminHttpState, auth_router, require_admin};
 use serde::Deserialize;
 use stravia_core::Gateway;
 use stravia_core::admin::{
-    BindRouteInput, CopyProviderOptions, ProviderConnectionCheckInput, UnbindRouteInput,
+    BindRouteInput, CopyProviderOptions, ProviderConnectionCheckInput,
+    TargetGroupThinkingRegenerateInput, TargetGroupThinkingResetInput, UnbindRouteInput,
 };
 use stravia_core::auth::{
     AuthCompletionInput, AuthSessionCandidate, AuthSessionStatusData, OAuthCallbackMode,
@@ -271,6 +272,14 @@ fn create_router_inner(
         .route(
             "/models/{route_id}/targets/{target_id}/thinking-map/regenerate",
             post(regenerate_target_thinking_map_handler),
+        )
+        .route(
+            "/models/{route_id}/target-groups/thinking-map/reset",
+            post(reset_target_group_thinking_mapping_handler),
+        )
+        .route(
+            "/models/{route_id}/target-groups/thinking-map/regenerate",
+            post(regenerate_target_group_thinking_map_handler),
         )
         .route("/models/{route_id}", models_item.clone())
         // Deprecated: use /models instead

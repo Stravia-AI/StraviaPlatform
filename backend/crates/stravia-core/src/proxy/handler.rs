@@ -216,6 +216,7 @@ mod tests {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -345,6 +346,7 @@ mod tests {
                     first_token_timeout_ms: Some(target.first_token_timeout_ms),
                     target_retry_budget: Some(target.target_retry_budget),
                     target_cooldown_ms: Some(target.target_cooldown_ms),
+                    config_mode: None,
                     thinking_level_map: map,
                 }
             })
@@ -567,6 +569,7 @@ mod tests {
                         first_token_timeout_ms: None,
                         target_retry_budget: None,
                         target_cooldown_ms: None,
+                        config_mode: None,
                         thinking_level_map: Vec::new(),
                     }],
                     default_thinking_level: None,

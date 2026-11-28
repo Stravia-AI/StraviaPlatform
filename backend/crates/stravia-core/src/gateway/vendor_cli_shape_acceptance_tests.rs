@@ -541,6 +541,7 @@ async fn route_key(
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
                 target_cooldown_ms: Some(0),
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

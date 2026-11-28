@@ -1579,11 +1579,12 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
   await expect(page.getByLabel('Layer 1')).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await expect(page.getByLabel('Destination 1 priority')).toHaveCount(0)
-  await expect(savedDestination).toContainText('Context 1.05M')
-  await expect(savedDestination).toContainText('Image')
-  await expect(savedDestination).toContainText('PDF')
-  await expect(savedDestination).toContainText('Text')
-  await expect(savedDestination).not.toContainText('Max output')
+  const savedGroup = page.locator('[data-slot="target-lane"]').first().locator('[data-slot="target-model-group"]').first()
+  await expect(savedGroup).toContainText('Context 1.05M')
+  await expect(savedGroup).toContainText('Image')
+  await expect(savedGroup).toContainText('PDF')
+  await expect(savedGroup).toContainText('Text')
+  await expect(savedGroup).not.toContainText('Max output')
 
   await savedDestination.click({ position: { x: 4, y: 4 } })
   await expect(page.getByRole('dialog')).toBeVisible()
@@ -2092,10 +2093,11 @@ test('Dragging a destination toward the page edge scrolls the page so it can rea
   expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(initialScroll)
 
   // 指针回到停用区后滚动停止，松手即可停用目标。
-  // mouse.move 返回时原生拖拽事件未必已被页面处理；等指针位置更新后再取基线。
+  // mouse.move 返回时指针拖拽事件未必已被页面处理；等指针位置更新后再取基线。
   const dragPointer = await page.evaluateHandle(() => {
     const latest = { clientY: Number.NaN }
-    const track = (event: DragEvent) => (latest.clientY = event.clientY)
+    const track = (event: MouseEvent) => (latest.clientY = event.clientY)
+    document.addEventListener('pointermove', track, { capture: true })
     document.addEventListener('dragenter', track, { capture: true })
     document.addEventListener('dragover', track, { capture: true })
     return latest
@@ -2201,4 +2203,182 @@ test.describe('touch drag on a phone', () => {
     await expect(lanes).toHaveCount(1)
     expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   })
+})
+
+test('Model editor pools same-model accounts, deduplicates strategy labels, and applies shared vs custom group config', async ({
+  page,
+}) => {
+  const providers = [
+    geometryProvider('pool-a', 'Antigravity 1'),
+    geometryProvider('pool-b', 'Antigravity 2'),
+    geometryProvider('pool-c', 'Antigravity 3'),
+    geometryProvider('pool-d', 'Antigravity 4'),
+  ]
+  const thinkingMap = (mediumEffort: string) =>
+    (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const).map((level) => ({
+      level,
+      control: level === 'medium' ? { type: 'effort', value: mediumEffort } : { type: 'hidden' },
+      source: 'overridden',
+    }))
+  const target = (
+    id: string,
+    provider_id: string,
+    model: string,
+    priority: number,
+    timeoutMs: number,
+    config_mode: 'shared' | 'custom',
+    mediumEffort: string,
+  ) => ({
+    id,
+    model_id: 'pooled-route',
+    provider_id,
+    model,
+    route_purposes: ['inference'],
+    enabled: true,
+    priority,
+    first_token_timeout_ms: timeoutMs,
+    target_retry_budget: 5,
+    target_cooldown_ms: 120_000,
+    config_mode,
+    created_at: '2026-08-17T00:00:00Z',
+    thinking_level_map: thinkingMap(mediumEffort),
+  })
+  const saved = {
+    id: 'pooled-route',
+    model_id: 'pooled-route',
+    display_name: 'Pooled Neon',
+    balance: 'traffic_equalization',
+    purpose: 'inference',
+    image_generation_bound: false,
+    web_search_bound: false,
+    is_enabled: true,
+    supported_thinking_levels: ['medium'],
+    created_at: '2026-08-17T00:00:00Z',
+    targets: [
+      target('t1', 'pool-a', 'gemini-4-neon', 20, 300_000, 'shared', 'medium'),
+      target('t2', 'pool-b', 'gemini-4-neon', 20, 300_000, 'shared', 'medium'),
+      target('t3', 'pool-c', 'gemini-4-neon', 20, 60_000, 'custom', 'low'),
+      target('t4', 'pool-a', 'claude-fallback', 10, 120_000, 'shared', 'medium'),
+    ],
+  }
+  const summary = {
+    id: 'gemini-4-neon',
+    name: 'Gemini 4 Neon',
+    available: true,
+    route_purposes: ['inference'],
+    specification: {
+      modalities: { input: ['text'], output: ['text'] },
+      reasoning_efforts: ['low', 'medium', 'high'],
+    },
+  }
+
+  let savedPayload:
+    | { targets?: Array<{ provider_id: string; model?: string; first_token_timeout_ms?: number; config_mode?: string }> }
+    | undefined
+  let regenPayload: Record<string, unknown> | undefined
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: providers } }))
+  await page.route('**/api/v1/providers/*/models', (route) =>
+    route.fulfill({ json: { data: { models: [summary] } } }),
+  )
+  await page.route('**/api/v1/providers/*/model?*', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          id: 'gemini-4-neon',
+          metadata: { reasoning_efforts: ['low', 'medium', 'high'] },
+          thinking_level_map: thinkingMap('medium'),
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/models/pooled-route', (route) => {
+    if (route.request().method() === 'PUT') {
+      savedPayload = route.request().postDataJSON()
+      return route.fulfill({ json: { data: saved } })
+    }
+    return route.fulfill({ json: { data: saved } })
+  })
+  await page.route('**/api/v1/models/pooled-route/target-statuses', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/models/pooled-route/target-groups/thinking-map/regenerate', (route) => {
+    regenPayload = route.request().postDataJSON()
+    const nextTargets = saved.targets.map((item) =>
+      item.model === 'gemini-4-neon' && (item.config_mode === 'shared' || regenPayload?.include_custom)
+        ? { ...item, thinking_level_map: thinkingMap('high') }
+        : item,
+    )
+    return route.fulfill({ json: { data: { ...saved, targets: nextTargets } } })
+  })
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/models/pooled-route')
+
+  const laneStack = page.locator('[data-slot="target-lane-stack"]')
+  await expect(laneStack.locator('[data-slot="target-lane"]')).toHaveCount(2)
+  await expect(laneStack.locator('[data-slot="target-model-group"][data-model="gemini-4-neon"]')).toHaveCount(1)
+
+  // 策略标签只在顶部客户端模型区出现一次，请求目标画布中不重复出现；画布也不泄露原始 priority 整数 20/10。
+  await expect(page.getByText('Traffic equalization', { exact: true })).toHaveCount(1)
+  await expect(laneStack).not.toContainText('Traffic equalization')
+  await expect(laneStack).not.toContainText('Latency preference')
+  await expect(laneStack).not.toContainText('priority 20')
+
+  // 打开模型组配置抽屉：修改共享超时 300s → 180s（不勾选覆盖独立），并触发组级重新生成思考映射。
+  const neonGroup = laneStack.locator('[data-slot="target-model-group"][data-model="gemini-4-neon"]')
+  await expect(neonGroup.locator('[data-slot="target-card"][data-config-mode="custom"]')).toHaveCount(1)
+  await neonGroup.getByRole('button', { name: 'Group config', exact: true }).click()
+
+  const groupSheet = page.locator('[data-slot="group-config-sheet"]')
+  await expect(groupSheet).toBeVisible()
+  await groupSheet.getByRole('button', { name: 'Regenerate group map', exact: true }).click()
+  await expect.poll(() => regenPayload).toEqual({
+    enabled: true,
+    priority: 20,
+    model: 'gemini-4-neon',
+    include_custom: false,
+  })
+
+  await groupSheet.getByLabel('First token timeout').fill('180')
+  await groupSheet.getByRole('button', { name: 'Apply to group', exact: true }).click()
+  await expect(groupSheet).toHaveCount(0)
+
+  // 保存时：pool-a/pool-b 的 gemini-4-neon 更新为 180s + shared，pool-c 保持 60s + custom。
+  await page.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect.poll(() => savedPayload?.targets).toBeDefined()
+  const byTarget = Object.fromEntries(
+    (savedPayload?.targets ?? []).map((item) => [
+      `${item.provider_id}:${item.model}:${item.config_mode}`,
+      item.first_token_timeout_ms,
+    ]),
+  )
+  expect(byTarget['pool-a:gemini-4-neon:shared']).toBe(180_000)
+  expect(byTarget['pool-b:gemini-4-neon:shared']).toBe(180_000)
+  expect(byTarget['pool-c:gemini-4-neon:custom']).toBe(60_000)
+  expect(byTarget['pool-a:claude-fallback:shared']).toBe(120_000)
+
+  // 等待首次保存完成跳转回列表页，再重新进入编辑页测试勾选覆盖独立配置 + 批量加账号。
+  await expect(page).toHaveURL(/\/models$/)
+  await page.goto('/models/pooled-route')
+  await expect(neonGroup.locator('[data-slot="target-card"][data-config-mode="custom"]')).toHaveCount(1)
+  await neonGroup.getByRole('button', { name: 'Group config', exact: true }).click()
+  await expect(groupSheet).toBeVisible()
+  await groupSheet.getByRole('checkbox').check()
+  await groupSheet.getByLabel('First token timeout').fill('240')
+  await groupSheet.getByRole('button', { name: 'Apply to group', exact: true }).click()
+  await expect(neonGroup.locator('[data-slot="target-card"][data-config-mode="custom"]')).toHaveCount(0)
+
+  // 批量加账号：把 pool-d 一键加入 gemini-4-neon 组，自动继承 240s + shared。
+  await neonGroup.getByRole('button', { name: 'Add accounts', exact: true }).click()
+  const batchSheet = page.locator('[data-slot="batch-add-sheet"]')
+  await expect(batchSheet).toBeVisible()
+  await batchSheet.getByText('Antigravity 4').click()
+  await batchSheet.locator('button[type="button"]').filter({ hasText: /Add 1/ }).click()
+  await expect(batchSheet).toHaveCount(0)
+  await expect(neonGroup.locator('[data-slot="target-card"]')).toHaveCount(4)
+
+  savedPayload = undefined
+  await page.getByRole('button', { name: 'Save model', exact: true }).click()
+  await expect.poll(() => savedPayload?.targets?.length).toBe(5)
+  const poolD = savedPayload?.targets?.find((item) => item.provider_id === 'pool-d')
+  expect(poolD?.config_mode).toBe('shared')
+  expect(poolD?.first_token_timeout_ms).toBe(240_000)
 })

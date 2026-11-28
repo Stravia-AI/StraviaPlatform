@@ -126,6 +126,7 @@ async fn antigravity_real_wasm_inference_matches_inference_capture() -> anyhow::
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
                 target_cooldown_ms: Some(0),
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

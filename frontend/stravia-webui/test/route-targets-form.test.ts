@@ -2,18 +2,34 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   buildRouteTargets,
+  checkGroupThinkingCompatibility,
+  commonGroupEffortSupport,
   createRouteTarget,
   createRouteTargetForms,
+  groupLaneTargetsByModel,
+  inheritGroupConfigForNewTarget,
+  mergeLaneIntoUpper,
   millisecondsToSeconds,
+  moveModelGroupToDock,
+  moveModelGroupToInsertion,
+  moveModelGroupToLane,
   moveRouteTargetToDock,
   moveRouteTargetToInsertion,
   moveRouteTargetToLane,
+  moveTargetToLaneWithInheritance,
   planRouteTargetInsertion,
   priorityLanes,
   reorderRouteTargetBefore,
   routeSupportedThinkingLevels,
   secondsToMilliseconds,
+  setTargetConfigMode,
+  stepModelGroup,
+  stepTargetSplitMerge,
+  summarizeTargetGroupConfig,
+  swapAdjacentLanes,
   THINKING_LEVELS,
+  updateModelGroupConfig,
+  type RouteTargetForm,
 } from '../src/lib/components/route-targets-form'
 import type { Route, ThinkingLevel, ThinkingLevelMapping } from '../src/lib/types'
 
@@ -270,6 +286,234 @@ describe('route targets form', () => {
 
     targets[1].enabled = false
     expect(routeSupportedThinkingLevels(targets)).toEqual([])
+  })
+
+  test('groups targets by model, updates shared members while protecting custom, and supports overwrite', () => {
+    const map = (value: string): ThinkingLevelMapping[] =>
+      THINKING_LEVELS.map((level) => ({
+        level,
+        control: level === 'medium' ? { type: 'effort', value } : { type: 'hidden' },
+        source: 'overridden',
+      }))
+
+    const targets: RouteTargetForm[] = []
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p1',
+        model: 'gemini-4-neon',
+        enabled: true,
+        priority: 10,
+        firstTokenTimeoutSeconds: 300,
+        targetRetryBudget: 5,
+        targetCooldownSeconds: 120,
+        configMode: 'shared',
+        thinkingLevelMap: map('medium'),
+      }),
+    )
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p2',
+        model: 'gemini-4-neon',
+        enabled: true,
+        priority: 10,
+        firstTokenTimeoutSeconds: 300,
+        targetRetryBudget: 5,
+        targetCooldownSeconds: 120,
+        configMode: 'shared',
+        thinkingLevelMap: map('medium'),
+      }),
+    )
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p3',
+        model: 'gemini-4-neon',
+        enabled: true,
+        priority: 10,
+        firstTokenTimeoutSeconds: 60,
+        targetRetryBudget: 3,
+        targetCooldownSeconds: 90,
+        configMode: 'custom',
+        thinkingLevelMap: map('low'),
+      }),
+    )
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p4',
+        model: 'claude-4-6-opus',
+        enabled: true,
+        priority: 10,
+        configMode: 'shared',
+      }),
+    )
+
+    const groups = groupLaneTargetsByModel(targets, { enabled: true, priority: 10 })
+    expect(groups.map((group) => [group.model, group.sharedTargets.length, group.customTargets.length])).toEqual([
+      ['gemini-4-neon', 2, 1],
+      ['claude-4-6-opus', 1, 0],
+    ])
+    expect(summarizeTargetGroupConfig(groups[0].sharedConfig)).toEqual({
+      timeoutSeconds: 300,
+      retryBudget: 5,
+      cooldownSeconds: 120,
+      enabledThinkingLevels: ['medium'],
+    })
+
+    const nextConfig = {
+      firstTokenTimeoutSeconds: 180,
+      targetRetryBudget: 4,
+      targetCooldownSeconds: 60,
+      thinkingLevelMap: map('high'),
+    }
+    const partial = updateModelGroupConfig(targets, { enabled: true, priority: 10 }, 'gemini-4-neon', nextConfig)
+    expect(partial).toEqual({ updatedCount: 2, overwrittenCustomCount: 0 })
+    expect(targets[0].firstTokenTimeoutSeconds).toBe(180)
+    expect(targets[1].firstTokenTimeoutSeconds).toBe(180)
+    expect(targets[2].firstTokenTimeoutSeconds).toBe(60)
+    expect(targets[2].configMode).toBe('custom')
+
+    const syncedBack = setTargetConfigMode(targets, targets[2].key, 'shared')
+    expect(syncedBack).toEqual({ ok: true, syncedFromGroup: true })
+    expect(targets[2].firstTokenTimeoutSeconds).toBe(180)
+    expect(targets[2].targetRetryBudget).toBe(4)
+
+    targets[2].configMode = 'custom'
+    targets[2].firstTokenTimeoutSeconds = 45
+    const overwrite = updateModelGroupConfig(
+      targets,
+      { enabled: true, priority: 10 },
+      'gemini-4-neon',
+      { ...nextConfig, firstTokenTimeoutSeconds: 240 },
+      { overwriteCustom: true },
+    )
+    expect(overwrite).toEqual({ updatedCount: 3, overwrittenCustomCount: 1 })
+    expect(targets.map((target) => target.configMode)).toEqual(['shared', 'shared', 'shared', 'shared'])
+    expect(targets[2].firstTokenTimeoutSeconds).toBe(240)
+
+    const added = createRouteTarget(targets, {
+      providerId: 'p5',
+      model: 'gemini-4-neon',
+      enabled: true,
+      priority: 10,
+    })
+    expect(inheritGroupConfigForNewTarget(targets, added, { enabled: true, priority: 10 })).toBe(true)
+    expect(added.firstTokenTimeoutSeconds).toBe(240)
+    expect(added.configMode).toBe('shared')
+
+    const payload = buildRouteTargets(targets)
+    expect(payload.error).toBeUndefined()
+    expect(payload.targets.map((target) => target.config_mode)).toEqual(['shared', 'shared', 'shared', 'shared'])
+  })
+
+  test('layer swap, merge into upper, split-merge step, and whole-group moves preserve invariants', () => {
+    const targets: RouteTargetForm[] = []
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p1',
+        model: 'model-a',
+        enabled: true,
+        priority: 2,
+        firstTokenTimeoutSeconds: 300,
+        configMode: 'shared',
+      }),
+    )
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p2',
+        model: 'model-b',
+        enabled: true,
+        priority: 2,
+        firstTokenTimeoutSeconds: 200,
+        configMode: 'shared',
+      }),
+    )
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p3',
+        model: 'model-a',
+        enabled: true,
+        priority: 1,
+        firstTokenTimeoutSeconds: 90,
+        configMode: 'shared',
+      }),
+    )
+    targets.push(
+      createRouteTarget(targets, {
+        providerId: 'p4',
+        model: 'model-a',
+        enabled: true,
+        priority: 1,
+        firstTokenTimeoutSeconds: 45,
+        configMode: 'custom',
+      }),
+    )
+
+    // Split p2 down out of lane 2, then merge it back up: strictly reversible.
+    const split = stepTargetSplitMerge(targets, targets[1].key, 'down')
+    expect(split.ok).toBe(true)
+    expect(split.action).toBe('split-down')
+    expect(priorityLanes(targets).length).toBe(3)
+
+    const mergedBack = stepTargetSplitMerge(targets, targets[1].key, 'up')
+    expect(mergedBack.ok).toBe(true)
+    expect(mergedBack.action).toBe('merge-up')
+    expect(priorityLanes(targets).length).toBe(2)
+
+    // Swap top & bottom lanes.
+    const lanesBefore = priorityLanes(targets)
+    expect(swapAdjacentLanes(targets, lanesBefore[0].priority, lanesBefore[1].priority)).toBe(true)
+    expect(priorityLanes(targets)[0].targets.map((t) => t.providerId)).toEqual(['p3', 'p4'])
+
+    // Swap back, then merge lower lane into upper: shared p3 inherits upper model-a's 300s, custom p4 keeps 45s!
+    const lanesSwapped = priorityLanes(targets)
+    expect(swapAdjacentLanes(targets, lanesSwapped[0].priority, lanesSwapped[1].priority)).toBe(true)
+    const lanesRestored = priorityLanes(targets)
+    const merged = mergeLaneIntoUpper(targets, lanesRestored[1].priority, lanesRestored[0].priority)
+    expect(merged).toEqual({ moved: 2, syncedShared: 1 })
+    expect(targets[2].firstTokenTimeoutSeconds).toBe(300)
+    expect(targets[3].firstTokenTimeoutSeconds).toBe(45)
+    expect(targets[3].configMode).toBe('custom')
+
+    // Whole model-a group steps down into its own new lane, keeping custom p4 intact.
+    const groupKeys = [targets[0].key, targets[2].key, targets[3].key]
+    const groupStep = stepModelGroup(targets, groupKeys, 'down')
+    expect(groupStep.ok).toBe(true)
+    expect(groupStep.action).toBe('split-down')
+    expect(priorityLanes(targets).length).toBe(2)
+    expect(targets[3].firstTokenTimeoutSeconds).toBe(45)
+
+    // Whole group move into top lane & insertion & dock protection.
+    const topPriority = priorityLanes(targets)[0].priority
+    expect(moveModelGroupToLane(targets, groupKeys, topPriority).ok).toBe(true)
+    expect(moveModelGroupToInsertion(targets, groupKeys, { position: 'bottom' })).toBe(true)
+    expect(moveModelGroupToDock(targets, groupKeys)).toBe(true)
+    // Cannot dock the last remaining enabled target p2.
+    expect(moveModelGroupToDock(targets, [targets[1].key])).toBe(false)
+
+    // Single target lane move inherits destination shared peer config.
+    const singleMove = moveTargetToLaneWithInheritance(targets, targets[2].key, topPriority)
+    expect(singleMove).toEqual({ ok: true, inheritedFromGroup: false })
+  })
+
+  test('checks cross-member thinking effort intersection and compatibility warnings', () => {
+    const members = [
+      {
+        label: 'Account A',
+        context: { protocol: 'anthropic-messages', reasoningEfforts: ['low', 'medium', 'high', 'max'] },
+      },
+      {
+        label: 'Account B',
+        context: { protocol: 'anthropic-messages', reasoningEfforts: ['low', 'medium', 'high'] },
+      },
+    ]
+    const support = commonGroupEffortSupport(members)
+    expect(support.common).toEqual(['low', 'medium', 'high'])
+    expect(support.differences).toEqual([{ label: 'Account B', missing: ['max'] }])
+
+    const issues = checkGroupThinkingCompatibility(members, [
+      { level: 'high', control: { type: 'effort', value: 'high' }, source: 'generated' },
+      { level: 'max', control: { type: 'effort', value: 'max' }, source: 'overridden' },
+    ])
+    expect(issues).toEqual([{ level: 'max', effort: 'max', incompatibleMembers: ['Account B'] }])
   })
 })
 

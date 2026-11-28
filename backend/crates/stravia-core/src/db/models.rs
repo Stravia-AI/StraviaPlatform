@@ -446,6 +446,26 @@ pub const DEFAULT_FIRST_TOKEN_TIMEOUT_MS: i64 = 120_000;
 pub const DEFAULT_TARGET_RETRY_BUDGET: i32 = 5;
 pub const DEFAULT_TARGET_COOLDOWN_MS: i64 = 120_000;
 
+/// 同层同模型组内 Target 的配置归属：跟随组共享或单账号独立覆盖。
+/// 生效的 4 项配置仍物化在每条 Target 行上，选路热路径不读取此字段。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum TargetConfigMode {
+    #[default]
+    Shared,
+    Custom,
+}
+
+impl TargetConfigMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Custom => "custom",
+        }
+    }
+}
+
 const fn default_target_enabled() -> bool {
     true
 }
@@ -460,6 +480,7 @@ pub struct TargetConfig {
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
     pub target_cooldown_ms: i64,
+    pub config_mode: TargetConfigMode,
     pub created_at: String,
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
     /// 管理面读取时从 Provider Model 快照投影的展示名；不持久化，存储层读出时为 `None`，
@@ -496,6 +517,7 @@ pub struct TargetView<'a> {
     pub first_token_timeout_ms: i64,
     pub target_retry_budget: i32,
     pub target_cooldown_ms: i64,
+    pub config_mode: TargetConfigMode,
     pub created_at: &'a str,
     pub thinking_level_map: &'a [ThinkingLevelMapping],
 }
@@ -515,6 +537,7 @@ impl<'a> From<&'a TargetConfig> for TargetView<'a> {
             first_token_timeout_ms: target.first_token_timeout_ms,
             target_retry_budget: target.target_retry_budget,
             target_cooldown_ms: target.target_cooldown_ms,
+            config_mode: target.config_mode,
             created_at: &target.created_at,
             thinking_level_map: &target.thinking_level_map,
         }
@@ -802,6 +825,8 @@ pub struct CreateTarget {
     pub first_token_timeout_ms: Option<i64>,
     pub target_retry_budget: Option<i32>,
     pub target_cooldown_ms: Option<i64>,
+    #[serde(default)]
+    pub config_mode: Option<TargetConfigMode>,
     #[serde(default)]
     pub thinking_level_map: Vec<ThinkingLevelMapping>,
 }

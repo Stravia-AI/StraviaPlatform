@@ -373,6 +373,7 @@ async fn generation_http_fixture_with_usage(
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(if retry_first_image { 1 } else { 0 }),
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

@@ -598,6 +598,7 @@ async fn create_route(
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(target_retry_budget),
                     target_cooldown_ms: Some(0),
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -1022,6 +1023,7 @@ async fn external_search_half_open_probe_sends_once_and_recovers_the_target() ->
                 target_retry_budget: Some(0),
                 target_cooldown_ms: Some(60_000),
 
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -2977,6 +2979,7 @@ async fn model_turn_guest_input_error(
             first_token_timeout_ms: None,
             target_retry_budget: Some(5),
             target_cooldown_ms: Some(60_000),
+            config_mode: None,
             thinking_level_map: ThinkingLevel::ALL
                 .into_iter()
                 .map(|level| ThinkingLevelMapping {

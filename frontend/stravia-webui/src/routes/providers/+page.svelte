@@ -297,6 +297,7 @@ async function deleteModelTarget(route: Route, targetId: string): Promise<void> 
           first_token_timeout_ms: target.first_token_timeout_ms,
           target_retry_budget: target.target_retry_budget,
           target_cooldown_ms: target.target_cooldown_ms,
+          config_mode: target.config_mode,
           thinking_level_map: target.thinking_level_map,
         })),
     })

@@ -1500,6 +1500,7 @@ async fn catalog_provider_without_dedicated_vendor_adapter_reaches_upstream() {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -1728,6 +1729,7 @@ async fn unrepresentable_thinking_mapping_uses_nearest_protocol_supported_level(
                 first_token_timeout_ms: Some(route.targets[0].first_token_timeout_ms),
                 target_retry_budget: Some(route.targets[0].target_retry_budget),
                 target_cooldown_ms: Some(route.targets[0].target_cooldown_ms),
+                config_mode: None,
                 thinking_level_map: map,
             }]),
             default_thinking_level: None,
@@ -1834,6 +1836,7 @@ async fn explicit_thinking_is_omitted_when_the_route_opens_no_levels() {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                config_mode: None,
                 thinking_level_map: map,
             }
         })
@@ -1933,6 +1936,7 @@ async fn failover_remaps_the_same_clamped_level_for_the_next_target() {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                config_mode: None,
                 thinking_level_map: map,
             }
         })
