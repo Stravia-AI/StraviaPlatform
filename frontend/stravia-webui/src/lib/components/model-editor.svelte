@@ -51,6 +51,7 @@ import type {
 import {
   addRouteTarget,
   buildRouteTargets,
+  countDistinctTargetAccounts,
   createRouteTarget,
   createRouteTargetForms,
   extractTargetGroupConfig,
@@ -1741,8 +1742,8 @@ async function saveModel(): Promise<void> {
                           ]}>
                           {m.model_editor_layer_value({ index: laneIndex + 1 })}
                         </span>
-                        <span class="text-xs text-muted-foreground tabular-nums">
-                          {layerStatsLabel(groups.length, lane.targets.length)}
+                        <span data-slot="target-lane-stats" class="text-xs text-muted-foreground tabular-nums">
+                          {layerStatsLabel(groups.length, countDistinctTargetAccounts(lane.targets))}
                         </span>
                       </div>
                       <div class="flex shrink-0 items-center gap-1">

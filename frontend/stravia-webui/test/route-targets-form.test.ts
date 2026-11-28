@@ -4,6 +4,7 @@ import {
   buildRouteTargets,
   checkGroupThinkingCompatibility,
   commonGroupEffortSupport,
+  countDistinctTargetAccounts,
   createRouteTarget,
   createRouteTargetForms,
   groupLaneTargetsByModel,
@@ -514,6 +515,27 @@ describe('route targets form', () => {
       { level: 'max', control: { type: 'effort', value: 'max' }, source: 'overridden' },
     ])
     expect(issues).toEqual([{ level: 'max', effort: 'max', incompatibleMembers: ['Account B'] }])
+  })
+
+  test('counts distinct non-empty provider accounts across model groups in a layer', () => {
+    const targets: RouteTargetForm[] = []
+    targets.push(
+      createRouteTarget(targets, { providerId: 'opencode', model: 'big-pickle', enabled: true, priority: 10 }),
+    )
+    targets.push(
+      createRouteTarget(targets, { providerId: 'opencode', model: 'flint-40b-free', enabled: true, priority: 10 }),
+    )
+    expect(countDistinctTargetAccounts(targets)).toBe(1)
+
+    targets.push(
+      createRouteTarget(targets, { providerId: 'openrouter', model: 'big-pickle', enabled: true, priority: 10 }),
+    )
+    targets.push(
+      createRouteTarget(targets, { providerId: '  opencode  ', model: 'other', enabled: true, priority: 10 }),
+    )
+    targets.push(createRouteTarget(targets, { providerId: '   ', model: 'draft', enabled: false, priority: 0 }))
+    expect(countDistinctTargetAccounts(targets)).toBe(2)
+    expect(countDistinctTargetAccounts([])).toBe(0)
   })
 })
 
