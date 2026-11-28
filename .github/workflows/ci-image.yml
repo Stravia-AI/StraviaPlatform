@@ -41,6 +41,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file .github/docker/ci.Dockerfile \
+            --target x64 \
             --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu/ \
             --build-arg APT_MIRROR_PORTS=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
             --build-arg NODE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/nodejs-release \
@@ -48,6 +49,28 @@ jobs:
             --cache-to=type=registry,ref=${IMAGE}:buildcache,mode=max \
             --tag "${IMAGE}:x64" \
             --tag "${IMAGE}:x64-${SHORT_SHA:0:12}" \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            .
+
+      - name: Build and push git.stravia.cn/stravia/stravia-ci:arm64-desktop
+        env:
+          IMAGE: git.stravia.cn/stravia/stravia-ci
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file .github/docker/ci.Dockerfile \
+            --target arm64-desktop \
+            --build-arg APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu/ \
+            --build-arg APT_MIRROR_PORTS=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ \
+            --build-arg NODE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/nodejs-release \
+            --cache-from=type=registry,ref=${IMAGE}:buildcache \
+            --cache-from=type=registry,ref=${IMAGE}:buildcache-arm64-desktop \
+            --cache-to=type=registry,ref=${IMAGE}:buildcache-arm64-desktop,mode=max \
+            --tag "${IMAGE}:arm64-desktop" \
+            --tag "${IMAGE}:arm64-desktop-${SHORT_SHA:0:12}" \
             --provenance=false \
             --sbom=false \
             --push \

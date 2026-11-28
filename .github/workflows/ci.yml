@@ -32,10 +32,11 @@ env:
   UV_VERSION: "0.11.28"
   PATCH_CRATE_VERSION: "0.1.13"
   SCCACHE_VERSION: "0.10.0"
+  CARGO_NEXTEST_VERSION: "0.9.152"
   CARGO_XWIN_VERSION: "0.22.0"
   APPLE_CODESIGN_VERSION: "0.29.0"
   XWIN_VERSION: "16"
-  # Keep sccache archive under the runner's 8 GiB /tmp tmpfs so actions/cache/save never hits ENOSPC.
+  # Fallback cap for local disk sccache archives when no remote sccache backend is configured.
   SCCACHE_CACHE_SIZE: "5G"
   CARGO_TERM_COLOR: always
   # Clear any container-baked index override (e.g. domestic PyPI mirror) so `uv run --locked` matches uv.lock.
@@ -273,10 +274,106 @@ jobs:
           done
           exit "$failed"
 
-  # Unified Linux Rust lane: fmt, WIT compat, clippy, unit tests, and shared E2E binaries
-  # run in one container to reuse target/, sccache, and prepared Wasm vendors without rebuilding.
+  # Parallel static Rust lane: fmt, WIT compatibility, and clippy run alongside unit tests
+  # so downstream E2E suites do not wait behind clippy on the critical path.
+  rust-clippy:
+    name: Rust fmt, WIT compat & clippy
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Bootstrap Linux x64 Rust toolchain
+        id: bootstrap
+        env:
+          NEED_LINUX_DESKTOP: "1"
+          RUST_TARGETS: "wasm32-wasip2"
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Restore Cargo registry and patched crates cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/patch
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
+          restore-keys: |
+            deps-cargo-v2-
+
+      - name: Restore Linux x64 sccache (rolling)
+        id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-clippy
+          restore-keys: |
+            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-
+
+      - name: Restore compiled Wasm vendor plugins
+        id: vendor-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            target/vendor-plugins
+            .task/checksum/build-vendors
+          key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Prepare patched crates and bundled vendor
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: |
+          bash .github/scripts/prepare_cargo_deps.sh
+          task build:vendors
+
+      - name: Check WIT compatibility and clippy
+        run: |
+          cargo run --locked -p stravia-devtools --bin stravia-tools -- wit-compat
+          cargo clippy --locked --workspace \
+            --exclude stravia-vendor-capability-contract-fixture \
+            --exclude stravia-vendor-lifecycle-contract-fixture \
+            --exclude stravia-vendor-management-contract-fixture \
+            --exclude stravia-vendor-manual-contract-fixture \
+            --exclude stravia-vendor-net-1-0-compat-fixture \
+            --exclude stravia-vendor-state-contract-fixture \
+            --all-targets -- -D warnings
+
+      - name: Show sccache stats
+        id: sccache-stats
+        if: always()
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
+
+      - name: Save Linux x64 sccache (rolling, even on lint failure)
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-clippy
+
+  # Unified Linux Rust test & E2E artifact lane: unit tests (via cargo-nextest), doc tests,
+  # and shared E2E service binaries reuse target/, sccache, and prepared Wasm vendors.
   rust-ci:
-    name: Rust check, unit tests & shared E2E build
+    name: Rust unit tests & shared E2E build
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
@@ -293,7 +390,8 @@ jobs:
       - name: Bootstrap Linux x64 Rust toolchain
         id: bootstrap
         env:
-          NEED_LINUX_DESKTOP: ${{ (needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true') && '1' || '0' }}
+          NEED_LINUX_DESKTOP: "0"
+          NEED_NEXTEST: ${{ (needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true') && '1' || '0' }}
           NEED_UV: "1"
           RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
@@ -323,6 +421,7 @@ jobs:
 
       - name: Restore Linux x64 sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -343,10 +442,6 @@ jobs:
             .task/checksum/build-vendors-all
             .task/checksum/build-vendor-fixtures
           key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
-
-      - name: Check Rust formatting
-        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-        run: cargo fmt --all -- --check
 
       - name: Prepare patched crates and vendor fixtures
         env:
@@ -382,23 +477,19 @@ jobs:
             .task/checksum/build-vendor-fixtures
           key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
 
-      - name: Check WIT compatibility and clippy
+      - name: Run locked Rust unit test suite
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
         run: |
-          cargo run --locked -p stravia-devtools --bin stravia-tools -- wit-compat
-          cargo clippy --locked --workspace \
+          bun tests/common/run-in-tempdir.ts cargo nextest run --locked --workspace \
+            --exclude stravia-desktop \
             --exclude stravia-vendor-capability-contract-fixture \
             --exclude stravia-vendor-lifecycle-contract-fixture \
             --exclude stravia-vendor-management-contract-fixture \
             --exclude stravia-vendor-manual-contract-fixture \
             --exclude stravia-vendor-net-1-0-compat-fixture \
             --exclude stravia-vendor-state-contract-fixture \
-            --all-targets -- -D warnings
-
-      - name: Run locked Rust unit test suite
-        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
-        run: |
-          bun tests/common/run-in-tempdir.ts cargo test --locked --workspace \
+            --no-fail-fast --status-level fail --final-status-level slow
+          bun tests/common/run-in-tempdir.ts cargo test --locked --doc --workspace \
             --exclude stravia-desktop \
             --exclude stravia-vendor-capability-contract-fixture \
             --exclude stravia-vendor-lifecycle-contract-fixture \
@@ -565,13 +656,16 @@ jobs:
           restore-keys: |
             ci-uv-v1-
 
-      - name: Restore Linux x64 sccache (rolling)
+      - name: Restore Linux x64 dev-origin sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-admin
+          key: sccache-linux-x64-dev-origin-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
+            sccache-linux-x64-dev-origin-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-dev-origin-
             sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             sccache-linux-x64-
 
@@ -611,16 +705,16 @@ jobs:
         if: always()
         env:
           CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
-          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-dev-origin-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
         run: bash .github/scripts/sccache_check_save.sh
 
-      - name: Save Linux x64 sccache (rolling, even on test failure)
+      - name: Save Linux x64 dev-origin sccache (rolling, even on test failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-admin
+          key: sccache-linux-x64-dev-origin-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
 
   postgres-e2e:
     name: PostgreSQL E2E
@@ -708,6 +802,43 @@ jobs:
           wait_tcp("redis", 6379, probe=b"PING\r\n", expect=b"PONG")
           PY
 
+      - name: Prepare isolated PostgreSQL worker databases
+        env:
+          POSTGRES_ADMIN_URL: postgresql://stravia:stravia@postgres:5432/stravia_test
+        run: |
+          uv run --locked --group test python - <<'PY'
+          import json
+          import os
+          import time
+          from pathlib import Path
+          import psycopg
+
+          admin_url = os.environ["POSTGRES_ADMIN_URL"]
+          workers = ["master", "gw0", "gw1", "gw2", "gw3"]
+          deadline = time.monotonic() + 60.0
+          while True:
+              try:
+                  conn = psycopg.connect(admin_url, autocommit=True)
+                  break
+              except psycopg.OperationalError as exc:
+                  if time.monotonic() >= deadline:
+                      raise SystemExit(f"PostgreSQL did not accept connections after 60s: {exc}")
+                  time.sleep(1.0)
+
+          urls: dict[str, str] = {}
+          with conn:
+              with conn.cursor() as cur:
+                  for worker in workers:
+                      db = f"stravia_storage_{worker}"
+                      cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
+                      if cur.fetchone() is None:
+                          cur.execute(f'CREATE DATABASE "{db}" OWNER stravia')
+                      urls[worker] = f"postgresql://stravia:stravia@postgres:5432/{db}"
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"STRAVIA_STORAGE_TEST_POSTGRES_URLS={json.dumps(urls)}\n")
+          PY
+
       - name: Run PostgreSQL E2E suite
         env:
           DB_URL: postgresql://stravia:stravia@postgres:5432/stravia_test
@@ -715,7 +846,7 @@ jobs:
           STRAVIA_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-server
           STRAVIA_TOOLS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-tools
           STRAVIA_STORAGE_HARNESS_BINARY: ${{ github.workspace }}/target/test-artifacts/services/stravia-storage-test-harness
-        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/storage -q --durations=0 -m storage -k postgres
+        run: bun tests/common/run-in-tempdir.ts uv run --locked --group test python -m pytest tests/e2e/storage -q -n 4 --dist loadgroup --durations=0 -m storage -k postgres
 
   webui-e2e:
     name: WebUI E2E
@@ -829,6 +960,7 @@ jobs:
 
       - name: Restore Windows x86_64 sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -961,6 +1093,7 @@ jobs:
 
       - name: Restore Windows x86_64 sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -1025,8 +1158,8 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-kvm
 
-  macos-cross-smoke:
-    name: macOS cross-compile & rcodesign/DMG smoke (${{ matrix.suffix }})
+  prepare-macos-assets:
+    name: Build shared WebUI & bundled vendor for macOS smoke
     needs: changes
     if: ${{ github.server_url != 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.reuse_covers_macos != 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke)) }}
     runs-on: ubuntu-latest
@@ -1035,38 +1168,15 @@ jobs:
       credentials:
         username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
         password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suffix: darwin-aarch64
-            target: aarch64-apple-darwin
-            arch: arm64
-            cmake_file: .github/cmake/macos-aarch64.cmake
-          - suffix: darwin-x86_64
-            target: x86_64-apple-darwin
-            arch: x86_64
-            cmake_file: .github/cmake/macos-x86_64.cmake
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Restore osxcross toolchain cache (when not prebuilt in image)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: /opt/osxcross/target
-          key: osxcross-899260ca-sdk15.5-linux-x64-v1
-          restore-keys: |
-            osxcross-899260ca-sdk15.5-linux-x64-v1
-
-      - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
+      - name: Bootstrap Linux x64 toolchain
         id: bootstrap
         env:
-          NEED_MACOS_CROSS: "1"
-          RUST_TARGETS: "wasm32-wasip2 ${{ matrix.target }}"
-          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL || 'https://github.com/joseluisq/macosx-sdks/releases/download/15.5/MacOSX15.5.sdk.tar.xz' }}
-          MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
+          RUST_TARGETS: "wasm32-wasip2"
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Cargo registry and patched crates
@@ -1091,15 +1201,16 @@ jobs:
           restore-keys: |
             deps-bun-v2-
 
-      - name: Restore macOS sccache (rolling)
+      - name: Restore Linux x64 wasm sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
-          key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          key: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-macos-shared
           restore-keys: |
-            sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            sccache-macos-${{ matrix.suffix }}-
+            sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-wasm-
 
       - name: Restore compiled Wasm vendor plugins
         id: vendor-cache
@@ -1110,13 +1221,121 @@ jobs:
             .task/checksum/build-vendors
           key: vendor-fixtures-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'patches/*+*.patch', '.cargo/config.toml', 'backend/crates/stravia-vendor-*/**', 'backend/crates/stravia-protocol-codec/**', 'backend/crates/stravia-runtime-contract/**', 'backend/crates/stravia-core/assets/providers.stravia.json', 'frontend/stravia-webui/src/assets/icons/*.svg', 'tests/common/build-plugin-marketplace-fixtures.ts') }}
 
-      - name: Prepare patched crates, WebUI, and bundled vendors
+      - name: Build WebUI dist and bundled base Wasm vendor once
         env:
           CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
         run: |
           bash .github/scripts/prepare_cargo_deps.sh
+          task install:web
           task build:web
           task build:vendors
+
+      - name: Show sccache stats
+        id: sccache-stats
+        if: always()
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+        run: bash .github/scripts/sccache_check_save.sh
+
+      - name: Save Linux x64 wasm sccache (rolling)
+        if: always() && steps.sccache-stats.outputs.should_save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-macos-shared
+
+      - name: Upload shared macOS smoke assets
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: macos-smoke-shared-assets
+          path: |
+            frontend/stravia-webui/dist
+            target/vendor-plugins
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-cross-smoke:
+    name: macOS cross-compile & rcodesign/DMG smoke (${{ matrix.suffix }})
+    needs: [changes, prepare-macos-assets]
+    if: ${{ github.server_url != 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.reuse_covers_macos != 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke)) }}
+    runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:x64
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: darwin-aarch64
+            target: aarch64-apple-darwin
+            arch: arm64
+            cmake_file: .github/cmake/macos-aarch64.cmake
+          - suffix: darwin-x86_64
+            target: x86_64-apple-darwin
+            arch: x86_64
+            cmake_file: .github/cmake/macos-x86_64.cmake
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download shared WebUI dist & bundled vendors
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
+        with:
+          name: macos-smoke-shared-assets
+          path: .
+
+      - name: Restore osxcross toolchain cache (when not prebuilt in image)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: /opt/osxcross/target
+          key: osxcross-899260ca-sdk15.5-linux-x64-v1
+          restore-keys: |
+            osxcross-899260ca-sdk15.5-linux-x64-v1
+
+      - name: Bootstrap Linux x64 macOS cross-compile toolchain (osxcross + MacOSX15.5 SDK)
+        id: bootstrap
+        env:
+          NEED_BUN: "0"
+          NEED_MACOS_CROSS: "1"
+          RUST_TARGETS: "${{ matrix.target }}"
+          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL || 'https://github.com/joseluisq/macosx-sdks/releases/download/15.5/MacOSX15.5.sdk.tar.xz' }}
+          MACOS_SDK_SHA256: ${{ vars.MACOS_SDK_SHA256 || 'c15cf0f3f17d714d1aa5a642da8e118db53d79429eb015771ba816aa7c6c1cbd' }}
+        run: bash .github/scripts/bootstrap_toolchain.sh
+
+      - name: Cache Cargo registry and patched crates
+        id: cargo-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/patch
+            .task/checksum/prepare-crates
+          key: deps-cargo-v2-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'patches/*+*.patch') }}
+          restore-keys: |
+            deps-cargo-v2-
+
+      - name: Restore macOS sccache (rolling)
+        id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/sccache
+          key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-macos-${{ matrix.suffix }}-
+
+      - name: Prepare patched crates
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: bash .github/scripts/prepare_cargo_deps.sh
 
       - name: Cross-compile macOS desktop binary via osxcross
         env:

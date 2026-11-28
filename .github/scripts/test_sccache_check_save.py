@@ -32,6 +32,7 @@ class SccacheCheckSaveTests(unittest.TestCase):
         matched_key: str,
         expected_prefix: str = "sccache-linux-x64-abc123-",
         min_misses: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         self._write_fake_sccache(stats_output)
         if self.output_file.exists():
@@ -43,8 +44,21 @@ class SccacheCheckSaveTests(unittest.TestCase):
             EXPECTED_KEY_PREFIX=expected_prefix,
             GITHUB_OUTPUT=str(self.output_file),
         )
+        for remote_var in (
+            "SCCACHE_WEBDAV_ENDPOINT",
+            "SCCACHE_ENDPOINT",
+            "SCCACHE_BUCKET",
+            "SCCACHE_REDIS",
+            "SCCACHE_REDIS_ENDPOINT",
+            "SCCACHE_GCS_BUCKET",
+            "SCCACHE_AZURE_CONNECTION_STRING",
+            "SCCACHE_GHA_ENABLED",
+        ):
+            env.pop(remote_var, None)
         if min_misses is not None:
             env["SCCACHE_SAVE_MIN_MISSES"] = str(min_misses)
+        if extra_env:
+            env.update(extra_env)
         proc = subprocess.run(
             ["bash", str(SCRIPT)],
             env=env,
@@ -107,6 +121,27 @@ class SccacheCheckSaveTests(unittest.TestCase):
         )
         decision, _ = self._run(stats, matched_key="")
         self.assertEqual(decision, "false")
+
+    def test_skips_save_when_remote_sccache_backend_is_active(self) -> None:
+        stats = "\n".join(
+            [
+                "Cache hits                          100",
+                "Cache misses                        500",
+            ]
+        )
+        for extra_env in (
+            {"SCCACHE_WEBDAV_ENDPOINT": "http://192.168.123.100:18426"},
+            {"SCCACHE_ENDPOINT": "http://127.0.0.1:9000", "SCCACHE_BUCKET": "sccache"},
+            {"SCCACHE_GHA_ENABLED": "true"},
+        ):
+            with self.subTest(extra_env=extra_env):
+                decision, stdout = self._run(
+                    stats,
+                    matched_key="",
+                    extra_env=extra_env,
+                )
+                self.assertEqual(decision, "false")
+                self.assertIn("remote sccache backend is active", stdout)
 
 
 if __name__ == "__main__":

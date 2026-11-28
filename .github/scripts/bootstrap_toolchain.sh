@@ -30,8 +30,10 @@ UV_VERSION="${UV_VERSION:-0.11.28}"
 CARGO_XWIN_VERSION="${CARGO_XWIN_VERSION:-0.22.0}"
 PATCH_CRATE_VERSION="${PATCH_CRATE_VERSION:-0.1.13}"
 SCCACHE_VERSION="${SCCACHE_VERSION:-0.10.0}"
+CARGO_NEXTEST_VERSION="${CARGO_NEXTEST_VERSION:-0.9.152}"
 
 NEED_RUST="${NEED_RUST:-1}"
+NEED_NEXTEST="${NEED_NEXTEST:-0}"
 NEED_BUN="${NEED_BUN:-1}"
 NEED_TASK="${NEED_TASK:-1}"
 NEED_UV="${NEED_UV:-0}"
@@ -78,7 +80,7 @@ add_pkg_if_missing() {
 }
 
 if command -v apt-get >/dev/null 2>&1; then
-  for pkg in ca-certificates curl git python3; do
+  for pkg in ca-certificates curl git python3 zstd; do
     add_pkg_if_missing "$pkg"
   done
   if [[ "$NEED_RUST" == "1" ]]; then
@@ -189,6 +191,11 @@ if [[ "$NEED_RUST" == "1" ]]; then
   if [[ "$NEED_XWIN" == "1" ]] && ! command -v cargo-xwin >/dev/null 2>&1; then
     cargo install --locked --version "${CARGO_XWIN_VERSION}" cargo-xwin
   fi
+  if [[ "$NEED_NEXTEST" == "1" ]] && ! command -v cargo-nextest >/dev/null 2>&1; then
+    mkdir -p "${LOCAL_BIN}"
+    curl -fsSL "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${CARGO_NEXTEST_VERSION}/cargo-nextest-${CARGO_NEXTEST_VERSION}-${SCCACHE_TRIPLE}.tar.gz" \
+      | tar -xz -C "${LOCAL_BIN}" cargo-nextest
+  fi
   if [[ "$NEED_MACOS_CROSS" == "1" ]] && ! command -v rcodesign >/dev/null 2>&1; then
     mkdir -p "${LOCAL_BIN}"
     if ! curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${APPLE_CODESIGN_VERSION}/apple-codesign-${APPLE_CODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
@@ -270,6 +277,22 @@ if [[ "$NEED_UV" == "1" ]]; then
   fi
 fi
 
+SCCACHE_REMOTE="false"
+if [[ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" \
+  || -n "${SCCACHE_ENDPOINT:-}" \
+  || -n "${SCCACHE_BUCKET:-}" \
+  || -n "${SCCACHE_REDIS:-}" \
+  || -n "${SCCACHE_REDIS_ENDPOINT:-}" \
+  || -n "${SCCACHE_GCS_BUCKET:-}" \
+  || -n "${SCCACHE_AZURE_CONNECTION_STRING:-}" \
+  || "${SCCACHE_GHA_ENABLED:-}" == "true" ]]; then
+  SCCACHE_REMOTE="true"
+fi
+
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "sccache_remote=${SCCACHE_REMOTE}" >> "$GITHUB_OUTPUT"
+fi
+
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "${CARGO_HOME}/bin" "${BUN_INSTALL}/bin" "${LOCAL_BIN}" >> "$GITHUB_PATH"
 fi
@@ -278,8 +301,6 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   cat <<EOF >> "$GITHUB_ENV"
 CARGO_HOME=${CARGO_HOME}
 RUSTUP_HOME=${RUSTUP_HOME}
-SCCACHE_DIR=${SCCACHE_DIR}
-SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-5G}
 SCCACHE_IDLE_TIMEOUT=${SCCACHE_IDLE_TIMEOUT:-3600}
 CARGO_INCREMENTAL=0
 CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG:-0}
@@ -290,6 +311,12 @@ LOCAL_BIN=${LOCAL_BIN}
 UV_CACHE_DIR=${UV_CACHE_DIR}
 ESLINT_CACHE_DIR=${ESLINT_CACHE_DIR}
 EOF
+  if [[ "${SCCACHE_REMOTE}" != "true" ]]; then
+    cat <<EOF >> "$GITHUB_ENV"
+SCCACHE_DIR=${SCCACHE_DIR}
+SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-5G}
+EOF
+  fi
   if [[ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]]; then
     echo "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}" >> "$GITHUB_ENV"
   fi
