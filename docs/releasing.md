@@ -146,11 +146,9 @@ gh workflow run release.yml --ref <branch> -f macos_only=true
 
 ### 同一提交的 CI 复用
 
-`dev`、`main` push 与版本 tag 仍各自触发工作流，但 `ci.yml` 在启动重型检查前通过 `.github/scripts/reuse_ci.py` 查询同仓库、精确相同 SHA 的自动完整 CI。已有成功运行时直接复用；已有排队或执行中的运行时等待其成功，没有合格候选时照常运行完整检查。只有 `main` / `dev` 的 `push` CI 可以作为证据；其他 SHA、其他仓库、PR、手动运行、缓存预热、失败、取消或跳过的运行均不能作为成功证据。
+`dev`、`main` push 与版本 tag 仍各自触发工作流，但 `ci.yml` 在 `changes` 阶段会通过 `.github/scripts/reuse_ci.py select` 查询同仓库、精确相同 SHA 的 `main` / `dev` `push` CI。已有成功运行时直接复用；已有运行 ID 更小的排队或执行中运行时，由轻量任务 `wait-reused-ci` 通过 `.github/scripts/reuse_ci.py wait` 等待其成功，并跳过共享重型检查（`check-fast`、`rust-ci`、各 E2E、`windows-cross-smoke`、`windows-kvm-desktop-e2e`）。`macos-cross-smoke` 仅在 `main` 上执行：当 `main` 复用 `dev` CI 时，`macos-cross-smoke` 仍与 `wait-reused-ci` 并行执行一次；当 `main` 复用另一条 `main` CI 时一并跳过。只有同仓库 `main` / `dev` 的 `push` CI 可以作为证据；其他 SHA、其他仓库、PR、手动 `workflow_dispatch`、失败、取消或跳过的运行均不能作为成功证据。
 
-独立 CI 只等待运行 ID 更小的 CI，Release 只等待独立 CI，不互相等待。API 失败、等待超时、候选运行失败或被取消都会使守门任务失败，不会把未验证的提交报告为通过。PR 始终验证自己的合并结果；显式 `workflow_dispatch`（包括缓存预热）始终执行其选择的任务。并发组按调用工作流、事件、ref 和预热模式隔离，避免手动预热或分支 CI 取消 Release 检查。
-
-查询运行状态只需要 `actions: read`，不授予取消运行或其他 Actions 写权限。Actions 页面仍可能出现多个轻量守门/等待条目，其 summary 会链接被复用的 CI；不再为已确认的同一提交重复启动整套测试。Rust 缓存仍只由现有可信 `main` writer 写入；当 `main` 复用 `dev` CI 时不会额外写缓存，需要时可在 `main` 手动选择 `cache_warm`。`Docker cache` 负责独立预热镜像构建缓存，不是完整 CI，不参与此复用规则。
+独立 CI 只等待运行 ID 更小的活跃 CI（避免双分支同时推送时互相等待），`release.yml` 则通过 `.github/scripts/wait_for_ci.py` 等待同提交的 `ci.yml` 通过。API 失败、等待超时、候选运行失败或被取消都会使守门任务失败，不会把未验证的提交报告为通过。PR 始终验证自己的合并结果；显式 `workflow_dispatch` 始终执行所选任务。并发组按工作流、事件和 ref 隔离，避免分支 CI 互相取消或影响 Release。
 
 ## 公钥轮换与恢复限制
 

@@ -35,6 +35,8 @@ env:
   CARGO_XWIN_VERSION: "0.22.0"
   APPLE_CODESIGN_VERSION: "0.29.0"
   XWIN_VERSION: "16"
+  # Keep sccache archive under the runner's 8 GiB /tmp tmpfs so actions/cache/save never hits ENOSPC.
+  SCCACHE_CACHE_SIZE: "5G"
   CARGO_TERM_COLOR: always
   # Clear any container-baked index override (e.g. domestic PyPI mirror) so `uv run --locked` matches uv.lock.
   UV_DEFAULT_INDEX: ""
@@ -53,11 +55,30 @@ jobs:
       ci_scripts: ${{ steps.filter.outputs.ci_scripts }}
       full: ${{ steps.filter.outputs.full }}
       windows_kvm_runner: ${{ steps.filter.outputs.windows_kvm_runner }}
+      reuse: ${{ steps.reuse.outputs.reuse }}
+      reuse_run_id: ${{ steps.reuse.outputs.reuse_run_id }}
+      reuse_covers_macos: ${{ steps.reuse.outputs.reuse_covers_macos }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+
+      - name: Check reusable CI for identical commit
+        id: reuse
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/reuse_ci.py select \
+            --api-url "${GITHUB_API_URL}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --ref "${GITHUB_REF}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-number "${GITHUB_RUN_NUMBER:-0}" \
+            --workflow-file "ci.yml"
 
       - name: Classify changed files
         id: filter
@@ -65,8 +86,20 @@ jobs:
         env:
           ENABLE_WINDOWS_KVM_E2E: ${{ vars.ENABLE_WINDOWS_KVM_E2E }}
           INPUT_RUN_WINDOWS_KVM_E2E: ${{ inputs.run_windows_kvm_e2e }}
+          REUSE_CI: ${{ steps.reuse.outputs.reuse }}
         run: |
           set -euo pipefail
+          if [[ "${REUSE_CI}" == "true" ]]; then
+            {
+              echo "rust=false"
+              echo "web=false"
+              echo "ci_scripts=false"
+              echo "full=false"
+              echo "windows_kvm_runner=ubuntu-latest"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           kvm_enabled="false"
           if [[ "${ENABLE_WINDOWS_KVM_E2E}" == "true" || ( "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_RUN_WINDOWS_KVM_E2E}" == "true" ) ]]; then
             kvm_enabled="true"
@@ -137,6 +170,33 @@ jobs:
             echo "windows_kvm_runner=${windows_kvm_runner}"
           } >> "$GITHUB_OUTPUT"
 
+  # Lightweight gate when reusing an identical-commit main/dev CI run; fails closed if the reused run fails/cancels.
+  wait-reused-ci:
+    name: Wait for reused CI run
+    needs: changes
+    if: github.server_url != 'https://github.com' && needs.changes.outputs.reuse == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout CI reuse script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: |
+            .github/scripts/reuse_ci.py
+          sparse-checkout-cone-mode: false
+
+      - name: Wait for reused CI run to succeed
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/reuse_ci.py wait \
+            --api-url "${GITHUB_API_URL}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --run-id "${{ needs.changes.outputs.reuse_run_id }}" \
+            --timeout-seconds 8400
+
   # Ultra-fast lane: no Rust/GTK needed; cached Bun/Task/ESLint + parallel WebUI checks.
   check-fast:
     name: Fast checks (WebUI lint/typecheck/unit & CI scripts)
@@ -151,7 +211,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Bun & Task (no Rust)
         id: bootstrap
@@ -162,7 +222,7 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
@@ -170,7 +230,7 @@ jobs:
             deps-bun-v2-
 
       - name: Cache ESLint content cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/eslint
           key: ci-eslint-v1-${{ hashFiles('frontend/stravia-webui/eslint.config.js', 'frontend/stravia-webui/tsconfig*.json') }}
@@ -228,7 +288,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Linux x64 Rust toolchain
         id: bootstrap
@@ -240,7 +300,7 @@ jobs:
 
       - name: Restore Cargo registry and patched crates cache
         id: cargo-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -254,7 +314,7 @@ jobs:
 
       - name: Restore Bun package cache
         id: bun-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
@@ -263,7 +323,7 @@ jobs:
 
       - name: Restore Linux x64 sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -273,7 +333,7 @@ jobs:
 
       - name: Restore compiled Wasm vendor plugins & fixtures
         id: vendor-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             target/vendor-plugins
@@ -297,7 +357,7 @@ jobs:
 
       - name: Save Cargo registry and patched crates cache
         if: steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: |
@@ -310,7 +370,7 @@ jobs:
 
       - name: Save compiled Wasm vendor plugins & fixtures
         if: steps.vendor-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: |
@@ -355,14 +415,14 @@ jobs:
 
       - name: Save Bun package cache
         if: steps.bun-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
 
       - name: Upload shared E2E binaries & fixtures
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: e2e-binaries-linux-x64
           path: |
@@ -385,7 +445,7 @@ jobs:
 
       - name: Save Linux x64 sccache (rolling, even on test failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -410,7 +470,7 @@ jobs:
           - storage:sqlite
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -422,7 +482,7 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache uv
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/uv
           key: ci-uv-v1-${{ hashFiles('uv.lock') }}
@@ -430,7 +490,7 @@ jobs:
             ci-uv-v1-
 
       - name: Download shared E2E binaries
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: e2e-binaries-linux-x64
           path: .
@@ -466,7 +526,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -477,7 +537,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -490,7 +550,7 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
@@ -498,7 +558,7 @@ jobs:
             deps-bun-v2-
 
       - name: Cache uv
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/uv
           key: ci-uv-v1-${{ hashFiles('uv.lock') }}
@@ -507,7 +567,7 @@ jobs:
 
       - name: Restore Linux x64 sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-admin
@@ -516,7 +576,7 @@ jobs:
             sccache-linux-x64-
 
       - name: Download shared E2E binaries
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: e2e-binaries-linux-x64
           path: .
@@ -556,7 +616,7 @@ jobs:
 
       - name: Save Linux x64 sccache (rolling, even on test failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -594,7 +654,7 @@ jobs:
           --health-retries 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap uv & Bun (no Rust needed)
         id: bootstrap
@@ -606,7 +666,7 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache uv
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/uv
           key: ci-uv-v1-${{ hashFiles('uv.lock') }}
@@ -614,7 +674,7 @@ jobs:
             ci-uv-v1-
 
       - name: Download shared E2E binaries
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: e2e-binaries-linux-x64
           path: .
@@ -670,7 +730,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Bun & Task (no Rust needed)
         id: bootstrap
@@ -681,7 +741,7 @@ jobs:
         run: bash .github/scripts/bootstrap_toolchain.sh
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
@@ -690,7 +750,7 @@ jobs:
 
       - name: Restore Playwright browsers
         id: playwright-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/ms-playwright
           key: ci-playwright-v2-${{ hashFiles('frontend/stravia-webui/package.json') }}
@@ -698,7 +758,7 @@ jobs:
             ci-playwright-v2-
 
       - name: Download shared E2E binaries
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: e2e-binaries-linux-x64
           path: .
@@ -718,7 +778,7 @@ jobs:
 
       - name: Save Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/ms-playwright
@@ -743,7 +803,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Linux x64 cross-compile + Wine toolchain
         id: bootstrap
@@ -755,7 +815,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -769,7 +829,7 @@ jobs:
 
       - name: Restore Windows x86_64 sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -779,7 +839,7 @@ jobs:
 
       - name: Restore compiled Wasm vendor plugins
         id: vendor-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             target/vendor-plugins
@@ -836,7 +896,7 @@ jobs:
 
       - name: Save Windows x86_64 sccache (rolling, even on test failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -855,7 +915,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Linux x64 cross-compile toolchain
         id: bootstrap
@@ -866,7 +926,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -879,7 +939,7 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
@@ -888,7 +948,7 @@ jobs:
 
       - name: Restore compiled Wasm vendor plugins & fixtures
         id: vendor-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             target/vendor-plugins
@@ -901,7 +961,7 @@ jobs:
 
       - name: Restore Windows x86_64 sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-windows-x86_64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-kvm
@@ -959,7 +1019,7 @@ jobs:
 
       - name: Save Windows x86_64 sccache (rolling, even on test failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -967,7 +1027,8 @@ jobs:
 
   macos-cross-smoke:
     name: macOS cross-compile & rcodesign/DMG smoke (${{ matrix.suffix }})
-    if: ${{ github.server_url != 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke)) }}
+    needs: changes
+    if: ${{ github.server_url != 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.reuse_covers_macos != 'true') || (github.event_name == 'workflow_dispatch' && inputs.run_macos_cross_smoke)) }}
     runs-on: ubuntu-latest
     container:
       image: git.stravia.cn/stravia/stravia-ci:x64
@@ -989,10 +1050,10 @@ jobs:
             cmake_file: .github/cmake/macos-x86_64.cmake
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: /opt/osxcross/target
           key: osxcross-899260ca-sdk15.5-linux-x64-v1
@@ -1010,7 +1071,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -1023,7 +1084,7 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
@@ -1032,7 +1093,7 @@ jobs:
 
       - name: Restore macOS sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -1042,7 +1103,7 @@ jobs:
 
       - name: Restore compiled Wasm vendor plugins
         id: vendor-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             target/vendor-plugins
@@ -1083,7 +1144,7 @@ jobs:
 
       - name: Save macOS sccache (rolling, even on test failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
