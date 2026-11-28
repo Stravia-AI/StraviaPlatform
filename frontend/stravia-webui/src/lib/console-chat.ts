@@ -307,6 +307,7 @@ export class ConsoleChatController {
   private catalogLoaded = false
   // 持久化删除期间禁止新请求；失败时保留可重试的停止历史。
   private deleting = new Set<string>()
+  private titleInFlight = new Set<string>()
   private clearing = false
 
   constructor(private readonly options: ConsoleChatControllerOptions) {}
@@ -431,8 +432,9 @@ export class ConsoleChatController {
     return this.write(() => {
       const current = this.conversations.find((item) => item.id === checkpoint.id)
       if (!current) return Promise.resolve()
-      // 标题只取已提交值，流式检查点不能覆盖并发重命名或复活已删除记录。
+      // 标题及来源只取已提交值，流式检查点不能覆盖并发重命名或复活已删除记录。
       checkpoint.title = current.title
+      checkpoint.titleSource = current.titleSource
       return this.options.store.saveConversation(checkpoint)
     })
   }
@@ -690,13 +692,20 @@ export class ConsoleChatController {
       this.conversations = this.conversations.filter((item) => item !== conversation)
       if (this.currentId === conversation.id) this.currentId = null
       this.publish()
-    } else if (result && conversation.titleSource === 'fallback' && this.options.generateTitle) {
-      const lastMessage = conversation.messages.at(-1)
-      const assistantText =
-        lastMessage?.role === 'assistant' ? consoleAssistantContent(lastMessage).text.trim() : undefined
-      void this.maybeGenerateTitle(conversation.id, conversation.apiKeyId, text, assistantText || undefined)
+    } else if (result) {
+      this.triggerAutoTitle(conversation)
     }
     return result
+  }
+  private triggerAutoTitle(conversation: ConsoleConversation): void {
+    if (conversation.titleSource !== 'fallback' || !this.options.generateTitle) return
+    if (this.titleInFlight.has(conversation.id)) return
+    const lastMessage = conversation.messages.at(-1)
+    if (lastMessage?.role !== 'assistant') return
+    const userMessage = [...conversation.messages].reverse().find((message) => message.role === 'user')
+    if (!userMessage || !userMessage.text.trim()) return
+    const assistantText = consoleAssistantContent(lastMessage).text.trim()
+    void this.maybeGenerateTitle(conversation.id, conversation.apiKeyId, userMessage.text, assistantText || undefined)
   }
   private async maybeGenerateTitle(
     conversationId: string,
@@ -705,12 +714,15 @@ export class ConsoleChatController {
     assistantMessage?: string,
   ): Promise<void> {
     const generateTitle = this.options.generateTitle
-    if (!generateTitle) return
+    if (!generateTitle || this.titleInFlight.has(conversationId)) return
+    this.titleInFlight.add(conversationId)
     let generated: string | null
     try {
       generated = await generateTitle({ apiKeyId, userMessage, assistantMessage })
     } catch {
       return
+    } finally {
+      this.titleInFlight.delete(conversationId)
     }
     const nextTitle = generated?.trim()
     if (!nextTitle || this.clearing || this.deleting.has(conversationId)) return
@@ -745,7 +757,8 @@ export class ConsoleChatController {
     }
     const previousMessages = [...conversation.messages]
     conversation.messages.pop()
-    await this.generate(conversation, request, last.thinkingLevel, previousMessages)
+    const result = await this.generate(conversation, request, last.thinkingLevel, previousMessages)
+    if (result) this.triggerAutoTitle(conversation)
   }
   async regenerate(): Promise<void> {
     const conversation = this.current()
@@ -758,7 +771,7 @@ export class ConsoleChatController {
     if (last?.role !== 'assistant' || !model || !this.imagesCompatible(model, conversation.messages)) return
     const previousMessages = [...conversation.messages]
     conversation.messages.pop()
-    await this.generate(
+    const result = await this.generate(
       conversation,
       {
         model: model.model_id,
@@ -769,6 +782,7 @@ export class ConsoleChatController {
       conversation.thinkingSelection,
       previousMessages,
     )
+    if (result) this.triggerAutoTitle(conversation)
   }
   /**
    * 以新文本替换一条历史用户消息并按当前模型与强度重新生成；原图片保留，该消息之后的轮次被丢弃。
@@ -790,7 +804,7 @@ export class ConsoleChatController {
     if (!model || !this.imagesCompatible(model, kept, original.images)) return false
     const previousMessages = [...conversation.messages]
     conversation.messages = [...kept, { ...original, id: this.id(), text, createdAt: this.time() }]
-    return this.generate(
+    const result = await this.generate(
       conversation,
       {
         model: model.model_id,
@@ -801,6 +815,8 @@ export class ConsoleChatController {
       conversation.thinkingSelection,
       previousMessages,
     )
+    if (result) this.triggerAutoTitle(conversation)
+    return result
   }
   private async generate(
     conversation: ConsoleConversation,

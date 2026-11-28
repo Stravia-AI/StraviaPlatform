@@ -323,6 +323,8 @@ async fn conversation_title_respects_thinking_level_inheritance_and_override() -
     assert_eq!(recorded.len(), 2);
     assert_eq!(recorded[0].model, route.id.as_str());
     assert_eq!(recorded[0].reasoning.level, None);
+    assert_eq!(recorded[0].generation.max_tokens, None);
+    assert!(recorded[0].stream.enabled);
     assert!(recorded[0].tools.is_none());
     assert!(
         recorded[0]
@@ -333,6 +335,8 @@ async fn conversation_title_respects_thinking_level_inheritance_and_override() -
 
     assert_eq!(recorded[1].model, route.id.as_str());
     assert_eq!(recorded[1].reasoning.level, Some(ThinkingLevel::Off));
+    assert_eq!(recorded[1].generation.max_tokens, None);
+    assert!(recorded[1].stream.enabled);
     assert!(
         recorded[1]
             .instructions
