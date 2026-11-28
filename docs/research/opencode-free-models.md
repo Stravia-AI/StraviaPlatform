@@ -2,7 +2,7 @@
 
 > **范围与证据等级**：本文以 `anomalyco/opencode` 仓库 `dev` 分支在 **2026-09-29** 读取的 commit `7945de208964a49300d7f770d1a71d078db9a4c4`（提交时间 2026-09-28T22:59:34Z）为源码证据；以 `opencode.ai/docs/zen/`（读取于 2026-09-29）和 `opencode.ai/legal/terms-of-service`（生效日期 2026-08-15）为官方文档证据；以公开 GitHub issue 与第三方桥接项目源码/README 为行为佐证。标记为「实测/社区观测」的内容来自第三方项目的实测记录，不是官方承诺；标记 [无法确认] 的内容无法从一手来源证实。本文不包含任何真实 token。
 
-> **2026-10-15 更新**：历史章节保留原时点证据，不作为当前门控规范。当前官方入口、CLI 捕获、单变量结果及真实 Wasm 修复见 §3.4.3；“随机 hex session 足够”“只追最新 UA”“空 schema 足够”等历史推断均不能继续作为实现依据。
+> **2026-11-28 更新**：历史章节保留原时点证据，不作为当前门控规范。当前官方 OpenCode `2.4.2`（Bun `1.4.4`）入口、隔离抓包与对齐细节见 §3.4.4；`1.18.25` 回归记录见 §3.4.3。“随机 hex session 足够”“只追最新 UA”“空 schema 足够”等历史推断均不能继续作为实现依据。
 
 ## 1. 先给结论
 
@@ -180,6 +180,15 @@ tools 检查对象的细化（同日实测，模型 big-pickle）：单工具 `b
 
 私有门控无法从公开源码完整还原，上述成功也不能外推为全部模型、全部工具集或 Responses 面可用；Python 与 Wasm 的成功只排除了“本次 Chat 请求必须由官方二进制／TLS 才能通过”的解释。[维护者仍明确不支持其他 harness 使用免费层](https://github.com/anomalyco/opencode/issues/49621#issuecomment-5723383322)，社区方案（如已关闭的 [9router #4132](https://github.com/decolua/9router/pull/4132) 和 [OMP 同类故障](https://github.com/can1357/oh-my-pi/issues/12306)）只能作为历史线索，不能替代当前受控验证。
 
+#### 3.4.4 本仓库对齐更新（2026-11-28，OpenCode `2.4.2` / Bun `1.4.4`）
+
+上游主线已迁移至 v2（更新 API `https://opencode.ai/update/api/latest/cli/npm` 指向 `2.4.2`，tag commit `55b3550c77dcfbd4e5d63dad932d7e0c3f3b714a`；GitHub `/releases/latest` 仍停留在 v1 线的 `v1.19.6`）。本次从官方发布包校验 SHA-256（`452912288f934d1771bd5bd0d8611ba3a6adc3db3ac3333c37facf373770ba66`）解压 `opencode-linux-x64.tar.gz`，在 `unshare -r -n`（仅 loopback）、独立 `HOME`/`XDG`/`APPDATA`/`OPENCODE_CONFIG_DIR`/空工作目录、`OPENCODE_DISABLE_MODELS_FETCH=1`、`share: disabled`、`update: disable`、`automations: false`、`--standalone` 环境下执行两次独立抓包，并在完成后清理 `/tmp` 临时文件。两次抓包结果一致：
+
+- **运行环境与 TLS 指纹**：内嵌运行时为 `Bun/1.4.4`。首包（无 TLS 1.3 PSK 续接扩展 `41`）ClientHello 携带 `X25519MLKEM768`（`4588`）+ `X25519`（`29`）key shares、13 个无 padding 扩展 `[0,23,65281,10,11,35,16,5,13,18,51,45,43]`，签名算法扩展为 11 项（较 Bun `1.4.2` 新增 `0x0807` ed25519 与 `0x0603` ecdsa_secp521r1_sha512），JA4 为 `t13d1713h1_5b57614c22b0_7f527383e249`，与仓库既有的 `bun-1-3-14`（Bun `1.3.14`）及 `bun`（Bun `1.4.2`）均不同，因此在 `stravia-core` 新增内置 shape `bun-1-4-4`（`revision: 1`，保留 `bun` 与 `bun-1-3-14` 原 revision 不变）。
+- **端点与 HTTP 头**：默认 Chat Completions 入口迁至 `https://opencode.ai/inference/openai/v1`（`/chat/completions`）。`User-Agent` 变更为 `opencode/latest/2.4.2/cli`（对应 `packages/core/src/app.ts` 的 ``opencode/${channel}/${version}/${name}``，不再拼接 `ai-sdk/provider-utils` 与 `runtime/bun`）；移除 `x-opencode-request`；新增 `b3`、`traceparent`、40 位 hex `x-opencode-project`，并将同一降序时间戳 `ses_` 值同步写入 `x-opencode-session`、`x-opencode-session-id`、`x-session-affinity`、`x-session-id`（精确按 Bun Fetch 排序输出）。
+- **请求体与内置工具**：`max_tokens` 改为 `max_completion_tokens`；默认省略 `tool_choice`（不再显式发 `"tool_choice": "auto"`）；内置工具 `bash` 改名为 `shell`（参数 `command` / `workdir` / `timeout` / `background`，`additionalProperties: false`，`strict: false`），`read` 必填字段由 `filePath` 改为 `path`（参数 `path` / `offset` / `limit`，`additionalProperties: false`，`strict: false`）。
+- **公开模型目录与实测边界**：2026-11-28 匿名 `GET https://opencode.ai/inference/openai/v1/models`（与 `/inference/v1/models` 返回相同 139,449 字节）返回 HTTP 200，当前 10 个免费 chat 模型均为 `type: "chat"` + `api["chat-completions"].base_url = "https://opencode.ai/inference/openai/v1"` + 0 成本（`big-pickle`、`mimo-v2.6-flash-free`、`deepseek-v4.1-flash-free`、`iceman-free`、`beam-free`、`flint-40b-free`、`nemotron-3.5-super-vl-free`、`nemotron-3.5-lightning-free`、`hy4-flash-free`、`seaglass-alpha-free`），另有 `jev-1.13-free` 为 `type: "decision"`（`systemone` 协议）。`opencode-free` 的 `discover()` 现显式过滤非 `chat` 类型、缺 `chat-completions` 或非 0 价格项（缺省扩展字段时回退到后缀/`big-pickle` 判定）。同日直接调用官方 `@opencode/cli-linux-x64@2.4.2` 验证全部 10 个免费模型：9/10 返回 HTTP 200（`seaglass-alpha-free` 返回 `Model unavailable`）。经受控转发与单变量消融实测证实，`opencode.ai/inference/openai/v1/chat/completions` 对任一门控失败均**伪装返回 `HTTP 429 FreeUsageLimitError`**（而非 400/403），实际 6 项强制门控为：① Bun TLS 指纹（原样载荷改经 Python OpenSSL / `curl` 转发即被拒）；② 官方 `User-Agent: opencode/latest/2.4.2/cli`；③ 合法 `ses_` 格式的 `x-opencode-session` 或 `x-session-id`；④ `tools` 含 `read`；⑤ `stream: true`；⑥ `system`（或 `developer`）消息内包含 `<env>...Working directory:...</env>`，逐字符二分确认最短可接受系统提示词为 29 字节 `<env>Working directory:</env>`（缺冒号、小写或将 `Working directory:` 移出 `<env>...</env>` 均被拒）。`stravia-vendor-base` 的 `opencode` / `opencode-go` 已使用 `Stravia/<version>` UA、`/inference/openai/v1`、`/inference/go/openai/v1` 与 `x-opencode-session`，符合官方第三方 harness 规范且无需调整。
+
 ### 3.5 区域与其它限制
 
 - 按 `cf-ipcountry` 类来源做模型级区域限制（`isModelCountryRestricted` → `RegionError`）；Go 档对 deepseek 系列要求 workspace 区域含 `cn` 的显式 opt-in（[issue #39872](https://github.com/anomalyco/opencode/issues/39872)）。
@@ -243,9 +252,9 @@ tools 检查对象的细化（同日实测，模型 big-pickle）：单工具 `b
 
 ### 7.4 本仓库实现
 
-专属插件 `stravia-vendor-opencode-free`（`provider_id = "opencode-free"`，dedicated，本地导入分发）保持 HTTP Chat Completions 接入，默认 Base URL 为 `https://opencode.ai/inference/v1`。免费请求强制原生流式 wire 与 `tool_choice: auto`，即使客户端已提供完整工具集也执行归一。只补缺失的 `bash/read`，采用官方输入字段与边界，保留客户端同名工具和已有指令；禁令只针对补出的名字，不新增执行器，不伪造结果。消息 ID 使用原生时间／随机编码；2026-10-22 起，session 由完整宿主作用域 affinity 确定性生成 `ses_` 表示，删除旧 256 项私有映射缓存，跨进程与组件重载不依赖保存映射。其前 12 hex 不再表示真实时间，不声称保持官方创建时间排序；无可信 affinity 的 session 仍按官方生命周期新建。固定 namespace、字节布局、向量、官方 parser 与公开网关证据见[OpenCode Free 插件契约](../design/vendor-plugins.md#opencode-free--opencode-free)。旧日期的真实上游验证不能外推为新确定性身份已获私有网关接受，本次仅完成合成凭据的本地 Wasm→HTTP 验证。
+专属插件 `stravia-vendor-opencode-free`（`provider_id = "opencode-free"`，dedicated，本地导入分发）保持 HTTP Chat Completions 接入，默认 Base URL 为 `https://opencode.ai/inference/openai/v1`，绑定 `bun-1-4-4` TLS shape，UA 为 `opencode/latest/2.4.2/cli`。免费请求强制原生流式 wire，将 `max_tokens` 归一为 `max_completion_tokens`，清除显式 `tool_choice` 以与官方 2.4.2 请求体对齐并避免非 `auto` 触发 400。`system` 槽位固定写入实测最短可接受提示词 `<env>Working directory:</env>`（并在补齐缺失占位工具时追加对应禁用声明），客户端原有的顶层 `instructions` 与前置 `system`/`developer` 消息参照 `stravia-vendor-kiro` 续接为首对 `user` + `assistant("I will follow these instructions.")` 对话，既通过上游 `<env>` 门控又不丢失用户指令。只补缺失的 `shell`/`read`，采用 2.4.2 实际输入字段（`shell.command`/`read.path`，`strict: false`，`additionalProperties: false`），保留客户端同名工具；禁令只针对补出的名字，不新增执行器，不伪造结果。会话 ID 与 40 位 hex `x-opencode-project` 按宿主会话身份确定性生成并扇出至 `x-opencode-session` / `x-opencode-session-id` / `x-session-affinity` / `x-session-id`，用户提示身份映射为 W3C `traceparent` 与 `b3`（不再发送已移除的 `x-opencode-request`），跨进程与组件重载不依赖私有状态。模型发现同时过滤非 `chat` 或非 `chat-completions` 模型（如 `jev-1.13-free`）及非零成本条目。
 
-不开放任意 `userAgent` 覆盖；未知控制仍由正向白名单透明丢弃，无 apiKey 时使用 `Bearer public`。与 base 的 `opencode` Profile 并存，不接管 Zen Go，不静默重写自定义 Base URL；手动固定旧 `/zen/v1` 的已有连接须在重新导入组件后更新地址。具体限制见[设计文档](../design/vendor-plugins.md#opencode-free--opencode-free)。
+不开放任意 `userAgent` 覆盖；未知控制仍由正向白名单透明丢弃，无 apiKey 时使用 `Bearer public`。与 base 的 `opencode` Profile 并存，不接管 Zen Go，不静默重写自定义 Base URL；手动固定旧 `/zen/v1` 或 `/inference/v1` 的已有连接须在重新导入组件后更新为 `https://opencode.ai/inference/openai/v1`。具体限制见[设计文档](../design/vendor-plugins.md#opencode-free--opencode-free)。
 
 先执行 `task build:vendors:all`，再分别运行：
 

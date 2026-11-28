@@ -32,8 +32,8 @@ const FAST_MODE_OPTION: &str = "fast_mode";
 /// Spoofed Codex CLI version sent on every request. The backend version-gates
 /// model availability for `/models` and `/responses` by exact client version
 /// rather than the catalog's `minimal_client_version`; an older pin silently
-/// hides newer SKUs such as gpt-6-sol and gpt-6.1-sol from discovery.
-const CLIENT_VERSION: &str = "0.167.0";
+/// hides newer SKUs such as gpt-6.2-sol and gpt-6.2-astra from discovery.
+const CLIENT_VERSION: &str = "0.172.0";
 const MAX_ERROR_BODY: usize = 256 * 1024;
 const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
 
@@ -457,8 +457,8 @@ fn discover(
     url.push(if url.contains('?') { '&' } else { '?' });
     url.push_str("client_version=");
     url.push_str(CLIENT_VERSION);
-    // Official 0.167.0 `/models` capture: version, auth identity, then the
-    // reqwest default Accept.
+    // Official 0.172.0 `/models` capture: version, auth identity, reqwest
+    // default Accept, and Accept-Encoding from http_fields.
     let mut headers = vec![("version".into(), CLIENT_VERSION.into())];
     codex::append_identity_headers(&provider, &mut headers)?;
     headers.push(("accept".into(), "*/*".into()));
@@ -610,9 +610,13 @@ fn apply_declared_specifications(model: &mut DiscoveredModel) {
         })
         .map(str::trim)
         .filter(|effort| {
+            // `ultra` and `persistent` are local Codex CLI aliases resolved before wire
+            // egress (`protocol/src/openai_models/reasoning_effort.rs`), not raw wire values.
             !effort.is_empty()
                 && !effort.eq_ignore_ascii_case("default")
                 && !effort.eq_ignore_ascii_case("null")
+                && !effort.eq_ignore_ascii_case("ultra")
+                && !effort.eq_ignore_ascii_case("persistent")
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -1177,6 +1181,41 @@ mod tests {
             model.metadata["reasoning_efforts"],
             json!(["low", "medium", "high", "xhigh", "max"])
         );
+    }
+
+    #[test]
+    fn discovered_model_filters_local_only_cli_reasoning_aliases() {
+        let entry = json!({
+            "slug": "gpt-6.2-sol",
+            "display_name": "gpt-6.2-sol",
+            "visibility": "list",
+            "minimal_client_version": "0.166.0",
+            "use_responses_lite": true,
+            "prefer_websockets": true,
+            "default_reasoning_level": "low",
+            "multi_agent_reasoning_effort": "xhigh",
+            "context_window": 500000,
+            "input_modalities": ["text", "image"],
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Fast responses"},
+                {"effort": "medium", "description": "Balanced"},
+                {"effort": "high", "description": "Deep"},
+                {"effort": "xhigh", "description": "Extra high"},
+                {"effort": "max", "description": "Max"},
+                {"effort": "ultra", "description": "Multi-agent CLI alias"},
+                {"effort": "persistent", "description": "Local disabled alias"}
+            ]
+        });
+        let model = discovered_model(&entry).expect("listed model");
+        assert_eq!(
+            model.metadata["reasoning_efforts"],
+            json!(["low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(
+            model.metadata["multi_agent_reasoning_effort"],
+            json!("xhigh")
+        );
+        assert_eq!(model.metadata["context_window"], json!(500000));
     }
 
     #[test]

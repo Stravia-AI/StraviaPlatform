@@ -1,12 +1,14 @@
 //! OpenCode Zen 免费层专属 Vendor 插件。
 //!
-//! 免费层使用私有客户端门控；本插件按已抓包并实调的官方版本构造 UA、
-//! 确定性 ses 身份、新建时间编码 msg、stream 与工具声明，tool_choice 归一为 auto。
-//! 缺失的 bash/read 只补声明并追加不可调用禁令，不提供工具执行器，不覆盖
+//! 免费层使用私有客户端门控；本插件按已抓包并实调的官方 OpenCode `2.4.2`
+//! （Bun `1.4.4`）构造 `opencode/latest/2.4.2/cli` UA、确定性 `ses_` 身份、
+//! 40 位 hex `x-opencode-project`、W3C `traceparent` / `b3` 链路头、stream、
+//! `max_completion_tokens` 与工具声明，并移除非默认 `tool_choice`。
+//! 缺失的 `shell`/`read` 只补声明并追加不可调用禁令，不提供工具执行器，不覆盖
 //! 客户端同名工具。成功实调不代表全部模型或未来门控都可用；原生拒绝照常返回。
 //! 依据与实测：docs/research/opencode-free-models.md §3.4。
 //!
-//! 本插件独立发布：不负责 `/zen/go/v1` 付费面（该面反向拒绝带 tools 的
+//! 本插件独立发布：不负责 `/inference/go/openai/v1` 付费面（该面反向拒绝带 tools 的
 //! 请求），也不接管 base 的 `opencode` Profile——免费通道是一个单独的
 //! `opencode-free` Provider Profile，由管理员导入本插件后新增。
 
@@ -39,7 +41,7 @@ const VENDOR_ID: &str = "opencode-free";
 const CHANNEL_ID: &str = "default";
 /// 本插件已验证的 Chat Completions 面，不把其他模型协议宣称为已支持。
 const PROTOCOL: &str = "openai-compatible/chat-completions/v1";
-const DEFAULT_BASE_URL: &str = "https://opencode.ai/inference/v1";
+const DEFAULT_BASE_URL: &str = "https://opencode.ai/inference/openai/v1";
 const MAX_MODELS_BODY: usize = 4 * 1024 * 1024;
 
 const FREE_MODEL_SUFFIX: &str = "-free";
@@ -47,11 +49,50 @@ const FREE_MODEL_SUFFIX: &str = "-free";
 /// 明确的模型不可用错误，此处不扩列兜底。
 const UNSUFFIXED_FREE_MODELS: &[&str] = &["big-pickle"];
 
-/// 官方 1.18.25 隔离抓包及真实上游验证过的完整组合，不能独立猜测 SDK 版本。
-const CLIENT_USER_AGENT: &str = "opencode/1.18.25 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+/// 官方 2.4.2（Bun 1.4.4）两次独立隔离抓包实测的完整 UA，不能独立猜测版本或字段。
+const CLIENT_USER_AGENT: &str = "opencode/latest/2.4.2/cli";
 
 fn is_free_tier_model(model: &str) -> bool {
     model.ends_with(FREE_MODEL_SUFFIX) || UNSUFFIXED_FREE_MODELS.contains(&model)
+}
+
+fn is_discoverable_free_chat_model(entry: &Value) -> bool {
+    let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    if !is_free_tier_model(id) {
+        return false;
+    }
+    // 排除非 chat 类型（如 `jev-1.13-free` 的 `type: "decision"` / `systemone`）。
+    if entry
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "chat")
+    {
+        return false;
+    }
+    if entry
+        .get("api")
+        .and_then(Value::as_object)
+        .is_some_and(|api| !api.contains_key("chat-completions"))
+    {
+        return false;
+    }
+    if entry
+        .pointer("/cost/text/input/price")
+        .and_then(Value::as_f64)
+        .is_some_and(|price| price != 0.0)
+    {
+        return false;
+    }
+    if entry
+        .pointer("/cost/text/output/price")
+        .and_then(Value::as_f64)
+        .is_some_and(|price| price != 0.0)
+    {
+        return false;
+    }
+    true
 }
 
 fn set_header(headers: &mut Fields, name: &str, value: String) {
@@ -61,7 +102,7 @@ fn set_header(headers: &mut Fields, name: &str, value: String) {
 
 fn bun_options() -> net::Options {
     let mut options = net::Options::new();
-    options.shape("bun-1-3-14").expect("valid bun shape");
+    options.shape("bun-1-4-4").expect("valid bun shape");
     options
         .response_decoding(&[
             net::Coding::Gzip,
@@ -112,7 +153,8 @@ fn check_provider(channel: &str, provider: &ProviderSnapshot) -> Result<(), Plug
     Ok(())
 }
 
-// OpenCode's OpenAI-compatible AI SDK adapter emits this closed Chat surface.
+// OpenCode 2.4.2's OpenAI chat protocol (`packages/ai/src/protocols/openai-chat.ts`)
+// emits this closed Chat surface, using `max_completion_tokens` for OpenCode Console.
 // Function schemas and arguments are application data, not request controls.
 fn project_body(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
@@ -127,6 +169,7 @@ fn project_body(body: &mut Value) {
                 | "stream_options"
                 | "temperature"
                 | "top_p"
+                | "max_completion_tokens"
                 | "max_tokens"
                 | "stop"
                 | "frequency_penalty"
@@ -140,6 +183,11 @@ fn project_body(body: &mut Value) {
                 | "user"
         )
     });
+    if let Some(max_tokens) = object.remove("max_tokens") {
+        object
+            .entry("max_completion_tokens".to_owned())
+            .or_insert(max_tokens);
+    }
     let streaming = object.get("stream").and_then(Value::as_bool) == Some(true);
     if let Some(options) = object
         .get_mut("stream_options")
@@ -257,14 +305,15 @@ fn discover(host: &GuestHost, provider: &ProviderSnapshot) -> Result<OperationOu
     }
     let value: Value = serde_json::from_slice(&body)
         .map_err(|_| common::plugin_error(ErrorKind::Invalid, "model list is not valid JSON"))?;
-    // 本插件只暴露免费模型：付费模型走 base 的 `opencode` Profile。
+    // 本插件只暴露免费 chat-completions 模型：付费模型走 base 的 `opencode` Profile，
+    // 非 chat 协议模型（如 `jev-1.13-free` 的 `systemone` decision 模型）不在此面暴露。
     let models = value
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|entry| is_discoverable_free_chat_model(entry))
         .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-        .filter(|id| is_free_tier_model(id))
         .map(|id| DiscoveredModel {
             id: id.to_owned(),
             display_name: id.to_owned(),
@@ -460,10 +509,51 @@ mod tests {
 
     #[test]
     fn non_free_model_decision() {
-        assert!(is_free_tier_model("mimo-v2.5-free"));
+        assert!(is_free_tier_model("mimo-v2.6-flash-free"));
+        assert!(is_free_tier_model("deepseek-v4.1-flash-free"));
         assert!(is_free_tier_model("big-pickle"));
         assert!(!is_free_tier_model("gpt-5.5"));
         assert!(!is_free_tier_model("freedom"));
+    }
+
+    #[test]
+    fn discovery_filter_excludes_non_chat_and_paid_models() {
+        assert!(is_discoverable_free_chat_model(&json!({
+            "id": "big-pickle",
+            "type": "chat",
+            "api": {"chat-completions": {"base_url": "https://opencode.ai/inference/openai/v1"}},
+            "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}}
+        })));
+        assert!(is_discoverable_free_chat_model(&json!({
+            "id": "mimo-v2.6-flash-free",
+            "type": "chat",
+            "api": {"chat-completions": {"base_url": "https://opencode.ai/inference/openai/v1"}},
+            "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}}
+        })));
+        // OpenAI-only fallback without models.dev metadata still works.
+        assert!(is_discoverable_free_chat_model(
+            &json!({"id": "big-pickle"})
+        ));
+        // Decision / SystemOne free models must not be exposed on chat-completions.
+        assert!(!is_discoverable_free_chat_model(&json!({
+            "id": "jev-1.13-free",
+            "type": "decision",
+            "api": {"systemone": {"base_url": "https://opencode.ai/inference/systemone/v1"}},
+            "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}}
+        })));
+        // Free-suffixed models that became paid must be excluded when cost metadata is present.
+        assert!(!is_discoverable_free_chat_model(&json!({
+            "id": "retired-free",
+            "type": "chat",
+            "api": {"chat-completions": {}},
+            "cost": {"text": {"input": {"price": 0.5}, "output": {"price": 1.0}}}
+        })));
+        assert!(!is_discoverable_free_chat_model(&json!({
+            "id": "gpt-5.5",
+            "type": "chat",
+            "api": {"chat-completions": {}},
+            "cost": {"text": {"input": {"price": 2.0}, "output": {"price": 8.0}}}
+        })));
     }
 
     #[test]
@@ -471,6 +561,7 @@ mod tests {
         let mut body = json!({
             "model":"big-pickle","messages":[{"role":"user","content":"hello"}],
             "stream":true,"stream_options":{"include_usage":false,"future":true},
+            "max_tokens":1024,
             "verbosity":"low","top_k":99,"parallel_tool_calls":false,
             "extra_body":{"tools":[{"type":"computer"}]},"metadata":{"injected":true},
             "tools":[{"type":"function","future":true,"function":{
@@ -483,6 +574,8 @@ mod tests {
         assert!(body.get("metadata").is_none());
         assert!(body.get("top_k").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 1024);
         assert_eq!(body["verbosity"], "low");
         assert_eq!(body["stream_options"], json!({"include_usage":true}));
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);

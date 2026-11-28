@@ -10,7 +10,7 @@ use tungstenite_deflate::{
 
 const MODEL: &str = "gpt-6-astra";
 const ROUTE: &str = "codex-shape-acceptance";
-const UA: &str = "codex-tui/0.167.0 (Linux Unknown; x86_64) unknown (codex-tui; 0.167.0)";
+const UA: &str = "codex-tui/0.172.0 (Linux Unknown; x86_64) unknown (codex-tui; 0.172.0)";
 
 fn events() -> Vec<Value> {
     let item = json!({"type":"message","id":"msg_1","status":"completed","role":"assistant",
@@ -96,7 +96,7 @@ fn field<'a>(fields: &'a [(String, String)], name: &str) -> &'a str {
 
 fn common_fields(fields: &[(String, String)]) {
     assert_eq!(field(fields, "host"), "chatgpt.com");
-    assert_eq!(field(fields, "version"), "0.167.0");
+    assert_eq!(field(fields, "version"), "0.172.0");
     assert_eq!(
         field(fields, "authorization"),
         "Bearer synthetic-old-access"
@@ -258,11 +258,13 @@ async fn serve(listener: TcpListener, acceptor: TlsAcceptor, http: bool) -> anyh
             "authorization",
             "originator",
             "user-agent",
+            "accept-encoding",
             "host",
             "content-length"
         ]
     );
     assert_eq!(field(&fields, "accept"), "text/event-stream");
+    assert_eq!(field(&fields, "accept-encoding"), "zstd,gzip");
     assert_eq!(field(&fields, "content-type"), "application/json");
     assert_eq!(field(&fields, "content-encoding"), "zstd");
     let len: usize = field(&fields, "content-length").parse()?;

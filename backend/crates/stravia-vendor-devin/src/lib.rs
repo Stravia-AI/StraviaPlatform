@@ -123,7 +123,7 @@ fn net_fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields
         fields.append("accept", b"*/*".to_vec());
     }
     if fields.get("accept-encoding").is_none() {
-        fields.append("accept-encoding", b"identity".to_vec());
+        fields.append("accept-encoding", b"gzip".to_vec());
     }
     if fields.get("user-agent").is_none() {
         fields.append("user-agent", b"Stravia".to_vec());
@@ -163,10 +163,16 @@ fn inference_options() -> stravia_vendor_sdk::net::Options {
     let mut options = stravia_vendor_sdk::net::Options::new();
     options.shape("devin").expect("devin shape is valid");
     options
+        .response_decoding(&[stravia_vendor_sdk::net::Coding::Gzip])
+        .expect("gzip decoding is valid");
+    options
 }
 
 fn net_options() -> stravia_vendor_sdk::net::Options {
     let mut options = stravia_vendor_sdk::net::Options::new();
     options.shape("default").expect("default shape is valid");
+    options
+        .response_decoding(&[stravia_vendor_sdk::net::Coding::Gzip])
+        .expect("gzip decoding is valid");
     options
 }

@@ -1,6 +1,7 @@
 {
   "clienthello": {
     "alpn": [],
+    "certificate_compression": [],
     "cipher_suites": [
       4866,
       4865,
@@ -17,70 +18,6 @@
       0
     ],
     "extension_details": [
-      {
-        "body": [
-          1,
-          1
-        ],
-        "decoded": {
-          "psk_key_exchange_modes": [
-            1
-          ]
-        },
-        "length": 2,
-        "payload_omitted": null,
-        "type": 45
-      },
-      {
-        "body": [],
-        "decoded": {
-          "extended_master_secret": true
-        },
-        "length": 0,
-        "payload_omitted": null,
-        "type": 23
-      },
-      {
-        "body": [
-          1,
-          0,
-          0,
-          0,
-          0
-        ],
-        "decoded": {
-          "status_request": true
-        },
-        "length": 5,
-        "payload_omitted": null,
-        "type": 5
-      },
-      {
-        "body": null,
-        "decoded": {
-          "groups": [
-            4588,
-            29
-          ]
-        },
-        "length": 1258,
-        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
-        "type": 51
-      },
-      {
-        "body": [
-          1,
-          0
-        ],
-        "decoded": {
-          "point_formats": [
-            0
-          ]
-        },
-        "length": 2,
-        "payload_omitted": null,
-        "type": 11
-      },
       {
         "body": [
           0,
@@ -134,9 +71,21 @@
         "type": 13
       },
       {
+        "body": [],
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": null,
+        "type": 23
+      },
+      {
         "body": null,
         "decoded": {
-          "server_name_present": true
+          "names": [
+            {
+              "type": 0,
+              "length": 9
+            }
+          ]
         },
         "length": 14,
         "payload_omitted": "extension payload may contain sensitive or unrecognized data",
@@ -161,11 +110,40 @@
         "type": 43
       },
       {
+        "body": [
+          1,
+          1
+        ],
+        "decoded": {
+          "modes": [
+            1
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 45
+      },
+      {
         "body": null,
-        "decoded": null,
-        "length": 0,
+        "decoded": {
+          "groups": [
+            4588,
+            29
+          ],
+          "shares": [
+            {
+              "group": 4588,
+              "length": 1216
+            },
+            {
+              "group": 29,
+              "length": 32
+            }
+          ]
+        },
+        "length": 1258,
         "payload_omitted": "extension payload may contain sensitive or unrecognized data",
-        "type": 35
+        "type": 51
       },
       {
         "body": [
@@ -191,29 +169,76 @@
         "length": 10,
         "payload_omitted": null,
         "type": 10
+      },
+      {
+        "body": null,
+        "decoded": null,
+        "length": 0,
+        "payload_omitted": "extension payload may contain sensitive or unrecognized data",
+        "type": 35
+      },
+      {
+        "body": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "decoded": null,
+        "length": 5,
+        "payload_omitted": null,
+        "type": 5
+      },
+      {
+        "body": [
+          1,
+          0
+        ],
+        "decoded": {
+          "formats": [
+            0
+          ]
+        },
+        "length": 2,
+        "payload_omitted": null,
+        "type": 11
       }
     ],
     "extensions": [
-      45,
-      23,
-      5,
-      51,
-      11,
       13,
+      23,
       0,
       43,
+      45,
+      51,
+      10,
       35,
-      10
+      5,
+      11
     ],
-    "ja3": "771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,45-23-5-51-11-13-0-43-35-10,4588-29-23-24,0",
-    "ja3_hash": "483a4f100d83cd19a9f9f9719dbf43cb",
+    "ja3": "771,4866-4865-4867-49196-49195-52393-49200-49199-52392-255,13-23-0-43-45-51-10-35-5-11,4588-29-23-24,0",
+    "ja3_hash": "46822fff0af58c6d7bf5dcb03b50f2a7",
     "ja4": "t13d101000_61a7ad8aa9b6_0d308c48d2a3",
     "key_share_groups": [
       4588,
       29
     ],
+    "key_shares": [
+      {
+        "group": 4588,
+        "length": 1216
+      },
+      {
+        "group": 29,
+        "length": 32
+      }
+    ],
     "legacy_version": 771,
     "padding_length": null,
+    "psk_modes": [
+      1
+    ],
     "signature_algorithms": [
       1283,
       1027,
@@ -229,6 +254,7 @@
       2309,
       2310
     ],
+    "signature_algorithms_cert": [],
     "sni_present": true,
     "supported_groups": [
       4588,
@@ -273,7 +299,7 @@
       },
       {
         "name": "user-agent",
-        "value": "codex-tui/0.167.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.167.0)"
+        "value": "codex-tui/0.172.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.172.0)"
       },
       {
         "name": "originator",
@@ -285,7 +311,7 @@
       },
       {
         "name": "version",
-        "value": "0.167.0"
+        "value": "0.172.0"
       },
       {
         "name": "x-codex-beta-features",
@@ -323,7 +349,7 @@
     "method": "GET",
     "target": "<redacted>",
     "version": "HTTP/1.1",
-    "raw_head": "GET <redacted> HTTP/1.1\r\nHost: <redacted>\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: <redacted>\r\nchatgpt-account-id: <redacted>\r\nauthorization: <redacted>\r\nuser-agent: codex-tui/0.167.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.167.0)\r\noriginator: codex-tui\r\nopenai-beta: responses_websockets=2026-02-06\r\nversion: 0.167.0\r\nx-codex-beta-features: remote_compaction_v2\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\nx-codex-window-id: <redacted>\r\nx-codex-turn-metadata: <redacted>\r\nx-codex-routing-hint: model=gpt-6-astra\r\nsec-websocket-extensions: permessage-deflate; client_max_window_bits\r\n\r\n",
+    "raw_head": "GET <redacted> HTTP/1.1\r\nHost: <redacted>\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: <redacted>\r\nchatgpt-account-id: <redacted>\r\nauthorization: <redacted>\r\nuser-agent: codex-tui/0.172.0 (NixOS 26.5.0; x86_64) xterm-256color (codex-tui; 0.172.0)\r\noriginator: codex-tui\r\nopenai-beta: responses_websockets=2026-02-06\r\nversion: 0.172.0\r\nx-codex-beta-features: remote_compaction_v2\r\nx-client-request-id: <redacted>\r\nsession-id: <redacted>\r\nthread-id: <redacted>\r\nx-codex-window-id: <redacted>\r\nx-codex-turn-metadata: <redacted>\r\nx-codex-routing-hint: model=gpt-6-astra\r\nsec-websocket-extensions: permessage-deflate; client_max_window_bits\r\n\r\n",
     "normalizations": [
       {
         "header_index": 0,
@@ -365,7 +391,7 @@
   },
   "provenance": {
     "client": "codex",
-    "version": "0.167.0",
+    "version": "0.172.0",
     "mode": "interactive",
     "capture_round": 1,
     "os": "linux",
@@ -375,8 +401,8 @@
     "invocation": "codex -c model=\"gpt-6-astra\" -c cli_auth_credentials_store=\"file\" -c chatgpt_base_url=\"https://localhost:<ephemeral-port>/backend-api\" -c openai_base_url=\"https://localhost:<ephemeral-port>/backend-api/codex\"",
     "pty": "Normal TUI; type Reply OK, pause, press Enter",
     "trust": "Local capture CA bind-mounted over system CA bundle inside mount namespace; SSL_CERT_FILE and CODEX_CA_CERTIFICATE unset; TLS verification enabled",
-    "capture_tool": "same-socket loopback TLS server and compiled capture-client hello-decode",
-    "connection_id": 11,
+    "capture_tool": "same-socket loopback TLS server with MemoryBIO ClientHello parser matching capture_client/hello.rs",
+    "connection_id": 5,
     "operation": "response.create",
     "model": "gpt-6-astra",
     "prompt_present": true,
@@ -386,7 +412,6 @@
       "input",
       "model",
       "parallel_tool_calls",
-      "previous_response_id",
       "prompt_cache_key",
       "reasoning",
       "store",
@@ -397,19 +422,9 @@
     ],
     "transport": "WebSocket",
     "warmup": "generate=false response.create answered locally before prompt inference on same socket",
-    "response": "capture server closes after receiving inference; no production API called",
+    "response": "capture server replies locally and closes after receiving inference; no production API called",
     "authorization_scheme": "Bearer",
-    "account_header_present": true,
-    "second_turn_evidence": {
-      "separate_run": "ws-two1",
-      "pty": "After local response.completed for Reply OK, type Second prompt and press Enter",
-      "connection_id": 11,
-      "operation": "response.create",
-      "prompt_present": true,
-      "previous_response_id_present": true,
-      "same_socket_as_first_prompt": true,
-      "note": "A separate connection 25 sent a warmup; the second user prompt used connection 11."
-    }
+    "account_header_present": true
   },
   "ws": {
     "inference_frame": {

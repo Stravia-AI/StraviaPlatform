@@ -8,9 +8,21 @@ fn user(text: &str) -> Value {
     json!({"type":"message","role":"user","content":[{"type":"input_text","text":text}]})
 }
 
+#[derive(Clone, Debug)]
+struct CapturedOpenCodeRequest {
+    session: String,
+    session_id: String,
+    session_affinity: String,
+    x_session_id: String,
+    project: String,
+    traceparent: String,
+    b3: String,
+    has_legacy_request_header: bool,
+}
+
 #[derive(Clone, Default)]
 struct OpenCodeCapture {
-    ids: Arc<Mutex<Vec<(String, String)>>>,
+    requests: Arc<Mutex<Vec<CapturedOpenCodeRequest>>>,
 }
 
 async fn opencode_upstream(
@@ -18,23 +30,30 @@ async fn opencode_upstream(
     headers: HeaderMap,
     request: AxumRequest,
 ) -> Response {
-    let session = headers
-        .get("x-opencode-session")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("missing")
-        .to_owned();
-    let message = headers
-        .get("x-opencode-request")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("missing")
-        .to_owned();
+    let header_str = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("missing")
+            .to_owned()
+    };
+    let captured = CapturedOpenCodeRequest {
+        session: header_str("x-opencode-session"),
+        session_id: header_str("x-opencode-session-id"),
+        session_affinity: header_str("x-session-affinity"),
+        x_session_id: header_str("x-session-id"),
+        project: header_str("x-opencode-project"),
+        traceparent: header_str("traceparent"),
+        b3: header_str("b3"),
+        has_legacy_request_header: headers.contains_key("x-opencode-request"),
+    };
     let _ = to_bytes(request.into_body(), 4 * 1024 * 1024)
         .await
         .unwrap();
     let number = {
-        let mut ids = capture.ids.lock();
-        ids.push((session, message));
-        ids.len()
+        let mut requests = capture.requests.lock();
+        requests.push(captured);
+        requests.len()
     };
     let delta = if number == 1 {
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"call_fixture","type":"function","function":{"name":"lookup","arguments":"{}"}}]})
@@ -213,55 +232,80 @@ async fn opencode_native_identity_follows_prompt_and_conversation_across_gateway
         .as_millis() as u64)
         & ((1 << 36) - 1);
     {
-        let ids = capture.ids.lock();
-        assert_eq!(ids.len(), 7);
-        let root_session = &ids[0].0;
-        let root_message = &ids[0].1;
-        assert_eq!(&ids[1].0, root_session);
+        let requests = capture.requests.lock();
+        assert_eq!(requests.len(), 7);
+        let trace_id = |req: &CapturedOpenCodeRequest| {
+            let tp: Vec<&str> = req.traceparent.split('-').collect();
+            let b3: Vec<&str> = req.b3.split('-').collect();
+            assert_eq!(tp.len(), 4, "{}", req.traceparent);
+            assert_eq!(b3.len(), 4, "{}", req.b3);
+            assert_eq!(tp[0], "00");
+            assert_eq!(tp[3], "01");
+            assert_eq!(b3[2], "1");
+            assert_eq!(tp[1], b3[0]);
+            assert_eq!(tp[2], b3[1]);
+            tp[1].to_owned()
+        };
+        let root_session = &requests[0].session;
+        let root_project = &requests[0].project;
+        let root_trace = trace_id(&requests[0]);
+        assert_eq!(&requests[1].session, root_session);
+        assert_eq!(&requests[1].project, root_project);
         assert_eq!(
-            &ids[1].1, root_message,
-            "tool continuation retains the user prompt identity"
+            trace_id(&requests[1]),
+            root_trace,
+            "tool continuation retains the user prompt trace identity"
         );
-        assert_eq!(&ids[2].0, root_session);
+        assert_eq!(&requests[2].session, root_session);
+        assert_eq!(&requests[2].project, root_project);
         assert_ne!(
-            &ids[2].1, root_message,
-            "a new user prompt gets a new message identity"
+            trace_id(&requests[2]),
+            root_trace,
+            "a new user prompt gets a new trace identity"
         );
-        assert_eq!(&ids[3].0, root_session, "conversation survives restart");
-        assert_ne!(&ids[3].1, &ids[2].1);
-        let root_time = native_timestamp(root_session, "ses_", true);
-        let first_time = native_timestamp(root_message, "msg_", false);
         assert_eq!(
-            root_time, first_time,
-            "root session and first prompt share their admission time"
+            &requests[3].session, root_session,
+            "conversation survives restart"
         );
-        for (session, message) in ids.iter() {
-            let session_time = native_timestamp(session, "ses_", true);
-            let message_time = native_timestamp(message, "msg_", false);
+        assert_eq!(
+            &requests[3].project, root_project,
+            "project survives restart"
+        );
+        assert_ne!(trace_id(&requests[3]), trace_id(&requests[2]));
+        for req in requests.iter() {
+            assert!(!req.has_legacy_request_header);
+            assert_eq!(req.session_id, req.session);
+            assert_eq!(req.session_affinity, req.session);
+            assert_eq!(req.x_session_id, req.session);
+            assert_eq!(req.project.len(), 40);
+            assert!(
+                req.project
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            );
+            let session_time = native_timestamp(&req.session, "ses_", true);
             assert!(
                 (before..=after).contains(&session_time),
                 "session time {session_time} outside {before}..={after}"
             );
-            assert!(
-                (before..=after).contains(&message_time),
-                "prompt time {message_time} outside {before}..={after}"
-            );
         }
-        let branches: Vec<_> = ids[4..]
+        let branches: Vec<_> = requests[4..]
             .iter()
-            .filter(|(session, _)| session == root_session)
+            .filter(|req| req.session == *root_session)
             .collect();
-        let isolated: Vec<_> = ids[4..]
+        let isolated: Vec<_> = requests[4..]
             .iter()
-            .filter(|(session, _)| session != root_session)
+            .filter(|req| req.session != *root_session)
             .collect();
         assert_eq!(branches.len(), 2);
         assert_eq!(isolated.len(), 1);
         assert_ne!(
-            branches[0].1, branches[1].1,
-            "identical branch admissions get distinct prompt IDs"
+            trace_id(branches[0]),
+            trace_id(branches[1]),
+            "identical branch admissions get distinct prompt trace IDs"
         );
-        assert_ne!(isolated[0].1, *root_message);
+        assert_ne!(trace_id(isolated[0]), root_trace);
+        assert_ne!(isolated[0].project, *root_project);
     }
     gateway.shutdown().await;
     server.abort();

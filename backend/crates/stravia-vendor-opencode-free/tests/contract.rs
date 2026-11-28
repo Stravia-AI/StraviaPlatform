@@ -22,7 +22,7 @@ use stravia_vendor_runtime::{
 use stravia_vendor_sdk::net::{self, ConnectRequest, Field, Options, Request as HttpRequest};
 use stravia_vendor_sdk::{ErrorKind, OperationInput, OperationOutput, ProviderSnapshot};
 
-const UPSTREAM: &str = "https://opencode.ai/inference/v1";
+const UPSTREAM: &str = "https://opencode.ai/inference/openai/v1";
 
 fn artifact() -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -92,7 +92,11 @@ impl HostServices for MockServices {
         let rejects_tool_choice = request.method == "POST"
             && serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
                 let model = body["model"].as_str().unwrap_or_default();
-                (model == "big-pickle" || model.ends_with("-free")) && body["tool_choice"] != "auto"
+                let is_free = model == "big-pickle" || model.ends_with("-free");
+                let disallowed_choice = body
+                    .get("tool_choice")
+                    .is_some_and(|choice| !choice.is_null() && choice != "auto");
+                is_free && disallowed_choice
             });
         self.recorded.requests.lock().push(request);
         if rejects_tool_choice {
@@ -146,7 +150,7 @@ impl HostServices for MockServices {
 
 const SSE_OK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"big-pickle\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"big-pickle\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
 
-const MODELS_JSON: &str = r#"{"object":"list","data":[{"id":"big-pickle"},{"id":"gpt-5.5"},{"id":"mimo-v2.5-free"},{"id":"claude-opus-5"}]}"#;
+const MODELS_JSON: &str = r#"{"object":"list","data":[{"id":"big-pickle"},{"id":"gpt-5.5","type":"chat","api":{"chat-completions":{}},"cost":{"text":{"input":{"price":2},"output":{"price":8}}}},{"id":"mimo-v2.6-flash-free","type":"chat","api":{"chat-completions":{"base_url":"https://opencode.ai/inference/openai/v1"}},"cost":{"text":{"input":{"price":0},"output":{"price":0}}}},{"id":"jev-1.13-free","type":"decision","api":{"systemone":{"base_url":"https://opencode.ai/inference/systemone/v1"}},"cost":{"text":{"input":{"price":0},"output":{"price":0}}}},{"id":"claude-opus-5"}]}"#;
 
 fn provider(model: &str) -> ProviderSnapshot {
     ProviderSnapshot {
@@ -280,8 +284,9 @@ async fn required_choice_with_complete_tools_does_not_trigger_native_400() {
     let (runtime, plugin) = load_plugin().await;
     let recorded = Arc::new(Recorded::default());
     let mut request = request("big-pickle");
-    request.tools = Some(vec![client_tool("bash"), client_tool("read")]);
+    request.tools = Some(vec![client_tool("shell"), client_tool("read")]);
     request.tool_choice = Some(ToolChoice::Required);
+    request.generation.max_tokens = Some(1024);
     let output = infer_once(
         &runtime,
         &plugin,
@@ -297,6 +302,10 @@ async fn required_choice_with_complete_tools_does_not_trigger_native_400() {
     };
     assert!(response.error.is_none(), "{:?}", response.error);
     assert_eq!(assistant_text(&response.items), "ok");
+    let body = sent_body(&recorded);
+    assert!(body.get("tool_choice").is_none());
+    assert!(body.get("max_tokens").is_none());
+    assert_eq!(body["max_completion_tokens"], 1024);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -312,6 +321,7 @@ async fn prompt_and_session_identity_survive_component_stores_without_private_st
     provider.client_headers = vec![
         ("x-opencode-session".into(), "injected-session".into()),
         ("x-opencode-request".into(), "injected-request".into()),
+        ("x-opencode-project".into(), "injected-project".into()),
     ];
     *recorded.private_state.lock() = Some(b"obsolete state must not be read".to_vec());
     for index in 0..4 {
@@ -357,6 +367,20 @@ async fn prompt_and_session_identity_survive_component_stores_without_private_st
             .map(|bytes| std::str::from_utf8(bytes).expect("UTF-8 header"))
             .expect("native identity header")
     };
+    let trace_id = |index: usize| {
+        let tp = header(index, "traceparent");
+        let b3 = header(index, "b3");
+        let tp_parts: Vec<&str> = tp.split('-').collect();
+        let b3_parts: Vec<&str> = b3.split('-').collect();
+        assert_eq!(tp_parts.len(), 4, "{tp}");
+        assert_eq!(b3_parts.len(), 4, "{b3}");
+        assert_eq!(tp_parts[0], "00");
+        assert_eq!(tp_parts[3], "01");
+        assert_eq!(b3_parts[2], "1");
+        assert_eq!(tp_parts[1], b3_parts[0]);
+        assert_eq!(tp_parts[2], b3_parts[1]);
+        tp_parts[1]
+    };
     assert_eq!(
         header(0, "x-opencode-session"),
         header(1, "x-opencode-session")
@@ -365,24 +389,35 @@ async fn prompt_and_session_identity_survive_component_stores_without_private_st
         header(0, "x-opencode-session"),
         header(2, "x-opencode-session")
     );
-    assert_eq!(
-        header(0, "x-opencode-request"),
-        header(1, "x-opencode-request")
-    );
     assert_ne!(
         header(0, "x-opencode-session"),
         header(3, "x-opencode-session")
     );
-    assert_ne!(
-        header(0, "x-opencode-request"),
-        header(2, "x-opencode-request")
+    assert_eq!(
+        header(0, "x-opencode-project"),
+        header(1, "x-opencode-project")
+    );
+    assert_eq!(
+        header(0, "x-opencode-project"),
+        header(2, "x-opencode-project")
     );
     assert_ne!(
-        header(2, "x-opencode-request"),
-        header(3, "x-opencode-request")
+        header(0, "x-opencode-project"),
+        header(3, "x-opencode-project")
     );
+    assert_eq!(trace_id(0), trace_id(1));
+    assert_ne!(trace_id(0), trace_id(2));
+    assert_ne!(trace_id(2), trace_id(3));
     for index in 0..4 {
-        assert!(header(index, "x-opencode-request").starts_with("msg_"));
+        assert_eq!(header(index, "User-Agent"), "opencode/latest/2.4.2/cli");
+        assert_eq!(header(index, "x-opencode-client"), "cli");
+        assert!(requests[index].headers.get("x-opencode-request").is_none());
+        let session = header(index, "x-opencode-session");
+        assert!(session.starts_with("ses_"));
+        assert_eq!(header(index, "x-opencode-session-id"), session);
+        assert_eq!(header(index, "x-session-affinity"), session);
+        assert_eq!(header(index, "x-session-id"), session);
+        assert_eq!(header(index, "x-opencode-project").len(), 40);
         let body: Value = serde_json::from_slice(&requests[index].body).unwrap();
         for name in [
             "session_id",
@@ -403,13 +438,13 @@ async fn prompt_and_session_identity_survive_component_stores_without_private_st
 #[ignore = "requires task build:vendors:all"]
 async fn client_named_tool_overrides_placeholder() {
     let (runtime, plugin) = load_plugin().await;
-    let mut request = request("mimo-v2.5-free");
-    request.tools = Some(vec![client_tool("bash")]);
+    let mut request = request("mimo-v2.6-flash-free");
+    request.tools = Some(vec![client_tool("shell")]);
     let recorded = Arc::new(Recorded::default());
     infer_once(
         &runtime,
         &plugin,
-        provider("mimo-v2.5-free"),
+        provider("mimo-v2.6-flash-free"),
         request,
         &recorded,
     )
@@ -418,11 +453,11 @@ async fn client_named_tool_overrides_placeholder() {
 
     let body = sent_body(&recorded);
     let names = sent_tool_names(&body);
-    assert_eq!(names, vec!["bash", "read"]);
-    // 客户端 bash 的 schema 原样保留。
-    let bash = &body["tools"][0];
+    assert_eq!(names, vec!["shell", "read"]);
+    // 客户端 shell 的 schema 原样保留。
+    let shell = &body["tools"][0];
     assert_eq!(
-        bash["function"]["parameters"]["properties"]["q"]["type"],
+        shell["function"]["parameters"]["properties"]["q"]["type"],
         json!("string")
     );
     let system = body["messages"]
@@ -432,8 +467,61 @@ async fn client_named_tool_overrides_placeholder() {
         .find(|m| m["role"] == "system")
         .expect("system message present");
     let text = system["content"].as_str().unwrap_or_default();
+    assert!(text.starts_with("<env>Working directory:</env>"), "{text}");
     assert!(text.contains("`read`"));
-    assert!(!text.contains("`bash`"));
+    assert!(!text.contains("`shell`"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires task build:vendors:all"]
+async fn free_model_uses_minimal_native_system_prompt_and_chains_client_instructions() {
+    let (runtime, plugin) = load_plugin().await;
+    let mut request = AiRequest::new(
+        "big-pickle",
+        vec![
+            AiItem {
+                role: Role::System,
+                content: MessageContent::Text("Client chat system instruction.".to_owned().into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+            AiItem {
+                role: Role::User,
+                content: MessageContent::Text("say ok".to_owned().into()),
+                tool_calls: None,
+                tool_call_id: None,
+                meta: None,
+            },
+        ],
+    );
+    request.instructions = Some("Top-level client instruction.".into());
+    request.tools = Some(vec![client_tool("shell"), client_tool("read")]);
+    let recorded = Arc::new(Recorded::default());
+    infer_once(
+        &runtime,
+        &plugin,
+        provider("big-pickle"),
+        request,
+        &recorded,
+    )
+    .await
+    .expect("inference succeeds");
+
+    let body = sent_body(&recorded);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "<env>Working directory:</env>");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(
+        messages[1]["content"],
+        "Top-level client instruction.\n\nClient chat system instruction."
+    );
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["content"], "I will follow these instructions.");
+    assert_eq!(messages[3]["role"], "user");
+    assert_eq!(messages[3]["content"], "say ok");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -441,11 +529,13 @@ async fn client_named_tool_overrides_placeholder() {
 async fn paid_model_passes_through_without_injection() {
     let (runtime, plugin) = load_plugin().await;
     let recorded = Arc::new(Recorded::default());
+    let mut paid_request = request("gpt-5.5");
+    paid_request.instructions = Some("Paid system policy.".into());
     infer_once(
         &runtime,
         &plugin,
         provider("gpt-5.5"),
-        request("gpt-5.5"),
+        paid_request,
         &recorded,
     )
     .await
@@ -453,8 +543,13 @@ async fn paid_model_passes_through_without_injection() {
 
     let body = sent_body(&recorded);
     assert!(body["tools"].is_null());
-    // 客户端非流式请求不被改写（付费模型不受免费门控）。
+    // 客户端非流式请求与系统提示词不被改写（付费模型不受免费门控）。
     assert_ne!(body["stream"], json!(true));
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "Paid system policy.");
+    assert_eq!(messages[1]["role"], "user");
     // 指纹头仍发送——与官方客户端一致。
     assert!(sent_header(&recorded, "x-opencode-session").is_some());
 }
@@ -489,7 +584,7 @@ async fn discovery_lists_only_free_models() {
         panic!("expected Discover output");
     };
     let ids: Vec<&str> = response.models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["big-pickle", "mimo-v2.5-free"]);
+    assert_eq!(ids, vec!["big-pickle", "mimo-v2.6-flash-free"]);
     let recorded_request = &recorded.requests.lock()[0];
     assert_eq!(recorded_request.method, "GET");
     assert_eq!(recorded_request.url, format!("{UPSTREAM}/models"));
@@ -576,6 +671,16 @@ impl HostServices for RealServices {
             .map_err(|_| HostFailure::new(ErrorKind::Invalid, "bad method"))?;
         let mut builder = client.request(method, request.url).body(request.body);
         for field in request.headers.into_vec() {
+            // `headers.slot("Host")` / `headers.slot("Content-Length")` 是供宿主
+            // HTTP/1.1 排序写入器填充的空占位符，不能原样作为空头传给 reqwest。
+            if field.bytes.is_empty()
+                && matches!(
+                    field.name.to_ascii_lowercase().as_str(),
+                    "host" | "content-length"
+                )
+            {
+                continue;
+            }
             let value = reqwest::header::HeaderValue::from_bytes(&field.bytes)
                 .map_err(|_| HostFailure::new(ErrorKind::Invalid, "bad header value"))?;
             builder = builder.header(field.name, value);

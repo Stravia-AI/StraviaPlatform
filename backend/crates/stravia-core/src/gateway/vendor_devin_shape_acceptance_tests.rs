@@ -26,11 +26,11 @@ fn chat_response() -> Vec<u8> {
 }
 
 // Capture every ClientHello before handing the same socket to rustls. The
-// response closes each connection, so the chat capture cannot be confused
-// with the preceding PKCE exchange or AssignModel request.
+// server negotiates HTTP/2 when offered (`devin` shape for GetChatMessage) and
+// HTTP/1.1 otherwise (`default` shape for PKCE exchange and AssignModel).
 async fn devin_server() -> anyhow::Result<(
     LocalTlsServer,
-    tokio::sync::oneshot::Receiver<(CapturedInference, Vec<u8>)>,
+    tokio::sync::oneshot::Receiver<(CapturedH2, Vec<u8>)>,
 )> {
     let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec![DEVIN_HOST.to_owned()])?;
@@ -42,7 +42,7 @@ async fn devin_server() -> anyhow::Result<(
     .with_safe_default_protocol_versions()?
     .with_no_client_auth()
     .with_single_cert(vec![cert.der().clone()], key)?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     // The independent cold captures explicitly disabled TLS tickets.
     config.send_tls13_tickets = 0;
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -75,6 +75,191 @@ async fn devin_server() -> anyhow::Result<(
             let (reader, writer) = tcp.into_split();
             let replay = std::io::Cursor::new(hello.clone()).chain(reader);
             let mut socket = acceptor.accept(tokio::io::join(replay, writer)).await?;
+            if socket.get_ref().1.alpn_protocol() == Some(b"h2") {
+                let mut preface = [0; 24];
+                socket.read_exact(&mut preface).await?;
+                anyhow::ensure!(
+                    &preface == b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+                    "invalid HTTP/2 preface"
+                );
+                write_h2_frame(&mut socket, 4, 0, 0, &[]).await?;
+                let mut settings = Vec::new();
+                let mut windows = Vec::new();
+                let mut block = bytes::BytesMut::new();
+                let mut body = Vec::new();
+                let mut request_stream = 0;
+                let mut continuing = false;
+                let mut first_frame = true;
+                loop {
+                    let mut header = [0; 9];
+                    socket.read_exact(&mut header).await?;
+                    let length = (usize::from(header[0]) << 16)
+                        | (usize::from(header[1]) << 8)
+                        | usize::from(header[2]);
+                    anyhow::ensure!(length <= 16384, "oversized HTTP/2 frame");
+                    let (kind, flags) = (header[3], header[4]);
+                    let stream = u32::from_be_bytes(header[5..9].try_into()?) & 0x7fff_ffff;
+                    if first_frame {
+                        anyhow::ensure!(
+                            (kind, flags, stream) == (4, 0, 0),
+                            "expected initial SETTINGS"
+                        );
+                        first_frame = false;
+                    }
+                    if continuing {
+                        anyhow::ensure!(
+                            kind == 9 && stream == request_stream,
+                            "interleaved CONTINUATION"
+                        );
+                    }
+                    let mut payload = vec![0; length];
+                    socket.read_exact(&mut payload).await?;
+                    match kind {
+                        4 if flags & 1 == 0 => {
+                            anyhow::ensure!(stream == 0 && length % 6 == 0, "invalid SETTINGS");
+                            for setting in payload.as_chunks::<6>().0 {
+                                settings.push((
+                                    u16::from_be_bytes(setting[..2].try_into()?),
+                                    u32::from_be_bytes(setting[2..].try_into()?),
+                                ));
+                            }
+                            write_h2_frame(&mut socket, 4, 1, 0, &[]).await?;
+                        }
+                        4 => anyhow::ensure!(stream == 0 && length == 0, "invalid SETTINGS ACK"),
+                        8 => {
+                            anyhow::ensure!(length == 4, "invalid WINDOW_UPDATE");
+                            windows.push((
+                                stream,
+                                u32::from_be_bytes(payload.as_slice().try_into()?) & 0x7fff_ffff,
+                            ));
+                        }
+                        1 | 9 => {
+                            anyhow::ensure!(
+                                flags & 0x28 == 0,
+                                "unexpected HEADERS padding or priority"
+                            );
+                            if kind == 1 {
+                                anyhow::ensure!(
+                                    request_stream == 0 && stream != 0,
+                                    "unexpected extra request"
+                                );
+                                request_stream = stream;
+                            }
+                            anyhow::ensure!(
+                                block.len() + payload.len() <= 65536,
+                                "oversized HPACK block"
+                            );
+                            block.extend_from_slice(&payload);
+                            continuing = flags & 4 == 0;
+                            if flags & 1 != 0 {
+                                anyhow::ensure!(!continuing, "incomplete header-only request");
+                                break;
+                            }
+                        }
+                        0 => {
+                            anyhow::ensure!(
+                                stream == request_stream && flags & 8 == 0,
+                                "invalid request DATA"
+                            );
+                            anyhow::ensure!(
+                                body.len() + payload.len() <= 4 * 1024 * 1024,
+                                "oversized inference body"
+                            );
+                            body.extend_from_slice(&payload);
+                            if flags & 1 != 0 {
+                                break;
+                            }
+                        }
+                        _ => anyhow::bail!("unexpected client frame {kind}"),
+                    }
+                }
+                let mut raw_fields = Vec::new();
+                rama_http_types::proto::h2::hpack::Decoder::new(4096)
+                    .decode(&mut std::io::Cursor::new(&mut block), |field| {
+                        raw_fields.push((
+                            field.name().as_slice().to_vec(),
+                            field.value_slice().to_vec(),
+                        ));
+                        std::ops::ControlFlow::Continue(())
+                    })
+                    .map_err(|err| anyhow::anyhow!("decode received HPACK: {err:?}"))?;
+                let fields = raw_fields
+                    .into_iter()
+                    .map(|(name, value)| Ok((String::from_utf8(name)?, String::from_utf8(value)?)))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let method = fields
+                    .iter()
+                    .find(|(name, _)| name == ":method")
+                    .context("missing :method")?
+                    .1
+                    .clone();
+                let path = fields
+                    .iter()
+                    .find(|(name, _)| name == ":path")
+                    .context("missing :path")?
+                    .1
+                    .clone();
+                let headers = fields
+                    .iter()
+                    .filter(|(name, _)| !name.starts_with(':'))
+                    .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
+                    .collect();
+                let request = ObservedRequest {
+                    method,
+                    path: path.clone(),
+                    headers,
+                    body: body.clone(),
+                };
+                request_tx
+                    .send(request.clone())
+                    .map_err(|_| anyhow::anyhow!("request observer dropped"))?;
+                let response = if let Some(reply) = devin_token_response(&request) {
+                    reply
+                } else if path == ASSIGN_PATH {
+                    assignment = Some(body.clone());
+                    let mut value = proto_string(1, ASSIGNMENT_JWT);
+                    value.extend(proto_string(2, ASSIGNED_MODEL));
+                    LocalResponse::protobuf(proto_len(1, &value))
+                } else if path == CHAT_PATH {
+                    LocalResponse {
+                        status: "200 OK",
+                        content_type: "application/connect+proto",
+                        body: chat_response(),
+                        release: None,
+                    }
+                } else {
+                    anyhow::bail!("unexpected H2 Devin request {path}");
+                };
+                // HPACK indexed :status=200; literal content-type (31).
+                let ct = response.content_type.as_bytes();
+                let mut response_head = vec![0x88, 0x0f, 0x10, u8::try_from(ct.len())?];
+                response_head.extend_from_slice(ct);
+                write_h2_frame(&mut socket, 1, 4, request_stream, &response_head).await?;
+                for (index, chunk) in response.body.chunks(16384).enumerate() {
+                    let last = (index + 1) * 16384 >= response.body.len();
+                    write_h2_frame(&mut socket, 0, u8::from(last), request_stream, chunk).await?;
+                }
+                observed.push(request);
+                if path == CHAT_PATH {
+                    let capture = CapturedH2 {
+                        hello,
+                        fields,
+                        settings,
+                        windows,
+                        body,
+                    };
+                    capture_tx
+                        .take()
+                        .unwrap()
+                        .send((capture, assignment.context("missing AssignModel")?))
+                        .map_err(|_| anyhow::anyhow!("capture receiver dropped"))?;
+                    break;
+                }
+                let mut goaway = [0u8; 8];
+                goaway[..4].copy_from_slice(&request_stream.to_be_bytes());
+                write_h2_frame(&mut socket, 7, 0, 0, &goaway).await?;
+                continue;
+            }
             let mut bytes = Vec::new();
             let mut buffer = [0; 4096];
             let (end, body_len) = loop {
@@ -126,27 +311,11 @@ async fn devin_server() -> anyhow::Result<(
                 let mut value = proto_string(1, ASSIGNMENT_JWT);
                 value.extend(proto_string(2, ASSIGNED_MODEL));
                 LocalResponse::protobuf(proto_len(1, &value))
-            } else if path == CHAT_PATH {
-                LocalResponse {
-                    status: "200 OK",
-                    content_type: "application/connect+proto",
-                    body: chat_response(),
-                    release: None,
-                }
             } else {
-                anyhow::bail!("unexpected local Devin request {path}");
+                anyhow::bail!("unexpected HTTP/1.1 Devin request {path}");
             };
             write_local_response(&mut socket, response).await?;
             observed.push(request);
-            if path == CHAT_PATH {
-                let capture = CapturedInference { hello, head, body };
-                capture_tx
-                    .take()
-                    .unwrap()
-                    .send((capture, assignment.context("missing AssignModel")?))
-                    .map_err(|_| anyhow::anyhow!("capture receiver dropped"))?;
-                break;
-            }
         }
         Ok(observed)
     });
@@ -226,11 +395,22 @@ async fn devin_real_wasm_inference_matches_interactive_tls_and_http() -> anyhow:
         )
         .await?;
     let key = route_key(&gateway, &provider.id, ROUTER, "devin-wire").await?;
-    let response = with_real_time_limit(crate::proxy::server::create_router(gateway).oneshot(
-        Request::post("/v1/responses").header("authorization", format!("Bearer {key}"))
-            .header("content-type", "application/json")
-            .body(Body::from(json!({"model":"devin-wire", "input":"reply wire accepted", "max_output_tokens":1234}).to_string()))?,
-    )).await??;
+    // Push the serialized GetChatMessageRequest past the 8192-byte Connect gzip
+    // threshold to verify the exact interactive 3000.15.14 compressed envelope
+    // and `connect-content-encoding: gzip` header order.
+    let prompt = format!("reply wire accepted\n{}", "padding ".repeat(1100));
+    let response = with_real_time_limit(
+        crate::proxy::server::create_router(gateway).oneshot(
+            Request::post("/v1/responses")
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model":"devin-wire", "input":prompt, "max_output_tokens":1234})
+                        .to_string(),
+                ))?,
+        ),
+    )
+    .await??;
     let status = response.status();
     let response_body = to_bytes(response.into_body(), 1024 * 1024).await?;
     anyhow::ensure!(
@@ -262,40 +442,61 @@ async fn devin_real_wasm_inference_matches_interactive_tls_and_http() -> anyhow:
             true,
         );
         let expected: Value = serde_json::from_str(sample)?;
-        assert_eq!(
-            captured.head.lines().next(),
-            Some("POST /exa.api_server_pb.ApiServerService/GetChatMessage HTTP/1.1")
-        );
-        assert_ordered_head_matches_fixture(&captured.head, &expected);
-    }
-    let headers: Vec<_> = captured
-        .head
-        .lines()
-        .skip(1)
-        .filter_map(|line| line.split_once(": "))
-        .collect();
-    assert_eq!(
-        headers[0].1,
-        format!("Basic {DEVIN_CONTRACT_TOKEN}-{DEVIN_CONTRACT_TOKEN}")
-    );
-    let trace: Vec<_> = headers[1].1.split('-').collect();
-    assert_eq!(trace.len(), 3);
-    assert_eq!((trace[0].len(), trace[1].len(), trace[2]), (32, 16, "1"));
-    assert!(
-        trace[..2]
+        let settings = expected["h2"]["frames"]
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|part| part.bytes().all(|b| b.is_ascii_hexdigit()))
-    );
-    assert_eq!(headers[5].1, DEVIN_HOST);
-    assert_eq!(headers[6].1.parse::<usize>()?, captured.body.len());
+            .find(|frame| frame["type"] == 4 && frame["flags"] == 0)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&captured.settings)?,
+            settings["settings"]
+        );
+        assert_eq!(captured.windows, vec![(0, 5177345)]);
+        let expected_headers = expected["h2"]["headers"].as_array().unwrap();
+        assert_eq!(
+            captured.fields.len(),
+            expected_headers.len(),
+            "{:?}",
+            captured.fields
+        );
+        for ((name, value), expected_field) in captured.fields.iter().zip(expected_headers) {
+            assert_eq!(name, expected_field["name"].as_str().unwrap());
+            match name.as_str() {
+                ":authority" => assert_eq!(value, DEVIN_HOST),
+                "authorization" => {
+                    assert_eq!(
+                        value,
+                        &format!("Basic {DEVIN_CONTRACT_TOKEN}-{DEVIN_CONTRACT_TOKEN}")
+                    );
+                }
+                "sentry-trace" => {
+                    let trace: Vec<_> = value.split('-').collect();
+                    assert_eq!(trace.len(), 3);
+                    assert_eq!((trace[0].len(), trace[1].len(), trace[2]), (32, 16, "1"));
+                    assert!(
+                        trace[..2]
+                            .iter()
+                            .all(|part| part.bytes().all(|b| b.is_ascii_hexdigit()))
+                    );
+                }
+                "content-length" => assert_eq!(value.parse::<usize>()?, captured.body.len()),
+                _ => assert_eq!(value, expected_field["value"].as_str().unwrap()),
+            }
+        }
+    }
 
     assert!(captured.body.len() >= 5);
-    assert_eq!(captured.body[0], 0);
+    assert_eq!(captured.body[0], 1);
     assert_eq!(
         u32::from_be_bytes(captured.body[1..5].try_into()?) as usize,
         captured.body.len() - 5
     );
-    let fields = wire_fields(&captured.body[5..])?;
+    let mut gunzip = async_compression::tokio::write::GzipDecoder::new(Vec::new());
+    gunzip.write_all(&captured.body[5..]).await?;
+    gunzip.shutdown().await?;
+    let decompressed = gunzip.into_inner();
+    let fields = wire_fields(&decompressed)?;
     let metadata = wire_fields(field(&fields, 1)?)?;
     let expected: Value = serde_json::from_str(fixture)?;
     for number in [1, 2, 4, 5, 7, 12, 28] {
@@ -313,6 +514,9 @@ async fn devin_real_wasm_inference_matches_interactive_tls_and_http() -> anyhow:
     assert!(fingerprint.len() >= 56 && fingerprint.len() % 2 == 0);
     assert!(fingerprint.iter().all(u8::is_ascii_hexdigit));
     let assigned = wire_fields(&assignment)?;
+    let assign_meta = wire_fields(field(&assigned, 1)?)?;
+    assert_eq!(field(&assign_meta, 1)?, b"devin-cli");
+    assert_eq!(field(&assign_meta, 2)?, b"3000.15.14");
     assert_eq!(field(&assigned, 2)?, ROUTER.as_bytes());
     assert_eq!(field(&fields, 16)?, field(&assigned, 3)?);
     assert_eq!(field(&fields, 21)?, ASSIGNED_MODEL.as_bytes());
@@ -322,11 +526,9 @@ async fn devin_real_wasm_inference_matches_interactive_tls_and_http() -> anyhow:
         .iter()
         .map(|entry| wire_fields(entry.2))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    assert!(
-        messages
-            .iter()
-            .any(|message| field(message, 3).is_ok_and(|prompt| prompt == b"reply wire accepted"))
-    );
+    assert!(messages.iter().any(|message| {
+        field(message, 3).is_ok_and(|body| body.starts_with(b"reply wire accepted"))
+    }));
     assert!(fields.iter().any(|entry| entry.0 == 7 && entry.1 == 5));
     let completion = wire_fields(field(&fields, 8)?)?;
     assert!(

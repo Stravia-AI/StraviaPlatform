@@ -17,7 +17,17 @@ const HEADER_SIZE: usize = 5;
 const FLAG_COMPRESSED: u8 = 0x01;
 const FLAG_END_STREAM: u8 = 0x02;
 
-#[cfg(test)]
+/// Devin CLI 3000.15.14 compresses Connect-RPC request frames with gzip when
+/// the serialized protobuf reaches 8192 bytes (`0x2000`) and emits
+/// `connect-content-encoding: gzip`. Smaller frames stay uncompressed.
+pub const REQUEST_GZIP_THRESHOLD: usize = 8192;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct FramedRequest {
+    pub body: Vec<u8>,
+    pub compressed: bool,
+}
+
 fn gzip(payload: &[u8]) -> anyhow::Result<Vec<u8>> {
     use std::io::Write;
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -39,15 +49,27 @@ fn gunzip(payload: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Wrap a serialized protobuf message in the single request envelope.
-/// The GetChatMessage path in the reference client sends the frame
-/// uncompressed (`wrapEnvelope(proto, { compress: false })`, flag `0x00`)
-/// and appends no end-of-stream frame.
-pub fn wrap_request(proto: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut frame = Vec::with_capacity(HEADER_SIZE + proto.len());
-    frame.push(0u8);
-    frame.extend_from_slice(&(proto.len() as u32).to_be_bytes());
-    frame.extend_from_slice(proto);
-    Ok(frame)
+/// Matches Devin CLI 3000.15.14: payloads of at least [`REQUEST_GZIP_THRESHOLD`]
+/// bytes are gzip-compressed (`flag = 0x01`); shorter payloads stay raw
+/// (`flag = 0x00`). No end-of-stream frame is appended.
+pub fn wrap_request(proto: &[u8]) -> anyhow::Result<FramedRequest> {
+    let (flags, payload): (u8, Cow<'_, [u8]>) = if proto.len() >= REQUEST_GZIP_THRESHOLD {
+        match gzip(proto) {
+            Ok(compressed) => (FLAG_COMPRESSED, Cow::Owned(compressed)),
+            Err(_) => (0u8, Cow::Borrowed(proto)),
+        }
+    } else {
+        (0u8, Cow::Borrowed(proto))
+    };
+    let len = u32::try_from(payload.len()).context("Connect request frame exceeds u32 length")?;
+    let mut body = Vec::with_capacity(HEADER_SIZE + payload.len());
+    body.push(flags);
+    body.extend_from_slice(&len.to_be_bytes());
+    body.extend_from_slice(&payload);
+    Ok(FramedRequest {
+        body,
+        compressed: flags & FLAG_COMPRESSED != 0,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -131,12 +153,30 @@ mod tests {
     }
 
     #[test]
-    fn request_envelope_is_single_uncompressed_frame() {
-        let frame = wrap_request(b"hello protobuf").unwrap();
-        assert_eq!(frame[0], 0);
-        let len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
-        assert_eq!(len, frame.len() - HEADER_SIZE);
-        assert_eq!(&frame[5..], b"hello protobuf");
+    fn request_envelope_stays_uncompressed_below_threshold() {
+        let payload = vec![b'a'; REQUEST_GZIP_THRESHOLD - 1];
+        let framed = wrap_request(&payload).unwrap();
+        assert!(!framed.compressed);
+        assert_eq!(framed.body[0], 0);
+        let len = u32::from_be_bytes(framed.body[1..5].try_into().unwrap()) as usize;
+        assert_eq!(len, framed.body.len() - HEADER_SIZE);
+        assert_eq!(&framed.body[5..], payload.as_slice());
+    }
+
+    #[test]
+    fn request_envelope_compresses_at_and_above_threshold() {
+        let payload = vec![b'a'; REQUEST_GZIP_THRESHOLD];
+        let framed = wrap_request(&payload).unwrap();
+        assert!(framed.compressed);
+        assert_eq!(framed.body[0], FLAG_COMPRESSED);
+        let len = u32::from_be_bytes(framed.body[1..5].try_into().unwrap()) as usize;
+        assert_eq!(len, framed.body.len() - HEADER_SIZE);
+        assert!(len < payload.len());
+        let mut reader = ConnectFrameReader::new();
+        assert_eq!(
+            reader.push(&framed.body).unwrap(),
+            vec![ConnectFrame::Data(Cow::Owned(payload))]
+        );
     }
 
     #[test]
