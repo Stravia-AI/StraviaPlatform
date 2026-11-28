@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use semver::{Version, VersionReq};
+use semver::{BuildMetadata, Comparator, Op, Version, VersionReq};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -46,10 +46,92 @@ fn storage_error(error: impl std::fmt::Display) -> MarketError {
     MarketError::new("network", error.to_string())
 }
 
+/// 比较宿主版本与插件 `host_version_req`；预发布宿主（如 `0.7.9-beta.1`）按 SemVer 顺序
+/// 满足已达到的版本下界（如 `>=0.7.8`、`>=0.6.0`），不套用 Cargo 依赖解析的预发布 opt-in 限制。
+pub(super) fn host_matches_req(req: &VersionReq, host: &Version) -> bool {
+    if host.pre.is_empty() {
+        return req.matches(host);
+    }
+    let host_cmp = Version {
+        major: host.major,
+        minor: host.minor,
+        patch: host.patch,
+        pre: host.pre.clone(),
+        build: BuildMetadata::EMPTY,
+    };
+    req.comparators
+        .iter()
+        .all(|cmp| comparator_matches_prerelease_host(cmp, &host_cmp))
+}
+
+fn comparator_matches_prerelease_host(cmp: &Comparator, host: &Version) -> bool {
+    let floor = Version {
+        major: cmp.major,
+        minor: cmp.minor.unwrap_or(0),
+        patch: cmp.patch.unwrap_or(0),
+        pre: cmp.pre.clone(),
+        build: BuildMetadata::EMPTY,
+    };
+    match cmp.op {
+        Op::Exact => match (cmp.minor, cmp.patch) {
+            (None, _) => host.major == cmp.major && host >= &floor,
+            (Some(minor), None) => host.major == cmp.major && host.minor == minor && host >= &floor,
+            (Some(_), Some(_)) => host == &floor,
+        },
+        Op::Wildcard => {
+            host.major == cmp.major
+                && cmp.minor.is_none_or(|minor| host.minor == minor)
+                && cmp.patch.is_none_or(|patch| host.patch == patch)
+                && (cmp.patch.is_none() || host.pre == cmp.pre)
+        }
+        Op::Greater => match (cmp.minor, cmp.patch) {
+            (None, _) => host.major > cmp.major,
+            (Some(minor), None) => (host.major, host.minor) > (cmp.major, minor),
+            (Some(_), Some(_)) => host > &floor,
+        },
+        Op::GreaterEq => host >= &floor,
+        Op::Less => match (cmp.minor, cmp.patch) {
+            (None, _) => host.major < cmp.major,
+            (Some(minor), None) => (host.major, host.minor) < (cmp.major, minor),
+            (Some(minor), Some(patch)) if cmp.pre.is_empty() => {
+                (host.major, host.minor, host.patch) < (cmp.major, minor, patch)
+            }
+            (Some(_), Some(_)) => host < &floor,
+        },
+        Op::LessEq => match (cmp.minor, cmp.patch) {
+            (None, _) => host.major <= cmp.major,
+            (Some(minor), None) => (host.major, host.minor) <= (cmp.major, minor),
+            (Some(_), Some(_)) => host <= &floor,
+        },
+        Op::Tilde => {
+            host >= &floor
+                && host.major == cmp.major
+                && cmp.minor.is_none_or(|minor| host.minor == minor)
+        }
+        Op::Caret => {
+            host >= &floor
+                && if cmp.major > 0 {
+                    host.major == cmp.major
+                } else {
+                    match cmp.minor {
+                        None => host.major == 0,
+                        Some(0) => {
+                            host.major == 0
+                                && host.minor == 0
+                                && cmp.patch.is_none_or(|patch| host.patch == patch)
+                        }
+                        Some(minor) => host.major == 0 && host.minor == minor,
+                    }
+                }
+        }
+        _ => cmp.matches(host),
+    }
+}
+
 pub(super) fn compatibility(release: &CatalogRelease) -> Option<String> {
     let host = Version::parse(env!("CARGO_PKG_VERSION"));
     let requirement = VersionReq::parse(&release.compatibility.host_version_req);
-    if !matches!((host, requirement), (Ok(host), Ok(req)) if req.matches(&host)) {
+    if !matches!((host, requirement), (Ok(host), Ok(req)) if host_matches_req(&req, &host)) {
         return Some(format!(
             "Requires host {}",
             release.compatibility.host_version_req

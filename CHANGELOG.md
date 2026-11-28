@@ -2,13 +2,25 @@
 
 ## Unreleased
 
+## [0.7.9-beta.1] - 2026-11-28
+
+### Verification
+
+- Manual signed-update and native installation smoke checks were not run on Windows x86_64/ARM64, Linux x86_64/ARM64 or macOS Intel/Apple Silicon because this release environment has no six-platform device matrix. Automated release checks do not replace verification of installation, relaunch or Gatekeeper behavior.
+
 ### Changed
 
 - Aligned the Antigravity vendor plugin with official Antigravity CLI `1.5.18` (`cl=1030252320`): updated `User-Agent`, switched `streamGenerateContent` HTTP/1.1 framing from `Transfer-Encoding: chunked` to buffered `Content-Length` (matching `ccpahttp.(*Transport).Stream`), consolidated tool `functionDeclarations` into a single tool object (matching `ccpa.buildFunctionDeclarations`), added `request.labels.trajectory_source = "CORTEX_TRAJECTORY_SOURCE_CLI"`, set `systemInstruction.role = "user"` when `system_prompt_prefix` is active (and preserved `role` on raw Gemini `systemInstruction`), and refreshed sanitized native capture fixtures. TLS ClientHello parameters remain unchanged (`revision: 2`). Rebuild and re-import the standalone Antigravity plugin to apply this alignment.
+- Improved Console Chat automatic conversation title generation reliability: enabled streaming for internal platform LLM text tasks, removed the tight 64-token output cap that caused reasoning models to return empty text, extended the title timeout from 20s to 30s, refined `<title/>` deferral instructions, triggered auto-title generation after retry/regenerate/edit flows with per-conversation in-flight deduplication, preserved `titleSource` across streaming checkpoints, and logged failures for diagnostics.
+- Unified Rust TLS cryptography backends (`sqlx`, `rustls-platform-verifier`, `tauri-plugin-updater`, `rcgen`) onto `aws-lc-rs`, eliminating mixed crypto providers across the workspace.
+- Clarified licensing and disclaimers across repository documentation, packaging metadata, and crate manifests: dedicated standalone vendor plugins are governed by `LICENSE-PLUGINS` (non-commercial personal research and learning only), shared plugin SDK/codec/contract crates are dual-licensed under `MIT OR Apache-2.0`, and the core platform and bundled Base vendor remain `AGPL-3.0-only`.
+- Release multi-architecture container images (`linux/amd64`, `linux/arm64`) now package the prebuilt Linux server binaries via `.github/docker/release.Dockerfile` instead of recompiling inside Docker buildx.
+- Rebuilt and published all eight standalone Wasm vendor plugins (`openai-codex`, `xai-grok`, `command-code`, `devin`, `opencode-free`, `claude-code`, `antigravity`, `kiro`) as prerelease (`0.7.9-beta.1`) artifacts alongside this beta; hosts on the `beta` update channel can refresh standalone plugins from the official marketplace after upgrading.
 
 ### Fixed
 
 - Gemini imported-tool-history validation fallback (`skip_thought_signature_validator`) now matches Gemini 3+ versioned models (`major >= 3`, including `gemini-4-neon`, `gemini-4-hydrogen`, and `gemini-<major>.<minor>-*`) on both the official Gemini `generativelanguage.googleapis.com` endpoint and Antigravity's default native endpoint, while continuing to exclude Gemini 2.5 and earlier, unversioned aliases, and unverified endpoints. This prevents HTTP 400 missing-`thought_signature` errors when continuing an unsigned tool loop across models (for example switching between `gemini-4-hydrogen` and `gemini-4-neon` over Open Responses). Rebuild and re-import the standalone Antigravity plugin to apply this fix.
+- Plugin marketplace host compatibility checks now evaluate SemVer ranges accurately on prerelease hosts (such as `0.7.9-beta.1`), so prerelease builds remain compatible with plugins whose minimum host floor is already satisfied (for example `>=0.7.8`) while still rejecting unmet floors (for example `>=0.7.9`).
 
 ## [0.7.8] - 2026-11-27
 

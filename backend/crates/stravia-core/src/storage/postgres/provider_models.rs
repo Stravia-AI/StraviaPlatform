@@ -76,21 +76,55 @@ impl ProviderModelStore for PostgresStorage {
 
     async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>> {
         let mut conn = self.pool.acquire().await?;
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, i64)>(
-            r#"SELECT provider_id, source_kind, presence, lifecycle_status, selection_policy, COUNT(*)
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+                Option<String>,
+                i64,
+            ),
+        >(
+            r#"SELECT provider_id,
+                      source_kind,
+                      presence,
+                      lifecycle_status,
+                      selection_policy,
+                      CASE WHEN jsonb_typeof(metadata_json->'modalities'->'output') = 'array'
+                           THEN (metadata_json->'modalities'->'output')::text
+                      END AS output_modalities,
+                      CASE WHEN jsonb_typeof(metadata_json->'capabilities') = 'array'
+                           THEN (metadata_json->'capabilities')::text
+                      END AS capabilities,
+                      COUNT(*)
                FROM provider_models
-               GROUP BY provider_id, source_kind, presence, lifecycle_status, selection_policy"#,
+               GROUP BY provider_id, source_kind, presence, lifecycle_status, selection_policy, output_modalities, capabilities"#,
         )
         .fetch_all(&mut *conn)
         .await?;
         count_provider_models(rows.into_iter().map(
-            |(provider_id, source_kind, presence, lifecycle_status, selection_policy, count)| {
+            |(
+                provider_id,
+                source_kind,
+                presence,
+                lifecycle_status,
+                selection_policy,
+                output_modalities,
+                capabilities,
+                count,
+            )| {
                 ProviderModelStateGroup {
                     provider_id,
                     source_kind,
                     presence,
                     lifecycle_status,
                     selection_policy,
+                    output_modalities,
+                    capabilities,
                     count,
                 }
             },
@@ -1753,6 +1787,106 @@ mod tests {
                 value: "low".into()
             }
         );
+
+        cleanup(admin, pool, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn count_by_provider_aggregates_availability_and_route_purposes() {
+        use crate::db::models::RoutePurpose;
+        use crate::provider_models::ModelModalities;
+
+        let Some((admin, pool, schema, storage)) = postgres_storage().await else {
+            return;
+        };
+        for provider_id in ["text-only", "search-only", "disabled-only"] {
+            sqlx::query(
+                "INSERT INTO providers (id, name, protocol, base_url, api_key)
+                 VALUES ($1, $1, 'openai', 'https://example.com', 'key')",
+            )
+            .bind(provider_id)
+            .execute(&pool)
+            .await
+            .expect("insert provider");
+        }
+        let record = |provider_id: &str,
+                      model_id: &str,
+                      selection_policy: ProviderModelSelectionPolicy,
+                      output: Option<Vec<&str>>,
+                      capabilities: Option<Vec<&str>>| {
+            let mut metadata = ProviderModelMetadata::bare(model_id);
+            metadata.modalities = output.map(|values| ModelModalities {
+                input: vec!["text".into()],
+                output: values.into_iter().map(str::to_owned).collect(),
+            });
+            if let Some(values) = capabilities {
+                metadata
+                    .extensions
+                    .insert("capabilities".into(), serde_json::json!(values));
+            }
+            NewProviderModelRecord {
+                provider_id: provider_id.into(),
+                model_id: model_id.into(),
+                source_kind: ProviderModelSourceKind::Discovered,
+                snapshot_state: SnapshotState::Unregistered,
+                source_metadata: None,
+                metadata_source_provider_id: None,
+                presence: ProviderModelPresence::Present,
+                selection_policy,
+                metadata,
+            }
+        };
+        for item in [
+            record(
+                "text-only",
+                "chat",
+                ProviderModelSelectionPolicy::Auto,
+                Some(vec!["text"]),
+                Some(vec!["infer"]),
+            ),
+            record(
+                "text-only",
+                "disabled-img",
+                ProviderModelSelectionPolicy::ForceDisabled,
+                Some(vec!["image"]),
+                None,
+            ),
+            record(
+                "search-only",
+                "searcher",
+                ProviderModelSelectionPolicy::Auto,
+                Some(vec!["text"]),
+                Some(vec!["search"]),
+            ),
+            record(
+                "disabled-only",
+                "off",
+                ProviderModelSelectionPolicy::ForceDisabled,
+                Some(vec!["text", "image"]),
+                None,
+            ),
+        ] {
+            let mutation = storage.create(item, None).await.expect("create model");
+            assert!(matches!(mutation, ProviderModelMutation::Applied(_)));
+        }
+
+        let counts = storage
+            .count_by_provider()
+            .await
+            .expect("count_by_provider");
+        assert_eq!(counts["text-only"].total, 2);
+        assert_eq!(counts["text-only"].available, 1);
+        assert_eq!(
+            counts["text-only"].route_purposes(true),
+            vec![RoutePurpose::Inference]
+        );
+        assert_eq!(counts["search-only"].route_purposes(false), vec![]);
+        assert_eq!(
+            counts["search-only"].route_purposes(true),
+            vec![RoutePurpose::WebSearch]
+        );
+        assert_eq!(counts["disabled-only"].available, 0);
+        assert_eq!(counts["disabled-only"].route_purposes(true), vec![]);
 
         cleanup(admin, pool, &schema).await;
     }

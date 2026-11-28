@@ -873,3 +873,36 @@ async fn repository_rename_between_real_preview_and_confirmation_is_accepted() {
     assert_eq!(installed.origin.unwrap().repository_id, 424242);
     assert!(h.is_installed().await);
 }
+
+#[test]
+fn prerelease_host_satisfies_compatible_version_requirements() {
+    let check = |req: &str, host: &str| {
+        super::view::host_matches_req(
+            &semver::VersionReq::parse(req).unwrap(),
+            &semver::Version::parse(host).unwrap(),
+        )
+    };
+
+    assert!(check(">=0.6.0", "0.7.9-beta.1"));
+    assert!(check(">=0.7.8", "0.7.9-beta.1"));
+    assert!(check(">=0.7.9-beta.1", "0.7.9-beta.1"));
+    assert!(check(">=0.7.9-beta.1", "0.7.9-beta.2"));
+    assert!(check(">=0.7.9-beta.1", "0.7.9"));
+    assert!(check(">=0.7.9-beta.1", "0.7.10-beta.1"));
+    assert!(check(">=0.7.9-beta.1", "0.8.0-beta.1"));
+    assert!(check("^0.7.8", "0.7.9-beta.1"));
+    assert!(check("~0.7.8", "0.7.9-beta.1"));
+    assert!(check(">=0.7.8, <0.8.0", "0.7.9-beta.1"));
+    assert!(check("<0.8.0-beta.2", "0.8.0-beta.1"));
+    assert!(check("=0.7.9-beta.1", "0.7.9-beta.1"));
+    assert!(check("0.7.*", "0.7.9-beta.1"));
+    assert!(check("*", "0.7.9-beta.1"));
+
+    assert!(!check(">=0.7.9", "0.7.9-beta.1"));
+    assert!(!check(">=0.7.9-beta.2", "0.7.9-beta.1"));
+    assert!(!check("^0.7.9", "0.7.9-beta.1"));
+    assert!(!check("^0.7.0", "0.8.0-beta.1"));
+    assert!(!check(">=0.7.8, <0.8.0", "0.8.0-beta.1"));
+    assert!(!check("=0.7.9", "0.7.9-beta.1"));
+    assert!(!check(">=0.7.9-beta.1", "0.7.8"));
+}

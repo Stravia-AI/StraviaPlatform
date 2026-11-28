@@ -1,4 +1,12 @@
-import type { CreateTarget, ProviderModelSummary, Route, ThinkingLevel, ThinkingLevelMapping } from '#lib/types.js'
+import type {
+  CreateTarget,
+  Provider,
+  ProviderModelSummary,
+  Route,
+  RoutePurpose,
+  ThinkingLevel,
+  ThinkingLevelMapping,
+} from '#lib/types.js'
 
 export interface RouteTargetForm {
   key: string
@@ -39,6 +47,12 @@ export interface PriorityLaneMember {
 
 export type RouteTargetInsertion =
   { position: 'top' } | { position: 'bottom' } | { position: 'between'; upperPriority: number; lowerPriority: number }
+
+/** 筛选包含支持当前路由用途的可用模型的供应商；不按启用状态过滤，允许为已停用供应商预配目标。 */
+export function providersForRoutePurpose(providers: readonly Provider[], purpose: RoutePurpose | null): Provider[] {
+  if (!purpose) return []
+  return providers.filter((provider) => provider.model_inventory?.route_purposes.includes(purpose) ?? false)
+}
 
 export const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 

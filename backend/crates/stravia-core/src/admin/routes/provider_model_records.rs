@@ -141,23 +141,25 @@ impl AdminService {
         Ok(state)
     }
 
-    /// 供应商列表行内的清单概况：计数一次聚合查询，同步状态按主键逐个读取（与列表其余按行读取一致）。
+    /// 供应商列表行内的清单概况：计数与用途支持一次聚合查询，同步状态按主键逐个读取（与列表其余按行读取一致）。
     pub async fn provider_model_inventories(
         &self,
-        provider_ids: &[String],
+        providers: &[Provider],
     ) -> anyhow::Result<std::collections::HashMap<String, ProviderModelInventory>> {
         let models = self.gw.storage.provider_models();
         let mut counts = models.count_by_provider().await?;
-        let mut inventories = std::collections::HashMap::with_capacity(provider_ids.len());
-        for provider_id in provider_ids {
-            let state = models.sync_state(provider_id).await?;
-            let counts = counts.remove(provider_id).unwrap_or_default();
+        let mut inventories = std::collections::HashMap::with_capacity(providers.len());
+        for provider in providers {
+            let state = models.sync_state(&provider.id).await?;
+            let counts = counts.remove(&provider.id).unwrap_or_default();
+            let search_channel = provider_supports_web_search(&self.gw, provider);
             inventories.insert(
-                provider_id.clone(),
+                provider.id.clone(),
                 ProviderModelInventory {
                     total: counts.total,
                     available: counts.available,
-                    in_progress: self.gw.provider_model_sync.in_progress(provider_id),
+                    route_purposes: counts.route_purposes(search_channel),
+                    in_progress: self.gw.provider_model_sync.in_progress(&provider.id),
                     last_check: state.last_check.map(|check| ProviderModelLastCheck {
                         checked_at: check.checked_at,
                         outcome: check.outcome,

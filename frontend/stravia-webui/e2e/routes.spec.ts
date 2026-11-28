@@ -16,6 +16,13 @@ for (const locale of ['en-US', 'zh-CN'] as const) {
       base_url: 'https://example.invalid',
       use_proxy: false,
       is_enabled: true,
+      model_inventory: {
+        total: 2,
+        available: 2,
+        route_purposes: ['inference', 'image_generation'],
+        in_progress: false,
+        last_check: null,
+      },
       created_at: '',
       updated_at: '',
     }
@@ -149,6 +156,7 @@ test('historical model alias can repair its purpose without replacing its destin
     base_url: 'https://example.invalid',
     use_proxy: false,
     is_enabled: true,
+    model_inventory: { total: 1, available: 1, route_purposes: ['inference'], in_progress: false, last_check: null },
     created_at: '',
     updated_at: '',
   }
@@ -278,6 +286,13 @@ test('prefilled model metadata stays clean without erasing a user draft', async 
             base_url: 'https://prefill.example/v1',
             use_proxy: false,
             is_enabled: true,
+            model_inventory: {
+              total: 1,
+              available: 1,
+              route_purposes: ['inference'],
+              in_progress: false,
+              last_check: null,
+            },
             created_at: '2026-08-17T00:00:00Z',
             updated_at: '2026-08-17T00:00:00Z',
           },
@@ -364,6 +379,7 @@ test('Kiro Builder ID destination validates Sonnet 5.5 efforts against its own m
     base_url: 'https://kiro.example',
     use_proxy: false,
     is_enabled: true,
+    model_inventory: { total: 1, available: 1, route_purposes: ['inference'], in_progress: false, last_check: null },
     created_at: '',
     updated_at: '',
   }
@@ -1028,6 +1044,13 @@ test('Model Route editor omits API Key and payload toggles', async ({ page }) =>
             base_url: 'https://provider.example/v1',
             use_proxy: false,
             is_enabled: true,
+            model_inventory: {
+              total: 3,
+              available: 3,
+              route_purposes: ['inference'],
+              in_progress: false,
+              last_check: null,
+            },
             created_at: '2026-08-17T00:00:00Z',
             updated_at: '2026-08-17T00:00:00Z',
           },
@@ -1174,6 +1197,13 @@ test('Model Route editor derives thinking levels and identifies blocking destina
             base_url: 'https://provider.example/v1',
             use_proxy: false,
             is_enabled: true,
+            model_inventory: {
+              total: 3,
+              available: 3,
+              route_purposes: ['inference'],
+              in_progress: false,
+              last_check: null,
+            },
             created_at: '2026-08-17T00:00:00Z',
             updated_at: '2026-08-17T00:00:00Z',
           },
@@ -1351,6 +1381,13 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
       base_url: 'https://a.example/v1',
       use_proxy: false,
       is_enabled: true,
+      model_inventory: {
+        total: 4,
+        available: 3,
+        route_purposes: ['inference', 'image_generation', 'web_search'],
+        in_progress: false,
+        last_check: null,
+      },
       created_at: '2026-08-17T00:00:00Z',
       updated_at: '2026-08-17T00:00:00Z',
     },
@@ -1363,6 +1400,13 @@ test('Route Builder loads Provider Models and edits priority-lane destinations i
       base_url: 'https://b.example/v1',
       use_proxy: false,
       is_enabled: true,
+      model_inventory: {
+        total: 4,
+        available: 3,
+        route_purposes: ['inference', 'image_generation', 'web_search'],
+        in_progress: false,
+        last_check: null,
+      },
       created_at: '2026-08-17T00:00:00Z',
       updated_at: '2026-08-17T00:00:00Z',
     },
@@ -1738,6 +1782,13 @@ test('Destination status reflects runtime state without overwriting the editor d
             base_url: 'https://provider.example/v1',
             use_proxy: false,
             is_enabled: true,
+            model_inventory: {
+              total: 3,
+              available: 3,
+              route_purposes: ['inference'],
+              in_progress: false,
+              last_check: null,
+            },
             created_at: '2026-08-17T00:00:00Z',
             updated_at: '2026-08-17T00:00:00Z',
           },
@@ -1816,7 +1867,12 @@ test('Destination status reflects runtime state without overwriting the editor d
   await expect(page.locator('#route-display-name')).toHaveValue('My unsaved label')
 })
 
-const geometryProvider = (id: string, name: string) => ({
+const geometryProvider = (
+  id: string,
+  name: string,
+  routePurposes: ('inference' | 'image_generation' | 'web_search')[] = ['inference'],
+  overrides: Record<string, unknown> = {},
+) => ({
   id,
   name,
   vendor: 'openai-compatible',
@@ -1825,8 +1881,16 @@ const geometryProvider = (id: string, name: string) => ({
   base_url: `https://${id}.example/v1`,
   use_proxy: false,
   is_enabled: true,
+  model_inventory: {
+    total: routePurposes.length,
+    available: routePurposes.length,
+    route_purposes: routePurposes,
+    in_progress: false,
+    last_check: null,
+  },
   created_at: '2026-08-17T00:00:00Z',
   updated_at: '2026-08-17T00:00:00Z',
+  ...overrides,
 })
 
 test('Destination provider dropdown is not clipped by the dialog edge or a short viewport', async ({ page }) => {
@@ -2202,3 +2266,258 @@ test.describe('touch drag on a phone', () => {
     expect(await main.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   })
 })
+
+test('Destination provider options filter by route purpose and keep readable names on mismatched targets', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const providers = [
+    geometryProvider('provider-devin-uuid', 'Devin', ['inference']),
+    geometryProvider('provider-antigravity-uuid', 'Antigravity3', ['inference', 'web_search']),
+    geometryProvider('provider-staged-uuid', 'Staged Search', ['web_search'], { is_enabled: false }),
+    geometryProvider('provider-empty-uuid', 'Empty Provider', []),
+    geometryProvider('provider-image-uuid', 'Image Studio', ['image_generation']),
+  ]
+  const saved = {
+    id: 'mismatched-route',
+    model_id: 'mismatched-route',
+    display_name: 'Mismatched route',
+    balance: 'traffic_equalization',
+    purpose: 'inference',
+    image_generation_bound: false,
+    web_search_bound: false,
+    is_enabled: true,
+    supported_thinking_levels: [],
+    created_at: '2026-08-17T00:00:00Z',
+    targets: [
+      {
+        id: 'target-devin',
+        model_id: 'mismatched-route',
+        provider_id: 'provider-devin-uuid',
+        model: 'devin-chat',
+        enabled: true,
+        priority: 1,
+        first_token_timeout_ms: 60_000,
+        target_retry_budget: 5,
+        target_cooldown_ms: 120_000,
+        thinking_level_map: [],
+        route_purposes: ['inference'],
+        purpose_mismatch: false,
+        created_at: '2026-08-17T00:00:00Z',
+      },
+    ],
+  }
+  await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: providers } }))
+  await page.route('**/api/v1/providers/provider-devin-uuid/models', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          models: [
+            { id: 'devin-chat', name: 'Devin Chat', available: true, route_purposes: ['inference'], specification: {} },
+          ],
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/providers/provider-antigravity-uuid/models', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          models: [
+            {
+              id: 'antigravity-search',
+              name: 'Antigravity Search',
+              available: true,
+              route_purposes: ['web_search'],
+              specification: {},
+            },
+          ],
+        },
+      },
+    }),
+  )
+  await page.route('**/api/v1/providers/provider-antigravity-uuid/model?*', (route) =>
+    route.fulfill({ json: { data: { id: 'antigravity-search', metadata: {}, thinking_level_map: [] } } }),
+  )
+  await page.route('**/api/v1/models/mismatched-route', (route) => route.fulfill({ json: { data: saved } }))
+  await page.route('**/api/v1/models/mismatched-route/target-statuses', (route) =>
+    route.fulfill({ json: { data: [] } }),
+  )
+
+  await page.goto('/models/new')
+  const purposeSelect = page.getByRole('combobox', { name: 'Purpose', exact: true })
+  const addDestination = page.getByRole('button', { name: 'Add destination', exact: true })
+  const dialog = page.getByRole('dialog')
+
+  for (const [purposeLabel, expectedOptions] of [
+    ['Inference', ['Devin', 'Antigravity3']],
+    ['Web Search', ['Antigravity3', 'Staged Search']],
+    ['Image Generation', ['Image Studio']],
+  ] as const) {
+    if (purposeLabel !== 'Inference') {
+      await purposeSelect.click()
+      await page.getByRole('option', { name: purposeLabel, exact: true }).click()
+    }
+    await addDestination.click()
+    await expect(
+      dialog.getByText(`Only providers with available models for ${purposeLabel} are listed.`, { exact: true }),
+    ).toBeVisible()
+    const providerBox = dialog.getByRole('combobox', { name: 'Destination 1 provider', exact: true })
+    await providerBox.click()
+    await expect(dialog.getByRole('option')).toHaveText([...expectedOptions])
+    await page.keyboard.press('Escape')
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+  }
+
+  // Restore default purpose so the draft is clean before navigating to the saved route.
+  await purposeSelect.click()
+  await page.getByRole('option', { name: 'Inference', exact: true }).click()
+
+  await page.goto('/models/mismatched-route')
+  const card = page.locator('[data-slot="target-card"]')
+  await expect(card).toContainText('Devin Chat')
+  await expect(card).toContainText('Devin')
+  await purposeSelect.click()
+  await page.getByRole('option', { name: 'Web Search', exact: true }).click()
+
+  await page.getByRole('button', { name: 'Edit destination 1', exact: true }).click()
+  const providerBox = dialog.getByRole('combobox', { name: 'Destination 1 provider', exact: true })
+  await expect(providerBox).toBeEnabled()
+  await expect(providerBox).toHaveValue('Devin')
+  await expect(providerBox).not.toHaveClass(/font-technical/)
+  await expect(dialog.getByRole('status')).toHaveText(
+    'No models from this provider support the selected purpose. Choose another provider or change the purpose.',
+  )
+  await providerBox.click()
+  await expect(dialog.getByRole('option')).toHaveText(['Antigravity3', 'Staged Search'])
+  await dialog.getByRole('option', { name: 'Antigravity3', exact: true }).click()
+  await expect(providerBox).toHaveValue('Antigravity3')
+
+  const modelBox = dialog.getByRole('combobox', { name: 'Destination 1 model', exact: true })
+  await expect(modelBox).toBeEnabled()
+  await modelBox.click()
+  await dialog.getByRole('option', { name: /Antigravity Search/ }).click()
+  await expect(dialog.getByRole('status')).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(card).toContainText('Antigravity Search')
+  await expect(card).toContainText('Antigravity3')
+})
+
+for (const locale of ['en-US', 'zh-CN'] as const) {
+  test(`Destination provider combobox disables with recovery guidance when no provider supports the purpose (${locale}, 320px)`, async ({
+    page,
+  }) => {
+    const zh = locale === 'zh-CN'
+    await page.addInitScript((language) => localStorage.setItem('stravia-locale', language), locale)
+    await page.setViewportSize({ width: 320, height: 800 })
+    const providers = [
+      geometryProvider('provider-devin-uuid', 'Devin', ['inference']),
+      geometryProvider('provider-empty-uuid', 'Empty Provider', []),
+    ]
+    const unconfigured = {
+      id: 'unconfigured-route',
+      model_id: 'unconfigured-route',
+      display_name: 'Unconfigured route',
+      balance: 'traffic_equalization',
+      purpose: null,
+      image_generation_bound: false,
+      web_search_bound: false,
+      is_enabled: true,
+      supported_thinking_levels: [],
+      created_at: '2026-08-17T00:00:00Z',
+      targets: [
+        {
+          id: 'target-devin',
+          model_id: 'unconfigured-route',
+          provider_id: 'provider-devin-uuid',
+          model: 'devin-chat',
+          enabled: true,
+          priority: 1,
+          first_token_timeout_ms: 60_000,
+          target_retry_budget: 5,
+          target_cooldown_ms: 120_000,
+          thinking_level_map: [],
+          route_purposes: ['inference'],
+          purpose_mismatch: true,
+          created_at: '2026-08-17T00:00:00Z',
+        },
+      ],
+    }
+    await page.route('**/api/v1/providers', (route) => route.fulfill({ json: { data: providers } }))
+    await page.route('**/api/v1/providers/provider-devin-uuid/models', (route) =>
+      route.fulfill({
+        json: {
+          data: {
+            models: [
+              {
+                id: 'devin-chat',
+                name: 'Devin Chat',
+                available: true,
+                route_purposes: ['inference'],
+                specification: {},
+              },
+            ],
+          },
+        },
+      }),
+    )
+    await page.route('**/api/v1/models/unconfigured-route', (route) => route.fulfill({ json: { data: unconfigured } }))
+    await page.route('**/api/v1/models/unconfigured-route/target-statuses', (route) =>
+      route.fulfill({ json: { data: [] } }),
+    )
+
+    const purposeSelect = page.getByRole('combobox', { name: zh ? '用途' : 'Purpose', exact: true })
+    const dialog = page.getByRole('dialog')
+    const providerBox = dialog.getByRole('combobox', {
+      name: zh ? '请求目标 1 的供应商' : 'Destination 1 provider',
+      exact: true,
+    })
+    const modelBox = dialog.getByRole('combobox', {
+      name: zh ? '请求目标 1 的模型' : 'Destination 1 model',
+      exact: true,
+    })
+    const noProvidersMessage = zh
+      ? '没有供应商包含支持「联网搜索」的可用模型。请同步或配置供应商模型，或更改用途。'
+      : 'No providers have available models for Web Search. Sync or configure provider models, or change the purpose.'
+    const selectFirstMessage = zh
+      ? '请先选择用途，再选择供应商和模型。'
+      : 'Select a purpose first to choose a provider and model.'
+
+    await page.goto('/models/new')
+    await purposeSelect.click()
+    await page.getByRole('option', { name: zh ? '联网搜索' : 'Web Search', exact: true }).click()
+    await page.getByRole('button', { name: zh ? '添加请求目标' : 'Add destination', exact: true }).click()
+    await expect(providerBox).toBeDisabled()
+    await expect(modelBox).toBeDisabled()
+    await expect(dialog.getByRole('status')).toHaveCount(1)
+    await expect(dialog.getByRole('status')).toHaveText(noProvidersMessage)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await dialog.getByRole('button', { name: zh ? '取消' : 'Cancel', exact: true }).click()
+
+    await purposeSelect.click()
+    await page.getByRole('option', { name: zh ? '对话推理' : 'Inference', exact: true }).click()
+
+    await page.goto('/models/unconfigured-route')
+    await expect(page.locator('[data-slot="target-card"]')).toContainText('Devin Chat')
+    await page.getByRole('button', { name: zh ? '编辑请求目标 1' : 'Edit destination 1', exact: true }).click()
+    await expect(providerBox).toBeDisabled()
+    await expect(providerBox).toHaveValue('Devin')
+    await expect(providerBox).not.toHaveClass(/font-technical/)
+    await expect(modelBox).toBeDisabled()
+    await expect(dialog.getByRole('status')).toHaveCount(1)
+    await expect(dialog.getByRole('status')).toHaveText(selectFirstMessage)
+    await dialog.getByRole('button', { name: zh ? '取消' : 'Cancel', exact: true }).click()
+
+    await purposeSelect.click()
+    await page.getByRole('option', { name: zh ? '联网搜索' : 'Web Search', exact: true }).click()
+    await page.getByRole('button', { name: zh ? '编辑请求目标 1' : 'Edit destination 1', exact: true }).click()
+    await expect(providerBox).toBeDisabled()
+    await expect(providerBox).toHaveValue('Devin')
+    await expect(modelBox).toBeDisabled()
+    await expect(dialog.getByRole('status')).toHaveCount(1)
+    await expect(dialog.getByRole('status')).toHaveText(noProvidersMessage)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}

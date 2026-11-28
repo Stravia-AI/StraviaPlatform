@@ -61,6 +61,7 @@ import {
   moveRouteTargetToLane,
   planRouteTargetInsertion,
   priorityLanes,
+  providersForRoutePurpose,
   removeRouteTarget,
   reorderRouteTargetBefore,
   routeSupportedThinkingLevels,
@@ -196,7 +197,7 @@ beforeNavigate((navigation) => {
   leaveConfirmOpen = true
 })
 
-const availableProviders = $derived(providers)
+const availableProviders = $derived(providersForRoutePurpose(providers, form.purpose))
 const targetLanes = $derived(priorityLanes(targets))
 const disabledTargets = $derived(targets.filter((target) => !target.enabled))
 const isDraggingTarget = $derived(Boolean(draggedTargetKey))
@@ -1463,10 +1464,23 @@ async function saveModel(): Promise<void> {
                     id={`target-provider-${target.key}`}
                     value={target.providerId}
                     options={availableProviders.map((provider) => ({ value: provider.id, label: provider.name }))}
+                    selectedLabel={providers.find((provider) => provider.id === target.providerId)?.name}
                     placeholder={m.model_editor_choose_model_service()}
                     emptyText={m.common_no_matching_providers()}
                     ariaLabel={m.model_editor_destination_value_model_service({ index: index + 1 })}
+                    disabled={availableProviders.length === 0}
                     onValueChange={(value: string) => void changeProvider(target, value)} />
+                  {#if !form.purpose}
+                    <p class="text-sm text-warning" role="status">{m.route_purpose_select_first()}</p>
+                  {:else if availableProviders.length === 0}
+                    <p class="text-sm text-warning" role="status">
+                      {m.route_purpose_no_providers({ purpose: routePurposeLabels[form.purpose]() })}
+                    </p>
+                  {:else if availableProviders.length < providers.length}
+                    <Field.Description>
+                      {m.route_purpose_providers_filtered({ purpose: routePurposeLabels[form.purpose]() })}
+                    </Field.Description>
+                  {/if}
                 </Field.Field>
 
                 <Field.Field>
@@ -1495,9 +1509,9 @@ async function saveModel(): Promise<void> {
                       ariaLabel={m.model_editor_destination_value_model({ index: index + 1 })}
                       disabled={!target.providerId || target.loading || candidates.length === 0}
                       onValueChange={(value: string) => void selectModel(target, value)} />
-                    {#if target.providerId && !target.loading && !target.validationError && candidates.length === 0}
+                    {#if form.purpose && availableProviders.length > 0 && target.providerId && !target.loading && !target.validationError && candidates.length === 0}
                       <p class="text-sm text-warning" role="status">
-                        {form.purpose ? m.route_purpose_no_candidates() : m.route_purpose_placeholder()}
+                        {m.route_purpose_no_candidates()}
                       </p>
                     {:else if form.purpose && candidates.length > 0 && candidates.length < target.inventory.length}
                       <Field.Description>

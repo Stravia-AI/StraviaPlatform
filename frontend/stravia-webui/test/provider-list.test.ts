@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { providersForRoutePurpose } from '../src/lib/components/route-targets-form'
 import {
   countLinkedModels,
   providerCostSortValue,
@@ -46,6 +47,7 @@ const route = (id: string, ...providerIds: string[]): Route => ({
 const inventory = (overrides: Partial<ProviderModelInventory> = {}): ProviderModelInventory => ({
   total: 10,
   available: 7,
+  route_purposes: ['inference'],
   in_progress: false,
   last_check: { checked_at: '2026-01-02T00:00:00Z', outcome: 'success' },
   ...overrides,
@@ -166,6 +168,38 @@ describe('providerInventoryState', () => {
     expect(providerInventorySortValue(provider())).toBe(-1)
     expect(providerInventorySortValue(provider({ model_inventory: inventory({ available: 0 }) }))).toBe(0)
     expect(providerInventorySortValue(provider({ model_inventory: inventory() }))).toBe(7)
+  })
+})
+
+describe('providersForRoutePurpose', () => {
+  const candidates = [
+    provider({ id: 'infer-only', model_inventory: inventory({ route_purposes: ['inference'] }) }),
+    provider({ id: 'infer-and-search', model_inventory: inventory({ route_purposes: ['inference', 'web_search'] }) }),
+    provider({
+      id: 'disabled-search',
+      is_enabled: false,
+      model_inventory: inventory({ route_purposes: ['web_search'] }),
+    }),
+    provider({ id: 'image-only', model_inventory: inventory({ route_purposes: ['image_generation'] }) }),
+    provider({ id: 'no-available', model_inventory: inventory({ available: 0, route_purposes: [] }) }),
+    provider({ id: 'missing-inventory' }),
+    provider({ id: 'null-inventory', model_inventory: null }),
+  ]
+
+  test('returns no providers when purpose is unset', () => {
+    expect(providersForRoutePurpose(candidates, null)).toEqual([])
+  })
+
+  test('filters strictly by model_inventory.route_purposes without excluding disabled providers', () => {
+    expect(providersForRoutePurpose(candidates, 'inference').map((p) => p.id)).toEqual([
+      'infer-only',
+      'infer-and-search',
+    ])
+    expect(providersForRoutePurpose(candidates, 'web_search').map((p) => p.id)).toEqual([
+      'infer-and-search',
+      'disabled-search',
+    ])
+    expect(providersForRoutePurpose(candidates, 'image_generation').map((p) => p.id)).toEqual(['image-only'])
   })
 })
 

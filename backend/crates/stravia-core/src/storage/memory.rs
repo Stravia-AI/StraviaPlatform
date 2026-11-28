@@ -1059,6 +1059,7 @@ impl ProviderModelStore for MemoryStorage {
             entry.total += 1;
             if item.effective_available() {
                 entry.available += 1;
+                entry.record_available_purposes(&item.metadata);
             }
         }
         Ok(counts)
