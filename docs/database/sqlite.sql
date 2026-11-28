@@ -283,7 +283,8 @@ CREATE TABLE "model_backends" (
     target_retry_budget    INTEGER NOT NULL DEFAULT 5,
     target_cooldown_ms     INTEGER NOT NULL DEFAULT 120000,
     enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
-);
+, config_mode TEXT NOT NULL DEFAULT 'shared'
+    CHECK (config_mode IN ('shared', 'custom')));
 
 CREATE TABLE model_change_items (
     record_id TEXT NOT NULL REFERENCES model_changes(id) ON DELETE CASCADE,
@@ -1798,6 +1799,7 @@ WHEN NEW.priority IS NULL OR typeof(NEW.priority) <> 'integer' OR NEW.priority <
     OR typeof(NEW.first_token_timeout_ms) <> 'integer' OR NEW.first_token_timeout_ms < 0
     OR typeof(NEW.target_cooldown_ms) <> 'integer' OR NEW.target_cooldown_ms < 0
     OR typeof(NEW.enabled) <> 'integer' OR NEW.enabled NOT IN (0, 1)
+    OR typeof(NEW.config_mode) <> 'text' OR NEW.config_mode NOT IN ('shared', 'custom')
     OR CASE WHEN json_valid(NEW.thinking_level_map) THEN json_type(NEW.thinking_level_map) <> 'array' ELSE 1 END
 BEGIN SELECT RAISE(ABORT, 'invalid Target configuration'); END;
 
@@ -1807,6 +1809,7 @@ WHEN NEW.priority IS NULL OR typeof(NEW.priority) <> 'integer' OR NEW.priority <
     OR typeof(NEW.first_token_timeout_ms) <> 'integer' OR NEW.first_token_timeout_ms < 0
     OR typeof(NEW.target_cooldown_ms) <> 'integer' OR NEW.target_cooldown_ms < 0
     OR typeof(NEW.enabled) <> 'integer' OR NEW.enabled NOT IN (0, 1)
+    OR typeof(NEW.config_mode) <> 'text' OR NEW.config_mode NOT IN ('shared', 'custom')
     OR CASE WHEN json_valid(NEW.thinking_level_map) THEN json_type(NEW.thinking_level_map) <> 'array' ELSE 1 END
 BEGIN SELECT RAISE(ABORT, 'invalid Target configuration'); END;
 

@@ -70,6 +70,7 @@ async fn execute_fails_over_before_canonical_output_and_returns_the_locked_targe
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(0),
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -164,6 +165,7 @@ async fn http_continuation_not_retained_by_zdr_replays_full_request_once() {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -289,6 +291,7 @@ async fn execute_does_not_fail_over_after_the_first_canonical_delta() {
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(5),
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -469,6 +472,7 @@ async fn clean_empty_stream_eof_caps_same_target_retries_and_fails_over() {
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(5),
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
@@ -479,6 +483,7 @@ async fn clean_empty_stream_eof_caps_same_target_retries_and_fails_over() {
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(0),
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 },
             ],

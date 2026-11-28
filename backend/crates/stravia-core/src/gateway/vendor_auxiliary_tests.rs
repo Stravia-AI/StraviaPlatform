@@ -788,6 +788,7 @@ async fn antigravity_independent_image_recovery_case(
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(retry_budget),
                 target_cooldown_ms: Some(0),
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

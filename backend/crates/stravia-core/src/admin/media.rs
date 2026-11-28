@@ -152,6 +152,7 @@ mod tests {
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 }],
                 default_thinking_level: None,
@@ -174,6 +175,7 @@ mod tests {
                         first_token_timeout_ms: None,
                         target_retry_budget: None,
                         target_cooldown_ms: None,
+                        config_mode: None,
                         thinking_level_map: Vec::new(),
                     },
                     crate::db::models::CreateTarget {
@@ -184,6 +186,7 @@ mod tests {
                         first_token_timeout_ms: None,
                         target_retry_budget: None,
                         target_cooldown_ms: None,
+                        config_mode: None,
                         thinking_level_map: Vec::new(),
                     },
                 ],
@@ -230,6 +233,7 @@ mod tests {
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
+            config_mode: None,
             thinking_level_map: Vec::new(),
         };
         let audio_model = admin

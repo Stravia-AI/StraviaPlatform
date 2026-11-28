@@ -1,27 +1,28 @@
 /**
- * 触屏拖拽。
+ * 统一指针拖拽引擎（鼠标 / 触屏 / 触控笔共用一套 Pointer Events 链路）。
  *
- * HTML5 拖放在移动浏览器上要么不触发，要么依赖各引擎不一的长按手势，且拖动时页面会随手指滚动。
- * 这里改用 Pointer Events 驱动：手柄元素声明 `touch-action: none`，按下后移动超过阈值即开始拖拽，
- * 用悬浮预览跟手，松手时按指针下的落点元素交给调用方处理。鼠标仍走原生 HTML5 拖放。
+ * 相比原生 HTML5 Drag-and-Drop：
+ * - 不触发跨浏览器差异的 `dropEffect` 光标或长按冲突；
+ * - 拖拽起手与落点高亮通过固定槽位 + `data-drag-over` 渲染，零布局跳动；
+ * - 支持位移阈值（6px 內按普通点击处理）、悬浮跟手预览、`Escape` 取消，以及与 `drag-autoscroll.ts` 协同滚屏。
  */
 
-/** 手指位移超过该距离才算拖拽；以内松手仍是普通点按，保留点击打开编辑器的行为。 */
-export const TOUCH_DRAG_SLOP_PX = 6
+/** 指针位移超过该距离才正式进入拖拽；以内松手保持普通点击行为。 */
+export const POINTER_DRAG_SLOP_PX = 6
 
-/** 指针下的落点元素带上该属性，供样式高亮。 */
+/** 指针当前命中的落点元素带上该属性，供样式高亮。 */
 const DRAG_OVER_ATTRIBUTE = 'data-drag-over'
 
-export interface TouchDragOptions {
-  /** 被拖拽的元素；拖拽开始时复制成跟手预览。 */
+export interface PointerDragOptions {
+  /** 被拖拽的源元素；进入拖拽时克隆为悬浮跟手预览。 */
   source: HTMLElement
-  /** 落点候选的选择器；取指针下最近的匹配祖先。 */
+  /** 合法落点选择器；每帧取指针下最近的匹配祖先。 */
   zoneSelector: string
-  /** 位移超过阈值，拖拽真正开始。 */
+  /** 位移超过阈值，拖拽正式开始。 */
   onStart: () => void
-  /** 松手；`zone` 为指针下的落点元素，不在任何落点上时为 `null`。 */
+  /** 松手落定；`zone` 为指针下的落点元素，不在合法落点上时为 `null`。 */
   onDrop: (zone: Element | null) => void | Promise<void>
-  /** 系统取消手势（如来电、系统手势）导致拖拽中断。 */
+  /** 用户按 Escape 或系统取消手势时中断拖拽。 */
   onCancel: () => void
 }
 
@@ -32,16 +33,29 @@ interface Point {
 
 let active = false
 
-/** 是否有触屏手势正在拖拽手柄（含尚未超过阈值的按下）。 */
-export function touchDragInProgress(): boolean {
+/** 当前是否存在进行中的指针拖拽（含按下尚未超过位移阈值阶段）。 */
+export function pointerDragInProgress(): boolean {
   return active
 }
 
 function createPreview(source: HTMLElement, rect: DOMRect): HTMLElement {
   const preview = source.cloneNode(true) as HTMLElement
-  // 预览只是视觉副本：去掉能被查询、聚焦或读屏识别为第二张卡片的属性。
-  for (const attribute of ['data-slot', 'data-key', 'data-enabled', 'role', 'tabindex', 'aria-label', 'id']) {
-    preview.removeAttribute(attribute)
+  const stripped = [
+    'data-slot',
+    'data-key',
+    'data-enabled',
+    'data-model',
+    'data-priority',
+    'data-config-mode',
+    'role',
+    'tabindex',
+    'aria-label',
+    'id',
+  ]
+  for (const element of [preview, ...preview.querySelectorAll('*')]) {
+    for (const attribute of stripped) {
+      element.removeAttribute(attribute)
+    }
   }
   preview.setAttribute('aria-hidden', 'true')
   preview.toggleAttribute('inert', true)
@@ -62,7 +76,7 @@ function createPreview(source: HTMLElement, rect: DOMRect): HTMLElement {
   return preview
 }
 
-/** 吞掉拖拽结束后浏览器可能补发的那次 click，免得卡片被误当作点按打开编辑器。 */
+/** 吞掉拖拽结束松手后浏览器可能补发的那次 click，防止误打开抽屉或弹窗。 */
 function swallowNextClick(): void {
   const release = () => {
     window.removeEventListener('click', swallow, true)
@@ -74,16 +88,16 @@ function swallowNextClick(): void {
     release()
   }
   window.addEventListener('click', swallow, true)
-  // 下一次按下必在下一次 click 之前；没有补发 click 时由它撤销拦截。
   window.addEventListener('pointerdown', release, true)
 }
 
 /**
- * 在手柄的 `pointerdown` 中调用。鼠标按下或已有拖拽进行时忽略，由原生拖放接管。
- * 手势结束（松手或取消）后自动清理监听与预览。
+ * 在拖拽手柄或可拖元素的 `pointerdown` 中调用。
+ * 忽略右键/中键、非主指针以及已在进行的拖拽；结束后自动清理所有监听与预览。
  */
-export function beginTouchDrag(event: PointerEvent, options: TouchDragOptions): void {
-  if (event.pointerType === 'mouse' || !event.isPrimary || active) return
+export function beginPointerDrag(event: PointerEvent, options: PointerDragOptions): void {
+  if (!event.isPrimary || active) return
+  if (event.pointerType === 'mouse' && event.button !== 0) return
   active = true
 
   const { source, zoneSelector } = options
@@ -94,6 +108,7 @@ export function beginTouchDrag(event: PointerEvent, options: TouchDragOptions): 
   let pointer = origin
   let preview: HTMLElement | undefined
   let hovered: Element | null = null
+  let previousUserSelect = ''
 
   const zoneAt = (point: Point): Element | null =>
     document.elementFromPoint(point.x, point.y)?.closest(zoneSelector) ?? null
@@ -110,9 +125,13 @@ export function beginTouchDrag(event: PointerEvent, options: TouchDragOptions): 
     window.removeEventListener('pointermove', move)
     window.removeEventListener('pointerup', up)
     window.removeEventListener('pointercancel', cancel)
+    window.removeEventListener('keydown', onKeyDown, true)
     document.removeEventListener('scroll', highlight, true)
     hovered?.removeAttribute(DRAG_OVER_ATTRIBUTE)
-    preview?.remove()
+    if (preview) {
+      document.body.style.userSelect = previousUserSelect
+      preview.remove()
+    }
     active = false
   }
 
@@ -120,8 +139,10 @@ export function beginTouchDrag(event: PointerEvent, options: TouchDragOptions): 
     if (moveEvent.pointerId !== pointerId) return
     pointer = { x: moveEvent.clientX, y: moveEvent.clientY }
     if (!preview) {
-      if (Math.hypot(pointer.x - origin.x, pointer.y - origin.y) < TOUCH_DRAG_SLOP_PX) return
-      // 先复制再通知调用方：回调会把源卡片标成"拖拽中"，预览应保持原样。
+      if (Math.hypot(pointer.x - origin.x, pointer.y - origin.y) < POINTER_DRAG_SLOP_PX) return
+      previousUserSelect = document.body.style.userSelect
+      document.body.style.userSelect = 'none'
+      window.getSelection()?.removeAllRanges()
       preview = createPreview(source, sourceRect)
       document.body.append(preview)
       options.onStart()
@@ -148,9 +169,19 @@ export function beginTouchDrag(event: PointerEvent, options: TouchDragOptions): 
     if (dragged) options.onCancel()
   }
 
+  const onKeyDown = (keyEvent: KeyboardEvent) => {
+    if (keyEvent.key !== 'Escape') return
+    keyEvent.preventDefault()
+    keyEvent.stopPropagation()
+    const dragged = preview !== undefined
+    stop()
+    if (dragged) options.onCancel()
+  }
+
   window.addEventListener('pointermove', move)
   window.addEventListener('pointerup', up)
   window.addEventListener('pointercancel', cancel)
-  // 手指不动而页面自动滚动时，指针下的落点也会变。
+  window.addEventListener('keydown', onKeyDown, true)
+  // 指针悬停触发自动滚动时，指针下的落点元素也在持续变化。
   document.addEventListener('scroll', highlight, { capture: true, passive: true })
 }

@@ -29,6 +29,8 @@ export type RouteSelectionStrategy = 'traffic_equalization' | 'latency_preferenc
 export const routePurposes = ['inference', 'image_generation', 'web_search'] as const
 export type RoutePurpose = (typeof routePurposes)[number]
 
+export type TargetConfigMode = 'shared' | 'custom'
+
 export interface Target {
   id: string
   purpose_mismatch: boolean
@@ -44,6 +46,7 @@ export interface Target {
   first_token_timeout_ms: number
   target_retry_budget: number
   target_cooldown_ms: number
+  config_mode?: TargetConfigMode
   created_at: string
   thinking_level_map: ThinkingLevelMapping[]
 }
@@ -103,7 +106,23 @@ export interface CreateTarget {
   first_token_timeout_ms?: number
   target_retry_budget?: number
   target_cooldown_ms?: number
+  config_mode?: TargetConfigMode
   thinking_level_map?: ThinkingLevelMapping[]
+}
+
+export interface TargetGroupThinkingResetInput {
+  enabled: boolean
+  priority: number
+  model: string
+  level: ThinkingLevel
+  include_custom?: boolean
+}
+
+export interface TargetGroupThinkingRegenerateInput {
+  enabled: boolean
+  priority: number
+  model: string
+  include_custom?: boolean
 }
 
 export type TargetRuntimeState = 'available' | 'cooling_down' | 'half_open' | 'probing'

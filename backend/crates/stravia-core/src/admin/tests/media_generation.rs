@@ -168,6 +168,7 @@ impl GenerationRouteFixture {
                         first_token_timeout_ms: Some(1_234),
                         target_retry_budget: Some(2),
                         target_cooldown_ms: Some(5_678),
+                        config_mode: None,
                         thinking_level_map: Vec::new(),
                     },
                     CreateTarget {
@@ -178,6 +179,7 @@ impl GenerationRouteFixture {
                         first_token_timeout_ms: Some(4_321),
                         target_retry_budget: Some(1),
                         target_cooldown_ms: Some(8_765),
+                        config_mode: None,
                         thinking_level_map: Vec::new(),
                     },
                 ],
@@ -209,6 +211,7 @@ impl GenerationRouteFixture {
                 first_token_timeout_ms: Some(target.first_token_timeout_ms),
                 target_retry_budget: Some(target.target_retry_budget),
                 target_cooldown_ms: Some(target.target_cooldown_ms),
+                config_mode: Some(target.config_mode),
                 thinking_level_map: target.thinking_level_map.clone(),
             })
             .collect()

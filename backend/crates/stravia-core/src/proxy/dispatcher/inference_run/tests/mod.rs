@@ -1363,6 +1363,7 @@ async fn configure_route_with_protocol(
             first_token_timeout_ms: None,
             target_retry_budget: Some(0),
             target_cooldown_ms: None,
+            config_mode: None,
             thinking_level_map: if protocol == "anthropic-messages" {
                 use crate::thinking::{ThinkingLevelMapping, ThinkingMappingSource};
                 use stravia_runtime_contract::thinking::{TargetThinkingControl, ThinkingLevel};
@@ -1435,6 +1436,7 @@ async fn set_target_retry_budget(gateway: &Gateway, model: &str, budget: i32) {
                             first_token_timeout_ms: Some(target.first_token_timeout_ms),
                             target_retry_budget: Some(budget),
                             target_cooldown_ms: Some(target.target_cooldown_ms),
+                            config_mode: None,
                             thinking_level_map: target.thinking_level_map,
                         })
                         .collect(),

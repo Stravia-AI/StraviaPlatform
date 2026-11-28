@@ -60,6 +60,7 @@ async fn local_search_binding_survives_rename_and_cannot_use_a_public_name_colli
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
+            config_mode: None,
             thinking_level_map: Vec::new(),
         }],
         default_thinking_level: None,

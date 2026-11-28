@@ -133,10 +133,11 @@ fn sqlite_migration_keeps_foreign_keys(migration: &sqlx::migrate::Migration) -> 
     // 58 重建无入站外键的 web_providers（local_engines 泛化为 config_json）并清理已移除种子设置，保持外键约束开启。
     // 59 原地改写 model_backends.thinking_level_map JSON 列中的旧思考控制类型，不修改表结构与外键。
     // 60 仅增删 providers/web_providers 的非外键列与触发器并更新 settings，不重建表、不改动外键，保持外键约束开启。
+    // 61 仅给 model_backends 新增非外键列 config_mode、更新存量分歧标记与契约触发器，不重建表、不改动外键，保持外键约束开启。
     // 新迁移须审查后显式登记；未知 SQL 不凭版本号继承已审核 SQL 的检查策略。
     if !matches!(
         migration.version,
-        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=60
+        1 | 3..=6 | 9..=11 | 13..=23 | 25..=31 | 34..=36 | 39 | 41..=61
     ) {
         return false;
     }
@@ -3924,6 +3925,269 @@ mod tests {
                 }
             }
             pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_0061_adds_target_config_mode_preserves_divergence_and_fk_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = sqlite_file_pool(directory.path()).await;
+        let migration_61 = super::SQLITE_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 61)
+            .expect("0061 SQLite migration");
+        assert!(
+            super::sqlite_migration_keeps_foreign_keys(migration_61),
+            "0061 must keep SQLite PRAGMA foreign_keys = ON"
+        );
+
+        let mut to_0060 = super::unlocked_runner(&super::SQLITE_MIGRATOR);
+        to_0060
+            .migrations
+            .to_mut()
+            .retain(|migration| migration.version <= 60);
+        super::run_sqlite_migrator(&pool, &to_0060, None)
+            .await
+            .expect("migrate through 0060");
+
+        for pid in ["p1", "p2", "p3", "p4"] {
+            sqlx::query(
+                "INSERT INTO providers (id, name, protocol, base_url, api_key) \
+                 VALUES (?, ?, 'anthropic-messages', 'https://example.invalid', '')",
+            )
+            .bind(pid)
+            .bind(pid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO models (id, model_id, balance) VALUES ('r-61', 'route-61', 'traffic_equalization')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 1) 同配置组（一致 300s）：全部保持 shared
+        for (id, pid) in [("same-1", "p1"), ("same-2", "p2")] {
+            sqlx::query(
+                "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms) \
+                 VALUES (?, 'r-61', ?, 'model-same', 1, 10, 300000)",
+            )
+            .bind(id)
+            .bind(pid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // 2) 3v1 分歧组：3 个 300s 保持 shared，1 个 60s 标为 custom
+        for (id, pid, timeout) in [
+            ("maj-1", "p1", 300_000_i64),
+            ("maj-2", "p2", 300_000_i64),
+            ("maj-3", "p3", 300_000_i64),
+            ("maj-outlier", "p4", 60_000_i64),
+        ] {
+            sqlx::query(
+                "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms) \
+                 VALUES (?, 'r-61', ?, 'model-majority', 1, 5, ?)",
+            )
+            .bind(id)
+            .bind(pid)
+            .bind(timeout)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // 3) 1v1 平局分歧组：两者均标为 custom，避免猜测覆盖
+        for (id, pid, timeout) in [("tie-1", "p1", 120_000_i64), ("tie-2", "p2", 90_000_i64)] {
+            sqlx::query(
+                "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms) \
+                 VALUES (?, 'r-61', ?, 'model-tie', 1, 0, ?)",
+            )
+            .bind(id)
+            .bind(pid)
+            .bind(timeout)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        migrate_sqlite(&pool, None)
+            .await
+            .expect("upgrade 0060 -> 0061");
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_secs() < 5, "0061 upgrade unexpectedly slow: {elapsed:?}");
+
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fk, 1);
+
+        let mode_of = |id: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT config_mode FROM model_backends WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(mode_of("same-1").await, "shared");
+        assert_eq!(mode_of("same-2").await, "shared");
+        assert_eq!(mode_of("maj-1").await, "shared");
+        assert_eq!(mode_of("maj-2").await, "shared");
+        assert_eq!(mode_of("maj-3").await, "shared");
+        assert_eq!(mode_of("maj-outlier").await, "custom");
+        assert_eq!(mode_of("tie-1").await, "custom");
+        assert_eq!(mode_of("tie-2").await, "custom");
+
+        // 契约触发器与 CHECK 拒绝非法 config_mode
+        assert!(
+            sqlx::query(
+                "UPDATE model_backends SET config_mode = 'invalid' WHERE id = 'same-1'",
+            )
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+        // 幂等再执行
+        migrate_sqlite(&pool, None)
+            .await
+            .expect("idempotent re-run at 0061");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_0061_adds_target_config_mode_when_configured() {
+        let Some(url) = std::env::var("DB_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return;
+        };
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        let database = format!("stravia_0061_test_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE \"{database}\" WITH TEMPLATE template0 ENCODING 'UTF8'"
+        )))
+        .execute(&admin)
+        .await
+        .expect("create isolated 0061 migration test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options.database(&database))
+            .await
+            .expect("connect isolated 0061 migration test database");
+        let scenario_pool = pool.clone();
+        let result = tokio::spawn(async move {
+            let pool = scenario_pool;
+            let mut to_0060 = super::unlocked_runner(&super::POSTGRES_MIGRATOR);
+            to_0060
+                .migrations
+                .to_mut()
+                .retain(|migration| migration.version <= 60);
+            super::run_postgres_migrator(&pool, &to_0060, None)
+                .await
+                .expect("migrate Postgres through 0060");
+
+            for pid in ["p1", "p2", "p3", "p4"] {
+                sqlx::query(
+                    "INSERT INTO providers (id, name, protocol, base_url, api_key) \
+                     VALUES ($1, $2, 'anthropic-messages', 'https://example.invalid', '')",
+                )
+                .bind(pid)
+                .bind(pid)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO models (id, model_id, balance) VALUES ('r-61', 'route-61', 'traffic_equalization')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            for (id, pid, model, prio, timeout) in [
+                ("same-1", "p1", "model-same", 10, 300_000_i64),
+                ("same-2", "p2", "model-same", 10, 300_000_i64),
+                ("maj-1", "p1", "model-majority", 5, 300_000_i64),
+                ("maj-2", "p2", "model-majority", 5, 300_000_i64),
+                ("maj-3", "p3", "model-majority", 5, 300_000_i64),
+                ("maj-outlier", "p4", "model-majority", 5, 60_000_i64),
+                ("tie-1", "p1", "model-tie", 0, 120_000_i64),
+                ("tie-2", "p2", "model-tie", 0, 90_000_i64),
+            ] {
+                sqlx::query(
+                    "INSERT INTO model_backends (id, model_id, provider_id, model, enabled, priority, first_token_timeout_ms) \
+                     VALUES ($1, 'r-61', $2, $3, true, $4, $5)",
+                )
+                .bind(id)
+                .bind(pid)
+                .bind(model)
+                .bind(prio)
+                .bind(timeout)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+
+            migrate_postgres(&pool, None)
+                .await
+                .expect("upgrade Postgres 0060 -> 0061");
+
+            for (id, expected) in [
+                ("same-1", "shared"),
+                ("same-2", "shared"),
+                ("maj-1", "shared"),
+                ("maj-2", "shared"),
+                ("maj-3", "shared"),
+                ("maj-outlier", "custom"),
+                ("tie-1", "custom"),
+                ("tie-2", "custom"),
+            ] {
+                let actual: String = sqlx::query_scalar(
+                    "SELECT config_mode FROM model_backends WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(actual, expected, "unexpected config_mode for {id}");
+            }
+
+            assert!(
+                sqlx::query(
+                    "UPDATE model_backends SET config_mode = 'invalid' WHERE id = 'same-1'",
+                )
+                .execute(&pool)
+                .await
+                .is_err()
+            );
+            migrate_postgres(&pool, None)
+                .await
+                .expect("idempotent Postgres re-run at 0061");
+        })
+        .await;
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE \"{database}\"")))
+            .execute(&admin)
+            .await
+            .expect("drop isolated 0061 migration test database");
+        admin.close().await;
+        if let Err(error) = result {
+            if error.is_panic() {
+                std::panic::resume_unwind(error.into_panic());
+            }
+            panic!("0061 Postgres migration test panicked: {error}");
         }
     }
 }

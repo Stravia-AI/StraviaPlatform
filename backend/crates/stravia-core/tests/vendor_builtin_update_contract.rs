@@ -299,6 +299,7 @@ async fn connection(gateway: &Gateway, base_url: &str) -> anyhow::Result<Connect
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

@@ -248,6 +248,7 @@ impl Harness {
                     first_token_timeout_ms: None,
                     target_retry_budget: Some(0),
                     target_cooldown_ms: Some(COOLDOWN_MS),
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 }],
                 default_thinking_level: None,

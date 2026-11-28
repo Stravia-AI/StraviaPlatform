@@ -1122,6 +1122,7 @@ async fn route_default_thinking_level_round_trips_and_updates() -> anyhow::Resul
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: Some(ThinkingLevel::High),
@@ -1205,6 +1206,7 @@ async fn route_configuration_supports_three_targets_priorities_and_failure_defau
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        config_mode: None,
         thinking_level_map: Vec::new(),
     };
     let route = admin
@@ -1292,6 +1294,7 @@ async fn route_configuration_round_trips_disabled_targets_and_requires_one_enabl
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        config_mode: None,
         thinking_level_map: Vec::new(),
     };
 
@@ -1369,6 +1372,7 @@ async fn listed_routes_project_provider_model_names_for_every_target() -> anyhow
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        config_mode: None,
         thinking_level_map: Vec::new(),
     };
     admin
@@ -1514,6 +1518,7 @@ async fn target_models_match_inventory_by_segment_and_case() -> anyhow::Result<(
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        config_mode: None,
         thinking_level_map: Vec::new(),
     };
 
@@ -1617,6 +1622,7 @@ async fn ambiguous_inventory_segments_keep_target_errors_visible() -> anyhow::Re
         first_token_timeout_ms: None,
         target_retry_budget: None,
         target_cooldown_ms: None,
+        config_mode: None,
         thinking_level_map: Vec::new(),
     };
     let input = |target: CreateTarget| CreateRoute {
@@ -1752,6 +1758,7 @@ async fn route_display_name_is_optional_normalized_and_not_an_identity() -> anyh
             first_token_timeout_ms: None,
             target_retry_budget: None,
             target_cooldown_ms: None,
+            config_mode: None,
             thinking_level_map: Vec::new(),
         }],
         default_thinking_level: None,
@@ -1854,6 +1861,7 @@ async fn unavailable_provider_model_cannot_be_bound_as_a_new_target() -> anyhow:
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -1885,6 +1893,7 @@ async fn missing_provider_model_cannot_be_added_as_a_new_target() -> anyhow::Res
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -1955,6 +1964,7 @@ async fn route_generates_seven_rows_seeds_levels_and_resets_one_override() -> an
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -2064,6 +2074,7 @@ async fn open_responses_accepts_max_effort_map() -> anyhow::Result<()> {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -2154,6 +2165,7 @@ async fn create_effort_route(
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: submit_efforts.unwrap_or_default(),
             }],
             default_thinking_level: None,
@@ -2324,6 +2336,7 @@ async fn gemini_accepts_generated_effort_maps() -> anyhow::Result<()> {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -2394,6 +2407,7 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 },
                 CreateTarget {
@@ -2404,6 +2418,7 @@ async fn supported_levels_are_the_union_of_enabled_targets() -> anyhow::Result<(
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 },
             ],
@@ -2474,6 +2489,7 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -2529,6 +2545,257 @@ async fn regenerate_updates_derived_supported_levels() -> anyhow::Result<()> {
             .thinking_level_map
             .iter()
             .all(|row| row.source == ThinkingMappingSource::Generated)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn target_config_mode_round_trips_rejects_shared_conflicts_and_regenerates_group_atomically()
+-> anyhow::Result<()> {
+    let (_data_dir, gateway, provider_a) = route_fixture().await?;
+    let admin = gateway.admin();
+    let create_provider = |name: &str| {
+        let admin = admin.clone();
+        let name = name.to_string();
+        async move {
+            admin
+                .create_provider(CreateProvider {
+                    name: Some(name),
+                    source: ProviderSourceInput::Custom {
+                        vendor: "custom".into(),
+                        channel: "default".into(),
+                        protocol: Some("anthropic-messages".into()),
+                        base_url: "http://127.0.0.1:9".into(),
+                        models_source: None,
+                        static_models: None,
+                    },
+                    credential: ProviderCredentialInput::None,
+                    vendor_options: Default::default(),
+                    proxy_mode: "none".into(),
+                })
+                .await
+        }
+    };
+    let provider_b = create_provider("Pool B").await?;
+    let provider_c = create_provider("Pool C (no max)").await?;
+
+    for (pid, efforts) in [
+        (&provider_a.id, json!(["none", "low", "medium", "high", "max"])),
+        (&provider_b.id, json!(["none", "low", "medium", "high", "max"])),
+        (&provider_c.id, json!(["none", "low", "medium", "high"])),
+    ] {
+        admin
+            .create_manual_provider_model(
+                pid,
+                "gemini-4-neon",
+                CreateManualProviderModel {
+                    template_id: None,
+                    metadata: json!({
+                        "id": "gemini-4-neon",
+                        "modalities": {"input": ["text"], "output": ["text"]},
+                        "reasoning_efforts": efforts,
+                    }),
+                },
+            )
+            .await?;
+    }
+
+    // 显式声明为 shared 但参数冲突必须返回 TARGET_GROUP_CONFIG_CONFLICT。
+    let conflict = admin
+        .create_model(CreateRoute {
+            purpose: crate::db::models::RoutePurpose::Inference,
+            model_id: "shared-pool".into(),
+            display_name: None,
+            balance: None,
+            targets: vec![
+                CreateTarget {
+                    provider_id: provider_a.id.clone(),
+                    model: "gemini-4-neon".into(),
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: Some(300_000),
+                    target_retry_budget: Some(5),
+                    target_cooldown_ms: Some(120_000),
+                    config_mode: Some(TargetConfigMode::Shared),
+                    thinking_level_map: Vec::new(),
+                },
+                CreateTarget {
+                    provider_id: provider_b.id.clone(),
+                    model: "gemini-4-neon".into(),
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: Some(60_000),
+                    target_retry_budget: Some(5),
+                    target_cooldown_ms: Some(120_000),
+                    config_mode: Some(TargetConfigMode::Shared),
+                    thinking_level_map: Vec::new(),
+                },
+            ],
+            default_thinking_level: None,
+            billing: None,
+        })
+        .await
+        .expect_err("conflicting shared targets must fail");
+    let conflict_payload: serde_json::Value =
+        serde_json::from_str(&conflict.to_string()).expect("coded group conflict error");
+    assert_eq!(conflict_payload["code"], "TARGET_GROUP_CONFIG_CONFLICT");
+
+    // A + C 共享（300s），B 独立覆盖（60s）；共同可用思考档位（不含 max，因 C 不支持 max）。
+    let shared_map = vec![
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Off,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: ThinkingMappingSource::Overridden,
+        },
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Minimal,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: ThinkingMappingSource::Overridden,
+        },
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Low,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: ThinkingMappingSource::Overridden,
+        },
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Medium,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Effort {
+                value: "medium".into(),
+            },
+            source: ThinkingMappingSource::Overridden,
+        },
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::High,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: ThinkingMappingSource::Overridden,
+        },
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Xhigh,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: ThinkingMappingSource::Overridden,
+        },
+        crate::thinking::ThinkingLevelMapping {
+            level: ThinkingLevel::Max,
+            control: stravia_runtime_contract::thinking::TargetThinkingControl::Hidden,
+            source: ThinkingMappingSource::Overridden,
+        },
+    ];
+    let route = admin
+        .create_model(CreateRoute {
+            purpose: crate::db::models::RoutePurpose::Inference,
+            model_id: "shared-pool".into(),
+            display_name: None,
+            balance: None,
+            targets: vec![
+                CreateTarget {
+                    provider_id: provider_a.id.clone(),
+                    model: "gemini-4-neon".into(),
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: Some(300_000),
+                    target_retry_budget: Some(5),
+                    target_cooldown_ms: Some(120_000),
+                    config_mode: Some(TargetConfigMode::Shared),
+                    thinking_level_map: shared_map.clone(),
+                },
+                CreateTarget {
+                    provider_id: provider_b.id.clone(),
+                    model: "gemini-4-neon".into(),
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: Some(60_000),
+                    target_retry_budget: Some(3),
+                    target_cooldown_ms: Some(90_000),
+                    config_mode: Some(TargetConfigMode::Custom),
+                    thinking_level_map: shared_map.clone(),
+                },
+                CreateTarget {
+                    provider_id: provider_c.id.clone(),
+                    model: "gemini-4-neon".into(),
+                    enabled: true,
+                    priority: Some(0),
+                    first_token_timeout_ms: Some(300_000),
+                    target_retry_budget: Some(5),
+                    target_cooldown_ms: Some(120_000),
+                    config_mode: Some(TargetConfigMode::Shared),
+                    thinking_level_map: shared_map,
+                },
+            ],
+            default_thinking_level: None,
+            billing: None,
+        })
+        .await?;
+
+    fn target_by<'a>(route: &'a crate::db::models::RouteConfig, pid: &str) -> &'a crate::db::models::TargetConfig {
+        route
+            .targets
+            .iter()
+            .find(|t| t.provider_id().as_str() == pid)
+            .expect("target")
+    }
+    assert_eq!(target_by(&route, &provider_a.id).config_mode, TargetConfigMode::Shared);
+    assert_eq!(target_by(&route, &provider_b.id).config_mode, TargetConfigMode::Custom);
+    assert_eq!(target_by(&route, &provider_c.id).config_mode, TargetConfigMode::Shared);
+
+    // 组级重新生成（include_custom = false）：A 和 C 一起恢复为共同可写交集（含 high、不含 max），B 保持独立不受影响。
+    let regenerated = admin
+        .regenerate_target_group_thinking_map(
+            &route.model_id,
+            TargetGroupThinkingRegenerateInput {
+                enabled: true,
+                priority: 0,
+                model: "gemini-4-neon".into(),
+                include_custom: false,
+            },
+        )
+        .await?;
+    let ta = target_by(&regenerated, &provider_a.id);
+    let tb = target_by(&regenerated, &provider_b.id);
+    let tc = target_by(&regenerated, &provider_c.id);
+    assert_eq!(
+        mapping_control(&ta.thinking_level_map, ThinkingLevel::High),
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value: "high".into() })
+    );
+    assert_eq!(
+        mapping_control(&tc.thinking_level_map, ThinkingLevel::High),
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value: "high".into() })
+    );
+    // C 不支持 max，因此共享组的 max 回退为 Hidden，保证 A 与 C 一致。
+    assert_eq!(
+        mapping_control(&ta.thinking_level_map, ThinkingLevel::Max),
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Hidden)
+    );
+    assert_eq!(
+        mapping_control(&tc.thinking_level_map, ThinkingLevel::Max),
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Hidden)
+    );
+    // B 是 custom，未勾选 include_custom 时仍保留原先 Hidden 的 high。
+    assert_eq!(
+        mapping_control(&tb.thinking_level_map, ThinkingLevel::High),
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Hidden)
+    );
+    assert_eq!(tb.config_mode, TargetConfigMode::Custom);
+    assert_eq!(tb.first_token_timeout_ms, 60_000);
+
+    // 组级单行重置（include_custom = true）：连同 B 一起重置 high 为共同可写生成值。
+    let reset_all = admin
+        .reset_target_group_thinking_mapping(
+            &route.model_id,
+            TargetGroupThinkingResetInput {
+                enabled: true,
+                priority: 0,
+                model: "gemini-4-neon".into(),
+                level: ThinkingLevel::High,
+                include_custom: true,
+            },
+        )
+        .await?;
+    assert_eq!(
+        mapping_control(
+            &target_by(&reset_all, &provider_b.id).thinking_level_map,
+            ThinkingLevel::High,
+        ),
+        Some(&stravia_runtime_contract::thinking::TargetThinkingControl::Effort { value: "high".into() })
     );
     Ok(())
 }

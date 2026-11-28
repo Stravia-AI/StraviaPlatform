@@ -196,6 +196,7 @@ async fn generation_app() -> GenerationApp {
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -742,6 +743,7 @@ async fn allow_slow_generation(fixture: &GenerationApp) {
                     first_token_timeout_ms: Some(120_000),
                     target_retry_budget: Some(0),
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 }]),
                 ..Default::default()
@@ -865,6 +867,7 @@ async fn registered_image_output_changes_gate_real_requests_and_recover_the_same
         first_token_timeout_ms: None,
         target_retry_budget: Some(0),
         target_cooldown_ms: None,
+        config_mode: None,
         thinking_level_map: Vec::new(),
     };
     admin

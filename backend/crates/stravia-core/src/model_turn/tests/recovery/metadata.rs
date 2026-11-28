@@ -139,6 +139,7 @@ async fn continuation_recovery_discards_failed_operation_metadata() {
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(1),
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

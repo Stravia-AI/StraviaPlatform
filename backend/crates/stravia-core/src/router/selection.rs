@@ -448,6 +448,7 @@ mod tests {
             target_retry_budget: DEFAULT_TARGET_RETRY_BUDGET,
             target_cooldown_ms: DEFAULT_TARGET_COOLDOWN_MS,
             created_at: String::new(),
+            config_mode: crate::db::models::TargetConfigMode::Shared,
             thinking_level_map: Vec::new(),
             model_name: None,
         }

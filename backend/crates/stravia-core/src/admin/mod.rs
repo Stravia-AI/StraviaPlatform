@@ -61,7 +61,10 @@ pub use provider_connection::{
     ProviderConfigurationPreview, ProviderConfigurationPreviewInput, ProviderConnectionCheckInput,
     ProviderNetworkPermission,
 };
-pub use routes::{BindRouteInput, RouteTargetStatus, UnbindRouteInput};
+pub use routes::{
+    BindRouteInput, RouteTargetStatus, TargetGroupThinkingRegenerateInput,
+    TargetGroupThinkingResetInput, UnbindRouteInput,
+};
 
 use auth_data::*;
 use model_data::*;

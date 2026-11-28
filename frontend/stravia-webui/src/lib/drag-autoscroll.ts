@@ -80,7 +80,7 @@ export function startDragAutoscroll(): () => void {
   // 移入新元素时可能先只有 dragenter；不能沿用边缘位置等到 dragover 才停滚。
   document.addEventListener('dragenter', track, { capture: true, passive: true })
   document.addEventListener('dragover', track, { capture: true, passive: true })
-  // 触屏拖拽（touch-drag.ts）由 Pointer Events 驱动，不产生 dragover；原生拖拽期间浏览器不派发 pointermove，二者不会重复。
+  // 统一指针拖拽（pointer-drag.ts）由 Pointer Events 驱动，不产生 dragover；原生拖拽期间浏览器不派发 pointermove，二者不会重复。
   document.addEventListener('pointermove', track, { capture: true, passive: true })
   frame = requestAnimationFrame(step)
   return () => {

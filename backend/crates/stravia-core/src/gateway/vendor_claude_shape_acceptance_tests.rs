@@ -211,6 +211,7 @@ async fn claude_inference_uses_genuine_tls_shape_and_ordered_http1() -> anyhow::
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

@@ -113,3 +113,33 @@ pub(super) async fn regenerate_target_thinking_map_handler(
         Err(error) => err(error),
     }
 }
+
+pub(super) async fn reset_target_group_thinking_mapping_handler(
+    State(gw): State<Gateway>,
+    Path(route_id): Path<String>,
+    Json(input): Json<TargetGroupThinkingResetInput>,
+) -> impl IntoResponse {
+    match gw
+        .admin()
+        .reset_target_group_thinking_mapping(&route_id, input)
+        .await
+    {
+        Ok(model) => Json(serde_json::json!({ "data": model })).into_response(),
+        Err(error) => err(error),
+    }
+}
+
+pub(super) async fn regenerate_target_group_thinking_map_handler(
+    State(gw): State<Gateway>,
+    Path(route_id): Path<String>,
+    Json(input): Json<TargetGroupThinkingRegenerateInput>,
+) -> impl IntoResponse {
+    match gw
+        .admin()
+        .regenerate_target_group_thinking_map(&route_id, input)
+        .await
+    {
+        Ok(model) => Json(serde_json::json!({ "data": model })).into_response(),
+        Err(error) => err(error),
+    }
+}

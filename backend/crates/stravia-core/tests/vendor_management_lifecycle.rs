@@ -402,6 +402,7 @@ async fn create_route(
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -1371,6 +1372,7 @@ async fn suspended_provider_fails_over_without_upstream_attempt_and_returns_afte
                     first_token_timeout_ms: None,
                     target_retry_budget: None,
                     target_cooldown_ms: None,
+                    config_mode: None,
                     thinking_level_map: Vec::new(),
                 })
                 .collect(),
@@ -1419,6 +1421,7 @@ async fn suspended_provider_fails_over_without_upstream_attempt_and_returns_afte
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             })
             .collect()
@@ -2425,6 +2428,7 @@ async fn inference_oauth_refresh_outage_preserves_credentials_and_recovers_on_ne
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(1),
                 target_cooldown_ms: Some(0),
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

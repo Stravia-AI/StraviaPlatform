@@ -74,6 +74,7 @@ async fn antigravity_discovered_search_route_through_stravia_read() -> anyhow::R
                 first_token_timeout_ms: None,
                 target_retry_budget: Some(0),
                 target_cooldown_ms: Some(0),
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,

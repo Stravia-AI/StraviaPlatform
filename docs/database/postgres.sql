@@ -1664,6 +1664,8 @@ CREATE TABLE public.model_backends (
     target_retry_budget integer DEFAULT 5 NOT NULL,
     target_cooldown_ms bigint DEFAULT 120000 NOT NULL,
     enabled boolean DEFAULT true NOT NULL,
+    config_mode text DEFAULT 'shared'::text NOT NULL,
+    CONSTRAINT model_backends_config_mode_contract CHECK ((config_mode = ANY (ARRAY['shared'::text, 'custom'::text]))),
     CONSTRAINT model_backends_cooldown_contract CHECK ((target_cooldown_ms >= 0)),
     CONSTRAINT model_backends_first_token_timeout_contract CHECK ((first_token_timeout_ms >= 0)),
     CONSTRAINT model_backends_model_nonblank CHECK ((btrim(model) <> ''::text)),

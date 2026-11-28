@@ -77,6 +77,8 @@ import type {
   ProviderStats,
   StatsOverview,
   StatsSeries,
+  TargetGroupThinkingRegenerateInput,
+  TargetGroupThinkingResetInput,
   TargetRuntimeStatus,
   TestResult,
   UpdateApiKey,
@@ -529,6 +531,10 @@ export const admin = {
       }),
     regenerateThinkingMap: (routeId: string, targetId: string) =>
       request<Route>('POST', `/models/${encodeURIComponent(routeId)}/targets/${targetId}/thinking-map/regenerate`),
+    resetGroupThinkingMapping: (routeId: string, input: TargetGroupThinkingResetInput) =>
+      request<Route>('POST', `/models/${encodeURIComponent(routeId)}/target-groups/thinking-map/reset`, input),
+    regenerateGroupThinkingMap: (routeId: string, input: TargetGroupThinkingRegenerateInput) =>
+      request<Route>('POST', `/models/${encodeURIComponent(routeId)}/target-groups/thinking-map/regenerate`, input),
     targetStatuses: (routeId: string) =>
       request<TargetRuntimeStatus[]>('GET', `/models/${encodeURIComponent(routeId)}/target-statuses`),
   },

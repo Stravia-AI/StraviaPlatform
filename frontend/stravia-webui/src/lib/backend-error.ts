@@ -304,6 +304,10 @@ export function localizeBackendErrorMessage(error: unknown, locale: Locale = get
         },
         options,
       )
+    case 'TARGET_GROUP_CONFIG_CONFLICT':
+      return m.backend_error_target_group_config_conflict({}, options)
+    case 'TARGET_GROUP_NOT_FOUND':
+      return m.backend_error_target_group_not_found({}, options)
     case 'THINKING_CONTROL_UNREPRESENTABLE': {
       const levels = extractNamedStrings(payload.params, 'levels', 'level')
       const supported = extractStringArray(payload.params, 'supported_controls')

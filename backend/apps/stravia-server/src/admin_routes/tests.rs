@@ -1711,6 +1711,7 @@ async fn model_target_statuses_stay_behind_admin_auth() -> anyhow::Result<()> {
                 first_token_timeout_ms: None,
                 target_retry_budget: None,
                 target_cooldown_ms: None,
+                config_mode: None,
                 thinking_level_map: Vec::new(),
             }],
             default_thinking_level: None,
@@ -3005,6 +3006,191 @@ async fn observation_sse_streams_close_promptly_on_request_shutdown() -> anyhow:
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), live.text())
         .await
         .expect("interaction live SSE must reach EOF")?;
+
+    gateway.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn target_group_thinking_map_endpoints_update_shared_members_and_preserve_custom()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let gateway = Gateway::new(GatewayConfig {
+        data_dir: directory.path().to_path_buf(),
+        ..Default::default()
+    })
+    .await?;
+    let auth = AdminAuth::new(gateway.storage.clone());
+    auth.ensure_native_admin().await?;
+    let tokens = auth.login_native().await?;
+    let app = desktop_admin_router(gateway.clone(), auth);
+
+    let admin = gateway.admin();
+    let mut provider_ids = Vec::new();
+    for name in ["Pool 1", "Pool 2"] {
+        let provider = admin
+            .create_provider(stravia_core::db::models::CreateProvider {
+                name: Some(name.into()),
+                source: stravia_core::db::models::ProviderSourceInput::Custom {
+                    vendor: "custom".into(),
+                    channel: "default".into(),
+                    protocol: Some("anthropic-messages".into()),
+                    base_url: "http://127.0.0.1:9".into(),
+                    models_source: None,
+                    static_models: None,
+                },
+                credential: stravia_core::db::models::ProviderCredentialInput::None,
+                vendor_options: Default::default(),
+                proxy_mode: "none".into(),
+            })
+            .await?;
+        admin
+            .create_manual_provider_model(
+                &provider.id,
+                "shared-model",
+                stravia_core::provider_models::CreateManualProviderModel {
+                    template_id: None,
+                    metadata: serde_json::json!({
+                        "id": "shared-model",
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                        "reasoning_efforts": ["none", "medium", "high"]
+                    }),
+                },
+            )
+            .await?;
+        provider_ids.push(provider.id);
+    }
+
+    let hidden_all = [
+        "off", "minimal", "low", "medium", "high", "xhigh", "max",
+    ]
+    .into_iter()
+    .map(|level| serde_json::json!({ "level": level, "control": { "type": "hidden" }, "source": "overridden" }))
+    .collect::<Vec<_>>();
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/models")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "model_id": "group-route",
+                        "purpose": "inference",
+                        "targets": [
+                            {
+                                "provider_id": provider_ids[0],
+                                "model": "shared-model",
+                                "enabled": true,
+                                "priority": 0,
+                                "first_token_timeout_ms": 300000,
+                                "config_mode": "shared",
+                                "thinking_level_map": hidden_all,
+                            },
+                            {
+                                "provider_id": provider_ids[1],
+                                "model": "shared-model",
+                                "enabled": true,
+                                "priority": 0,
+                                "first_token_timeout_ms": 60000,
+                                "config_mode": "custom",
+                                "thinking_level_map": hidden_all,
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create_response.status(), StatusCode::OK);
+
+    let regen_response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/models/group-route/target-groups/thinking-map/regenerate")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "priority": 0,
+                        "model": "shared-model",
+                        "include_custom": false
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(regen_response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(regen_response.into_body(), usize::MAX).await?)?;
+    let targets = body["data"]["targets"].as_array().expect("targets array");
+    let shared = targets
+        .iter()
+        .find(|t| t["provider_id"] == provider_ids[0])
+        .expect("shared target");
+    let custom = targets
+        .iter()
+        .find(|t| t["provider_id"] == provider_ids[1])
+        .expect("custom target");
+    assert_eq!(shared["config_mode"], "shared");
+    assert_eq!(custom["config_mode"], "custom");
+    assert_eq!(
+        shared["thinking_level_map"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["level"] == "high")
+            .unwrap()["control"]["value"],
+        "high"
+    );
+    assert_eq!(
+        custom["thinking_level_map"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["level"] == "high")
+            .unwrap()["control"]["type"],
+        "hidden"
+    );
+
+    let reset_response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/models/group-route/target-groups/thinking-map/reset")
+                .header("authorization", format!("Bearer {}", tokens.access_token))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "enabled": true,
+                        "priority": 0,
+                        "model": "shared-model",
+                        "level": "high",
+                        "include_custom": true
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(reset_response.status(), StatusCode::OK);
+    let reset_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(reset_response.into_body(), usize::MAX).await?)?;
+    let custom_after = reset_body["data"]["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["provider_id"] == provider_ids[1])
+        .unwrap();
+    assert_eq!(
+        custom_after["thinking_level_map"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["level"] == "high")
+            .unwrap()["control"]["value"],
+        "high"
+    );
 
     gateway.shutdown().await;
     Ok(())
