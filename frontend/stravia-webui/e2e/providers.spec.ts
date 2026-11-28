@@ -503,6 +503,7 @@ test('configured Providers table shows inventory, linked models and cost, and pe
       model_inventory: {
         total: 10,
         available: 7,
+        route_purposes: ['inference'],
         in_progress: false,
         last_check: { checked_at: timestamp, outcome: 'success' },
       },
@@ -531,6 +532,7 @@ test('configured Providers table shows inventory, linked models and cost, and pe
       model_inventory: {
         total: 3,
         available: 0,
+        route_purposes: [],
         in_progress: false,
         last_check: { checked_at: timestamp, outcome: 'failure' },
       },

@@ -13,6 +13,8 @@ interface Props {
   id: string
   value: string
   options: SearchComboboxOption[]
+  /** 当 `value` 非空且不在 `options` 中时显示的易读标签（例如不再支持当前用途的供应商名）；省略时原样以等宽字显示 `value`。 */
+  selectedLabel?: string
   placeholder: string
   emptyText: string
   ariaLabel?: string
@@ -31,6 +33,7 @@ let {
   id,
   value,
   options,
+  selectedLabel,
   placeholder,
   emptyText,
   ariaLabel,
@@ -52,11 +55,12 @@ let composing = false
 let keepSelectionOnMouseUp = false
 
 const selected = $derived(options.find((option) => option.value === value))
+const fallbackLabel = $derived(value ? selectedLabel?.trim() || undefined : undefined)
 const editing = $derived(!freeText && query !== null)
-const text = $derived(freeText ? value : (query ?? selected?.label ?? value))
-// 已保存的值可能已不在候选里（如已删除的供应商），此时原样显示 ID。
+const text = $derived(freeText ? value : (query ?? selected?.label ?? fallbackLabel ?? value))
+// 已保存的值可能已不在候选里（如不再支持当前用途或已删除的供应商）：提供了易读标签时按正文显示，否则原样以等宽字显示 ID。
 const technicalText = $derived(
-  freeText || (!editing && Boolean(value) && (selected ? Boolean(selected.technical) : true)),
+  freeText || (!editing && Boolean(value) && (selected ? Boolean(selected.technical) : !fallbackLabel)),
 )
 const filteredOptions = $derived.by(() => {
   const needle = (freeText ? value : (query ?? '')).trim().toLocaleLowerCase(localeState.current)
@@ -75,7 +79,7 @@ function optionId(option: SearchComboboxOption): string {
 }
 
 function openList(): void {
-  if (open) return
+  if (disabled || open) return
   open = true
   if (!freeText && selected) highlighted = selected.value
 }

@@ -78,21 +78,55 @@ impl ProviderModelStore for SqliteStorage {
 
     async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>> {
         let mut connection = self.pool.acquire().await?;
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, String, i64)>(
-            r#"SELECT provider_id, source_kind, presence, lifecycle_status, selection_policy, COUNT(*)
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+                Option<String>,
+                i64,
+            ),
+        >(
+            r#"SELECT provider_id,
+                      source_kind,
+                      presence,
+                      lifecycle_status,
+                      selection_policy,
+                      CASE WHEN json_type(metadata_json, '$.modalities.output') = 'array'
+                           THEN json_extract(metadata_json, '$.modalities.output')
+                      END AS output_modalities,
+                      CASE WHEN json_type(metadata_json, '$.capabilities') = 'array'
+                           THEN json_extract(metadata_json, '$.capabilities')
+                      END AS capabilities,
+                      COUNT(*)
                FROM provider_models
-               GROUP BY provider_id, source_kind, presence, lifecycle_status, selection_policy"#,
+               GROUP BY provider_id, source_kind, presence, lifecycle_status, selection_policy, output_modalities, capabilities"#,
         )
         .fetch_all(&mut *connection)
         .await?;
         count_provider_models(rows.into_iter().map(
-            |(provider_id, source_kind, presence, lifecycle_status, selection_policy, count)| {
+            |(
+                provider_id,
+                source_kind,
+                presence,
+                lifecycle_status,
+                selection_policy,
+                output_modalities,
+                capabilities,
+                count,
+            )| {
                 ProviderModelStateGroup {
                     provider_id,
                     source_kind,
                     presence,
                     lifecycle_status,
                     selection_policy,
+                    output_modalities,
+                    capabilities,
                     count,
                 }
             },
@@ -1220,15 +1254,17 @@ mod tests {
         let counts = storage.count_by_provider().await.unwrap();
         for provider_id in ["matrix", "single"] {
             let models = storage.list_for_provider(provider_id).await.unwrap();
+            let mut expected = ProviderModelCounts::default();
+            for model in &models {
+                expected.total += 1;
+                if model.effective_available() {
+                    expected.available += 1;
+                    expected.record_available_purposes(&model.metadata);
+                }
+            }
             assert_eq!(
                 counts.get(provider_id).copied(),
-                Some(ProviderModelCounts {
-                    total: models.len(),
-                    available: models
-                        .iter()
-                        .filter(|model| model.effective_available())
-                        .count(),
-                }),
+                Some(expected),
                 "{provider_id}"
             );
         }
@@ -1238,6 +1274,142 @@ mod tests {
             "the matrix must exercise both available and unavailable models"
         );
         assert!(!counts.contains_key("empty"));
+    }
+
+    #[tokio::test]
+    async fn count_by_provider_aggregates_route_purposes_from_available_models_only() {
+        use crate::db::models::RoutePurpose;
+        use crate::provider_models::ModelModalities;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init_pool(data_dir.path()).await.unwrap();
+        crate::migrations::migrate_sqlite(&pool, None)
+            .await
+            .unwrap();
+        let mut writer = pool.begin_write().await.unwrap();
+        for provider_id in [
+            "text-only",
+            "image-only",
+            "search-only",
+            "unavailable-purposes",
+            "feature-tags",
+        ] {
+            sqlx::query(
+                "INSERT INTO providers (id, name, protocol, base_url, api_key)
+                 VALUES (?, ?, 'openai', 'https://example.com', 'key')",
+            )
+            .bind(provider_id)
+            .bind(provider_id)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        }
+        writer.commit().await.unwrap();
+        let storage = SqliteStorage::from_pool(pool);
+
+        let record = |provider_id: &str,
+                      model_id: &str,
+                      selection_policy: ProviderModelSelectionPolicy,
+                      output: Option<Vec<&str>>,
+                      capabilities: Option<Vec<&str>>| {
+            let mut metadata = ProviderModelMetadata::bare(model_id);
+            metadata.modalities = output.map(|values| ModelModalities {
+                input: vec!["text".into()],
+                output: values.into_iter().map(str::to_owned).collect(),
+            });
+            if let Some(values) = capabilities {
+                metadata
+                    .extensions
+                    .insert("capabilities".into(), serde_json::json!(values));
+            }
+            NewProviderModelRecord {
+                provider_id: provider_id.into(),
+                model_id: model_id.into(),
+                source_kind: ProviderModelSourceKind::Discovered,
+                snapshot_state: SnapshotState::Unregistered,
+                source_metadata: None,
+                metadata_source_provider_id: None,
+                presence: ProviderModelPresence::Present,
+                selection_policy,
+                metadata,
+            }
+        };
+
+        for item in [
+            // Available text-only model with explicit infer capability (not search).
+            record(
+                "text-only",
+                "chat",
+                ProviderModelSelectionPolicy::Auto,
+                Some(vec!["text"]),
+                Some(vec!["infer"]),
+            ),
+            // Disabled image model must NOT grant image_generation.
+            record(
+                "text-only",
+                "disabled-img",
+                ProviderModelSelectionPolicy::ForceDisabled,
+                Some(vec!["image"]),
+                None,
+            ),
+            record(
+                "image-only",
+                "painter",
+                ProviderModelSelectionPolicy::Auto,
+                Some(vec!["image"]),
+                Some(vec!["media_image"]),
+            ),
+            record(
+                "search-only",
+                "searcher",
+                ProviderModelSelectionPolicy::Auto,
+                Some(vec!["text"]),
+                Some(vec!["search"]),
+            ),
+            // Only unavailable models exist: all purposes must remain false.
+            record(
+                "unavailable-purposes",
+                "off-dual",
+                ProviderModelSelectionPolicy::ForceDisabled,
+                Some(vec!["text", "image"]),
+                Some(vec!["infer", "search"]),
+            ),
+            // Feature-only tags must not restrict infer/search.
+            record(
+                "feature-tags",
+                "tagged",
+                ProviderModelSelectionPolicy::Auto,
+                Some(vec!["text"]),
+                Some(vec!["reasoning", "image_input"]),
+            ),
+        ] {
+            let mutation = storage.create(item, None).await.unwrap();
+            assert!(matches!(mutation, ProviderModelMutation::Applied(_)));
+        }
+
+        let counts = storage.count_by_provider().await.unwrap();
+        assert_eq!(
+            counts["text-only"].route_purposes(true),
+            vec![RoutePurpose::Inference]
+        );
+        assert_eq!(
+            counts["image-only"].route_purposes(true),
+            vec![RoutePurpose::ImageGeneration]
+        );
+        assert_eq!(counts["search-only"].route_purposes(false), vec![]);
+        assert_eq!(
+            counts["search-only"].route_purposes(true),
+            vec![RoutePurpose::WebSearch]
+        );
+        assert_eq!(counts["unavailable-purposes"].route_purposes(true), vec![]);
+        assert_eq!(
+            counts["feature-tags"].route_purposes(false),
+            vec![RoutePurpose::Inference]
+        );
+        assert_eq!(
+            counts["feature-tags"].route_purposes(true),
+            vec![RoutePurpose::Inference, RoutePurpose::WebSearch]
+        );
     }
 
     #[tokio::test]

@@ -475,8 +475,9 @@ pub trait ProviderModelStore: Send + Sync {
         &self,
         provider_id: &str,
     ) -> anyhow::Result<Vec<ProviderModelRecord>>;
-    /// 每个 Provider 的 Provider Model 总数与可用数；没有清单的 Provider 不在结果中。
-    /// 可用性规则与 [`ProviderModelRecord::effective_available`] 同源，且不读取 `metadata_json`。
+    /// 每个 Provider 的 Provider Model 总数、可用数与可用模型声明的路由用途；没有清单的 Provider 不在结果中。
+    /// 可用性与用途判定分别与 [`ProviderModelRecord::effective_available`] 和
+    /// [`crate::provider_models::ProviderModelMetadata::supports_route_purpose`] 同源。
     async fn count_by_provider(&self) -> anyhow::Result<HashMap<String, ProviderModelCounts>>;
     async fn get(
         &self,

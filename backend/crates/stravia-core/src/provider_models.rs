@@ -400,27 +400,16 @@ impl ProviderModelMetadata {
     /// Use the persisted model declaration, never display defaults. Search also
     /// requires support on the selected Vendor channel.
     pub fn supports_route_purpose(&self, purpose: RoutePurpose) -> bool {
-        let capabilities = self
-            .extensions
-            .get("capabilities")
-            .and_then(Value::as_array);
-        let declares = |capability| {
-            capabilities.is_none_or(|values| {
-                !has_explicit_operation_capabilities(values)
-                    || values
-                        .iter()
-                        .any(|value| value.as_str() == Some(capability))
-            })
-        };
-        let output = match purpose {
-            RoutePurpose::Inference if declares("infer") => "text",
-            RoutePurpose::Inference => return false,
-            RoutePurpose::ImageGeneration => "image",
-            RoutePurpose::WebSearch => return declares("search"),
-        };
-        self.modalities
-            .as_ref()
-            .is_some_and(|modalities| modalities.output.iter().any(|value| value == output))
+        supports_route_purpose_fields(
+            self.modalities
+                .as_ref()
+                .map(|modalities| modalities.output.as_slice()),
+            self.extensions
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            purpose,
+        )
     }
 
     pub fn has_specification(&self) -> bool {
@@ -781,6 +770,28 @@ pub(crate) fn has_explicit_operation_capabilities(values: &[Value]) -> bool {
     })
 }
 
+fn supports_route_purpose_fields(
+    output_modalities: Option<&[String]>,
+    capabilities: Option<&[Value]>,
+    purpose: RoutePurpose,
+) -> bool {
+    let declares = |capability| {
+        capabilities.is_none_or(|values| {
+            !has_explicit_operation_capabilities(values)
+                || values
+                    .iter()
+                    .any(|value| value.as_str() == Some(capability))
+        })
+    };
+    let output = match purpose {
+        RoutePurpose::Inference if declares("infer") => "text",
+        RoutePurpose::Inference => return false,
+        RoutePurpose::ImageGeneration => "image",
+        RoutePurpose::WebSearch => return declares("search"),
+    };
+    output_modalities.is_some_and(|modalities| modalities.iter().any(|value| value == output))
+}
+
 pub(crate) fn eligible_route_purposes(
     metadata: &ProviderModelMetadata,
     search_channel: bool,
@@ -827,15 +838,40 @@ pub fn effective_availability(
     }
 }
 
-/// 一个 Provider 的 Provider Model 总数与可用数。
+/// 一个 Provider 的 Provider Model 总数、可用数与可用模型声明的路由用途。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderModelCounts {
     pub total: usize,
     pub available: usize,
+    pub supports_inference: bool,
+    pub supports_image_generation: bool,
+    pub supports_web_search_model: bool,
 }
 
-/// 存储层按 `(provider, 来源, presence, 生命周期, 选择策略)` 分组后的行数。
-/// 这些列都是 `provider_models` 的投影列，聚合不需要读取 `metadata_json`。
+impl ProviderModelCounts {
+    pub fn record_available_purposes(&mut self, metadata: &ProviderModelMetadata) {
+        self.supports_inference |= metadata.supports_route_purpose(RoutePurpose::Inference);
+        self.supports_image_generation |=
+            metadata.supports_route_purpose(RoutePurpose::ImageGeneration);
+        self.supports_web_search_model |= metadata.supports_route_purpose(RoutePurpose::WebSearch);
+    }
+
+    pub fn route_purposes(self, search_channel: bool) -> Vec<RoutePurpose> {
+        let mut purposes = Vec::with_capacity(RoutePurpose::ALL.len());
+        if self.supports_inference {
+            purposes.push(RoutePurpose::Inference);
+        }
+        if self.supports_image_generation {
+            purposes.push(RoutePurpose::ImageGeneration);
+        }
+        if search_channel && self.supports_web_search_model {
+            purposes.push(RoutePurpose::WebSearch);
+        }
+        purposes
+    }
+}
+
+/// 存储层按 `(provider, 来源, presence, 生命周期, 选择策略, 输出模态, 操作能力)` 分组后的行数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModelStateGroup {
     pub provider_id: String,
@@ -843,10 +879,14 @@ pub struct ProviderModelStateGroup {
     pub presence: String,
     pub lifecycle_status: Option<String>,
     pub selection_policy: String,
+    /// `metadata_json.modalities.output` 的 JSON 数组文本；缺失或非数组时为 `None`。
+    pub output_modalities: Option<String>,
+    /// `metadata_json.capabilities` 的 JSON 数组文本；缺失或非数组时为 `None`。
+    pub capabilities: Option<String>,
     pub count: i64,
 }
 
-/// 把分组行折叠成每个 Provider 的计数；列值非法或计数为负时报错，不跳过。
+/// 把分组行折叠成每个 Provider 的计数与路由用途支持；列值非法或计数为负时报错，不跳过。
 pub fn count_provider_models(
     groups: impl IntoIterator<Item = ProviderModelStateGroup>,
 ) -> anyhow::Result<std::collections::HashMap<String, ProviderModelCounts>> {
@@ -862,8 +902,35 @@ pub fn count_provider_models(
         );
         let entry = counts.entry(group.provider_id).or_default();
         entry.total += count;
-        if available {
+        if available && count > 0 {
             entry.available += count;
+            let output_modalities: Option<Vec<String>> = group
+                .output_modalities
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("decode Provider Model output modalities")?;
+            let capabilities: Option<Vec<Value>> = group
+                .capabilities
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .context("decode Provider Model capabilities")?;
+            entry.supports_inference |= supports_route_purpose_fields(
+                output_modalities.as_deref(),
+                capabilities.as_deref(),
+                RoutePurpose::Inference,
+            );
+            entry.supports_image_generation |= supports_route_purpose_fields(
+                output_modalities.as_deref(),
+                capabilities.as_deref(),
+                RoutePurpose::ImageGeneration,
+            );
+            entry.supports_web_search_model |= supports_route_purpose_fields(
+                output_modalities.as_deref(),
+                capabilities.as_deref(),
+                RoutePurpose::WebSearch,
+            );
         }
     }
     Ok(counts)
@@ -1630,6 +1697,7 @@ pub struct ProviderModelSyncState {
 pub struct ProviderModelInventory {
     pub total: usize,
     pub available: usize,
+    pub route_purposes: Vec<RoutePurpose>,
     pub in_progress: bool,
     pub last_check: Option<ProviderModelLastCheck>,
 }

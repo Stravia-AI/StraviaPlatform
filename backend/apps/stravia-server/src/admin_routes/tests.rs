@@ -1000,11 +1000,162 @@ async fn provider_list_reports_model_inventory_with_the_effective_availability_r
     };
     assert_eq!(
         inventory(&stocked.id),
-        serde_json::json!({ "total": 6, "available": 3, "in_progress": false, "last_check": null })
+        serde_json::json!({
+            "total": 6,
+            "available": 3,
+            "route_purposes": [],
+            "in_progress": false,
+            "last_check": null
+        })
     );
     assert_eq!(
         inventory(&empty.id),
-        serde_json::json!({ "total": 0, "available": 0, "in_progress": false, "last_check": null })
+        serde_json::json!({
+            "total": 0,
+            "available": 0,
+            "route_purposes": [],
+            "in_progress": false,
+            "last_check": null
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_list_reports_supported_route_purposes_by_available_models_and_channel()
+-> anyhow::Result<()> {
+    use stravia_core::provider_models::{
+        ModelModalities, NewProviderModelRecord, ProviderModelMetadata, ProviderModelPresence,
+        ProviderModelSelectionPolicy, ProviderModelSourceKind, SnapshotState,
+    };
+
+    let data_dir = tempfile::tempdir()?;
+    let gateway = memory_gateway(data_dir.path()).await?;
+    stravia_core::plugin::test_support::install_distributed_vendor(&gateway, "antigravity").await?;
+    let create_provider = |name: &str, vendor: &str, channel: &str| CreateProviderRecord {
+        name: name.into(),
+        vendor: Some(vendor.into()),
+        protocol: "openai-compatible".into(),
+        base_url: "https://api.example.com/v1".into(),
+        preset_key: Some(vendor.into()),
+        channel: Some(channel.into()),
+        models_source: Some("catalog".into()),
+        static_models: None,
+        api_key: String::new(),
+        adapter_credentials: "{}".into(),
+        vendor_options: "{}".into(),
+        auth_mode: "apikey".into(),
+        proxy_mode: "none".into(),
+    };
+    let inference_only = gateway
+        .storage
+        .providers()
+        .create(create_provider("Devin-like", "openai", "default"))
+        .await?;
+    let search_capable = gateway
+        .storage
+        .providers()
+        .create(create_provider("Antigravity", "antigravity", "oauth"))
+        .await?;
+    let image_only = gateway
+        .storage
+        .providers()
+        .create(create_provider("Image", "openai", "default"))
+        .await?;
+
+    let add_model = |provider_id: &str,
+                     model_id: &str,
+                     selection_policy: ProviderModelSelectionPolicy,
+                     output: Vec<&str>,
+                     capabilities: Option<Vec<&str>>| {
+        let mut metadata = ProviderModelMetadata::bare(model_id);
+        metadata.modalities = Some(ModelModalities {
+            input: vec!["text".into()],
+            output: output.into_iter().map(str::to_owned).collect(),
+        });
+        if let Some(values) = capabilities {
+            metadata
+                .extensions
+                .insert("capabilities".into(), serde_json::json!(values));
+        }
+        NewProviderModelRecord {
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+            source_kind: ProviderModelSourceKind::Discovered,
+            snapshot_state: SnapshotState::Unregistered,
+            source_metadata: None,
+            metadata_source_provider_id: None,
+            presence: ProviderModelPresence::Present,
+            selection_policy,
+            metadata,
+        }
+    };
+    for record in [
+        // Non-search provider: available text model + disabled image model -> only inference.
+        add_model(
+            &inference_only.id,
+            "chat",
+            ProviderModelSelectionPolicy::Auto,
+            vec!["text"],
+            None,
+        ),
+        add_model(
+            &inference_only.id,
+            "disabled-img",
+            ProviderModelSelectionPolicy::ForceDisabled,
+            vec!["image"],
+            None,
+        ),
+        // Search-capable channel with search-only model -> only web_search.
+        add_model(
+            &search_capable.id,
+            "grounding",
+            ProviderModelSelectionPolicy::Auto,
+            vec!["text"],
+            Some(vec!["search"]),
+        ),
+        // Image-only model -> only image_generation.
+        add_model(
+            &image_only.id,
+            "painter",
+            ProviderModelSelectionPolicy::Auto,
+            vec!["image"],
+            None,
+        ),
+    ] {
+        gateway
+            .storage
+            .provider_models()
+            .create(record, None)
+            .await?;
+    }
+
+    let app = create_unprotected_router(gateway);
+    let response = app
+        .oneshot(Request::get("/api/v1/providers").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let providers = json["data"].as_array().expect("provider list");
+    let purposes = |id: &str| {
+        providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .expect("provider listed")["model_inventory"]["route_purposes"]
+            .clone()
+    };
+    assert_eq!(
+        purposes(&inference_only.id),
+        serde_json::json!(["inference"])
+    );
+    assert_eq!(
+        purposes(&search_capable.id),
+        serde_json::json!(["web_search"])
+    );
+    assert_eq!(
+        purposes(&image_only.id),
+        serde_json::json!(["image_generation"])
     );
     Ok(())
 }

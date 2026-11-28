@@ -37,6 +37,8 @@ export interface ProviderModelInventory {
   total: number
   /** Provider Models that are effectively available, using the same rule as `ProviderModelSummary.available`. */
   available: number
+  /** Route purposes supported by at least one effectively available Provider Model on this provider. */
+  route_purposes: RoutePurpose[]
   in_progress: boolean
   /** Latest synchronization attempt; null when the provider has never been checked. */
   last_check: { checked_at: string; outcome: ModelChangeOutcome } | null

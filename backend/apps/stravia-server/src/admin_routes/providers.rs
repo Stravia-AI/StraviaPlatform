@@ -54,11 +54,7 @@ pub(super) async fn list_providers(State(gw): State<Gateway>) -> impl IntoRespon
                 Ok(plans) => plans,
                 Err(error) => return err(error),
             };
-            let provider_ids: Vec<String> = providers
-                .iter()
-                .map(|provider| provider.id.clone())
-                .collect();
-            let mut inventories = match gw.admin().provider_model_inventories(&provider_ids).await {
+            let mut inventories = match gw.admin().provider_model_inventories(&providers).await {
                 Ok(inventories) => inventories,
                 Err(error) => return err(error),
             };
