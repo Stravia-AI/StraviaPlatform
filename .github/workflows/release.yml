@@ -23,6 +23,8 @@ env:
   CARGO_XWIN_VERSION: "0.22.0"
   APPLE_CODESIGN_VERSION: "0.29.0"
   XWIN_VERSION: "16"
+  # Keep sccache archive under the runner's 8 GiB /tmp tmpfs so actions/cache/save never hits ENOSPC.
+  SCCACHE_CACHE_SIZE: "5G"
   GITHUB_RELEASE_REPOSITORY: ${{ vars.RELEASE_GITHUB_REPOSITORY || 'Stravia-AI/StraviaPlatform' }}
   GITHUB_RELEASE_SERVER_URL: https://github.com
   GITHUB_RELEASE_API_URL: https://api.github.com
@@ -45,7 +47,7 @@ jobs:
       include_macos: ${{ steps.release.outputs.include_macos }}
     steps:
       - name: Checkout complete history
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -172,7 +174,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Bootstrap Linux x64 toolchain
         id: bootstrap
@@ -182,7 +184,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -195,26 +197,26 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
           restore-keys: |
             deps-bun-v2-
 
-      - name: Restore Linux x64 sccache (rolling)
+      - name: Restore Linux x64 wasm sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
+          key: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
           restore-keys: |
-            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            sccache-linux-x64-
+            sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-wasm-
 
       - name: Restore compiled Wasm vendor plugins
         id: vendor-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             target/vendor-plugins
@@ -235,19 +237,19 @@ jobs:
         if: always()
         env:
           CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
-          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
         run: bash .github/scripts/sccache_check_save.sh
 
-      - name: Save Linux x64 sccache (rolling)
+      - name: Save Linux x64 wasm sccache (rolling)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
+          key: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-shared
 
       - name: Upload shared release build inputs
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: release-shared-assets
           path: |
@@ -271,7 +273,7 @@ jobs:
       has_plugins: ${{ steps.select.outputs.has_plugins }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -288,7 +290,7 @@ jobs:
         run: python3 .github/scripts/select_vendor_plugins.py
 
       - name: Upload selection marker
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: vendor-plugin-selection
           path: stravia-plugin-selection-v1.json
@@ -297,7 +299,7 @@ jobs:
 
       - name: Download shared bundled base vendor
         if: steps.select.outputs.has_plugins == 'true'
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: release-shared-assets
           path: .
@@ -313,7 +315,7 @@ jobs:
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -325,16 +327,16 @@ jobs:
           restore-keys: |
             deps-cargo-v2-
 
-      - name: Restore Linux x64 sccache (rolling)
+      - name: Restore Linux x64 wasm sccache (rolling)
         id: sccache-cache
         if: steps.select.outputs.has_plugins == 'true'
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
+          key: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
           restore-keys: |
-            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            sccache-linux-x64-
+            sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-wasm-
 
       - name: Prepare patched crates
         if: steps.select.outputs.has_plugins == 'true'
@@ -428,7 +430,7 @@ jobs:
 
       - name: Upload dedicated plugin assets
         if: steps.select.outputs.has_plugins == 'true'
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: vendor-plugins
           path: dist/*
@@ -440,16 +442,16 @@ jobs:
         if: always() && steps.select.outputs.has_plugins == 'true'
         env:
           CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
-          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
         run: bash .github/scripts/sccache_check_save.sh
 
-      - name: Save Linux x64 sccache (rolling)
+      - name: Save Linux x64 wasm sccache (rolling)
         if: always() && steps.select.outputs.has_plugins == 'true' && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
+          key: sccache-linux-x64-wasm-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-plugins
 
   # Combined Linux x64 build: compiles stravia-server (x64), stravia-desktop AppImage (x64),
   # and stravia-server (arm64 cross) in one container to reuse stravia-core, sccache, and WebUI dist.
@@ -467,10 +469,10 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: release-shared-assets
           path: .
@@ -485,7 +487,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -498,22 +500,30 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
           restore-keys: |
             deps-bun-v2-
 
-      - name: Restore Linux x64 sccache (rolling)
+      - name: Cache Tauri bundling tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/tauri
+          key: tauri-tools-v1-linux-x86_64-cli2.12.6
+          restore-keys: |
+            tauri-tools-v1-linux-x86_64-
+
+      - name: Restore Linux x64 release sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-release
+          key: sccache-linux-x64-release-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
-            sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            sccache-linux-x64-
+            sccache-linux-x64-release-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            sccache-linux-x64-release-
 
       - name: Validate updater signing credentials
         env:
@@ -547,6 +557,17 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          mkdir -p "${HOME}/.cache/tauri"
+          runtime_file="${HOME}/.cache/tauri/runtime-x86_64"
+          if [[ ! -s "${runtime_file}" ]]; then
+            tmp_runtime="${runtime_file}.tmp.$$"
+            curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+              -o "${tmp_runtime}" \
+              "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64"
+            chmod +x "${tmp_runtime}"
+            mv -f "${tmp_runtime}" "${runtime_file}"
+          fi
+          export LDAI_RUNTIME_FILE="${runtime_file}"
           (
             cd backend/apps/stravia-desktop
             bunx --bun @tauri-apps/cli@2.12.6 build \
@@ -582,7 +603,7 @@ jobs:
           tar -C package -czf "dist-server-arm64/${asset}.tar.gz" "${asset}"
 
       - name: Upload Linux x86_64 server asset
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: server-linux-x86_64-gnu
           path: dist-server-x64/*
@@ -590,7 +611,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Linux x86_64 desktop asset
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: desktop-linux-x86_64
           path: dist-desktop-x64/*
@@ -598,7 +619,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Linux aarch64 server asset
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: server-linux-aarch64-gnu
           path: dist-server-arm64/*
@@ -610,16 +631,16 @@ jobs:
         if: always()
         env:
           CACHE_MATCHED_KEY: ${{ steps.sccache-cache.outputs.cache-matched-key }}
-          EXPECTED_KEY_PREFIX: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+          EXPECTED_KEY_PREFIX: sccache-linux-x64-release-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-
         run: bash .github/scripts/sccache_check_save.sh
 
-      - name: Save Linux x64 sccache (rolling, even on build failure)
+      - name: Save Linux x64 release sccache (rolling, even on build failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
-          key: sccache-linux-x64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}-release
+          key: sccache-linux-x64-release-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
 
   # Combined Windows MSVC cross-build per arch: compiles server + desktop NSIS in one container
   # sharing cargo-xwin SDK, target/<triple>/release/, sccache, and prebuilt WebUI dist.
@@ -645,10 +666,10 @@ jobs:
             target: aarch64-pc-windows-msvc
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: release-shared-assets
           path: .
@@ -662,7 +683,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -675,16 +696,24 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
           restore-keys: |
             deps-bun-v2-
 
+      - name: Cache Tauri bundling tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/tauri
+          key: tauri-tools-v1-${{ matrix.suffix }}-cli2.12.6
+          restore-keys: |
+            tauri-tools-v1-${{ matrix.suffix }}-
+
       - name: Restore Windows sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -750,7 +779,7 @@ jobs:
           cp "${bundles[0]}.sig" "dist-desktop/${desktop_asset}.sig"
 
       - name: Upload Windows server asset
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: server-${{ matrix.suffix }}
           path: dist-server/*
@@ -758,7 +787,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows desktop asset
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist-desktop/*
@@ -775,7 +804,7 @@ jobs:
 
       - name: Save Windows sccache (rolling, even on build failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -792,16 +821,16 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: release-shared-assets
           path: .
 
       - name: Cache Rust build toolchain binaries
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.rustup
@@ -822,7 +851,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -835,16 +864,24 @@ jobs:
             deps-cargo-v2-
 
       - name: Cache Bun packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.bun/install/cache
           key: deps-bun-v2-${{ hashFiles('bun.lock') }}
           restore-keys: |
             deps-bun-v2-
 
+      - name: Cache Tauri bundling tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/tauri
+          key: tauri-tools-v1-linux-aarch64-cli2.12.6
+          restore-keys: |
+            tauri-tools-v1-linux-aarch64-
+
       - name: Restore Linux arm64 sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-linux-arm64-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -937,6 +974,17 @@ jobs:
             chmod +x "${cross_tmp}/bin/ldd"
             export PATH="${cross_tmp}/bin:${PATH}"
           fi
+          mkdir -p "${HOME}/.cache/tauri"
+          runtime_file="${HOME}/.cache/tauri/runtime-aarch64"
+          if [[ ! -s "${runtime_file}" ]]; then
+            tmp_runtime="${runtime_file}.tmp.$$"
+            curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+              -o "${tmp_runtime}" \
+              "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64"
+            chmod +x "${tmp_runtime}"
+            mv -f "${tmp_runtime}" "${runtime_file}"
+          fi
+          export LDAI_RUNTIME_FILE="${runtime_file}"
           (
             cd backend/apps/stravia-desktop
             bunx --bun @tauri-apps/cli@2.12.6 build \
@@ -990,7 +1038,7 @@ jobs:
           cp "${bundles[0]}.sig" "dist/${asset}.sig"
 
       - name: Upload Linux aarch64 desktop asset
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: desktop-linux-aarch64
           path: dist/*
@@ -1007,7 +1055,7 @@ jobs:
 
       - name: Save Linux arm64 sccache (rolling, even on build failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -1039,16 +1087,16 @@ jobs:
             cmake_file: .github/cmake/macos-x86_64.cmake
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download shared WebUI dist & bundled vendors
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: release-shared-assets
           path: .
 
       - name: Restore osxcross toolchain cache (when not prebuilt in image)
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: /opt/osxcross/target
           key: osxcross-899260ca-sdk15.5-linux-x64-v1
@@ -1067,7 +1115,7 @@ jobs:
 
       - name: Cache Cargo registry and patched crates
         id: cargo-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -1081,7 +1129,7 @@ jobs:
 
       - name: Restore macOS sccache (rolling)
         id: sccache-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
           key: sccache-macos-${{ matrix.suffix }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ github.run_id }}
@@ -1117,7 +1165,7 @@ jobs:
             --output-dir dist
 
       - name: Upload macOS release assets
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: desktop-${{ matrix.suffix }}
           path: dist/*
@@ -1134,7 +1182,7 @@ jobs:
 
       - name: Save macOS sccache (rolling, even on build failure)
         if: always() && steps.sccache-stats.outputs.should_save == 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         continue-on-error: true
         with:
           path: ~/.cache/sccache
@@ -1153,10 +1201,10 @@ jobs:
           - platform: linux/arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Check host arm64 BuildKit support
         if: matrix.platform == 'linux/arm64'
@@ -1171,7 +1219,7 @@ jobs:
 
       - name: Set up QEMU
         if: matrix.platform == 'linux/arm64' && steps.buildx-check.outputs.has_arm64 != 'true'
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
         with:
           platforms: arm64
 
@@ -1203,79 +1251,79 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout manifest generator
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download server linux-x86_64-gnu
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: server-linux-x86_64-gnu
           path: release-assets
 
       - name: Download server linux-aarch64-gnu
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: server-linux-aarch64-gnu
           path: release-assets
 
       - name: Download server windows-x86_64
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: server-windows-x86_64
           path: release-assets
 
       - name: Download server windows-aarch64
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: server-windows-aarch64
           path: release-assets
 
       - name: Download desktop linux-x86_64
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: desktop-linux-x86_64
           path: release-assets
 
       - name: Download desktop linux-aarch64
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: desktop-linux-aarch64
           path: release-assets
 
       - name: Download desktop windows-x86_64
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: desktop-windows-x86_64
           path: release-assets
 
       - name: Download desktop windows-aarch64
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: desktop-windows-aarch64
           path: release-assets
 
       - name: Download desktop darwin-aarch64
         if: needs.prepare.outputs.include_macos == 'true'
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: desktop-darwin-aarch64
           path: release-assets
 
       - name: Download desktop darwin-x86_64
         if: needs.prepare.outputs.include_macos == 'true'
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: desktop-darwin-x86_64
           path: release-assets
 
       - name: Download selection marker
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: vendor-plugin-selection
           path: release-assets
 
       - name: Download dedicated plugin assets
         if: needs.build-vendor-plugins.outputs.has_plugins == 'true'
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: vendor-plugins
           path: release-assets
@@ -1301,7 +1349,7 @@ jobs:
           LC_ALL=C sha256sum -- * > SHA256SUMS
 
       - name: Upload consolidated release assets
-        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: release-assets
           path: release-assets/*
@@ -1317,7 +1365,7 @@ jobs:
     timeout-minutes: 65
     steps:
       - name: Checkout CI gate script
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: |
             .github/scripts/wait_for_ci.py
@@ -1346,12 +1394,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout release metadata
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Download release assets
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: release-assets
           path: release-assets
@@ -1407,16 +1455,16 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download prebuilt Linux x86_64 server archive
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: server-linux-x86_64-gnu
           path: prebuilt-server/amd64
 
       - name: Download prebuilt Linux aarch64 server archive
-        uses: https://data.forgejo.org/forgejo/download-artifact@v4
+        uses: https://data.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e # v4
         with:
           name: server-linux-aarch64-gnu
           path: prebuilt-server/arm64
@@ -1443,7 +1491,7 @@ jobs:
           [[ "${arm64_info}" == *"ARM aarch64"* ]] || { echo "ERROR: expected ARM aarch64 binary: ${arm64_info}" >&2; exit 1; }
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Check host arm64 BuildKit support
         id: buildx-check
@@ -1457,7 +1505,7 @@ jobs:
 
       - name: Set up QEMU
         if: steps.buildx-check.outputs.has_arm64 != 'true'
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
         with:
           platforms: arm64
 
@@ -1513,7 +1561,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout release helper
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Publish completed draft
         env:
