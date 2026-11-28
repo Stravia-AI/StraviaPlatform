@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Gemini imported-tool-history validation fallback (`skip_thought_signature_validator`) now matches Gemini 3+ versioned models (`major >= 3`, including `gemini-4-neon`, `gemini-4-hydrogen`, and `gemini-<major>.<minor>-*`) on both the official Gemini `generativelanguage.googleapis.com` endpoint and Antigravity's default native endpoint, while continuing to exclude Gemini 2.5 and earlier, unversioned aliases, and unverified endpoints. This prevents HTTP 400 missing-`thought_signature` errors when continuing an unsigned tool loop across models (for example switching between `gemini-4-hydrogen` and `gemini-4-neon` over Open Responses). Rebuild and re-import the standalone Antigravity plugin to apply this fix.
+
 ## [0.7.8] - 2026-11-27
 
 ### Verification

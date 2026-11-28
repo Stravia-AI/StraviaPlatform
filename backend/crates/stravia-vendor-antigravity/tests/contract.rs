@@ -1160,16 +1160,42 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
         axum::serve(listener, app).await.unwrap();
     });
     let (runtime, plugin) = load_plugin().await;
-    for (signature, unverified) in [
-        (None, false),
-        (Some("opaque-native+/=="), false),
-        (None, true),
+    for (model, selector, signature, unverified) in [
+        ("gemini-3.8-flash", None, None, false),
+        ("gemini-3.8-flash", None, Some("opaque-native+/=="), false),
+        ("gemini-3.8-flash", None, None, true),
+        ("gemini-4-neon", None, None, false),
+        ("gemini-4-neon", None, Some("opaque-native+/=="), false),
+        ("gemini-4-neon", None, None, true),
+        (
+            "gemini-4-hydrogen",
+            Some("gemini-4-hydrogen-medium"),
+            None,
+            false,
+        ),
     ] {
         fixture
             .require_call_signature
             .store(!unverified, Ordering::Relaxed);
         let mut provider = provider();
-        provider.model = Some("gemini-3.8-flash".into());
+        provider.model = Some(model.into());
+        if let Some(selected) = selector {
+            provider.model_metadata = Some(stravia_vendor_sdk::ModelMetadata {
+                selector: Some(selected.into()),
+                extensions: BTreeMap::from([(
+                    "antigravity".into(),
+                    json!({
+                        "default": selected,
+                        "variants": [{
+                            "id": selected,
+                            "effort": "medium",
+                            "metadata": {"thinkingLevel": 2}
+                        }]
+                    }),
+                )]),
+                ..Default::default()
+            });
+        }
         if unverified {
             provider.base_url = "https://unverified.example".into();
         }
@@ -1178,7 +1204,7 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
             ("project_id".into(), json!("test-project")),
         ]);
         let mut body = json!({
-            "model": "gemini-3.8-flash",
+            "model": model,
             "contents": [
                 {"role":"user","parts":[{"text":"Add both lookup results."}]},
                 {"role":"model","parts":[
@@ -1221,6 +1247,7 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
         assert_eq!(output.output_text(), "真实 HTTP 冒烟");
         let received = fixture.received.lock();
         let envelope: Value = serde_json::from_slice(&received.last().unwrap().2).unwrap();
+        assert_eq!(envelope["model"], selector.unwrap_or(model));
         assert_eq!(envelope["request"]["contents"], expected);
         let labels = &envelope["request"]["labels"];
         assert!(labels.get("request_id").is_none());
@@ -1228,6 +1255,55 @@ async fn imported_tool_history_continues_without_replacing_native_signatures() {
         assert_eq!(labels["used_claude"], "false");
         assert_eq!(labels["used_claude_conservative"], "true");
         assert_eq!(labels["used_non_gemini_model"], "true");
+    }
+    // Open Responses 跨模型续跑：旧模型 reasoning/encrypted_content 缺失且新用户输入折叠进 function_call_output。
+    fixture
+        .require_call_signature
+        .store(true, Ordering::Relaxed);
+    for model in ["gemini-4-neon", "gemini-4-hydrogen"] {
+        let mut provider = provider();
+        provider.model = Some(model.into());
+        provider.credentials = BTreeMap::from([
+            ("access_token".into(), json!("test-token")),
+            ("project_id".into(), json!("test-project")),
+        ]);
+        let request = ProtocolTransform::global()
+            .bind(
+                stravia_runtime_contract::protocol::ids::OPEN_RESPONSES_2026_04_24,
+                GOOGLE_GEMINI_GENERATE_CONTENT_V1BETA,
+            )
+            .unwrap()
+            .decode_request(json!({
+                "model": model,
+                "input": [
+                    {"role": "user", "content": "Inspect the repo."},
+                    {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"key\":\"A\"}"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "result A\n\n[user follow-up folded into tool result]"}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type": "object", "properties": {"key": {"type": "string"}}}
+                }]
+            }))
+            .unwrap();
+        let result = run(
+            runtime,
+            plugin,
+            &services,
+            OperationInput::Infer { provider, request },
+        )
+        .await;
+        let OperationOutput::Infer(output) = result.unwrap() else {
+            panic!("inference output")
+        };
+        assert_eq!(output.output_text(), "真实 HTTP 冒烟");
+        let received = fixture.received.lock();
+        let envelope: Value = serde_json::from_slice(&received.last().unwrap().2).unwrap();
+        assert_eq!(
+            envelope["request"]["contents"][1]["parts"][0]["thoughtSignature"],
+            "skip_thought_signature_validator"
+        );
     }
     fixture
         .require_call_signature
