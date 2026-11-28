@@ -446,8 +446,17 @@ async fn update_routes_expose_instance_state_and_exact_skip_version() -> anyhow:
     assert_eq!(initial.status(), StatusCode::OK);
     let body = to_bytes(initial.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let expected_default_channel = if env!("CARGO_PKG_VERSION")
+        .split('+')
+        .next()
+        .is_some_and(|version| version.contains('-'))
+    {
+        "beta"
+    } else {
+        "release"
+    };
     assert_eq!(json["data"]["check_status"], "idle");
-    assert_eq!(json["data"]["channel"], "release");
+    assert_eq!(json["data"]["channel"], expected_default_channel);
     assert_eq!(json["data"]["download_supported"], false);
 
     let channel_changed = app

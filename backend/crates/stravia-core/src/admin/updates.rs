@@ -826,9 +826,10 @@ impl UpdateService {
     ) -> anyhow::Result<()> {
         let version = Version::parse(version)?;
         let _check = self.check_lock.lock().await;
+        let channel = self.current_channel().await?;
         let now = self.clock.now();
         let state = PersistedUpdateState {
-            channel: Some(UpdateChannel::Release),
+            channel: Some(channel),
             last_success_at: Some(now),
             last_failure: None,
             available_update: Some(AvailableUpdate {
