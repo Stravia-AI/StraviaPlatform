@@ -3,7 +3,7 @@ name = "stravia-vendor-sdk"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Guest-side SDK for Stravia vendor Wasm plugins: typed descriptor, canonical envelopes, and host imports"
 publish = false
 

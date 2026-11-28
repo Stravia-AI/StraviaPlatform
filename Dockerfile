@@ -28,7 +28,7 @@ RUN rustup target add wasm32-wasip2 \
     && ([ "${TARGETARCH}" != "arm64" ] || rustup target add aarch64-unknown-linux-gnu) \
     && cargo install patch-crate --version 0.1.13 --locked
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock LICENSE-PLUGINS ./
 COPY .cargo .cargo
 COPY patches/ patches/
 COPY backend backend

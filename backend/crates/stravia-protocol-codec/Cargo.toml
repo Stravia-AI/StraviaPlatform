@@ -3,7 +3,7 @@ name = "stravia-protocol-codec"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Standard protocol codecs and extensible canonical transforms shared by the Stravia host and Wasm vendor plugins"
 
 [lints]

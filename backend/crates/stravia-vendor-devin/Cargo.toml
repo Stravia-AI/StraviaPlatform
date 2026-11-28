@@ -3,7 +3,7 @@ name = "stravia-vendor-devin"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file = "../../../LICENSE-PLUGINS"
 description = "Dedicated Devin Wasm vendor guest for Stravia"
 publish = false
 

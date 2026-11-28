@@ -3,7 +3,7 @@ name = "stravia-runtime-contract"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Shared canonical and execution contracts for Stravia capability modules"
 
 [lints]

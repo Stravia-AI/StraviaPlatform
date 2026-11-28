@@ -1,0 +1,105 @@
+Stravia Dedicated Vendor Plugins — Non-Commercial License & Disclaimer
+======================================================================
+
+Copyright (c) Stravia Contributors. All rights reserved.
+
+1. Scope
+--------
+This license and disclaimer applies exclusively to the dedicated Wasm vendor
+plugins maintained in this repository and their compiled artifacts
+(`.wasm` / `.wasm.zst`):
+
+  - stravia-vendor-codex
+  - stravia-vendor-claudecode
+  - stravia-vendor-grok
+  - stravia-vendor-devin
+  - stravia-vendor-command-code
+  - stravia-vendor-antigravity
+  - stravia-vendor-opencode-free
+  - stravia-vendor-kiro
+
+The Stravia core platform and the bundled `stravia-vendor-base` plugin remain
+licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`,
+see `LICENSE`). Shared plugin SDK and codec crates (`stravia-vendor-sdk`,
+`stravia-vendor-common`, `stravia-protocol-codec`, `stravia-runtime-contract`)
+are dual-licensed under `MIT OR Apache-2.0`.
+
+2. Personal Research and Learning Only (Community Edition)
+----------------------------------------------------------
+Permission is hereby granted, free of charge, to any individual to view, build,
+modify, and run the dedicated vendor plugins in the Stravia Community Edition
+solely for personal, non-commercial technical research, study, and protocol
+interoperability learning.
+
+3. Prohibition of Commercial Use
+--------------------------------
+Without prior written authorization from the copyright holder, you may NOT use,
+copy, modify, redistribute, host, or deploy any dedicated vendor plugin (in
+source or compiled form) for any commercial purpose, including but not limited
+to:
+
+  a) Offering hosted, SaaS, proxy, relay, or API resale services (paid or free)
+     to third parties;
+  b) Bundling, embedding, or redistributing the plugins in any commercial
+     product or service;
+  c) Production or organizational deployment within a business, enterprise, or
+     for-profit operation;
+  d) Any other activity intended for direct or indirect commercial advantage or
+     monetary compensation.
+
+For commercial licensing inquiries, please contact Stravia via
+https://www.stravia.cn/.
+
+4. Disclaimer of Warranty and Third-Party Terms Risk
+----------------------------------------------------
+THE DEDICATED VENDOR PLUGINS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AVAILABILITY, CONTINUED
+COMPATIBILITY, OR NONINFRINGEMENT.
+
+These plugins interact with third-party services and subscription endpoints.
+Stravia and its contributors are not affiliated with, endorsed by, or sponsored
+by any of those third-party providers. Using these plugins MAY VIOLATE the
+applicable third-party Terms of Service (ToS) or Acceptable Use Policies and
+may result in account suspension, termination, quota loss, or other legal or
+financial consequences.
+
+YOU ASSUME ALL RISKS AND FULL RESPONSIBILITY FOR YOUR USE OF THESE PLUGINS.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES, ACCOUNT SUSPENSION, DATA LOSS, OR OTHER LIABILITY ARISING FROM OR IN
+CONNECTION WITH THE USE OF THESE PLUGINS.
+
+----------------------------------------------------------------------
+中文参考说明（如与英文正文存在歧义，以英文正文为准）
+----------------------------------------------------------------------
+
+1. 适用范围
+本许可与免责声明仅适用于本仓库中独立分发的 8 个专属供应商 Wasm 插件及其编译产物
+（`.wasm` / `.wasm.zst`）：
+`stravia-vendor-codex`、`stravia-vendor-claudecode`、`stravia-vendor-grok`、
+`stravia-vendor-devin`、`stravia-vendor-command-code`、`stravia-vendor-antigravity`、
+`stravia-vendor-opencode-free`、`stravia-vendor-kiro`。
+
+Stravia 核心平台与内嵌基础插件（`stravia-vendor-base`）继续适用根目录 `LICENSE`
+（`AGPL-3.0-only`）；插件共享 SDK 与编解码 crate（`stravia-vendor-sdk`、
+`stravia-vendor-common`、`stravia-protocol-codec`、`stravia-runtime-contract`）
+适用 `MIT OR Apache-2.0`。
+
+2. 社区版仅供个人研究与学习
+社区版中提供的上述专属供应商插件仅授权个人在非商业前提下用于技术研究、学习与协议
+互操作性探索。
+
+3. 禁止商用
+未经版权方书面授权，禁止将上述专属插件（源码或编译产物）及其修改版本用于任何商业
+用途，包括但不限于：对外提供托管、中转、代理或 API 转售服务（无论是否收费）；集成
+或随商业产品/服务分发；用于企业或盈利性组织的生产环境部署；以及其他任何直接或间接
+谋取商业利益的行为。如需商业授权，请通过 https://www.stravia.cn/ 联系。
+
+4. 免责声明与第三方条款风险
+上述专属插件按「现状（AS IS）」提供，不提供任何明示或暗示的担保（含可用性、持续
+兼容性、适销性、特定用途适用性及不侵权担保）。
+
+相关插件涉及第三方服务与订阅通道，本项目及作者与相关第三方服务提供商无任何隶属、
+合作或官方背书关系。使用这些插件可能违反第三方服务条款或使用政策，并存在账号受限、
+封禁、额度损失及其他法律或经济风险。使用上述插件所产生的一切风险与后果均由使用者
+自行承担，本项目及作者不承担任何直接或间接责任。

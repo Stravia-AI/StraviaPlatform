@@ -157,6 +157,9 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 > [!IMPORTANT]
 > 信任第三方来源前请务必核对公钥指纹。签名与摘要校验只证明来源真实，**不代表代码安全**：插件会获得所选连接的上游凭据与已批准的网络目标。详见[插件市场](docs/design/plugin-marketplace.md)与[供应商插件设计](docs/design/vendor-plugins.md)。
 
+> [!WARNING]
+> **专属供应商插件非商用与免责声明：** 社区版提供的专属供应商插件（**Codex**、**Claude Code**、**Grok**、**Command Code**、**Devin**、**Kiro**、**Antigravity**、**OpenCode Free**）**仅供个人技术研究与学习，禁止任何形式的商业用途**（未经书面授权不得用于商业托管、中转转售、企业生产部署等，详见 [`LICENSE-PLUGINS`](LICENSE-PLUGINS)）。相关插件按「现状（AS IS）」提供，不作任何担保；接入第三方服务或订阅通道可能违反上游服务条款并导致账号受限或封禁，**一切风险与后果由使用者自行承担**。
+
 ### 本地凭据保护（可逆脱敏）
 
 默认关闭。开启一次即可覆盖所有 Stravia API Key 的出站模型请求，客户端零改动。
@@ -246,7 +249,9 @@ curl http://127.0.0.1:23471/v1/chat/completions \
 
 ## 许可证
 
-Stravia 采用 [GNU Affero General Public License v3.0 only](LICENSE)（`AGPL-3.0-only`）许可。
+- **核心平台与基础插件（`stravia-vendor-base`）：** 采用 [GNU Affero General Public License v3.0 only](LICENSE)（`AGPL-3.0-only`）许可。
+- **专属供应商插件**（`codex`、`claudecode`、`grok`、`devin`、`command-code`、`antigravity`、`opencode-free`、`kiro`）：适用 [`LICENSE-PLUGINS`](LICENSE-PLUGINS) —— **禁止商用**，社区版**仅供个人研究与学习**，按「现状（AS IS）」提供且附带完整免责声明（第三方服务条款与账号风险由使用者自担）。如需商业授权，请通过 [www.stravia.cn](https://www.stravia.cn/) 联系。
+- **插件共享 SDK 与编解码 Crate**（`stravia-vendor-sdk`、`stravia-vendor-common`、`stravia-protocol-codec`、`stravia-runtime-contract`）：采用 `MIT OR Apache-2.0` 双许可。
 
 随仓库分发的第三方组件保留各自许可证：
 - 凭据检测规则（Betterleaks）：[MIT License](backend/crates/stravia-credential-protection/src/detection/LICENSE.betterleaks)

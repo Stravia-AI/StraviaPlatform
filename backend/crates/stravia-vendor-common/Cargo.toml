@@ -3,7 +3,7 @@ name = "stravia-vendor-common"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 description = "Shared request, response, error, URL, and thinking utilities for Stravia vendor guests"
 publish = false
 
