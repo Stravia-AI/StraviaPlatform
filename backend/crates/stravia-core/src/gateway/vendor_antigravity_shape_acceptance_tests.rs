@@ -58,15 +58,27 @@ async fn inference_listener() -> anyhow::Result<(
             }
         };
         let head = String::from_utf8(request[..end].to_vec())?;
-        // Drain the real chunked request before closing the TLS connection.
-        while !request[end..]
-            .windows(5)
-            .any(|window| window == b"0\r\n\r\n")
-        {
+        // Drain the real Content-Length request before closing the TLS connection.
+        let content_length = head
+            .split("\r\n")
+            .find_map(|line| {
+                let (name, value) = line.split_once(": ")?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.parse::<usize>().ok())
+                    .flatten()
+            })
+            .context("inference request must carry Content-Length")?;
+        anyhow::ensure!(
+            !head
+                .split("\r\n")
+                .any(|line| line.to_ascii_lowercase().starts_with("transfer-encoding:")),
+            "unexpected Transfer-Encoding on 1.5.18 inference request"
+        );
+        while request.len() - end < content_length {
             let count = stream.read(&mut buffer).await?;
             anyhow::ensure!(
                 count > 0 && request.len() < 4 * 1024 * 1024,
-                "incomplete chunked inference body"
+                "incomplete inference body"
             );
             request.extend_from_slice(&buffer[..count]);
         }
@@ -177,16 +189,18 @@ async fn antigravity_real_wasm_inference_matches_inference_capture() -> anyhow::
     assert_eq!(fields.len(), expected.len());
     for ((name, value), expected) in fields.iter().zip(expected) {
         assert_eq!(*name, expected["name"].as_str().unwrap());
-        let expected_value = if name.eq_ignore_ascii_case("user-agent") {
-            // 连接层夹具保留真实 1.5.8 抓包；1.5.13 同连接采集的已记录 TLS 字段未变。
-            "antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)"
-        } else {
-            expected["value"].as_str().unwrap()
-        };
+        let expected_value = expected["value"].as_str().unwrap();
         if expected_value != "<redacted>" {
             assert_eq!(*value, expected_value);
         }
     }
+    let content_length: usize = fields
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .expect("Content-Length header")
+        .1
+        .parse()?;
+    assert!(content_length > 0);
     assert!(
         !fields
             .iter()
@@ -254,23 +268,23 @@ async fn lifecycle_listener() -> anyhow::Result<(
                         stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
                         return Ok(());
                     }
-                    // The vendor transport streams HTTP/1 chunked bodies.
-                    while !bytes[head_end..].windows(5).any(|w| w == b"0\r\n\r\n") {
+                    // CLI 1.5.18 sends buffered Content-Length HTTP/1.1 inference requests.
+                    let content_length = head
+                        .split("\r\n")
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(": ")?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .context("content-length")?;
+                    while bytes.len() - head_end < content_length {
                         let n = stream.read(&mut buffer).await?;
                         anyhow::ensure!(n > 0 && bytes.len() < 4 * 1024 * 1024, "incomplete request body");
                         bytes.extend_from_slice(&buffer[..n]);
                     }
-                    let mut pos = head_end;
-                    let mut body = Vec::new();
-                    loop {
-                        let end = pos + bytes[pos..].windows(2).position(|w| w == b"\r\n").context("chunk size")?;
-                        let size = usize::from_str_radix(std::str::from_utf8(&bytes[pos..end])?.split(';').next().unwrap(), 16)?;
-                        pos = end + 2;
-                        if size == 0 { break; }
-                        body.extend_from_slice(&bytes[pos..pos + size]);
-                        pos += size + 2;
-                    }
-                    let request: Value = serde_json::from_slice(&body)?;
+                    let body = &bytes[head_end..head_end + content_length];
+                    let request: Value = serde_json::from_slice(body)?;
                     let text = request.to_string();
                     let tool_call = text.contains("tool-request") && !text.contains("functionResponse");
                     tx.send(request)?;
@@ -417,6 +431,10 @@ async fn antigravity_lifecycle_survives_gateway_restart_and_isolates_branches() 
         .to_owned();
     assert_eq!(root_labels["request_id"], format!("{trajectory}-0"));
     assert_eq!(root_labels["last_step_index"], "0");
+    assert_eq!(
+        root_labels["trajectory_source"],
+        "CORTEX_TRAJECTORY_SOURCE_CLI"
+    );
     assert_eq!(root_labels["used_non_gemini_model"], "false");
     let root_id = root["id"].as_str().context("root response id")?.to_owned();
     let first = lifecycle_response(

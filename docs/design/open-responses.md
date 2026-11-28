@@ -181,11 +181,11 @@ Gemini 工具结果要求对象时，标量或数组业务值由 `{"result": …
 
 媒体按合法原生载体逐项编码。支持的 PDF 或纯文本可使用文件或 inline data；标准 Messages 不制造音频 block。无法表达的附件不会被 stringify 后冒充等价输入，也不因此删除同消息的正文。
 
-### Gemini 3 工具历史导入
+### Gemini 3+ 工具历史导入
 
-只有官方 Gemini HTTPS `generativelanguage.googleapis.com` 的 `/v1beta/models/…:generateContent` / `:streamGenerateContent` 和 Antigravity 默认原生端点可在已确认的 Gemini 3 / 3.x 公开模型上使用 `skip_thought_signature_validator`。
+只有官方 Gemini HTTPS `generativelanguage.googleapis.com` 的 `/v1beta/models/…:generateContent` / `:streamGenerateContent` 和 Antigravity 默认原生端点可在 Gemini 3+（`gemini-<major>-…` / `gemini-<major>.<minor>-…`，`major >= 3`，含 Gemini 3 / 3.x / 4 及后续数字主版本）公开模型上使用 `skip_thought_signature_validator`。
 当前用户轮次内，逐 model step 检查首个函数调用：仅当它的签名缺失、为 `null` 或为空时补该请求控制；已有非空签名不改，也不处理其后的并行调用。
-该值只写目标 wire，不存入 canonical 历史、不代表原生证明；Vertex、非官方地址、代理自定义 endpoint 或不明模型别名不适用。
+该值只写目标 wire，不存入 canonical 历史、不代表原生证明；Gemini 2.5 及更早代际、Vertex、非官方地址、代理自定义 endpoint 或不明模型别名不适用。
 
 ## 原生压缩
 

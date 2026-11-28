@@ -1647,31 +1647,43 @@ mod tests {
     }
 
     #[test]
-    fn gemini_import_control_supports_major_three_minor_versions_only() {
+    fn gemini_import_control_supports_gemini_3_and_newer_versioned_models() {
         let original = json!({"contents":[
             {"role":"user","parts":[{"text":"weather"}]},
             {"role":"model","parts":[{"functionCall":{"id":"a","name":"weather","args":{"city":"Paris"}}},{"functionCall":{"id":"b","name":"weather","args":{"city":"London"}}}]},
             {"role":"user","parts":[{"functionResponse":{"id":"a","name":"weather","response":{"temp":15}}},{"functionResponse":{"id":"b","name":"weather","response":{"temp":12}}}]}
         ]});
-        for model in ["gemini-3.8-flash", "gemini-3.1-pro-preview"] {
+        for model in [
+            "gemini-3.8-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-4-neon",
+            "gemini-4-hydrogen",
+            "gemini-4.1-pro",
+            "models/gemini-4-neon",
+            "gemini-5-pro",
+        ] {
             let mut body = original.clone();
+            let path_model = model.strip_prefix("models/").unwrap_or(model);
             let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+                "https://generativelanguage.googleapis.com/v1beta/models/{path_model}:generateContent"
             );
             prepare_gemini_imported_tool_history(GEMINI_PROTOCOL, model, &url, &mut body);
             assert_eq!(strict_gemini_consumer(&body), Ok(()), "{model}");
             let mut expected = original.clone();
             expected["contents"][1]["parts"][0]["thoughtSignature"] =
                 json!("skip_thought_signature_validator");
-            assert_eq!(body, expected);
+            assert_eq!(body, expected, "{model}");
         }
         for model in [
-            "gemini-30-flash",
             "gemini-2.5-pro",
-            "gemini-4.1-pro",
+            "gemini-2.0-flash",
+            "gemini-03-flash",
+            "gemini-04-neon",
             "gemini-flash-latest",
             "gemini-3.x-pro",
             "gemini-3.-pro",
+            "gemini-4",
+            "gemini-4-",
         ] {
             let mut body = original.clone();
             let url = format!(

@@ -1,17 +1,17 @@
 {
   "provenance": {
     "client": "official Antigravity CLI",
-    "version": "1.5.8",
+    "version": "1.5.18",
     "os": "linux",
     "arch": "amd64",
     "mode": "print",
-    "captured_at": "2026-11-13T07:14:04.335895+00:00",
-    "invocation": "agy --model gemini-4-hydrogen-medium --print \"Reply OK\"",
-    "capture": "独立 HOME/XDG、空工作区及 user/mount namespace；仅当前进程信任 loopback TLS bridge 的临时 CA；经用户授权使用只读提取的 consumer access token，不复制或刷新 refresh token。bridge 转发真实 Google HTTPS，ClientHello 来自承载该请求的同一连接。",
+    "captured_at": "2026-11-28T03:39:01.084525+00:00",
+    "invocation": "agy --model gemini-4-hydrogen-medium --disable-slash-commands --print \"Reply OK\"",
+    "capture": "独立 HOME/XDG 与空工作区；仅当前进程经 HTTPS_PROXY 信任 loopback TLS MITM 代理的临时 CA；经用户授权只读提取 consumer access token，不复制或刷新 refresh token。代理转发真实 Google HTTPS，ClientHello 来自承载该请求的同一连接。",
     "operation": "streamGenerateContent",
     "status": 200,
-    "normalization": "ClientHello 随机数、会话、keyshare 材料和未知扩展经独立 decoder 去除；Host、Authorization、动态长度脱敏。正文只保留结构键、合成提示存在与生成控制；不保存账号、会话、签名或系统提示。",
-    "limitations": "仅 Linux amd64 consumer print 模式；TLS 样本为客户端到 loopback bridge 的握手，不是 bridge 到 Google 的握手。未验证 OAuth 交换、其他平台、TCP 时序或 WS。",
+    "normalization": "ClientHello 随机数、会话、keyshare 材料和未知扩展经独立 decoder 去除；Host、Authorization、动态 Content-Length 脱敏。正文只保留结构键、合成提示存在与生成控制；不保存账号、会话、签名或系统提示。",
+    "limitations": "仅 Linux amd64 consumer print 模式；TLS 样本为客户端到 loopback 代理的握手，代理仅协商 HTTP/1.1，不代表代理到 Google 的握手或非代理直连行为。未验证 OAuth 交换、其他平台、TCP 时序或 WS。",
     "model": "gemini-4-hydrogen-medium"
   },
   "clienthello": {
@@ -42,7 +42,7 @@
         "decoded": {
           "server_name_present": true
         },
-        "length": 14,
+        "length": 38,
         "payload_omitted": "extension payload may contain sensitive or unrecognized data",
         "type": 0
       },
@@ -291,6 +291,16 @@
           "groups": [
             4588,
             29
+          ],
+          "shares": [
+            {
+              "group": 4588,
+              "length": 1216
+            },
+            {
+              "group": 29,
+              "length": 32
+            }
           ]
         },
         "length": 1258,
@@ -320,7 +330,6 @@
       29
     ],
     "legacy_version": 771,
-    "padding_length": null,
     "signature_algorithms": [
       2308,
       2309,
@@ -362,11 +371,11 @@
       },
       {
         "name": "User-Agent",
-        "value": "antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=amd64; cl=1020628950; auth_method=consumer)"
+        "value": "antigravity/cli/1.5.18 (aidev_client; os_type=linux; arch=amd64; cl=1030252320; auth_method=consumer)"
       },
       {
-        "name": "Transfer-Encoding",
-        "value": "chunked"
+        "name": "Content-Length",
+        "value": "<redacted>"
       },
       {
         "name": "Authorization",
@@ -381,24 +390,24 @@
         "value": "gzip"
       }
     ],
-    "raw_head": "POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\nHost: <redacted>\r\nUser-Agent: antigravity/cli/1.5.8 (aidev_client; os_type=linux; arch=amd64; cl=1020628950; auth_method=consumer)\r\nTransfer-Encoding: chunked\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n"
+    "raw_head": "POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\nHost: <redacted>\r\nUser-Agent: antigravity/cli/1.5.18 (aidev_client; os_type=linux; arch=amd64; cl=1030252320; auth_method=consumer)\r\nContent-Length: <redacted>\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n"
   },
   "body_pattern": {
     "envelope_keys": [
-      "project",
-      "requestId",
-      "request",
       "model",
-      "userAgent",
-      "requestType"
+      "project",
+      "request",
+      "requestId",
+      "requestType",
+      "userAgent"
     ],
     "request_keys": [
       "contents",
-      "systemInstruction",
-      "tools",
-      "labels",
       "generationConfig",
-      "sessionId"
+      "labels",
+      "sessionId",
+      "systemInstruction",
+      "tools"
     ],
     "generation_config_keys": [
       "maxOutputTokens",
@@ -411,6 +420,7 @@
       "request_id",
       "root_cascade_id",
       "trajectory_id",
+      "trajectory_source",
       "used_claude",
       "used_claude_conservative",
       "used_non_gemini_model"

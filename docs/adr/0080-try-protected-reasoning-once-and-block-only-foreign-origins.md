@@ -23,7 +23,7 @@ status: accepted
 
 拒绝记忆仍是可丢失的进程内状态：重启后清空，多实例之间不共享，不需要 schema 变更。
 
-Gemini 3 导入无签名工具历史时，受支持的出口可在编码请求时使用 `skip_thought_signature_validator`。这不是原生签名、来源记录或拒绝记忆，不写入权威历史；适用端点和工具调用范围见 [Open Responses 的表达能力与省略规则](../design/open-responses.md#表达能力与省略规则)。
+Gemini 3+ 导入无签名工具历史时，受支持的出口可在编码请求时使用 `skip_thought_signature_validator`。这不是原生签名、来源记录或拒绝记忆，不写入权威历史；适用端点和工具调用范围见 [Open Responses 的表达能力与省略规则](../design/open-responses.md#表达能力与省略规则)。
 
 ## Considered Options
 

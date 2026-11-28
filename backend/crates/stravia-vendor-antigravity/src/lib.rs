@@ -30,7 +30,7 @@ const VENDOR_ID: &str = "antigravity";
 const CHANNEL: &str = "oauth";
 const SYSTEM_PROMPT_PREFIX_OPTION: &str = "system_prompt_prefix";
 const BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
-const CLI_USER_AGENT: &str = "antigravity/cli/1.5.13 (aidev_client; os_type=linux; arch=amd64; cl=1025641825; auth_method=consumer)";
+const CLI_USER_AGENT: &str = "antigravity/cli/1.5.18 (aidev_client; os_type=linux; arch=amd64; cl=1030252320; auth_method=consumer)";
 
 pub fn descriptor() -> VendorDescriptor {
     let capabilities = BTreeSet::from([

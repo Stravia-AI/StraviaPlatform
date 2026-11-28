@@ -52,6 +52,7 @@ struct RequestLabels<'a> {
     cascade_id: String,
     root_cascade_id: String,
     trajectory_id: uuid::Uuid,
+    trajectory_source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_step_index: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +70,7 @@ impl<'a> RequestLabels<'a> {
             root_cascade_id: labels.cascade_id.clone(),
             cascade_id: labels.cascade_id,
             trajectory_id: labels.trajectory_id,
+            trajectory_source: "CORTEX_TRAJECTORY_SOURCE_CLI",
             last_step_index: labels.last_step_index.map(|n| n.to_string()),
             last_execution_id: labels.last_execution_id,
             used_claude: labels.used_claude.to_string(),
@@ -243,6 +245,7 @@ pub(crate) fn infer(
         thinking.insert(field.into(), json!(value));
     }
     // 同协议优先保留 raw 声明的 response schema 和原生工具；不重复添加 canonical 声明。
+    // CLI 1.5.18 ccpa.buildFunctionDeclarations 将全部 functionDeclarations 合并入单个工具对象。
     if let Some(groups) = object.get_mut("tools").and_then(Value::as_array_mut)
         && groups.iter().any(|group| {
             group
@@ -251,14 +254,14 @@ pub(crate) fn infer(
                 .is_some_and(|declarations| !declarations.is_empty())
         })
     {
-        split_raw_function_groups(groups);
+        merge_raw_function_groups(groups);
     } else if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
         let groups = object
             .entry("tools")
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
             .ok_or_else(|| invalid("tools must be an array"))?;
-        groups.reserve(tools.len());
+        let mut declarations = Vec::with_capacity(tools.len());
         for tool in tools {
             let mut declaration = serde_json::Map::new();
             declaration.insert("name".into(), Value::String(tool.name));
@@ -266,8 +269,12 @@ pub(crate) fn infer(
             if let Some(description) = tool.description {
                 declaration.insert("description".into(), Value::String(description));
             }
-            groups.push(function_group(Value::Object(declaration)));
+            declarations.push(Value::Object(declaration));
         }
+        groups.push(Value::Object(serde_json::Map::from_iter([(
+            "functionDeclarations".into(),
+            Value::Array(declarations),
+        )])));
     }
     if !object.contains_key("toolConfig") {
         let config = match tool_choice {
@@ -339,14 +346,8 @@ pub(crate) fn infer(
             .insert("sessionId".into(), json!(native_session_id(session)));
     }
     let project = client::project(host, &provider)?;
-    let mut headers = stravia_vendor_sdk::net::Fields::new();
-    for field in client::headers(&provider)?.into_vec() {
-        if field.name.eq_ignore_ascii_case("content-length") {
-            headers.append("Transfer-Encoding", b"chunked".as_slice());
-        } else {
-            headers.append(field.name, field.bytes);
-        }
-    }
+    // CLI 1.5.18 ccpahttp.(*Transport).Stream 与 Unary 共用带 Content-Length 的 HTTP/1.1 缓冲请求。
+    let headers = client::headers(&provider)?;
     host.emit_started()?;
     let (reservation, lifecycle_labels) = crate::lifecycle::Reservation::begin(lifecycle_input)?;
     let steps = lifecycle_labels
@@ -672,7 +673,7 @@ fn take_top_level_instruction_parts(request: &mut AiRequest) -> Result<Vec<Value
         .remove("__google_raw_system_instruction")
         && let Some(text) = instructions.as_deref()
     {
-        content(&mut raw, true)?;
+        content(&mut raw)?;
         if let Some(Value::Array(parts)) = raw
             .as_object_mut()
             .and_then(|system| system.remove("parts"))
@@ -753,7 +754,7 @@ fn apply_system_prompt_prefix(request: &mut Value, mut parts: Vec<Value>) {
     text.push_str(bridge);
     object.insert(
         "systemInstruction".into(),
-        json!({"parts": [text_part(text)]}),
+        json!({"role": "user", "parts": [text_part(text)]}),
     );
 
     if !parts.is_empty() {
@@ -797,8 +798,8 @@ pub(crate) fn sanitize_request(value: &mut Value) -> Result<(), PluginError> {
     });
     for (key, value) in object {
         match key.as_str() {
-            "contents" => array(value, |v| content(v, false))?,
-            "systemInstruction" => content(value, true)?,
+            "contents" => array(value, content)?,
+            "systemInstruction" => content(value)?,
             "generationConfig" => generation(value)?,
             "tools" => array(value, tool)?,
             "toolConfig" => {
@@ -833,15 +834,13 @@ fn array(
     }
     Ok(())
 }
-fn content(value: &mut Value, system: bool) -> Result<(), PluginError> {
-    project(
-        value,
-        if system {
-            &["parts"]
-        } else {
-            &["role", "parts"]
-        },
-    )?;
+fn content(value: &mut Value) -> Result<(), PluginError> {
+    project(value, &["role", "parts"])?;
+    if let Some(object) = value.as_object_mut()
+        && object.get("role").is_some_and(Value::is_null)
+    {
+        object.remove("role");
+    }
     if let Some(parts) = value.get_mut("parts") {
         array(parts, part)?;
     }
@@ -975,39 +974,44 @@ fn generation(value: &mut Value) -> Result<(), PluginError> {
     }
     Ok(())
 }
-fn function_group(declaration: Value) -> Value {
-    Value::Object(serde_json::Map::from_iter([(
-        "functionDeclarations".into(),
-        Value::Array(vec![declaration]),
-    )]))
-}
-
-fn split_raw_function_groups(groups: &mut Vec<Value>) {
-    let extra: usize = groups
-        .iter()
-        .filter_map(|group| group.get("functionDeclarations")?.as_array())
-        .map(|declarations| declarations.len().saturating_sub(1))
-        .sum();
-    if extra == 0 {
-        return;
-    }
-    // 从尾端展开，保留声明顺序，不复制 schema；同组的原生工具字段只保留在首项。
-    let original_len = groups.len();
-    let mut end = original_len + extra;
-    groups.resize_with(end, || Value::Null);
-    for index in (0..original_len).rev() {
-        let mut group = groups[index].take();
-        if let Some(declarations) = group
-            .get_mut("functionDeclarations")
-            .and_then(Value::as_array_mut)
-        {
-            while declarations.len() > 1 {
-                end -= 1;
-                groups[end] = function_group(declarations.pop().expect("multiple declarations"));
-            }
+fn merge_raw_function_groups(groups: &mut Vec<Value>) {
+    let mut target: Option<usize> = None;
+    let mut index = 0;
+    while index < groups.len() {
+        let has_declarations = groups[index]
+            .get("functionDeclarations")
+            .and_then(Value::as_array)
+            .is_some();
+        if !has_declarations {
+            index += 1;
+            continue;
         }
-        end -= 1;
-        groups[end] = group;
+        if let Some(first) = target {
+            let mut moved = groups[index]
+                .as_object_mut()
+                .and_then(|object| object.remove("functionDeclarations"))
+                .and_then(|value| match value {
+                    Value::Array(array) => Some(array),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if let Some(destination) = groups[first]
+                .get_mut("functionDeclarations")
+                .and_then(Value::as_array_mut)
+            {
+                destination.append(&mut moved);
+            }
+            if groups[index]
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+            {
+                groups.remove(index);
+                continue;
+            }
+        } else {
+            target = Some(index);
+        }
+        index += 1;
     }
 }
 
@@ -1412,6 +1416,7 @@ mod tests {
             envelope["request"]["labels"],
             json!({
                 "cascade_id": "conversation", "root_cascade_id": "conversation", "trajectory_id": id,
+                "trajectory_source": "CORTEX_TRAJECTORY_SOURCE_CLI",
                 "used_claude": "false", "used_claude_conservative": "true", "used_non_gemini_model": "true"
             })
         );
@@ -1552,6 +1557,7 @@ mod tests {
             "contents": [{"role": "user", "parts": [{"text": "Task"}]}]
         });
         apply_system_prompt_prefix(&mut body, vec![text_part("Top instructions".into())]);
+        assert_eq!(body["systemInstruction"]["role"], "user");
         let system_parts = body["systemInstruction"]["parts"].as_array().unwrap();
         assert_eq!(system_parts.len(), 1);
         assert_eq!(
@@ -1581,11 +1587,30 @@ mod tests {
         apply_system_prompt_prefix(&mut blank_only, Vec::new());
         assert_eq!(
             blank_only["systemInstruction"],
-            json!({"parts": [{"text": AGY_SYSTEM_PREFIX}]})
+            json!({"role": "user", "parts": [{"text": AGY_SYSTEM_PREFIX}]})
         );
         assert_eq!(
             blank_only["contents"],
             json!([{"role": "user", "parts": [{"text": "Task"}]}])
+        );
+    }
+
+    #[test]
+    fn merge_raw_function_groups_consolidates_declarations_and_preserves_other_tools() {
+        let mut groups = vec![
+            json!({"functionDeclarations": [{"name": "a"}]}),
+            json!({"googleSearch": {}}),
+            json!({"functionDeclarations": [{"name": "b"}, {"name": "c"}]}),
+            json!({"functionDeclarations": [{"name": "d"}], "urlContext": {}}),
+        ];
+        merge_raw_function_groups(&mut groups);
+        assert_eq!(
+            groups,
+            vec![
+                json!({"functionDeclarations": [{"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}]}),
+                json!({"googleSearch": {}}),
+                json!({"urlContext": {}}),
+            ]
         );
     }
 }
