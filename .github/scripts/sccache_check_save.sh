@@ -31,7 +31,17 @@ misses="${misses:-0}"
 
 should_save="false"
 reason=""
-if (( hits + misses == 0 )); then
+if [[ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" \
+  || -n "${SCCACHE_ENDPOINT:-}" \
+  || -n "${SCCACHE_BUCKET:-}" \
+  || -n "${SCCACHE_REDIS:-}" \
+  || -n "${SCCACHE_REDIS_ENDPOINT:-}" \
+  || -n "${SCCACHE_GCS_BUCKET:-}" \
+  || -n "${SCCACHE_AZURE_CONNECTION_STRING:-}" \
+  || "${SCCACHE_GHA_ENABLED:-}" == "true" ]]; then
+  should_save="false"
+  reason="remote sccache backend is active; skipping actions/cache archive upload"
+elif (( hits + misses == 0 )); then
   should_save="false"
   reason="no sccache compilations executed"
 elif [[ -n "${EXPECTED_KEY_PREFIX}" && "${CACHE_MATCHED_KEY}" != "${EXPECTED_KEY_PREFIX}"* ]]; then

@@ -23,7 +23,7 @@ env:
   CARGO_XWIN_VERSION: "0.22.0"
   APPLE_CODESIGN_VERSION: "0.29.0"
   XWIN_VERSION: "16"
-  # Keep sccache archive under the runner's 8 GiB /tmp tmpfs so actions/cache/save never hits ENOSPC.
+  # Fallback cap for local disk sccache archives when no remote sccache backend is configured.
   SCCACHE_CACHE_SIZE: "5G"
   GITHUB_RELEASE_REPOSITORY: ${{ vars.RELEASE_GITHUB_REPOSITORY || 'Stravia-AI/StraviaPlatform' }}
   GITHUB_RELEASE_SERVER_URL: https://github.com
@@ -206,6 +206,7 @@ jobs:
 
       - name: Restore Linux x64 wasm sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -329,7 +330,7 @@ jobs:
 
       - name: Restore Linux x64 wasm sccache (rolling)
         id: sccache-cache
-        if: steps.select.outputs.has_plugins == 'true'
+        if: steps.select.outputs.has_plugins == 'true' && steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -406,7 +407,9 @@ jobs:
           PUBLISHED_AT: ${{ needs.prepare.outputs.published_at }}
           REPOSITORY_ID: ${{ vars.OFFICIAL_REPOSITORY_ID || '1350654373' }}
         run: |
-          cargo run --release -p stravia-devtools --bin stravia-tools -- plugin-catalog \
+          # Use dev profile (dependencies stay opt-level=3 per Cargo.toml, workspace avoids thin-LTO/CGU=1
+          # rebuilds and reuses warm CI dev sccache from `wit-compat`).
+          cargo run --locked -p stravia-devtools --bin stravia-tools -- plugin-catalog \
             --repository-id "${REPOSITORY_ID}" --release-tag "${RELEASE_TAG}" \
             --host-version-req ">=${RELEASE_VERSION}" --published-at "${PUBLISHED_AT}" \
             --input plugin-input.json --output dist
@@ -517,6 +520,7 @@ jobs:
 
       - name: Restore Linux x64 release sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -713,6 +717,7 @@ jobs:
 
       - name: Restore Windows sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -818,6 +823,11 @@ jobs:
       - prepare
       - build-shared-assets
     runs-on: ubuntu-latest
+    container:
+      image: git.stravia.cn/stravia/stravia-ci:arm64-desktop
+      credentials:
+        username: ${{ vars.REGISTRY_PACKAGE_USER || github.actor }}
+        password: ${{ secrets.REGISTRY_PACKAGE_TOKEN || secrets.GITHUB_TOKEN }}
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -828,18 +838,6 @@ jobs:
         with:
           name: release-shared-assets
           path: .
-
-      - name: Cache Rust build toolchain binaries
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.rustup
-            ~/.cargo/bin
-            ~/.bun/bin
-            ~/.local/bin
-          key: toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-wasip2-v1
-          restore-keys: |
-            toolchain-rust-${{ env.RUST_VERSION }}-patch${{ env.PATCH_CRATE_VERSION }}-sccache${{ env.SCCACHE_VERSION }}-bun${{ env.BUN_VERSION }}-task${{ env.TASK_VERSION }}-
 
       - name: Bootstrap Linux arm64 desktop cross-compile toolchain
         id: bootstrap
@@ -881,6 +879,7 @@ jobs:
 
       - name: Restore Linux arm64 sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
@@ -1129,6 +1128,7 @@ jobs:
 
       - name: Restore macOS sccache (rolling)
         id: sccache-cache
+        if: steps.bootstrap.outputs.sccache_remote != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/sccache
