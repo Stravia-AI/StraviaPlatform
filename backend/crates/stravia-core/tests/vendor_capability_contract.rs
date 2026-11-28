@@ -768,11 +768,11 @@ async fn mark_base_as_previous_builtin(directory: &Path) -> anyhow::Result<()> {
 async fn call_generate(client: &McpClient, input: Value) -> rmcp::model::CallToolResult {
     client
         .call_tool(
-            CallToolRequestParams::new("generate")
+            CallToolRequestParams::new("StraviaGenerate")
                 .with_arguments(input.as_object().expect("generation input object").clone()),
         )
         .await
-        .expect("generate tools/call")
+        .expect("StraviaGenerate tools/call")
 }
 
 #[tokio::test]
@@ -2759,7 +2759,7 @@ async fn pure_image_vendor_stores_real_owned_png_and_cannot_chat() -> anyhow::Re
             .await?
             .tools
             .iter()
-            .all(|tool| tool.name != "generate"),
+            .all(|tool| tool.name != "StraviaGenerate"),
         "disabled platform capability must hide the media tool"
     );
 
@@ -2804,7 +2804,7 @@ async fn pure_image_vendor_stores_real_owned_png_and_cannot_chat() -> anyhow::Re
             .await?
             .tools
             .iter()
-            .any(|tool| tool.name == "generate"),
+            .any(|tool| tool.name == "StraviaGenerate"),
         "MCP access may use an enabled media tool without transparent injection"
     );
     upstream

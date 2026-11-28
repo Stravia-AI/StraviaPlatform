@@ -1,6 +1,6 @@
 # 媒体生成
 
-媒体生成目前只支持文本生图与参考图编辑。公开工具的 wire name 是 `generate`；两种操作使用同一个工具和图片 Route。
+媒体生成目前只支持文本生图与参考图编辑。公开工具的 wire name 是 `StraviaGenerate`；两种操作使用同一个工具和图片 Route。
 显式调用、MCP 与自动暴露见[平台能力门禁与透明注入](agent-core.md#平台能力门禁与透明注入)；
 有界等待及后台状态查询见[工具执行交接](agent-core.md#工具执行交接)。
 
@@ -44,8 +44,8 @@
 - `download_url`：15 分钟 bearer 下载链接，不是文件身份，不另返回 `expires_at`。
 
 工具结果的链接始终从已配置完整 `client_base_url` 通过平台读取，即使启用 S3 直连也不改用外部地址。
-生成前校验该入口。展示用 `![图片描述](download_url "stravia://artifacts/<artifact-id>")`，在 title 中保留稳定引用；
-失效后用 StraviaRead 取得新链接，不重新生成。后台查询原样返回链接，不自动续签。
+生成前校验该入口。展示用 `![图片描述](download_url)`，不向用户或任何客户端输出 `stravia://` 内部引用（包括正文、Markdown 链接、title 或 alt）；
+`path` 仅留在工具参数/历史恢复中供参考图复用或通过 `StraviaRead`（`<path>:download`）取得新链接，不重新生成。后台查询原样返回链接，不自动续签。
 
 产物已保存但链接签发失败时，返回 `artifact_download_failed` 并携带 `artifact` 的路径、MIME、大小和像素规格；
 保留产物，不重跑上游。文件和签名授权的生命周期见 [Artifact 契约](agent-core.md#artifact-与单请求上传)。

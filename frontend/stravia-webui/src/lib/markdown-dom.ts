@@ -91,16 +91,13 @@ export function createMarkdownBlockRenderer(
   function renderImage(image: MarkdownImage, clientBase: string) {
     const host = document.createElement('span')
     host.className = 'markdown-artifact-image'
-    const caption = document.createElement('span')
-    caption.textContent = image.alt
     const unavailable = document.createElement('span')
     unavailable.className = 'markdown-render-error'
     unavailable.textContent = errors.image
-    host.append(caption)
-    if (image.artifact) {
-      const reference = document.createElement('code')
-      reference.textContent = image.artifact
-      host.append(reference)
+    if (image.alt.trim()) {
+      const caption = document.createElement('span')
+      caption.textContent = image.alt
+      host.append(caption)
     }
     const url = imageUrl(image.url, clientBase)
     if (!url) {
@@ -196,7 +193,7 @@ export function createMarkdownBlockRenderer(
     errors = messages
     const keys = new Set(block.fragments.map(identity))
     for (const key of entries.keys()) if (!keys.has(key)) entries.delete(key)
-    const imageKey = (image: MarkdownImage) => JSON.stringify([image.id, image.url, image.alt, image.artifact])
+    const imageKey = (image: MarkdownImage) => JSON.stringify([image.id, image.url, image.alt])
     const imageKeys = new Set(block.images.map(imageKey))
     const imagesChanged = imageKeys.size !== images.size || [...imageKeys].some((key) => !images.has(key))
     for (const key of images.keys()) if (!imageKeys.has(key)) images.delete(key)

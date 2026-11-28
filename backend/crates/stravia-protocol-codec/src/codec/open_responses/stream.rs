@@ -2002,19 +2002,47 @@ impl ResponsesStreamFormatter {
                         self.finish_message(&mut events, message_index, "completed");
                     }
                     if let Some((_, _, encrypted_content)) = item.reasoning_ref() {
-                        if let Some(sealed) = self.sealed_reasoning_items.get_mut(index) {
-                            if let Some(ciphertext) = encrypted_content {
-                                sealed["encrypted_content"] =
-                                    serde_json::Value::String(ciphertext.to_owned());
-                            }
-                        } else if self.reasoning_item_id.is_some()
-                            && !self.indexed_reasoning.contains_key(index)
-                        {
+                        if let Some(mut reasoning) = self.indexed_reasoning.remove(index) {
+                            reasoning.encrypted_content = encrypted_content.map(str::to_owned);
+                            // Typed ItemDone proves native ciphertext complete.
+                            self.seal_indexed_reasoning_item(&mut events, *index, reasoning);
+                        } else if self.reasoning_item_id.is_some() {
                             // Providers without output indices (Anthropic, Gemini) stream Thinking
                             // through the unindexed item; its typed completion finishes that item
-                            // instead of opening a second one at the same position.
+                            // instead of opening a second one at the same position. Check this
+                            // before `sealed_reasoning_items` so a later hidden round whose local
+                            // `index` collides with an already-sealed earlier item seals the open
+                            // item rather than overwriting the earlier turn's ciphertext.
                             self.reasoning_encrypted_content = encrypted_content.map(str::to_owned);
                             self.seal_reasoning_item(&mut events);
+                        } else if let Some(sealed) = self.sealed_reasoning_items.get_mut(index) {
+                            match (
+                                sealed
+                                    .get("encrypted_content")
+                                    .and_then(serde_json::Value::as_str),
+                                encrypted_content,
+                            ) {
+                                (None, Some(ciphertext)) => {
+                                    sealed["encrypted_content"] =
+                                        serde_json::Value::String(ciphertext.to_owned());
+                                }
+                                (Some(existing), Some(ciphertext)) if existing != ciphertext => {
+                                    let output_index = self.next_output_index;
+                                    self.next_output_index += 1;
+                                    self.ensure_indexed_reasoning(&mut events, output_index, None);
+                                    let mut reasoning = self
+                                        .indexed_reasoning
+                                        .remove(&output_index)
+                                        .expect("indexed reasoning was inserted");
+                                    reasoning.encrypted_content = Some(ciphertext.to_owned());
+                                    self.seal_indexed_reasoning_item(
+                                        &mut events,
+                                        output_index,
+                                        reasoning,
+                                    );
+                                }
+                                _ => {}
+                            }
                         } else {
                             self.ensure_indexed_reasoning(&mut events, *index, None);
                             let mut reasoning = self

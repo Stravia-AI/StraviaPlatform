@@ -21,7 +21,7 @@
 | [web-access-providers.md](web-access-providers.md) | `WebProviderFactory` 宿主扩展缝、外部 Web Provider 注册/校验/调度、脱敏管理视图与公网抓取安全边界 | 高层搜索报告与研究循环语义 |
 | [web-search.md](web-search.md) | 联网搜索与网页读取契约、Search Report/Turn/Source 续接、Local Agent 与 External Route 后端语义 | 通用 `StraviaRead` 语法与门禁规则、底层 Web Provider 注册 |
 | [media-understanding.md](media-understanding.md) | 多模态理解报告与派生物、图片规范化与上游 WebP 支持边界、Office 文档提取与 ZIP 预检安全边界 | 通用 `StraviaRead`、Artifact 上传与门禁规则 |
-| [media-generation.md](media-generation.md) | `generate` 媒体生成工具契约、`image_generation` 路由绑定、各厂商图片适配器映射、失败重试与配额限制 | 通用工具交接与 Artifact 传输契约 |
+| [media-generation.md](media-generation.md) | `StraviaGenerate` 媒体生成工具契约、`image_generation` 路由绑定、各厂商图片适配器映射、失败重试与配额限制 | 通用工具交接与 Artifact 传输契约 |
 | [history-recall.md](history-recall.md) | `stravia://history/` 命名空间、交互链路可见性、只追加转录与稳定行号、全文检索与索引延迟、仅透明注入暴露边界 | 通用 `StraviaRead` 语法、观测落盘实现 |
 | [credential-protection.md](credential-protection.md) | 本地可逆脱敏规则与强度分级、API Key/Principal 映射与占位符还原、发布顺序、按最近检出（`last_detected_at`）过期、命中/复用管理端脱敏 | Wire Debug 抓包过滤（仅 `Authorization` 头） |
 | [interaction-observation.md](interaction-observation.md) | 交互归属与交互链路、请求终态与成功率指标、Confirmed Usage 与长期 Stats、事件流/SSE、Debug 开关与四方向 Wire 抓包、诊断包导出、请求记录交互契约 | 凭据脱敏规则、存储底层引用回收、表结构逐列抄录 |

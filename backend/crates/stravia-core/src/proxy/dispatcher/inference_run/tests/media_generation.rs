@@ -189,7 +189,7 @@ async fn generation_http_fixture_with_usage(
                     .find_map(|tool| {
                         tool["name"]
                             .as_str()
-                            .filter(|name| name.starts_with("stravia__generate"))
+                            .filter(|name| *name == "StraviaGenerate")
                     })
                     .expect("Media Generation tool in parent request");
                 let mut response = response_resource(
@@ -485,7 +485,7 @@ async fn set_generation_injection(
 fn explicit_generate_tool() -> Value {
     json!({
         "type": "function",
-        "name": "generate",
+        "name": "StraviaGenerate",
         "description": "Generate media",
         "parameters": {
             "type": "object",
@@ -507,7 +507,7 @@ fn generated_tools(request: &Value) -> Vec<&Value> {
         .filter(|tool| {
             tool["name"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("stravia__generate"))
+                .is_some_and(|name| name == "StraviaGenerate")
         })
         .collect()
 }
@@ -530,7 +530,7 @@ async fn response_usage_includes_confirmed_image_generation_and_both_parent_roun
             "model": PARENT_MODEL,
             "input": "Create a blue square.",
             "tools": [explicit_generate_tool()],
-            "tool_choice": {"type":"function","name":"generate"}
+            "tool_choice": {"type":"function","name":"StraviaGenerate"}
         }),
     )
     .await;
@@ -569,7 +569,7 @@ async fn response_usage_counts_parallel_image_calls_after_retry_without_inventin
                 "model": PARENT_MODEL,
                 "input": "Create two blue squares.",
                 "tools": [explicit_generate_tool()],
-                "tool_choice": {"type":"function","name":"generate"}
+                "tool_choice": {"type":"function","name":"StraviaGenerate"}
             }),
         )
         .await;
@@ -602,7 +602,7 @@ async fn response_usage_preserves_unknown_cache_creation_across_internal_calls()
                 "model": PARENT_MODEL,
                 "input": "Create two blue squares.",
                 "tools": [explicit_generate_tool()],
-                "tool_choice": {"type":"function","name":"generate"}
+                "tool_choice": {"type":"function","name":"StraviaGenerate"}
             }),
         )
         .await;
@@ -659,7 +659,7 @@ async fn explicit_generate_executes_without_injection_permission_and_stays_platf
             "model": PARENT_MODEL,
             "input": "Create a blue square.",
             "tools": [explicit_generate_tool()],
-            "tool_choice": {"type":"function","name":"generate"}
+            "tool_choice": {"type":"function","name":"StraviaGenerate"}
         }),
     )
     .await;
@@ -790,7 +790,7 @@ async fn transparent_exposure_requires_both_switches_and_preserves_fixed_client_
     set_generation_injection(&fixture, true, true).await;
     let fixed_client_tool = json!({
         "type": "function",
-        "name": "stravia__generate",
+        "name": "client_generate",
         "description": "Client-owned fixed tool",
         "parameters": {
             "type": "object",
@@ -800,7 +800,7 @@ async fn transparent_exposure_requires_both_switches_and_preserves_fixed_client_
         },
         "strict": true
     });
-    let fixed_choice = json!({"type": "function", "name": "stravia__generate"});
+    let fixed_choice = json!({"type": "function", "name": "client_generate"});
     let (status, body) = post_responses(
         &fixture,
         json!({
@@ -821,7 +821,7 @@ async fn transparent_exposure_requires_both_switches_and_preserves_fixed_client_
     let tools = requests[2]["tools"].as_array().expect("outbound tools");
     let client = tools
         .iter()
-        .find(|tool| tool["name"] == "stravia__generate")
+        .find(|tool| tool["name"] == "client_generate")
         .expect("fixed client tool");
     assert_eq!(client["description"], "Client-owned fixed tool");
     assert_eq!(client["strict"], true);
@@ -830,8 +830,8 @@ async fn transparent_exposure_requires_both_switches_and_preserves_fixed_client_
 
     let platform = tools
         .iter()
-        .find(|tool| tool["name"] == "stravia__generate_2")
-        .expect("collision-free Media Generation tool");
+        .find(|tool| tool["name"] == "StraviaGenerate")
+        .expect("transparent Media Generation tool");
     assert_eq!(platform["strict"], false);
     assert_eq!(platform["parameters"]["required"], json!(["type", "input"]));
 }

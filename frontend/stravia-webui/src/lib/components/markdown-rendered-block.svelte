@@ -69,9 +69,6 @@ function renderBlock(element: HTMLDivElement) {
           class="max-h-[70dvh] max-w-full self-center object-contain"
           onerror={() => (imageFailed = true)} />
       {/if}
-      {#if image.artifact}
-        <code class="text-xs break-all text-muted-foreground">{image.artifact}</code>
-      {/if}
       {#snippet footer()}
         {#if !imageFailed}
           <a
@@ -125,9 +122,8 @@ function renderBlock(element: HTMLDivElement) {
   object-fit: contain;
   border-radius: var(--radius-lg);
 }
-.markdown-rendered-block :global(.markdown-artifact-image > code) {
-  overflow-wrap: anywhere;
-  font-size: 0.85em;
+.markdown-rendered-block :global(.markdown-artifact-image > .markdown-render-error) {
+  margin-block-start: 0;
 }
 .markdown-rendered-block :global(.markdown-image-actions) {
   display: flex;

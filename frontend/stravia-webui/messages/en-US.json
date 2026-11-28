@@ -77,7 +77,7 @@
   "console_chat_image_input_unsupported": "This model does not support images in this message or conversation. Choose an image-capable model.",
   "markdown_math_error": "Formula could not be rendered. Source is preserved.",
   "markdown_mermaid_error": "Diagram could not be rendered. Source is preserved.",
-  "markdown_image_error": "Image unavailable. The Artifact reference is preserved when provided.",
+  "markdown_image_error": "Image unavailable.",
   "markdown_image_open": "Open image",
   "markdown_image_download": "Download image",
   "observation_activity_running": "Running",
