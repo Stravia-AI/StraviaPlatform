@@ -7,8 +7,8 @@ use stravia_runtime_contract::thinking::TargetThinkingControl;
 pub(crate) const SELECTOR_EXTENSION_KEY: &str = "devin";
 
 const LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const TRAILING_FLAGS: &[&str] = &["thinking", "1m", "fast", "priority", "slow"];
-const SPEED_FLAGS: &[&str] = &["fast", "priority", "slow"];
+const TRAILING_FLAGS: &[&str] = &["thinking", "1m", "fast", "priority", "slow", "lightning"];
+const SPEED_FLAGS: &[&str] = &["fast", "priority", "slow", "lightning"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SelectorParts<'a> {
@@ -32,6 +32,12 @@ pub(crate) struct SelectorTable {
     pub selectors: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routers: Option<Vec<String>>,
+    /// Authoritative canonical effort -> selector mapping derived from
+    /// `ClientModelConfig.#30` (`ModelFamilyMetadata`) and selector traits.
+    /// Allows unsuffixed selectors (e.g. `glm-5-2-1m` = High, `swe-1-7` = Max)
+    /// to resolve cleanly when effort control is requested.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub effort_selectors: BTreeMap<String, String>,
 }
 
 pub(crate) fn decompose(selector: &str) -> SelectorParts<'_> {
@@ -155,6 +161,7 @@ pub(crate) fn table_from_extensions(extensions: &BTreeMap<String, Value>) -> Opt
         default,
         selectors,
         routers,
+        effort_selectors,
     } = table;
     let routers = routers.map(|routers| {
         routers
@@ -162,10 +169,15 @@ pub(crate) fn table_from_extensions(extensions: &BTreeMap<String, Value>) -> Opt
             .filter(|router| selectors.contains(router))
             .collect()
     });
+    let effort_selectors = effort_selectors
+        .into_iter()
+        .filter(|(_, target)| selectors.contains(target))
+        .collect();
     Some(SelectorTable {
         default,
         selectors,
         routers,
+        effort_selectors,
     })
 }
 
@@ -173,6 +185,21 @@ pub(crate) fn resolve_selector(
     table: &SelectorTable,
     control: Option<&TargetThinkingControl>,
 ) -> String {
+    if let Some(TargetThinkingControl::Effort { value }) = control {
+        let key = if stravia_runtime_contract::thinking::effort_is_off(value) {
+            "none".to_string()
+        } else {
+            value.to_ascii_lowercase()
+        };
+        if let Some(target) = table
+            .effort_selectors
+            .get(&key)
+            .filter(|target| table.selectors.contains(target))
+        {
+            return target.clone();
+        }
+    }
+
     let default_traits = traits(&table.default);
     let members: Vec<(&String, SelectorTraits)> = table
         .selectors
@@ -231,7 +258,7 @@ pub(crate) fn level_from_label(label: &str) -> Option<String> {
     while let Some(last) = words.last() {
         if matches!(
             last.to_ascii_lowercase().as_str(),
-            "1m" | "fast" | "thinking" | "context"
+            "1m" | "fast" | "thinking" | "context" | "lightning"
         ) {
             words.pop();
         } else {
@@ -258,6 +285,7 @@ pub(crate) fn family_name_from_label(label: &str) -> Option<String> {
             "1m" | "fast"
                 | "thinking"
                 | "context"
+                | "lightning"
                 | "no"
                 | "none"
                 | "minimal"

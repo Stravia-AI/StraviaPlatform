@@ -28,25 +28,6 @@ use stravia_vendor_sdk::{
 const DEFAULT_BASE_URL: &str = "https://server.codeium.com";
 const CATALOG_PATH: &str = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
 const MAX_UNARY_BODY: usize = 16 * 1024 * 1024;
-const STATIC_MODELS: &[&str] = &[
-    "swe-1-6-slow",
-    "swe-1-7",
-    "swe-1-7-lightning",
-    "swe-2-medium",
-    "swe-2-high",
-    "swe-2-max",
-    "claude-sonnet-5-medium",
-    "claude-opus-5-medium",
-    "claude-5-fable-medium",
-    "gpt-5-4-medium",
-    "gpt-5-5-medium",
-    "gpt-5-6-luna-medium",
-    "gemini-3-5-flash-medium",
-    "gemini-3-1-pro-low",
-    "glm-5-2",
-    "kimi-k2-7",
-    "deepseek-v4",
-];
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PrivateState {
@@ -309,7 +290,7 @@ fn infer(
             format!("Devin request is not representable: {err}"),
         )
     })?;
-    let body = wrap_request(&proto).map_err(|err| {
+    let framed = wrap_request(&proto).map_err(|err| {
         error(
             ErrorKind::Trapped,
             format!("frame Devin Connect request: {err}"),
@@ -320,8 +301,8 @@ fn infer(
         stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: endpoint(&provider, GET_CHAT_MESSAGE_PATH),
-            headers: crate::inference_fields(connect_headers(token, true)),
-            body,
+            headers: crate::inference_fields(connect_headers(token, true, framed.compressed)),
+            body: framed.body,
         },
         &crate::inference_options(),
     )?;
@@ -480,7 +461,7 @@ fn resolve_assignment(
         stravia_vendor_sdk::net::Request {
             method: "POST".into(),
             url: endpoint(provider, ASSIGN_MODEL_PATH),
-            headers: crate::net_fields(connect_headers(token, false)),
+            headers: crate::net_fields(connect_headers(token, false, false)),
             body: encode_assign_model_request_with_platform(
                 token,
                 router_uid,
@@ -569,12 +550,7 @@ fn discover(
         )
     })?;
 
-    let mut selectors: Vec<String> = entries.iter().map(|entry| entry.selector.clone()).collect();
-    for selector in STATIC_MODELS {
-        if !selectors.iter().any(|current| current == selector) {
-            selectors.push((*selector).to_string());
-        }
-    }
+    let selectors: Vec<String> = entries.iter().map(|entry| entry.selector.clone()).collect();
     let models = family::group_families(&selectors, &entries)
         .iter()
         .map(family::discovered_model)
@@ -624,42 +600,43 @@ fn session_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
     .ok_or_else(|| error(ErrorKind::Auth, "Devin session token is missing"))
 }
 
-fn connect_headers(token: &str, streaming: bool) -> Vec<(String, String)> {
-    let trace = uuid::Uuid::new_v4().simple().to_string();
-    let span = uuid::Uuid::new_v4().simple().to_string();
+fn connect_headers(token: &str, streaming: bool, compressed: bool) -> Vec<(String, String)> {
     if streaming {
-        return vec![
+        let trace = uuid::Uuid::new_v4().simple().to_string();
+        let span = uuid::Uuid::new_v4().simple().to_string();
+        let mut headers = vec![
             ("authorization".into(), format!("Basic {token}-{token}")),
             ("sentry-trace".into(), format!("{trace}-{}-1", &span[..16])),
+        ];
+        if compressed {
+            headers.push(("connect-content-encoding".into(), "gzip".into()));
+        }
+        headers.extend([
             ("content-type".into(), "application/connect+proto".into()),
             ("connect-protocol-version".into(), "1".into()),
             ("accept".into(), "*/*".into()),
+            ("accept-encoding".into(), "gzip".into()),
             ("host".into(), String::new()),
             ("content-length".into(), String::new()),
-        ];
+        ]);
+        return headers;
     }
     vec![
-        (
-            "content-type".into(),
-            if streaming {
-                "application/connect+proto".into()
-            } else {
-                "application/proto".into()
-            },
-        ),
-        ("connect-protocol-version".into(), "1".into()),
-        ("sentry-trace".into(), format!("{trace}-{}-1", &span[..16])),
-        ("accept".into(), "*/*".into()),
         ("authorization".into(), format!("Basic {token}-{token}")),
+        ("content-type".into(), "application/proto".into()),
+        ("connect-protocol-version".into(), "1".into()),
+        ("accept".into(), "*/*".into()),
+        ("accept-encoding".into(), "gzip".into()),
     ]
 }
 
 fn catalog_headers(token: &str) -> Vec<(String, String)> {
     vec![
+        ("authorization".into(), format!("Basic {token}-{token}")),
         ("content-type".into(), "application/proto".into()),
         ("connect-protocol-version".into(), "1".into()),
         ("accept".into(), "*/*".into()),
-        ("authorization".into(), format!("Basic {token}-{token}")),
+        ("accept-encoding".into(), "gzip".into()),
     ]
 }
 
@@ -931,24 +908,45 @@ mod session_tests {
 
     #[test]
     fn interactive_inference_headers_match_cli_order() {
-        let headers = connect_headers("token", true);
-        let names: Vec<&str> = headers.iter().map(|(name, _)| name.as_str()).collect();
+        let plain = connect_headers("token", true, false);
+        let plain_names: Vec<&str> = plain.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(
-            names,
+            plain_names,
             [
                 "authorization",
                 "sentry-trace",
                 "content-type",
                 "connect-protocol-version",
                 "accept",
+                "accept-encoding",
                 "host",
-                "content-length"
+                "content-length",
             ]
         );
-        assert_eq!(headers[0].1, "Basic token-token");
-        assert_eq!(headers[2].1, "application/connect+proto");
-        assert!(headers[5].1.is_empty());
-        assert!(headers[6].1.is_empty());
+        assert_eq!(plain[0].1, "Basic token-token");
+        assert_eq!(plain[2].1, "application/connect+proto");
+        assert_eq!(plain[5].1, "gzip");
+        assert!(plain[6].1.is_empty());
+        assert!(plain[7].1.is_empty());
+
+        let compressed = connect_headers("token", true, true);
+        let compressed_names: Vec<&str> =
+            compressed.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            compressed_names,
+            [
+                "authorization",
+                "sentry-trace",
+                "connect-content-encoding",
+                "content-type",
+                "connect-protocol-version",
+                "accept",
+                "accept-encoding",
+                "host",
+                "content-length",
+            ]
+        );
+        assert_eq!(compressed[2].1, "gzip");
     }
 
     #[test]

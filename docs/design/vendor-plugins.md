@@ -229,9 +229,10 @@ State 资源的 key、payload 和 journal 正文有明确配额；超限失败�
 
 ### Codex · `openai-codex`
 
-[Codex 插件](../../backend/crates/stravia-vendor-codex)使用订阅 Responses wire，推理与独立压缩固定流式；非流式客户端由宿主汇总。独立压缩走末尾带 trigger 的流式 Responses，不调用公共 `/responses/compact`。
+[Codex 插件](../../backend/crates/stravia-vendor-codex)使用订阅 Responses wire，推理与独立压缩固定流式；非流式客户端由宿主汇总。独立压缩走末尾带 trigger 的流式 Responses，不调用公共 `/responses/compact`。版本对齐与隔离捕获记录见 [Codex 0.172.0 对齐调研](../research/codex-cli-0-172-alignment.md)。
 
-- 官方模型 metadata 决定 Responses Lite 或普通形态；Lite 的前缀及原生偏移由会话 journal 和可信 gap 投影，WS 增量不重复前缀。
+- 官方模型 metadata 决定 Responses Lite 或普通形态；Lite 的前缀及原生偏移由会话 journal 和可信 gap 投影，WS 增量不重复前缀。托管 `web_search` 保留在顶层 `tools`，不进入 `input` 的 `additional_tools`。
+- 模型目录声明的本地 CLI 推理别名（`ultra`、`persistent`）不作为公开 wire 档位暴露，若请求显式传入则按模型元数据（`multi_agent_reasoning_effort` 与支持列表）在出站前解析为真实 wire 档位。
 - thread、逻辑轮、window 和 installation 由宿主证明提供。HTTP 不发 WS-only 续接 ID；若拿到仅有增量的输入，先向宿主报告不可用，不删 ID 后照发增量。
 - Fast 按连接配置，仅覆盖普通 HTTP/WS 推理的服务档位，不改变发现、额度、搜索、生图或独立压缩；官方 hosted 搜索和生图使用各自操作，见[媒体生成](media-generation.md)。
 - 额度 credits 保留原单位和小数，不换算成 USD；重置按上文权益规则。

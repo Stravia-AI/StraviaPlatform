@@ -74,6 +74,7 @@ const BUILTIN_SHAPES: &[&str] = &[
     include_str!("data/claude-code.json"),
     include_str!("data/bun.json"),
     include_str!("data/bun-1.3.14.json"),
+    include_str!("data/bun-1.4.4.json"),
     include_str!("data/antigravity.json"),
     include_str!("data/codex-http.json"),
     include_str!("data/codex-ws.json"),

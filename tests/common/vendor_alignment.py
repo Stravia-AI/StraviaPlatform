@@ -288,7 +288,7 @@ def main() -> int:
                 # Inference remains blocked until the runner verifies a model
                 # against a freshly discovered free-model list.
                 records = [{"provider": {"vendor": plugin_id, "channel": "default",
-                                         "protocol": "openai-compatible", "base_url": "https://opencode.ai/inference/v1",
+                                         "protocol": "openai-compatible", "base_url": "https://opencode.ai/inference/openai/v1",
                                          "models_source": None, "static_models": None, "api_key": "",
                                          "adapter_credentials": "{}", "vendor_options": "{}", "auth_mode": "apikey", "use_proxy": False},
                             "oauth": None, "models": [], "anonymous": True}]

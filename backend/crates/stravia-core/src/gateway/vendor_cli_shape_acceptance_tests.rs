@@ -608,7 +608,7 @@ async fn opencode_real_wasm_inference_matches_interactive_tls_and_http() -> anyh
         "opencode-free",
         "default",
         "openai-compatible/chat-completions/v1",
-        "https://opencode.ai/inference/v1",
+        "https://opencode.ai/inference/openai/v1",
         ProviderCredentialInput::None,
     )
     .await?;
@@ -616,7 +616,7 @@ async fn opencode_real_wasm_inference_matches_interactive_tls_and_http() -> anyh
     let response = with_real_time_limit(crate::proxy::server::create_router(gateway).oneshot(
         Request::post("/v1/responses").header("authorization", format!("Bearer {key}"))
             .header("content-type", "application/json").body(Body::from(json!({
-                "model":"opencode-interactive", "input":"Reply with local CLI answer", "max_output_tokens":16000, "stream":true
+                "model":"opencode-interactive", "input":"Reply with local CLI answer", "max_output_tokens":32000, "stream":true
             }).to_string()))?,
     )).await??;
     let status = response.status();
@@ -631,7 +631,7 @@ async fn opencode_real_wasm_inference_matches_interactive_tls_and_http() -> anyh
     let fixture = include_str!("../plugin/network/shape/fixtures/opencode-interactive.json");
     crate::plugin::network::shape::tests::assert_wire_server_name(&captured.hello, "opencode.ai");
     crate::plugin::network::shape::tests::assert_wire_matches_fixture(
-        "bun-1-3-14",
+        "bun-1-4-4",
         &captured.hello,
         fixture,
         false,
@@ -641,18 +641,21 @@ async fn opencode_real_wasm_inference_matches_interactive_tls_and_http() -> anyh
     assert!(
         captured
             .head
-            .starts_with("POST /inference/v1/chat/completions HTTP/1.1\r\n")
+            .starts_with("POST /inference/openai/v1/chat/completions HTTP/1.1\r\n")
     );
     let request: Value = serde_json::from_slice(&captured.body)?;
-    for field in [
-        "model",
-        "stream",
-        "tool_choice",
-        "stream_options",
-        "max_tokens",
-    ] {
+    for field in ["model", "stream", "stream_options", "max_completion_tokens"] {
         assert_eq!(request[field], expected["request"][field], "{field}");
     }
+    assert!(request.get("tool_choice").is_none(), "{request}");
+    assert!(request.get("max_tokens").is_none(), "{request}");
+    assert_eq!(request["messages"][0]["role"], "system");
+    assert!(
+        request["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("<env>Working directory:</env>")),
+        "{request}"
+    );
     with_real_time_limit(server.task).await???;
     Ok(())
 }

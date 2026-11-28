@@ -69,9 +69,10 @@ fn fetch_user_status(
                     "authorization".into(),
                     format!("Basic {credential}-{credential}"),
                 ),
-                ("accept".into(), "*/*".into()),
                 ("content-type".into(), "application/proto".into()),
                 ("connect-protocol-version".into(), "1".into()),
+                ("accept".into(), "*/*".into()),
+                ("accept-encoding".into(), "gzip".into()),
             ]),
             body: encode_client_metadata_request_with_platform(
                 credential,

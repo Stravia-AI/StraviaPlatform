@@ -20,7 +20,7 @@ use super::{
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 // Retire reusable sessions before the upstream's one-hour connection limit.
 const WEBSOCKET_REUSE_MAX_AGE_MILLIS: u64 = 55 * 60 * 1000;
-/// Interactive official client identity (rust-v0.167.0
+/// Interactive official client identity (rust-v0.172.0
 /// login/src/auth/default_client.rs `get_codex_user_agent`). A Wasm guest
 /// cannot observe the host OS or terminal, so the platform segment uses the
 /// official fallbacks for an unidentified Linux release (`os_info` Unknown
@@ -71,6 +71,8 @@ struct ModelProfile {
     support_verbosity: Option<bool>,
     default_verbosity: Option<String>,
     default_reasoning_level: Option<String>,
+    multi_agent_reasoning_effort: Option<String>,
+    supported_reasoning_levels: Vec<String>,
     node_repl_auto_review_required: bool,
     node_repl_disabled: bool,
     incremental_tool_messages: Option<Value>,
@@ -78,6 +80,19 @@ struct ModelProfile {
 
 impl ModelProfile {
     fn new(provider: &ProviderSnapshot, operation: BodyOperation) -> Self {
+        let supported_reasoning_levels = model_metadata(provider, "supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|level| {
+                level
+                    .as_str()
+                    .or_else(|| level.get("effort").and_then(Value::as_str))
+            })
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_owned)
+            .collect();
         Self {
             // Only native inference uses the Lite wire; the plugin-constructed
             // search and image requests keep the public Responses shape.
@@ -88,6 +103,8 @@ impl ModelProfile {
                 .and_then(Value::as_bool),
             default_verbosity: model_text(provider, "default_verbosity"),
             default_reasoning_level: model_text(provider, "default_reasoning_level"),
+            multi_agent_reasoning_effort: model_text(provider, "multi_agent_reasoning_effort"),
+            supported_reasoning_levels,
             node_repl_auto_review_required: model_metadata(
                 provider,
                 "node_repl_auto_review_required",
@@ -101,6 +118,44 @@ impl ModelProfile {
                 .and_then(|messages| messages.get("incremental_tools"))
                 .cloned(),
         }
+    }
+
+    /// rust-v0.172.0 `protocol/src/openai_models/reasoning_effort.rs`:
+    /// `ultra` and `persistent` are local CLI aliases resolved before wire egress.
+    fn resolve_reasoning_effort(&self, effort: &str) -> String {
+        if effort.eq_ignore_ascii_case("ultra") {
+            let resolved = self
+                .multi_agent_reasoning_effort
+                .as_deref()
+                .filter(|candidate| {
+                    !candidate.eq_ignore_ascii_case("ultra")
+                        && self
+                            .supported_reasoning_levels
+                            .iter()
+                            .any(|preset| preset.eq_ignore_ascii_case(candidate))
+                })
+                .or_else(|| {
+                    self.supported_reasoning_levels
+                        .iter()
+                        .find(|preset| preset.eq_ignore_ascii_case("max"))
+                        .or_else(|| {
+                            self.supported_reasoning_levels
+                                .iter()
+                                .rev()
+                                .find(|preset| !preset.eq_ignore_ascii_case("ultra"))
+                        })
+                        .map(String::as_str)
+                })
+                .unwrap_or("medium");
+            if resolved.eq_ignore_ascii_case("persistent") {
+                return "disabled".to_owned();
+            }
+            return resolved.to_owned();
+        }
+        if effort.eq_ignore_ascii_case("persistent") {
+            return "disabled".to_owned();
+        }
+        effort.to_owned()
     }
 }
 
@@ -162,7 +217,7 @@ impl NativeSession {
         }
     }
 
-    /// Projects a Responses body onto the official rust-v0.167.0
+    /// Projects a Responses body onto the official rust-v0.172.0
     /// `ResponsesApiRequest` / `ResponseCreateWsRequest` (core/src/client.rs
     /// `build_responses_request`) and attaches this session's identity.
     pub(super) fn project_body(
@@ -197,6 +252,16 @@ impl NativeSession {
         if self.operation.is_inference() {
             self.apply_model_defaults(object);
         }
+        if let Some(effort) = object
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(Value::as_str)
+            .map(|value| self.model.resolve_reasoning_effort(value))
+            && let Some(reasoning) = object.get_mut("reasoning").and_then(Value::as_object_mut)
+        {
+            reasoning.insert("effort".into(), effort.into());
+        }
         let tools = if self.model.responses_lite {
             object.insert("parallel_tool_calls".into(), Value::Bool(false));
             if let Some(reasoning) = object
@@ -206,7 +271,22 @@ impl NativeSession {
             {
                 reasoning.insert("context".into(), "all_turns".into());
             }
-            object.remove("tools")
+            // rust-v0.172.0 `session/turn.rs` & `session/world_state.rs`: hosted
+            // `web_search` tools remain in top-level `tools` and never enter
+            // `input` `additional_tools` declarations.
+            match object.remove("tools") {
+                Some(Value::Array(all_tools)) => {
+                    let (hosted, incremental): (Vec<Value>, Vec<Value>) =
+                        all_tools.into_iter().partition(|tool| {
+                            tool.get("type").and_then(Value::as_str) == Some("web_search")
+                        });
+                    if !hosted.is_empty() {
+                        object.insert("tools".into(), Value::Array(hosted));
+                    }
+                    (!incremental.is_empty()).then_some(Value::Array(incremental))
+                }
+                other => other,
+            }
         } else {
             None
         };
@@ -566,7 +646,7 @@ fn responses_lite_tools(tools: Vec<Value>) -> Vec<Value> {
     declarations
 }
 
-/// rust-v0.167.0 login/src/auth/default_client.rs `get_codex_user_agent`.
+/// rust-v0.172.0 login/src/auth/default_client.rs `get_codex_user_agent`.
 pub(super) fn user_agent() -> String {
     format!("{ORIGINATOR}/{CLIENT_VERSION} {USER_AGENT_PLATFORM} ({ORIGINATOR}; {CLIENT_VERSION})")
 }
@@ -687,7 +767,7 @@ pub(super) fn encode_tools(
     tools
 }
 
-// Closed wire contract in declaration order: rust-v0.167.0
+// Closed wire contract in declaration order: rust-v0.172.0
 // codex-api/src/common.rs `ResponseCreateWsRequest` after its `type` tag;
 // `ResponsesApiRequest` is the same sequence without the WS-only fields. The
 // official client keeps routing fields ahead of the potentially multi-megabyte
@@ -709,10 +789,12 @@ const WIRE_FIELDS: &[&str] = &[
     "stream_options",
     "include",
     "prompt_cache_key",
+    "prompt_cache_options",
     "text",
     "generate",
     "client_metadata",
     "access_programs",
+    "request_country",
 ];
 const WS_ONLY_FIELDS: &[&str] = &["previous_response_id", "generate"];
 // Plugin-owned or unsupported: never forwarded from the caller. Client
@@ -720,8 +802,10 @@ const WS_ONLY_FIELDS: &[&str] = &["previous_response_id", "generate"];
 const SESSION_FIELDS: &[&str] = &[
     "type",
     "stream_options",
+    "prompt_cache_options",
     "client_metadata",
     "access_programs",
+    "request_country",
 ];
 
 /// A projected body serialized in the official field order. A `Value` map
@@ -884,7 +968,7 @@ fn retain_control_fields(value: Option<&mut Value>, fields: &[&str]) {
     }
 }
 
-/// Header order follows the official 0.167.0 HTTP capture: core/src/client.rs
+/// Header order follows the official 0.172.0 HTTP capture: core/src/client.rs
 /// request headers, transport headers, then codex-api auth and identity.
 pub(super) fn append_runtime_headers(
     provider: &ProviderSnapshot,
@@ -959,7 +1043,9 @@ pub(super) fn fields(headers: Vec<(String, String)>) -> stravia_vendor_sdk::net:
 }
 
 pub(super) fn http_fields(mut headers: Vec<(String, String)>) -> stravia_vendor_sdk::net::Fields {
-    headers.push(("accept-encoding".into(), "identity".into()));
+    // rust-v0.172.0 `codex-rs/http-client/Cargo.toml` enables reqwest `gzip` and
+    // `zstd`, so every HTTP request advertises `accept-encoding: zstd,gzip`.
+    headers.push(("accept-encoding".into(), "zstd,gzip".into()));
     headers.push(("cookie".into(), String::new()));
     fields(headers)
 }
@@ -969,6 +1055,12 @@ pub(super) fn http_options()
     let mut options = stravia_vendor_sdk::net::Options::new();
     options
         .shape("codex-http")
+        .map_err(|e| invalid(e.to_string()))?;
+    options
+        .response_decoding(&[
+            stravia_vendor_sdk::net::Coding::Zstd,
+            stravia_vendor_sdk::net::Coding::Gzip,
+        ])
         .map_err(|e| invalid(e.to_string()))?;
     options
         .set(stravia_vendor_sdk::net::keys::COOKIES, COOKIE_POLICY)
@@ -1071,9 +1163,6 @@ pub(super) fn start_responses_http(
     let sticky = load_sticky_turn_state(provider)?;
     let mut headers = stravia_vendor_sdk::net::Fields::new();
     for field in std::mem::take(&mut request.headers).into_vec() {
-        if field.name.eq_ignore_ascii_case("accept-encoding") {
-            continue;
-        }
         if compressed && field.name.eq_ignore_ascii_case("content-type") {
             headers.append("content-encoding", b"zstd".to_vec());
         }
@@ -1925,16 +2014,19 @@ mod tests {
         ] {
             let mut body = original.clone();
             prepare_operation_body(&mut body, operation).unwrap();
-            // 0.167.0 has no top-level instructions or caller-owned stream
-            // options; access programs are session-owned.
+            // 0.172.0 has no top-level instructions or caller-owned stream
+            // options; prompt_cache_options, access_programs, and request_country
+            // are session-owned.
             for absent in [
                 "private_parameter",
                 "metadata",
                 "prompt_cache_retention",
+                "prompt_cache_options",
                 "client_metadata",
                 "instructions",
                 "stream_options",
                 "access_programs",
+                "request_country",
             ] {
                 assert!(body.get(absent).is_none(), "{absent}");
             }
@@ -2048,9 +2140,10 @@ mod tests {
         let provider = lite_provider();
         let session = NativeSession::new(&provider, BodyOperation::Http);
         let body = project(&session, turn_body());
-        for absent in ["tools", "instructions"] {
-            assert!(body.get(absent).is_none(), "{absent}");
-        }
+        assert!(body.get("instructions").is_none());
+        // 0.172.0 keeps hosted `web_search` in top-level `tools` while moving
+        // client-visible tool declarations into `input` `additional_tools`.
+        assert_eq!(body["tools"], json!([{"type":"web_search"}]));
         assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(
@@ -2060,6 +2153,8 @@ mod tests {
         assert_eq!(body["text"], json!({"verbosity":"low"}));
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert!(body.get("access_programs").is_none());
+        assert!(body.get("prompt_cache_options").is_none());
+        assert!(body.get("request_country").is_none());
         assert_eq!(
             body["prompt_cache_key"],
             body["client_metadata"]["thread_id"]
@@ -2071,11 +2166,10 @@ mod tests {
         assert_eq!(declarations["role"], "developer");
         assert!(declarations["id"].as_str().unwrap().starts_with("at_"));
         // Function and freeform tools join `functions` where the first of them
-        // appeared; other declarations keep their relative order.
+        // appeared; hosted `web_search` is never placed inside `additional_tools`.
         assert_eq!(
             declarations["tools"],
             json!([
-                {"type":"web_search"},
                 {"type":"namespace","name":"functions","description":"","tools":[
                     {"type":"function","name":"read","parameters":{"type":"object"}},
                     {"type":"custom","name":"exec","format":{"type":"text"}}
@@ -2134,12 +2228,120 @@ mod tests {
             &body["input"].as_array().unwrap()[2..],
             turn_body()["input"].as_array().unwrap().as_slice()
         );
-        assert!(body.get("tools").is_none());
+        assert_eq!(body["tools"], json!([{"type":"web_search"}]));
         assert!(body.get("instructions").is_none());
         assert_eq!(body["reasoning"]["context"], "all_turns");
 
         let full = project(&session, turn_body());
         assert_eq!(full["input"][0]["type"], "additional_tools");
+    }
+
+    #[test]
+    fn lite_turn_handles_hosted_only_and_incremental_only_tool_sets() {
+        let provider = lite_provider();
+        let session = NativeSession::new(&provider, BodyOperation::Http);
+
+        let web_only = project(
+            &session,
+            json!({
+                "model": "gpt-6.2-sol",
+                "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+                "tools": [{"type":"web_search","external_web_access":true}]
+            }),
+        );
+        assert_eq!(
+            web_only["tools"],
+            json!([{"type":"web_search","external_web_access":true}])
+        );
+        let input = web_only["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+
+        let fn_only = project(
+            &session,
+            json!({
+                "model": "gpt-6.2-sol",
+                "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+                "tools": [{"type":"function","name":"read","parameters":{"type":"object"}}]
+            }),
+        );
+        assert!(fn_only.get("tools").is_none());
+        assert_eq!(fn_only["input"][0]["type"], "additional_tools");
+    }
+
+    #[test]
+    fn reasoning_effort_resolves_local_cli_aliases_before_wire_egress() {
+        let mut with_multi = lite_provider();
+        let extensions = &mut with_multi.model_metadata.as_mut().unwrap().extensions;
+        extensions.insert("multi_agent_reasoning_effort".into(), json!("xhigh"));
+        extensions.insert(
+            "supported_reasoning_levels".into(),
+            json!([
+                {"effort": "low"},
+                {"effort": "medium"},
+                {"effort": "high"},
+                {"effort": "xhigh"},
+                {"effort": "max"},
+                {"effort": "ultra"}
+            ]),
+        );
+        let session = NativeSession::new(&with_multi, BodyOperation::Http);
+        let ultra = project(
+            &session,
+            json!({"model":"gpt-6.2-sol","input":[],"reasoning":{"effort":"ultra"}}),
+        );
+        assert_eq!(ultra["reasoning"]["effort"], "xhigh");
+        assert_eq!(
+            turn_metadata(&ultra["client_metadata"])["reasoning_effort"],
+            "xhigh"
+        );
+        let persistent = project(
+            &session,
+            json!({"model":"gpt-6.2-sol","input":[],"reasoning":{"effort":"persistent"}}),
+        );
+        assert_eq!(persistent["reasoning"]["effort"], "disabled");
+        assert_eq!(
+            turn_metadata(&persistent["client_metadata"])["reasoning_effort"],
+            "disabled"
+        );
+
+        let mut max_fallback = lite_provider();
+        max_fallback
+            .model_metadata
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert(
+                "supported_reasoning_levels".into(),
+                json!([{"effort": "low"}, {"effort": "max"}, {"effort": "ultra"}]),
+            );
+        let body = project(
+            &NativeSession::new(&max_fallback, BodyOperation::Http),
+            json!({"model":"gpt-6-sol","input":[],"reasoning":{"effort":"ultra"}}),
+        );
+        assert_eq!(body["reasoning"]["effort"], "max");
+
+        let mut last_non_ultra = lite_provider();
+        last_non_ultra
+            .model_metadata
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert(
+                "supported_reasoning_levels".into(),
+                json!([{"effort": "low"}, {"effort": "high"}, {"effort": "ultra"}]),
+            );
+        let body = project(
+            &NativeSession::new(&last_non_ultra, BodyOperation::Http),
+            json!({"model":"gpt-6-sol","input":[],"reasoning":{"effort":"ultra"}}),
+        );
+        assert_eq!(body["reasoning"]["effort"], "high");
+
+        let body = project(
+            &NativeSession::new(&lite_provider(), BodyOperation::Http),
+            json!({"model":"gpt-6-sol","input":[],"reasoning":{"effort":"ultra"}}),
+        );
+        assert_eq!(body["reasoning"]["effort"], "medium");
     }
 
     /// Top-level keys in wire order; a `Value` would sort them.
@@ -2185,6 +2387,7 @@ mod tests {
                 "model",
                 "stream",
                 "input",
+                "tools",
                 "tool_choice",
                 "parallel_tool_calls",
                 "reasoning",
@@ -2490,7 +2693,7 @@ mod tests {
             ("content-type".into(), "application/json".into()),
         ];
         append_runtime_headers(&provider, &body, &session, &mut headers).unwrap();
-        // Official 0.167.0 HTTP capture order.
+        // Official 0.172.0 HTTP capture order (before http_fields appends accept-encoding/cookie).
         assert_eq!(
             headers
                 .iter()
@@ -2512,6 +2715,16 @@ mod tests {
                 "originator",
                 "user-agent",
             ]
+        );
+        let wire_fields = http_fields(headers.clone());
+        assert_eq!(wire_fields.get("accept-encoding"), Some(&b"zstd,gzip"[..]));
+        let options = http_options().unwrap();
+        assert_eq!(
+            options
+                .iter()
+                .find(|(k, _)| *k == stravia_vendor_sdk::net::keys::RESPONSE_DECODING)
+                .map(|(_, v)| v),
+            Some("zstd,gzip")
         );
         let headers: BTreeMap<_, _> = headers.into_iter().collect();
         for (header, key) in [
@@ -2536,11 +2749,11 @@ mod tests {
             format!("{}:0", headers["thread-id"])
         );
         assert_eq!(headers["x-codex-beta-features"], "remote_compaction_v2");
-        assert_eq!(headers["version"], "0.167.0");
+        assert_eq!(headers["version"], "0.172.0");
         assert_eq!(headers["originator"], "codex-tui");
         assert_eq!(
             headers["user-agent"],
-            "codex-tui/0.167.0 (Linux Unknown; x86_64) unknown (codex-tui; 0.167.0)"
+            "codex-tui/0.172.0 (Linux Unknown; x86_64) unknown (codex-tui; 0.172.0)"
         );
         assert_eq!(headers["x-codex-routing-hint"], "model=gpt-6-astra");
         let turn = turn_metadata(&body["client_metadata"]);

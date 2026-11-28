@@ -90,11 +90,12 @@ use stravia_runtime_contract::protocol::ir::ServiceTier;
 /// Connect-RPC method path on the Devin api-server host.
 pub const GET_CHAT_MESSAGE_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
 
-/// ClientMetadata identity differs by operation: interactive GetChatMessage
-/// uses `devin-cli` at #1 while GetUserStatus uses `chisel`; both use
-/// `chisel` at #12 and #28 in the 3000.11.3 captures.
+/// ClientMetadata identity differs by operation in the 3000.15.14 captures:
+/// GetChatMessage, GetCliModelConfigs, and AssignModel use `devin-cli` at #1,
+/// while GetUserStatus uses `chisel`; all use `chisel` at #12 and #28.
 const CLIENT_NAME: &str = "chisel";
-const CLIENT_VERSION: &str = "3000.11.3";
+const INTERACTIVE_CLIENT_NAME: &str = "devin-cli";
+const CLIENT_VERSION: &str = "3000.15.14";
 const CLIENT_LANGUAGE: &str = "en";
 
 /// ClientMetadata #5 platform identity.
@@ -310,7 +311,13 @@ pub fn encode_assign_model_request_with_platform(
     write_message_field(
         &mut out,
         1,
-        &client_metadata(session_token, false, platform, CLIENT_NAME, fingerprint),
+        &client_metadata(
+            session_token,
+            false,
+            platform,
+            INTERACTIVE_CLIENT_NAME,
+            fingerprint,
+        ),
     );
     write_string_field(&mut out, 2, router_uid);
     write_string_field(&mut out, 3, cascade_id);
@@ -343,8 +350,8 @@ pub fn decode_assign_model_response(body: &[u8]) -> Option<ModelAssignment> {
 /// Unary seat-management requests (GetUserStatus, GetCliModelConfigs) carry
 /// only `ClientMetadata` at field #1 and travel as `application/proto` —
 /// raw protobuf, no Connect envelope. `displays` adds #30
-/// (`supported_model_displays` = [3,4,6,7,8]), which only the
-/// GetCliModelConfigs capture carries.
+/// (`supported_model_displays` = [3,4,6,7,8]) and switches #1 client_name to
+/// `devin-cli`, matching the 3000.15.14 GetCliModelConfigs capture.
 pub fn encode_client_metadata_request_with_platform(
     session_token: &str,
     displays: bool,
@@ -352,44 +359,67 @@ pub fn encode_client_metadata_request_with_platform(
     fingerprint: &str,
 ) -> Vec<u8> {
     let mut out = Vec::new();
+    let client_name = if displays {
+        INTERACTIVE_CLIENT_NAME
+    } else {
+        CLIENT_NAME
+    };
     write_message_field(
         &mut out,
         1,
-        &client_metadata(session_token, displays, platform, CLIENT_NAME, fingerprint),
+        &client_metadata(session_token, displays, platform, client_name, fingerprint),
     );
     out
 }
 
 /// One entry from `GetCliModelConfigsResponse`. `ClientModelConfig` repeats
 /// at top-level #1; entries flagged #4 disabled are not callable and dropped
-/// at decode time. Tag numbers are calibrated from a live 200 response
-/// (`dwgx/WindsurfAPI` `devin-connect-catalog.js` decodeCatalog); the pricing
-/// rows at #32 were recovered from the CLI's cached `model_configs` payload.
+/// at decode time. Field numbers are verified against Devin CLI 3000.15.14
+/// protobuf metadata and live `GetCliModelConfigs` responses.
 #[derive(Debug, Clone, Default)]
 pub struct DevinModelConfig {
     /// #22 — the value `GetChatMessageRequest.model` expects.
     pub selector: String,
-    /// #1 — friendly label, e.g. "Claude Opus 4.8 Medium".
+    /// #1 — friendly label, e.g. "Claude Opus 5 Medium".
     pub label: Option<String>,
-    /// #5 — explicit upstream multimodal capability flag.
+    /// #5 or #23.#6.#11 (`ModelFeatures.supports_images`) — explicit upstream
+    /// multimodal capability flag. `None` only when neither #5 nor
+    /// `ModelFeatures` is present on the entry.
     pub supports_images: Option<bool>,
     /// #10 — upstream provider enum (1=cognition 2=openai 3=anthropic
-    /// 4=google 7=moonshot 9=zhipu; other values surface as the raw number).
+    /// 4=google 5=xai 6=deepseek 7=moonshot 9=zhipu 11=nvidia 13=meta).
     pub provider: Option<u64>,
-    /// #18 — context window tokens (observed 200000 on swe-1-6-slow).
+    /// #18 or #23.#4 (`ModelInfo.max_tokens`) — context window tokens.
     pub context_window: Option<u64>,
-    /// #23.#23 — family alias inside ModelInfo, e.g. "claude-opus-4.8". Every
+    /// #23.#13 (`ModelInfo.max_output_tokens`) — maximum output tokens.
+    pub max_output_tokens: Option<u64>,
+    /// #23.#6.#12 (`ModelFeatures.supports_tool_calls`).
+    pub supports_tool_calls: Option<bool>,
+    /// #23.#6.#15 (`ModelFeatures.supports_thinking`).
+    pub supports_thinking: Option<bool>,
+    /// #23.#23 — family alias inside ModelInfo, e.g. "claude-opus-5". Every
     /// selector of one family carries the same alias; entries without it are
     /// pseudo-selectors (adaptive, *-default, review lanes), not models.
     pub alias: Option<String>,
-    /// #23.#20 — short alias the CLI pins on the family's canonical entry
-    /// (e.g. `gpt-5-6-sol-medium` carries `gpt-5p6`); marks upstream's own
-    /// default pick inside the family.
-    pub short_alias: Option<String>,
     /// #23.#25 — `is_model_router`: a router uid must be resolved through
     /// `AssignModel` before `GetChatMessage`; calling it directly is answered
     /// with the canned `unavailable: third-party model provider` trailer.
     pub is_router: bool,
+    /// #30.#1 — `ModelFamilyMetadata.model_family_label`, e.g. "Claude Opus 5".
+    pub family_label: Option<String>,
+    /// #30.#2 (`Effort` / `Reasoning Effort`) — normalized canonical effort
+    /// level (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`).
+    pub effort_level: Option<String>,
+    /// #30.#2 (`Fast Mode` / `Speed`, order == 1) — explicit speed tier flag.
+    pub fast_mode: bool,
+    /// #30.#2 (`1M Context`, order == 1) — explicit 1M context tier flag.
+    pub context_1m: bool,
+    /// #30.#2 (`Thinking`) — explicit thinking toggle (`Some(true)` on,
+    /// `Some(false)` off).
+    pub thinking_toggle: Option<bool>,
+    /// #31 — `is_default_model_in_family`, upstream's authoritative default
+    /// selector inside the family.
+    pub is_default_in_family: bool,
     /// #32 — per-row USD pricing, see [`DevinModelCost`].
     pub cost: Option<DevinModelCost>,
 }
@@ -411,10 +441,27 @@ pub fn devin_upstream_provider_name(id: u64) -> Option<&'static str> {
         2 => "openai",
         3 => "anthropic",
         4 => "google",
+        5 => "xai",
+        6 => "deepseek",
         7 => "moonshot",
         9 => "zhipu",
+        11 => "nvidia",
+        13 => "meta",
         _ => return None,
     })
+}
+
+fn normalize_family_effort(display_name: &str) -> Option<String> {
+    match display_name.trim().to_ascii_lowercase().as_str() {
+        "none" | "no thinking" | "off" => Some("none".into()),
+        "minimal" => Some("minimal".into()),
+        "low" => Some("low".into()),
+        "medium" => Some("medium".into()),
+        "high" => Some("high".into()),
+        "xhigh" => Some("xhigh".into()),
+        "max" => Some("max".into()),
+        _ => None,
+    }
 }
 
 /// Decode a live `GetCliModelConfigs` response without treating malformed
@@ -445,48 +492,139 @@ pub fn decode_cli_model_configs(body: &[u8]) -> anyhow::Result<Vec<DevinModelCon
         let Some(selector) = string(&config, 22) else {
             continue;
         };
-        let (alias, short_alias, is_router) =
-            if let Some(info) = config.iter().find(|f| f.number == 23 && f.wire_type == 2) {
-                let info = parse_fields(info.bytes).context("GetCliModelConfigs model info")?;
-                (
-                    string(&info, 23),
-                    string(&info, 20),
-                    varint(&info, 25) == Some(1),
-                )
-            } else {
-                Default::default()
-            };
+
+        let mut info_max_tokens = None;
+        let mut max_output_tokens = None;
+        let mut has_features = false;
+        let mut feat_images = None;
+        let mut feat_tools = None;
+        let mut feat_thinking = None;
+        let mut alias = None;
+        let mut is_router = false;
+
+        if let Some(info) = config.iter().find(|f| f.number == 23 && f.wire_type == 2) {
+            let info = parse_fields(info.bytes).context("GetCliModelConfigs model info")?;
+            info_max_tokens = varint(&info, 4).filter(|&v| v > 0);
+            max_output_tokens = varint(&info, 13).filter(|&v| v > 0);
+            alias = string(&info, 23);
+            is_router = varint(&info, 25) == Some(1);
+            if let Some(features) = info.iter().find(|f| f.number == 6 && f.wire_type == 2) {
+                let features =
+                    parse_fields(features.bytes).context("GetCliModelConfigs model features")?;
+                has_features = true;
+                feat_images = varint(&features, 11);
+                feat_tools = varint(&features, 12);
+                feat_thinking = varint(&features, 15);
+            }
+        }
+
+        let top_images = varint(&config, 5);
+        // Proto3 omits `false` booleans: if `ModelFeatures` is present and
+        // neither top-level #5 nor `ModelFeatures.#11` is 1, the model is
+        // affirmatively text-only; if neither #5 nor `ModelFeatures` is
+        // present, image support is unspecified (`None`).
+        let supports_images = if top_images == Some(1) || feat_images == Some(1) {
+            Some(true)
+        } else if top_images == Some(0) || feat_images == Some(0) || has_features {
+            Some(false)
+        } else {
+            None
+        };
+        let supports_tool_calls = has_features.then_some(feat_tools == Some(1));
+        let supports_thinking = has_features.then_some(feat_thinking == Some(1));
+        let context_window = varint(&config, 18).filter(|&v| v > 0).or(info_max_tokens);
+
+        let mut family_label = None;
+        let mut effort_level = None;
+        let mut fast_mode = false;
+        let mut context_1m = false;
+        let mut thinking_toggle = None;
+        if let Some(meta) = config.iter().find(|f| f.number == 30 && f.wire_type == 2) {
+            let meta =
+                parse_fields(meta.bytes).context("GetCliModelConfigs model family metadata")?;
+            family_label = string(&meta, 1);
+            for item in meta.iter().filter(|f| f.number == 2 && f.wire_type == 2) {
+                let Ok(pair) = parse_fields(item.bytes) else {
+                    continue;
+                };
+                let Some(key) = string(&pair, 1) else {
+                    continue;
+                };
+                let Some(val) = pair.iter().find(|f| f.number == 2 && f.wire_type == 2) else {
+                    continue;
+                };
+                let Ok(val_fields) = parse_fields(val.bytes) else {
+                    continue;
+                };
+                let order = varint(&val_fields, 1);
+                let display = string(&val_fields, 2);
+                match key.to_ascii_lowercase().as_str() {
+                    "effort" | "reasoning effort" => {
+                        if let Some(level) = display.as_deref().and_then(normalize_family_effort) {
+                            effort_level = Some(level);
+                        }
+                    }
+                    "fast mode" | "speed" => {
+                        fast_mode |= order == Some(1);
+                    }
+                    "1m context" => {
+                        context_1m |= order == Some(1);
+                    }
+                    "thinking" => {
+                        thinking_toggle = Some(order == Some(1));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         configs.push(DevinModelConfig {
             selector,
             label: string(&config, 1),
-            supports_images: varint(&config, 5).map(|v| v == 1),
+            supports_images,
             provider: varint(&config, 10),
-            context_window: varint(&config, 18),
+            context_window,
+            max_output_tokens,
+            supports_tool_calls,
+            supports_thinking,
             alias,
-            short_alias,
             is_router,
+            family_label,
+            effort_level,
+            fast_mode,
+            context_1m,
+            thinking_toggle,
+            is_default_in_family: varint(&config, 31) == Some(1),
             cost: decode_model_cost(&config),
         });
     }
     Ok(configs)
 }
 
-/// Decode the repeated #32 pricing rows. A row is a sub-message mixing string
-/// fields (component name, unit, tooltip) with floats; the component name is
-/// recognized by content, and the price lives at field #2 as fixed32 or
-/// fixed64. Values outside a plausible $/1M-token band are ignored so a
-/// schema drift degrades to "no pricing" instead of corrupt numbers.
+/// Decode the repeated #32 pricing rows (`ModelDimension`). Field #1 names the
+/// component (`Input` / `Cached input` / `Output`), #2 carries the price as
+/// fixed32/fixed64, and #6 (`kind`, when present) equals 1 for pricing rows.
+/// Values outside a plausible $/1M-token band are ignored so schema drift
+/// degrades to "no pricing" instead of corrupt numbers.
 fn decode_model_cost(config: &[ProtoField<'_>]) -> Option<DevinModelCost> {
     let mut cost = DevinModelCost::default();
     for row in config.iter().filter(|f| f.number == 32 && f.wire_type == 2) {
         let Ok(fields) = parse_fields(row.bytes) else {
             continue;
         };
+        if let Some(dim_kind) = fields
+            .iter()
+            .find(|f| f.number == 6 && f.wire_type == 0)
+            .map(|f| f.scalar)
+            && dim_kind != 1
+        {
+            continue;
+        }
         let kind = fields
             .iter()
-            .filter(|f| f.wire_type == 2)
-            .filter_map(|f| std::str::from_utf8(f.bytes).ok())
-            .find_map(|text| match text.trim().to_ascii_lowercase().as_str() {
+            .find(|f| f.number == 1 && f.wire_type == 2)
+            .and_then(|f| std::str::from_utf8(f.bytes).ok())
+            .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
                 "input" => Some(0),
                 "cached input" => Some(1),
                 "output" => Some(2),
@@ -520,9 +658,9 @@ fn decode_model_cost(config: &[ProtoField<'_>]) -> Option<DevinModelCost> {
     (cost != DevinModelCost::default()).then_some(cost)
 }
 
-/// ClientMetadata field set: the 3000.11.3 interactive GetChatMessage and
-/// GetUserStatus captures contain {1,2,3,4,5,7,12,28,31}; the earlier
-/// GetCliModelConfigs capture adds #30 (`displays`). Other fields are omitted.
+/// ClientMetadata field set: the 3000.15.14 interactive GetChatMessage,
+/// AssignModel, and GetUserStatus captures contain {1,2,3,4,5,7,12,28,31};
+/// GetCliModelConfigs adds #30 (`displays`). Other fields are omitted.
 fn client_metadata(
     session_token: &str,
     displays: bool,
@@ -3463,20 +3601,38 @@ mod tests {
 
     #[test]
     fn decodes_cli_model_config_display_metadata() {
+        let mut features = Vec::new();
+        write_varint_field(&mut features, 11, 1);
+        write_varint_field(&mut features, 12, 1);
+        write_varint_field(&mut features, 15, 1);
         let mut info = Vec::new();
-        write_string_field(&mut info, 20, "cs5m");
+        write_varint_field(&mut info, 4, 1_000_000);
+        write_message_field(&mut info, 6, &features);
+        write_varint_field(&mut info, 13, 128_000);
         write_string_field(&mut info, 23, "claude-sonnet-5");
+        let mut effort_val = Vec::new();
+        write_varint_field(&mut effort_val, 1, 1);
+        write_string_field(&mut effort_val, 2, "Medium");
+        write_varint_field(&mut effort_val, 3, 1);
+        let mut effort_entry = Vec::new();
+        write_string_field(&mut effort_entry, 1, "Effort");
+        write_message_field(&mut effort_entry, 2, &effort_val);
+        let mut family_meta = Vec::new();
+        write_string_field(&mut family_meta, 1, "Claude Sonnet 5");
+        write_message_field(&mut family_meta, 2, &effort_entry);
+
         let mut config = Vec::new();
         write_string_field(&mut config, 1, " Claude Sonnet 5 Medium ");
-        write_varint_field(&mut config, 5, 1);
         write_varint_field(&mut config, 10, 3);
-        write_varint_field(&mut config, 18, 400_000);
         write_string_field(&mut config, 22, "claude-sonnet-5-medium");
         write_message_field(&mut config, 23, &info);
+        write_message_field(&mut config, 30, &family_meta);
+        write_varint_field(&mut config, 31, 1);
         for (name, price) in [("Input", 5.0_f64), ("Cached input", 0.5), ("Output", 25.0)] {
             let mut row = Vec::new();
             write_string_field(&mut row, 1, name);
             write_fixed64_field(&mut row, 2, price);
+            write_varint_field(&mut row, 6, 1);
             write_message_field(&mut config, 32, &row);
         }
         let mut body = Vec::new();
@@ -3488,16 +3644,34 @@ mod tests {
         assert_eq!(entry.selector, "claude-sonnet-5-medium");
         assert_eq!(entry.label.as_deref(), Some("Claude Sonnet 5 Medium"));
         assert_eq!(entry.supports_images, Some(true));
+        assert_eq!(entry.supports_tool_calls, Some(true));
+        assert_eq!(entry.supports_thinking, Some(true));
         assert_eq!(entry.provider, Some(3));
-        assert_eq!(entry.context_window, Some(400_000));
+        assert_eq!(entry.context_window, Some(1_000_000));
+        assert_eq!(entry.max_output_tokens, Some(128_000));
         assert_eq!(entry.alias.as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(entry.short_alias.as_deref(), Some("cs5m"));
+        assert_eq!(entry.family_label.as_deref(), Some("Claude Sonnet 5"));
+        assert_eq!(entry.effort_level.as_deref(), Some("medium"));
+        assert!(entry.is_default_in_family);
         let cost = entry.cost.expect("pricing rows");
         assert_eq!(cost.input, Some(5.0));
         assert_eq!(cost.cache_read, Some(0.5));
         assert_eq!(cost.output, Some(25.0));
-        assert_eq!(devin_upstream_provider_name(3), Some("anthropic"));
-        assert_eq!(devin_upstream_provider_name(6), None);
+        for (id, expected) in [
+            (1, Some("cognition")),
+            (2, Some("openai")),
+            (3, Some("anthropic")),
+            (4, Some("google")),
+            (5, Some("xai")),
+            (6, Some("deepseek")),
+            (7, Some("moonshot")),
+            (9, Some("zhipu")),
+            (11, Some("nvidia")),
+            (13, Some("meta")),
+            (99, None),
+        ] {
+            assert_eq!(devin_upstream_provider_name(id), expected);
+        }
     }
 
     #[test]

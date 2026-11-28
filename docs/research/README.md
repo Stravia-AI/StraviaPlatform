@@ -18,6 +18,8 @@
 | [antigravity-model-mapping.md](antigravity-model-mapping.md) | `stravia-vendor-antigravity` | Agent 推理模型目录筛选与 family/effort 合并证据 |
 | [antigravity-cli-web-search.md](antigravity-cli-web-search.md) | `stravia-vendor-antigravity` | 独立搜索操作、grounding 与来源校验实证 |
 | [claude-code-fable-5-2.md](claude-code-fable-5-2.md) | `stravia-vendor-claudecode` | Claude Code CLI 原生与 Stravia 的思考/effort/beta 对照 |
+| [codex-cli-0-172-alignment.md](codex-cli-0-172-alignment.md) | `stravia-vendor-codex` | Codex CLI `0.172.0` 传输、Responses Lite 与推理档位对齐实证 |
+| [devin-cli-3000-15-14-alignment.md](devin-cli-3000-15-14-alignment.md) | `stravia-vendor-devin` | Devin CLI `3000.15.14` H2/Connect gzip 抓包与 `GetCliModelConfigs` 元数据实证 |
 | [grok-oauth.md](grok-oauth.md) | `stravia-vendor-grok` | Grok OAuth Device Flow 上游对照与信任边界（注：文中早期架构设想为历史记录） |
 | [kiro-cli-request-alignment.md](kiro-cli-request-alignment.md) | `stravia-vendor-kiro` | Kiro CLI TUI/ACP/SDK 请求线协议对照与版本差异 |
 | [kiro-cli-credits.md](kiro-cli-credits.md) | `stravia-vendor-kiro` | `GetUsageLimits` 额度字段语义与真实响应证据 |

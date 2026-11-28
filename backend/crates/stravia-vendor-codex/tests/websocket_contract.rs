@@ -645,13 +645,14 @@ async fn http_case(case: &'static str) {
             header("x-codex-turn-metadata"),
             body["client_metadata"]["x-codex-turn-metadata"].as_str()
         );
-        assert_eq!(header("version"), Some("0.167.0"));
+        assert_eq!(header("version"), Some("0.172.0"));
         assert_eq!(header("originator"), Some("codex-tui"));
         assert_eq!(
             header("x-codex-beta-features"),
             Some("remote_compaction_v2")
         );
         assert_eq!(header("accept"), Some("text/event-stream"));
+        assert_eq!(header("accept-encoding"), Some("zstd,gzip"));
         assert!(header("x-codex-installation-id").is_none());
         assert!(body.get("instructions").is_none());
         if case == "logprobs"
@@ -1810,7 +1811,7 @@ async fn websocket_metadata_observer_failure_does_not_complete_or_reuse() {
     assert!(recorded.closed.lock().is_empty());
 }
 
-/// Official 0.167.0 WS capture: Lite frames carry the HTTP-only Lite header
+/// Official 0.172.0 WS capture: Lite frames carry the HTTP-only Lite header
 /// and the dispatch time as reserved client_metadata keys; a continuation
 /// frame sends only the appended items, never the prompt prefix again.
 #[tokio::test(flavor = "current_thread")]

@@ -1,23 +1,24 @@
 {
   "provenance": {
     "client": "OpenCode",
-    "version": "1.18.25",
+    "version": "2.4.2",
     "os": "linux",
     "arch": "x86_64",
-    "mode": "interactive",
-    "invocation": "opencode --pure --model opencode/big-pickle; prompt typed through actual PTY after TUI ready",
-    "captured_at": "2026-11-07T08:00:39Z",
-    "network_isolation": "user/mount/network namespace, loopback only, host nscd hidden; fresh HOME/XDG/workdir; public placeholder credential",
-    "target": "https://localhost:<ephemeral-port>/v1",
-    "capture_tool": "official CLI plus local TLS listener and capture-client hello parser",
+    "mode": "run-standalone",
+    "invocation": "opencode run --standalone --model opencode/big-pickle; fresh TLS ClientHello from connection 1 and main chat request head/body from connection 2",
+    "captured_at": "2026-11-28T07:13:20Z",
+    "network_isolation": "Linux user and network namespaces (unshare -r -n), loopback only; isolated HOME/XDG/APPDATA/config/workdir; OPENCODE_DISABLE_MODELS_FETCH=1; share=disabled; update=disable; automations=false; public placeholder credential",
+    "target": "https://localhost:<ephemeral-port>/inference/openai/v1",
+    "capture_tool": "official CLI v2.4.2 plus local TLS loopback listener and capture-client hello parser",
     "capture_round": 1,
-    "response": "Local SSE response rendered as INTERACTIVE_CAPTURE_OK in the normal TUI"
+    "response": "Local SSE response rendered as INTERACTIVE_CAPTURE_OK"
   },
   "connection_id": 1,
   "clienthello": {
     "alpn": [
       "http/1.1"
     ],
+    "certificate_compression": [],
     "cipher_suites": [
       4865,
       4866,
@@ -73,7 +74,9 @@
       {
         "body": [
           0,
-          6,
+          8,
+          17,
+          236,
           0,
           29,
           0,
@@ -83,12 +86,13 @@
         ],
         "decoded": {
           "groups": [
+            4588,
             29,
             23,
             24
           ]
         },
-        "length": 8,
+        "length": 10,
         "payload_omitted": null,
         "type": 10
       },
@@ -150,7 +154,7 @@
       {
         "body": [
           0,
-          18,
+          22,
           4,
           3,
           8,
@@ -167,6 +171,10 @@
           6,
           6,
           1,
+          8,
+          7,
+          6,
+          3,
           2,
           1
         ],
@@ -180,10 +188,12 @@
             1281,
             2054,
             1537,
+            2055,
+            1539,
             513
           ]
         },
-        "length": 20,
+        "length": 24,
         "payload_omitted": null,
         "type": 13
       },
@@ -200,10 +210,21 @@
         "body": null,
         "decoded": {
           "groups": [
+            4588,
             29
+          ],
+          "shares": [
+            {
+              "group": 4588,
+              "length": 1216
+            },
+            {
+              "group": 29,
+              "length": 32
+            }
           ]
         },
-        "length": 38,
+        "length": 1258,
         "payload_omitted": "extension payload may contain sensitive or unrecognized data",
         "type": 51
       },
@@ -238,255 +259,6 @@
         "length": 5,
         "payload_omitted": null,
         "type": 43
-      },
-      {
-        "body": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "decoded": {
-          "padding_length": 239
-        },
-        "length": 239,
-        "payload_omitted": null,
-        "type": 21
       }
     ],
     "extensions": [
@@ -502,17 +274,30 @@
       18,
       51,
       45,
-      43,
-      21
+      43
     ],
-    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0",
-    "ja3_hash": "d871d02cecbde59abbf8f4806134addf",
-    "ja4": "t13d1714h1_5b57614c22b0_43ade6aba3df",
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43,4588-29-23-24,0",
+    "ja3_hash": "1523504b38f0fae0d881d4b6554aac1b",
+    "ja4": "t13d1713h1_5b57614c22b0_7f527383e249",
     "key_share_groups": [
+      4588,
       29
     ],
+    "key_shares": [
+      {
+        "group": 4588,
+        "length": 1216
+      },
+      {
+        "group": 29,
+        "length": 32
+      }
+    ],
     "legacy_version": 771,
-    "padding_length": 239,
+    "padding_length": null,
+    "psk_modes": [
+      1
+    ],
     "signature_algorithms": [
       1027,
       2052,
@@ -522,10 +307,14 @@
       1281,
       2054,
       1537,
+      2055,
+      1539,
       513
     ],
+    "signature_algorithms_cert": [],
     "sni_present": true,
     "supported_groups": [
+      4588,
       29,
       23,
       24
@@ -550,7 +339,15 @@
       },
       {
         "name": "User-Agent",
-        "value": "opencode/1.18.25 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+        "value": "opencode/latest/2.4.2/cli"
+      },
+      {
+        "name": "b3",
+        "value": "<redacted>"
+      },
+      {
+        "name": "traceparent",
+        "value": "<redacted>"
       },
       {
         "name": "x-opencode-client",
@@ -561,11 +358,19 @@
         "value": "<redacted>"
       },
       {
-        "name": "x-opencode-request",
+        "name": "x-opencode-session",
         "value": "<redacted>"
       },
       {
-        "name": "x-opencode-session",
+        "name": "x-opencode-session-id",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-session-affinity",
+        "value": "<redacted>"
+      },
+      {
+        "name": "x-session-id",
         "value": "<redacted>"
       },
       {
@@ -595,11 +400,11 @@
         "reason": "credential_or_dynamic"
       },
       {
-        "header_index": 4,
+        "header_index": 3,
         "reason": "credential_or_dynamic"
       },
       {
-        "header_index": 5,
+        "header_index": 4,
         "reason": "credential_or_dynamic"
       },
       {
@@ -607,42 +412,57 @@
         "reason": "credential_or_dynamic"
       },
       {
+        "header_index": 7,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 8,
+        "reason": "credential_or_dynamic"
+      },
+      {
         "header_index": 9,
         "reason": "credential_or_dynamic"
       },
       {
-        "header_index": 11,
+        "header_index": 10,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 13,
+        "reason": "credential_or_dynamic"
+      },
+      {
+        "header_index": 15,
         "reason": "credential_or_dynamic"
       }
     ],
-    "raw_head": "POST <redacted> HTTP/1.1\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nUser-Agent: opencode/1.18.25 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14\r\nx-opencode-client: cli\r\nx-opencode-project: <redacted>\r\nx-opencode-request: <redacted>\r\nx-opencode-session: <redacted>\r\nConnection: keep-alive\r\nAccept: */*\r\nHost: <redacted>\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: <redacted>\r\n\r\n"
+    "raw_head": "POST <redacted> HTTP/1.1\r\nAuthorization: <redacted>\r\nContent-Type: application/json\r\nUser-Agent: opencode/latest/2.4.2/cli\r\nb3: <redacted>\r\ntraceparent: <redacted>\r\nx-opencode-client: cli\r\nx-opencode-project: <redacted>\r\nx-opencode-session: <redacted>\r\nx-opencode-session-id: <redacted>\r\nx-session-affinity: <redacted>\r\nx-session-id: <redacted>\r\nConnection: keep-alive\r\nAccept: */*\r\nHost: <redacted>\r\nAccept-Encoding: gzip, deflate, br, zstd\r\nContent-Length: <redacted>\r\n\r\n"
   },
   "request": {
-    "path": "/v1/chat/completions",
+    "path": "/inference/openai/v1/chat/completions",
     "model": "big-pickle",
     "stream": true,
     "stream_options": {
       "include_usage": true
     },
-    "tool_choice": "auto",
-    "max_tokens": 16000,
+    "max_completion_tokens": 32000,
     "message_roles": [
       "system",
       "user"
     ],
     "tool_names": [
-      "bash",
       "edit",
       "glob",
       "grep",
       "question",
       "read",
+      "shell",
       "skill",
-      "task",
-      "todowrite",
+      "subagent",
       "webfetch",
       "websearch",
-      "write"
+      "write",
+      "execute"
     ],
     "interactive_prompt_present": true
   }

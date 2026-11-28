@@ -96,7 +96,7 @@ fn access_token(provider: &ProviderSnapshot) -> Result<&str, PluginError> {
         })
 }
 
-/// Official 0.167.0 backend-client usage read. The TUI also sends
+/// Official 0.172.0 backend-client usage read. The TUI also sends
 /// `x-openai-codex-luna-reserve`, which backend-client reserves for clients
 /// that can switch to the Reserve model; a passive usage reader must not.
 fn usage_request(provider: &ProviderSnapshot, access_token: &str) -> Request {

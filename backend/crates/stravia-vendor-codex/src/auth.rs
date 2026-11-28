@@ -204,6 +204,12 @@ fn token_request(host: &GuestHost, form: String) -> Result<TokenResponse, Plugin
     options
         .shape("codex-http")
         .map_err(|e| invalid(e.to_string()))?;
+    options
+        .response_decoding(&[
+            stravia_vendor_sdk::net::Coding::Zstd,
+            stravia_vendor_sdk::net::Coding::Gzip,
+        ])
+        .map_err(|e| invalid(e.to_string()))?;
     let response = host.http_start(
         stravia_vendor_sdk::net::Request {
             method: "POST".into(),
@@ -215,7 +221,7 @@ fn token_request(host: &GuestHost, form: String) -> Result<TokenResponse, Plugin
                 ),
                 ("accept".into(), "application/json".into()),
                 ("user-agent".into(), crate::codex::user_agent()),
-                ("accept-encoding".into(), "identity".into()),
+                ("accept-encoding".into(), "zstd,gzip".into()),
             ]),
             body: form.into_bytes(),
         },

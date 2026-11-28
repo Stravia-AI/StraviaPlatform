@@ -5161,7 +5161,7 @@ async fn manually_installed_codex_component_reuses_one_connection_for_search_and
     }
     let infer_turn: Value =
         serde_json::from_str(requests[0].headers["x-codex-turn-metadata"].to_str()?)?;
-    // 0.167.0 只在 client_metadata 与 turn metadata 中携带 installation ID，不再发送同名请求头。
+    // 0.172.0 只在 client_metadata 与 turn metadata 中携带 installation ID，不再发送同名请求头。
     let installation_id = requests[0].body["client_metadata"]["x-codex-installation-id"]
         .as_str()
         .expect("installation ID in client_metadata")

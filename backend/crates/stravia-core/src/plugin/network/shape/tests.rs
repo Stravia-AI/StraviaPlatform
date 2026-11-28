@@ -261,8 +261,14 @@ fn clienthello_matches_independently_captured_fingerprints() {
             false,
         ),
         (
-            "bun-1-3-14",
+            "bun-1-4-4",
             include_str!("fixtures/opencode-interactive.json"),
+            false,
+            false,
+        ),
+        (
+            "bun-1-4-4",
+            include_str!("fixtures/opencode-interactive.repeat.json"),
             false,
             false,
         ),
@@ -310,7 +316,7 @@ pub(crate) fn assert_wire_server_name(wire: &[u8], host: &str) {
 fn bun_padding_tracks_sni_length_and_stays_zero_filled() {
     let registry = ShapeRegistry::builtin().unwrap();
     let config = registry.get("bun-1-3-14").unwrap().tls_for("direct", false);
-    let fixture = include_str!("fixtures/opencode-interactive.json");
+    let fixture = include_str!("fixtures/bun-1.3.14-http.json");
     for (host, padding_len) in [("localhost", 239), ("opencode.ai", 237)] {
         let wire = capture_wire_for_host(config.clone(), host);
         assert_wire_server_name(&wire, host);
@@ -436,6 +442,8 @@ fn builtin_shapes_load_and_are_isolated_by_proxy_and_protocol() {
         "default",
         "claude-code",
         "bun",
+        "bun-1-3-14",
+        "bun-1-4-4",
         "antigravity",
         "codex-http",
         "codex-ws",
