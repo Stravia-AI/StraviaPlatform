@@ -1359,10 +1359,13 @@ jobs:
   wait-ci:
     name: Wait for CI on this commit
     if: needs.prepare.outputs.publish == 'true'
+    # Run after platform builds & asset collection so polling does not occupy a runner slot
+    # during builds or burn its timeout while CI jobs are queued behind release builds.
     needs:
       - prepare
+      - collect-assets
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 125
     steps:
       - name: Checkout CI gate script
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1380,7 +1383,8 @@ jobs:
             --api-url "${GITHUB_API_URL}" \
             --repository "${GITHUB_REPOSITORY}" \
             --commit-sha "${GITHUB_SHA}" \
-            --workflow-file "ci.yml"
+            --workflow-file "ci.yml" \
+            --timeout-seconds 7200
 
   prepare-draft:
     name: Prepare draft release
